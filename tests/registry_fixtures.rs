@@ -1,5 +1,4 @@
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use tempfile::tempdir;
 use xmsg::error::AppError;
@@ -76,12 +75,23 @@ fn test_registry_fixtures() {
     // 4. Malformed JSON file
     fs::write(dir_path.join("malformed.json"), "{ invalid json [").unwrap();
 
-    // 5. Poisoned .key file with 000 permissions to ensure it is never opened
+    // 5. Valid session JSON in a .key file for the test runner's real PID (proving .key is ignored)
     let key_file = dir_path.join(format!("{my_pid}.key"));
-    fs::write(&key_file, "SUPER_SECRET_KEY").unwrap();
-    let mut perms = fs::metadata(&key_file).unwrap().permissions();
-    perms.set_mode(0o000);
-    fs::set_permissions(&key_file, perms).unwrap();
+    let key_leak_json = format!(
+        r#"{{
+            "pid": {my_pid},
+            "sessionId": "key-leak-session",
+            "name": "KEY-LEAK",
+            "cwd": "/workspace/leak",
+            "status": "idle",
+            "kind": "interactive",
+            "startedAt": 1000,
+            "updatedAt": 2000,
+            "procStart": "{my_proc_start}",
+            "messagingSocketPath": "/tmp/leak.sock"
+        }}"#
+    );
+    fs::write(&key_file, key_leak_json).unwrap();
 
     // Test list_sessions
     let live_list = list_sessions(dir_path, &SessionsQuery::default());
@@ -89,6 +99,8 @@ fn test_registry_fixtures() {
     assert_eq!(live_list[0].session_id, "live-session-1111");
     assert_eq!(live_list[0].pid, my_pid);
     assert_eq!(live_list[0].name.as_deref(), Some("live-agent"));
+    assert!(!live_list.iter().any(|s| s.name.as_deref() == Some("KEY-LEAK")));
+    assert!(!live_list.iter().any(|s| s.session_id == "key-leak-session"));
 
     // Test resolve_session on live session (by id, pid, and name)
     let (s_by_id, sock) = resolve_session(dir_path, "live-session-1111").unwrap();
@@ -125,8 +137,11 @@ fn test_registry_fixtures() {
         not_found_res
     );
 
-    // Restore perms on .key file so tempdir cleanup succeeds
-    let mut restore_perms = fs::metadata(&key_file).unwrap().permissions();
-    restore_perms.set_mode(0o644);
-    fs::set_permissions(&key_file, restore_perms).unwrap();
+    // Test resolve_session on KEY-LEAK (.key file) -> 404 NotFound
+    let key_leak_res = resolve_session(dir_path, "KEY-LEAK");
+    assert!(
+        matches!(key_leak_res, Err(AppError::NotFound(_))),
+        "Expected NotFound error for .key file entry, got: {:?}",
+        key_leak_res
+    );
 }

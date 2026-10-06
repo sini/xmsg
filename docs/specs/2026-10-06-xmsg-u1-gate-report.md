@@ -125,3 +125,27 @@ The implementation spec fails 7 critical construction and protocol checks across
 6. **Define Query Parameters:** Specify query filtering for `?cwd=` and `?status=busy|idle` on `GET /v1/sessions`.
 7. **Expand Gating Oracle Oracles:** Add test cases for 410, 400, 504, and GET endpoints.
 8. **Document Body Logging Prohibition:** State the request log format on stderr and the invariant forbidding body logging.
+
+---
+
+## Post-Landing Verification (U1.1 Follow-Up)
+
+### 1. `.key` File Discrimination Control
+- **Fault Identified by Orchestrator:** The original `.key` fixture used `chmod 000` permissions. Because an unreadable file is skipped silently by filesystem reads, the negative control could pass even if the code attempted to process `.key` files.
+- **Remediation:** The fixture was replaced with a fully valid session JSON referencing the test runner's live PID, with a distinctive name `"KEY-LEAK"`. The test asserts:
+  1. `KEY-LEAK` is absent from `list_sessions`.
+  2. `resolve_session` for `"KEY-LEAK"` and `"key-leak-session"` returns `Err(AppError::NotFound)`.
+- **Planted Violation & Red Run:**
+  `src/registry.rs` was temporarily modified to treat `.key` as an allowed extension alongside `.json`:
+  ```rust
+  let ext = path.extension().and_then(|s| s.to_str());
+  if ext != Some("json") && ext != Some("key") { continue; }
+  ```
+  `cargo test --test registry_fixtures` was executed, failing immediately:
+  ```text
+  thread 'test_registry_fixtures' panicked at tests/registry_fixtures.rs:99:5:
+  assertion `left == right` failed: Only live session should be listed
+    left: 2
+   right: 1
+  ```
+  The code was reverted to the strict `.json` check and returned to green (exit code 0).
