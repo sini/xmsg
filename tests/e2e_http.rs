@@ -153,11 +153,18 @@ async fn start_harness(max_body: usize) -> TestHarness {
     );
     fs::write(sess_dir.path().join("twin2.json"), twin2_json).unwrap();
 
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    xmsg::storage::init_db(&conn).unwrap();
+    let (notify_tx, _) = tokio::sync::broadcast::channel(16);
+
     let app_state = Arc::new(AppState {
         sessions_dir: sess_dir.path().to_path_buf(),
         host_label: "test-host".to_string(),
         max_body,
         request_counter: AtomicU64::new(1),
+        db: Arc::new(std::sync::Mutex::new(conn)),
+        notify_tx,
+        reply_ttl: Duration::from_secs(604800),
     });
 
     let app = build_router(app_state);
@@ -206,11 +213,18 @@ async fn test_e2e_sessions_list_and_query_200() {
         .unwrap();
     assert_eq!(res.status(), reqwest::StatusCode::OK);
     let sessions: Vec<serde_json::Value> = res.json().await.unwrap();
-    assert_eq!(sessions.len(), 4, "Dead sessions filtered out, 4 live remain");
+    assert_eq!(
+        sessions.len(),
+        4,
+        "Dead sessions filtered out, 4 live remain"
+    );
 
     // Filter by cwd
     let res = client
-        .get(format!("{}/v1/sessions?cwd=/workspace/project-a", harness.base_url))
+        .get(format!(
+            "{}/v1/sessions?cwd=/workspace/project-a",
+            harness.base_url
+        ))
         .send()
         .await
         .unwrap();
@@ -255,7 +269,10 @@ async fn test_e2e_post_message_accepted_202() {
         "text": "hello from test"
     });
     let res = client
-        .post(format!("{}/v1/sessions/my-worker/messages", harness.base_url))
+        .post(format!(
+            "{}/v1/sessions/my-worker/messages",
+            harness.base_url
+        ))
         .json(&post_body)
         .send()
         .await
@@ -274,7 +291,10 @@ async fn test_e2e_post_message_accepted_202() {
     assert_eq!(parsed.r#type, "user");
     assert_eq!(parsed.message.role, "user");
     assert!(parsed.message.content.contains("hello from test"));
-    assert!(parsed.message.content.contains("from-name=\"xmsg@test-host · claude\""));
+    assert!(parsed
+        .message
+        .content
+        .contains("from-name=\"xmsg@test-host · claude\""));
 }
 
 #[tokio::test]
@@ -287,7 +307,10 @@ async fn test_e2e_post_message_dead_session_gone_410() {
         "text": "ping"
     });
     let res = client
-        .post(format!("{}/v1/sessions/dead-worker/messages", harness.base_url))
+        .post(format!(
+            "{}/v1/sessions/dead-worker/messages",
+            harness.base_url
+        ))
         .json(&post_body)
         .send()
         .await
@@ -307,7 +330,10 @@ async fn test_e2e_post_message_unknown_session_not_found_404() {
         "text": "ping"
     });
     let res = client
-        .post(format!("{}/v1/sessions/unknown-ref-xyz/messages", harness.base_url))
+        .post(format!(
+            "{}/v1/sessions/unknown-ref-xyz/messages",
+            harness.base_url
+        ))
         .json(&post_body)
         .send()
         .await
@@ -327,7 +353,10 @@ async fn test_e2e_post_message_ambiguous_conflict_409() {
         "text": "ping"
     });
     let res = client
-        .post(format!("{}/v1/sessions/twin-worker/messages", harness.base_url))
+        .post(format!(
+            "{}/v1/sessions/twin-worker/messages",
+            harness.base_url
+        ))
         .json(&post_body)
         .send()
         .await
@@ -348,7 +377,10 @@ async fn test_e2e_post_message_unknown_field_bad_request_400() {
         "unknown_extra": 123
     });
     let res = client
-        .post(format!("{}/v1/sessions/my-worker/messages", harness.base_url))
+        .post(format!(
+            "{}/v1/sessions/my-worker/messages",
+            harness.base_url
+        ))
         .json(&bad_field_body)
         .send()
         .await
@@ -368,7 +400,10 @@ async fn test_e2e_post_message_empty_text_bad_request_400() {
         "text": ""
     });
     let res = client
-        .post(format!("{}/v1/sessions/my-worker/messages", harness.base_url))
+        .post(format!(
+            "{}/v1/sessions/my-worker/messages",
+            harness.base_url
+        ))
         .json(&empty_text_body)
         .send()
         .await
@@ -388,7 +423,10 @@ async fn test_e2e_post_message_invalid_sender_bad_sender_400() {
         "text": "valid text"
     });
     let res = client
-        .post(format!("{}/v1/sessions/my-worker/messages", harness.base_url))
+        .post(format!(
+            "{}/v1/sessions/my-worker/messages",
+            harness.base_url
+        ))
         .json(&bad_sender_body)
         .send()
         .await
@@ -409,7 +447,10 @@ async fn test_e2e_post_message_body_too_large_413() {
         "text": huge_text
     });
     let res = client
-        .post(format!("{}/v1/sessions/my-worker/messages", harness.base_url))
+        .post(format!(
+            "{}/v1/sessions/my-worker/messages",
+            harness.base_url
+        ))
         .json(&huge_body)
         .send()
         .await
@@ -429,7 +470,10 @@ async fn test_e2e_post_message_inbox_unavailable_502() {
         "text": "hi"
     });
     let res = client
-        .post(format!("{}/v1/sessions/dead-sock-worker/messages", harness.base_url))
+        .post(format!(
+            "{}/v1/sessions/dead-sock-worker/messages",
+            harness.base_url
+        ))
         .json(&post_body)
         .send()
         .await

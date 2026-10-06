@@ -99,7 +99,9 @@ fn test_registry_fixtures() {
     assert_eq!(live_list[0].session_id, "live-session-1111");
     assert_eq!(live_list[0].pid, my_pid);
     assert_eq!(live_list[0].name.as_deref(), Some("live-agent"));
-    assert!(!live_list.iter().any(|s| s.name.as_deref() == Some("KEY-LEAK")));
+    assert!(!live_list
+        .iter()
+        .any(|s| s.name.as_deref() == Some("KEY-LEAK")));
     assert!(!live_list.iter().any(|s| s.session_id == "key-leak-session"));
 
     // Test resolve_session on live session (by id, pid, and name)

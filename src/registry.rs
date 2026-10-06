@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
 use crate::error::AppError;
@@ -99,7 +99,11 @@ pub fn read_session_entries(sessions_dir: &Path) -> Vec<SessionFileEntry> {
     let read_dir = match std::fs::read_dir(sessions_dir) {
         Ok(rd) => rd,
         Err(err) => {
-            debug!("Unable to read sessions directory {}: {}", sessions_dir.display(), err);
+            debug!(
+                "Unable to read sessions directory {}: {}",
+                sessions_dir.display(),
+                err
+            );
             return entries;
         }
     };
@@ -137,7 +141,10 @@ pub fn list_sessions(sessions_dir: &Path, query: &SessionsQuery) -> Vec<Session>
 
     for entry in entries {
         if !is_pid_live(entry.pid, &entry.proc_start) {
-            debug!("Skipping dead/reused session pid {} ({})", entry.pid, entry.session_id);
+            debug!(
+                "Skipping dead/reused session pid {} ({})",
+                entry.pid, entry.session_id
+            );
             continue;
         }
 
@@ -209,11 +216,75 @@ pub fn resolve_session(sessions_dir: &Path, ref_str: &str) -> Result<(Session, P
     }
 
     if live_candidates.len() > 1 {
-        let ids: Vec<String> = live_candidates.iter().map(|c| c.session_id.clone()).collect();
+        let ids: Vec<String> = live_candidates
+            .iter()
+            .map(|c| c.session_id.clone())
+            .collect();
         return Err(AppError::Ambiguous(ids.join(", ")));
     }
 
     let resolved = live_candidates.into_iter().next().unwrap();
     let socket_path = PathBuf::from(&resolved.messaging_socket_path);
     Ok((resolved.into(), socket_path))
+}
+
+/// Walks ancestor process parent PIDs (reading /proc/<pid>/stat field 4) up to PID 1,
+/// searching for the first ancestor that has an active session file in `sessions_dir`.
+/// Parameterized with `proc_root` to allow unit testing with synthetic proc trees.
+pub fn find_ancestor_session_in(
+    proc_root: &Path,
+    sessions_dir: &Path,
+    start_pid: u32,
+) -> Result<Session, AppError> {
+    let mut curr_pid = start_pid;
+
+    for _ in 0..32 {
+        let stat_path = proc_root.join(curr_pid.to_string()).join("stat");
+        let content = match std::fs::read_to_string(&stat_path) {
+            Ok(c) => c,
+            Err(_) => break,
+        };
+
+        let Some(rparen) = content.rfind(')') else {
+            break;
+        };
+
+        let remainder = &content[rparen + 1..];
+        let fields: Vec<&str> = remainder.split_whitespace().collect();
+        if fields.len() < 2 {
+            break;
+        }
+
+        // fields[0] is state (field 3)
+        // fields[1] is ppid (field 4)
+        let Ok(ppid) = fields[1].parse::<u32>() else {
+            break;
+        };
+
+        if ppid <= 1 {
+            break;
+        }
+
+        let session_file = sessions_dir.join(format!("{ppid}.json"));
+        if session_file.exists() {
+            if let Ok(content) = std::fs::read_to_string(&session_file) {
+                if let Ok(entry) = serde_json::from_str::<SessionFileEntry>(&content) {
+                    if is_pid_live_in(proc_root, ppid, &entry.proc_start) {
+                        return Ok(entry.into());
+                    }
+                }
+            }
+        }
+
+        curr_pid = ppid;
+    }
+
+    Err(AppError::NotFound(
+        "no live ancestor agent session found".to_string(),
+    ))
+}
+
+/// Convenience wrapper for live runtime ancestor walk using system /proc and current PID.
+pub fn find_ancestor_session(sessions_dir: &Path) -> Result<Session, AppError> {
+    find_ancestor_session_in(Path::new("/proc"), sessions_dir, std::process::id())
 }

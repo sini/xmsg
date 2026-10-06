@@ -1,7 +1,7 @@
-use std::path::Path;
-use std::time::Duration;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::time::timeout;
@@ -36,6 +36,8 @@ pub struct DeliveryResponse {
     pub session_id: String,
     pub from_name: String,
     pub bytes: usize,
+    #[serde(alias = "message_id")]
+    pub message_id: String,
 }
 
 /// Sanitizes the `from` parameter:
@@ -78,7 +80,9 @@ pub fn sanitize_from(host_label: &str, raw_from: &str) -> Result<String, AppErro
 
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {
-        return Err(AppError::BadSender("sender name is empty after sanitization".to_string()));
+        return Err(AppError::BadSender(
+            "sender name is empty after sanitization".to_string(),
+        ));
     }
 
     let prefixed = format!("xmsg@{host_label} · {trimmed}");
@@ -127,7 +131,11 @@ pub async fn deliver_to_socket(socket_path: &Path, line: &str) -> Result<(), App
     let connect_fut = UnixStream::connect(socket_path);
     let mut stream = match timeout(SOCKET_TIMEOUT, connect_fut).await {
         Ok(Ok(s)) => s,
-        Ok(Err(e)) => return Err(AppError::InboxUnavailable(format!("socket connect failed: {e}"))),
+        Ok(Err(e)) => {
+            return Err(AppError::InboxUnavailable(format!(
+                "socket connect failed: {e}"
+            )))
+        }
         Err(_) => return Err(AppError::InboxTimeout),
     };
 
@@ -139,7 +147,9 @@ pub async fn deliver_to_socket(socket_path: &Path, line: &str) -> Result<(), App
 
     match timeout(SOCKET_TIMEOUT, write_fut).await {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(AppError::InboxUnavailable(format!("socket write failed: {e}"))),
+        Ok(Err(e)) => Err(AppError::InboxUnavailable(format!(
+            "socket write failed: {e}"
+        ))),
         Err(_) => Err(AppError::InboxTimeout),
     }
 }

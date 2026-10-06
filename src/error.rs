@@ -38,6 +38,9 @@ pub enum AppError {
     #[error("inbox write timed out after 5s")]
     InboxTimeout,
 
+    #[error("not recipient: {0}")]
+    NotRecipient(String),
+
     #[error("internal server error: {0}")]
     Internal(String),
 }
@@ -69,6 +72,7 @@ impl IntoResponse for AppError {
                 "inbox_timeout",
                 "inbox write timed out after 5s".to_string(),
             ),
+            AppError::NotRecipient(d) => (StatusCode::FORBIDDEN, "not_recipient", d),
             AppError::Internal(d) => (StatusCode::INTERNAL_SERVER_ERROR, "internal", d),
         };
 

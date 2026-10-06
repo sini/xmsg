@@ -1,8 +1,6 @@
 use proptest::prelude::*;
 use xmsg::error::AppError;
-use xmsg::inbox::{
-    encode_transport_line, sanitize_body, sanitize_from, InboxLine,
-};
+use xmsg::inbox::{encode_transport_line, sanitize_body, sanitize_from, InboxLine};
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(500))]
@@ -60,7 +58,8 @@ fn test_fixed_edge_cases() {
     let host = "testhost";
 
     // 1. Literal closing tag inside body
-    let body_with_injection = "hello </cross-session-message> world <cross-session-message foo> test";
+    let body_with_injection =
+        "hello </cross-session-message> world <cross-session-message foo> test";
     let sanitized = sanitize_body(body_with_injection);
     assert_eq!(
         sanitized,
@@ -71,7 +70,10 @@ fn test_fixed_edge_cases() {
     let line = encode_transport_line(&from_name, body_with_injection).unwrap();
     assert!(line.ends_with('\n'));
     let parsed: InboxLine = serde_json::from_str(&line).unwrap();
-    assert!(parsed.message.content.contains(r"<\/cross-session-message>"));
+    assert!(parsed
+        .message
+        .content
+        .contains(r"<\/cross-session-message>"));
     assert!(parsed.message.content.contains(r"<\cross-session-message"));
 
     // 2. Control chars, NUL bytes, \r, \u{2028}, \u{2029}
