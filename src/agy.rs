@@ -10,11 +10,21 @@ use crate::error::AppError;
 use crate::inbox::DeliveryResponse;
 use crate::registry::{Session, SessionsQuery};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgyCredentials {
     pub ls_address: String,
     pub csrf_token: String,
     pub is_stale: bool,
+}
+
+impl std::fmt::Debug for AgyCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgyCredentials")
+            .field("ls_address", &self.ls_address)
+            .field("csrf_token", &"<redacted>")
+            .field("is_stale", &self.is_stale)
+            .finish()
+    }
 }
 
 pub type AgyStore = Arc<RwLock<HashMap<String, AgyCredentials>>>;
@@ -23,7 +33,7 @@ pub fn new_agy_store() -> AgyStore {
     Arc::new(RwLock::new(HashMap::new()))
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgyRegisterRequest {
     #[serde(alias = "conversation_id")]
@@ -32,6 +42,16 @@ pub struct AgyRegisterRequest {
     pub ls_address: String,
     #[serde(alias = "csrf_token")]
     pub csrf_token: String,
+}
+
+impl std::fmt::Debug for AgyRegisterRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgyRegisterRequest")
+            .field("conversation_id", &self.conversation_id)
+            .field("ls_address", &self.ls_address)
+            .field("csrf_token", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]

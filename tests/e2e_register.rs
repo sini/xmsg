@@ -235,3 +235,36 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
         assert!(!creds.is_stale);
     }
 }
+
+#[test]
+fn test_debug_redacts_csrf_token() {
+    let creds = xmsg::agy::AgyCredentials {
+        ls_address: "127.0.0.1:1234".to_string(),
+        csrf_token: "super-secret-csrf-token-12345".to_string(),
+        is_stale: false,
+    };
+    let creds_debug = format!("{creds:?}");
+    assert!(
+        !creds_debug.contains("super-secret-csrf-token-12345"),
+        "Debug output must not leak csrf_token: {creds_debug}"
+    );
+    assert!(
+        creds_debug.contains("<redacted>"),
+        "Debug output must contain <redacted>: {creds_debug}"
+    );
+
+    let req = AgyRegisterRequest {
+        conversation_id: "conv-redact".to_string(),
+        ls_address: "127.0.0.1:5678".to_string(),
+        csrf_token: "super-secret-request-token-67890".to_string(),
+    };
+    let req_debug = format!("{req:?}");
+    assert!(
+        !req_debug.contains("super-secret-request-token-67890"),
+        "Debug output must not leak csrf_token: {req_debug}"
+    );
+    assert!(
+        req_debug.contains("<redacted>"),
+        "Debug output must contain <redacted>: {req_debug}"
+    );
+}
