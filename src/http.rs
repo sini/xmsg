@@ -22,6 +22,8 @@ use crate::storage::{self, MessageRecord, ReplyRecord};
 
 pub struct AppState {
     pub sessions_dir: PathBuf,
+    pub agy_config: crate::agy::AgyConfig,
+    pub agy_store: crate::agy::AgyStore,
     pub host_label: String,
     pub max_body: usize,
     pub request_counter: AtomicU64,
@@ -81,11 +83,33 @@ async fn healthz_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
     )
 }
 
+enum ResolvedTarget {
+    Claude(registry::Session, PathBuf),
+    Agy(registry::Session),
+}
+
+fn resolve_target_session(state: &AppState, ref_str: &str) -> Result<ResolvedTarget, AppError> {
+    match registry::resolve_session(&state.sessions_dir, ref_str) {
+        Ok((session, socket_path)) => Ok(ResolvedTarget::Claude(session, socket_path)),
+        Err(AppError::Gone { session_id, pid }) => Err(AppError::Gone { session_id, pid }),
+        Err(AppError::Ambiguous(ids)) => Err(AppError::Ambiguous(ids)),
+        Err(AppError::NotFound(_)) => {
+            match crate::agy::resolve_agy_session(&state.agy_config, &state.agy_store, ref_str)? {
+                Some(session) => Ok(ResolvedTarget::Agy(session)),
+                None => Err(AppError::NotFound(ref_str.to_string())),
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
 async fn list_sessions_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SessionsQuery>,
 ) -> impl IntoResponse {
-    let sessions = registry::list_sessions(&state.sessions_dir, &query);
+    let mut sessions = registry::list_sessions(&state.sessions_dir, &query);
+    let mut agy_sessions = crate::agy::list_agy_sessions(&state.agy_config, &state.agy_store, &query);
+    sessions.append(&mut agy_sessions);
     (StatusCode::OK, Json(sessions))
 }
 
@@ -93,7 +117,11 @@ async fn get_session_handler(
     State(state): State<Arc<AppState>>,
     AxumPath(ref_str): AxumPath<String>,
 ) -> Result<Response, AppError> {
-    let (session, _socket_path) = registry::resolve_session(&state.sessions_dir, &ref_str)?;
+    let target = resolve_target_session(&state, &ref_str)?;
+    let session = match target {
+        ResolvedTarget::Claude(s, _) => s,
+        ResolvedTarget::Agy(s) => s,
+    };
     Ok((StatusCode::OK, Json(session)).into_response())
 }
 
@@ -147,43 +175,52 @@ async fn send_message_handler(
     };
 
     // Resolve target session
-    let (session, socket_path) = match registry::resolve_session(&state.sessions_dir, &ref_str) {
-        Ok(res) => res,
-        Err(err) => {
-            eprintln!(
-                "req_id={} ref={} from=\"{}\" bytes={} outcome=resolve_error detail=\"{}\"",
-                req_id, ref_str, from_name, body_len, err
-            );
-            return Err(err);
-        }
-    };
+    let target = resolve_target_session(&state, &ref_str).map_err(|err| {
+        eprintln!(
+            "req_id={} ref={} from=\"{}\" bytes={} outcome=resolve_error detail=\"{}\"",
+            req_id, ref_str, from_name, body_len, err
+        );
+        err
+    })?;
 
     // Generate ULID message ID
     let message_id = ulid::Ulid::new().to_string();
 
-    // Envelope footer (§8.2)
-    let body_with_footer = format!(
-        "{}\n\n[xmsg] message_id={} — reply with the xmsg reply tool",
-        req.text, message_id
-    );
-
-    // Encode transport line
-    let line = inbox::encode_transport_line(&from_name, &body_with_footer)?;
-
-    // Deliver to socket
-    if let Err(err) = inbox::deliver_to_socket(&socket_path, &line).await {
-        eprintln!(
-            "req_id={} session_id={} from=\"{}\" bytes={} outcome=delivery_failed detail=\"{}\"",
-            req_id, session.session_id, from_name, body_len, err
-        );
-        return Err(err);
-    }
+    let session_id = match target {
+        ResolvedTarget::Claude(session, socket_path) => {
+            let body_with_footer = format!(
+                "{}\n\n[xmsg] message_id={} — reply with the xmsg reply tool",
+                req.text, message_id
+            );
+            let line = inbox::encode_transport_line(&from_name, &body_with_footer)?;
+            if let Err(err) = inbox::deliver_to_socket(&socket_path, &line).await {
+                eprintln!(
+                    "req_id={} session_id={} from=\"{}\" bytes={} outcome=delivery_failed detail=\"{}\"",
+                    req_id, session.session_id, from_name, body_len, err
+                );
+                return Err(err);
+            }
+            session.session_id
+        }
+        ResolvedTarget::Agy(session) => {
+            crate::agy::deliver_agy(
+                &state.agy_config,
+                &state.agy_store,
+                &session,
+                &from_name,
+                &message_id,
+                &req.text,
+            )
+            .await?;
+            session.session_id
+        }
+    };
 
     // Record message in SQLite
     let msg_record = MessageRecord {
         id: message_id.clone(),
         created_at: storage::now_epoch_secs(),
-        session_id: session.session_id.clone(),
+        session_id: session_id.clone(),
         from_name: from_name.clone(),
         bytes: body_len,
         outcome: "delivered".to_string(),
@@ -200,13 +237,13 @@ async fn send_message_handler(
     // Invariant: Message bodies are NEVER logged under any circumstances
     eprintln!(
         "req_id={} message_id={} session_id={} from=\"{}\" bytes={} outcome=delivered",
-        req_id, message_id, session.session_id, from_name, body_len
+        req_id, message_id, session_id, from_name, body_len
     );
     info!(
         target: "xmsg",
         req_id = req_id,
         message_id = %message_id,
-        session_id = %session.session_id,
+        session_id = %session_id,
         from = %from_name,
         bytes = body_len,
         outcome = "delivered"
@@ -215,7 +252,7 @@ async fn send_message_handler(
     Ok((
         StatusCode::ACCEPTED,
         Json(DeliveryResponse {
-            session_id: session.session_id,
+            session_id,
             from_name,
             bytes: body_len,
             message_id,
@@ -347,7 +384,11 @@ async fn send_reply_handler(
     }
 
     // Resolve replier session
-    let (session, _sock) = registry::resolve_session(&state.sessions_dir, &req.session_ref)?;
+    let target = resolve_target_session(&state, &req.session_ref)?;
+    let replier_session_id = match target {
+        ResolvedTarget::Claude(s, _) => s.session_id,
+        ResolvedTarget::Agy(s) => s.session_id,
+    };
 
     // Lock SQLite, verify recipient, insert reply, and purge
     let reply = {
@@ -360,10 +401,10 @@ async fn send_reply_handler(
             .ok_or_else(|| AppError::NotFound(format!("message '{id}'")))?;
 
         // Only the recipient of the message may reply (§8.3)
-        if session.session_id != msg.session_id {
+        if replier_session_id != msg.session_id {
             eprintln!(
                 "req_id={} message_id={} session_id={} expected_recipient={} outcome=not_recipient",
-                req_id, id, session.session_id, msg.session_id
+                req_id, id, replier_session_id, msg.session_id
             );
             return Err(AppError::NotRecipient(format!(
                 "session {} is not the recipient of message {}",
@@ -371,7 +412,7 @@ async fn send_reply_handler(
             )));
         }
 
-        let reply = storage::insert_reply(&db, &id, &session.session_id, &req.text)
+        let reply = storage::insert_reply(&db, &id, &replier_session_id, &req.text)
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
         // Run TTL purge
@@ -385,7 +426,7 @@ async fn send_reply_handler(
 
     eprintln!(
         "req_id={} message_id={} reply_seq={} replier={} outcome=reply_created",
-        req_id, id, reply.seq, session.session_id
+        req_id, id, reply.seq, replier_session_id
     );
 
     Ok((StatusCode::CREATED, Json(reply)).into_response())

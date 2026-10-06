@@ -37,6 +37,14 @@ pub struct Session {
     pub version: Option<String>,
     pub started_at: u64,
     pub updated_at: u64,
+    #[serde(default = "default_claude_harness")]
+    pub harness: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registered: Option<bool>,
+}
+
+fn default_claude_harness() -> String {
+    "claude".to_string()
 }
 
 impl From<SessionFileEntry> for Session {
@@ -52,6 +60,8 @@ impl From<SessionFileEntry> for Session {
             version: entry.version,
             started_at: entry.started_at,
             updated_at: entry.updated_at,
+            harness: "claude".to_string(),
+            registered: None,
         }
     }
 }

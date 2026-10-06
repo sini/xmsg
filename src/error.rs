@@ -41,6 +41,9 @@ pub enum AppError {
     #[error("not recipient: {0}")]
     NotRecipient(String),
 
+    #[error("credentials stale: {0}")]
+    CredentialsStale(String),
+
     #[error("internal server error: {0}")]
     Internal(String),
 }
@@ -73,6 +76,7 @@ impl IntoResponse for AppError {
                 "inbox write timed out after 5s".to_string(),
             ),
             AppError::NotRecipient(d) => (StatusCode::FORBIDDEN, "not_recipient", d),
+            AppError::CredentialsStale(d) => (StatusCode::SERVICE_UNAVAILABLE, "credentials_stale", d),
             AppError::Internal(d) => (StatusCode::INTERNAL_SERVER_ERROR, "internal", d),
         };
 

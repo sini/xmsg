@@ -8,14 +8,19 @@ pub struct McpConfig {
     pub sessions_dir: PathBuf,
     pub xmsg_url: String,
     pub proc_root: PathBuf,
+    pub presence_dir: PathBuf,
+    pub proc_locks_path: PathBuf,
 }
 
 impl McpConfig {
     pub fn new(sessions_dir: PathBuf, xmsg_url: String) -> Self {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         Self {
             sessions_dir,
             xmsg_url,
             proc_root: PathBuf::from("/proc"),
+            presence_dir: PathBuf::from(home).join(".gemini/antigravity-cli/presence"),
+            proc_locks_path: PathBuf::from("/proc/locks"),
         }
     }
 }
@@ -187,6 +192,29 @@ fn tool_err(text: String) -> Value {
     })
 }
 
+fn derive_caller_session(config: &McpConfig) -> Result<(String, String), String> {
+    // 1. Try Claude session via sessions_dir/<ppid>.json
+    if let Ok(s) = registry::find_ancestor_session_in(
+        &config.proc_root,
+        &config.sessions_dir,
+        std::process::id(),
+    ) {
+        let name = s.name.unwrap_or_else(|| s.session_id.clone());
+        return Ok((s.session_id, name));
+    }
+
+    // 2. Try Agy session via presence locks held by ancestor
+    match crate::agy::find_ancestor_agy_session_in(
+        &config.proc_root,
+        &config.proc_locks_path,
+        &config.presence_dir,
+        std::process::id(),
+    ) {
+        Ok(conv_id) => Ok((conv_id.clone(), conv_id)),
+        Err(e) => Err(format!("failed to derive caller session identity: {e}")),
+    }
+}
+
 fn execute_tool(
     config: &McpConfig,
     client: &reqwest::blocking::Client,
@@ -223,18 +251,10 @@ fn execute_tool(
             };
 
             // Derive caller identity via ancestor walk
-            let caller = match registry::find_ancestor_session_in(
-                &config.proc_root,
-                &config.sessions_dir,
-                std::process::id(),
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    return tool_err(format!("failed to derive caller session identity: {e}"))
-                }
+            let (_caller_session_id, from_name) = match derive_caller_session(config) {
+                Ok(pair) => pair,
+                Err(e) => return tool_err(e),
             };
-
-            let from_name = caller.name.unwrap_or(caller.session_id);
 
             let url = format!("{}/v1/sessions/{}/messages", config.xmsg_url, target_ref);
             let payload = json!({
@@ -264,20 +284,14 @@ fn execute_tool(
             };
 
             // Derive caller identity via ancestor walk
-            let caller = match registry::find_ancestor_session_in(
-                &config.proc_root,
-                &config.sessions_dir,
-                std::process::id(),
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    return tool_err(format!("failed to derive caller session identity: {e}"))
-                }
+            let (caller_session_id, _) = match derive_caller_session(config) {
+                Ok(pair) => pair,
+                Err(e) => return tool_err(e),
             };
 
             let url = format!("{}/v1/messages/{}/replies", config.xmsg_url, message_id);
             let payload = json!({
-                "sessionRef": caller.session_id,
+                "sessionRef": caller_session_id,
                 "text": text
             });
 

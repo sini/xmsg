@@ -30,6 +30,28 @@ enum Commands {
 
     /// Run the stdio MCP server for agent harnesses
     Mcp(McpArgs),
+
+    /// Register credentials with running xmsg server
+    Register(RegisterArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct RegisterArgs {
+    #[command(subcommand)]
+    pub harness: RegisterHarness,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RegisterHarness {
+    /// Register Antigravity session credentials
+    Agy(RegisterAgyArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct RegisterAgyArgs {
+    /// Registration socket path (defaults to $XDG_RUNTIME_DIR/xmsg/register.sock)
+    #[arg(long, env = "XMSG_REGISTER_SOCK")]
+    pub sock: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -57,6 +79,10 @@ pub struct ServeArgs {
     /// Reply TTL in seconds (default 7 days: 604800)
     #[arg(long, env = "XMSG_REPLY_TTL", default_value_t = 604800)]
     pub reply_ttl: u64,
+
+    /// Registration socket path (defaults to $XDG_RUNTIME_DIR/xmsg/register.sock)
+    #[arg(long, env = "XMSG_REGISTER_SOCK")]
+    pub register_sock: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -129,8 +155,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let stdout = io::stdout();
             run_mcp_loop(&config, stdin.lock(), stdout.lock())?;
         }
+        Commands::Register(args) => match args.harness {
+            RegisterHarness::Agy(agy_args) => {
+                run_register_agy(agy_args)?;
+            }
+        },
     }
 
+    Ok(())
+}
+
+fn run_register_agy(args: RegisterAgyArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let conv_id = std::env::var("ANTIGRAVITY_CONVERSATION_ID")
+            .map_err(|_| "ANTIGRAVITY_CONVERSATION_ID not set")?;
+        let ls_addr = std::env::var("ANTIGRAVITY_LS_ADDRESS")
+            .map_err(|_| "ANTIGRAVITY_LS_ADDRESS not set")?;
+        let csrf_token = std::env::var("ANTIGRAVITY_CSRF_TOKEN")
+            .map_err(|_| "ANTIGRAVITY_CSRF_TOKEN not set")?;
+
+        let sock_path = args
+            .sock
+            .unwrap_or_else(xmsg::agy::default_register_sock_path);
+
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+
+        let mut stream = UnixStream::connect(&sock_path)?;
+        stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+
+        let payload = serde_json::json!({
+            "conversation_id": conv_id,
+            "ls_address": ls_addr,
+            "csrf_token": csrf_token,
+        });
+
+        writeln!(stream, "{payload}")?;
+        stream.flush()?;
+
+        let mut resp = String::new();
+        let _ = stream.read_to_string(&mut resp);
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&resp) {
+            if val.get("status").and_then(|s| s.as_str()) == Some("error") {
+                let detail = val
+                    .get("detail")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("unknown error");
+                return Err(format!("registration rejected by server: {detail}").into());
+            }
+        }
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        eprintln!("xmsg register agy notice: {e}");
+    }
+
+    println!("{{\"injectSteps\":[]}}");
     Ok(())
 }
 
@@ -167,8 +249,27 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let (notify_tx, _) = broadcast::channel(1024);
 
+    let agy_config = xmsg::agy::AgyConfig::default();
+    let agy_store = xmsg::agy::new_agy_store();
+    let my_uid = xmsg::agy::current_uid();
+    let register_sock_path = args
+        .register_sock
+        .unwrap_or_else(xmsg::agy::default_register_sock_path);
+
+    let reg_config = agy_config.clone();
+    let reg_store = agy_store.clone();
+    let reg_sock = register_sock_path.clone();
+
+    tokio::spawn(async move {
+        if let Err(e) = xmsg::agy::run_register_server(reg_sock, reg_config, reg_store, my_uid).await {
+            tracing::error!("register server error: {e}");
+        }
+    });
+
     let state = Arc::new(AppState {
         sessions_dir,
+        agy_config,
+        agy_store,
         host_label,
         max_body: args.max_body,
         request_counter: AtomicU64::new(1),

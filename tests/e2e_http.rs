@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -159,6 +160,13 @@ async fn start_harness(max_body: usize) -> TestHarness {
 
     let app_state = Arc::new(AppState {
         sessions_dir: sess_dir.path().to_path_buf(),
+        agy_config: xmsg::agy::AgyConfig {
+            presence_dir: sess_dir.path().join("presence"),
+            proc_locks_path: sess_dir.path().join("proc_locks"),
+            proc_root: PathBuf::from("/proc"),
+            agy_bin: "agy".to_string(),
+        },
+        agy_store: xmsg::agy::new_agy_store(),
         host_label: "test-host".to_string(),
         max_body,
         request_counter: AtomicU64::new(1),

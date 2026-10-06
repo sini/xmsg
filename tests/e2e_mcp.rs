@@ -65,6 +65,18 @@ struct McpHarness {
     stop_signal: Arc<AtomicBool>,
 }
 
+impl McpHarness {
+    fn mcp_config(&self) -> McpConfig {
+        McpConfig {
+            sessions_dir: self.sessions_dir.clone(),
+            xmsg_url: self.base_url.clone(),
+            proc_root: self.proc_root.clone(),
+            presence_dir: PathBuf::from("/tmp/nonexistent-presence"),
+            proc_locks_path: PathBuf::from("/tmp/nonexistent-proc-locks"),
+        }
+    }
+}
+
 impl Drop for McpHarness {
     fn drop(&mut self) {
         self.stop_signal.store(true, Ordering::Relaxed);
@@ -126,6 +138,13 @@ async fn start_mcp_harness() -> McpHarness {
 
     let app_state = Arc::new(AppState {
         sessions_dir: sess_dir.path().to_path_buf(),
+        agy_config: xmsg::agy::AgyConfig {
+            presence_dir: sess_dir.path().join("presence"),
+            proc_locks_path: sess_dir.path().join("proc_locks"),
+            proc_root: PathBuf::from("/proc"),
+            agy_bin: "agy".to_string(),
+        },
+        agy_store: xmsg::agy::new_agy_store(),
         host_label: "test-host".to_string(),
         max_body: 65536,
         request_counter: AtomicU64::new(1),
@@ -178,11 +197,7 @@ async fn call_mcp_single(config: &McpConfig, req: serde_json::Value) -> Option<s
 #[tokio::test]
 async fn test_mcp_initialize_and_tools_list() {
     let harness = start_mcp_harness().await;
-    let config = McpConfig {
-        sessions_dir: harness.sessions_dir.clone(),
-        xmsg_url: harness.base_url.clone(),
-        proc_root: harness.proc_root.clone(),
-    };
+    let config = harness.mcp_config();
 
     // 1. initialize with default version negotiation
     let init_req = serde_json::json!({
@@ -293,11 +308,7 @@ async fn test_mcp_initialize_and_tools_list() {
 #[tokio::test]
 async fn test_mcp_send_rejects_from_argument() {
     let harness = start_mcp_harness().await;
-    let config = McpConfig {
-        sessions_dir: harness.sessions_dir.clone(),
-        xmsg_url: harness.base_url.clone(),
-        proc_root: harness.proc_root.clone(),
-    };
+    let config = harness.mcp_config();
 
     let call_req = serde_json::json!({
         "jsonrpc": "2.0",
@@ -347,11 +358,7 @@ async fn test_mcp_send_and_reply_with_derived_caller() {
         &dummy_sock,
     );
 
-    let config = McpConfig {
-        sessions_dir: harness.sessions_dir.clone(),
-        xmsg_url: harness.base_url.clone(),
-        proc_root: harness.proc_root.clone(),
-    };
+    let config = harness.mcp_config();
 
     // 1. send message via MCP
     let send_req = serde_json::json!({
@@ -446,11 +453,7 @@ async fn test_mcp_send_and_reply_with_derived_caller() {
 #[tokio::test]
 async fn test_mcp_list_sessions() {
     let harness = start_mcp_harness().await;
-    let config = McpConfig {
-        sessions_dir: harness.sessions_dir.clone(),
-        xmsg_url: harness.base_url.clone(),
-        proc_root: harness.proc_root.clone(),
-    };
+    let config = harness.mcp_config();
 
     let list_req = serde_json::json!({
         "jsonrpc": "2.0",
