@@ -20,11 +20,15 @@ impl McpConfig {
     }
 }
 
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2024-11-05"];
+pub const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
+
 pub fn run_mcp_loop<R: BufRead, W: Write>(
     config: &McpConfig,
     mut reader: R,
     mut writer: W,
 ) -> io::Result<()> {
+    let client = reqwest::blocking::Client::new();
     let mut line = String::new();
     while reader.read_line(&mut line)? > 0 {
         let trimmed = line.trim();
@@ -48,7 +52,7 @@ pub fn run_mcp_loop<R: BufRead, W: Write>(
             }
         };
 
-        if let Some(resp) = handle_jsonrpc(config, &msg) {
+        if let Some(resp) = handle_jsonrpc(config, &client, &msg) {
             writeln!(writer, "{}", serde_json::to_string(&resp)?)?;
             writer.flush()?;
         }
@@ -59,17 +63,31 @@ pub fn run_mcp_loop<R: BufRead, W: Write>(
     Ok(())
 }
 
-fn handle_jsonrpc(config: &McpConfig, msg: &Value) -> Option<Value> {
+fn handle_jsonrpc(
+    config: &McpConfig,
+    client: &reqwest::blocking::Client,
+    msg: &Value,
+) -> Option<Value> {
     let method = msg.get("method").and_then(Value::as_str)?;
     let id = msg.get("id").cloned();
 
     match method {
         "initialize" => id.map(|id| {
+            let client_version = msg
+                .get("params")
+                .and_then(|p| p.get("protocolVersion"))
+                .and_then(Value::as_str);
+
+            let protocol_version = match client_version {
+                Some(v) if SUPPORTED_PROTOCOL_VERSIONS.contains(&v) => v,
+                _ => DEFAULT_PROTOCOL_VERSION,
+            };
+
             json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": protocol_version,
                     "capabilities": {
                         "tools": { "listChanged": false }
                     },
@@ -138,7 +156,7 @@ fn handle_jsonrpc(config: &McpConfig, msg: &Value) -> Option<Value> {
             let name = params.and_then(|p| p.get("name")).and_then(Value::as_str).unwrap_or("");
             let args = params.and_then(|p| p.get("arguments")).cloned().unwrap_or(json!({}));
 
-            let res = execute_tool(config, name, &args);
+            let res = execute_tool(config, client, name, &args);
             json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -169,9 +187,12 @@ fn tool_err(text: String) -> Value {
     })
 }
 
-fn execute_tool(config: &McpConfig, name: &str, args: &Value) -> Value {
-    let client = reqwest::blocking::Client::new();
-
+fn execute_tool(
+    config: &McpConfig,
+    client: &reqwest::blocking::Client,
+    name: &str,
+    args: &Value,
+) -> Value {
     match name {
         "list" => {
             let url = format!("{}/v1/sessions", config.xmsg_url);

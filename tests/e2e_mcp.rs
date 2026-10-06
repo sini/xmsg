@@ -184,7 +184,7 @@ async fn test_mcp_initialize_and_tools_list() {
         proc_root: harness.proc_root.clone(),
     };
 
-    // 1. initialize
+    // 1. initialize with default version negotiation
     let init_req = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -195,8 +195,38 @@ async fn test_mcp_initialize_and_tools_list() {
         .await
         .expect("response to initialize");
     assert_eq!(init_resp["id"], 1);
-    assert_eq!(init_resp["result"]["protocolVersion"], "2024-11-05");
+    assert_eq!(init_resp["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(init_resp["result"]["serverInfo"]["name"], "xmsg");
+
+    // Negotiate 2024-11-05
+    let init_req_2024 = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 11,
+        "method": "initialize",
+        "params": { "protocolVersion": "2024-11-05" }
+    });
+    let init_resp_2024 = call_mcp_single(&config, init_req_2024).await.unwrap();
+    assert_eq!(init_resp_2024["result"]["protocolVersion"], "2024-11-05");
+
+    // Negotiate 2025-06-18
+    let init_req_2025 = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 12,
+        "method": "initialize",
+        "params": { "protocolVersion": "2025-06-18" }
+    });
+    let init_resp_2025 = call_mcp_single(&config, init_req_2025).await.unwrap();
+    assert_eq!(init_resp_2025["result"]["protocolVersion"], "2025-06-18");
+
+    // Fallback for unknown version
+    let init_req_unknown = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 13,
+        "method": "initialize",
+        "params": { "protocolVersion": "3000-01-01" }
+    });
+    let init_resp_unknown = call_mcp_single(&config, init_req_unknown).await.unwrap();
+    assert_eq!(init_resp_unknown["result"]["protocolVersion"], "2025-06-18");
 
     // 2. notifications/initialized produces no response
     let notif_req = serde_json::json!({
@@ -443,4 +473,78 @@ async fn test_mcp_list_sessions() {
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0]["sessionId"], "sess-target-5000");
     assert_eq!(sessions[0]["name"], "target-agent");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_shipped_binary_mcp_initialize_and_tool_call() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let harness = start_mcp_harness().await;
+
+    let binary_path = env!("CARGO_BIN_EXE_xmsg");
+    let mut child = std::process::Command::new(binary_path)
+        .arg("mcp")
+        .arg("--sessions-dir")
+        .arg(&harness.sessions_dir)
+        .arg("--xmsg-url")
+        .arg(&harness.base_url)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn xmsg mcp");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    let mut reader = BufReader::new(stdout);
+
+    // 1. Send initialize
+    let init_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18"
+        }
+    });
+    let mut init_bytes = serde_json::to_vec(&init_req).unwrap();
+    init_bytes.push(b'\n');
+    stdin.write_all(&init_bytes).unwrap();
+    stdin.flush().unwrap();
+
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let init_resp: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(init_resp["id"], 1);
+    assert_eq!(init_resp["result"]["protocolVersion"], "2025-06-18");
+
+    // 2. Send tools/call list
+    let list_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "list",
+            "arguments": {}
+        }
+    });
+    let mut list_bytes = serde_json::to_vec(&list_req).unwrap();
+    list_bytes.push(b'\n');
+    stdin.write_all(&list_bytes).unwrap();
+    stdin.flush().unwrap();
+
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    let list_resp: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(list_resp["id"], 2);
+    assert_eq!(list_resp["result"]["isError"], false);
+
+    // Close stdin and assert process exits cleanly
+    drop(stdin);
+    let status = child.wait().expect("wait on child");
+    assert!(
+        status.success(),
+        "xmsg mcp binary exited cleanly without panic: {:?}",
+        status
+    );
 }

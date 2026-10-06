@@ -112,57 +112,15 @@ fn resolve_db_path(path: Option<PathBuf>) -> PathBuf {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
         Commands::Serve(args) => {
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-                )
-                .with_target(false)
-                .init();
-
-            let host_label = args
-                .host_label
-                .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().to_string());
-            let sessions_dir = resolve_sessions_dir(args.sessions_dir);
-            let db_path = resolve_db_path(args.db_path);
-
-            if let Some(parent) = db_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-
-            info!(
-                listen = %args.listen,
-                host_label = %host_label,
-                sessions_dir = %sessions_dir.display(),
-                db_path = %db_path.display(),
-                max_body = args.max_body,
-                reply_ttl = args.reply_ttl,
-                "starting xmsg server"
-            );
-
-            let conn = rusqlite::Connection::open(&db_path)?;
-            storage::init_db(&conn)?;
-
-            let (notify_tx, _) = broadcast::channel(1024);
-
-            let state = Arc::new(AppState {
-                sessions_dir,
-                host_label,
-                max_body: args.max_body,
-                request_counter: AtomicU64::new(1),
-                db: Arc::new(Mutex::new(conn)),
-                notify_tx,
-                reply_ttl: Duration::from_secs(args.reply_ttl),
-            });
-
-            let app = build_router(state);
-            let listener = tokio::net::TcpListener::bind(&args.listen).await?;
-            axum::serve(listener, app).await?;
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(run_serve(args))?;
         }
         Commands::Mcp(args) => {
             let sessions_dir = resolve_sessions_dir(args.sessions_dir);
@@ -173,5 +131,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    Ok(())
+}
+
+async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .with_target(false)
+        .init();
+
+    let host_label = args
+        .host_label
+        .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().to_string());
+    let sessions_dir = resolve_sessions_dir(args.sessions_dir);
+    let db_path = resolve_db_path(args.db_path);
+
+    if let Some(parent) = db_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    info!(
+        listen = %args.listen,
+        host_label = %host_label,
+        sessions_dir = %sessions_dir.display(),
+        db_path = %db_path.display(),
+        max_body = args.max_body,
+        reply_ttl = args.reply_ttl,
+        "starting xmsg server"
+    );
+
+    let conn = rusqlite::Connection::open(&db_path)?;
+    storage::init_db(&conn)?;
+
+    let (notify_tx, _) = broadcast::channel(1024);
+
+    let state = Arc::new(AppState {
+        sessions_dir,
+        host_label,
+        max_body: args.max_body,
+        request_counter: AtomicU64::new(1),
+        db: Arc::new(Mutex::new(conn)),
+        notify_tx,
+        reply_ttl: Duration::from_secs(args.reply_ttl),
+    });
+
+    let app = build_router(state);
+    let listener = tokio::net::TcpListener::bind(&args.listen).await?;
+    axum::serve(listener, app).await?;
     Ok(())
 }
