@@ -200,6 +200,10 @@ fn msg(db: &Arc<Mutex<rusqlite::Connection>>, id: &str, sid: &str, h: &str) {
             bytes: 1,
             outcome: "delivered".into(),
             recipient_harness: h.into(),
+            return_harness: None,
+            return_session_id: None,
+            push_replies: false,
+            thread_id: id.into(),
         },
     )
     .unwrap();

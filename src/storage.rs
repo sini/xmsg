@@ -13,10 +13,22 @@ pub struct MessageRecord {
     pub outcome: String,
     #[serde(default = "default_recipient_harness")]
     pub recipient_harness: String,
+    #[serde(default)]
+    pub return_harness: Option<String>,
+    #[serde(default)]
+    pub return_session_id: Option<String>,
+    #[serde(default = "default_true")]
+    pub push_replies: bool,
+    #[serde(default)]
+    pub thread_id: String,
 }
 
 fn default_recipient_harness() -> String {
     "claude".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -27,6 +39,10 @@ pub struct ReplyRecord {
     pub created_at: i64,
     pub replier_session_id: String,
     pub text: String,
+    #[serde(default)]
+    pub push_outcome: Option<String>,
+    #[serde(default)]
+    pub pushed_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -59,7 +75,11 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             from_name TEXT NOT NULL,
             bytes INTEGER NOT NULL,
             outcome TEXT NOT NULL,
-            recipient_harness TEXT NOT NULL DEFAULT 'claude'
+            recipient_harness TEXT NOT NULL DEFAULT 'claude',
+            return_harness TEXT,
+            return_session_id TEXT,
+            push_replies INTEGER NOT NULL DEFAULT 1,
+            thread_id TEXT NOT NULL DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS replies (
@@ -67,7 +87,9 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             message_id TEXT NOT NULL REFERENCES messages(id),
             created_at INTEGER NOT NULL,
             replier_session_id TEXT NOT NULL,
-            text TEXT NOT NULL
+            text TEXT NOT NULL,
+            push_outcome TEXT,
+            pushed_message_id TEXT
         );
 
         CREATE TABLE IF NOT EXISTS pi_pending_messages (
@@ -88,24 +110,76 @@ pub fn init_db(conn: &Connection) -> Result<()> {
         "#,
     )?;
 
-    // Migration check: ensure recipient_harness column exists on existing messages tables
+    // Migration check: ensure recipient_harness and return_address columns exist on existing messages tables
     let mut stmt = conn.prepare("PRAGMA table_info(messages)")?;
     let mut rows = stmt.query([])?;
     let mut has_recipient_harness = false;
+    let mut has_return_harness = false;
+    let mut has_return_session_id = false;
+    let mut has_push_replies = false;
+    let mut has_thread_id = false;
     let mut has_columns = false;
     while let Some(row) = rows.next()? {
         has_columns = true;
         let col_name: String = row.get(1)?;
-        if col_name == "recipient_harness" {
-            has_recipient_harness = true;
-            break;
+        match col_name.as_str() {
+            "recipient_harness" => has_recipient_harness = true,
+            "return_harness" => has_return_harness = true,
+            "return_session_id" => has_return_session_id = true,
+            "push_replies" => has_push_replies = true,
+            "thread_id" => has_thread_id = true,
+            _ => {}
         }
     }
-    if has_columns && !has_recipient_harness {
-        conn.execute(
-            "ALTER TABLE messages ADD COLUMN recipient_harness TEXT NOT NULL DEFAULT 'claude'",
-            [],
-        )?;
+    if has_columns {
+        if !has_recipient_harness {
+            conn.execute(
+                "ALTER TABLE messages ADD COLUMN recipient_harness TEXT NOT NULL DEFAULT 'claude'",
+                [],
+            )?;
+        }
+        if !has_return_harness {
+            conn.execute("ALTER TABLE messages ADD COLUMN return_harness TEXT", [])?;
+        }
+        if !has_return_session_id {
+            conn.execute("ALTER TABLE messages ADD COLUMN return_session_id TEXT", [])?;
+        }
+        if !has_push_replies {
+            conn.execute(
+                "ALTER TABLE messages ADD COLUMN push_replies INTEGER NOT NULL DEFAULT 1",
+                [],
+            )?;
+        }
+        if !has_thread_id {
+            conn.execute(
+                "ALTER TABLE messages ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+    }
+
+    // Migration check: ensure push_outcome and pushed_message_id exist on replies table
+    let mut stmt = conn.prepare("PRAGMA table_info(replies)")?;
+    let mut rows = stmt.query([])?;
+    let mut has_push_outcome = false;
+    let mut has_pushed_message_id = false;
+    let mut has_reply_columns = false;
+    while let Some(row) = rows.next()? {
+        has_reply_columns = true;
+        let col_name: String = row.get(1)?;
+        match col_name.as_str() {
+            "push_outcome" => has_push_outcome = true,
+            "pushed_message_id" => has_pushed_message_id = true,
+            _ => {}
+        }
+    }
+    if has_reply_columns {
+        if !has_push_outcome {
+            conn.execute("ALTER TABLE replies ADD COLUMN push_outcome TEXT", [])?;
+        }
+        if !has_pushed_message_id {
+            conn.execute("ALTER TABLE replies ADD COLUMN pushed_message_id TEXT", [])?;
+        }
     }
 
     Ok(())
@@ -113,7 +187,7 @@ pub fn init_db(conn: &Connection) -> Result<()> {
 
 pub fn insert_message(conn: &Connection, msg: &MessageRecord) -> Result<()> {
     conn.execute(
-        "INSERT INTO messages (id, created_at, session_id, from_name, bytes, outcome, recipient_harness) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO messages (id, created_at, session_id, from_name, bytes, outcome, recipient_harness, return_harness, return_session_id, push_replies, thread_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             msg.id,
             msg.created_at,
@@ -122,6 +196,10 @@ pub fn insert_message(conn: &Connection, msg: &MessageRecord) -> Result<()> {
             msg.bytes as i64,
             msg.outcome,
             msg.recipient_harness,
+            msg.return_harness,
+            msg.return_session_id,
+            if msg.push_replies { 1i64 } else { 0i64 },
+            msg.thread_id,
         ],
     )?;
     Ok(())
@@ -129,12 +207,13 @@ pub fn insert_message(conn: &Connection, msg: &MessageRecord) -> Result<()> {
 
 pub fn get_message(conn: &Connection, id: &str) -> Result<Option<MessageRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT id, created_at, session_id, from_name, bytes, outcome, recipient_harness FROM messages WHERE id = ?1",
+        "SELECT id, created_at, session_id, from_name, bytes, outcome, recipient_harness, return_harness, return_session_id, push_replies, thread_id FROM messages WHERE id = ?1",
     )?;
     let mut rows = stmt.query(params![id])?;
 
     if let Some(row) = rows.next()? {
         let bytes_i64: i64 = row.get(4)?;
+        let push_replies_i64: i64 = row.get(9)?;
         Ok(Some(MessageRecord {
             id: row.get(0)?,
             created_at: row.get(1)?,
@@ -143,6 +222,10 @@ pub fn get_message(conn: &Connection, id: &str) -> Result<Option<MessageRecord>>
             bytes: bytes_i64 as usize,
             outcome: row.get(5)?,
             recipient_harness: row.get(6)?,
+            return_harness: row.get(7)?,
+            return_session_id: row.get(8)?,
+            push_replies: push_replies_i64 != 0,
+            thread_id: row.get(10)?,
         }))
     } else {
         Ok(None)
@@ -154,11 +237,20 @@ pub fn insert_reply(
     message_id: &str,
     replier_session_id: &str,
     text: &str,
+    push_outcome: Option<&str>,
+    pushed_message_id: Option<&str>,
 ) -> Result<ReplyRecord> {
     let created_at = now_epoch_secs();
     conn.execute(
-        "INSERT INTO replies (message_id, created_at, replier_session_id, text) VALUES (?1, ?2, ?3, ?4)",
-        params![message_id, created_at, replier_session_id, text],
+        "INSERT INTO replies (message_id, created_at, replier_session_id, text, push_outcome, pushed_message_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            message_id,
+            created_at,
+            replier_session_id,
+            text,
+            push_outcome,
+            pushed_message_id
+        ],
     )?;
     let seq = conn.last_insert_rowid();
 
@@ -168,6 +260,8 @@ pub fn insert_reply(
         created_at,
         replier_session_id: replier_session_id.to_string(),
         text: text.to_string(),
+        push_outcome: push_outcome.map(|s| s.to_string()),
+        pushed_message_id: pushed_message_id.map(|s| s.to_string()),
     })
 }
 
@@ -177,7 +271,7 @@ pub fn get_replies_after(
     after_seq: i64,
 ) -> Result<Vec<ReplyRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT seq, message_id, created_at, replier_session_id, text FROM replies WHERE message_id = ?1 AND seq > ?2 ORDER BY seq ASC",
+        "SELECT seq, message_id, created_at, replier_session_id, text, push_outcome, pushed_message_id FROM replies WHERE message_id = ?1 AND seq > ?2 ORDER BY seq ASC",
     )?;
     let rows = stmt.query_map(params![message_id, after_seq], |row| {
         Ok(ReplyRecord {
@@ -186,6 +280,8 @@ pub fn get_replies_after(
             created_at: row.get(2)?,
             replier_session_id: row.get(3)?,
             text: row.get(4)?,
+            push_outcome: row.get(5)?,
+            pushed_message_id: row.get(6)?,
         })
     })?;
 

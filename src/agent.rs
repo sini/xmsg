@@ -236,6 +236,12 @@ pub async fn run_agent_server(
     }
 
     let listener = UnixListener::bind(&sock_path)?;
+    fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600)).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("failed to set permissions on {}: {e}", sock_path.display()),
+        )
+    })?;
 
     loop {
         let (stream, _) = match listener.accept().await {
@@ -384,53 +390,271 @@ pub async fn run_agent_server(
                             continue;
                         }
 
+                        if text.len() > state_clone.max_body {
+                            let err_resp = serde_json::json!({
+                                "status": "error",
+                                "error": "body_too_large",
+                                "detail": format!(
+                                    "reply body length {} exceeds maximum allowed {}",
+                                    text.len(),
+                                    state_clone.max_body
+                                )
+                            });
+                            let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+                            continue;
+                        }
+
+                        let msg_res: Result<storage::MessageRecord, (String, String)> = {
+                            match state_clone.db.lock() {
+                                Ok(db) => match storage::get_message(&db, message_id) {
+                                    Ok(Some(m)) => Ok(m),
+                                    Ok(None) => Err((
+                                        "not_found".to_string(),
+                                        format!("message '{message_id}'"),
+                                    )),
+                                    Err(e) => Err(("internal".to_string(), e.to_string())),
+                                },
+                                Err(e) => Err(("internal".to_string(), e.to_string())),
+                            }
+                        };
+
+                        let msg = match msg_res {
+                            Ok(m) => m,
+                            Err((err_kind, detail)) => {
+                                let err_resp = serde_json::json!({
+                                    "status": "error",
+                                    "error": err_kind,
+                                    "detail": detail
+                                });
+                                let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+                                continue;
+                            }
+                        };
+
+                        if caller.harness != msg.recipient_harness
+                            || caller.session_id != msg.session_id
+                        {
+                            let caller_display = if let Some(stripped) = caller
+                                .session_id
+                                .strip_prefix(&format!("{}:", caller.harness))
+                            {
+                                format!("{}:{}", caller.harness, stripped)
+                            } else {
+                                format!("{}:{}", caller.harness, caller.session_id)
+                            };
+                            let msg_display = if let Some(stripped) = msg
+                                .session_id
+                                .strip_prefix(&format!("{}:", msg.recipient_harness))
+                            {
+                                format!("{}:{}", msg.recipient_harness, stripped)
+                            } else {
+                                format!("{}:{}", msg.recipient_harness, msg.session_id)
+                            };
+                            let err_resp = serde_json::json!({
+                                "status": "error",
+                                "error": "not_recipient",
+                                "detail": format!(
+                                    "caller session '{caller_display}' is not recipient of message '{message_id}' (expected '{msg_display}')"
+                                )
+                            });
+                            let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+                            continue;
+                        }
+
+                        let (push_outcome, pushed_message_id) = if let (
+                            Some(ret_harness),
+                            Some(ret_session_id),
+                        ) = (
+                            msg.return_harness.as_deref(),
+                            msg.return_session_id.as_deref(),
+                        ) {
+                            if !msg.push_replies {
+                                (Some("disabled".to_string()), None)
+                            } else {
+                                let new_message_id = ulid::Ulid::new().to_string();
+                                let replier_name =
+                                    caller.name.as_deref().unwrap_or(&caller.session_id);
+                                let replier_badge = inbox::sanitize_attested_from(
+                                    &state_clone.host_label,
+                                    &caller.harness,
+                                    replier_name,
+                                );
+
+                                let push_res: Result<(), &'static str> = match ret_harness {
+                                    "claude" => {
+                                        match registry::resolve_session(
+                                            &state_clone.sessions_dir,
+                                            ret_session_id,
+                                        ) {
+                                            Ok((_session, socket_path)) => {
+                                                if !socket_path.exists() {
+                                                    Err("sender_gone")
+                                                } else {
+                                                    let body_with_header = format!(
+                                                        "[xmsg] reply to message_id={message_id} — message_id={new_message_id}; reply with the xmsg reply tool\n\n{text}"
+                                                    );
+                                                    match inbox::encode_transport_line(
+                                                        &replier_badge,
+                                                        &body_with_header,
+                                                    ) {
+                                                        Ok(line) => match inbox::deliver_to_socket(
+                                                            &socket_path,
+                                                            &line,
+                                                        )
+                                                        .await
+                                                        {
+                                                            Ok(()) => Ok(()),
+                                                            Err(e) => {
+                                                                let err_str = e.to_string();
+                                                                if err_str
+                                                                    .contains("Connection refused")
+                                                                    || err_str.contains(
+                                                                        "No such file or directory",
+                                                                    )
+                                                                {
+                                                                    Err("sender_gone")
+                                                                } else {
+                                                                    Err("push_failed")
+                                                                }
+                                                            }
+                                                        },
+                                                        Err(_) => Err("push_failed"),
+                                                    }
+                                                }
+                                            }
+                                            Err(AppError::Gone { .. })
+                                            | Err(AppError::NotFound(_)) => Err("sender_gone"),
+                                            Err(_) => Err("push_failed"),
+                                        }
+                                    }
+                                    "agy" => {
+                                        match crate::agy::resolve_agy_session(
+                                            &state_clone.agy_config,
+                                            &state_clone.agy_store,
+                                            ret_session_id,
+                                        ) {
+                                            Ok(Some(session)) => {
+                                                let envelope = format!(
+                                                    "[xmsg] reply to message_id={message_id} — message_id={new_message_id}; reply with the xmsg reply tool\n\n{text}"
+                                                );
+                                                match crate::agy::deliver_agy_envelope(
+                                                    &state_clone.agy_config,
+                                                    &state_clone.agy_store,
+                                                    &session,
+                                                    &replier_badge,
+                                                    &envelope,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(()) => Ok(()),
+                                                    Err(AppError::Gone { .. })
+                                                    | Err(AppError::CredentialsStale(_)) => {
+                                                        Err("sender_gone")
+                                                    }
+                                                    Err(_) => Err("push_failed"),
+                                                }
+                                            }
+                                            Ok(None) => Err("sender_gone"),
+                                            Err(_) => Err("push_failed"),
+                                        }
+                                    }
+                                    "pi" => {
+                                        match crate::pi::resolve_pi_session(
+                                            &state_clone.agy_config.proc_root,
+                                            &state_clone.pi_store,
+                                            ret_session_id,
+                                        ) {
+                                            Ok(Some(session)) => {
+                                                let envelope = format!(
+                                                    "[xmsg] reply to message_id={message_id} — message_id={new_message_id}; reply with the xmsg reply tool\n\n{text}"
+                                                );
+                                                let pi_msg = storage::PiPendingMessage {
+                                                    id: new_message_id.clone(),
+                                                    session_id: session.session_id.clone(),
+                                                    created_at: storage::now_epoch_secs(),
+                                                    from_name: replier_badge.clone(),
+                                                    bytes: text.len(),
+                                                    text: text.to_string(),
+                                                    envelope,
+                                                    delivered_at: None,
+                                                };
+                                                let insert_res = (|| -> Result<bool, AppError> {
+                                                    let db =
+                                                        state_clone.db.lock().map_err(|e| {
+                                                            AppError::Internal(e.to_string())
+                                                        })?;
+                                                    storage::insert_pi_message(&db, &pi_msg)
+                                                        .map_err(|e| {
+                                                            AppError::Internal(e.to_string())
+                                                        })
+                                                })(
+                                                );
+                                                match insert_res {
+                                                    Ok(true) => {
+                                                        let _ = state_clone
+                                                            .pi_notify_tx
+                                                            .send(session.session_id.clone());
+                                                        Ok(())
+                                                    }
+                                                    Ok(false) => Err("push_failed"),
+                                                    Err(_) => Err("push_failed"),
+                                                }
+                                            }
+                                            Ok(None) => Err("sender_gone"),
+                                            Err(_) => Err("push_failed"),
+                                        }
+                                    }
+                                    _ => Err("sender_gone"),
+                                };
+
+                                match push_res {
+                                    Ok(()) => {
+                                        let pushed_record = storage::MessageRecord {
+                                            id: new_message_id.clone(),
+                                            created_at: storage::now_epoch_secs(),
+                                            session_id: ret_session_id.to_string(),
+                                            from_name: replier_badge,
+                                            bytes: text.len(),
+                                            outcome: "delivered".to_string(),
+                                            recipient_harness: ret_harness.to_string(),
+                                            return_harness: Some(caller.harness.clone()),
+                                            return_session_id: Some(caller.session_id.clone()),
+                                            push_replies: true,
+                                            thread_id: if msg.thread_id.is_empty() {
+                                                msg.id.clone()
+                                            } else {
+                                                msg.thread_id.clone()
+                                            },
+                                        };
+                                        if let Ok(db) = state_clone.db.lock() {
+                                            let _ = storage::insert_message(&db, &pushed_record);
+                                        }
+                                        (Some("pushed".to_string()), Some(new_message_id))
+                                    }
+                                    Err(outcome) => (Some(outcome.to_string()), None),
+                                }
+                            }
+                        } else {
+                            (None, None)
+                        };
+
                         let res: Result<storage::ReplyRecord, AppError> = (|| {
                             let db = state_clone
                                 .db
                                 .lock()
                                 .map_err(|e| AppError::Internal(e.to_string()))?;
-                            let msg = storage::get_message(&db, message_id)
-                                .map_err(|e| AppError::Internal(e.to_string()))?
-                                .ok_or_else(|| {
-                                    AppError::NotFound(format!("message '{message_id}'"))
-                                })?;
-
-                            if caller.harness != msg.recipient_harness
-                                || caller.session_id != msg.session_id
-                            {
-                                let caller_display = if let Some(stripped) = caller
-                                    .session_id
-                                    .strip_prefix(&format!("{}:", caller.harness))
-                                {
-                                    format!("{}:{}", caller.harness, stripped)
-                                } else {
-                                    format!("{}:{}", caller.harness, caller.session_id)
-                                };
-                                let msg_display = if let Some(stripped) = msg
-                                    .session_id
-                                    .strip_prefix(&format!("{}:", msg.recipient_harness))
-                                {
-                                    format!("{}:{}", msg.recipient_harness, stripped)
-                                } else {
-                                    format!("{}:{}", msg.recipient_harness, msg.session_id)
-                                };
-                                Err(AppError::NotRecipient(format!(
-                                    "caller session '{caller_display}' is not recipient of message '{message_id}' (expected '{msg_display}')"
-                                )))
-                            } else {
-                                let reply = storage::insert_reply(
-                                    &db,
-                                    message_id,
-                                    &caller.session_id,
-                                    text,
-                                )
-                                .map_err(|e| AppError::Internal(e.to_string()))?;
-                                let _ =
-                                    storage::purge_replies(&db, state_clone.reply_ttl.as_secs());
-                                let _ =
-                                    storage::purge_messages(&db, state_clone.reply_ttl.as_secs());
-                                Ok(reply)
-                            }
+                            let reply = storage::insert_reply(
+                                &db,
+                                message_id,
+                                &caller.session_id,
+                                text,
+                                push_outcome.as_deref(),
+                                pushed_message_id.as_deref(),
+                            )
+                            .map_err(|e| AppError::Internal(e.to_string()))?;
+                            let _ = storage::purge_replies(&db, state_clone.reply_ttl.as_secs());
+                            let _ = storage::purge_messages(&db, state_clone.reply_ttl.as_secs());
+                            Ok(reply)
                         })(
                         );
 
@@ -445,7 +669,9 @@ pub async fn run_agent_server(
                                         "sessionRef": reply.replier_session_id,
                                         "replierSessionId": reply.replier_session_id,
                                         "createdAt": reply.created_at,
-                                        "text": reply.text
+                                        "text": reply.text,
+                                        "pushOutcome": reply.push_outcome,
+                                        "pushedMessageId": reply.pushed_message_id,
                                     }
                                 });
                                 let _ = writer.write_all(format!("{ok_resp}\n").as_bytes()).await;
@@ -453,11 +679,7 @@ pub async fn run_agent_server(
                             Err(e) => {
                                 let err_resp = serde_json::json!({
                                     "status": "error",
-                                    "error": match &e {
-                                        AppError::NotRecipient(_) => "not_recipient",
-                                        AppError::NotFound(_) => "not_found",
-                                        _ => "internal"
-                                    },
+                                    "error": "internal",
                                     "detail": e.to_string()
                                 });
                                 let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
@@ -467,6 +689,11 @@ pub async fn run_agent_server(
                     "send" => {
                         let target_ref = req_val.get("ref").and_then(|v| v.as_str()).unwrap_or("");
                         let text = req_val.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                        let push_replies = req_val
+                            .get("push_replies")
+                            .or_else(|| req_val.get("pushReplies"))
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
 
                         if target_ref.is_empty() || text.is_empty() {
                             let err_resp = serde_json::json!({
@@ -585,6 +812,10 @@ pub async fn run_agent_server(
                                             bytes: body_len,
                                             outcome: "delivered".to_string(),
                                             recipient_harness: target_harness,
+                                            return_harness: Some(caller.harness.clone()),
+                                            return_session_id: Some(caller.session_id.clone()),
+                                            push_replies,
+                                            thread_id: message_id.clone(),
                                         };
                                         if let Ok(db) = state_clone.db.lock() {
                                             let _ = storage::insert_message(&db, &msg_record);

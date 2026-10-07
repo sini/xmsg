@@ -145,7 +145,8 @@ fn handle_jsonrpc(
                                 "type": "object",
                                 "properties": {
                                     "ref": { "type": "string", "description": "Target session ID, PID, or name" },
-                                    "text": { "type": "string", "description": "Message content" }
+                                    "text": { "type": "string", "description": "Message content" },
+                                    "push_replies": { "type": "boolean", "description": "Whether to push replies back to the sender session (default: true). Set false for poll-only replies." }
                                 },
                                 "required": ["ref", "text"],
                                 "additionalProperties": false
@@ -294,11 +295,16 @@ fn execute_tool(
             let Some(text) = args.get("text").and_then(Value::as_str) else {
                 return tool_err("missing required string argument 'text'".to_string());
             };
+            let push_replies = args
+                .get("push_replies")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
 
             let payload = json!({
                 "action": "send",
                 "ref": target_ref,
-                "text": text
+                "text": text,
+                "push_replies": push_replies,
             });
 
             match call_agent_sock(&config.agent_sock, &payload) {

@@ -366,6 +366,29 @@ pub async fn deliver_agy(
     message_id: &str,
     body_text: &str,
 ) -> Result<DeliveryResponse, AppError> {
+    // Format envelope (§9.4)
+    let envelope = format!(
+        "[xmsg] from={} message_id={} — reply with the xmsg reply tool\n\n{}",
+        from_name, message_id, body_text
+    );
+    deliver_agy_envelope(config, store, session, from_name, &envelope).await?;
+
+    Ok(DeliveryResponse {
+        session_id: session.session_id.clone(),
+        from_name: from_name.to_string(),
+        bytes: body_text.len(),
+        message_id: message_id.to_string(),
+    })
+}
+
+/// Delivers a raw envelope string to an Antigravity session.
+pub async fn deliver_agy_envelope(
+    config: &AgyConfig,
+    store: &AgyStore,
+    session: &Session,
+    title: &str,
+    envelope: &str,
+) -> Result<(), AppError> {
     // 1. Check lock is still held
     let _current_holder = match get_presence_lock_holder(
         &config.presence_dir,
@@ -400,21 +423,15 @@ pub async fn deliver_agy(
         )));
     }
 
-    // 3. Format envelope (§9.4)
-    let envelope = format!(
-        "[xmsg] from={} message_id={} — reply with the xmsg reply tool\n\n{}",
-        from_name, message_id, body_text
-    );
-
     // 4. Spawn agy agentapi send-message directly as argv vector with NO shell
     let mut cmd = tokio::process::Command::new(&config.agy_bin);
     cmd.arg("agentapi")
         .arg("send-message")
         .arg("--title")
-        .arg(from_name)
+        .arg(title)
         .arg("--")
         .arg(&session.session_id)
-        .arg(&envelope)
+        .arg(envelope)
         .env("ANTIGRAVITY_LS_ADDRESS", &creds.ls_address)
         .env("ANTIGRAVITY_CSRF_TOKEN", &creds.csrf_token)
         .stdout(std::process::Stdio::piped())
@@ -458,12 +475,7 @@ pub async fn deliver_agy(
         return Err(AppError::InboxUnavailable("delivery failed".to_string()));
     }
 
-    Ok(DeliveryResponse {
-        session_id: session.session_id.clone(),
-        from_name: from_name.to_string(),
-        bytes: body_text.len(),
-        message_id: message_id.to_string(),
-    })
+    Ok(())
 }
 
 /// Ancestor walk to find an active agy presence lock held by an ancestor process.
@@ -573,6 +585,16 @@ pub async fn run_register_server(
     }
 
     let listener = tokio::net::UnixListener::bind(&sock_path)?;
+    fs::set_permissions(
+        &sock_path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("failed to set permissions on {}: {e}", sock_path.display()),
+        )
+    })?;
 
     loop {
         let (stream, _) = match listener.accept().await {

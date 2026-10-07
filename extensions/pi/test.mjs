@@ -58,15 +58,24 @@ async function runTest1() {
   const mockPi = new MockExtensionAPI();
   extensionDefault(mockPi);
 
-  assert.equal(mockPi.tools.length, 1);
-  const replyTool = mockPi.tools[0];
-  assert.equal(replyTool.name, "reply");
+  assert.equal(mockPi.tools.length, 3);
+  const toolNames = mockPi.tools.map((t) => t.name);
+  assert.ok(toolNames.includes("list"), "list tool must be registered");
+  assert.ok(toolNames.includes("send"), "send tool must be registered");
+  assert.ok(toolNames.includes("reply"), "reply tool must be registered");
+
+  const sendTool = mockPi.tools.find((t) => t.name === "send");
+  assert.ok(sendTool.parameters.properties.ref);
+  assert.ok(sendTool.parameters.properties.text);
+  assert.ok(sendTool.parameters.properties.push_replies);
+
+  const replyTool = mockPi.tools.find((t) => t.name === "reply");
   assert.equal(typeof replyTool.description, "string");
   assert.ok(replyTool.parameters);
   assert.equal(replyTool.parameters.type, "object");
   assert.ok(replyTool.parameters.properties.message_id);
   assert.ok(replyTool.parameters.properties.text);
-  console.log("✔ Test 1 passed: Pi extension registers 'reply' tool with valid schema");
+  console.log("✔ Test 1 passed: Pi extension registers 'list', 'send', and 'reply' tools with valid schemas");
 }
 
 async function runTest2() {
@@ -257,9 +266,27 @@ async function runTest3() {
   assert.ok(result2.content[0].text.includes("not recipient of message msg-not-recipient"));
   assert.equal(result2.details.error, "not_recipient");
 
+  // 3. Successful send over agent.sock (never HTTP)
+  bridge.registerSendTool();
+  const sendTool = mockPi.tools.find((t) => t.name === "send");
+  assert.ok(sendTool);
+
+  const result3 = await sendTool.execute(
+    "call-3",
+    { ref: "victim-session", text: "Hello from Pi via agent.sock", push_replies: true },
+    undefined,
+    undefined,
+    { sessionManager: { getSessionId: () => "pi-sess-replier" } },
+  );
+
+  assert.equal(receivedReq.action, "send");
+  assert.equal(receivedReq.ref, "victim-session");
+  assert.equal(receivedReq.text, "Hello from Pi via agent.sock");
+  assert.equal(receivedReq.push_replies, true);
+
   await new Promise((r) => server.close(r));
   fs.rmSync(tmpDir, { recursive: true, force: true });
-  console.log("✔ Test 3 passed: Pi reply tool connects to agent.sock and handles reply correctly");
+  console.log("✔ Test 3 passed: Pi reply and send tools connect to agent.sock correctly");
 }
 
 async function main() {

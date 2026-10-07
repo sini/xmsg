@@ -91,8 +91,14 @@ export class XmsgPiBridge {
 
   public setSession(sessionId: string, sessionName?: string, cwd?: string) {
     this.currentSessionId = sessionId;
-    this.currentSessionName = sessionName;
-    this.currentCwd = cwd || process.cwd();
+    const resolvedCwd = cwd || process.cwd();
+    this.currentCwd = resolvedCwd;
+    if (sessionName && sessionName.trim()) {
+      this.currentSessionName = sessionName.trim();
+    } else {
+      const base = path.basename(resolvedCwd);
+      this.currentSessionName = base || "pi";
+    }
   }
 
   public getSessionId(): string | undefined {
@@ -239,6 +245,135 @@ export class XmsgPiBridge {
     });
   }
 
+  private callAgentSock(req: any): Promise<any> {
+    if (!this.agentSockPath) {
+      return Promise.resolve({
+        content: [{ type: "text", text: "Error: agent.sock path unknown (XDG_RUNTIME_DIR unset)" }],
+        details: { error: "agent_sock_unknown" },
+      });
+    }
+    if (!verifySecureSocketDir(this.agentSockPath)) {
+      return Promise.resolve({
+        content: [{ type: "text", text: "Error: agent.sock directory failed security check" }],
+        details: { error: "insecure_socket_dir" },
+      });
+    }
+
+    return new Promise((resolve) => {
+      let client: net.Socket;
+      try {
+        client = net.connect(this.agentSockPath!, () => {
+          client.write(JSON.stringify(req) + "\n");
+        });
+      } catch (err: any) {
+        resolve({
+          content: [{ type: "text", text: `Error connecting to agent socket: ${err.message}` }],
+          details: { error: "socket_error", detail: err.message },
+        });
+        return;
+      }
+
+      let data = "";
+      client.on("data", (chunk) => {
+        data += chunk.toString();
+        if (data.includes("\n")) {
+          client.end();
+        }
+      });
+
+      client.on("error", (err) => {
+        resolve({
+          content: [{ type: "text", text: `Error connecting to agent socket: ${err.message}` }],
+          details: { error: "socket_error", detail: err.message },
+        });
+      });
+
+      client.on("close", () => {
+        try {
+          const line = data.trim().split("\n")[0];
+          if (!line) {
+            resolve({
+              content: [{ type: "text", text: "Error: empty response from agent socket" }],
+              details: { error: "empty_response" },
+            });
+            return;
+          }
+          const resp = JSON.parse(line);
+          resolve(resp);
+        } catch (err: any) {
+          resolve({
+            content: [{ type: "text", text: `Error parsing agent response: ${err.message}` }],
+            details: { error: "parse_error", detail: String(err) },
+          });
+        }
+      });
+    });
+  }
+
+  public registerListTool() {
+    this.pi.registerTool({
+      name: "list",
+      label: "List",
+      description: "List active agent sessions on the local host",
+      parameters: Type.Object({}),
+      execute: async () => {
+        try {
+          const res = await fetch(`${this.xmsgUrl}/v1/sessions`);
+          if (!res.ok) {
+            const errText = await res.text();
+            return {
+              content: [{ type: "text", text: `HTTP ${res.status}: ${errText}` }],
+              details: { error: "http_error", status: res.status },
+            };
+          }
+          const data = await res.json();
+          return {
+            content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+            details: data,
+          };
+        } catch (err: any) {
+          return {
+            content: [{ type: "text", text: `Error listing sessions: ${err.message}` }],
+            details: { error: "fetch_error", detail: err.message },
+          };
+        }
+      },
+    });
+  }
+
+  public registerSendTool() {
+    this.pi.registerTool({
+      name: "send",
+      label: "Send",
+      description: "Send a cross-session message to another agent by session ID, PID, or name. Sender identity is automatically derived.",
+      parameters: Type.Object({
+        ref: Type.String({ description: "Target session ID, PID, or name" }),
+        text: Type.String({ description: "Message content" }),
+        push_replies: Type.Optional(Type.Boolean({ description: "Whether to push replies back to the sender session (default: true)" })),
+      }),
+      execute: async (_toolCallId, params: any) => {
+        const req = {
+          action: "send",
+          ref: params.ref,
+          text: params.text,
+          push_replies: params.push_replies ?? true,
+        };
+        const resp = await this.callAgentSock(req);
+        if (resp.status === "ok") {
+          return {
+            content: [{ type: "text", text: `Message sent (id ${resp.delivery?.messageId || resp.delivery})` }],
+            details: resp.delivery || resp,
+          };
+        } else {
+          return {
+            content: [{ type: "text", text: `Error sending message: ${resp.detail || resp.error || JSON.stringify(resp)}` }],
+            details: resp,
+          };
+        }
+      },
+    });
+  }
+
   public registerReplyTool() {
     this.pi.registerTool({
       name: "reply",
@@ -248,97 +383,43 @@ export class XmsgPiBridge {
         message_id: Type.String({ description: "The ID of the message being replied to" }),
         text: Type.String({ description: "Reply content" }),
       }),
-      execute: async (_toolCallId, params) => {
-        if (!this.agentSockPath) {
+      execute: async (_toolCallId, params: any) => {
+        const req = {
+          action: "reply",
+          messageId: params.message_id,
+          text: params.text,
+        };
+        const resp = await this.callAgentSock(req);
+        if (resp.status === "ok") {
           return {
-            content: [{ type: "text", text: "Error: agent.sock path unknown (XDG_RUNTIME_DIR unset)" }],
-            details: { error: "agent_sock_unknown" },
+            content: [{ type: "text", text: `Reply sent (seq ${resp.reply?.seq})` }],
+            details: resp.reply,
+          };
+        } else if (resp.error === "not_recipient") {
+          return {
+            content: [{ type: "text", text: `Error: not recipient of message ${params.message_id}` }],
+            details: { error: "not_recipient", status: 403, detail: resp.detail },
+          };
+        } else {
+          return {
+            content: [{ type: "text", text: `Error sending reply: ${resp.detail || resp.error || JSON.stringify(resp)}` }],
+            details: resp,
           };
         }
-        if (!verifySecureSocketDir(this.agentSockPath)) {
-          return {
-            content: [{ type: "text", text: "Error: agent.sock directory failed security check" }],
-            details: { error: "insecure_socket_dir" },
-          };
-        }
-
-        return new Promise((resolve) => {
-          let client: net.Socket;
-          try {
-            client = net.connect(this.agentSockPath!, () => {
-              const req = {
-                action: "reply",
-                messageId: params.message_id,
-                text: params.text,
-              };
-              client.write(JSON.stringify(req) + "\n");
-            });
-          } catch (err: any) {
-            resolve({
-              content: [{ type: "text", text: `Error connecting to agent socket: ${err.message}` }],
-              details: { error: "socket_error", detail: err.message },
-            });
-            return;
-          }
-
-          let data = "";
-          client.on("data", (chunk) => {
-            data += chunk.toString();
-            if (data.includes("\n")) {
-              client.end();
-            }
-          });
-
-          client.on("error", (err) => {
-            resolve({
-              content: [{ type: "text", text: `Error connecting to agent socket: ${err.message}` }],
-              details: { error: "socket_error", detail: err.message },
-            });
-          });
-
-          client.on("close", () => {
-            try {
-              const line = data.trim().split("\n")[0];
-              if (!line) {
-                resolve({
-                  content: [{ type: "text", text: "Error: empty response from agent socket" }],
-                  details: { error: "empty_response" },
-                });
-                return;
-              }
-              const resp = JSON.parse(line);
-              if (resp.status === "ok") {
-                resolve({
-                  content: [{ type: "text", text: `Reply sent (seq ${resp.reply.seq})` }],
-                  details: resp.reply,
-                });
-              } else if (resp.error === "not_recipient") {
-                resolve({
-                  content: [{ type: "text", text: `Error: not recipient of message ${params.message_id}` }],
-                  details: { error: "not_recipient", status: 403, detail: resp.detail },
-                });
-              } else {
-                resolve({
-                  content: [{ type: "text", text: `Error sending reply: ${resp.detail || resp.error}` }],
-                  details: resp,
-                });
-              }
-            } catch (err: any) {
-              resolve({
-                content: [{ type: "text", text: `Error parsing agent response: ${err.message}` }],
-                details: { error: "parse_error", detail: String(err) },
-              });
-            }
-          });
-        });
       },
     });
+  }
+
+  public registerTools() {
+    this.registerListTool();
+    this.registerSendTool();
+    this.registerReplyTool();
   }
 }
 
 export default function (pi: ExtensionAPI) {
   const bridge = new XmsgPiBridge(pi);
-  bridge.registerReplyTool();
+  bridge.registerTools();
 
   pi.on("session_start", async (_event, ctx) => {
     const sessionId = ctx.sessionManager.getSessionId();

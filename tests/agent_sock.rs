@@ -298,6 +298,10 @@ async fn test_agent_sock_reply_and_send_flow() {
         bytes: 20,
         outcome: "delivered".to_string(),
         recipient_harness: "claude".to_string(),
+        return_harness: None,
+        return_session_id: None,
+        push_replies: false,
+        thread_id: "msg-001".to_string(),
     };
     {
         let db_lock = db.lock().unwrap();
@@ -332,6 +336,10 @@ async fn test_agent_sock_reply_and_send_flow() {
         bytes: 20,
         outcome: "delivered".to_string(),
         recipient_harness: "claude".to_string(),
+        return_harness: None,
+        return_session_id: None,
+        push_replies: false,
+        thread_id: "msg-002".to_string(),
     };
     {
         let db_lock = db.lock().unwrap();

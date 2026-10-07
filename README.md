@@ -7,7 +7,7 @@
 ## 1. Security Architecture & Trust Model
 
 ### 1.1 Same-UID Trust Boundary
-All local IPC in `xmsg` relies on Unix domain sockets located in `$XDG_RUNTIME_DIR/xmsg/` (mode `0700`, owned by the running user's UID):
+All local IPC in `xmsg` relies on Unix domain sockets located in `$XDG_RUNTIME_DIR/xmsg/` (mode `0700` directory, socket mode `0600`, owned by the running user's UID):
 - Sockets authenticate connected peers via kernel-attested credentials (`SO_PEERCRED` UID).
 - Any process executing under the **same local UID** is within the trust boundary and may connect to the Unix sockets.
 - Sockets are protected against symlink attacks and race conditions on startup by verifying directory ownership and permissions prior to binding.
@@ -55,9 +55,9 @@ flowchart TD
     Pi["Pi Agent Session<br/>(xmsg-pi extension)"]
   end
 
-  subgraph IPC["Local IPC ($XDG_RUNTIME_DIR/xmsg/)"]
-    AgentSock["agent.sock<br/>(send, reply)"]
-    RegisterSock["register.sock<br/>(register agy, pi long-poll)"]
+  subgraph IPC["Local IPC: runtime dir / xmsg"]
+    AgentSock["agent.sock (mode 0600)<br/>(send, reply)"]
+    RegisterSock["register.sock (mode 0600)<br/>(register agy, pi long-poll)"]
   end
 
   subgraph Bridge["xmsg Bridge Daemon (127.0.0.1)"]
@@ -76,17 +76,31 @@ flowchart TD
   HTTP --> Registry
 ```
 
-`xmsg` operates two Unix domain sockets in `$XDG_RUNTIME_DIR/xmsg/`:
+`xmsg` operates two Unix domain sockets in `$XDG_RUNTIME_DIR/xmsg/` (created with file permissions mode `0600`):
 
 ### 2.1 `agent.sock`
 Used by active agent sessions and MCP tool instances:
-- **`reply` action:** Validates caller identity via ancestor walk, verifies recipient authorization against SQLite records, records the reply, and broadcasts notifications.
-- **`send` action:** Formats an attested sender badge `xmsg@<host> · <harness>:<name>`, enforces payload limits (`max_body`), and delivers directly to the recipient session.
+- **`send` action:** Formats an attested sender badge `xmsg@<host> · <harness>:<name>`, enforces payload limits (`max_body`), derives kernel-attested return address (`return_harness`, `return_session_id`), and delivers directly to the recipient session. Supports optional `"push_replies": bool` (defaults to `true`). Callers cannot supply or spoof return addresses.
+- **`reply` action:** Validates caller identity via ancestor walk, verifies recipient authorization against SQLite records, and records the reply. If the original message has an attested return address and `push_replies` is enabled, pushes the reply directly into the original sender's adapter (Claude channel socket, Antigravity `agentapi`, or Pi queue) with conversational threading (`thread_id`), returning `push_outcome` (`pushed`, `sender_gone`, `push_failed`, or `disabled`).
 
 ### 2.2 `register.sock`
 Used by non-Claude harnesses for registration and polling:
 - **Antigravity Registration:** `xmsg register agy` sends session credentials (`conversation_id`, `ls_address`, `csrf_token`) over this socket to enable outbound HTTP message injection into Antigravity.
 - **Pi Registration & Polling:** The Pi extension registers its process and enters an event-driven long-poll loop to receive inbound messages.
+
+### 2.3 Return Address & Reply Push Delivery (Unit U8)
+- **Strictly Derived Return Address:** The server derives `return_harness = caller.harness` and `return_session_id = caller.session_id` directly from kernel process attestation. Any caller-supplied address fields are strictly rejected. Anonymous HTTP sends have `return_harness = None` and `push_replies = false`.
+- **Push Opt-Out:** Senders can pass `"push_replies": false` to opt out of asynchronous push delivery. Replies to opt-out messages record `push_outcome = "disabled"` without attempting delivery.
+- **Envelope Header & Threading:** Pushed replies are inserted as full first-class messages with a new ULID `id`, reciprocal return address, and `thread_id` pointing to the originating message. The delivered envelope begins with:
+  ```text
+  [xmsg] reply to message_id=<orig_id> — message_id=<new_id>; reply with the xmsg reply tool
+  ```
+  This enables persistent bidirectional conversational threading across disparate harnesses.
+- **Push Outcomes:** Recorded in the `replies` table:
+  - `pushed`: Successfully delivered to recipient adapter.
+  - `sender_gone`: Original sender socket or process no longer exists.
+  - `push_failed`: Transient error or adapter connection failure.
+  - `disabled`: Original sender opted out with `push_replies = false`.
 
 ---
 
@@ -106,14 +120,18 @@ Used by non-Claude harnesses for registration and polling:
 ```
 Exposes three tools (all execute autonomously without user interaction prompts):
 - **`list`:** Enumerate active agent sessions across all harnesses.
-- **`send`:** Send a message to a session ref (derives attested caller identity; callers cannot override the sender).
-- **`reply`:** Reply to a received message by its `message_id` (enforces recipient authorization).
+- **`send(ref, text, [push_replies])`:** Send a message to a session ref (derives attested caller identity and return address; callers cannot override the sender).
+- **`reply(message_id, text)`:** Reply to a received message by its `message_id` (enforces recipient authorization and pushes to the original sender if return address exists).
 
 ### 3.2 Pi Coding Agent Extension: `extensions/pi/`
 TypeScript extension for Pi (`@earendil-works/pi-coding-agent`):
 - Connects to `register.sock`, receives server-derived session ID, and long-polls for inbound messages.
+- Defaults session display name to the directory basename of the working directory.
 - Delivers incoming messages into Pi with `expandPromptTemplates: false` to prevent remote command or prompt template injection.
-- Registers a `reply` tool connecting to `agent.sock`.
+- Registers three tools:
+  - **`list`:** Queries active sessions via local HTTP.
+  - **`send`:** Sends messages over `agent.sock` to ensure kernel attestation of peer PID and return address.
+  - **`reply`:** Sends replies over `agent.sock`.
 
 ### 3.3 Antigravity Integration: `xmsg register agy`
 Registers local Antigravity credentials with the running `xmsg` server over `register.sock`, allowing seamless bidirectional messaging.

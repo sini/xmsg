@@ -271,6 +271,10 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
         bytes: 10,
         outcome: "delivered".to_string(),
         recipient_harness: "pi".to_string(),
+        return_harness: None,
+        return_session_id: None,
+        push_replies: false,
+        thread_id: "other-msg-123".to_string(),
     };
     {
         let db_lock = db.lock().unwrap();

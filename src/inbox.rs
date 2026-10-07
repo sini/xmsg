@@ -132,8 +132,15 @@ pub fn sanitize_attested_from(host_label: &str, harness: &str, caller_name: &str
 
     let trimmed = cleaned.trim();
     let name_part = if trimmed.is_empty() { "agent" } else { trimmed };
+    let harness_prefix = format!("{harness}:");
+    let name_stripped = name_part.strip_prefix(&harness_prefix).unwrap_or(name_part);
+    let name_final = if name_stripped.is_empty() {
+        "agent"
+    } else {
+        name_stripped
+    };
 
-    let prefixed = format!("xmsg@{host_label} · {harness}:{name_part}");
+    let prefixed = format!("xmsg@{host_label} · {harness}:{name_final}");
     prefixed.chars().take(64).collect()
 }
 

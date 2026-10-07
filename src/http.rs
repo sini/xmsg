@@ -44,7 +44,25 @@ pub struct MessageDetailResponse {
     pub from_name: String,
     pub bytes: usize,
     pub outcome: String,
+    #[serde(default = "default_recipient_harness")]
+    pub recipient_harness: String,
+    #[serde(default)]
+    pub return_harness: Option<String>,
+    #[serde(default)]
+    pub return_session_id: Option<String>,
+    #[serde(default = "default_true")]
+    pub push_replies: bool,
+    #[serde(default)]
+    pub thread_id: String,
     pub replies: Vec<ReplyRecord>,
+}
+
+fn default_recipient_harness() -> String {
+    "claude".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -267,6 +285,10 @@ async fn send_message_handler(
         bytes: body_len,
         outcome: "delivered".to_string(),
         recipient_harness,
+        return_harness: None,
+        return_session_id: None,
+        push_replies: false,
+        thread_id: message_id.clone(),
     };
 
     {
@@ -333,6 +355,11 @@ async fn get_message_handler(
             from_name: msg.from_name,
             bytes: msg.bytes,
             outcome: msg.outcome,
+            recipient_harness: msg.recipient_harness,
+            return_harness: msg.return_harness,
+            return_session_id: msg.return_session_id,
+            push_replies: msg.push_replies,
+            thread_id: msg.thread_id,
             replies,
         }),
     )
