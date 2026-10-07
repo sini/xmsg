@@ -21,15 +21,21 @@ All local IPC in `xmsg` relies on Unix domain sockets located in `$XDG_RUNTIME_D
 - **Claude Sessions:** Discovered via `~/.claude/sessions` and verified for process liveness and starttime continuity via `/proc/<pid>/stat`.
 - **Antigravity Sessions:** Verified via presence lock holder files in `/proc/locks` (enforcing `FLOCK` only and refusing ambiguous multiple holders).
 - **Pi Sessions:** Session identity is **server-derived** from attested kernel process parameters:
-  $$\text{sessionId} = \text{"pi:"} \parallel \text{peer\_pid} \parallel \text{":"} \parallel \text{starttime}$$
+  ```text
+  sessionId = "pi:" || peer_pid || ":" || starttime
+  ```
   Caller-asserted session IDs in registration payloads are completely ignored.
 - **Process Verification:** Pi peer processes are inspected for command line and script baselines in `/proc/<pid>/cmdline`. Note that this verifies process argument baselines but does not cryptographically authenticate the executable binary.
 - **Attested Badges & Harness Binding:** The attested sender badge formats as:
-  $$\text{fromName} = \text{"xmsg@"} \parallel \text{host\_label} \parallel \text{" · "} \parallel \text{caller.harness} \parallel \text{":"} \parallel \text{cleaned\_name}$$
+  ```text
+  fromName = "xmsg@" || host_label || " · " || caller.harness || ":" || cleaned_name
+  ```
   The harness (`claude:`, `pi:`, `agy:`) and process binding are cryptographically/kernel-attested by `xmsg`, while the display name is chosen by the session.
 - **Ancestor Process Walk:** For calls to `agent.sock` (such as MCP tools spawned in child shells), `xmsg` traverses parent PIDs upwards through `/proc/<pid>/stat` to identify the originating agent session.
 - **Harness-Bound Reply Authorization:** All stored messages record the recipient harness (`claude`, `agy`, or `pi`). A reply is accepted only when:
-  $$\text{caller.harness} == \text{msg.recipient\_harness} \quad \land \quad \text{caller.session\_id} == \text{msg.session\_id}$$
+  ```text
+  caller.harness == msg.recipient_harness && caller.session_id == msg.session_id
+  ```
 
 ### 1.4 Envelope Sanitization & Breakout Protection
 - **Printable-ASCII Sender Enforcement:** HTTP sender names are strictly restricted to printable ASCII characters (`0x20` to `0x7E`) and cannot contain `:` or `/`. Because `:` is prohibited over HTTP, unauthenticated callers can never forge the attested badge separator `:` by mathematical construction.
@@ -40,6 +46,35 @@ All local IPC in `xmsg` relies on Unix domain sockets located in `$XDG_RUNTIME_D
 ---
 
 ## 2. IPC Sockets & Components
+
+```mermaid
+flowchart TD
+  subgraph Harnesses["Running Agent Harnesses"]
+    Claude["Claude Code Session<br/>(~/.claude/sessions)"]
+    Agy["Antigravity Session<br/>(/proc/locks FLOCK)"]
+    Pi["Pi Agent Session<br/>(xmsg-pi extension)"]
+  end
+
+  subgraph IPC["Local IPC ($XDG_RUNTIME_DIR/xmsg/)"]
+    AgentSock["agent.sock<br/>(send, reply)"]
+    RegisterSock["register.sock<br/>(register agy, pi long-poll)"]
+  end
+
+  subgraph Bridge["xmsg Bridge Daemon (127.0.0.1)"]
+    Registry["Session Registry & Liveness"]
+    Store[("SQLite Store<br/>messages, replies")]
+    HTTP["HTTP API<br/>(/healthz, /v1/sessions, /v1/messages)"]
+  end
+
+  Claude -->|direct socket injection| HTTP
+  Agy -->|credentials| RegisterSock
+  Pi -->|long-poll & receive| RegisterSock
+  Harnesses -.->|MCP child process| AgentSock
+  AgentSock --> Store
+  RegisterSock --> Registry
+  HTTP --> Store
+  HTTP --> Registry
+```
 
 `xmsg` operates two Unix domain sockets in `$XDG_RUNTIME_DIR/xmsg/`:
 
