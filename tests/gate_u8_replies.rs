@@ -16,17 +16,16 @@ use xmsg::pi::{new_pi_store, PiSessionInfo};
 use xmsg::storage;
 
 fn get_self_proc_start() -> String {
-    let stat = fs::read_to_string("/proc/self/stat").expect("read /proc/self/stat");
-    let rparen = stat.rfind(')').expect("closing paren in stat");
-    let fields: Vec<&str> = stat[rparen + 1..].split_whitespace().collect();
-    fields[19].to_string()
+    xmsg::process::starttime(
+        std::path::Path::new(xmsg::process::LIVE_PROC_ROOT),
+        std::process::id(),
+    )
+    .expect("live starttime")
 }
 
 fn get_proc_start_of(pid: u32) -> String {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).expect("read /proc/<pid>/stat");
-    let rparen = stat.rfind(')').expect("closing paren in stat");
-    let fields: Vec<&str> = stat[rparen + 1..].split_whitespace().collect();
-    fields[19].to_string()
+    xmsg::process::starttime(std::path::Path::new(xmsg::process::LIVE_PROC_ROOT), pid)
+        .expect("live starttime")
 }
 
 #[allow(dead_code)]

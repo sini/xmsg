@@ -13,9 +13,18 @@ use xmsg::http::AppState;
 use xmsg::pi::new_pi_store;
 
 fn real_start(pid: u32) -> String {
-    let s = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-    let rp = s.rfind(')').unwrap();
-    s[rp + 1..].split_whitespace().nth(19).unwrap().to_string()
+    xmsg::process::starttime(std::path::Path::new(xmsg::process::LIVE_PROC_ROOT), pid)
+        .expect("live starttime")
+}
+
+/// A live process outside the synthetic proc tree. macOS only lets a non-root
+/// user inspect its own processes, so it cannot use PID 1 there.
+fn target_pid() -> u32 {
+    if cfg!(target_os = "linux") {
+        1
+    } else {
+        std::os::unix::process::parent_id()
+    }
 }
 
 fn write_stat(proc_root: &Path, pid: u32, comm: &str, ppid: u32, st: &str) {
@@ -88,12 +97,12 @@ async fn setup(max_body: usize) -> Env {
     }
     fs::write(&locks, "").unwrap();
 
-    // Target Claude session "target" at pid 1 with inbox
+    // Target Claude session "target" at target_pid() with inbox
     let inbox = t.path().join("inbox.sock");
     fs::write(
         sessions.join("target.json"),
         serde_json::json!({
-            "pid": 1,
+            "pid": target_pid(),
             "sessionId": "target-claude",
             "name": "target",
             "cwd": "/",
@@ -101,7 +110,7 @@ async fn setup(max_body: usize) -> Env {
             "kind": "interactive",
             "startedAt": 0,
             "updatedAt": 0,
-            "procStart": real_start(1),
+            "procStart": real_start(target_pid()),
             "messagingSocketPath": inbox.to_str().unwrap()
         })
         .to_string(),

@@ -122,8 +122,13 @@ pub fn resolve_caller_session(
             }
         }
 
-        // 2. Check Antigravity presence lock holders
-        if let Ok(entries) = fs::read_dir(&agy_config.presence_dir) {
+        // 2. Check Antigravity presence lock holders (skipped where agy cannot work)
+        let agy_entries = if agy::locks_supported(&agy_config.proc_locks_path) {
+            fs::read_dir(&agy_config.presence_dir).ok()
+        } else {
+            None
+        };
+        if let Some(entries) = agy_entries {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|s| s.to_str()) == Some("lock") {
@@ -179,22 +184,7 @@ pub fn resolve_caller_session(
         }
 
         // Step up to PPID
-        let stat_path = proc_root.join(curr_pid.to_string()).join("stat");
-        let content = match fs::read_to_string(&stat_path) {
-            Ok(c) => c,
-            Err(_) => break,
-        };
-
-        let Some(rparen) = content.rfind(')') else {
-            break;
-        };
-        let remainder = &content[rparen + 1..];
-        let fields: Vec<&str> = remainder.split_whitespace().collect();
-        if fields.len() < 2 {
-            break;
-        }
-
-        let Ok(ppid) = fields[1].parse::<u32>() else {
+        let Some(ppid) = crate::process::parent_pid(proc_root, curr_pid) else {
             break;
         };
         if ppid <= 1 {

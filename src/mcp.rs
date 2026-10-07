@@ -25,9 +25,9 @@ impl McpConfig {
             sessions_dir,
             xmsg_url,
             agent_sock,
-            proc_root: PathBuf::from("/proc"),
+            proc_root: PathBuf::from(crate::process::LIVE_PROC_ROOT),
             presence_dir: PathBuf::from(home).join(".gemini/antigravity-cli/presence"),
-            proc_locks_path: PathBuf::from("/proc/locks"),
+            proc_locks_path: PathBuf::from(crate::agy::LIVE_PROC_LOCKS),
         }
     }
 

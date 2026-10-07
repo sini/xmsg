@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
 use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
@@ -39,18 +38,7 @@ pub fn new_pi_store() -> PiStore {
 }
 
 pub fn get_proc_starttime(proc_root: &Path, pid: u32) -> io::Result<String> {
-    let stat_path = proc_root.join(pid.to_string()).join("stat");
-    let content = fs::read_to_string(&stat_path)?;
-    let Some(rparen) = content.rfind(')') else {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid stat"));
-    };
-    let remainder = &content[rparen + 1..];
-    let fields: Vec<&str> = remainder.split_whitespace().collect();
-    if fields.len() < 20 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "stat too short"));
-    }
-    // Field 22 in 1-based index is index 19 after rparen
-    Ok(fields[19].to_string())
+    crate::process::starttime(proc_root, pid)
 }
 
 pub fn is_pi_cmdline(args: &[&str]) -> bool {
@@ -101,10 +89,9 @@ pub fn verify_pi_process(
             "peer UID {peer_uid} does not match server UID {my_uid}"
         )));
     }
-    let cmdline_path = proc_root.join(peer_pid.to_string()).join("cmdline");
-    let cmdline = fs::read_to_string(&cmdline_path)
+    let cmdline = crate::process::cmdline(proc_root, peer_pid)
         .map_err(|e| AppError::NotFound(format!("process {peer_pid} not found: {e}")))?;
-    let args: Vec<&str> = cmdline.split('\0').filter(|s| !s.is_empty()).collect();
+    let args: Vec<&str> = cmdline.iter().map(String::as_str).collect();
     if !is_pi_cmdline(&args) {
         return Err(AppError::BadRequest(format!(
             "peer process {peer_pid} is not a pi instance"
