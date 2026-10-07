@@ -15,10 +15,11 @@ use xmsg::inbox::InboxLine;
 use xmsg::pi::new_pi_store;
 
 fn get_self_proc_start() -> String {
-    let stat = fs::read_to_string("/proc/self/stat").expect("read /proc/self/stat");
-    let rparen = stat.rfind(')').expect("closing paren in stat");
-    let fields: Vec<&str> = stat[rparen + 1..].split_whitespace().collect();
-    fields[19].to_string()
+    xmsg::process::starttime(
+        std::path::Path::new(xmsg::process::LIVE_PROC_ROOT),
+        std::process::id(),
+    )
+    .expect("live starttime")
 }
 
 struct GateHarness {
@@ -110,10 +111,11 @@ async fn setup_gate_harness() -> GateHarness {
         .expect("spawn dummy sleep child");
     let victim_pid = child.id();
     let victim_proc_start = {
-        let stat = fs::read_to_string(format!("/proc/{victim_pid}/stat")).expect("read /proc/stat");
-        let rparen = stat.rfind(')').expect("closing paren in stat");
-        let fields: Vec<&str> = stat[rparen + 1..].split_whitespace().collect();
-        fields[19].to_string()
+        xmsg::process::starttime(
+            std::path::Path::new(xmsg::process::LIVE_PROC_ROOT),
+            victim_pid,
+        )
+        .expect("live starttime")
     };
 
     let target_session_json = serde_json::json!({

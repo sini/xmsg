@@ -179,10 +179,11 @@ fn test_resolve_caller_session_ancestor_walk() {
 }
 
 fn get_self_proc_start() -> String {
-    let stat = fs::read_to_string("/proc/self/stat").expect("read /proc/self/stat");
-    let rparen = stat.rfind(')').expect("closing paren in stat");
-    let fields: Vec<&str> = stat[rparen + 1..].split_whitespace().collect();
-    fields[19].to_string()
+    xmsg::process::starttime(
+        std::path::Path::new(xmsg::process::LIVE_PROC_ROOT),
+        std::process::id(),
+    )
+    .expect("live starttime")
 }
 
 #[tokio::test]

@@ -13,10 +13,11 @@ use xmsg::inbox::InboxLine;
 use xmsg::mcp::{run_mcp_loop, McpConfig};
 
 fn get_self_proc_start() -> String {
-    let stat = fs::read_to_string("/proc/self/stat").expect("read /proc/self/stat");
-    let rparen = stat.rfind(')').expect("closing paren in stat");
-    let fields: Vec<&str> = stat[rparen + 1..].split_whitespace().collect();
-    fields[19].to_string()
+    xmsg::process::starttime(
+        std::path::Path::new(xmsg::process::LIVE_PROC_ROOT),
+        std::process::id(),
+    )
+    .expect("live starttime")
 }
 
 fn write_proc_stat(proc_dir: &Path, pid: u32, ppid: u32, proc_start: &str) {

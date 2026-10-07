@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
 use crate::error::AppError;
+use crate::process;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -74,33 +75,11 @@ pub struct SessionsQuery {
 
 /// Checks whether a process with `pid` is currently alive and has the expected `proc_start`.
 pub fn is_pid_live(pid: u32, expected_proc_start: &str) -> bool {
-    is_pid_live_in(Path::new("/proc"), pid, expected_proc_start)
+    is_pid_live_in(Path::new(process::LIVE_PROC_ROOT), pid, expected_proc_start)
 }
 
 pub fn is_pid_live_in(proc_root: &Path, pid: u32, expected_proc_start: &str) -> bool {
-    let stat_path = proc_root.join(pid.to_string()).join("stat");
-    let content = match std::fs::read_to_string(&stat_path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-
-    // In Linux /proc/<pid>/stat, field 2 is the comm in parentheses.
-    // Comm can contain spaces or closing parens, so find the LAST ')'
-    let Some(rparen) = content.rfind(')') else {
-        return false;
-    };
-
-    let remainder = &content[rparen + 1..];
-    let fields: Vec<&str> = remainder.split_whitespace().collect();
-    // After the closing paren:
-    // index 0 is field 3 (state)
-    // index 19 is field 22 (starttime)
-    if fields.len() < 20 {
-        return false;
-    }
-
-    let actual_starttime = fields[19];
-    actual_starttime == expected_proc_start
+    process::claude_proc_start_matches(proc_root, pid, expected_proc_start)
 }
 
 /// Reads all session files in `sessions_dir`, ignoring `.key` files and invalid entries.
@@ -238,7 +217,7 @@ pub fn resolve_session(sessions_dir: &Path, ref_str: &str) -> Result<(Session, P
     Ok((resolved.into(), socket_path))
 }
 
-/// Walks ancestor process parent PIDs (reading /proc/<pid>/stat field 4) up to PID 1,
+/// Walks ancestor process parent PIDs up to PID 1,
 /// searching for the first ancestor that has an active session file in `sessions_dir`.
 /// Parameterized with `proc_root` to allow unit testing with synthetic proc trees.
 pub fn find_ancestor_session_in(
@@ -249,25 +228,7 @@ pub fn find_ancestor_session_in(
     let mut curr_pid = start_pid;
 
     for _ in 0..32 {
-        let stat_path = proc_root.join(curr_pid.to_string()).join("stat");
-        let content = match std::fs::read_to_string(&stat_path) {
-            Ok(c) => c,
-            Err(_) => break,
-        };
-
-        let Some(rparen) = content.rfind(')') else {
-            break;
-        };
-
-        let remainder = &content[rparen + 1..];
-        let fields: Vec<&str> = remainder.split_whitespace().collect();
-        if fields.len() < 2 {
-            break;
-        }
-
-        // fields[0] is state (field 3)
-        // fields[1] is ppid (field 4)
-        let Ok(ppid) = fields[1].parse::<u32>() else {
+        let Some(ppid) = process::parent_pid(proc_root, curr_pid) else {
             break;
         };
 
@@ -294,7 +255,11 @@ pub fn find_ancestor_session_in(
     ))
 }
 
-/// Convenience wrapper for live runtime ancestor walk using system /proc and current PID.
+/// Convenience wrapper for live runtime ancestor walk using the running system and current PID.
 pub fn find_ancestor_session(sessions_dir: &Path) -> Result<Session, AppError> {
-    find_ancestor_session_in(Path::new("/proc"), sessions_dir, std::process::id())
+    find_ancestor_session_in(
+        Path::new(process::LIVE_PROC_ROOT),
+        sessions_dir,
+        std::process::id(),
+    )
 }

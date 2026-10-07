@@ -54,6 +54,17 @@ impl std::fmt::Debug for AgyRegisterRequest {
     }
 }
 
+/// The kernel's lock table. Only Linux has it; a fixture file at another path
+/// is parsed in the same format on every platform.
+pub const LIVE_PROC_LOCKS: &str = "/proc/locks";
+
+/// Whether presence locks can be checked through `proc_locks_path`: always on
+/// Linux, and elsewhere only against a fixture. macOS has no way to read
+/// another process's `flock` holders, so agy is Linux only there.
+pub fn locks_supported(proc_locks_path: &Path) -> bool {
+    cfg!(target_os = "linux") || proc_locks_path != Path::new(LIVE_PROC_LOCKS)
+}
+
 #[derive(Debug, Clone)]
 pub struct AgyConfig {
     pub presence_dir: PathBuf,
@@ -67,8 +78,8 @@ impl Default for AgyConfig {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         Self {
             presence_dir: PathBuf::from(home).join(".gemini/antigravity-cli/presence"),
-            proc_locks_path: PathBuf::from("/proc/locks"),
-            proc_root: PathBuf::from("/proc"),
+            proc_locks_path: PathBuf::from(LIVE_PROC_LOCKS),
+            proc_root: PathBuf::from(crate::process::LIVE_PROC_ROOT),
             agy_bin: "agy".to_string(),
         }
     }
@@ -118,7 +129,19 @@ pub fn find_lock_holder(
     dev_minor: u32,
     target_inode: u64,
 ) -> io::Result<Option<u32>> {
-    let content = fs::read_to_string(proc_locks_path)?;
+    let content = match fs::read_to_string(proc_locks_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == io::ErrorKind::NotFound && !cfg!(target_os = "linux") => {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "agy presence locks need {} (Linux only)",
+                    proc_locks_path.display()
+                ),
+            ));
+        }
+        Err(e) => return Err(e),
+    };
     let mut matching_pids = std::collections::HashSet::new();
     for line in content.lines() {
         if let Some((pid, maj, min, ino)) = parse_locks_line(line) {
@@ -167,6 +190,9 @@ pub fn list_agy_sessions(
     query: &SessionsQuery,
 ) -> Vec<Session> {
     let mut sessions = Vec::new();
+    if !locks_supported(&config.proc_locks_path) {
+        return sessions;
+    }
 
     let entries = match fs::read_dir(&config.presence_dir) {
         Ok(e) => e,
@@ -285,6 +311,12 @@ pub fn verify_registration(
     peer_pid: u32,
     req: &AgyRegisterRequest,
 ) -> Result<u32, AppError> {
+    if !locks_supported(proc_locks) {
+        return Err(AppError::BadRequest(format!(
+            "agy is Linux only: its presence locks need {LIVE_PROC_LOCKS}"
+        )));
+    }
+
     // 1. Peer UID verification
     if peer_uid != my_uid {
         return Err(AppError::NotRecipient(format!(
@@ -318,22 +350,7 @@ pub fn verify_registration(
     let mut reached_holder = false;
 
     for _ in 0..32 {
-        let stat_path = proc_root.join(curr_pid.to_string()).join("stat");
-        let content = match fs::read_to_string(&stat_path) {
-            Ok(c) => c,
-            Err(_) => break,
-        };
-
-        let Some(rparen) = content.rfind(')') else {
-            break;
-        };
-        let remainder = &content[rparen + 1..];
-        let fields: Vec<&str> = remainder.split_whitespace().collect();
-        if fields.len() < 2 {
-            break;
-        }
-
-        let Ok(ppid) = fields[1].parse::<u32>() else {
+        let Some(ppid) = crate::process::parent_pid(proc_root, curr_pid) else {
             break;
         };
         if ppid <= 1 {
@@ -485,25 +502,15 @@ pub fn find_ancestor_agy_session_in(
     presence_dir: &Path,
     start_pid: u32,
 ) -> Result<String, AppError> {
+    if !locks_supported(proc_locks) {
+        return Err(AppError::NotFound(
+            "no live ancestor agy session found (agy is Linux only)".to_string(),
+        ));
+    }
     let mut curr_pid = start_pid;
 
     for _ in 0..32 {
-        let stat_path = proc_root.join(curr_pid.to_string()).join("stat");
-        let content = match fs::read_to_string(&stat_path) {
-            Ok(c) => c,
-            Err(_) => break,
-        };
-
-        let Some(rparen) = content.rfind(')') else {
-            break;
-        };
-        let remainder = &content[rparen + 1..];
-        let fields: Vec<&str> = remainder.split_whitespace().collect();
-        if fields.len() < 2 {
-            break;
-        }
-
-        let Ok(ppid) = fields[1].parse::<u32>() else {
+        let Some(ppid) = crate::process::parent_pid(proc_root, curr_pid) else {
             break;
         };
         if ppid <= 1 {
@@ -758,5 +765,50 @@ pub async fn run_register_server(
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixture_locks_are_supported_everywhere() {
+        assert!(locks_supported(Path::new("/tmp/fixture/locks")));
+        assert_eq!(
+            locks_supported(Path::new(LIVE_PROC_LOCKS)),
+            cfg!(target_os = "linux")
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn registration_against_live_locks_is_rejected_off_linux() {
+        let req = AgyRegisterRequest {
+            conversation_id: "c".to_string(),
+            ls_address: "127.0.0.1:1".to_string(),
+            csrf_token: "t".to_string(),
+        };
+        let uid = current_uid();
+        let err = verify_registration(
+            Path::new(crate::process::LIVE_PROC_ROOT),
+            Path::new(LIVE_PROC_LOCKS),
+            Path::new("/nonexistent"),
+            uid,
+            uid,
+            std::process::id(),
+            &req,
+        )
+        .unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(ref d) if d.contains("Linux only")));
+        assert!(matches!(
+            find_ancestor_agy_session_in(
+                Path::new(crate::process::LIVE_PROC_ROOT),
+                Path::new(LIVE_PROC_LOCKS),
+                Path::new("/nonexistent"),
+                std::process::id(),
+            ),
+            Err(AppError::NotFound(_))
+        ));
     }
 }
