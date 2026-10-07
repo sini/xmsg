@@ -114,7 +114,10 @@ fn test_verify_registration_ancestor_walk() {
     let min = dev_minor(dev);
 
     // Holder PID is 2000
-    let locks_content = format!("1: FLOCK ADVISORY WRITE 2000 {:02x}:{:02x}:{} 0 EOF\n", maj, min, ino);
+    let locks_content = format!(
+        "1: FLOCK ADVISORY WRITE 2000 {:02x}:{:02x}:{} 0 EOF\n",
+        maj, min, ino
+    );
     fs::write(&proc_locks, locks_content).unwrap();
 
     // Setup process hierarchy: 4000 -> 3000 -> 2000 (holder) -> 1
@@ -132,15 +135,39 @@ fn test_verify_registration_ancestor_walk() {
     };
 
     // 1. Direct holder (peer_pid == holder_pid == 2000) -> OK
-    let res_direct = verify_registration(&proc_root, &proc_locks, &presence_dir, 1000, 1000, 2000, &req);
+    let res_direct = verify_registration(
+        &proc_root,
+        &proc_locks,
+        &presence_dir,
+        1000,
+        1000,
+        2000,
+        &req,
+    );
     assert_eq!(res_direct.unwrap(), 2000);
 
     // 2. Descendant (peer_pid == 4000) -> OK
-    let res_descendant = verify_registration(&proc_root, &proc_locks, &presence_dir, 1000, 1000, 4000, &req);
+    let res_descendant = verify_registration(
+        &proc_root,
+        &proc_locks,
+        &presence_dir,
+        1000,
+        1000,
+        4000,
+        &req,
+    );
     assert_eq!(res_descendant.unwrap(), 2000);
 
     // 3. Non-descendant (peer_pid == 9000) -> Err(NotRecipient)
-    let res_non = verify_registration(&proc_root, &proc_locks, &presence_dir, 1000, 1000, 9000, &req);
+    let res_non = verify_registration(
+        &proc_root,
+        &proc_locks,
+        &presence_dir,
+        1000,
+        1000,
+        9000,
+        &req,
+    );
     assert!(matches!(res_non, Err(AppError::NotRecipient(_))));
 }
 
@@ -167,7 +194,10 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
     let min = dev_minor(dev);
 
     // Our process (my_pid) is the lock holder
-    let locks_content = format!("1: FLOCK ADVISORY WRITE {my_pid} {:02x}:{:02x}:{} 0 EOF\n", maj, min, ino);
+    let locks_content = format!(
+        "1: FLOCK ADVISORY WRITE {my_pid} {:02x}:{:02x}:{} 0 EOF\n",
+        maj, min, ino
+    );
     fs::write(&proc_locks, locks_content).unwrap();
 
     let config = AgyConfig {
@@ -178,12 +208,23 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
     };
     let store = new_agy_store();
 
+    let pi_store = xmsg::pi::new_pi_store();
+    let mem_conn = rusqlite::Connection::open_in_memory().unwrap();
+    xmsg::storage::init_db(&mem_conn).unwrap();
+    let db = std::sync::Arc::new(std::sync::Mutex::new(mem_conn));
+    let (pi_notify_tx, _) = tokio::sync::broadcast::channel(16);
+    let reply_ttl = Duration::from_secs(604800);
+
     // Start registration server in background
     let s_path = sock_path.clone();
     let s_cfg = config.clone();
     let s_store = store.clone();
+    let s_pi = pi_store.clone();
+    let s_db = db.clone();
+    let s_tx = pi_notify_tx.clone();
     tokio::spawn(async move {
-        let _ = run_register_server(s_path, s_cfg, s_store, my_uid).await;
+        let _ =
+            run_register_server(s_path, s_cfg, s_store, s_pi, s_db, s_tx, reply_ttl, my_uid).await;
     });
 
     // Wait briefly for socket to become ready
@@ -196,7 +237,10 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
         "ls_address": "127.0.0.1:4000",
         "csrf_token": "token-initial"
     });
-    stream.write_all(format!("{req1}\n").as_bytes()).await.unwrap();
+    stream
+        .write_all(format!("{req1}\n").as_bytes())
+        .await
+        .unwrap();
 
     let mut reader = BufReader::new(stream);
     let mut resp = String::new();
@@ -219,7 +263,10 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
         "ls_address": "127.0.0.1:5000",
         "csrf_token": "token-replaced"
     });
-    stream2.write_all(format!("{req2}\n").as_bytes()).await.unwrap();
+    stream2
+        .write_all(format!("{req2}\n").as_bytes())
+        .await
+        .unwrap();
 
     let mut reader2 = BufReader::new(stream2);
     let mut resp2 = String::new();

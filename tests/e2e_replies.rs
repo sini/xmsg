@@ -117,6 +117,7 @@ async fn start_replies_harness(reply_ttl: Duration) -> RepliesHarness {
     let db = Arc::new(std::sync::Mutex::new(conn));
     let (notify_tx, _) = tokio::sync::broadcast::channel(16);
 
+    let (pi_notify_tx, _) = tokio::sync::broadcast::channel(16);
     let app_state = Arc::new(AppState {
         sessions_dir: sess_dir.path().to_path_buf(),
         agy_config: xmsg::agy::AgyConfig {
@@ -126,6 +127,8 @@ async fn start_replies_harness(reply_ttl: Duration) -> RepliesHarness {
             agy_bin: "agy".to_string(),
         },
         agy_store: xmsg::agy::new_agy_store(),
+        pi_store: xmsg::pi::new_pi_store(),
+        pi_notify_tx,
         host_label: "test-host".to_string(),
         max_body: 65536,
         request_counter: AtomicU64::new(1),

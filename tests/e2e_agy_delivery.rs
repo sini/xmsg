@@ -6,9 +6,7 @@ use std::time::Duration;
 use tempfile::tempdir;
 use tokio::sync::broadcast;
 
-use xmsg::agy::{
-    dev_major, dev_minor, new_agy_store, AgyConfig, AgyCredentials,
-};
+use xmsg::agy::{dev_major, dev_minor, new_agy_store, AgyConfig, AgyCredentials};
 use xmsg::http::{build_router, AppState};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -33,7 +31,10 @@ async fn test_agy_delivery_env_isolation_and_credentials_lifecycle() {
     let maj = dev_major(dev);
     let min = dev_minor(dev);
 
-    let locks_content = format!("1: FLOCK ADVISORY WRITE {my_pid} {:02x}:{:02x}:{} 0 EOF\n", maj, min, ino);
+    let locks_content = format!(
+        "1: FLOCK ADVISORY WRITE {my_pid} {:02x}:{:02x}:{} 0 EOF\n",
+        maj, min, ino
+    );
     fs::write(&proc_locks, locks_content).unwrap();
 
     // 2. Create fake agy script
@@ -82,10 +83,13 @@ exit 0
     xmsg::storage::init_db(&conn).unwrap();
     let (notify_tx, _) = broadcast::channel(16);
 
+    let (pi_notify_tx, _) = broadcast::channel(16);
     let state = Arc::new(AppState {
         sessions_dir: sess_dir,
         agy_config,
         agy_store: agy_store.clone(),
+        pi_store: xmsg::pi::new_pi_store(),
+        pi_notify_tx,
         host_label: "test-host".to_string(),
         max_body: 65536,
         request_counter: AtomicU64::new(1),
@@ -127,7 +131,10 @@ exit 0
     assert!(captured_argv.contains("agentapi send-message --title xmsg@test-host · claude-orch"));
     assert!(captured_argv.contains(conv_id));
     assert!(captured_argv.contains(&format!("[xmsg] from=xmsg@test-host · claude-orch message_id={msg_id} — reply with the xmsg reply tool\n\nHello Antigravity session!")));
-    assert!(!captured_argv.contains("super-secret-token-xyz"), "Security Invariant: CSRF token MUST NOT appear in argv");
+    assert!(
+        !captured_argv.contains("super-secret-token-xyz"),
+        "Security Invariant: CSRF token MUST NOT appear in argv"
+    );
 
     // Verify env: credentials passed strictly via environment
     let captured_env = fs::read_to_string(&env_log).unwrap();
@@ -155,7 +162,10 @@ exit 0
     {
         let store = agy_store.read().unwrap();
         let creds = store.get(conv_id).unwrap();
-        assert!(creds.is_stale, "Store entry must be marked stale after Unauthenticated error");
+        assert!(
+            creds.is_stale,
+            "Store entry must be marked stale after Unauthenticated error"
+        );
     }
 
     // Removing fail_file still results in 503 because store is stale
@@ -169,7 +179,10 @@ exit 0
         .send()
         .await
         .unwrap();
-    assert_eq!(resp_still_stale.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        resp_still_stale.status(),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE
+    );
 
     // --- Phase 3: Re-registration Recovery ---
     agy_store.write().unwrap().insert(

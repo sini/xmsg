@@ -5,9 +5,7 @@ use std::process::Command;
 use std::time::Duration;
 use tempfile::tempdir;
 
-use xmsg::agy::{
-    current_uid, dev_major, dev_minor, new_agy_store, run_register_server, AgyConfig,
-};
+use xmsg::agy::{current_uid, dev_major, dev_minor, new_agy_store, run_register_server, AgyConfig};
 
 #[test]
 fn test_register_cli_server_stopped_invariant() {
@@ -22,22 +20,43 @@ fn test_register_cli_server_stopped_invariant() {
         .output()
         .expect("execute xmsg register agy");
 
-    assert_eq!(output.status.code(), Some(0), "CLI must exit 0 even if env vars missing");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "CLI must exit 0 even if env vars missing"
+    );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert_eq!(stdout.trim(), "{\"injectSteps\":[]}", "stdout must always output injectSteps:[]");
+    assert_eq!(
+        stdout.trim(),
+        "{\"injectSteps\":[]}",
+        "stdout must always output injectSteps:[]"
+    );
 
     // Case B: Server not running, non-existent socket specified
     let output2 = Command::new(bin)
-        .args(["register", "agy", "--sock", "/tmp/non-existent-xmsg-test.sock"])
+        .args([
+            "register",
+            "agy",
+            "--sock",
+            "/tmp/non-existent-xmsg-test.sock",
+        ])
         .env("ANTIGRAVITY_CONVERSATION_ID", "test-conv")
         .env("ANTIGRAVITY_LS_ADDRESS", "localhost:1234")
         .env("ANTIGRAVITY_CSRF_TOKEN", "token")
         .output()
         .expect("execute xmsg register agy");
 
-    assert_eq!(output2.status.code(), Some(0), "CLI must exit 0 even if server is down");
+    assert_eq!(
+        output2.status.code(),
+        Some(0),
+        "CLI must exit 0 even if server is down"
+    );
     let stdout2 = String::from_utf8(output2.stdout).unwrap();
-    assert_eq!(stdout2.trim(), "{\"injectSteps\":[]}", "stdout must always output injectSteps:[]");
+    assert_eq!(
+        stdout2.trim(),
+        "{\"injectSteps\":[]}",
+        "stdout must always output injectSteps:[]"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -65,7 +84,10 @@ async fn test_shipped_binary_register_cli_with_server() {
     let min = dev_minor(dev);
 
     // Current test process is the lock holder
-    let locks_content = format!("1: FLOCK ADVISORY WRITE {my_pid} {:02x}:{:02x}:{} 0 EOF\n", maj, min, ino);
+    let locks_content = format!(
+        "1: FLOCK ADVISORY WRITE {my_pid} {:02x}:{:02x}:{} 0 EOF\n",
+        maj, min, ino
+    );
     fs::write(&proc_locks, locks_content).unwrap();
 
     let config = AgyConfig {
@@ -80,8 +102,14 @@ async fn test_shipped_binary_register_cli_with_server() {
     let s_path = sock_path.clone();
     let s_cfg = config;
     let s_store = store.clone();
+    let s_pi = xmsg::pi::new_pi_store();
+    let mem_conn = rusqlite::Connection::open_in_memory().unwrap();
+    xmsg::storage::init_db(&mem_conn).unwrap();
+    let s_db = std::sync::Arc::new(std::sync::Mutex::new(mem_conn));
+    let (s_tx, _) = tokio::sync::broadcast::channel(16);
+    let s_ttl = Duration::from_secs(604800);
     tokio::spawn(async move {
-        let _ = run_register_server(s_path, s_cfg, s_store, my_uid).await;
+        let _ = run_register_server(s_path, s_cfg, s_store, s_pi, s_db, s_tx, s_ttl, my_uid).await;
     });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -103,7 +131,10 @@ async fn test_shipped_binary_register_cli_with_server() {
 
     // Verify server registered the credentials
     let creds_opt = store.read().unwrap().get(conv_id).cloned();
-    assert!(creds_opt.is_some(), "Credentials should be registered in store");
+    assert!(
+        creds_opt.is_some(),
+        "Credentials should be registered in store"
+    );
     let creds = creds_opt.unwrap();
     assert_eq!(creds.ls_address, "localhost:33399");
     assert_eq!(creds.csrf_token, "token-secret-cli-99");

@@ -23,6 +23,19 @@ pub struct ReplyRecord {
     pub text: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PiPendingMessage {
+    pub id: String,
+    pub session_id: String,
+    pub created_at: i64,
+    pub from_name: String,
+    pub bytes: usize,
+    pub text: String,
+    pub envelope: String,
+    pub delivered_at: Option<i64>,
+}
+
 pub fn now_epoch_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -50,8 +63,21 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             text TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS pi_pending_messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            from_name TEXT NOT NULL,
+            bytes INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            envelope TEXT NOT NULL,
+            delivered_at INTEGER
+        );
+
         CREATE INDEX IF NOT EXISTS idx_replies_message_seq ON replies(message_id, seq);
         CREATE INDEX IF NOT EXISTS idx_replies_created_at ON replies(created_at);
+        CREATE INDEX IF NOT EXISTS idx_pi_pending_session ON pi_pending_messages(session_id, delivered_at);
+        CREATE INDEX IF NOT EXISTS idx_pi_pending_created_at ON pi_pending_messages(created_at);
         "#,
     )?;
     Ok(())
@@ -147,4 +173,64 @@ pub fn get_all_replies(conn: &Connection, message_id: &str) -> Result<Vec<ReplyR
 pub fn purge_replies(conn: &Connection, ttl_secs: u64) -> Result<usize> {
     let cutoff = now_epoch_secs() - (ttl_secs as i64);
     conn.execute("DELETE FROM replies WHERE created_at < ?1", params![cutoff])
+}
+
+pub fn insert_pi_message(conn: &Connection, msg: &PiPendingMessage) -> Result<()> {
+    conn.execute(
+        "INSERT INTO pi_pending_messages (id, session_id, created_at, from_name, bytes, text, envelope, delivered_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            msg.id,
+            msg.session_id,
+            msg.created_at,
+            msg.from_name,
+            msg.bytes as i64,
+            msg.text,
+            msg.envelope,
+            msg.delivered_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn get_next_pending_pi_message(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Option<PiPendingMessage>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, session_id, created_at, from_name, bytes, text, envelope, delivered_at FROM pi_pending_messages WHERE session_id = ?1 AND delivered_at IS NULL ORDER BY created_at ASC, rowid ASC LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![session_id])?;
+
+    if let Some(row) = rows.next()? {
+        let bytes_i64: i64 = row.get(4)?;
+        Ok(Some(PiPendingMessage {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            created_at: row.get(2)?,
+            from_name: row.get(3)?,
+            bytes: bytes_i64 as usize,
+            text: row.get(5)?,
+            envelope: row.get(6)?,
+            delivered_at: row.get(7)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn ack_pi_message(conn: &Connection, message_id: &str) -> Result<()> {
+    let now = now_epoch_secs();
+    conn.execute(
+        "UPDATE pi_pending_messages SET delivered_at = ?1 WHERE id = ?2",
+        params![now, message_id],
+    )?;
+    Ok(())
+}
+
+pub fn purge_pi_messages(conn: &Connection, ttl_secs: u64) -> Result<usize> {
+    let cutoff = now_epoch_secs() - (ttl_secs as i64);
+    conn.execute(
+        "DELETE FROM pi_pending_messages WHERE created_at < ?1",
+        params![cutoff],
+    )
 }

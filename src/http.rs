@@ -24,6 +24,8 @@ pub struct AppState {
     pub sessions_dir: PathBuf,
     pub agy_config: crate::agy::AgyConfig,
     pub agy_store: crate::agy::AgyStore,
+    pub pi_store: crate::pi::PiStore,
+    pub pi_notify_tx: broadcast::Sender<String>,
     pub host_label: String,
     pub max_body: usize,
     pub request_counter: AtomicU64,
@@ -86,6 +88,7 @@ async fn healthz_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
 enum ResolvedTarget {
     Claude(registry::Session, PathBuf),
     Agy(registry::Session),
+    Pi(registry::Session),
 }
 
 fn resolve_target_session(state: &AppState, ref_str: &str) -> Result<ResolvedTarget, AppError> {
@@ -96,7 +99,16 @@ fn resolve_target_session(state: &AppState, ref_str: &str) -> Result<ResolvedTar
         Err(AppError::NotFound(_)) => {
             match crate::agy::resolve_agy_session(&state.agy_config, &state.agy_store, ref_str)? {
                 Some(session) => Ok(ResolvedTarget::Agy(session)),
-                None => Err(AppError::NotFound(ref_str.to_string())),
+                None => {
+                    match crate::pi::resolve_pi_session(
+                        &state.agy_config.proc_root,
+                        &state.pi_store,
+                        ref_str,
+                    )? {
+                        Some(session) => Ok(ResolvedTarget::Pi(session)),
+                        None => Err(AppError::NotFound(ref_str.to_string())),
+                    }
+                }
             }
         }
         Err(err) => Err(err),
@@ -108,8 +120,12 @@ async fn list_sessions_handler(
     Query(query): Query<SessionsQuery>,
 ) -> impl IntoResponse {
     let mut sessions = registry::list_sessions(&state.sessions_dir, &query);
-    let mut agy_sessions = crate::agy::list_agy_sessions(&state.agy_config, &state.agy_store, &query);
+    let mut agy_sessions =
+        crate::agy::list_agy_sessions(&state.agy_config, &state.agy_store, &query);
     sessions.append(&mut agy_sessions);
+    let mut pi_sessions =
+        crate::pi::list_pi_sessions(&state.agy_config.proc_root, &state.pi_store, &query);
+    sessions.append(&mut pi_sessions);
     (StatusCode::OK, Json(sessions))
 }
 
@@ -121,6 +137,7 @@ async fn get_session_handler(
     let session = match target {
         ResolvedTarget::Claude(s, _) => s,
         ResolvedTarget::Agy(s) => s,
+        ResolvedTarget::Pi(s) => s,
     };
     Ok((StatusCode::OK, Json(session)).into_response())
 }
@@ -212,6 +229,32 @@ async fn send_message_handler(
                 &req.text,
             )
             .await?;
+            session.session_id
+        }
+        ResolvedTarget::Pi(session) => {
+            let envelope = format!(
+                "[xmsg] from={} message_id={} — reply with the xmsg reply tool\n\n{}",
+                from_name, message_id, req.text
+            );
+            let pi_msg = storage::PiPendingMessage {
+                id: message_id.clone(),
+                session_id: session.session_id.clone(),
+                created_at: storage::now_epoch_secs(),
+                from_name: from_name.clone(),
+                bytes: body_len,
+                text: req.text.clone(),
+                envelope,
+                delivered_at: None,
+            };
+            {
+                let db = state
+                    .db
+                    .lock()
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                storage::insert_pi_message(&db, &pi_msg)
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+            }
+            let _ = state.pi_notify_tx.send(session.session_id.clone());
             session.session_id
         }
     };
@@ -388,6 +431,7 @@ async fn send_reply_handler(
     let replier_session_id = match target {
         ResolvedTarget::Claude(s, _) => s.session_id,
         ResolvedTarget::Agy(s) => s.session_id,
+        ResolvedTarget::Pi(s) => s.session_id,
     };
 
     // Lock SQLite, verify recipient, insert reply, and purge

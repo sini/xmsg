@@ -1,10 +1,10 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 use crate::inbox::DeliveryResponse;
@@ -190,7 +190,11 @@ pub fn list_agy_sessions(
             .map(|c| !c.is_stale)
             .unwrap_or(false);
 
-        let status = if is_registered { "idle" } else { "unregistered" };
+        let status = if is_registered {
+            "idle"
+        } else {
+            "unregistered"
+        };
 
         let session = Session {
             session_id: conversation_id.clone(),
@@ -279,7 +283,8 @@ pub fn verify_registration(
     }
 
     // 2. Presence lock check
-    let holder_pid = match get_presence_lock_holder(presence_dir, proc_locks, &req.conversation_id) {
+    let holder_pid = match get_presence_lock_holder(presence_dir, proc_locks, &req.conversation_id)
+    {
         Ok(Some(pid)) => pid,
         Ok(None) => {
             return Err(AppError::Gone {
@@ -287,7 +292,11 @@ pub fn verify_registration(
                 pid: 0,
             });
         }
-        Err(e) => return Err(AppError::Internal(format!("failed to check presence lock: {e}"))),
+        Err(e) => {
+            return Err(AppError::Internal(format!(
+                "failed to check presence lock: {e}"
+            )))
+        }
     };
 
     // 3. Ancestor walk from peer_pid to holder_pid
@@ -305,14 +314,18 @@ pub fn verify_registration(
             Err(_) => break,
         };
 
-        let Some(rparen) = content.rfind(')') else { break; };
+        let Some(rparen) = content.rfind(')') else {
+            break;
+        };
         let remainder = &content[rparen + 1..];
         let fields: Vec<&str> = remainder.split_whitespace().collect();
         if fields.len() < 2 {
             break;
         }
 
-        let Ok(ppid) = fields[1].parse::<u32>() else { break; };
+        let Ok(ppid) = fields[1].parse::<u32>() else {
+            break;
+        };
         if ppid <= 1 {
             break;
         }
@@ -454,14 +467,18 @@ pub fn find_ancestor_agy_session_in(
             Err(_) => break,
         };
 
-        let Some(rparen) = content.rfind(')') else { break; };
+        let Some(rparen) = content.rfind(')') else {
+            break;
+        };
         let remainder = &content[rparen + 1..];
         let fields: Vec<&str> = remainder.split_whitespace().collect();
         if fields.len() < 2 {
             break;
         }
 
-        let Ok(ppid) = fields[1].parse::<u32>() else { break; };
+        let Ok(ppid) = fields[1].parse::<u32>() else {
+            break;
+        };
         if ppid <= 1 {
             break;
         }
@@ -472,7 +489,9 @@ pub fn find_ancestor_agy_session_in(
                 let path = entry.path();
                 if path.extension().and_then(|s| s.to_str()) == Some("lock") {
                     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        if let Ok(Some(holder)) = get_presence_lock_holder(presence_dir, proc_locks, stem) {
+                        if let Ok(Some(holder)) =
+                            get_presence_lock_holder(presence_dir, proc_locks, stem)
+                        {
                             if holder == ppid {
                                 return Ok(stem.to_string());
                             }
@@ -485,7 +504,9 @@ pub fn find_ancestor_agy_session_in(
         curr_pid = ppid;
     }
 
-    Err(AppError::NotFound("no live ancestor agy session found".to_string()))
+    Err(AppError::NotFound(
+        "no live ancestor agy session found".to_string(),
+    ))
 }
 
 /// Returns current process UID.
@@ -501,18 +522,25 @@ pub fn current_uid() -> u32 {
 /// Returns the default registration socket path ($XDG_RUNTIME_DIR/xmsg/register.sock or /tmp/xmsg-$UID/register.sock).
 pub fn default_register_sock_path() -> PathBuf {
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(runtime_dir).join("xmsg").join("register.sock")
+        PathBuf::from(runtime_dir)
+            .join("xmsg")
+            .join("register.sock")
     } else {
         let uid = current_uid();
         PathBuf::from(format!("/tmp/xmsg-{uid}")).join("register.sock")
     }
 }
 
-/// Runs the registration Unix domain socket server.
+/// Runs the registration Unix domain socket server multiplexing agy and pi harnesses.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_register_server(
     sock_path: PathBuf,
     config: AgyConfig,
     store: AgyStore,
+    pi_store: crate::pi::PiStore,
+    db: Arc<Mutex<rusqlite::Connection>>,
+    pi_notify_tx: tokio::sync::broadcast::Sender<String>,
+    reply_ttl: Duration,
     my_uid: u32,
 ) -> io::Result<()> {
     if let Some(parent) = sock_path.parent() {
@@ -525,7 +553,7 @@ pub async fn run_register_server(
     let listener = tokio::net::UnixListener::bind(&sock_path)?;
 
     loop {
-        let (mut stream, _) = match listener.accept().await {
+        let (stream, _) = match listener.accept().await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("register server accept error: {e}");
@@ -546,43 +574,82 @@ pub async fn run_register_server(
 
         let config_clone = config.clone();
         let store_clone = store.clone();
+        let pi_store_clone = pi_store.clone();
+        let db_clone = db.clone();
+        let pi_notify_tx_clone = pi_notify_tx.clone();
 
         tokio::spawn(async move {
             use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-            let (reader, mut writer) = stream.split();
+            let (reader, mut writer) = stream.into_split();
             let mut buf_reader = BufReader::new(reader);
             let mut line = String::new();
             let read_ok = buf_reader.read_line(&mut line).await.is_ok();
             if read_ok && !line.trim().is_empty() {
-                match serde_json::from_str::<AgyRegisterRequest>(&line) {
-                    Ok(req) => {
-                        match verify_registration(
-                            &config_clone.proc_root,
-                            &config_clone.proc_locks_path,
-                            &config_clone.presence_dir,
-                            my_uid,
-                            peer_uid,
-                            peer_pid,
-                            &req,
-                        ) {
-                            Ok(_) => {
-                                store_clone.write().unwrap().insert(
-                                    req.conversation_id.clone(),
-                                    AgyCredentials {
-                                        ls_address: req.ls_address,
-                                        csrf_token: req.csrf_token,
-                                        is_stale: false,
-                                    },
-                                );
-                                let _ = writer.write_all(b"{\"status\":\"ok\"}\n").await;
+                let val: Result<serde_json::Value, _> = serde_json::from_str(&line);
+                match val {
+                    Ok(ref v) if v.get("harness").and_then(|h| h.as_str()) == Some("pi") => {
+                        match serde_json::from_value::<crate::pi::PiRegisterRequest>(v.clone()) {
+                            Ok(req) => {
+                                if let Err(e) = crate::pi::handle_pi_connection(
+                                    buf_reader,
+                                    writer,
+                                    config_clone.proc_root.clone(),
+                                    pi_store_clone,
+                                    my_uid,
+                                    peer_uid,
+                                    peer_pid,
+                                    req,
+                                    db_clone,
+                                    pi_notify_tx_clone,
+                                    reply_ttl,
+                                )
+                                .await
+                                {
+                                    tracing::warn!("pi connection ended with error: {e}");
+                                }
                             }
                             Err(e) => {
-                                tracing::warn!("registration rejected: {e}");
-                                let err_resp = format!("{{\"status\":\"error\",\"detail\":\"{}\"}}\n", e);
+                                let err_resp = format!("{{\"status\":\"error\",\"detail\":\"invalid pi request: {e}\"}}\n");
                                 let _ = writer.write_all(err_resp.as_bytes()).await;
                             }
                         }
                     }
+                    Ok(v) => match serde_json::from_value::<AgyRegisterRequest>(v) {
+                        Ok(req) => {
+                            match verify_registration(
+                                &config_clone.proc_root,
+                                &config_clone.proc_locks_path,
+                                &config_clone.presence_dir,
+                                my_uid,
+                                peer_uid,
+                                peer_pid,
+                                &req,
+                            ) {
+                                Ok(_) => {
+                                    store_clone.write().unwrap().insert(
+                                        req.conversation_id.clone(),
+                                        AgyCredentials {
+                                            ls_address: req.ls_address,
+                                            csrf_token: req.csrf_token,
+                                            is_stale: false,
+                                        },
+                                    );
+                                    let _ = writer.write_all(b"{\"status\":\"ok\"}\n").await;
+                                }
+                                Err(e) => {
+                                    tracing::warn!("registration rejected: {e}");
+                                    let err_resp =
+                                        format!("{{\"status\":\"error\",\"detail\":\"{}\"}}\n", e);
+                                    let _ = writer.write_all(err_resp.as_bytes()).await;
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            let _ = writer
+                                .write_all(b"{\"status\":\"error\",\"detail\":\"invalid json\"}\n")
+                                .await;
+                        }
+                    },
                     Err(_) => {
                         let _ = writer
                             .write_all(b"{\"status\":\"error\",\"detail\":\"invalid json\"}\n")
@@ -593,4 +660,3 @@ pub async fn run_register_server(
         });
     }
 }
-

@@ -247,10 +247,13 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let conn = rusqlite::Connection::open(&db_path)?;
     storage::init_db(&conn)?;
 
+    let db = Arc::new(Mutex::new(conn));
     let (notify_tx, _) = broadcast::channel(1024);
+    let (pi_notify_tx, _) = broadcast::channel(1024);
 
     let agy_config = xmsg::agy::AgyConfig::default();
     let agy_store = xmsg::agy::new_agy_store();
+    let pi_store = xmsg::pi::new_pi_store();
     let my_uid = xmsg::agy::current_uid();
     let register_sock_path = args
         .register_sock
@@ -258,10 +261,25 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let reg_config = agy_config.clone();
     let reg_store = agy_store.clone();
+    let reg_pi_store = pi_store.clone();
     let reg_sock = register_sock_path.clone();
+    let reg_db = db.clone();
+    let reg_pi_notify_tx = pi_notify_tx.clone();
+    let reply_ttl = Duration::from_secs(args.reply_ttl);
 
     tokio::spawn(async move {
-        if let Err(e) = xmsg::agy::run_register_server(reg_sock, reg_config, reg_store, my_uid).await {
+        if let Err(e) = xmsg::agy::run_register_server(
+            reg_sock,
+            reg_config,
+            reg_store,
+            reg_pi_store,
+            reg_db,
+            reg_pi_notify_tx,
+            reply_ttl,
+            my_uid,
+        )
+        .await
+        {
             tracing::error!("register server error: {e}");
         }
     });
@@ -270,12 +288,14 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         sessions_dir,
         agy_config,
         agy_store,
+        pi_store,
+        pi_notify_tx,
         host_label,
         max_body: args.max_body,
         request_counter: AtomicU64::new(1),
-        db: Arc::new(Mutex::new(conn)),
+        db,
         notify_tx,
-        reply_ttl: Duration::from_secs(args.reply_ttl),
+        reply_ttl,
     });
 
     let app = build_router(state);

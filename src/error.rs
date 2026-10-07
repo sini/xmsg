@@ -76,7 +76,9 @@ impl IntoResponse for AppError {
                 "inbox write timed out after 5s".to_string(),
             ),
             AppError::NotRecipient(d) => (StatusCode::FORBIDDEN, "not_recipient", d),
-            AppError::CredentialsStale(d) => (StatusCode::SERVICE_UNAVAILABLE, "credentials_stale", d),
+            AppError::CredentialsStale(d) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "credentials_stale", d)
+            }
             AppError::Internal(d) => (StatusCode::INTERNAL_SERVER_ERROR, "internal", d),
         };
 

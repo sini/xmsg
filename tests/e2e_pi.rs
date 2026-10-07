@@ -1,0 +1,275 @@
+use axum::http::StatusCode;
+use serde_json::Value;
+use std::fs;
+use std::path::Path;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tempfile::tempdir;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
+
+use xmsg::agy::{current_uid, new_agy_store, run_register_server, AgyConfig};
+use xmsg::http::{build_router, AppState};
+use xmsg::pi::new_pi_store;
+
+fn get_self_proc_start() -> String {
+    let stat = fs::read_to_string("/proc/self/stat").expect("read /proc/self/stat");
+    let rparen = stat.rfind(')').expect("closing paren in stat");
+    let fields: Vec<&str> = stat[rparen + 1..].split_whitespace().collect();
+    fields[19].to_string()
+}
+
+fn setup_mock_proc_pi(proc_root: &Path, pid: u32) -> String {
+    let pid_dir = proc_root.join(pid.to_string());
+    fs::create_dir_all(&pid_dir).unwrap();
+    fs::write(pid_dir.join("cmdline"), "node\0/path/to/pi\0").unwrap();
+
+    let starttime = "99887711".to_string();
+    let stat_content =
+        format!("{pid} (pi) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {starttime} 0 0\n");
+    fs::write(pid_dir.join("stat"), stat_content).unwrap();
+
+    starttime
+}
+
+#[tokio::test]
+async fn test_e2e_pi_registration_delivery_and_reply_flow() {
+    let tmp = tempdir().unwrap();
+    let proc_root = tmp.path().join("proc");
+    let proc_locks = tmp.path().join("locks");
+    let presence_dir = tmp.path().join("presence");
+    let sessions_dir = tmp.path().join("sessions");
+    let sock_path = tmp.path().join("register.sock");
+
+    fs::create_dir_all(&proc_root).unwrap();
+    fs::create_dir_all(&presence_dir).unwrap();
+    fs::create_dir_all(&sessions_dir).unwrap();
+    fs::write(&proc_locks, "").unwrap();
+
+    let my_pid = std::process::id();
+    let my_uid = current_uid();
+    let _ = setup_mock_proc_pi(&proc_root, my_pid);
+
+    let agy_config = AgyConfig {
+        presence_dir: presence_dir.clone(),
+        proc_locks_path: proc_locks.clone(),
+        proc_root: proc_root.clone(),
+        agy_bin: "agy".to_string(),
+    };
+
+    let agy_store = new_agy_store();
+    let pi_store = new_pi_store();
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    xmsg::storage::init_db(&conn).unwrap();
+    let db = Arc::new(Mutex::new(conn));
+
+    let (notify_tx, _) = tokio::sync::broadcast::channel(1024);
+    let (pi_notify_tx, _) = tokio::sync::broadcast::channel(1024);
+    let reply_ttl = Duration::from_secs(604800);
+
+    // 1. Start registration server
+    let s_path = sock_path.clone();
+    let s_cfg = agy_config.clone();
+    let s_store = agy_store.clone();
+    let s_pi = pi_store.clone();
+    let s_db = db.clone();
+    let s_tx = pi_notify_tx.clone();
+    tokio::spawn(async move {
+        let _ =
+            run_register_server(s_path, s_cfg, s_store, s_pi, s_db, s_tx, reply_ttl, my_uid).await;
+    });
+
+    // 2. Start HTTP server
+    let app_state = Arc::new(AppState {
+        sessions_dir: sessions_dir.clone(),
+        agy_config: agy_config.clone(),
+        agy_store: agy_store.clone(),
+        pi_store: pi_store.clone(),
+        pi_notify_tx: pi_notify_tx.clone(),
+        host_label: "test-host".to_string(),
+        max_body: 65536,
+        request_counter: AtomicU64::new(1),
+        db: db.clone(),
+        notify_tx: notify_tx.clone(),
+        reply_ttl,
+    });
+
+    let app = build_router(app_state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 3. Mock Pi connects over Unix domain socket and registers
+    let stream = UnixStream::connect(&sock_path).await.unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    let reg_req = serde_json::json!({
+        "harness": "pi",
+        "sessionId": "pi-worker-1",
+        "sessionName": "worker-one",
+        "cwd": "/workspace/project"
+    });
+    writer
+        .write_all(format!("{reg_req}\n").as_bytes())
+        .await
+        .unwrap();
+
+    let mut resp_line = String::new();
+    reader.read_line(&mut resp_line).await.unwrap();
+    let reg_resp: Value = serde_json::from_str(&resp_line).unwrap();
+    assert_eq!(reg_resp["status"], "ok");
+    assert_eq!(reg_resp["sessionId"], "pi-worker-1");
+
+    // 4. Verify session appears in GET /v1/sessions
+    let client = reqwest::Client::new();
+    let sessions_resp = client
+        .get(format!("http://127.0.0.1:{http_port}/v1/sessions"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sessions_resp.status(), StatusCode::OK);
+    let sessions_json: Value = sessions_resp.json().await.unwrap();
+    let sessions_arr = sessions_json.as_array().unwrap();
+    let pi_sess = sessions_arr
+        .iter()
+        .find(|s| s["sessionId"] == "pi-worker-1")
+        .expect("pi-worker-1 should be listed in /v1/sessions");
+    assert_eq!(pi_sess["harness"], "pi");
+    assert_eq!(pi_sess["name"], "worker-one");
+    assert_eq!(pi_sess["registered"], true);
+
+    // 5. Pi starts long-poll on the socket in background task
+    let (delivery_tx, mut delivery_rx) = tokio::sync::mpsc::channel::<Value>(1);
+    let mut writer_clone = writer;
+
+    tokio::spawn(async move {
+        // Send poll
+        let poll_cmd = serde_json::json!({
+            "action": "poll",
+            "sessionId": "pi-worker-1",
+            "waitSecs": 5
+        });
+        writer_clone
+            .write_all(format!("{poll_cmd}\n").as_bytes())
+            .await
+            .unwrap();
+
+        let mut deliver_line = String::new();
+        if reader.read_line(&mut deliver_line).await.unwrap() > 0 {
+            let val: Value = serde_json::from_str(&deliver_line).unwrap();
+            let _ = delivery_tx.send(val.clone()).await;
+
+            // Send ack
+            if let Some(msg_id) = val.get("messageId").and_then(|m| m.as_str()) {
+                let ack_cmd = serde_json::json!({
+                    "action": "ack",
+                    "messageId": msg_id
+                });
+                writer_clone
+                    .write_all(format!("{ack_cmd}\n").as_bytes())
+                    .await
+                    .unwrap();
+
+                let mut ack_line = String::new();
+                let _ = reader.read_line(&mut ack_line).await;
+            }
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 6. Post message to Pi session via HTTP
+    let send_resp = client
+        .post(format!(
+            "http://127.0.0.1:{http_port}/v1/sessions/pi-worker-1/messages"
+        ))
+        .json(&serde_json::json!({
+            "from": "alice-orch",
+            "text": "Hello Pi agent, please run unit tests!"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(send_resp.status(), StatusCode::ACCEPTED);
+    let send_data: Value = send_resp.json().await.unwrap();
+    let message_id = send_data["messageId"].as_str().unwrap().to_string();
+    assert_eq!(send_data["sessionId"], "pi-worker-1");
+
+    // 7. Verify Pi socket waiter received the delivery with §9.4 envelope
+    let delivered_val = tokio::time::timeout(Duration::from_secs(2), delivery_rx.recv())
+        .await
+        .unwrap()
+        .expect("delivery should have been received by Pi socket");
+
+    assert_eq!(delivered_val["action"], "deliver");
+    assert_eq!(delivered_val["messageId"], message_id);
+    let envelope = delivered_val["envelope"].as_str().unwrap();
+    assert!(envelope.contains("[xmsg] from=xmsg@test-host · alice-orch message_id="));
+    assert!(envelope.contains("reply with the xmsg reply tool"));
+    assert!(envelope.contains("Hello Pi agent, please run unit tests!"));
+
+    // 8. Test reply from recipient Pi session (201 Created)
+    let reply_resp = client
+        .post(format!(
+            "http://127.0.0.1:{http_port}/v1/messages/{message_id}/replies"
+        ))
+        .json(&serde_json::json!({
+            "sessionRef": "pi-worker-1",
+            "text": "All 42 tests passed cleanly!"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(reply_resp.status(), StatusCode::CREATED);
+    let reply_data: Value = reply_resp.json().await.unwrap();
+    assert_eq!(reply_data["seq"], 1);
+    assert_eq!(reply_data["text"], "All 42 tests passed cleanly!");
+
+    // 9. Test reply from non-recipient session (403 Forbidden)
+    // Setup a dummy other session
+    let twin_sock = tmp.path().join("other.sock");
+    let self_proc_start = get_self_proc_start();
+    let other_json = format!(
+        r#"{{"pid": {my_pid}, "sessionId": "other-agent", "cwd": "/tmp", "status": "idle", "kind": "interactive", "startedAt": 1000, "updatedAt": 1000, "procStart": "{self_proc_start}", "messagingSocketPath": "{}"}}"#,
+        twin_sock.display()
+    );
+    fs::write(sessions_dir.join("other.json"), other_json).unwrap();
+
+    let reject_resp = client
+        .post(format!(
+            "http://127.0.0.1:{http_port}/v1/messages/{message_id}/replies"
+        ))
+        .json(&serde_json::json!({
+            "sessionRef": "other-agent",
+            "text": "Unauthorized hijack reply"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(reject_resp.status(), StatusCode::FORBIDDEN);
+
+    // 10. Check GET /v1/messages/{id} includes the delivered message and recipient's reply
+    let msg_detail_resp = client
+        .get(format!(
+            "http://127.0.0.1:{http_port}/v1/messages/{message_id}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(msg_detail_resp.status(), StatusCode::OK);
+    let msg_detail: Value = msg_detail_resp.json().await.unwrap();
+    assert_eq!(msg_detail["sessionId"], "pi-worker-1");
+    let replies = msg_detail["replies"].as_array().unwrap();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0]["seq"], 1);
+    assert_eq!(replies[0]["text"], "All 42 tests passed cleanly!");
+}
