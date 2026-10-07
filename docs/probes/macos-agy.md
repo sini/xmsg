@@ -96,16 +96,17 @@ Both devices and inodes match identically.
 
 ---
 
-## 4. Lock Inspection Investigation (Option C Finding & Option B Ruling)
+## 4. Lock Inspection Investigation (Source Reading; Not Executed on Darwin) & Option B Ruling
 
-During gate review for Unit U9/U9.1, whether macOS can verify `flock(2)` ownership (Option C) was investigated:
+During gate review for Unit U9/U9.1, whether macOS can verify `flock(2)` ownership (Option C) was investigated via Darwin XNU source analysis (`apple-oss-distributions/xnu`):
 
-### Option C Measurement
+### Option C Source Analysis (Derived from XNU Source; Not Executed on Darwin)
 - **Darwin Kernel Lock Tables:** Unlike Linux `/proc/locks`, the Darwin XNU kernel does not expose BSD `flock(2)` advisory lock tables to unprivileged userspace.
 - **`proc_pidfdinfo` Limits:** The `proc_pidfdinfo(pid, fd, PROC_PIDFDVNODEPATHINFO, ...)` API returns vnode details (`vnode_info.vi_stat.vst_dev`, `vnode_info.vi_stat.vst_ino`) and file flags, but exposes no advisory lock state.
-- **`fcntl(F_GETLK)` Divergence:** POSIX record locks (`fcntl`) and BSD whole-file locks (`flock(2)`) are maintained separately in Darwin XNU; `fcntl(F_GETLK)` cannot inspect or query BSD `flock` locks.
-- **Privilege Boundary:** Querying kernel lock structures directly requires `root` privileges or DTrace probes, which violates `xmsg`'s unprivileged same-UID trust model.
-- **Result:** It is impossible via unprivileged public Darwin APIs to distinguish a process actively holding `flock(LOCK_EX)` from a child process inheriting an open file descriptor across `exec`.
+- **`fcntl(F_GETLK)` and `lf_getlock`:** In Darwin XNU (`bsd/kern/kern_lockf.c`), `fcntl(F_GETLK)` calls `lf_getlock()`, which walks the per-vnode `lockf` list and can detect the presence of an `F_FLOCK` write lock placed by `flock(2)` via `VNOP_ADVLOCK`. However, because `lf_owner` is NULL for non-POSIX flock locks, `lf_getlock` sets `fl->l_pid = -1`. Thus `F_GETLK` can report that a conflicting flock exists on the vnode, but cannot identify which PID holds the lock.
+- **Holder Distinction Gap:** Because `F_GETLK` only reports existence without attributing ownership to a PID, an existence-only signal cannot distinguish the active lock holder from a child process that inherited an open file descriptor across `exec` while the real session holds the lock.
+- **Privilege Boundary:** Querying kernel lock structures directly or tracing lock state requires `root` privileges or DTrace probes, which violates `xmsg`'s unprivileged same-UID trust model.
+- **Result:** Public unprivileged Darwin APIs cannot attribute `flock(2)` ownership to a specific PID or distinguish the active holder from an exec-inheritor.
 
 ### Option B Adoption (Owner Ruling 2026-10-07)
 Per owner ruling, `xmsg` adopts **Option B**:

@@ -465,7 +465,7 @@ mod macos {
                 size,
             )
         };
-        if rc <= 0 {
+        if rc != size {
             return Err(io::Error::last_os_error());
         }
         let info = unsafe { vpi.assume_init() };

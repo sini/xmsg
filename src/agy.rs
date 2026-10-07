@@ -492,6 +492,18 @@ pub fn verify_registration(
             break;
         }
 
+        // Read starttime first at top of iteration before checks
+        let st1 = match crate::process::starttime(proc_root, curr_pid) {
+            Ok(st) => st,
+            Err(_) => {
+                let Some(ppid) = crate::process::parent_pid(proc_root, curr_pid) else {
+                    break;
+                };
+                curr_pid = ppid;
+                continue;
+            }
+        };
+
         // (a) EXECUTABLE check: kernel-reported executable path matches a trusted exe
         let exe_matches = match crate::process::exe_path(proc_root, curr_pid) {
             Ok(exe) => {
@@ -509,16 +521,6 @@ pub fn verify_registration(
             };
 
             if has_file_open {
-                let st1 = match crate::process::starttime(proc_root, curr_pid) {
-                    Ok(st) => st,
-                    Err(_) => {
-                        let Some(ppid) = crate::process::parent_pid(proc_root, curr_pid) else {
-                            break;
-                        };
-                        curr_pid = ppid;
-                        continue;
-                    }
-                };
                 chosen_ancestor = Some((curr_pid, st1));
                 break;
             }

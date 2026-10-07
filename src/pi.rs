@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
@@ -133,8 +133,9 @@ pub fn verify_pi_process(
         }
 
         // 3. Resolve relative script argument against /proc/<pid>/cwd
-        let proc_cwd =
-            crate::process::cwd(proc_root, peer_pid).unwrap_or_else(|_| PathBuf::from("."));
+        let proc_cwd = crate::process::cwd(proc_root, peer_pid).map_err(|e| {
+            AppError::NotFound(format!("process {peer_pid} cwd not accessible: {e}"))
+        })?;
         let script_path = proc_cwd.join(script_arg);
         let script_canon = std::fs::canonicalize(&script_path).unwrap_or(script_path);
         let matches_trusted = trusted_entrypoints.iter().any(|trusted| {

@@ -43,6 +43,8 @@ fn setup_mock_process(
     if let Some(cmd) = cmdline {
         fs::write(pid_dir.join("cmdline"), cmd).unwrap();
     }
+
+    let _ = std::os::unix::fs::symlink(&pid_dir, pid_dir.join("cwd"));
 }
 
 /// Cell 1: Accept - ancestor is trusted exe AND has presence inode open.

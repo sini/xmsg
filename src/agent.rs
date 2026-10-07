@@ -127,7 +127,7 @@ pub fn resolve_caller_session(
             }
         }
 
-        // 2. Check Antigravity registered sessions or presence lock holders
+        // 2. Check Antigravity registered sessions
         {
             let agy_lock = agy_store.read().unwrap();
             for info in agy_lock.values() {
