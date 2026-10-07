@@ -553,7 +553,7 @@ pub fn current_uid() -> u32 {
     }
 }
 
-/// Returns the default registration socket path ($XDG_RUNTIME_DIR/xmsg/register.sock).
+/// Returns the default registration socket path (see [`crate::agent::socket_dir_for_env`]).
 pub fn default_register_sock_path() -> Result<PathBuf, AppError> {
     crate::agent::default_register_sock_path()
 }
