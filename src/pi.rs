@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
@@ -81,6 +81,7 @@ pub fn is_pi_cmdline(args: &[&str]) -> bool {
 pub fn verify_pi_process(
     proc_root: &Path,
     trusted_entrypoints: &[std::path::PathBuf],
+    trusted_node_bins: &[std::path::PathBuf],
     my_uid: u32,
     peer_uid: u32,
     peer_pid: u32,
@@ -95,25 +96,47 @@ pub fn verify_pi_process(
     let args: Vec<&str> = cmdline.iter().map(String::as_str).collect();
 
     if !trusted_entrypoints.is_empty() {
-        // Kernel executable must be node
+        // 1. Kernel executable verification: must match configured node bin, or be named node/nodejs
         let exe = crate::process::exe_path(proc_root, peer_pid)
             .map_err(|e| AppError::NotFound(format!("process {peer_pid} exe not found: {e}")))?;
-        let exe_name = exe.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if exe_name != "node" && exe_name != "nodejs" {
-            return Err(AppError::BadRequest(format!(
-                "peer process {peer_pid} executable is not node"
-            )));
+        if !trusted_node_bins.is_empty() {
+            let exe_canon = std::fs::canonicalize(&exe).unwrap_or_else(|_| exe.clone());
+            let matches_node = trusted_node_bins.iter().any(|trusted| {
+                let trusted_canon =
+                    std::fs::canonicalize(trusted).unwrap_or_else(|_| trusted.clone());
+                exe_canon == trusted_canon
+            });
+            if !matches_node {
+                return Err(AppError::BadRequest(format!(
+                    "peer process {peer_pid} executable does not match any trusted node binary"
+                )));
+            }
+        } else {
+            let exe_name = exe.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if exe_name != "node" && exe_name != "nodejs" {
+                return Err(AppError::BadRequest(format!(
+                    "peer process {peer_pid} executable is not node"
+                )));
+            }
         }
 
-        // Script argument must canonicalize to a configured trusted pi entrypoint
-        let Some(script_arg) = args.iter().skip(1).find(|arg| !arg.starts_with('-')) else {
+        // 2. Script argument must be args[1], refusing any leading flags
+        let Some(script_arg) = args.get(1) else {
             return Err(AppError::BadRequest(format!(
                 "peer process {peer_pid} has no script argument"
             )));
         };
-        let script_path = Path::new(script_arg);
-        let script_canon =
-            std::fs::canonicalize(script_path).unwrap_or_else(|_| script_path.to_path_buf());
+        if script_arg.starts_with('-') {
+            return Err(AppError::BadRequest(format!(
+                "peer process {peer_pid} has flag before script argument: {script_arg}"
+            )));
+        }
+
+        // 3. Resolve relative script argument against /proc/<pid>/cwd
+        let proc_cwd =
+            crate::process::cwd(proc_root, peer_pid).unwrap_or_else(|_| PathBuf::from("."));
+        let script_path = proc_cwd.join(script_arg);
+        let script_canon = std::fs::canonicalize(&script_path).unwrap_or(script_path);
         let matches_trusted = trusted_entrypoints.iter().any(|trusted| {
             let trusted_canon = std::fs::canonicalize(trusted).unwrap_or_else(|_| trusted.clone());
             script_canon == trusted_canon
@@ -232,6 +255,7 @@ pub async fn handle_pi_connection<
     proc_root: std::path::PathBuf,
     store: PiStore,
     trusted_entrypoints: &[std::path::PathBuf],
+    trusted_node_bins: &[std::path::PathBuf],
     my_uid: u32,
     peer_uid: u32,
     peer_pid: u32,
@@ -240,18 +264,24 @@ pub async fn handle_pi_connection<
     pi_notify_tx: broadcast::Sender<String>,
     reply_ttl: Duration,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let starttime =
-        match verify_pi_process(&proc_root, trusted_entrypoints, my_uid, peer_uid, peer_pid) {
-            Ok(st) => st,
-            Err(e) => {
-                let err_resp = serde_json::json!({
-                    "status": "error",
-                    "detail": e.to_string(),
-                });
-                let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
-                return Err(e.into());
-            }
-        };
+    let starttime = match verify_pi_process(
+        &proc_root,
+        trusted_entrypoints,
+        trusted_node_bins,
+        my_uid,
+        peer_uid,
+        peer_pid,
+    ) {
+        Ok(st) => st,
+        Err(e) => {
+            let err_resp = serde_json::json!({
+                "status": "error",
+                "detail": e.to_string(),
+            });
+            let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+            return Err(e.into());
+        }
+    };
 
     let session_id = format!("pi:{peer_pid}:{starttime}");
     let conflict = {

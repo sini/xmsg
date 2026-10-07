@@ -69,6 +69,7 @@ impl AgySessionInfo {
     }
 }
 
+#[cfg(test)]
 impl From<AgyCredentials> for AgySessionInfo {
     fn from(c: AgyCredentials) -> Self {
         Self {
@@ -109,7 +110,7 @@ impl PartialEq<AgyRegistration> for u32 {
 
 pub fn is_agy_session_alive(proc_root: &Path, info: &AgySessionInfo) -> bool {
     if info.starttime.is_empty() {
-        return true;
+        return false;
     }
     match crate::process::starttime(proc_root, info.pid) {
         Ok(st) => st == info.starttime,
@@ -508,7 +509,17 @@ pub fn verify_registration(
             };
 
             if has_file_open {
-                chosen_ancestor = Some(curr_pid);
+                let st1 = match crate::process::starttime(proc_root, curr_pid) {
+                    Ok(st) => st,
+                    Err(_) => {
+                        let Some(ppid) = crate::process::parent_pid(proc_root, curr_pid) else {
+                            break;
+                        };
+                        curr_pid = ppid;
+                        continue;
+                    }
+                };
+                chosen_ancestor = Some((curr_pid, st1));
                 break;
             }
         }
@@ -519,8 +530,8 @@ pub fn verify_registration(
         curr_pid = ppid;
     }
 
-    let chosen_pid = match chosen_ancestor {
-        Some(pid) => pid,
+    let (chosen_pid, initial_starttime) = match chosen_ancestor {
+        Some(pair) => pair,
         None => {
             return Err(AppError::NotRecipient(format!(
                 "peer PID {peer_pid} has no ancestor matching a trusted agy executable with presence lock open"
@@ -528,7 +539,7 @@ pub fn verify_registration(
         }
     };
 
-    // 6. Linux additional check: if FLOCK holder line exists in /proc/locks, it must equal chosen_pid
+    // 6. Linux additional check: a FLOCK holder line must exist in /proc/locks AND equal chosen_pid
     if locks_supported(proc_locks) {
         let maj = dev_major(target_dev);
         let min = dev_minor(target_dev);
@@ -540,7 +551,11 @@ pub fn verify_registration(
                     )));
                 }
             }
-            Ok(None) => {}
+            Ok(None) => {
+                return Err(AppError::NotRecipient(format!(
+                    "presence lock file has no FLOCK holder in {proc_locks:?}"
+                )));
+            }
             Err(e) => {
                 return Err(AppError::Ambiguous(format!(
                     "ambiguous presence lock in /proc/locks: {e}"
@@ -549,17 +564,22 @@ pub fn verify_registration(
         }
     }
 
-    // 7. Derive starttime and session key
-    let starttime = crate::process::starttime(proc_root, chosen_pid).map_err(|e| {
+    // 7. Verify starttime stability to guard against PID recycling race
+    let st2 = crate::process::starttime(proc_root, chosen_pid).map_err(|e| {
         AppError::Internal(format!(
             "failed to read starttime for PID {chosen_pid}: {e}"
         ))
     })?;
-    let session_key = format!("agy:{chosen_pid}:{starttime}");
+    if initial_starttime != st2 {
+        return Err(AppError::Internal(format!(
+            "process starttime changed during verification for PID {chosen_pid}"
+        )));
+    }
+    let session_key = format!("agy:{chosen_pid}:{st2}");
 
     Ok(AgyRegistration {
         pid: chosen_pid,
-        starttime,
+        starttime: st2,
         session_key,
     })
 }
@@ -599,12 +619,18 @@ pub async fn deliver_agy_envelope(
     // 1. Liveness check via pid + starttime (no per-message lock check)
     let (is_alive, conv_target, creds) = {
         let store_lock = store.read().unwrap();
-        let maybe_info = store_lock
-            .get(&session.session_id)
-            .or_else(|| session.name.as_ref().and_then(|n| store_lock.get(n)));
+        let maybe_info = store_lock.get(&session.session_id).cloned().or_else(|| {
+            store_lock
+                .values()
+                .find(|info| {
+                    info.conversation_id == session.session_id
+                        || session.name.as_deref() == Some(&info.conversation_id)
+                })
+                .cloned()
+        });
         match maybe_info {
             Some(info) => {
-                let alive = is_agy_session_alive(&config.proc_root, info);
+                let alive = is_agy_session_alive(&config.proc_root, &info);
                 let target = if !info.conversation_id.is_empty() {
                     info.conversation_id.clone()
                 } else {
@@ -619,10 +645,8 @@ pub async fn deliver_agy_envelope(
     if !is_alive {
         {
             let mut store_lock = store.write().unwrap();
-            store_lock.remove(&session.session_id);
-            if let Some(ref name) = session.name {
-                store_lock.remove(name);
-            }
+            store_lock
+                .retain(|k, v| k != &session.session_id && v.conversation_id != session.session_id);
         }
         return Err(AppError::Gone {
             session_id: session.session_id.clone(),
@@ -680,8 +704,16 @@ pub async fn deliver_agy_envelope(
         || combined.contains("connection refused")
         || combined.contains("Connection refused")
     {
-        if let Some(entry) = store.write().unwrap().get_mut(&session.session_id) {
-            entry.is_stale = true;
+        {
+            let mut store_lock = store.write().unwrap();
+            if let Some(entry) = store_lock.get_mut(&session.session_id) {
+                entry.is_stale = true;
+            } else if let Some(entry) = store_lock.values_mut().find(|e| {
+                e.conversation_id == session.session_id
+                    || session.name.as_deref() == Some(&e.conversation_id)
+            }) {
+                entry.is_stale = true;
+            }
         }
         let excerpt: String = combined.chars().take(200).collect();
         tracing::warn!("agy delivery auth failure: {excerpt}");
@@ -700,54 +732,6 @@ pub async fn deliver_agy_envelope(
     }
 
     Ok(())
-}
-
-/// Ancestor walk to find an active agy presence lock held by an ancestor process.
-pub fn find_ancestor_agy_session_in(
-    proc_root: &Path,
-    proc_locks: &Path,
-    presence_dir: &Path,
-    start_pid: u32,
-) -> Result<String, AppError> {
-    if !locks_supported(proc_locks) {
-        return Err(AppError::NotFound(
-            "no live ancestor agy session found (agy is Linux only)".to_string(),
-        ));
-    }
-    let mut curr_pid = start_pid;
-
-    for _ in 0..32 {
-        let Some(ppid) = crate::process::parent_pid(proc_root, curr_pid) else {
-            break;
-        };
-        if ppid <= 1 {
-            break;
-        }
-
-        // Check if ppid holds any presence lock in presence_dir
-        if let Ok(entries) = fs::read_dir(presence_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("lock") {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        if let Ok(Some(holder)) =
-                            get_presence_lock_holder(presence_dir, proc_locks, stem)
-                        {
-                            if holder == ppid {
-                                return Ok(stem.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        curr_pid = ppid;
-    }
-
-    Err(AppError::NotFound(
-        "no live ancestor agy session found".to_string(),
-    ))
 }
 
 /// Returns current process UID.
@@ -773,6 +757,7 @@ pub async fn run_register_server(
     store: AgyStore,
     pi_store: crate::pi::PiStore,
     trusted_pi_entrypoints: Vec<PathBuf>,
+    trusted_pi_node_bins: Vec<PathBuf>,
     db: Arc<Mutex<rusqlite::Connection>>,
     pi_notify_tx: tokio::sync::broadcast::Sender<String>,
     reply_ttl: Duration,
@@ -835,6 +820,7 @@ pub async fn run_register_server(
         let store_clone = store.clone();
         let pi_store_clone = pi_store.clone();
         let trusted_pi_entrypoints_clone = trusted_pi_entrypoints.clone();
+        let trusted_pi_node_bins_clone = trusted_pi_node_bins.clone();
         let db_clone = db.clone();
         let pi_notify_tx_clone = pi_notify_tx.clone();
 
@@ -906,6 +892,7 @@ pub async fn run_register_server(
                                     config_clone.proc_root.clone(),
                                     pi_store_clone,
                                     &trusted_pi_entrypoints_clone,
+                                    &trusted_pi_node_bins_clone,
                                     my_uid,
                                     peer_uid,
                                     peer_pid,
@@ -953,10 +940,7 @@ pub async fn run_register_server(
                                     );
                                     {
                                         let mut store_lock = store_clone.write().unwrap();
-                                        store_lock
-                                            .insert(reg.session_key.clone(), session_info.clone());
-                                        store_lock
-                                            .insert(req.conversation_id.clone(), session_info);
+                                        store_lock.insert(reg.session_key.clone(), session_info);
                                     }
                                     let resp = serde_json::json!({
                                         "status": "ok",

@@ -99,6 +99,10 @@ pub struct ServeArgs {
         value_delimiter = ','
     )]
     pub pi_entrypoints: Vec<PathBuf>,
+
+    /// Trusted Node executable paths for Pi (defaults to accepting any executable named node/nodejs)
+    #[arg(long = "pi-node-bin", env = "XMSG_PI_NODE_BIN", value_delimiter = ',')]
+    pub pi_node_bins: Vec<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -309,6 +313,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let reg_store = agy_store.clone();
     let reg_pi_store = pi_store.clone();
     let reg_pi_entrypoints = pi_entrypoints.clone();
+    let reg_pi_node_bins = args.pi_node_bins.clone();
     let reg_sock = register_sock_path.clone();
     let reg_db = db.clone();
     let reg_pi_notify_tx = pi_notify_tx.clone();
@@ -321,6 +326,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
             reg_store,
             reg_pi_store,
             reg_pi_entrypoints,
+            reg_pi_node_bins,
             reg_db,
             reg_pi_notify_tx,
             reply_ttl,

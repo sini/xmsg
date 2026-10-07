@@ -119,6 +119,7 @@ async fn test_shipped_binary_register_cli_with_server() {
             s_store,
             s_pi,
             vec![],
+            vec![],
             s_db,
             s_tx,
             s_ttl,
@@ -145,10 +146,19 @@ async fn test_shipped_binary_register_cli_with_server() {
     eprintln!("CLI stderr: {}", String::from_utf8_lossy(&output.stderr));
 
     // Verify server registered the credentials
-    let creds_opt = store.read().unwrap().get(conv_id).cloned();
+    let creds_opt = store
+        .read()
+        .unwrap()
+        .values()
+        .find(|info| info.conversation_id == conv_id)
+        .cloned();
     assert!(
         creds_opt.is_some(),
         "Credentials should be registered in store"
+    );
+    assert!(
+        store.read().unwrap().get(conv_id).is_none(),
+        "conversation_id must not be a direct store key"
     );
     let creds = creds_opt.unwrap();
     assert_eq!(creds.ls_address, "localhost:33399");

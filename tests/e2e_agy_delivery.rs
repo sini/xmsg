@@ -37,6 +37,12 @@ async fn test_agy_delivery_env_isolation_and_credentials_lifecycle() {
     );
     fs::write(&proc_locks, locks_content).unwrap();
 
+    let pid_dir = proc_root.join(my_pid.to_string());
+    fs::create_dir_all(&pid_dir).unwrap();
+    let stat_content =
+        format!("{my_pid} (proc) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 100 0 0 0 0 0 0 0 0 0 0\n");
+    fs::write(pid_dir.join("stat"), stat_content).unwrap();
+
     // 2. Create fake agy script
     let fake_agy_bin = tmp.path().join("fake_agy.sh");
     let argv_log = tmp.path().join("captured_argv.txt");
@@ -71,15 +77,21 @@ exit 0
     let agy_store = new_agy_store();
 
     // Register initial credentials
-    agy_store.write().unwrap().insert(
+    let initial_info = xmsg::agy::AgySessionInfo::new(
         conv_id.to_string(),
+        my_pid,
+        "100".to_string(),
         AgyCredentials {
             ls_address: "127.0.0.1:9999".to_string(),
             csrf_token: "super-secret-token-xyz".to_string(),
             is_stale: false,
-        }
-        .into(),
+        },
     );
+    let initial_key = initial_info.session_key.clone();
+    agy_store
+        .write()
+        .unwrap()
+        .insert(initial_key.clone(), initial_info);
 
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     xmsg::storage::init_db(&conn).unwrap();
@@ -124,7 +136,7 @@ exit 0
 
     assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
     let resp_body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(resp_body["sessionId"], conv_id);
+    assert_eq!(resp_body["sessionId"], initial_key);
     assert_eq!(resp_body["fromName"], "xmsg@test-host · claude-orch");
     let msg_id = resp_body["messageId"].as_str().unwrap().to_string();
     assert!(!msg_id.is_empty());
@@ -164,7 +176,7 @@ exit 0
     // Verify marked stale in memory store
     {
         let store = agy_store.read().unwrap();
-        let creds = store.get(conv_id).unwrap();
+        let creds = store.get(&initial_key).unwrap();
         assert!(
             creds.is_stale,
             "Store entry must be marked stale after Unauthenticated error"
@@ -188,15 +200,20 @@ exit 0
     );
 
     // --- Phase 3: Re-registration Recovery ---
-    agy_store.write().unwrap().insert(
+    let refreshed_info = xmsg::agy::AgySessionInfo::new(
         conv_id.to_string(),
+        my_pid,
+        "100".to_string(),
         AgyCredentials {
             ls_address: "127.0.0.1:9999".to_string(),
             csrf_token: "refreshed-token-456".to_string(),
             is_stale: false,
-        }
-        .into(),
+        },
     );
+    agy_store
+        .write()
+        .unwrap()
+        .insert(refreshed_info.session_key.clone(), refreshed_info);
 
     let resp_recovered = client
         .post(&send_url)

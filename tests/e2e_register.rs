@@ -274,6 +274,7 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
             s_store,
             s_pi,
             vec![],
+            vec![],
             s_db,
             s_tx,
             reply_ttl,
@@ -309,13 +310,19 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
     assert_eq!(val["status"], "ok");
     assert!(val["sessionId"].as_str().unwrap().starts_with("agy:"));
 
+    let sid1 = val["sessionId"].as_str().unwrap();
+
     // Verify in store
     {
         let map = store.read().unwrap();
-        let creds = map.get("conv-123").unwrap();
+        let creds = map.get(sid1).unwrap();
         assert_eq!(creds.ls_address, "127.0.0.1:4000");
         assert_eq!(creds.csrf_token, "token-initial");
         assert!(!creds.is_stale);
+        assert!(
+            map.get("conv-123").is_none(),
+            "conversation_id must not be a store key"
+        );
     }
 
     // 2. Atomic replacement with new credentials
@@ -335,11 +342,12 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
     reader2.read_line(&mut resp2).await.unwrap();
     let val2: serde_json::Value = serde_json::from_str(resp2.trim()).unwrap();
     assert_eq!(val2["status"], "ok");
+    let sid2 = val2["sessionId"].as_str().unwrap();
 
     // Verify atomic update in store
     {
         let map = store.read().unwrap();
-        let creds = map.get("conv-123").unwrap();
+        let creds = map.get(sid2).unwrap();
         assert_eq!(creds.ls_address, "127.0.0.1:5000");
         assert_eq!(creds.csrf_token, "token-replaced");
         assert!(!creds.is_stale);

@@ -109,7 +109,7 @@ pub fn default_agent_sock_path() -> Result<PathBuf, AppError> {
 pub fn resolve_caller_session(
     proc_root: &Path,
     sessions_dir: &Path,
-    agy_config: &AgyConfig,
+    _agy_config: &AgyConfig,
     agy_store: &crate::agy::AgyStore,
     pi_store: &PiStore,
     peer_pid: u32,
@@ -157,43 +157,6 @@ pub fn resolve_caller_session(
                         harness: "agy".to_string(),
                         registered: Some(true),
                     });
-                }
-            }
-        }
-
-        let agy_entries = if agy::locks_supported(&agy_config.proc_locks_path) {
-            fs::read_dir(&agy_config.presence_dir).ok()
-        } else {
-            None
-        };
-        if let Some(entries) = agy_entries {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("lock") {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        if let Ok(Some(holder)) = agy::get_presence_lock_holder(
-                            &agy_config.presence_dir,
-                            &agy_config.proc_locks_path,
-                            stem,
-                        ) {
-                            if holder == curr_pid {
-                                return Ok(Session {
-                                    session_id: stem.to_string(),
-                                    name: Some(stem.to_string()),
-                                    pid: curr_pid,
-                                    cwd: "/".to_string(),
-                                    status: "idle".to_string(),
-                                    kind: "interactive".to_string(),
-                                    entrypoint: None,
-                                    version: None,
-                                    started_at: 0,
-                                    updated_at: 0,
-                                    harness: "agy".to_string(),
-                                    registered: Some(true),
-                                });
-                            }
-                        }
-                    }
                 }
             }
         }

@@ -81,6 +81,7 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
             s_store,
             s_pi,
             vec![],
+            vec![],
             s_db,
             s_tx,
             reply_ttl,

@@ -27,7 +27,7 @@ fn test_verify_pi_process_success() {
         "987654321",
     );
 
-    let res = verify_pi_process(&proc_root, &[], 1000, 1000, 12345);
+    let res = verify_pi_process(&proc_root, &[], &[], 1000, 1000, 12345);
     assert_eq!(res.unwrap(), "987654321");
 
     let st = get_proc_starttime(&proc_root, 12345).unwrap();
@@ -41,7 +41,7 @@ fn test_verify_pi_process_uid_mismatch() {
 
     setup_mock_proc(&proc_root, 12345, "pi", "987654321");
 
-    let res = verify_pi_process(&proc_root, &[], 1000, 1001, 12345);
+    let res = verify_pi_process(&proc_root, &[], &[], 1000, 1001, 12345);
     assert!(matches!(res, Err(AppError::NotRecipient(_))));
 }
 
@@ -52,7 +52,7 @@ fn test_verify_pi_process_not_pi() {
 
     setup_mock_proc(&proc_root, 12345, "/bin/bash\0-l", "987654321");
 
-    let res = verify_pi_process(&proc_root, &[], 1000, 1000, 12345);
+    let res = verify_pi_process(&proc_root, &[], &[], 1000, 1000, 12345);
     assert!(matches!(res, Err(AppError::BadRequest(_))));
 }
 
@@ -64,7 +64,7 @@ fn test_verify_pi_process_rejects_arbitrary_cmdline_substring() {
     // Oracle honesty O2: Ensure cmdlines containing "pi" as a substring (e.g. spin()) are rejected
     setup_mock_proc(&proc_root, 12345, "python3\0-c\0spin()\0", "987654321");
 
-    let res = verify_pi_process(&proc_root, &[], 1000, 1000, 12345);
+    let res = verify_pi_process(&proc_root, &[], &[], 1000, 1000, 12345);
     assert!(matches!(res, Err(AppError::BadRequest(_))));
 }
 
@@ -74,7 +74,7 @@ fn test_verify_pi_process_not_found() {
     let proc_root = tmp.path().join("proc");
     fs::create_dir_all(&proc_root).unwrap();
 
-    let res = verify_pi_process(&proc_root, &[], 1000, 1000, 99999);
+    let res = verify_pi_process(&proc_root, &[], &[], 1000, 1000, 99999);
     assert!(matches!(res, Err(AppError::NotFound(_))));
 }
 

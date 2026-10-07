@@ -53,10 +53,19 @@ fn cell_1_accept_trusted_exe_and_lock_open() {
     let proc_locks = tmp.path().join("locks");
     let presence_dir = tmp.path().join("presence");
     fs::create_dir_all(&presence_dir).unwrap();
-    fs::write(&proc_locks, "").unwrap();
-
     let lock_file = presence_dir.join("conv-1.lock");
     fs::write(&lock_file, "lock").unwrap();
+    let meta = fs::metadata(&lock_file).unwrap();
+    let dev = meta.dev();
+    let ino = meta.ino();
+    let maj = dev_major(dev);
+    let min = dev_minor(dev);
+
+    let locks_content = format!(
+        "1: FLOCK ADVISORY WRITE 2000 {:02x}:{:02x}:{} 0 EOF\n",
+        maj, min, ino
+    );
+    fs::write(&proc_locks, locks_content).unwrap();
 
     let dummy_agy = tmp.path().join("trusted_agy");
     fs::write(&dummy_agy, "binary").unwrap();
@@ -474,7 +483,7 @@ fn cell_9_pi_untrusted_script_path_refused() {
         Some(&cmdline),
     );
 
-    let res = verify_pi_process(&proc_root, &trusted_entrypoints, 1000, 1000, 12345);
+    let res = verify_pi_process(&proc_root, &trusted_entrypoints, &[], 1000, 1000, 12345);
     match res {
         Err(AppError::BadRequest(msg)) => {
             assert!(
@@ -513,7 +522,7 @@ fn cell_10_pi_trusted_script_path_accepted() {
         Some(&cmdline),
     );
 
-    let res = verify_pi_process(&proc_root, &trusted_entrypoints, 1000, 1000, 12345);
+    let res = verify_pi_process(&proc_root, &trusted_entrypoints, &[], 1000, 1000, 12345);
     assert_eq!(res.expect("trusted pi script should be accepted"), "1000");
 }
 

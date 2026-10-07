@@ -159,7 +159,7 @@ async fn setup(max_body: usize) -> Env {
             ptx.clone(),
         );
         tokio::spawn(async move {
-            let _ = run_register_server(a, b, c, d, vec![], e, f, ttl, uid).await;
+            let _ = run_register_server(a, b, c, d, vec![], vec![], e, f, ttl, uid).await;
         });
     }
 

@@ -93,3 +93,25 @@ Measured against live Antigravity PID `2739763` on Linux 6.12 (x86_64):
    # Device: 0,46    Inode: 1148992
    ```
 Both devices and inodes match identically.
+
+---
+
+## 4. Lock Inspection Investigation (Option C Finding & Option B Ruling)
+
+During gate review for Unit U9/U9.1, whether macOS can verify `flock(2)` ownership (Option C) was investigated:
+
+### Option C Measurement
+- **Darwin Kernel Lock Tables:** Unlike Linux `/proc/locks`, the Darwin XNU kernel does not expose BSD `flock(2)` advisory lock tables to unprivileged userspace.
+- **`proc_pidfdinfo` Limits:** The `proc_pidfdinfo(pid, fd, PROC_PIDFDVNODEPATHINFO, ...)` API returns vnode details (`vnode_info.vi_stat.vst_dev`, `vnode_info.vi_stat.vst_ino`) and file flags, but exposes no advisory lock state.
+- **`fcntl(F_GETLK)` Divergence:** POSIX record locks (`fcntl`) and BSD whole-file locks (`flock(2)`) are maintained separately in Darwin XNU; `fcntl(F_GETLK)` cannot inspect or query BSD `flock` locks.
+- **Privilege Boundary:** Querying kernel lock structures directly requires `root` privileges or DTrace probes, which violates `xmsg`'s unprivileged same-UID trust model.
+- **Result:** It is impossible via unprivileged public Darwin APIs to distinguish a process actively holding `flock(LOCK_EX)` from a child process inheriting an open file descriptor across `exec`.
+
+### Option B Adoption (Owner Ruling 2026-10-07)
+Per owner ruling, `xmsg` adopts **Option B**:
+- macOS accepts the proof composed of:
+  1. Process executable path (`proc_pidpath`) matches a trusted `--agy-exe` binary.
+  2. Open file descriptor table (`proc_pidinfo` + `proc_pidfdinfo`) contains the matching vnode `(vst_dev, vst_ino)` of `<presence_dir>/<conversation_id>.lock`.
+- **Known Limitation:** On macOS, an inherited file descriptor across `exec` satisfies the check without active FLOCK ownership verification. This known gap is accepted in trade for cross-platform support without requiring root privileges.
+- macOS refusal is **not** reintroduced. Option B is the active and supported behavior.
+

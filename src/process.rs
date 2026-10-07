@@ -94,6 +94,27 @@ pub fn claude_proc_start_matches(proc_root: &Path, pid: u32, expected: &str) -> 
     matches!(starttime(proc_root, pid), Ok(st) if st == expected)
 }
 
+/// Returns the current working directory of `pid`.
+///
+/// On Linux live systems, reads the `/proc/<pid>/cwd` symlink.
+/// On macOS live systems, queries `proc_pidvnodepathinfo`.
+/// On synthetic test fixtures, reads `<proc_root>/<pid>/cwd`.
+pub fn cwd(proc_root: &Path, pid: u32) -> io::Result<std::path::PathBuf> {
+    if is_live(proc_root) {
+        #[cfg(target_os = "macos")]
+        return macos::cwd(pid);
+    }
+    let cwd_link = proc_root.join(pid.to_string()).join("cwd");
+    match fs::read_link(&cwd_link) {
+        Ok(target) => Ok(target),
+        Err(_) if proc_root != Path::new(LIVE_PROC_ROOT) && cwd_link.is_file() => {
+            let s = fs::read_to_string(&cwd_link)?;
+            Ok(std::path::PathBuf::from(s.trim()))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Returns the executable path of `pid`.
 ///
 /// On Linux live systems, reads the `/proc/<pid>/exe` symlink.
@@ -107,7 +128,7 @@ pub fn exe_path(proc_root: &Path, pid: u32) -> io::Result<std::path::PathBuf> {
     let exe_link = proc_root.join(pid.to_string()).join("exe");
     match fs::read_link(&exe_link) {
         Ok(target) => Ok(target),
-        Err(_) if exe_link.is_file() => Ok(exe_link),
+        Err(_) if proc_root != Path::new(LIVE_PROC_ROOT) && exe_link.is_file() => Ok(exe_link),
         Err(e) => Err(e),
     }
 }
@@ -422,6 +443,37 @@ mod macos {
             }
         }
         Ok(ids)
+    }
+
+    #[repr(C)]
+    pub struct proc_vnodepathinfo {
+        pub pvi_cdir: libc::vnode_info_path,
+        pub pvi_rdir: libc::vnode_info_path,
+    }
+
+    pub const PROC_PIDVNODEPATHINFO: libc::c_int = 9;
+
+    pub fn cwd(pid: u32) -> io::Result<std::path::PathBuf> {
+        let mut vpi = MaybeUninit::<proc_vnodepathinfo>::zeroed();
+        let size = std::mem::size_of::<proc_vnodepathinfo>() as libc::c_int;
+        let rc = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                PROC_PIDVNODEPATHINFO,
+                0,
+                vpi.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if rc <= 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let info = unsafe { vpi.assume_init() };
+        let c_str = unsafe { std::ffi::CStr::from_ptr(info.pvi_cdir.vip_path.as_ptr()) };
+        let s = c_str
+            .to_str()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        Ok(std::path::PathBuf::from(s))
     }
 
     #[cfg(test)]

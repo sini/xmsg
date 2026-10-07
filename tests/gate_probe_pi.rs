@@ -167,6 +167,7 @@ async fn setup_gate_harness() -> GateHarness {
             reg_store,
             reg_pi_store,
             vec![],
+            vec![],
             reg_db,
             reg_pi_notify,
             Duration::from_secs(3600),
