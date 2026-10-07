@@ -152,6 +152,7 @@ async fn start_mcp_harness() -> McpHarness {
             proc_locks_path: sess_dir.path().join("proc_locks"),
             proc_root: proc_dir.path().to_path_buf(),
             agy_bin: "agy".to_string(),
+            trusted_agy_exes: Vec::new(),
         },
         agy_store: xmsg::agy::new_agy_store(),
         pi_store: xmsg::pi::new_pi_store(),

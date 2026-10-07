@@ -180,6 +180,7 @@ exit 0
         proc_locks_path: proc_locks_path.clone(),
         proc_root: proc_root.clone(),
         agy_bin: fake_agy_bin.to_string_lossy().to_string(),
+        trusted_agy_exes: Vec::new(),
     };
 
     let state = Arc::new(AppState {
@@ -947,11 +948,16 @@ async fn test_u8_cross_harness_claude_to_agy() {
     // Register credentials
     env.state.agy_store.write().unwrap().insert(
         conv_id.to_string(),
-        AgyCredentials {
-            ls_address: "127.0.0.1:8888".to_string(),
-            csrf_token: "csrf-8888".to_string(),
-            is_stale: false,
-        },
+        xmsg::agy::AgySessionInfo::new(
+            conv_id.to_string(),
+            agy_pid,
+            "5000".to_string(),
+            AgyCredentials {
+                ls_address: "127.0.0.1:8888".to_string(),
+                csrf_token: "csrf-8888".to_string(),
+                is_stale: false,
+            },
+        ),
     );
 
     // Act as Claude Session A to send to Agy

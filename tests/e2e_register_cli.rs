@@ -84,18 +84,21 @@ async fn test_shipped_binary_register_cli_with_server() {
     let maj = dev_major(dev);
     let min = dev_minor(dev);
 
-    // Current test process is the lock holder
+    // Current test process is the lock holder and must have lock file open
+    let _open_lock = std::fs::File::open(&lock_file).unwrap();
     let locks_content = format!(
         "1: FLOCK ADVISORY WRITE {my_pid} {:02x}:{:02x}:{} 0 EOF\n",
         maj, min, ino
     );
     fs::write(&proc_locks, locks_content).unwrap();
 
+    let my_exe = std::env::current_exe().unwrap();
     let config = AgyConfig {
         presence_dir,
         proc_locks_path: proc_locks,
         proc_root,
         agy_bin: "agy".to_string(),
+        trusted_agy_exes: vec![my_exe],
     };
     let store = new_agy_store();
 
@@ -110,7 +113,18 @@ async fn test_shipped_binary_register_cli_with_server() {
     let (s_tx, _) = tokio::sync::broadcast::channel(16);
     let s_ttl = Duration::from_secs(604800);
     tokio::spawn(async move {
-        let _ = run_register_server(s_path, s_cfg, s_store, s_pi, s_db, s_tx, s_ttl, my_uid).await;
+        let _ = run_register_server(
+            s_path,
+            s_cfg,
+            s_store,
+            s_pi,
+            vec![],
+            s_db,
+            s_tx,
+            s_ttl,
+            my_uid,
+        )
+        .await;
     });
 
     tokio::time::sleep(Duration::from_millis(50)).await;

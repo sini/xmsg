@@ -12,13 +12,30 @@ use xmsg::agy::{
 };
 use xmsg::error::AppError;
 
-fn setup_mock_proc_stat(proc_root: &Path, pid: u32, ppid: u32) {
+fn setup_mock_proc(
+    proc_root: &Path,
+    pid: u32,
+    ppid: u32,
+    exe_target: Option<&Path>,
+    open_file: Option<&Path>,
+) {
     let pid_dir = proc_root.join(pid.to_string());
-    fs::create_dir_all(&pid_dir).unwrap();
+    let fd_dir = pid_dir.join("fd");
+    fs::create_dir_all(&fd_dir).unwrap();
     let stat_content = format!(
-        "{pid} (test_proc) S {ppid} {pid} {pid} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+        "{pid} (test_proc) S {ppid} {pid} {pid} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12345 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
     );
     fs::write(pid_dir.join("stat"), stat_content).unwrap();
+    if let Some(exe) = exe_target {
+        let exe_link = pid_dir.join("exe");
+        let _ = fs::remove_file(&exe_link);
+        std::os::unix::fs::symlink(exe, &exe_link).unwrap();
+    }
+    if let Some(target) = open_file {
+        let fd_link = fd_dir.join("3");
+        let _ = fs::remove_file(&fd_link);
+        std::os::unix::fs::symlink(target, &fd_link).unwrap();
+    }
 }
 
 #[test]
@@ -28,6 +45,10 @@ fn test_verify_registration_uid_mismatch() {
     let proc_locks = tmp.path().join("locks");
     let presence_dir = tmp.path().join("presence");
     fs::create_dir_all(&presence_dir).unwrap();
+
+    let dummy_exe = tmp.path().join("mock_agy");
+    fs::write(&dummy_exe, "mock").unwrap();
+    let trusted_exes = vec![dummy_exe];
 
     let req = AgyRegisterRequest {
         conversation_id: "test-conv-1".to_string(),
@@ -39,6 +60,7 @@ fn test_verify_registration_uid_mismatch() {
         &proc_root,
         &proc_locks,
         &presence_dir,
+        &trusted_exes,
         1000, // my_uid
         1001, // peer_uid mismatch!
         5000,
@@ -57,6 +79,10 @@ fn test_verify_registration_missing_or_dead_lock() {
     fs::create_dir_all(&presence_dir).unwrap();
     fs::write(&proc_locks, "").unwrap();
 
+    let dummy_exe = tmp.path().join("mock_agy");
+    fs::write(&dummy_exe, "mock").unwrap();
+    let trusted_exes = vec![dummy_exe];
+
     let req = AgyRegisterRequest {
         conversation_id: "test-conv-missing".to_string(),
         ls_address: "127.0.0.1:1234".to_string(),
@@ -68,6 +94,7 @@ fn test_verify_registration_missing_or_dead_lock() {
         &proc_root,
         &proc_locks,
         &presence_dir,
+        &trusted_exes,
         1000,
         1000,
         5000,
@@ -75,9 +102,11 @@ fn test_verify_registration_missing_or_dead_lock() {
     );
     assert!(matches!(res1, Err(AppError::Gone { .. })));
 
-    // 2. Lock file exists, but no entry in /proc/locks -> Err(Gone)
+    // 2. Lock file exists, but no ancestor holds it open -> Err(NotRecipient)
     let lock_file = presence_dir.join("test-conv-dead.lock");
     fs::write(&lock_file, "").unwrap();
+
+    setup_mock_proc(&proc_root, 5000, 1, None, None);
 
     let req_dead = AgyRegisterRequest {
         conversation_id: "test-conv-dead".to_string(),
@@ -88,12 +117,13 @@ fn test_verify_registration_missing_or_dead_lock() {
         &proc_root,
         &proc_locks,
         &presence_dir,
+        &trusted_exes,
         1000,
         1000,
         5000,
         &req_dead,
     );
-    assert!(matches!(res2, Err(AppError::Gone { .. })));
+    assert!(matches!(res2, Err(AppError::NotRecipient(_))));
 }
 
 #[test]
@@ -120,13 +150,18 @@ fn test_verify_registration_ancestor_walk() {
     );
     fs::write(&proc_locks, locks_content).unwrap();
 
+    let dummy_exe = tmp.path().join("mock_agy");
+    fs::write(&dummy_exe, "mock").unwrap();
+    let trusted_exes = vec![dummy_exe.clone()];
+
     // Setup process hierarchy: 4000 -> 3000 -> 2000 (holder) -> 1
-    setup_mock_proc_stat(&proc_root, 4000, 3000);
-    setup_mock_proc_stat(&proc_root, 3000, 2000);
-    setup_mock_proc_stat(&proc_root, 2000, 1);
+    // Holder 2000 has trusted exe and lock file open
+    setup_mock_proc(&proc_root, 2000, 1, Some(&dummy_exe), Some(&lock_file));
+    setup_mock_proc(&proc_root, 3000, 2000, None, None);
+    setup_mock_proc(&proc_root, 4000, 3000, None, None);
 
     // Also a disconnected process: 9000 -> 1
-    setup_mock_proc_stat(&proc_root, 9000, 1);
+    setup_mock_proc(&proc_root, 9000, 1, None, None);
 
     let req = AgyRegisterRequest {
         conversation_id: "conv-active".to_string(),
@@ -139,6 +174,7 @@ fn test_verify_registration_ancestor_walk() {
         &proc_root,
         &proc_locks,
         &presence_dir,
+        &trusted_exes,
         1000,
         1000,
         2000,
@@ -151,6 +187,7 @@ fn test_verify_registration_ancestor_walk() {
         &proc_root,
         &proc_locks,
         &presence_dir,
+        &trusted_exes,
         1000,
         1000,
         4000,
@@ -163,6 +200,7 @@ fn test_verify_registration_ancestor_walk() {
         &proc_root,
         &proc_locks,
         &presence_dir,
+        &trusted_exes,
         1000,
         1000,
         9000,
@@ -201,11 +239,17 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
     );
     fs::write(&proc_locks, locks_content).unwrap();
 
+    let dummy_exe = tmp.path().join("mock_agy");
+    fs::write(&dummy_exe, "mock").unwrap();
+
+    setup_mock_proc(&proc_root, my_pid, 1, Some(&dummy_exe), Some(&lock_file));
+
     let config = AgyConfig {
         presence_dir: presence_dir.clone(),
         proc_locks_path: proc_locks.clone(),
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
+        trusted_agy_exes: vec![dummy_exe],
     };
     let store = new_agy_store();
 
@@ -224,8 +268,18 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
     let s_db = db.clone();
     let s_tx = pi_notify_tx.clone();
     tokio::spawn(async move {
-        let _ =
-            run_register_server(s_path, s_cfg, s_store, s_pi, s_db, s_tx, reply_ttl, my_uid).await;
+        let _ = run_register_server(
+            s_path,
+            s_cfg,
+            s_store,
+            s_pi,
+            vec![],
+            s_db,
+            s_tx,
+            reply_ttl,
+            my_uid,
+        )
+        .await;
     });
 
     // Wait briefly for socket to become ready
@@ -251,7 +305,9 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
     let mut reader = BufReader::new(stream);
     let mut resp = String::new();
     reader.read_line(&mut resp).await.unwrap();
-    assert_eq!(resp.trim(), "{\"status\":\"ok\"}");
+    let val: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
+    assert_eq!(val["status"], "ok");
+    assert!(val["sessionId"].as_str().unwrap().starts_with("agy:"));
 
     // Verify in store
     {
@@ -277,7 +333,8 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
     let mut reader2 = BufReader::new(stream2);
     let mut resp2 = String::new();
     reader2.read_line(&mut resp2).await.unwrap();
-    assert_eq!(resp2.trim(), "{\"status\":\"ok\"}");
+    let val2: serde_json::Value = serde_json::from_str(resp2.trim()).unwrap();
+    assert_eq!(val2["status"], "ok");
 
     // Verify atomic update in store
     {

@@ -94,6 +94,46 @@ pub fn claude_proc_start_matches(proc_root: &Path, pid: u32, expected: &str) -> 
     matches!(starttime(proc_root, pid), Ok(st) if st == expected)
 }
 
+/// Returns the executable path of `pid`.
+///
+/// On Linux live systems, reads the `/proc/<pid>/exe` symlink.
+/// On macOS live systems, queries the kernel via `proc_pidpath(2)`.
+/// On synthetic test fixtures, reads `<proc_root>/<pid>/exe`.
+pub fn exe_path(proc_root: &Path, pid: u32) -> io::Result<std::path::PathBuf> {
+    if is_live(proc_root) {
+        #[cfg(target_os = "macos")]
+        return macos::pidpath(pid);
+    }
+    let exe_link = proc_root.join(pid.to_string()).join("exe");
+    match fs::read_link(&exe_link) {
+        Ok(target) => Ok(target),
+        Err(_) if exe_link.is_file() => Ok(exe_link),
+        Err(e) => Err(e),
+    }
+}
+
+/// Returns the device and inode pairs `(dev, ino)` of all open file descriptors for `pid`.
+///
+/// On Linux live systems and synthetic test fixtures, stats each entry in `<proc_root>/<pid>/fd/`.
+/// On macOS live systems, queries `proc_pidinfo(PROC_PIDLISTFDS)` and `proc_pidfdinfo(PROC_PIDFDVNODEPATHINFO)`
+/// for vnode file descriptors.
+pub fn open_file_ids(proc_root: &Path, pid: u32) -> io::Result<Vec<(u64, u64)>> {
+    if is_live(proc_root) {
+        #[cfg(target_os = "macos")]
+        return macos::open_file_ids(pid);
+    }
+    let fd_dir = proc_root.join(pid.to_string()).join("fd");
+    let entries = fs::read_dir(fd_dir)?;
+    let mut ids = Vec::new();
+    for entry in entries.flatten() {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(meta) = fs::metadata(entry.path()) {
+            ids.push((meta.dev(), meta.ino()));
+        }
+    }
+    Ok(ids)
+}
+
 /// Returns the per-user runtime directory used when `XDG_RUNTIME_DIR` is unset:
 /// the Darwin user temp dir (`confstr(_CS_DARWIN_USER_TEMP_DIR)`) on macOS, a
 /// 0700 directory owned by the user. `None` on other platforms.
@@ -292,6 +332,98 @@ mod macos {
         Some(PathBuf::from(OsStr::from_bytes(s.to_bytes())))
     }
 
+    pub fn pidpath(pid: u32) -> io::Result<PathBuf> {
+        let mut buf = vec![0 as libc::c_char; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        let n = unsafe {
+            libc::proc_pidpath(
+                pid as libc::c_int,
+                buf.as_mut_ptr().cast(),
+                buf.len() as u32,
+            )
+        };
+        if n <= 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let s = unsafe { CStr::from_ptr(buf.as_ptr()) };
+        Ok(PathBuf::from(OsStr::from_bytes(s.to_bytes())))
+    }
+
+    #[repr(C)]
+    pub struct proc_fileinfo {
+        pub fi_openflags: u32,
+        pub fi_status: u32,
+        pub fi_offset: i64,
+        pub fi_type: i32,
+        pub fi_guardflags: u32,
+    }
+
+    #[repr(C)]
+    pub struct vnode_fdinfowithpath {
+        pub pfi: proc_fileinfo,
+        pub pvip: libc::vnode_info_path,
+    }
+
+    pub const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
+
+    pub fn open_file_ids(pid: u32) -> io::Result<Vec<(u64, u64)>> {
+        let size_needed = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDLISTFDS,
+                0,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if size_needed <= 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("cannot list fds for process {pid}"),
+            ));
+        }
+        let count = size_needed as usize / std::mem::size_of::<libc::proc_fdinfo>();
+        let mut fd_list: Vec<libc::proc_fdinfo> = Vec::with_capacity(count);
+        let n = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDLISTFDS,
+                0,
+                fd_list.as_mut_ptr().cast(),
+                size_needed,
+            )
+        };
+        if n <= 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let num_fds = n as usize / std::mem::size_of::<libc::proc_fdinfo>();
+        unsafe { fd_list.set_len(num_fds) };
+
+        let mut ids = Vec::new();
+        let vnode_size = std::mem::size_of::<vnode_fdinfowithpath>() as libc::c_int;
+
+        for fd_info in fd_list {
+            if fd_info.proc_fdtype as libc::c_int == libc::PROX_FDTYPE_VNODE {
+                let mut vnode_info = MaybeUninit::<vnode_fdinfowithpath>::zeroed();
+                let rc = unsafe {
+                    libc::proc_pidfdinfo(
+                        pid as libc::c_int,
+                        fd_info.proc_fd,
+                        PROC_PIDFDVNODEPATHINFO,
+                        vnode_info.as_mut_ptr().cast(),
+                        vnode_size,
+                    )
+                };
+                if rc == vnode_size {
+                    let vi = unsafe { vnode_info.assume_init() };
+                    let dev = vi.pvip.vip_vi.vi_stat.vst_dev as u64;
+                    let ino = vi.pvip.vip_vi.vi_stat.vst_ino;
+                    ids.push((dev, ino));
+                }
+            }
+        }
+        Ok(ids)
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -392,6 +524,52 @@ mod tests {
             Some(std::os::unix::process::parent_id())
         );
         assert!(!cmdline(root, me).unwrap().is_empty());
+    }
+
+    #[test]
+    fn live_exe_path_and_open_file_ids() {
+        use std::os::unix::fs::MetadataExt;
+        let root = Path::new(LIVE_PROC_ROOT);
+        let me = std::process::id();
+        let exe = exe_path(root, me).expect("read self exe");
+        assert!(exe.exists());
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let meta = std::fs::metadata(tmp.path()).unwrap();
+        let expected_dev_ino = (meta.dev(), meta.ino());
+
+        let fds = open_file_ids(root, me).expect("open file ids for self");
+        assert!(
+            fds.contains(&expected_dev_ino),
+            "open_file_ids should contain named temp file"
+        );
+    }
+
+    #[test]
+    fn fixture_exe_path_and_open_file_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proc_root = tmp.path();
+        let pid_dir = proc_root.join("123");
+        let fd_dir = pid_dir.join("fd");
+        fs::create_dir_all(&fd_dir).unwrap();
+
+        let dummy_exe = tmp.path().join("bin_agy");
+        fs::write(&dummy_exe, "binary").unwrap();
+        std::os::unix::fs::symlink(&dummy_exe, pid_dir.join("exe")).unwrap();
+
+        let dummy_file = tmp.path().join("open_file.txt");
+        fs::write(&dummy_file, "contents").unwrap();
+        std::os::unix::fs::symlink(&dummy_file, fd_dir.join("3")).unwrap();
+
+        use std::os::unix::fs::MetadataExt;
+        let file_meta = fs::metadata(&dummy_file).unwrap();
+        let expected = (file_meta.dev(), file_meta.ino());
+
+        let resolved_exe = exe_path(proc_root, 123).unwrap();
+        assert_eq!(resolved_exe, dummy_exe);
+
+        let ids = open_file_ids(proc_root, 123).unwrap();
+        assert_eq!(ids, vec![expected]);
     }
 
     #[cfg(target_os = "macos")]

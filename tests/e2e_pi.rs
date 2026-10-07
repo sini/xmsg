@@ -54,6 +54,7 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
         proc_locks_path: proc_locks.clone(),
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
+        trusted_agy_exes: Vec::new(),
     };
 
     let agy_store = new_agy_store();
@@ -74,8 +75,18 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
     let s_db = db.clone();
     let s_tx = pi_notify_tx.clone();
     tokio::spawn(async move {
-        let _ =
-            run_register_server(s_path, s_cfg, s_store, s_pi, s_db, s_tx, reply_ttl, my_uid).await;
+        let _ = run_register_server(
+            s_path,
+            s_cfg,
+            s_store,
+            s_pi,
+            vec![],
+            s_db,
+            s_tx,
+            reply_ttl,
+            my_uid,
+        )
+        .await;
     });
 
     // 2. Start HTTP server

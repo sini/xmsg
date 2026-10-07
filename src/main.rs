@@ -87,6 +87,18 @@ pub struct ServeArgs {
     /// Agent socket path (defaults to $XDG_RUNTIME_DIR/xmsg/agent.sock; on macOS without it, the Darwin user temp dir)
     #[arg(long, env = "XMSG_AGENT_SOCK")]
     pub agent_sock: Option<PathBuf>,
+
+    /// Trusted Antigravity executable paths (comma-separated or multiple flags)
+    #[arg(long = "agy-exe", env = "XMSG_AGY_EXE", value_delimiter = ',')]
+    pub agy_exes: Vec<PathBuf>,
+
+    /// Trusted Pi entrypoint script paths (comma-separated or multiple flags)
+    #[arg(
+        long = "pi-entrypoint",
+        env = "XMSG_PI_ENTRYPOINT",
+        value_delimiter = ','
+    )]
+    pub pi_entrypoints: Vec<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -274,7 +286,11 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let (notify_tx, _) = broadcast::channel(1024);
     let (pi_notify_tx, _) = broadcast::channel(1024);
 
-    let agy_config = xmsg::agy::AgyConfig::default();
+    let agy_config = xmsg::agy::AgyConfig {
+        trusted_agy_exes: args.agy_exes,
+        ..Default::default()
+    };
+    let pi_entrypoints = args.pi_entrypoints;
     let agy_store = xmsg::agy::new_agy_store();
     let pi_store = xmsg::pi::new_pi_store();
     let my_uid = xmsg::agent::current_uid();
@@ -292,6 +308,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let reg_config = agy_config.clone();
     let reg_store = agy_store.clone();
     let reg_pi_store = pi_store.clone();
+    let reg_pi_entrypoints = pi_entrypoints.clone();
     let reg_sock = register_sock_path.clone();
     let reg_db = db.clone();
     let reg_pi_notify_tx = pi_notify_tx.clone();
@@ -303,6 +320,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
             reg_config,
             reg_store,
             reg_pi_store,
+            reg_pi_entrypoints,
             reg_db,
             reg_pi_notify_tx,
             reply_ttl,

@@ -66,6 +66,7 @@ exit 0
         proc_locks_path: proc_locks,
         proc_root,
         agy_bin: fake_agy_bin.to_string_lossy().to_string(),
+        trusted_agy_exes: Vec::new(),
     };
     let agy_store = new_agy_store();
 
@@ -76,7 +77,8 @@ exit 0
             ls_address: "127.0.0.1:9999".to_string(),
             csrf_token: "super-secret-token-xyz".to_string(),
             is_stale: false,
-        },
+        }
+        .into(),
     );
 
     let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -192,7 +194,8 @@ exit 0
             ls_address: "127.0.0.1:9999".to_string(),
             csrf_token: "refreshed-token-456".to_string(),
             is_stale: false,
-        },
+        }
+        .into(),
     );
 
     let resp_recovered = client

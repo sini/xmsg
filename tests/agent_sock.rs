@@ -136,7 +136,9 @@ fn test_resolve_caller_session_ancestor_walk() {
         proc_locks_path,
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
+        trusted_agy_exes: Vec::new(),
     };
+    let agy_store = new_agy_store();
     let pi_store = new_pi_store();
 
     // Setup process hierarchy: PID 3000 -> PPID 2000 -> PPID 1000 -> PPID 1
@@ -179,8 +181,15 @@ fn test_resolve_caller_session_ancestor_walk() {
     fs::write(sessions_dir.join("1000.json"), session_json.to_string()).unwrap();
 
     // 1. Caller PID 3000 should resolve upwards to session claude-sess-alpha
-    let resolved =
-        resolve_caller_session(&proc_root, &sessions_dir, &agy_config, &pi_store, 3000).unwrap();
+    let resolved = resolve_caller_session(
+        &proc_root,
+        &sessions_dir,
+        &agy_config,
+        &agy_store,
+        &pi_store,
+        3000,
+    )
+    .unwrap();
     assert_eq!(resolved.session_id, "claude-sess-alpha");
     assert_eq!(resolved.name.as_deref(), Some("alpha-agent"));
 
@@ -193,7 +202,14 @@ fn test_resolve_caller_session_ancestor_walk() {
     )
     .unwrap();
 
-    match resolve_caller_session(&proc_root, &sessions_dir, &agy_config, &pi_store, 9999) {
+    match resolve_caller_session(
+        &proc_root,
+        &sessions_dir,
+        &agy_config,
+        &agy_store,
+        &pi_store,
+        9999,
+    ) {
         Err(AppError::NotRecipient(msg)) => {
             assert!(msg.contains("does not descend"));
         }
@@ -286,6 +302,7 @@ async fn test_agent_sock_reply_and_send_flow() {
         proc_locks_path,
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
+        trusted_agy_exes: Vec::new(),
     };
 
     let app_state = Arc::new(AppState {

@@ -19,13 +19,13 @@ All local IPC in `xmsg` relies on Unix domain sockets located in `$XDG_RUNTIME_D
 ### 1.3 Attestation & Identity Derivation
 `xmsg` prevents cross-session and cross-harness impersonation among non-adversarial same-UID processes:
 - **Claude Sessions:** Discovered via `~/.claude/sessions` and verified for process liveness and starttime continuity via `/proc/<pid>/stat` (on macOS via `proc_pidinfo`, matching to the second the UTC `ps -o lstart` text Claude Code records as `procStart`; local-time renderings are rejected).
-- **Antigravity Sessions:** Verified via presence lock holder files in `/proc/locks` (enforcing `FLOCK` only and refusing ambiguous multiple holders). Linux only: macOS has no way to read another process's `flock` holders, so agy sessions are never listed there and `register agy` is rejected.
+- **Antigravity Sessions:** Verified via dual attestation: the registering peer's ancestor chain is traversed to find a process matching a configured trusted executable (`--agy-exe`) that has the presence lock file descriptor `<presence_dir>/<conversation_id>.lock` open (matched by canonical device and inode numbers). The server derives the session key `agy:<pid>:<starttime>`, and subsequent liveness is tracked by PID and start time. On Linux, `/proc/locks` is checked additionally to confirm exclusive FLOCK ownership. On macOS, support is implemented using `proc_pidpath` and `proc_pidinfo`/`proc_pidfdinfo`, marked as **implemented, unverified** pending validation on Darwin hardware (see `docs/probes/macos-agy.md`).
 - **Pi Sessions:** Session identity is **server-derived** from attested kernel process parameters:
   ```text
   sessionId = "pi:" || peer_pid || ":" || starttime
   ```
   Caller-asserted session IDs in registration payloads are completely ignored.
-- **Process Verification:** Pi peer processes are inspected for command line and script baselines in `/proc/<pid>/cmdline` (`KERN_PROCARGS2` on macOS). Note that this verifies process argument baselines but does not cryptographically authenticate the executable binary.
+- **Process Verification (Pi):** When `--pi-entrypoint` is configured, `xmsg` verifies that the process executable is `node` (via `exe_path`) and that the script entrypoint argument canonicalizes to a trusted path. When `--pi-entrypoint` is not configured, `xmsg` falls back to the legacy command-line heuristic (`is_pi_cmdline`), which is weaker as it only inspects `argv` without verifying the executable or script binary.
 - **Attested Badges & Harness Binding:** The attested sender badge formats as:
   ```text
   fromName = "xmsg@" || host_label || " · " || caller.harness || ":" || cleaned_name

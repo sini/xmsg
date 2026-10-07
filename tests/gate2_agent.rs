@@ -136,6 +136,7 @@ async fn setup(max_body: usize) -> Env {
         proc_locks_path: locks.clone(),
         proc_root: proc_root.clone(),
         agy_bin: "/nonexistent-agy".into(),
+        trusted_agy_exes: Vec::new(),
     };
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     xmsg::storage::init_db(&conn).unwrap();
@@ -158,7 +159,7 @@ async fn setup(max_body: usize) -> Env {
             ptx.clone(),
         );
         tokio::spawn(async move {
-            let _ = run_register_server(a, b, c, d, e, f, ttl, uid).await;
+            let _ = run_register_server(a, b, c, d, vec![], e, f, ttl, uid).await;
         });
     }
 

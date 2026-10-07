@@ -110,6 +110,7 @@ pub fn resolve_caller_session(
     proc_root: &Path,
     sessions_dir: &Path,
     agy_config: &AgyConfig,
+    agy_store: &crate::agy::AgyStore,
     pi_store: &PiStore,
     peer_pid: u32,
 ) -> Result<Session, AppError> {
@@ -126,7 +127,40 @@ pub fn resolve_caller_session(
             }
         }
 
-        // 2. Check Antigravity presence lock holders (skipped where agy cannot work)
+        // 2. Check Antigravity registered sessions or presence lock holders
+        {
+            let agy_lock = agy_store.read().unwrap();
+            for info in agy_lock.values() {
+                if info.pid > 0
+                    && info.pid == curr_pid
+                    && agy::is_agy_session_alive(proc_root, info)
+                {
+                    return Ok(Session {
+                        session_id: if !info.session_key.is_empty() {
+                            info.session_key.clone()
+                        } else {
+                            info.conversation_id.clone()
+                        },
+                        name: if !info.conversation_id.is_empty() {
+                            Some(info.conversation_id.clone())
+                        } else {
+                            None
+                        },
+                        pid: info.pid,
+                        cwd: "/".to_string(),
+                        status: "idle".to_string(),
+                        kind: "interactive".to_string(),
+                        entrypoint: None,
+                        version: None,
+                        started_at: info.registered_at.max(0) as u64,
+                        updated_at: info.registered_at.max(0) as u64,
+                        harness: "agy".to_string(),
+                        registered: Some(true),
+                    });
+                }
+            }
+        }
+
         let agy_entries = if agy::locks_supported(&agy_config.proc_locks_path) {
             fs::read_dir(&agy_config.presence_dir).ok()
         } else {
@@ -350,6 +384,7 @@ pub async fn run_agent_server(
                     &state_clone.agy_config.proc_root,
                     &state_clone.sessions_dir,
                     &state_clone.agy_config,
+                    &state_clone.agy_store,
                     &state_clone.pi_store,
                     peer_pid,
                 ) {

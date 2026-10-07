@@ -148,6 +148,7 @@ async fn setup_gate_harness() -> GateHarness {
         proc_locks_path,
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
+        trusted_agy_exes: Vec::new(),
     };
     let agy_store = new_agy_store();
     let pi_store = new_pi_store();
@@ -165,6 +166,7 @@ async fn setup_gate_harness() -> GateHarness {
             reg_config,
             reg_store,
             reg_pi_store,
+            vec![],
             reg_db,
             reg_pi_notify,
             Duration::from_secs(3600),
