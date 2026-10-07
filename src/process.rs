@@ -94,10 +94,23 @@ pub fn claude_proc_start_matches(proc_root: &Path, pid: u32, expected: &str) -> 
     matches!(starttime(proc_root, pid), Ok(st) if st == expected)
 }
 
+/// Returns the per-user runtime directory used when `XDG_RUNTIME_DIR` is unset:
+/// the Darwin user temp dir (`confstr(_CS_DARWIN_USER_TEMP_DIR)`) on macOS, a
+/// 0700 directory owned by the user. `None` on other platforms.
+pub fn fallback_runtime_dir() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    return macos::darwin_user_temp_dir();
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
+    use std::ffi::{CStr, OsStr};
     use std::io;
     use std::mem::{size_of, MaybeUninit};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::PathBuf;
 
     pub fn bsdinfo(pid: u32) -> io::Result<libc::proc_bsdinfo> {
         let mut info = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
@@ -264,6 +277,19 @@ mod macos {
             rest = &rest[end + 1..];
         }
         Some(args)
+    }
+
+    pub fn darwin_user_temp_dir() -> Option<PathBuf> {
+        let mut buf = vec![0 as libc::c_char; libc::PATH_MAX as usize];
+        // SAFETY: buf has buf.len() writable bytes; confstr NUL-terminates.
+        let n =
+            unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr(), buf.len()) };
+        if n == 0 || n > buf.len() {
+            return None;
+        }
+        // SAFETY: confstr wrote a NUL-terminated string within buf.
+        let s = unsafe { CStr::from_ptr(buf.as_ptr()) };
+        Some(PathBuf::from(OsStr::from_bytes(s.to_bytes())))
     }
 
     #[cfg(test)]

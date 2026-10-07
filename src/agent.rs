@@ -79,13 +79,17 @@ pub fn ensure_secure_socket_dir(dir: &Path, expected_uid: u32) -> Result<(), App
     Ok(())
 }
 
+/// Resolves `<runtime dir>/xmsg`: `$XDG_RUNTIME_DIR` when set, otherwise the
+/// platform's per-user runtime dir (the Darwin user temp dir on macOS).
 pub fn socket_dir_for_env(xdg_var: Option<&str>) -> Result<PathBuf, AppError> {
     match xdg_var {
         Some(val) if !val.trim().is_empty() => Ok(PathBuf::from(val).join("xmsg")),
-        _ => Err(AppError::InsecureSocketDir(
-            "XDG_RUNTIME_DIR environment variable is not set. Sockets cannot be safely created without a secure runtime directory."
-                .to_string(),
-        )),
+        _ => crate::process::fallback_runtime_dir()
+            .map(|d| d.join("xmsg"))
+            .ok_or_else(|| AppError::InsecureSocketDir(
+                "XDG_RUNTIME_DIR environment variable is not set. Sockets cannot be safely created without a secure runtime directory."
+                    .to_string(),
+            )),
     }
 }
 

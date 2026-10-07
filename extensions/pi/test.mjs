@@ -289,6 +289,8 @@ async function runTest3() {
   console.log("✔ Test 3 passed: Pi reply and send tools connect to agent.sock correctly");
 }
 
+// Socket path resolution is covered by test-paths.mjs, which runs without pi.
+
 async function main() {
   try {
     await runTest1();

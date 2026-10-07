@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -5,12 +6,39 @@ import readline from "node:readline";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
+let darwinUserTempDir: string | null | undefined;
+
+// The runtime dir holding xmsg/, resolved like the xmsg binary does:
+// $XDG_RUNTIME_DIR, else on macOS confstr(_CS_DARWIN_USER_TEMP_DIR). TMPDIR is
+// not used because it can be missing or different under launchd. A blank
+// XDG_RUNTIME_DIR counts as unset, as in the binary's socket_dir_for_env.
+export function defaultRuntimeDir(): string | undefined {
+  const xdg = process.env.XDG_RUNTIME_DIR;
+  if (xdg && xdg.trim()) {
+    return xdg;
+  }
+  if (process.platform !== "darwin") {
+    return undefined;
+  }
+  if (darwinUserTempDir === undefined) {
+    try {
+      const out = execFileSync("/usr/bin/getconf", ["DARWIN_USER_TEMP_DIR"], { encoding: "utf8" });
+      darwinUserTempDir = out.trim() || null;
+    } catch (err: any) {
+      console.error(`[xmsg-pi] getconf DARWIN_USER_TEMP_DIR failed: ${err.message || err}`);
+      darwinUserTempDir = null;
+    }
+  }
+  return darwinUserTempDir ?? undefined;
+}
+
 export function defaultRegisterSockPath(): string | undefined {
   if (process.env.XMSG_REGISTER_SOCK) {
     return process.env.XMSG_REGISTER_SOCK;
   }
-  if (process.env.XDG_RUNTIME_DIR) {
-    return path.join(process.env.XDG_RUNTIME_DIR, "xmsg", "register.sock");
+  const runtimeDir = defaultRuntimeDir();
+  if (runtimeDir) {
+    return path.join(runtimeDir, "xmsg", "register.sock");
   }
   return undefined;
 }
@@ -19,8 +47,9 @@ export function defaultAgentSockPath(): string | undefined {
   if (process.env.XMSG_AGENT_SOCK) {
     return process.env.XMSG_AGENT_SOCK;
   }
-  if (process.env.XDG_RUNTIME_DIR) {
-    return path.join(process.env.XDG_RUNTIME_DIR, "xmsg", "agent.sock");
+  const runtimeDir = defaultRuntimeDir();
+  if (runtimeDir) {
+    return path.join(runtimeDir, "xmsg", "agent.sock");
   }
   return undefined;
 }

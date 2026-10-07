@@ -67,6 +67,7 @@ fn test_ensure_secure_socket_dir_permissions_and_ownership() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn test_missing_xdg_runtime_dir_returns_error() {
     let res = xmsg::agent::socket_dir_for_env(None);
@@ -84,7 +85,32 @@ fn test_missing_xdg_runtime_dir_returns_error() {
 
     let empty_res = xmsg::agent::socket_dir_for_env(Some("   "));
     assert!(matches!(empty_res, Err(AppError::InsecureSocketDir(_))));
+}
 
+#[cfg(target_os = "macos")]
+#[test]
+fn test_missing_xdg_runtime_dir_uses_darwin_user_temp_dir() {
+    let out = std::process::Command::new("/usr/bin/getconf")
+        .arg("DARWIN_USER_TEMP_DIR")
+        .output()
+        .expect("getconf DARWIN_USER_TEMP_DIR");
+    let temp_dir = std::path::PathBuf::from(String::from_utf8(out.stdout).unwrap().trim());
+    let expected = temp_dir.join("xmsg");
+
+    assert_eq!(xmsg::agent::socket_dir_for_env(None).unwrap(), expected);
+    assert_eq!(
+        xmsg::agent::socket_dir_for_env(Some("   ")).unwrap(),
+        expected
+    );
+    // sun_path is 104 bytes on macOS
+    assert!(expected.join("register.sock").as_os_str().len() < 104);
+
+    let meta = fs::metadata(&temp_dir).unwrap();
+    assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+}
+
+#[test]
+fn test_xdg_runtime_dir_wins() {
     let valid_res = xmsg::agent::socket_dir_for_env(Some("/run/user/1000"));
     assert_eq!(
         valid_res.unwrap(),

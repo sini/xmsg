@@ -49,7 +49,7 @@ pub enum RegisterHarness {
 
 #[derive(Parser, Debug)]
 pub struct RegisterAgyArgs {
-    /// Registration socket path (defaults to $XDG_RUNTIME_DIR/xmsg/register.sock)
+    /// Registration socket path (defaults to $XDG_RUNTIME_DIR/xmsg/register.sock; on macOS without it, the Darwin user temp dir)
     #[arg(long, env = "XMSG_REGISTER_SOCK")]
     pub sock: Option<PathBuf>,
 }
@@ -80,11 +80,11 @@ pub struct ServeArgs {
     #[arg(long, env = "XMSG_REPLY_TTL", default_value_t = 604800)]
     pub reply_ttl: u64,
 
-    /// Registration socket path (defaults to $XDG_RUNTIME_DIR/xmsg/register.sock)
+    /// Registration socket path (defaults to $XDG_RUNTIME_DIR/xmsg/register.sock; on macOS without it, the Darwin user temp dir)
     #[arg(long, env = "XMSG_REGISTER_SOCK")]
     pub register_sock: Option<PathBuf>,
 
-    /// Agent socket path (defaults to $XDG_RUNTIME_DIR/xmsg/agent.sock)
+    /// Agent socket path (defaults to $XDG_RUNTIME_DIR/xmsg/agent.sock; on macOS without it, the Darwin user temp dir)
     #[arg(long, env = "XMSG_AGENT_SOCK")]
     pub agent_sock: Option<PathBuf>,
 }
@@ -99,7 +99,7 @@ pub struct McpArgs {
     #[arg(long, env = "XMSG_URL", default_value = "http://127.0.0.1:7787")]
     pub xmsg_url: String,
 
-    /// Agent socket path (defaults to $XDG_RUNTIME_DIR/xmsg/agent.sock)
+    /// Agent socket path (defaults to $XDG_RUNTIME_DIR/xmsg/agent.sock; on macOS without it, the Darwin user temp dir)
     #[arg(long, env = "XMSG_AGENT_SOCK")]
     pub agent_sock: Option<PathBuf>,
 }
