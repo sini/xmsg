@@ -89,11 +89,20 @@ fn test_fixed_edge_cases() {
     assert_eq!(long_sanitized.chars().count(), 64);
     assert!(long_sanitized.starts_with("xmsg@testhost · "));
 
-    // 4. Unicode scalar boundary test (e.g. emojis / multibyte chars)
+    // 4. Non-ASCII rejection (e.g. emojis / multibyte chars) and separator rejection
     let unicode_from = "🦀".repeat(100);
-    let unicode_sanitized = sanitize_from(host, &unicode_from).unwrap();
-    assert_eq!(unicode_sanitized.chars().count(), 64);
-    assert!(unicode_sanitized.starts_with("xmsg@testhost · 🦀"));
+    assert!(matches!(
+        sanitize_from(host, &unicode_from),
+        Err(AppError::BadSender(_))
+    ));
+    assert!(matches!(
+        sanitize_from(host, "session:evil"),
+        Err(AppError::BadSender(_))
+    ));
+    assert!(matches!(
+        sanitize_from(host, "session/evil"),
+        Err(AppError::BadSender(_))
+    ));
 
     // 5. Empty / stripped from rejection
     assert!(matches!(

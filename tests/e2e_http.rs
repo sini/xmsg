@@ -22,6 +22,7 @@ struct TestHarness {
     _sock_dir: TempDir,
     base_url: String,
     received_lines: Arc<Mutex<Vec<String>>>,
+    pub app_state: Arc<AppState>,
     stop_signal: Arc<AtomicBool>,
 }
 
@@ -179,7 +180,7 @@ async fn start_harness(max_body: usize) -> TestHarness {
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
     });
 
-    let app = build_router(app_state);
+    let app = build_router(app_state.clone());
     let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = tcp_listener.local_addr().unwrap().port();
     let base_url = format!("http://127.0.0.1:{port}");
@@ -193,6 +194,7 @@ async fn start_harness(max_body: usize) -> TestHarness {
         _sock_dir: sock_dir,
         base_url,
         received_lines,
+        app_state,
         stop_signal,
     }
 }
@@ -500,7 +502,7 @@ async fn test_e2e_post_message_reserved_session_prefix_400() {
     let harness = start_harness(65536).await;
     let client = reqwest::Client::new();
 
-    // Red Demo 2: HTTP POST with from starting with session: returns 400 Bad Request
+    // Red Demo 2 / C1: HTTP POST with from containing ':' or '/' returns 400 Bad Request (bad_sender)
     let res = client
         .post(format!(
             "{}/v1/sessions/my-worker/messages",
@@ -515,8 +517,8 @@ async fn test_e2e_post_message_reserved_session_prefix_400() {
         .unwrap();
     assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
     let err_val: serde_json::Value = res.json().await.unwrap();
-    assert_eq!(err_val["error"], "bad_request");
-    assert!(err_val["detail"].as_str().unwrap().contains("reserved"));
+    assert_eq!(err_val["error"], "bad_sender");
+    assert!(err_val["detail"].as_str().unwrap().contains(':'));
 
     // Also with session/
     let res = client
@@ -532,4 +534,76 @@ async fn test_e2e_post_message_reserved_session_prefix_400() {
         .await
         .unwrap();
     assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+    let err_val: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(err_val["error"], "bad_sender");
+    assert!(err_val["detail"].as_str().unwrap().contains('/'));
+}
+
+#[tokio::test]
+async fn test_e2e_post_message_pi_queue_full_503() {
+    let harness = start_harness(65536).await;
+    let client = reqwest::Client::new();
+
+    // Register a Pi session in the pi_store using current live process
+    let my_pid = std::process::id();
+    let my_proc_start = get_self_proc_start();
+    let pi_session_id = format!("pi:{my_pid}:{my_proc_start}");
+    {
+        let mut store = harness.app_state.pi_store.write().unwrap();
+        store.insert(
+            pi_session_id.clone(),
+            xmsg::pi::PiSessionInfo {
+                pid: my_pid,
+                session_id: pi_session_id.clone(),
+                name: Some("pi-worker".to_string()),
+                starttime: my_proc_start,
+                registered_at: 1000,
+                cwd: "/tmp".to_string(),
+            },
+        );
+    }
+
+    // Fill the Pi queue with 100 pending messages
+    {
+        let db = harness.app_state.db.lock().unwrap();
+        for i in 0..100 {
+            let msg = xmsg::storage::PiPendingMessage {
+                id: format!("fill-{i}"),
+                session_id: pi_session_id.clone(),
+                created_at: 1000,
+                from_name: "filler".to_string(),
+                bytes: 4,
+                text: "fill".to_string(),
+                envelope: "env".to_string(),
+                delivered_at: None,
+            };
+            xmsg::storage::insert_pi_message(&db, &msg).unwrap();
+        }
+    }
+
+    // The 101st message over HTTP must return 503 Service Unavailable
+    let res = client
+        .post(format!(
+            "{}/v1/sessions/pi-worker/messages",
+            harness.base_url
+        ))
+        .json(&serde_json::json!({
+            "from": "alice",
+            "text": "exceeding queue capacity"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        res.status(),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "queue full must return 503 Service Unavailable"
+    );
+    let err_val: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(err_val["error"], "service_unavailable");
+    assert!(err_val["detail"]
+        .as_str()
+        .unwrap()
+        .contains("queue is full"));
 }

@@ -9,10 +9,10 @@ fn test_parse_locks_line() {
     let parsed1 = parse_locks_line(line1);
     assert_eq!(parsed1, Some((2739763, 0, 46, 1148992)));
 
-    // 2. Valid POSIX write line: dev hex 08:01 = 8, 1
+    // 2. POSIX write line is ignored (FLOCK only)
     let line2 = "1: POSIX ADVISORY WRITE 12345 08:01:99999 0 EOF";
     let parsed2 = parse_locks_line(line2);
-    assert_eq!(parsed2, Some((12345, 8, 1, 99999)));
+    assert_eq!(parsed2, None);
 
     // 3. READ lock ignored (must be exclusive WRITE)
     let line3 = "2: FLOCK ADVISORY READ 54321 00:2e:1148992 0 EOF";
@@ -66,4 +66,15 @@ fn test_find_lock_holder_from_fixture() {
     // Read lock on 66666 is ignored
     let read_holder = find_lock_holder(&locks_file, 0, 46, 66666).unwrap();
     assert_eq!(read_holder, None);
+
+    // Multiple distinct FLOCK holders for the same inode return an ambiguity error
+    let multi_fixture = r#"1: FLOCK  ADVISORY  WRITE 2000 00:2e:55555 0 EOF
+2: FLOCK  ADVISORY  WRITE 3000 00:2e:55555 0 EOF
+"#;
+    fs::write(&locks_file, multi_fixture).unwrap();
+    let multi_err = find_lock_holder(&locks_file, 0, 46, 55555);
+    assert!(
+        multi_err.is_err(),
+        "multiple distinct lock holders must return an error"
+    );
 }

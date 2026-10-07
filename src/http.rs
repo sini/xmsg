@@ -173,19 +173,7 @@ async fn send_message_handler(
         return Err(AppError::BadRequest("text must not be empty".to_string()));
     }
 
-    // Prefix protection: HTTP callers may not claim session: or session/ prefixes
-    let trimmed_from = req.from.trim();
-    if trimmed_from.starts_with("session:") || trimmed_from.starts_with("session/") {
-        eprintln!(
-            "req_id={} ref={} bytes={} outcome=bad_sender detail=\"reserved prefix\"",
-            req_id, ref_str, body_len
-        );
-        return Err(AppError::BadRequest(
-            "sender prefix 'session:' or 'session/' is reserved for attested callers".to_string(),
-        ));
-    }
-
-    // Sanitize sender name
+    // Sanitize sender name (enforces printable ASCII and rejects ':' and '/')
     let from_name = match inbox::sanitize_from(&state.host_label, &req.from) {
         Ok(name) => name,
         Err(err) => {
@@ -260,7 +248,7 @@ async fn send_message_handler(
                 let inserted = storage::insert_pi_message(&db, &pi_msg)
                     .map_err(|e| AppError::Internal(e.to_string()))?;
                 if !inserted {
-                    return Err(AppError::InboxUnavailable(
+                    return Err(AppError::ServiceUnavailable(
                         "pi session message queue is full".to_string(),
                     ));
                 }

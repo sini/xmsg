@@ -372,6 +372,6 @@ async fn test_agent_sock_reply_and_send_flow() {
     assert_eq!(send_resp["status"], "ok");
     assert_eq!(
         send_resp["delivery"]["fromName"],
-        "xmsg@test-host · session:sender-session"
+        "xmsg@test-host · claude:sender-session"
     );
 }

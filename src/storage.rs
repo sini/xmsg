@@ -87,6 +87,27 @@ pub fn init_db(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_pi_pending_created_at ON pi_pending_messages(created_at);
         "#,
     )?;
+
+    // Migration check: ensure recipient_harness column exists on existing messages tables
+    let mut stmt = conn.prepare("PRAGMA table_info(messages)")?;
+    let mut rows = stmt.query([])?;
+    let mut has_recipient_harness = false;
+    let mut has_columns = false;
+    while let Some(row) = rows.next()? {
+        has_columns = true;
+        let col_name: String = row.get(1)?;
+        if col_name == "recipient_harness" {
+            has_recipient_harness = true;
+            break;
+        }
+    }
+    if has_columns && !has_recipient_harness {
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN recipient_harness TEXT NOT NULL DEFAULT 'claude'",
+            [],
+        )?;
+    }
+
     Ok(())
 }
 

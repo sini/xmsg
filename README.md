@@ -17,20 +17,23 @@ All local IPC in `xmsg` relies on Unix domain sockets located in `$XDG_RUNTIME_D
 > **No-Auth HTTP Service**: The `xmsg` HTTP server provides **no authentication mechanisms**. It is designed solely for local inter-process communication and **MUST STRICTLY bind to the loopback interface (`127.0.0.1`)**. Never expose the HTTP port to external networks, shared interfaces, or container bridges without a dedicated authenticating proxy.
 
 ### 1.3 Attestation & Identity Derivation
-`xmsg` strictly prevents cross-session and cross-harness impersonation:
+`xmsg` prevents cross-session and cross-harness impersonation among non-adversarial same-UID processes:
 - **Claude Sessions:** Discovered via `~/.claude/sessions` and verified for process liveness and starttime continuity via `/proc/<pid>/stat`.
-- **Antigravity Sessions:** Verified via presence lock holder files in `/proc/locks`.
+- **Antigravity Sessions:** Verified via presence lock holder files in `/proc/locks` (enforcing `FLOCK` only and refusing ambiguous multiple holders).
 - **Pi Sessions:** Session identity is **server-derived** from attested kernel process parameters:
   $$\text{sessionId} = \text{"pi:"} \parallel \text{peer\_pid} \parallel \text{":"} \parallel \text{starttime}$$
   Caller-asserted session IDs in registration payloads are completely ignored.
-- **Process Verification:** Pi peer processes are validated by inspecting executable paths and script basenames in `/proc/<pid>/cmdline`, preventing arbitrary processes from registering.
+- **Process Verification:** Pi peer processes are inspected for command line and script baselines in `/proc/<pid>/cmdline`. Note that this verifies process argument baselines but does not cryptographically authenticate the executable binary.
+- **Attested Badges & Harness Binding:** The attested sender badge formats as:
+  $$\text{fromName} = \text{"xmsg@"} \parallel \text{host\_label} \parallel \text{" · "} \parallel \text{caller.harness} \parallel \text{":"} \parallel \text{cleaned\_name}$$
+  The harness (`claude:`, `pi:`, `agy:`) and process binding are cryptographically/kernel-attested by `xmsg`, while the display name is chosen by the session.
 - **Ancestor Process Walk:** For calls to `agent.sock` (such as MCP tools spawned in child shells), `xmsg` traverses parent PIDs upwards through `/proc/<pid>/stat` to identify the originating agent session.
 - **Harness-Bound Reply Authorization:** All stored messages record the recipient harness (`claude`, `agy`, or `pi`). A reply is accepted only when:
   $$\text{caller.harness} == \text{msg.recipient\_harness} \quad \land \quad \text{caller.session\_id} == \text{msg.session\_id}$$
 
 ### 1.4 Envelope Sanitization & Breakout Protection
-- **Reserved Prefix Protection:** HTTP callers are prohibited from using the `session:` or `session/` prefixes. All prefixes are evaluated *after* character stripping and Unicode normalization (NFKC).
-- **Attested Visual Badges:** The `xmsg@<host> · session:<name>` badge is strictly generated internally for authenticated socket callers.
+- **Printable-ASCII Sender Enforcement:** HTTP sender names are strictly restricted to printable ASCII characters (`0x20` to `0x7E`) and cannot contain `:` or `/`. Because `:` is prohibited over HTTP, unauthenticated callers can never forge the attested badge separator `:` by mathematical construction.
+- **Attested Visual Badges:** The `xmsg@<host> · <harness>:<name>` badge is strictly generated internally for authenticated socket callers.
 - **Sender Sanitization:** Sender names are stripped of quotes, angle brackets, control characters, and newlines, and capped at 64 characters across all sinks (`assemble_envelope`, inbox headers, and UI titles).
 - **XML Breakout Defense:** The transport envelope escapes attribute double quotes (`&quot;`), guaranteeing that the `<cross-session-message>` XML tag cannot be broken out of.
 
@@ -43,7 +46,7 @@ All local IPC in `xmsg` relies on Unix domain sockets located in `$XDG_RUNTIME_D
 ### 2.1 `agent.sock`
 Used by active agent sessions and MCP tool instances:
 - **`reply` action:** Validates caller identity via ancestor walk, verifies recipient authorization against SQLite records, records the reply, and broadcasts notifications.
-- **`send` action:** Formats an attested sender badge `xmsg@<host> · session:<name>`, enforces payload limits (`max_body`), and delivers directly to the recipient session.
+- **`send` action:** Formats an attested sender badge `xmsg@<host> · <harness>:<name>`, enforces payload limits (`max_body`), and delivers directly to the recipient session.
 
 ### 2.2 `register.sock`
 Used by non-Claude harnesses for registration and polling:

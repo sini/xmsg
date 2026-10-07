@@ -5,7 +5,7 @@ use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::broadcast;
 
 use crate::error::AppError;
@@ -273,19 +273,34 @@ pub async fn handle_pi_connection<
     writer.write_all(format!("{ok_resp}\n").as_bytes()).await?;
 
     // Handle commands from extension
-    use tokio::io::AsyncReadExt;
-    let mut line = String::new();
+    let mut byte_buf = Vec::new();
+    let max_frame = 65536 * 6 + 4096;
     loop {
-        line.clear();
-        let n = (&mut buf_reader).take(65536).read_line(&mut line).await?;
+        byte_buf.clear();
+        let n = (&mut buf_reader)
+            .take((max_frame + 1) as u64)
+            .read_until(b'\n', &mut byte_buf)
+            .await?;
         if n == 0 {
             break;
         }
-        if n >= 65536 && !line.ends_with('\n') {
+        if byte_buf.len() > max_frame || (n >= max_frame && !byte_buf.ends_with(b"\n")) {
             let err = serde_json::json!({ "status": "error", "detail": "frame exceeds maximum allowed size" });
             let _ = writer.write_all(format!("{err}\n").as_bytes()).await;
             break;
         }
+        if !byte_buf.ends_with(b"\n") {
+            break;
+        }
+
+        let line = match std::str::from_utf8(&byte_buf) {
+            Ok(s) => s,
+            Err(_) => {
+                let err = serde_json::json!({ "status": "error", "detail": "invalid utf-8" });
+                let _ = writer.write_all(format!("{err}\n").as_bytes()).await;
+                break;
+            }
+        };
 
         let trimmed = line.trim();
         if trimmed.is_empty() {

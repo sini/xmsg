@@ -40,13 +40,27 @@ pub struct DeliveryResponse {
     pub message_id: String,
 }
 
-/// Sanitizes the `from` parameter:
-/// - Strips `"`, `<`, `>`, and Unicode categories Cc, Cf, Cs, Zl, Zp.
+/// Sanitizes the `from` parameter for unauthenticated HTTP senders:
+/// - Rejects ':' and '/' outright (returns AppError::BadSender).
+/// - Enforces strictly printable ASCII characters (0x20 to 0x7E).
+/// - Strips quotes (") and angle brackets (<, >).
 /// - Collapses whitespace runs to a single space.
 /// - Trims leading and trailing whitespace.
 /// - Prefixes `xmsg@<host-label> · `.
-/// - Truncates the whole resulting string to 64 Unicode scalar characters.
+/// - Truncates the whole resulting string to 64 characters.
 pub fn sanitize_from(host_label: &str, raw_from: &str) -> Result<String, AppError> {
+    if raw_from.contains(':') || raw_from.contains('/') {
+        return Err(AppError::BadSender(
+            "sender name cannot contain ':' or '/'".to_string(),
+        ));
+    }
+
+    if raw_from.chars().any(|c| !(' '..='~').contains(&c)) {
+        return Err(AppError::BadSender(
+            "sender name must contain only printable ASCII characters".to_string(),
+        ));
+    }
+
     let mut cleaned = String::with_capacity(raw_from.len());
     let mut prev_whitespace = false;
 
@@ -55,19 +69,7 @@ pub fn sanitize_from(host_label: &str, raw_from: &str) -> Result<String, AppErro
             continue;
         }
 
-        let cat = get_general_category(c);
-        if matches!(
-            cat,
-            GeneralCategory::Control
-                | GeneralCategory::Format
-                | GeneralCategory::Surrogate
-                | GeneralCategory::LineSeparator
-                | GeneralCategory::ParagraphSeparator
-        ) {
-            continue;
-        }
-
-        if c.is_whitespace() {
+        if c == ' ' {
             if !prev_whitespace {
                 cleaned.push(' ');
                 prev_whitespace = true;
@@ -85,25 +87,18 @@ pub fn sanitize_from(host_label: &str, raw_from: &str) -> Result<String, AppErro
         ));
     }
 
-    let lower = trimmed.to_lowercase();
-    if lower.starts_with("session:") || lower.starts_with("session/") {
-        return Err(AppError::BadSender(
-            "reserved prefix 'session:' is not allowed in unauthenticated sender name".to_string(),
-        ));
-    }
-
     let prefixed = format!("xmsg@{host_label} · {trimmed}");
     let capped: String = prefixed.chars().take(64).collect();
     Ok(capped)
 }
 
 /// Sanitizes an attested caller session name and formats the attested badge:
-/// `xmsg@<host-label> · session:<cleaned_caller_name>`.
+/// `xmsg@<host-label> · <harness>:<cleaned_caller_name>`.
 /// - Strips `"`, `<`, `>`, `\n`, `\r`, and Unicode categories Cc, Cf, Cs, Zl, Zp.
 /// - Collapses whitespace runs to a single space.
 /// - Trims leading and trailing whitespace.
 /// - Caps total string to 64 Unicode scalar characters.
-pub fn sanitize_attested_from(host_label: &str, caller_name: &str) -> String {
+pub fn sanitize_attested_from(host_label: &str, harness: &str, caller_name: &str) -> String {
     let mut cleaned = String::with_capacity(caller_name.len());
     let mut prev_whitespace = false;
 
@@ -138,7 +133,7 @@ pub fn sanitize_attested_from(host_label: &str, caller_name: &str) -> String {
     let trimmed = cleaned.trim();
     let name_part = if trimmed.is_empty() { "agent" } else { trimmed };
 
-    let prefixed = format!("xmsg@{host_label} · session:{name_part}");
+    let prefixed = format!("xmsg@{host_label} · {harness}:{name_part}");
     prefixed.chars().take(64).collect()
 }
 

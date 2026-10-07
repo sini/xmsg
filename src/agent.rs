@@ -3,7 +3,7 @@ use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
 use crate::agy::{self, AgyConfig};
@@ -274,29 +274,31 @@ pub async fn run_agent_server(
         let state_clone = state.clone();
 
         tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
             let (reader, mut writer) = stream.into_split();
             let mut buf_reader = BufReader::new(reader);
-            let mut line = String::new();
-            let max_line = state_clone.max_body + 4096;
+            let mut byte_buf = Vec::new();
+            let max_frame = state_clone.max_body * 6 + 4096;
 
             loop {
-                line.clear();
+                byte_buf.clear();
                 let n = (&mut buf_reader)
-                    .take(max_line as u64)
-                    .read_line(&mut line)
+                    .take((max_frame + 1) as u64)
+                    .read_until(b'\n', &mut byte_buf)
                     .await
                     .unwrap_or(0);
                 if n == 0 {
                     break;
                 }
-                if n >= max_line && !line.ends_with('\n') {
+                if byte_buf.len() > max_frame || (n >= max_frame && !byte_buf.ends_with(b"\n")) {
                     let err_resp = serde_json::json!({
                         "status": "error",
                         "error": "bad_request",
                         "detail": "frame exceeds maximum allowed size"
                     });
                     let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+                    break;
+                }
+                if !byte_buf.ends_with(b"\n") {
                     break;
                 }
 
@@ -309,9 +311,22 @@ pub async fn run_agent_server(
                     tracing::warn!("peer PID {peer_pid} died or starttime changed");
                     break;
                 }
+
+                let line = match std::str::from_utf8(&byte_buf) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        let err_resp = serde_json::json!({
+                            "status": "error",
+                            "error": "bad_request",
+                            "detail": "invalid utf-8"
+                        });
+                        let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+                        break;
+                    }
+                };
+
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
-                    line.clear();
                     continue;
                 }
 
@@ -324,7 +339,6 @@ pub async fn run_agent_server(
                             "detail": "invalid json"
                         });
                         let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
-                        line.clear();
                         continue;
                     }
                 };
@@ -347,7 +361,6 @@ pub async fn run_agent_server(
                             "detail": e.to_string()
                         });
                         let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
-                        line.clear();
                         continue;
                     }
                 };
@@ -368,7 +381,6 @@ pub async fn run_agent_server(
                                 "detail": "messageId and text are required"
                             });
                             let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
-                            line.clear();
                             continue;
                         }
 
@@ -386,9 +398,24 @@ pub async fn run_agent_server(
                             if caller.harness != msg.recipient_harness
                                 || caller.session_id != msg.session_id
                             {
+                                let caller_display = if let Some(stripped) = caller
+                                    .session_id
+                                    .strip_prefix(&format!("{}:", caller.harness))
+                                {
+                                    format!("{}:{}", caller.harness, stripped)
+                                } else {
+                                    format!("{}:{}", caller.harness, caller.session_id)
+                                };
+                                let msg_display = if let Some(stripped) = msg
+                                    .session_id
+                                    .strip_prefix(&format!("{}:", msg.recipient_harness))
+                                {
+                                    format!("{}:{}", msg.recipient_harness, stripped)
+                                } else {
+                                    format!("{}:{}", msg.recipient_harness, msg.session_id)
+                                };
                                 Err(AppError::NotRecipient(format!(
-                                    "caller session '{}:{}' is not recipient of message '{}' (expected '{}:{}')",
-                                    caller.harness, caller.session_id, message_id, msg.recipient_harness, msg.session_id
+                                    "caller session '{caller_display}' is not recipient of message '{message_id}' (expected '{msg_display}')"
                                 )))
                             } else {
                                 let reply = storage::insert_reply(
@@ -448,7 +475,6 @@ pub async fn run_agent_server(
                                 "detail": "ref and text are required"
                             });
                             let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
-                            line.clear();
                             continue;
                         }
 
@@ -463,14 +489,16 @@ pub async fn run_agent_server(
                                 )
                             });
                             let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
-                            line.clear();
                             continue;
                         }
 
-                        // Derive from_name: xmsg@<host> · session:<name> (sanitized and capped to 64)
+                        // Derive from_name: xmsg@<host> · <harness>:<name> (sanitized and capped to 64)
                         let caller_name = caller.name.as_deref().unwrap_or(&caller.session_id);
-                        let from_name =
-                            inbox::sanitize_attested_from(&state_clone.host_label, caller_name);
+                        let from_name = inbox::sanitize_attested_from(
+                            &state_clone.host_label,
+                            &caller.harness,
+                            caller_name,
+                        );
 
                         let target_res = resolve_target_session(&state_clone, target_ref);
                         match target_res {
@@ -529,8 +557,8 @@ pub async fn run_agent_server(
                                             let inserted = storage::insert_pi_message(&db, &pi_msg)
                                                 .map_err(|e| AppError::Internal(e.to_string()))?;
                                             if !inserted {
-                                                return Err(AppError::InboxUnavailable(
-                                                    "pi session queue is full".to_string(),
+                                                return Err(AppError::ServiceUnavailable(
+                                                    "pi session message queue is full".to_string(),
                                                 ));
                                             }
                                             Ok(())
@@ -605,8 +633,6 @@ pub async fn run_agent_server(
                         let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
                     }
                 }
-
-                line.clear();
             }
         });
     }

@@ -91,7 +91,7 @@ pub fn parse_locks_line(line: &str) -> Option<(u32, u32, u32, u64)> {
     }
     let lock_type = parts[1];
     let access = parts[3];
-    if lock_type != "FLOCK" && lock_type != "POSIX" {
+    if lock_type != "FLOCK" {
         return None;
     }
     if access != "WRITE" {
@@ -111,6 +111,7 @@ pub fn parse_locks_line(line: &str) -> Option<(u32, u32, u32, u64)> {
 
 /// Finds the holder PID of an exclusive write lock for a given (dev_major, dev_minor, inode).
 /// READ-ONLY: Never acquires, opens, or flocks the file.
+/// If multiple distinct PIDs match the target inode, returns an ambiguity error.
 pub fn find_lock_holder(
     proc_locks_path: &Path,
     dev_major: u32,
@@ -118,14 +119,23 @@ pub fn find_lock_holder(
     target_inode: u64,
 ) -> io::Result<Option<u32>> {
     let content = fs::read_to_string(proc_locks_path)?;
+    let mut matching_pids = std::collections::HashSet::new();
     for line in content.lines() {
         if let Some((pid, maj, min, ino)) = parse_locks_line(line) {
             if maj == dev_major && min == dev_minor && ino == target_inode {
-                return Ok(Some(pid));
+                matching_pids.insert(pid);
             }
         }
     }
-    Ok(None)
+    if matching_pids.is_empty() {
+        Ok(None)
+    } else if matching_pids.len() == 1 {
+        Ok(matching_pids.into_iter().next())
+    } else {
+        Err(io::Error::other(
+            "multiple lock holders detected for presence lock",
+        ))
+    }
 }
 
 /// Finds the holder PID of a conversation's presence lock file.
@@ -594,22 +604,60 @@ pub async fn run_register_server(
             use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
             let (reader, mut writer) = stream.into_split();
             let mut buf_reader = BufReader::new(reader);
-            let mut line = String::new();
-            let n = (&mut buf_reader)
-                .take(65536)
-                .read_line(&mut line)
-                .await
-                .unwrap_or(0);
-            if n > 0 && !line.trim().is_empty() {
-                if n >= 65536 && !line.ends_with('\n') {
+            let mut byte_buf = Vec::new();
+            let max_frame = 65536;
+
+            let read_res = tokio::time::timeout(
+                Duration::from_secs(30),
+                (&mut buf_reader)
+                    .take((max_frame + 1) as u64)
+                    .read_until(b'\n', &mut byte_buf),
+            )
+            .await;
+
+            let n = match read_res {
+                Ok(Ok(n)) => n,
+                Ok(Err(e)) => {
+                    tracing::warn!("register.sock read error: {e}");
+                    return;
+                }
+                Err(_) => {
+                    tracing::warn!("register.sock connection timed out waiting for initial frame");
+                    return;
+                }
+            };
+
+            if n == 0 {
+                return;
+            }
+
+            if byte_buf.len() > max_frame || (n >= max_frame && !byte_buf.ends_with(b"\n")) {
+                let err = serde_json::json!({
+                    "status": "error",
+                    "detail": "frame exceeds maximum allowed size"
+                });
+                let _ = writer.write_all(format!("{err}\n").as_bytes()).await;
+                return;
+            }
+
+            if !byte_buf.ends_with(b"\n") {
+                return;
+            }
+
+            let line = match std::str::from_utf8(&byte_buf) {
+                Ok(s) => s,
+                Err(_) => {
                     let err = serde_json::json!({
                         "status": "error",
-                        "detail": "frame exceeds maximum allowed size"
+                        "detail": "invalid utf-8"
                     });
                     let _ = writer.write_all(format!("{err}\n").as_bytes()).await;
                     return;
                 }
-                let val: Result<serde_json::Value, _> = serde_json::from_str(&line);
+            };
+
+            if !line.trim().is_empty() {
+                let val: Result<serde_json::Value, _> = serde_json::from_str(line.trim());
                 match val {
                     Ok(ref v) if v.get("harness").and_then(|h| h.as_str()) == Some("pi") => {
                         match serde_json::from_value::<crate::pi::PiRegisterRequest>(v.clone()) {
