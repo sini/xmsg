@@ -11,6 +11,12 @@ pub struct MessageRecord {
     pub from_name: String,
     pub bytes: usize,
     pub outcome: String,
+    #[serde(default = "default_recipient_harness")]
+    pub recipient_harness: String,
+}
+
+fn default_recipient_harness() -> String {
+    "claude".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,7 +58,8 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             session_id TEXT NOT NULL,
             from_name TEXT NOT NULL,
             bytes INTEGER NOT NULL,
-            outcome TEXT NOT NULL
+            outcome TEXT NOT NULL,
+            recipient_harness TEXT NOT NULL DEFAULT 'claude'
         );
 
         CREATE TABLE IF NOT EXISTS replies (
@@ -85,7 +92,7 @@ pub fn init_db(conn: &Connection) -> Result<()> {
 
 pub fn insert_message(conn: &Connection, msg: &MessageRecord) -> Result<()> {
     conn.execute(
-        "INSERT INTO messages (id, created_at, session_id, from_name, bytes, outcome) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO messages (id, created_at, session_id, from_name, bytes, outcome, recipient_harness) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             msg.id,
             msg.created_at,
@@ -93,6 +100,7 @@ pub fn insert_message(conn: &Connection, msg: &MessageRecord) -> Result<()> {
             msg.from_name,
             msg.bytes as i64,
             msg.outcome,
+            msg.recipient_harness,
         ],
     )?;
     Ok(())
@@ -100,7 +108,7 @@ pub fn insert_message(conn: &Connection, msg: &MessageRecord) -> Result<()> {
 
 pub fn get_message(conn: &Connection, id: &str) -> Result<Option<MessageRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT id, created_at, session_id, from_name, bytes, outcome FROM messages WHERE id = ?1",
+        "SELECT id, created_at, session_id, from_name, bytes, outcome, recipient_harness FROM messages WHERE id = ?1",
     )?;
     let mut rows = stmt.query(params![id])?;
 
@@ -113,6 +121,7 @@ pub fn get_message(conn: &Connection, id: &str) -> Result<Option<MessageRecord>>
             from_name: row.get(3)?,
             bytes: bytes_i64 as usize,
             outcome: row.get(5)?,
+            recipient_harness: row.get(6)?,
         }))
     } else {
         Ok(None)
@@ -175,7 +184,29 @@ pub fn purge_replies(conn: &Connection, ttl_secs: u64) -> Result<usize> {
     conn.execute("DELETE FROM replies WHERE created_at < ?1", params![cutoff])
 }
 
-pub fn insert_pi_message(conn: &Connection, msg: &PiPendingMessage) -> Result<()> {
+pub fn purge_messages(conn: &Connection, ttl_secs: u64) -> Result<usize> {
+    let cutoff = now_epoch_secs() - (ttl_secs as i64);
+    conn.execute(
+        "DELETE FROM messages WHERE created_at < ?1",
+        params![cutoff],
+    )
+}
+
+pub const MAX_PI_QUEUE_PER_SESSION: usize = 100;
+
+pub fn count_pending_pi_messages(conn: &Connection, session_id: &str) -> Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT COUNT(*) FROM pi_pending_messages WHERE session_id = ?1 AND delivered_at IS NULL",
+    )?;
+    let count: i64 = stmt.query_row(params![session_id], |row| row.get(0))?;
+    Ok(count as usize)
+}
+
+pub fn insert_pi_message(conn: &Connection, msg: &PiPendingMessage) -> Result<bool> {
+    let pending = count_pending_pi_messages(conn, &msg.session_id)?;
+    if pending >= MAX_PI_QUEUE_PER_SESSION {
+        return Ok(false);
+    }
     conn.execute(
         "INSERT INTO pi_pending_messages (id, session_id, created_at, from_name, bytes, text, envelope, delivered_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
@@ -189,7 +220,7 @@ pub fn insert_pi_message(conn: &Connection, msg: &PiPendingMessage) -> Result<()
             msg.delivered_at,
         ],
     )?;
-    Ok(())
+    Ok(true)
 }
 
 pub fn get_next_pending_pi_message(
@@ -218,13 +249,13 @@ pub fn get_next_pending_pi_message(
     }
 }
 
-pub fn ack_pi_message(conn: &Connection, message_id: &str) -> Result<()> {
+pub fn ack_pi_message(conn: &Connection, session_id: &str, message_id: &str) -> Result<bool> {
     let now = now_epoch_secs();
-    conn.execute(
-        "UPDATE pi_pending_messages SET delivered_at = ?1 WHERE id = ?2",
-        params![now, message_id],
+    let count = conn.execute(
+        "UPDATE pi_pending_messages SET delivered_at = ?1 WHERE id = ?2 AND session_id = ?3 AND delivered_at IS NULL",
+        params![now, message_id, session_id],
     )?;
-    Ok(())
+    Ok(count > 0)
 }
 
 pub fn purge_pi_messages(conn: &Connection, ttl_secs: u64) -> Result<usize> {

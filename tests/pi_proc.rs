@@ -57,6 +57,18 @@ fn test_verify_pi_process_not_pi() {
 }
 
 #[test]
+fn test_verify_pi_process_rejects_arbitrary_cmdline_substring() {
+    let tmp = tempdir().unwrap();
+    let proc_root = tmp.path().join("proc");
+
+    // Oracle honesty O2: Ensure cmdlines containing "pi" as a substring (e.g. spin()) are rejected
+    setup_mock_proc(&proc_root, 12345, "python3\0-c\0spin()\0", "987654321");
+
+    let res = verify_pi_process(&proc_root, 1000, 1000, 12345);
+    assert!(matches!(res, Err(AppError::BadRequest(_))));
+}
+
+#[test]
 fn test_verify_pi_process_not_found() {
     let tmp = tempdir().unwrap();
     let proc_root = tmp.path().join("proc");

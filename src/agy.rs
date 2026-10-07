@@ -402,6 +402,7 @@ pub async fn deliver_agy(
         .arg("send-message")
         .arg("--title")
         .arg(from_name)
+        .arg("--")
         .arg(&session.session_id)
         .arg(&envelope)
         .env("ANTIGRAVITY_LS_ADDRESS", &creds.ls_address)
@@ -431,16 +432,20 @@ pub async fn deliver_agy(
         if let Some(entry) = store.write().unwrap().get_mut(&session.session_id) {
             entry.is_stale = true;
         }
-        return Err(AppError::CredentialsStale(format!(
-            "authentication failed: {combined}"
-        )));
+        let excerpt: String = combined.chars().take(200).collect();
+        tracing::warn!("agy delivery auth failure: {excerpt}");
+        return Err(AppError::CredentialsStale(
+            "authentication failed".to_string(),
+        ));
     }
 
     if !output.status.success() {
-        return Err(AppError::InboxUnavailable(format!(
-            "delivery exited with code {:?}: {combined}",
+        let excerpt: String = combined.chars().take(200).collect();
+        tracing::warn!(
+            "agy delivery failure (code {:?}): {excerpt}",
             output.status.code()
-        )));
+        );
+        return Err(AppError::InboxUnavailable("delivery failed".to_string()));
     }
 
     Ok(DeliveryResponse {
@@ -544,7 +549,18 @@ pub async fn run_register_server(
             ));
         }
     }
-    let _ = fs::remove_file(&sock_path);
+    if sock_path.exists() {
+        if tokio::net::UnixStream::connect(&sock_path).await.is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!(
+                    "another server instance is actively listening on {}",
+                    sock_path.display()
+                ),
+            ));
+        }
+        let _ = fs::remove_file(&sock_path);
+    }
 
     let listener = tokio::net::UnixListener::bind(&sock_path)?;
 
@@ -575,12 +591,24 @@ pub async fn run_register_server(
         let pi_notify_tx_clone = pi_notify_tx.clone();
 
         tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+            use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
             let (reader, mut writer) = stream.into_split();
             let mut buf_reader = BufReader::new(reader);
             let mut line = String::new();
-            let read_ok = buf_reader.read_line(&mut line).await.is_ok();
-            if read_ok && !line.trim().is_empty() {
+            let n = (&mut buf_reader)
+                .take(65536)
+                .read_line(&mut line)
+                .await
+                .unwrap_or(0);
+            if n > 0 && !line.trim().is_empty() {
+                if n >= 65536 && !line.ends_with('\n') {
+                    let err = serde_json::json!({
+                        "status": "error",
+                        "detail": "frame exceeds maximum allowed size"
+                    });
+                    let _ = writer.write_all(format!("{err}\n").as_bytes()).await;
+                    return;
+                }
                 let val: Result<serde_json::Value, _> = serde_json::from_str(&line);
                 match val {
                     Ok(ref v) if v.get("harness").and_then(|h| h.as_str()) == Some("pi") => {
@@ -605,8 +633,11 @@ pub async fn run_register_server(
                                 }
                             }
                             Err(e) => {
-                                let err_resp = format!("{{\"status\":\"error\",\"detail\":\"invalid pi request: {e}\"}}\n");
-                                let _ = writer.write_all(err_resp.as_bytes()).await;
+                                let err_resp = serde_json::json!({
+                                    "status": "error",
+                                    "detail": format!("invalid pi request: {e}")
+                                });
+                                let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
                             }
                         }
                     }
@@ -634,9 +665,12 @@ pub async fn run_register_server(
                                 }
                                 Err(e) => {
                                     tracing::warn!("registration rejected: {e}");
-                                    let err_resp =
-                                        format!("{{\"status\":\"error\",\"detail\":\"{}\"}}\n", e);
-                                    let _ = writer.write_all(err_resp.as_bytes()).await;
+                                    let err_resp = serde_json::json!({
+                                        "status": "error",
+                                        "detail": e.to_string()
+                                    });
+                                    let _ =
+                                        writer.write_all(format!("{err_resp}\n").as_bytes()).await;
                                 }
                             }
                         }

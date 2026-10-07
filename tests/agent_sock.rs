@@ -8,8 +8,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use xmsg::agent::{
-    current_uid, default_agent_sock_path, default_register_sock_path, default_socket_dir,
-    ensure_secure_socket_dir, resolve_caller_session, run_agent_server,
+    current_uid, ensure_secure_socket_dir, resolve_caller_session, run_agent_server,
 };
 use xmsg::agy::{new_agy_store, AgyConfig};
 use xmsg::error::AppError;
@@ -70,32 +69,27 @@ fn test_ensure_secure_socket_dir_permissions_and_ownership() {
 
 #[test]
 fn test_missing_xdg_runtime_dir_returns_error() {
-    // Red Demo 4: When XDG_RUNTIME_DIR is unset, default_socket_dir returns Err(InsecureSocketDir)
-    let orig_xdg = std::env::var("XDG_RUNTIME_DIR").ok();
-    std::env::remove_var("XDG_RUNTIME_DIR");
-
-    let res = default_socket_dir();
+    let res = xmsg::agent::socket_dir_for_env(None);
     match res {
         Err(AppError::InsecureSocketDir(msg)) => {
             assert!(msg.contains("XDG_RUNTIME_DIR"));
         }
         other => {
-            if let Some(val) = orig_xdg {
-                std::env::set_var("XDG_RUNTIME_DIR", val);
-            }
             panic!(
-                "expected InsecureSocketDir when XDG_RUNTIME_DIR is unset, got: {:?}",
+                "expected InsecureSocketDir when XDG_RUNTIME_DIR is None, got: {:?}",
                 other
             );
         }
     }
 
-    assert!(default_register_sock_path().is_err());
-    assert!(default_agent_sock_path().is_err());
+    let empty_res = xmsg::agent::socket_dir_for_env(Some("   "));
+    assert!(matches!(empty_res, Err(AppError::InsecureSocketDir(_))));
 
-    if let Some(val) = orig_xdg {
-        std::env::set_var("XDG_RUNTIME_DIR", val);
-    }
+    let valid_res = xmsg::agent::socket_dir_for_env(Some("/run/user/1000"));
+    assert_eq!(
+        valid_res.unwrap(),
+        std::path::PathBuf::from("/run/user/1000/xmsg")
+    );
 }
 
 #[test]
@@ -279,6 +273,7 @@ async fn test_agent_sock_reply_and_send_flow() {
         db: db.clone(),
         notify_tx,
         reply_ttl: Duration::from_secs(3600),
+        long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
     });
 
     let s_path = agent_sock_path.clone();
@@ -302,6 +297,7 @@ async fn test_agent_sock_reply_and_send_flow() {
         from_name: "orchestrator".to_string(),
         bytes: 20,
         outcome: "delivered".to_string(),
+        recipient_harness: "claude".to_string(),
     };
     {
         let db_lock = db.lock().unwrap();
@@ -335,6 +331,7 @@ async fn test_agent_sock_reply_and_send_flow() {
         from_name: "orchestrator".to_string(),
         bytes: 20,
         outcome: "delivered".to_string(),
+        recipient_harness: "claude".to_string(),
     };
     {
         let db_lock = db.lock().unwrap();

@@ -38,15 +38,20 @@ fn test_pi_pending_messages_fifo_and_ack() {
     let fetched1 = get_next_pending_pi_message(&conn, "pi-sess-1").unwrap();
     assert_eq!(fetched1.as_ref().map(|m| m.id.as_str()), Some("m1"));
 
-    // Ack msg1
-    ack_pi_message(&conn, "m1").unwrap();
+    // Ack with wrong session fails
+    let ack_wrong = ack_pi_message(&conn, "wrong-session", "m1").unwrap();
+    assert!(!ack_wrong, "Acking with wrong session must return false");
+
+    // Ack msg1 with correct session succeeds
+    let ack_ok = ack_pi_message(&conn, "pi-sess-1", "m1").unwrap();
+    assert!(ack_ok, "Acking with correct session must return true");
 
     // Second retrieval must return msg2
     let fetched2 = get_next_pending_pi_message(&conn, "pi-sess-1").unwrap();
     assert_eq!(fetched2.as_ref().map(|m| m.id.as_str()), Some("m2"));
 
     // Ack msg2
-    ack_pi_message(&conn, "m2").unwrap();
+    ack_pi_message(&conn, "pi-sess-1", "m2").unwrap();
 
     // Third retrieval must return None
     let fetched3 = get_next_pending_pi_message(&conn, "pi-sess-1").unwrap();

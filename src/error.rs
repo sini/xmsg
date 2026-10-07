@@ -44,6 +44,9 @@ pub enum AppError {
     #[error("credentials stale: {0}")]
     CredentialsStale(String),
 
+    #[error("service unavailable: {0}")]
+    ServiceUnavailable(String),
+
     #[error("internal server error: {0}")]
     Internal(String),
 
@@ -81,6 +84,9 @@ impl IntoResponse for AppError {
             AppError::NotRecipient(d) => (StatusCode::FORBIDDEN, "not_recipient", d),
             AppError::CredentialsStale(d) => {
                 (StatusCode::SERVICE_UNAVAILABLE, "credentials_stale", d)
+            }
+            AppError::ServiceUnavailable(d) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable", d)
             }
             AppError::Internal(d) => (StatusCode::INTERNAL_SERVER_ERROR, "internal", d),
             AppError::InsecureSocketDir(d) => {

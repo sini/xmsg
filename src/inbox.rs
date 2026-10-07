@@ -85,9 +85,61 @@ pub fn sanitize_from(host_label: &str, raw_from: &str) -> Result<String, AppErro
         ));
     }
 
+    let lower = trimmed.to_lowercase();
+    if lower.starts_with("session:") || lower.starts_with("session/") {
+        return Err(AppError::BadSender(
+            "reserved prefix 'session:' is not allowed in unauthenticated sender name".to_string(),
+        ));
+    }
+
     let prefixed = format!("xmsg@{host_label} · {trimmed}");
     let capped: String = prefixed.chars().take(64).collect();
     Ok(capped)
+}
+
+/// Sanitizes an attested caller session name and formats the attested badge:
+/// `xmsg@<host-label> · session:<cleaned_caller_name>`.
+/// - Strips `"`, `<`, `>`, `\n`, `\r`, and Unicode categories Cc, Cf, Cs, Zl, Zp.
+/// - Collapses whitespace runs to a single space.
+/// - Trims leading and trailing whitespace.
+/// - Caps total string to 64 Unicode scalar characters.
+pub fn sanitize_attested_from(host_label: &str, caller_name: &str) -> String {
+    let mut cleaned = String::with_capacity(caller_name.len());
+    let mut prev_whitespace = false;
+
+    for c in caller_name.chars() {
+        if c == '"' || c == '<' || c == '>' || c == '\n' || c == '\r' {
+            continue;
+        }
+
+        let cat = get_general_category(c);
+        if matches!(
+            cat,
+            GeneralCategory::Control
+                | GeneralCategory::Format
+                | GeneralCategory::Surrogate
+                | GeneralCategory::LineSeparator
+                | GeneralCategory::ParagraphSeparator
+        ) {
+            continue;
+        }
+
+        if c.is_whitespace() {
+            if !prev_whitespace {
+                cleaned.push(' ');
+                prev_whitespace = true;
+            }
+        } else {
+            cleaned.push(c);
+            prev_whitespace = false;
+        }
+    }
+
+    let trimmed = cleaned.trim();
+    let name_part = if trimmed.is_empty() { "agent" } else { trimmed };
+
+    let prefixed = format!("xmsg@{host_label} · session:{name_part}");
+    prefixed.chars().take(64).collect()
 }
 
 /// Sanitizes the message body:
@@ -101,8 +153,10 @@ pub fn sanitize_body(body: &str) -> String {
 }
 
 /// Assembles the inner envelope string.
+/// Escapes `"` in `from_name` to prevent XML attribute breakout.
 pub fn assemble_envelope(from_name: &str, sanitized_body: &str) -> String {
-    format!("<cross-session-message from-name=\"{from_name}\">\n{sanitized_body}\n</cross-session-message>")
+    let safe_from_name = from_name.replace('"', "&quot;");
+    format!("<cross-session-message from-name=\"{safe_from_name}\">\n{sanitized_body}\n</cross-session-message>")
 }
 
 /// Encodes the complete transport line:

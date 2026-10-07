@@ -32,6 +32,7 @@ pub struct AppState {
     pub db: Arc<Mutex<rusqlite::Connection>>,
     pub notify_tx: broadcast::Sender<String>,
     pub reply_ttl: Duration,
+    pub long_poll_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -208,7 +209,7 @@ async fn send_message_handler(
     // Generate ULID message ID
     let message_id = ulid::Ulid::new().to_string();
 
-    let session_id = match target {
+    let (session_id, recipient_harness) = match target {
         ResolvedTarget::Claude(session, socket_path) => {
             let body_with_footer = format!(
                 "{}\n\n[xmsg] message_id={} — reply with the xmsg reply tool",
@@ -222,7 +223,7 @@ async fn send_message_handler(
                 );
                 return Err(err);
             }
-            session.session_id
+            (session.session_id, "claude".to_string())
         }
         ResolvedTarget::Agy(session) => {
             crate::agy::deliver_agy(
@@ -234,7 +235,7 @@ async fn send_message_handler(
                 &req.text,
             )
             .await?;
-            session.session_id
+            (session.session_id, "agy".to_string())
         }
         ResolvedTarget::Pi(session) => {
             let envelope = format!(
@@ -256,11 +257,16 @@ async fn send_message_handler(
                     .db
                     .lock()
                     .map_err(|e| AppError::Internal(e.to_string()))?;
-                storage::insert_pi_message(&db, &pi_msg)
+                let inserted = storage::insert_pi_message(&db, &pi_msg)
                     .map_err(|e| AppError::Internal(e.to_string()))?;
+                if !inserted {
+                    return Err(AppError::InboxUnavailable(
+                        "pi session message queue is full".to_string(),
+                    ));
+                }
             }
             let _ = state.pi_notify_tx.send(session.session_id.clone());
-            session.session_id
+            (session.session_id, "pi".to_string())
         }
     };
 
@@ -272,6 +278,7 @@ async fn send_message_handler(
         from_name: from_name.clone(),
         bytes: body_len,
         outcome: "delivered".to_string(),
+        recipient_harness,
     };
 
     {
@@ -280,6 +287,9 @@ async fn send_message_handler(
             .lock()
             .map_err(|e| AppError::Internal(e.to_string()))?;
         storage::insert_message(&db, &msg_record).map_err(|e| AppError::Internal(e.to_string()))?;
+        let _ = storage::purge_messages(&db, state.reply_ttl.as_secs());
+        let _ = storage::purge_replies(&db, state.reply_ttl.as_secs());
+        let _ = storage::purge_pi_messages(&db, state.reply_ttl.as_secs());
     }
 
     // Invariant: Message bodies are NEVER logged under any circumstances
@@ -362,6 +372,22 @@ async fn get_replies_handler(
 
     let after_seq = query.after.unwrap_or(0);
     let wait_secs = query.wait.unwrap_or(0).min(60);
+
+    let _permit = if wait_secs > 0 {
+        match state.long_poll_semaphore.clone().try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                return Err(AppError::ServiceUnavailable(
+                    "too many concurrent long-poll requests".to_string(),
+                ));
+            }
+            Err(e) => {
+                return Err(AppError::Internal(e.to_string()));
+            }
+        }
+    } else {
+        None
+    };
 
     // Subscribe to notifications BEFORE checking database to eliminate race conditions
     let rx = if wait_secs > 0 {

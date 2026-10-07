@@ -79,14 +79,19 @@ pub fn ensure_secure_socket_dir(dir: &Path, expected_uid: u32) -> Result<(), App
     Ok(())
 }
 
-pub fn default_socket_dir() -> Result<PathBuf, AppError> {
-    match std::env::var("XDG_RUNTIME_DIR") {
-        Ok(val) if !val.trim().is_empty() => Ok(PathBuf::from(val).join("xmsg")),
+pub fn socket_dir_for_env(xdg_var: Option<&str>) -> Result<PathBuf, AppError> {
+    match xdg_var {
+        Some(val) if !val.trim().is_empty() => Ok(PathBuf::from(val).join("xmsg")),
         _ => Err(AppError::InsecureSocketDir(
             "XDG_RUNTIME_DIR environment variable is not set. Sockets cannot be safely created without a secure runtime directory."
                 .to_string(),
         )),
     }
+}
+
+pub fn default_socket_dir() -> Result<PathBuf, AppError> {
+    let xdg = std::env::var("XDG_RUNTIME_DIR").ok();
+    socket_dir_for_env(xdg.as_deref())
 }
 
 pub fn default_register_sock_path() -> Result<PathBuf, AppError> {
@@ -217,7 +222,18 @@ pub async fn run_agent_server(
             ));
         }
     }
-    let _ = fs::remove_file(&sock_path);
+    if sock_path.exists() {
+        if tokio::net::UnixStream::connect(&sock_path).await.is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!(
+                    "another server instance is actively listening on {}",
+                    sock_path.display()
+                ),
+            ));
+        }
+        let _ = fs::remove_file(&sock_path);
+    }
 
     let listener = UnixListener::bind(&sock_path)?;
 
@@ -246,14 +262,53 @@ pub async fn run_agent_server(
             continue;
         }
 
+        let initial_starttime =
+            match crate::pi::get_proc_starttime(&state.agy_config.proc_root, peer_pid) {
+                Ok(st) => st,
+                Err(e) => {
+                    tracing::warn!("failed to get starttime for peer PID {peer_pid}: {e}");
+                    continue;
+                }
+            };
+
         let state_clone = state.clone();
 
         tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
             let (reader, mut writer) = stream.into_split();
             let mut buf_reader = BufReader::new(reader);
             let mut line = String::new();
+            let max_line = state_clone.max_body + 4096;
 
-            while buf_reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+            loop {
+                line.clear();
+                let n = (&mut buf_reader)
+                    .take(max_line as u64)
+                    .read_line(&mut line)
+                    .await
+                    .unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                if n >= max_line && !line.ends_with('\n') {
+                    let err_resp = serde_json::json!({
+                        "status": "error",
+                        "error": "bad_request",
+                        "detail": "frame exceeds maximum allowed size"
+                    });
+                    let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+                    break;
+                }
+
+                // Verify peer PID is still live and starttime has not changed
+                if crate::pi::get_proc_starttime(&state_clone.agy_config.proc_root, peer_pid)
+                    .ok()
+                    .as_deref()
+                    != Some(initial_starttime.as_str())
+                {
+                    tracing::warn!("peer PID {peer_pid} died or starttime changed");
+                    break;
+                }
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     line.clear();
@@ -328,10 +383,12 @@ pub async fn run_agent_server(
                                     AppError::NotFound(format!("message '{message_id}'"))
                                 })?;
 
-                            if caller.session_id != msg.session_id {
+                            if caller.harness != msg.recipient_harness
+                                || caller.session_id != msg.session_id
+                            {
                                 Err(AppError::NotRecipient(format!(
-                                    "caller session '{}' is not recipient of message '{}' (expected '{}')",
-                                    caller.session_id, message_id, msg.session_id
+                                    "caller session '{}:{}' is not recipient of message '{}' (expected '{}:{}')",
+                                    caller.harness, caller.session_id, message_id, msg.recipient_harness, msg.session_id
                                 )))
                             } else {
                                 let reply = storage::insert_reply(
@@ -343,6 +400,8 @@ pub async fn run_agent_server(
                                 .map_err(|e| AppError::Internal(e.to_string()))?;
                                 let _ =
                                     storage::purge_replies(&db, state_clone.reply_ttl.as_secs());
+                                let _ =
+                                    storage::purge_messages(&db, state_clone.reply_ttl.as_secs());
                                 Ok(reply)
                             }
                         })(
@@ -393,10 +452,25 @@ pub async fn run_agent_server(
                             continue;
                         }
 
-                        // Derive from_name: xmsg@<host> · session:<name>
+                        if text.len() > state_clone.max_body {
+                            let err_resp = serde_json::json!({
+                                "status": "error",
+                                "error": "body_too_large",
+                                "detail": format!(
+                                    "message body length {} exceeds maximum allowed {}",
+                                    text.len(),
+                                    state_clone.max_body
+                                )
+                            });
+                            let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+                            line.clear();
+                            continue;
+                        }
+
+                        // Derive from_name: xmsg@<host> · session:<name> (sanitized and capped to 64)
                         let caller_name = caller.name.as_deref().unwrap_or(&caller.session_id);
                         let from_name =
-                            format!("xmsg@{} · session:{}", state_clone.host_label, caller_name);
+                            inbox::sanitize_attested_from(&state_clone.host_label, caller_name);
 
                         let target_res = resolve_target_session(&state_clone, target_ref);
                         match target_res {
@@ -416,7 +490,9 @@ pub async fn run_agent_server(
                                             Ok(line) => {
                                                 inbox::deliver_to_socket(&socket_path, &line)
                                                     .await
-                                                    .map(|_| session.session_id)
+                                                    .map(|_| {
+                                                        (session.session_id, "claude".to_string())
+                                                    })
                                             }
                                             Err(e) => Err(e),
                                         }
@@ -430,7 +506,7 @@ pub async fn run_agent_server(
                                         text,
                                     )
                                     .await
-                                    .map(|_| session.session_id),
+                                    .map(|_| (session.session_id, "agy".to_string())),
                                     ResolvedTarget::Pi(session) => {
                                         let envelope = format!(
                                             "[xmsg] from={from_name} message_id={message_id} — reply with the xmsg reply tool\n\n{text}"
@@ -450,8 +526,13 @@ pub async fn run_agent_server(
                                                 .db
                                                 .lock()
                                                 .map_err(|e| AppError::Internal(e.to_string()))?;
-                                            storage::insert_pi_message(&db, &pi_msg)
+                                            let inserted = storage::insert_pi_message(&db, &pi_msg)
                                                 .map_err(|e| AppError::Internal(e.to_string()))?;
+                                            if !inserted {
+                                                return Err(AppError::InboxUnavailable(
+                                                    "pi session queue is full".to_string(),
+                                                ));
+                                            }
                                             Ok(())
                                         })();
                                         match db_res {
@@ -459,7 +540,7 @@ pub async fn run_agent_server(
                                                 let _ = state_clone
                                                     .pi_notify_tx
                                                     .send(session.session_id.clone());
-                                                Ok(session.session_id)
+                                                Ok((session.session_id, "pi".to_string()))
                                             }
                                             Err(e) => Err(e),
                                         }
@@ -467,7 +548,7 @@ pub async fn run_agent_server(
                                 };
 
                                 match deliver_res {
-                                    Ok(delivered_session_id) => {
+                                    Ok((delivered_session_id, target_harness)) => {
                                         let msg_record = storage::MessageRecord {
                                             id: message_id.clone(),
                                             created_at: storage::now_epoch_secs(),
@@ -475,6 +556,7 @@ pub async fn run_agent_server(
                                             from_name: from_name.clone(),
                                             bytes: body_len,
                                             outcome: "delivered".to_string(),
+                                            recipient_harness: target_harness,
                                         };
                                         if let Ok(db) = state_clone.db.lock() {
                                             let _ = storage::insert_message(&db, &msg_record);

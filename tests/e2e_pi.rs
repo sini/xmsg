@@ -91,6 +91,7 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
         db: db.clone(),
         notify_tx: notify_tx.clone(),
         reply_ttl,
+        long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
     });
 
     let app = build_router(app_state.clone());
@@ -129,7 +130,8 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
     reader.read_line(&mut resp_line).await.unwrap();
     let reg_resp: Value = serde_json::from_str(&resp_line).unwrap();
     assert_eq!(reg_resp["status"], "ok");
-    assert_eq!(reg_resp["sessionId"], "pi-worker-1");
+    let derived_session_id = reg_resp["sessionId"].as_str().unwrap().to_string();
+    assert!(derived_session_id.starts_with("pi:"));
 
     // 4. Verify session appears in GET /v1/sessions
     let client = reqwest::Client::new();
@@ -143,8 +145,8 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
     let sessions_arr = sessions_json.as_array().unwrap();
     let pi_sess = sessions_arr
         .iter()
-        .find(|s| s["sessionId"] == "pi-worker-1")
-        .expect("pi-worker-1 should be listed in /v1/sessions");
+        .find(|s| s["sessionId"] == derived_session_id)
+        .expect("pi session should be listed in /v1/sessions");
     assert_eq!(pi_sess["harness"], "pi");
     assert_eq!(pi_sess["name"], "worker-one");
     assert_eq!(pi_sess["registered"], true);
@@ -153,12 +155,13 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
     let (delivery_tx, mut delivery_rx) = tokio::sync::mpsc::channel::<Value>(1);
     let (keepalive_tx, keepalive_rx) = tokio::sync::oneshot::channel::<()>();
     let mut writer_clone = writer;
+    let poll_session_id = derived_session_id.clone();
 
     tokio::spawn(async move {
         // Send poll
         let poll_cmd = serde_json::json!({
             "action": "poll",
-            "sessionId": "pi-worker-1",
+            "sessionId": poll_session_id,
             "waitSecs": 5
         });
         writer_clone
@@ -192,10 +195,10 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // 6. Post message to Pi session via HTTP
+    // 6. Post message to Pi session via HTTP (using session name worker-one)
     let send_resp = client
         .post(format!(
-            "http://127.0.0.1:{http_port}/v1/sessions/pi-worker-1/messages"
+            "http://127.0.0.1:{http_port}/v1/sessions/worker-one/messages"
         ))
         .json(&serde_json::json!({
             "from": "alice-orch",
@@ -208,7 +211,7 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
     assert_eq!(send_resp.status(), StatusCode::ACCEPTED);
     let send_data: Value = send_resp.json().await.unwrap();
     let message_id = send_data["messageId"].as_str().unwrap().to_string();
-    assert_eq!(send_data["sessionId"], "pi-worker-1");
+    assert_eq!(send_data["sessionId"], derived_session_id);
 
     // 7. Verify Pi socket waiter received the delivery with §9.4 envelope
     let delivered_val = tokio::time::timeout(Duration::from_secs(2), delivery_rx.recv())
@@ -229,7 +232,7 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
             "http://127.0.0.1:{http_port}/v1/messages/{message_id}/replies"
         ))
         .json(&serde_json::json!({
-            "sessionRef": "pi-worker-1",
+            "sessionRef": "worker-one",
             "text": "All 42 tests passed cleanly!"
         }))
         .send()
@@ -267,6 +270,7 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
         from_name: "test-orch".to_string(),
         bytes: 10,
         outcome: "delivered".to_string(),
+        recipient_harness: "pi".to_string(),
     };
     {
         let db_lock = db.lock().unwrap();
@@ -299,7 +303,7 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
         .unwrap();
     assert_eq!(msg_detail_resp.status(), StatusCode::OK);
     let msg_detail: Value = msg_detail_resp.json().await.unwrap();
-    assert_eq!(msg_detail["sessionId"], "pi-worker-1");
+    assert_eq!(msg_detail["sessionId"], derived_session_id);
     let replies = msg_detail["replies"].as_array().unwrap();
     assert_eq!(replies.len(), 1);
     assert_eq!(replies[0]["seq"], 1);

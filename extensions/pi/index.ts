@@ -189,6 +189,9 @@ export class XmsgPiBridge {
           if (regResp.status !== "ok") {
             throw new Error(`Registration failed: ${regResp.detail || JSON.stringify(regResp)}`);
           }
+          if (regResp.sessionId) {
+            this.currentSessionId = regResp.sessionId;
+          }
 
           // 3. Enter polling loop
           while (this.running) {

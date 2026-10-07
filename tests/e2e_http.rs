@@ -176,6 +176,7 @@ async fn start_harness(max_body: usize) -> TestHarness {
         db: Arc::new(std::sync::Mutex::new(conn)),
         notify_tx,
         reply_ttl: Duration::from_secs(604800),
+        long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
     });
 
     let app = build_router(app_state);

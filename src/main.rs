@@ -249,6 +249,8 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(parent) = db_path.parent() {
         let _ = std::fs::create_dir_all(parent);
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
     }
 
     info!(
@@ -262,6 +264,10 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let conn = rusqlite::Connection::open(&db_path)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o600));
+    }
     storage::init_db(&conn)?;
 
     let db = Arc::new(Mutex::new(conn));
@@ -320,6 +326,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         db,
         notify_tx,
         reply_ttl,
+        long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
     });
 
     let agent_sock = agent_sock_path.clone();
