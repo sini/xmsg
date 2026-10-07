@@ -493,3 +493,42 @@ async fn test_e2e_post_message_inbox_unavailable_502() {
     let err_val: serde_json::Value = res.json().await.unwrap();
     assert_eq!(err_val["error"], "inbox_unavailable");
 }
+
+#[tokio::test]
+async fn test_e2e_post_message_reserved_session_prefix_400() {
+    let harness = start_harness(65536).await;
+    let client = reqwest::Client::new();
+
+    // Red Demo 2: HTTP POST with from starting with session: returns 400 Bad Request
+    let res = client
+        .post(format!(
+            "{}/v1/sessions/my-worker/messages",
+            harness.base_url
+        ))
+        .json(&serde_json::json!({
+            "from": "session:evil",
+            "text": "spoofed session prefix"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+    let err_val: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(err_val["error"], "bad_request");
+    assert!(err_val["detail"].as_str().unwrap().contains("reserved"));
+
+    // Also with session/
+    let res = client
+        .post(format!(
+            "{}/v1/sessions/my-worker/messages",
+            harness.base_url
+        ))
+        .json(&serde_json::json!({
+            "from": "session/evil",
+            "text": "spoofed session slash prefix"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+}

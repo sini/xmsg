@@ -1,18 +1,57 @@
+import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import readline from "node:readline";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-export function defaultRegisterSockPath(): string {
+export function defaultRegisterSockPath(): string | undefined {
   if (process.env.XMSG_REGISTER_SOCK) {
     return process.env.XMSG_REGISTER_SOCK;
   }
   if (process.env.XDG_RUNTIME_DIR) {
     return path.join(process.env.XDG_RUNTIME_DIR, "xmsg", "register.sock");
   }
-  const uid = typeof process.getuid === "function" ? process.getuid() : 1000;
-  return `/tmp/xmsg-${uid}/register.sock`;
+  return undefined;
+}
+
+export function defaultAgentSockPath(): string | undefined {
+  if (process.env.XMSG_AGENT_SOCK) {
+    return process.env.XMSG_AGENT_SOCK;
+  }
+  if (process.env.XDG_RUNTIME_DIR) {
+    return path.join(process.env.XDG_RUNTIME_DIR, "xmsg", "agent.sock");
+  }
+  return undefined;
+}
+
+export function verifySecureSocketDir(sockPath: string): boolean {
+  try {
+    const dir = path.dirname(sockPath);
+    const stat = fs.lstatSync(dir);
+    if (stat.isSymbolicLink()) {
+      console.error(`[xmsg-pi] socket directory ${dir} is a symlink`);
+      return false;
+    }
+    if (!stat.isDirectory()) {
+      console.error(`[xmsg-pi] socket directory ${dir} is not a directory`);
+      return false;
+    }
+    const uid = typeof process.getuid === "function" ? process.getuid() : 1000;
+    if (stat.uid !== uid) {
+      console.error(`[xmsg-pi] socket directory ${dir} owned by UID ${stat.uid}, expected ${uid}`);
+      return false;
+    }
+    const mode = stat.mode & 0o777;
+    if (mode !== 0o700) {
+      console.error(`[xmsg-pi] socket directory ${dir} has mode ${mode.toString(8)}, expected 0700`);
+      return false;
+    }
+    return true;
+  } catch (err: any) {
+    console.error(`[xmsg-pi] failed to verify socket directory: ${err.message || err}`);
+    return false;
+  }
 }
 
 export function defaultXmsgUrl(): string {
@@ -21,6 +60,7 @@ export function defaultXmsgUrl(): string {
 
 export interface ExtensionOptions {
   sockPath?: string;
+  agentSockPath?: string;
   xmsgUrl?: string;
   pollWaitSecs?: number;
   reconnectDelayMs?: number;
@@ -28,7 +68,8 @@ export interface ExtensionOptions {
 
 export class XmsgPiBridge {
   private pi: ExtensionAPI;
-  private sockPath: string;
+  private sockPath?: string;
+  private agentSockPath?: string;
   private xmsgUrl: string;
   private pollWaitSecs: number;
   private reconnectDelayMs: number;
@@ -42,6 +83,7 @@ export class XmsgPiBridge {
   constructor(pi: ExtensionAPI, options: ExtensionOptions = {}) {
     this.pi = pi;
     this.sockPath = options.sockPath || defaultRegisterSockPath();
+    this.agentSockPath = options.agentSockPath || defaultAgentSockPath();
     this.xmsgUrl = options.xmsgUrl || defaultXmsgUrl();
     this.pollWaitSecs = options.pollWaitSecs ?? 30;
     this.reconnectDelayMs = options.reconnectDelayMs ?? 1500;
@@ -59,6 +101,14 @@ export class XmsgPiBridge {
 
   public start() {
     if (this.running) return;
+    if (!this.sockPath) {
+      console.warn("[xmsg-pi] XDG_RUNTIME_DIR is not set and no sockPath provided; disabling socket polling");
+      return;
+    }
+    if (!verifySecureSocketDir(this.sockPath)) {
+      console.warn(`[xmsg-pi] socket directory for ${this.sockPath} failed security check; disabling socket polling`);
+      return;
+    }
     this.running = true;
     this.connectLoop();
   }
@@ -96,6 +146,9 @@ export class XmsgPiBridge {
 
   private runConnection(): Promise<void> {
     return new Promise((resolve, reject) => {
+      if (!this.sockPath) {
+        return resolve();
+      }
       const socket = net.connect(this.sockPath);
       this.socket = socket;
 
@@ -192,51 +245,89 @@ export class XmsgPiBridge {
         message_id: Type.String({ description: "The ID of the message being replied to" }),
         text: Type.String({ description: "Reply content" }),
       }),
-      execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
-        const sessionId = ctx?.sessionManager?.getSessionId?.() || this.currentSessionId;
-        if (!sessionId) {
+      execute: async (_toolCallId, params) => {
+        if (!this.agentSockPath) {
           return {
-            content: [{ type: "text", text: "Error: session ID unknown" }],
-            details: { error: "session_id_unknown" },
+            content: [{ type: "text", text: "Error: agent.sock path unknown (XDG_RUNTIME_DIR unset)" }],
+            details: { error: "agent_sock_unknown" },
+          };
+        }
+        if (!verifySecureSocketDir(this.agentSockPath)) {
+          return {
+            content: [{ type: "text", text: "Error: agent.sock directory failed security check" }],
+            details: { error: "insecure_socket_dir" },
           };
         }
 
-        const url = `${this.xmsgUrl}/v1/messages/${encodeURIComponent(params.message_id)}/replies`;
-        try {
-          const res = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              sessionRef: sessionId,
-              text: params.text,
-            }),
+        return new Promise((resolve) => {
+          let client: net.Socket;
+          try {
+            client = net.connect(this.agentSockPath!, () => {
+              const req = {
+                action: "reply",
+                messageId: params.message_id,
+                text: params.text,
+              };
+              client.write(JSON.stringify(req) + "\n");
+            });
+          } catch (err: any) {
+            resolve({
+              content: [{ type: "text", text: `Error connecting to agent socket: ${err.message}` }],
+              details: { error: "socket_error", detail: err.message },
+            });
+            return;
+          }
+
+          let data = "";
+          client.on("data", (chunk) => {
+            data += chunk.toString();
+            if (data.includes("\n")) {
+              client.end();
+            }
           });
 
-          if (res.status === 201) {
-            const data = await res.json();
-            return {
-              content: [{ type: "text", text: `Reply sent (seq ${data.seq})` }],
-              details: data,
-            };
-          } else if (res.status === 403) {
-            const errBody = await res.text();
-            return {
-              content: [{ type: "text", text: `Error: not recipient of message ${params.message_id}` }],
-              details: { error: "not_recipient", status: 403, detail: errBody },
-            };
-          } else {
-            const errBody = await res.text();
-            return {
-              content: [{ type: "text", text: `Error sending reply (HTTP ${res.status}): ${errBody}` }],
-              details: { error: "http_error", status: res.status, detail: errBody },
-            };
-          }
-        } catch (err: any) {
-          return {
-            content: [{ type: "text", text: `Error sending reply: ${err.message || String(err)}` }],
-            details: { error: "network_error", detail: String(err) },
-          };
-        }
+          client.on("error", (err) => {
+            resolve({
+              content: [{ type: "text", text: `Error connecting to agent socket: ${err.message}` }],
+              details: { error: "socket_error", detail: err.message },
+            });
+          });
+
+          client.on("close", () => {
+            try {
+              const line = data.trim().split("\n")[0];
+              if (!line) {
+                resolve({
+                  content: [{ type: "text", text: "Error: empty response from agent socket" }],
+                  details: { error: "empty_response" },
+                });
+                return;
+              }
+              const resp = JSON.parse(line);
+              if (resp.status === "ok") {
+                resolve({
+                  content: [{ type: "text", text: `Reply sent (seq ${resp.reply.seq})` }],
+                  details: resp.reply,
+                });
+              } else if (resp.error === "not_recipient") {
+                resolve({
+                  content: [{ type: "text", text: `Error: not recipient of message ${params.message_id}` }],
+                  details: { error: "not_recipient", status: 403, detail: resp.detail },
+                });
+              } else {
+                resolve({
+                  content: [{ type: "text", text: `Error sending reply: ${resp.detail || resp.error}` }],
+                  details: resp,
+                });
+              }
+            } catch (err: any) {
+              resolve({
+                content: [{ type: "text", text: `Error parsing agent response: ${err.message}` }],
+                details: { error: "parse_error", detail: String(err) },
+              });
+            }
+          });
+        });
       },
     });
   }

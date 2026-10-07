@@ -1,5 +1,5 @@
 use std::fs;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
@@ -67,6 +67,7 @@ async fn test_shipped_binary_register_cli_with_server() {
     let proc_locks = tmp.path().join("locks");
     let presence_dir = tmp.path().join("presence");
     let sock_dir = tempdir().unwrap();
+    fs::set_permissions(sock_dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let sock_path = sock_dir.path().join("register.sock");
     fs::create_dir_all(&presence_dir).unwrap();
 

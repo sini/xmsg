@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod agent;
 pub mod agy;
 pub mod error;
 pub mod http;

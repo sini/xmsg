@@ -1,4 +1,3 @@
-use crate::registry;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -7,6 +6,7 @@ use std::path::PathBuf;
 pub struct McpConfig {
     pub sessions_dir: PathBuf,
     pub xmsg_url: String,
+    pub agent_sock: PathBuf,
     pub proc_root: PathBuf,
     pub presence_dir: PathBuf,
     pub proc_locks_path: PathBuf,
@@ -15,13 +15,25 @@ pub struct McpConfig {
 impl McpConfig {
     pub fn new(sessions_dir: PathBuf, xmsg_url: String) -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let agent_sock = std::env::var("XMSG_AGENT_SOCK")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                crate::agent::default_agent_sock_path()
+                    .unwrap_or_else(|_| PathBuf::from("/nonexistent/agent.sock"))
+            });
         Self {
             sessions_dir,
             xmsg_url,
+            agent_sock,
             proc_root: PathBuf::from("/proc"),
             presence_dir: PathBuf::from(home).join(".gemini/antigravity-cli/presence"),
             proc_locks_path: PathBuf::from("/proc/locks"),
         }
+    }
+
+    pub fn with_agent_sock(mut self, agent_sock: PathBuf) -> Self {
+        self.agent_sock = agent_sock;
+        self
     }
 }
 
@@ -192,26 +204,59 @@ fn tool_err(text: String) -> Value {
     })
 }
 
-fn derive_caller_session(config: &McpConfig) -> Result<(String, String), String> {
-    // 1. Try Claude session via sessions_dir/<ppid>.json
-    if let Ok(s) = registry::find_ancestor_session_in(
-        &config.proc_root,
-        &config.sessions_dir,
-        std::process::id(),
-    ) {
-        let name = s.name.unwrap_or_else(|| s.session_id.clone());
-        return Ok((s.session_id, name));
+fn call_agent_sock(sock_path: &std::path::Path, payload: &Value) -> Result<Value, String> {
+    let my_uid = crate::agent::current_uid();
+    if let Some(parent) = sock_path.parent() {
+        crate::agent::ensure_secure_socket_dir(parent, my_uid)
+            .map_err(|e| format!("insecure agent socket directory: {e}"))?;
     }
 
-    // 2. Try Agy session via presence locks held by ancestor
-    match crate::agy::find_ancestor_agy_session_in(
-        &config.proc_root,
-        &config.proc_locks_path,
-        &config.presence_dir,
-        std::process::id(),
-    ) {
-        Ok(conv_id) => Ok((conv_id.clone(), conv_id)),
-        Err(e) => Err(format!("failed to derive caller session identity: {e}")),
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let mut stream = UnixStream::connect(sock_path).map_err(|e| {
+        format!(
+            "failed to connect to agent socket at {}: {e}",
+            sock_path.display()
+        )
+    })?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| e.to_string())?;
+
+    let line = format!("{payload}\n");
+    stream
+        .write_all(line.as_bytes())
+        .map_err(|e| format!("failed to write to agent socket: {e}"))?;
+    stream
+        .flush()
+        .map_err(|e| format!("failed to flush agent socket: {e}"))?;
+
+    let mut reader = BufReader::new(stream);
+    let mut resp_line = String::new();
+    reader
+        .read_line(&mut resp_line)
+        .map_err(|e| format!("failed to read response from agent socket: {e}"))?;
+
+    let resp_val: Value = serde_json::from_str(&resp_line)
+        .map_err(|e| format!("invalid response JSON from agent socket: {e}"))?;
+
+    if resp_val.get("status").and_then(Value::as_str) == Some("error") {
+        let err_kind = resp_val
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("error");
+        let detail = resp_val
+            .get("detail")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error");
+        Err(format!("{err_kind}: {detail}"))
+    } else {
+        Ok(resp_val)
     }
 }
 
@@ -250,29 +295,18 @@ fn execute_tool(
                 return tool_err("missing required string argument 'text'".to_string());
             };
 
-            // Derive caller identity via ancestor walk
-            let (_caller_session_id, from_name) = match derive_caller_session(config) {
-                Ok(pair) => pair,
-                Err(e) => return tool_err(e),
-            };
-
-            let url = format!("{}/v1/sessions/{}/messages", config.xmsg_url, target_ref);
             let payload = json!({
-                "from": from_name,
+                "action": "send",
+                "ref": target_ref,
                 "text": text
             });
 
-            match client.post(&url).json(&payload).send() {
+            match call_agent_sock(&config.agent_sock, &payload) {
                 Ok(resp) => {
-                    let status = resp.status();
-                    let resp_text = resp.text().unwrap_or_default();
-                    if status.is_success() {
-                        tool_ok(resp_text)
-                    } else {
-                        tool_err(format!("HTTP {status}: {resp_text}"))
-                    }
+                    let delivery_val = resp.get("delivery").cloned().unwrap_or(resp);
+                    tool_ok(delivery_val.to_string())
                 }
-                Err(e) => tool_err(format!("failed to connect to xmsg server at {url}: {e}")),
+                Err(e) => tool_err(e),
             }
         }
         "reply" => {
@@ -283,29 +317,18 @@ fn execute_tool(
                 return tool_err("missing required string argument 'text'".to_string());
             };
 
-            // Derive caller identity via ancestor walk
-            let (caller_session_id, _) = match derive_caller_session(config) {
-                Ok(pair) => pair,
-                Err(e) => return tool_err(e),
-            };
-
-            let url = format!("{}/v1/messages/{}/replies", config.xmsg_url, message_id);
             let payload = json!({
-                "sessionRef": caller_session_id,
+                "action": "reply",
+                "messageId": message_id,
                 "text": text
             });
 
-            match client.post(&url).json(&payload).send() {
+            match call_agent_sock(&config.agent_sock, &payload) {
                 Ok(resp) => {
-                    let status = resp.status();
-                    let resp_text = resp.text().unwrap_or_default();
-                    if status.is_success() {
-                        tool_ok(resp_text)
-                    } else {
-                        tool_err(format!("HTTP {status}: {resp_text}"))
-                    }
+                    let reply_val = resp.get("reply").cloned().unwrap_or(resp);
+                    tool_ok(reply_val.to_string())
                 }
-                Err(e) => tool_err(format!("failed to connect to xmsg server at {url}: {e}")),
+                Err(e) => tool_err(e),
             }
         }
         _ => tool_err(format!("unknown tool: {name}")),

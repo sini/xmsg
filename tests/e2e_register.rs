@@ -1,5 +1,5 @@
 use std::fs;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -178,6 +178,7 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
     let proc_locks = tmp.path().join("locks");
     let presence_dir = tmp.path().join("presence");
     let sock_dir = tempdir().unwrap();
+    fs::set_permissions(sock_dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let sock_path = sock_dir.path().join("register.sock");
     fs::create_dir_all(&presence_dir).unwrap();
 
@@ -228,7 +229,12 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
     });
 
     // Wait briefly for socket to become ready
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..20 {
+        if sock_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     // 1. Connect and send initial registration
     let mut stream = UnixStream::connect(&sock_path).await.unwrap();

@@ -1,5 +1,6 @@
 use std::fs;
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -7,6 +8,7 @@ use tempfile::{tempdir, TempDir};
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
+use xmsg::agent::run_agent_server;
 use xmsg::http::{build_router, AppState, MessageDetailResponse};
 use xmsg::inbox::{self, DeliveryResponse};
 use xmsg::storage::ReplyRecord;
@@ -19,9 +21,10 @@ fn get_self_proc_start() -> String {
 }
 
 struct RepliesHarness {
-    _sess_dir: TempDir,
+    sess_dir: TempDir,
     _sock_dir: TempDir,
     base_url: String,
+    agent_sock_path: PathBuf,
     db: Arc<std::sync::Mutex<rusqlite::Connection>>,
     received_lines: Arc<Mutex<Vec<String>>>,
     stop_signal: Arc<AtomicBool>,
@@ -33,13 +36,56 @@ impl Drop for RepliesHarness {
     }
 }
 
+async fn post_agent_sock_reply(
+    agent_sock: &Path,
+    message_id: &str,
+    text: &str,
+) -> Result<ReplyRecord, String> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+    let mut stream = UnixStream::connect(agent_sock)
+        .await
+        .map_err(|e| e.to_string())?;
+    let req = serde_json::json!({
+        "action": "reply",
+        "messageId": message_id,
+        "text": text
+    });
+    stream
+        .write_all(format!("{req}\n").as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .await
+        .map_err(|e| e.to_string())?;
+    let val: serde_json::Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+    if val.get("status").and_then(|s| s.as_str()) == Some("error") {
+        Err(val
+            .get("error")
+            .and_then(|s| s.as_str())
+            .unwrap_or("error")
+            .to_string())
+    } else {
+        let reply_val = val
+            .get("reply")
+            .ok_or_else(|| "missing reply field".to_string())?;
+        serde_json::from_value(reply_val.clone()).map_err(|e| e.to_string())
+    }
+}
+
 async fn start_replies_harness(reply_ttl: Duration) -> RepliesHarness {
     let sess_dir = tempdir().expect("tempdir for sessions");
     let sock_dir = tempdir().expect("tempdir for socket");
+    fs::set_permissions(sock_dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+
     let sock_path = sock_dir.path().join("recipient_inbox.sock");
-    let other_sock_path = sock_dir.path().join("other_inbox.sock");
+    let agent_sock_path = sock_dir.path().join("agent.sock");
 
     let my_pid = std::process::id();
+    let my_uid = xmsg::agent::current_uid();
     let my_proc_start = get_self_proc_start();
 
     let listener = UnixListener::bind(&sock_path).expect("bind unix socket");
@@ -94,24 +140,6 @@ async fn start_replies_harness(reply_ttl: Duration) -> RepliesHarness {
     )
     .unwrap();
 
-    // 2. Another session for testing non-recipient 403
-    let other_json = format!(
-        r#"{{
-            "pid": {my_pid},
-            "sessionId": "sess-other-2222",
-            "name": "other-worker",
-            "cwd": "/workspace/other",
-            "status": "idle",
-            "kind": "interactive",
-            "startedAt": 1000,
-            "updatedAt": 2000,
-            "procStart": "{my_proc_start}",
-            "messagingSocketPath": "{}"
-        }}"#,
-        other_sock_path.display()
-    );
-    fs::write(sess_dir.path().join("other.json"), other_json).unwrap();
-
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     xmsg::storage::init_db(&conn).unwrap();
     let db = Arc::new(std::sync::Mutex::new(conn));
@@ -137,7 +165,7 @@ async fn start_replies_harness(reply_ttl: Duration) -> RepliesHarness {
         reply_ttl,
     });
 
-    let app = build_router(app_state);
+    let app = build_router(app_state.clone());
     let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = tcp_listener.local_addr().unwrap().port();
     let base_url = format!("http://127.0.0.1:{port}");
@@ -146,10 +174,19 @@ async fn start_replies_harness(reply_ttl: Duration) -> RepliesHarness {
         axum::serve(tcp_listener, app).await.unwrap();
     });
 
+    let agent_sock = agent_sock_path.clone();
+    let agent_state = app_state.clone();
+    tokio::spawn(async move {
+        let _ = run_agent_server(agent_sock, agent_state, my_uid).await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
     RepliesHarness {
-        _sess_dir: sess_dir,
+        sess_dir,
         _sock_dir: sock_dir,
         base_url,
+        agent_sock_path,
         db,
         received_lines,
         stop_signal,
@@ -214,24 +251,30 @@ async fn test_reply_roundtrip_and_envelope_footer() {
     );
     drop(lines);
 
-    // 3. POST reply as recipient (§8.3)
-    let reply_payload = serde_json::json!({
-        "sessionRef": "sess-recipient-1111",
-        "text": "PR #42 reviewed and accepted."
-    });
-
-    let res = client
+    // 3a. Red Demo 1: HTTP POST to /v1/messages/{id}/replies returns 405 Method Not Allowed
+    let http_res = client
         .post(format!(
             "{}/v1/messages/{}/replies",
             harness.base_url, message_id
         ))
-        .json(&reply_payload)
+        .json(&serde_json::json!({
+            "sessionRef": "sess-recipient-1111",
+            "text": "PR #42 reviewed and accepted."
+        }))
         .send()
         .await
         .unwrap();
+    assert_eq!(http_res.status(), reqwest::StatusCode::METHOD_NOT_ALLOWED);
 
-    assert_eq!(res.status(), reqwest::StatusCode::CREATED);
-    let reply: ReplyRecord = res.json().await.unwrap();
+    // 3b. POST reply via agent.sock
+    let reply = post_agent_sock_reply(
+        &harness.agent_sock_path,
+        &message_id,
+        "PR #42 reviewed and accepted.",
+    )
+    .await
+    .unwrap();
+
     assert_eq!(reply.seq, 1);
     assert_eq!(reply.message_id, message_id);
     assert_eq!(reply.replier_session_id, "sess-recipient-1111");
@@ -274,7 +317,7 @@ async fn test_reply_not_recipient_403() {
     let harness = start_replies_harness(Duration::from_secs(3600)).await;
     let client = reqwest::Client::new();
 
-    // Deliver message to recipient
+    // Deliver message to recipient (sess-recipient-1111)
     let post_msg_payload = serde_json::json!({
         "from": "orchestrator",
         "text": "For recipient only"
@@ -291,29 +334,39 @@ async fn test_reply_not_recipient_403() {
     assert_eq!(res.status(), reqwest::StatusCode::ACCEPTED);
     let delivery: DeliveryResponse = res.json().await.unwrap();
 
-    // Attempt reply from other-worker (different live session)
-    let reply_payload = serde_json::json!({
-        "sessionRef": "other-worker",
-        "text": "Imposter attempting to reply"
-    });
+    // Change current PID session identity to other-worker (sess-other-2222)
+    let my_pid = std::process::id();
+    let my_proc_start = get_self_proc_start();
+    let other_json = format!(
+        r#"{{
+            "pid": {my_pid},
+            "sessionId": "sess-other-2222",
+            "name": "other-worker",
+            "cwd": "/workspace/other",
+            "status": "idle",
+            "kind": "interactive",
+            "startedAt": 1000,
+            "updatedAt": 2000,
+            "procStart": "{my_proc_start}",
+            "messagingSocketPath": "/tmp/dummy.sock"
+        }}"#
+    );
+    fs::write(
+        harness.sess_dir.path().join(format!("{my_pid}.json")),
+        other_json,
+    )
+    .unwrap();
 
-    let res = client
-        .post(format!(
-            "{}/v1/messages/{}/replies",
-            harness.base_url, delivery.message_id
-        ))
-        .json(&reply_payload)
-        .send()
-        .await
-        .unwrap();
+    // Attempt reply from other-worker (sess-other-2222) over agent.sock
+    let err = post_agent_sock_reply(
+        &harness.agent_sock_path,
+        &delivery.message_id,
+        "Imposter attempting to reply",
+    )
+    .await
+    .unwrap_err();
 
-    assert_eq!(res.status(), reqwest::StatusCode::FORBIDDEN);
-    let body: serde_json::Value = res.json().await.unwrap();
-    assert_eq!(body["error"], "not_recipient");
-    assert!(body["detail"]
-        .as_str()
-        .unwrap()
-        .contains("is not the recipient"));
+    assert_eq!(err, "not_recipient");
 }
 
 #[tokio::test]
@@ -321,22 +374,15 @@ async fn test_reply_error_conditions() {
     let harness = start_replies_harness(Duration::from_secs(3600)).await;
     let client = reqwest::Client::new();
 
-    // 1. Reply to non-existent message ID -> 404
-    let res = client
-        .post(format!(
-            "{}/v1/messages/01HXYZNONEXISTENT00000000/replies",
-            harness.base_url
-        ))
-        .json(&serde_json::json!({
-            "sessionRef": "recipient-worker",
-            "text": "Hello"
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status(), reqwest::StatusCode::NOT_FOUND);
-    let body: serde_json::Value = res.json().await.unwrap();
-    assert_eq!(body["error"], "not_found");
+    // 1. Reply to non-existent message ID -> not_found
+    let err = post_agent_sock_reply(
+        &harness.agent_sock_path,
+        "01HXYZNONEXISTENT00000000",
+        "Hello",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err, "not_found");
 
     // Deliver a valid message for remaining tests
     let res = client
@@ -354,53 +400,25 @@ async fn test_reply_error_conditions() {
     let delivery: DeliveryResponse = res.json().await.unwrap();
     let valid_id = delivery.message_id;
 
-    // 2. Reply with unknown sessionRef -> 404
+    // 2. Reply with empty text -> bad_request
+    let err = post_agent_sock_reply(&harness.agent_sock_path, &valid_id, "")
+        .await
+        .unwrap_err();
+    assert_eq!(err, "bad_request");
+
+    // 3. HTTP POST to /v1/messages/{id}/replies returns 405 Method Not Allowed
     let res = client
         .post(format!(
             "{}/v1/messages/{valid_id}/replies",
             harness.base_url
         ))
         .json(&serde_json::json!({
-            "sessionRef": "unknown-nonexistent-session",
             "text": "Hello"
         }))
         .send()
         .await
         .unwrap();
-    assert_eq!(res.status(), reqwest::StatusCode::NOT_FOUND);
-
-    // 3. Reply with empty text -> 400
-    let res = client
-        .post(format!(
-            "{}/v1/messages/{valid_id}/replies",
-            harness.base_url
-        ))
-        .json(&serde_json::json!({
-            "sessionRef": "recipient-worker",
-            "text": ""
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
-    let body: serde_json::Value = res.json().await.unwrap();
-    assert_eq!(body["error"], "bad_request");
-
-    // 4. Reply with extra JSON fields -> 400 (deny_unknown_fields)
-    let res = client
-        .post(format!(
-            "{}/v1/messages/{valid_id}/replies",
-            harness.base_url
-        ))
-        .json(&serde_json::json!({
-            "sessionRef": "recipient-worker",
-            "text": "Hello",
-            "unexpectedField": 123
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(res.status(), reqwest::StatusCode::METHOD_NOT_ALLOWED);
 }
 
 #[tokio::test]
@@ -468,22 +486,12 @@ async fn test_long_poll_replies() {
         "Waited approximately 1s on timeout"
     );
 
-    // 5. Long-poll wakes up immediately when reply arrives
-    let base_url_clone = harness.base_url.clone();
+    // 5. Long-poll wakes up immediately when reply arrives via agent.sock
+    let agent_sock = harness.agent_sock_path.clone();
     let msg_id_clone = message_id.clone();
-    tokio::spawn(async move {
+    let reply_task = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(150)).await;
-        let c = reqwest::Client::new();
-        let _ = c
-            .post(format!(
-                "{base_url_clone}/v1/messages/{msg_id_clone}/replies"
-            ))
-            .json(&serde_json::json!({
-                "sessionRef": "recipient-worker",
-                "text": "Waking up long poll waiter"
-            }))
-            .send()
-            .await;
+        post_agent_sock_reply(&agent_sock, &msg_id_clone, "Waking up long poll waiter").await
     });
 
     let start = Instant::now();
@@ -496,6 +504,7 @@ async fn test_long_poll_replies() {
         .await
         .unwrap();
     let elapsed = start.elapsed();
+    let _ = reply_task.await.unwrap();
     assert_eq!(res.status(), reqwest::StatusCode::OK);
     let replies: Vec<ReplyRecord> = res.json().await.unwrap();
     assert_eq!(replies.len(), 1);
@@ -552,20 +561,10 @@ async fn test_ttl_purge_on_reply() {
     assert_eq!(replies.len(), 1);
     assert_eq!(replies[0].text, "old expired reply");
 
-    // POST a new reply, which triggers purge (§8.3)
-    let res = client
-        .post(format!(
-            "{}/v1/messages/{message_id}/replies",
-            harness.base_url
-        ))
-        .json(&serde_json::json!({
-            "sessionRef": "recipient-worker",
-            "text": "brand new reply"
-        }))
-        .send()
+    // POST a new reply via agent.sock, which triggers purge (§8.3)
+    let _ = post_agent_sock_reply(&harness.agent_sock_path, &message_id, "brand new reply")
         .await
         .unwrap();
-    assert_eq!(res.status(), reqwest::StatusCode::CREATED);
 
     // Verify old reply is purged and only new reply remains
     let res = client

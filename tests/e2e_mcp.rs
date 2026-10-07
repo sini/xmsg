@@ -61,6 +61,7 @@ struct McpHarness {
     base_url: String,
     sessions_dir: PathBuf,
     proc_root: PathBuf,
+    agent_sock: PathBuf,
     received_lines: Arc<Mutex<Vec<String>>>,
     stop_signal: Arc<AtomicBool>,
 }
@@ -70,6 +71,7 @@ impl McpHarness {
         McpConfig {
             sessions_dir: self.sessions_dir.clone(),
             xmsg_url: self.base_url.clone(),
+            agent_sock: self.agent_sock.clone(),
             proc_root: self.proc_root.clone(),
             presence_dir: PathBuf::from("/tmp/nonexistent-presence"),
             proc_locks_path: PathBuf::from("/tmp/nonexistent-proc-locks"),
@@ -87,7 +89,12 @@ async fn start_mcp_harness() -> McpHarness {
     let sess_dir = tempdir().expect("tempdir for sessions");
     let proc_dir = tempdir().expect("tempdir for proc");
     let sock_dir = tempdir().expect("tempdir for sockets");
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(sock_dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+
     let sock_path = sock_dir.path().join("target_inbox.sock");
+    let agent_sock_path = sock_dir.path().join("agent.sock");
+    let my_uid = xmsg::agent::current_uid();
 
     let listener = UnixListener::bind(&sock_path).expect("bind unix socket");
     let received_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -142,7 +149,7 @@ async fn start_mcp_harness() -> McpHarness {
         agy_config: xmsg::agy::AgyConfig {
             presence_dir: sess_dir.path().join("presence"),
             proc_locks_path: sess_dir.path().join("proc_locks"),
-            proc_root: PathBuf::from("/proc"),
+            proc_root: proc_dir.path().to_path_buf(),
             agy_bin: "agy".to_string(),
         },
         agy_store: xmsg::agy::new_agy_store(),
@@ -156,7 +163,7 @@ async fn start_mcp_harness() -> McpHarness {
         reply_ttl: Duration::from_secs(3600),
     });
 
-    let app = build_router(app_state);
+    let app = build_router(app_state.clone());
     let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = tcp_listener.local_addr().unwrap().port();
     let base_url = format!("http://127.0.0.1:{port}");
@@ -165,9 +172,18 @@ async fn start_mcp_harness() -> McpHarness {
         axum::serve(tcp_listener, app).await.unwrap();
     });
 
+    let ag_sock = agent_sock_path.clone();
+    let ag_state = app_state.clone();
+    tokio::spawn(async move {
+        let _ = xmsg::agent::run_agent_server(ag_sock, ag_state, my_uid).await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
     McpHarness {
         sessions_dir: sess_dir.path().to_path_buf(),
         proc_root: proc_dir.path().to_path_buf(),
+        agent_sock: agent_sock_path,
         _sess_dir: sess_dir,
         _proc_dir: proc_dir,
         _sock_dir: sock_dir,
@@ -389,7 +405,7 @@ async fn test_mcp_send_and_reply_with_derived_caller() {
     assert_eq!(delivery_json["sessionId"], "sess-target-5000");
     assert_eq!(
         delivery_json["fromName"],
-        "xmsg@test-host · calling-orchestrator"
+        "xmsg@test-host · session:calling-orchestrator"
     );
 
     // Check socket delivery to target-agent
@@ -400,7 +416,7 @@ async fn test_mcp_send_and_reply_with_derived_caller() {
     assert!(inbox_line
         .message
         .content
-        .contains("from-name=\"xmsg@test-host · calling-orchestrator\""));
+        .contains("from-name=\"xmsg@test-host · session:calling-orchestrator\""));
     assert!(inbox_line
         .message
         .content
@@ -494,6 +510,8 @@ async fn test_shipped_binary_mcp_initialize_and_tool_call() {
         .arg(&harness.sessions_dir)
         .arg("--xmsg-url")
         .arg(&harness.base_url)
+        .arg("--agent-sock")
+        .arg(&harness.agent_sock)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

@@ -519,16 +519,9 @@ pub fn current_uid() -> u32 {
     }
 }
 
-/// Returns the default registration socket path ($XDG_RUNTIME_DIR/xmsg/register.sock or /tmp/xmsg-$UID/register.sock).
-pub fn default_register_sock_path() -> PathBuf {
-    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(runtime_dir)
-            .join("xmsg")
-            .join("register.sock")
-    } else {
-        let uid = current_uid();
-        PathBuf::from(format!("/tmp/xmsg-{uid}")).join("register.sock")
-    }
+/// Returns the default registration socket path ($XDG_RUNTIME_DIR/xmsg/register.sock).
+pub fn default_register_sock_path() -> Result<PathBuf, AppError> {
+    crate::agent::default_register_sock_path()
 }
 
 /// Runs the registration Unix domain socket server multiplexing agy and pi harnesses.
@@ -544,9 +537,12 @@ pub async fn run_register_server(
     my_uid: u32,
 ) -> io::Result<()> {
     if let Some(parent) = sock_path.parent() {
-        let _ = fs::create_dir_all(parent);
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+        if let Err(e) = crate::agent::ensure_secure_socket_dir(parent, my_uid) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                e.to_string(),
+            ));
+        }
     }
     let _ = fs::remove_file(&sock_path);
 

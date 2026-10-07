@@ -47,13 +47,6 @@ pub struct MessageDetailResponse {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct SendReplyRequest {
-    pub session_ref: String,
-    pub text: String,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct LongPollQuery {
     pub after: Option<i64>,
     pub wait: Option<u64>,
@@ -66,10 +59,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/sessions/{ref}", get(get_session_handler))
         .route("/v1/sessions/{ref}/messages", post(send_message_handler))
         .route("/v1/messages/{id}", get(get_message_handler))
-        .route(
-            "/v1/messages/{id}/replies",
-            get(get_replies_handler).post(send_reply_handler),
-        )
+        .route("/v1/messages/{id}/replies", get(get_replies_handler))
         .with_state(state)
 }
 
@@ -85,13 +75,16 @@ async fn healthz_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
     )
 }
 
-enum ResolvedTarget {
+pub(crate) enum ResolvedTarget {
     Claude(registry::Session, PathBuf),
     Agy(registry::Session),
     Pi(registry::Session),
 }
 
-fn resolve_target_session(state: &AppState, ref_str: &str) -> Result<ResolvedTarget, AppError> {
+pub(crate) fn resolve_target_session(
+    state: &AppState,
+    ref_str: &str,
+) -> Result<ResolvedTarget, AppError> {
     match registry::resolve_session(&state.sessions_dir, ref_str) {
         Ok((session, socket_path)) => Ok(ResolvedTarget::Claude(session, socket_path)),
         Err(AppError::Gone { session_id, pid }) => Err(AppError::Gone { session_id, pid }),
@@ -177,6 +170,18 @@ async fn send_message_handler(
             req_id, ref_str, body_len
         );
         return Err(AppError::BadRequest("text must not be empty".to_string()));
+    }
+
+    // Prefix protection: HTTP callers may not claim session: or session/ prefixes
+    let trimmed_from = req.from.trim();
+    if trimmed_from.starts_with("session:") || trimmed_from.starts_with("session/") {
+        eprintln!(
+            "req_id={} ref={} bytes={} outcome=bad_sender detail=\"reserved prefix\"",
+            req_id, ref_str, body_len
+        );
+        return Err(AppError::BadRequest(
+            "sender prefix 'session:' or 'session/' is reserved for attested callers".to_string(),
+        ));
     }
 
     // Sanitize sender name
@@ -402,76 +407,4 @@ async fn get_replies_handler(
     };
 
     Ok((StatusCode::OK, Json(replies)).into_response())
-}
-
-async fn send_reply_handler(
-    State(state): State<Arc<AppState>>,
-    AxumPath(id): AxumPath<String>,
-    body_bytes: Bytes,
-) -> Result<Response, AppError> {
-    let req_id = state.request_counter.fetch_add(1, Ordering::Relaxed);
-    let body_len = body_bytes.len();
-
-    if body_len > state.max_body {
-        return Err(AppError::PayloadTooLarge {
-            size: body_len,
-            limit: state.max_body,
-        });
-    }
-
-    let req: SendReplyRequest =
-        serde_json::from_slice(&body_bytes).map_err(|e| AppError::BadRequest(e.to_string()))?;
-
-    if req.text.is_empty() {
-        return Err(AppError::BadRequest("text must not be empty".to_string()));
-    }
-
-    // Resolve replier session
-    let target = resolve_target_session(&state, &req.session_ref)?;
-    let replier_session_id = match target {
-        ResolvedTarget::Claude(s, _) => s.session_id,
-        ResolvedTarget::Agy(s) => s.session_id,
-        ResolvedTarget::Pi(s) => s.session_id,
-    };
-
-    // Lock SQLite, verify recipient, insert reply, and purge
-    let reply = {
-        let db = state
-            .db
-            .lock()
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-        let msg = storage::get_message(&db, &id)
-            .map_err(|e| AppError::Internal(e.to_string()))?
-            .ok_or_else(|| AppError::NotFound(format!("message '{id}'")))?;
-
-        // Only the recipient of the message may reply (§8.3)
-        if replier_session_id != msg.session_id {
-            eprintln!(
-                "req_id={} message_id={} session_id={} expected_recipient={} outcome=not_recipient",
-                req_id, id, replier_session_id, msg.session_id
-            );
-            return Err(AppError::NotRecipient(format!(
-                "session {} is not the recipient of message {}",
-                req.session_ref, id
-            )));
-        }
-
-        let reply = storage::insert_reply(&db, &id, &replier_session_id, &req.text)
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-
-        // Run TTL purge
-        let _ = storage::purge_replies(&db, state.reply_ttl.as_secs());
-
-        reply
-    };
-
-    // Notify long-poll waiters
-    let _ = state.notify_tx.send(id.clone());
-
-    eprintln!(
-        "req_id={} message_id={} reply_seq={} replier={} outcome=reply_created",
-        req_id, id, reply.seq, replier_session_id
-    );
-
-    Ok((StatusCode::CREATED, Json(reply)).into_response())
 }

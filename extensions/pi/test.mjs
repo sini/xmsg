@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import net from "node:net";
-import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -72,6 +71,7 @@ async function runTest1() {
 
 async function runTest2() {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ext-test-"));
+  fs.chmodSync(tmpDir, 0o700);
   const sockPath = path.join(tmpDir, "test.sock");
 
   let serverReceivedReg = null;
@@ -166,41 +166,63 @@ async function runTest2() {
 }
 
 async function runTest3() {
-  let receivedPost = null;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ext-agent-sock-"));
+  fs.chmodSync(tmpDir, 0o700);
+  const agentSockPath = path.join(tmpDir, "agent.sock");
 
-  const server = http.createServer((req, res) => {
-    let body = "";
-    req.on("data", (c) => (body += c.toString()));
-    req.on("end", () => {
-      receivedPost = {
-        url: req.url,
-        method: req.method,
-        headers: req.headers,
-        body: JSON.parse(body),
-      };
+  let receivedReq = null;
 
-      if (req.url === "/v1/messages/msg-valid/replies") {
-        res.writeHead(201, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ id: "rep-101", seq: 1, text: receivedPost.body.text }));
-      } else if (req.url === "/v1/messages/msg-not-recipient/replies") {
-        res.writeHead(403, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "not_recipient" }));
-      } else {
-        res.writeHead(404);
-        res.end();
+  const server = net.createServer((socket) => {
+    socket.on("error", () => {});
+    let buf = "";
+    socket.on("data", (chunk) => {
+      buf += chunk.toString();
+      let lines = buf.split("\n");
+      buf = lines.pop();
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        receivedReq = JSON.parse(line);
+        if (receivedReq.messageId === "msg-valid") {
+          socket.write(
+            JSON.stringify({
+              status: "ok",
+              reply: {
+                id: "rep-101",
+                messageId: "msg-valid",
+                seq: 1,
+                sessionRef: "pi-sess-replier",
+                createdAt: 1000,
+                text: receivedReq.text,
+              },
+            }) + "\n"
+          );
+        } else if (receivedReq.messageId === "msg-not-recipient") {
+          socket.write(
+            JSON.stringify({
+              status: "error",
+              error: "not_recipient",
+              detail: "caller is not recipient",
+            }) + "\n"
+          );
+        } else {
+          socket.write(
+            JSON.stringify({
+              status: "error",
+              error: "not_found",
+              detail: "message not found",
+            }) + "\n"
+          );
+        }
       }
     });
   });
 
-  const port = await new Promise((resolve) => {
-    server.listen(0, "127.0.0.1", () => {
-      resolve(server.address().port);
-    });
-  });
+  await new Promise((resolve) => server.listen(agentSockPath, resolve));
 
   const mockPi = new MockExtensionAPI();
   const bridge = new XmsgPiBridge(mockPi, {
-    xmsgUrl: `http://127.0.0.1:${port}`,
+    agentSockPath,
   });
   bridge.setSession("pi-sess-replier");
   bridge.registerReplyTool();
@@ -208,7 +230,7 @@ async function runTest3() {
   const replyTool = mockPi.tools.find((t) => t.name === "reply");
   assert.ok(replyTool);
 
-  // 1. Successful reply (201 Created)
+  // 1. Successful reply over agent.sock
   const result1 = await replyTool.execute(
     "call-1",
     { message_id: "msg-valid", text: "Hello from Pi!" },
@@ -217,14 +239,13 @@ async function runTest3() {
     { sessionManager: { getSessionId: () => "pi-sess-replier" } },
   );
 
-  assert.equal(receivedPost.method, "POST");
-  assert.equal(receivedPost.url, "/v1/messages/msg-valid/replies");
-  assert.equal(receivedPost.body.sessionRef, "pi-sess-replier");
-  assert.equal(receivedPost.body.text, "Hello from Pi!");
+  assert.equal(receivedReq.action, "reply");
+  assert.equal(receivedReq.messageId, "msg-valid");
+  assert.equal(receivedReq.text, "Hello from Pi!");
   assert.equal(result1.content[0].text, "Reply sent (seq 1)");
   assert.equal(result1.details.seq, 1);
 
-  // 2. Forbidden reply (403 Not Recipient)
+  // 2. Forbidden reply (not_recipient)
   const result2 = await replyTool.execute(
     "call-2",
     { message_id: "msg-not-recipient", text: "Imposter reply!" },
@@ -234,11 +255,11 @@ async function runTest3() {
   );
 
   assert.ok(result2.content[0].text.includes("not recipient of message msg-not-recipient"));
-  assert.equal(result2.details.status, 403);
   assert.equal(result2.details.error, "not_recipient");
 
   await new Promise((r) => server.close(r));
-  console.log("✔ Test 3 passed: Pi reply tool executes POST /v1/messages/{id}/replies correctly");
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  console.log("✔ Test 3 passed: Pi reply tool connects to agent.sock and handles reply correctly");
 }
 
 async function main() {

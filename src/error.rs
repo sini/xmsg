@@ -46,6 +46,9 @@ pub enum AppError {
 
     #[error("internal server error: {0}")]
     Internal(String),
+
+    #[error("insecure socket directory: {0}")]
+    InsecureSocketDir(String),
 }
 
 impl IntoResponse for AppError {
@@ -80,6 +83,9 @@ impl IntoResponse for AppError {
                 (StatusCode::SERVICE_UNAVAILABLE, "credentials_stale", d)
             }
             AppError::Internal(d) => (StatusCode::INTERNAL_SERVER_ERROR, "internal", d),
+            AppError::InsecureSocketDir(d) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "insecure_socket_dir", d)
+            }
         };
 
         (

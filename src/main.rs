@@ -83,6 +83,10 @@ pub struct ServeArgs {
     /// Registration socket path (defaults to $XDG_RUNTIME_DIR/xmsg/register.sock)
     #[arg(long, env = "XMSG_REGISTER_SOCK")]
     pub register_sock: Option<PathBuf>,
+
+    /// Agent socket path (defaults to $XDG_RUNTIME_DIR/xmsg/agent.sock)
+    #[arg(long, env = "XMSG_AGENT_SOCK")]
+    pub agent_sock: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -94,6 +98,10 @@ pub struct McpArgs {
     /// URL of xmsg HTTP server
     #[arg(long, env = "XMSG_URL", default_value = "http://127.0.0.1:7787")]
     pub xmsg_url: String,
+
+    /// Agent socket path (defaults to $XDG_RUNTIME_DIR/xmsg/agent.sock)
+    #[arg(long, env = "XMSG_AGENT_SOCK")]
+    pub agent_sock: Option<PathBuf>,
 }
 
 fn resolve_sessions_dir(dir: Option<PathBuf>) -> PathBuf {
@@ -150,7 +158,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Mcp(args) => {
             let sessions_dir = resolve_sessions_dir(args.sessions_dir);
-            let config = McpConfig::new(sessions_dir, args.xmsg_url);
+            let mut config = McpConfig::new(sessions_dir, args.xmsg_url);
+            if let Some(sock) = args.agent_sock {
+                config.agent_sock = sock;
+            }
             let stdin = io::stdin();
             let stdout = io::stdout();
             run_mcp_loop(&config, stdin.lock(), stdout.lock())?;
@@ -174,9 +185,15 @@ fn run_register_agy(args: RegisterAgyArgs) -> Result<(), Box<dyn std::error::Err
         let csrf_token = std::env::var("ANTIGRAVITY_CSRF_TOKEN")
             .map_err(|_| "ANTIGRAVITY_CSRF_TOKEN not set")?;
 
-        let sock_path = args
-            .sock
-            .unwrap_or_else(xmsg::agy::default_register_sock_path);
+        let sock_path = match args.sock {
+            Some(p) => p,
+            None => xmsg::agent::default_register_sock_path()?,
+        };
+
+        let my_uid = xmsg::agent::current_uid();
+        if let Some(parent) = sock_path.parent() {
+            xmsg::agent::ensure_secure_socket_dir(parent, my_uid)?;
+        }
 
         use std::io::{Read, Write};
         use std::os::unix::net::UnixStream;
@@ -254,10 +271,17 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let agy_config = xmsg::agy::AgyConfig::default();
     let agy_store = xmsg::agy::new_agy_store();
     let pi_store = xmsg::pi::new_pi_store();
-    let my_uid = xmsg::agy::current_uid();
-    let register_sock_path = args
-        .register_sock
-        .unwrap_or_else(xmsg::agy::default_register_sock_path);
+    let my_uid = xmsg::agent::current_uid();
+    let register_sock_path = match args.register_sock {
+        Some(p) => p,
+        None => xmsg::agent::default_register_sock_path()
+            .map_err(|e| format!("cannot determine register socket path: {e}"))?,
+    };
+    let agent_sock_path = match args.agent_sock {
+        Some(p) => p,
+        None => xmsg::agent::default_agent_sock_path()
+            .map_err(|e| format!("cannot determine agent socket path: {e}"))?,
+    };
 
     let reg_config = agy_config.clone();
     let reg_store = agy_store.clone();
@@ -296,6 +320,14 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         db,
         notify_tx,
         reply_ttl,
+    });
+
+    let agent_sock = agent_sock_path.clone();
+    let agent_state = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = xmsg::agent::run_agent_server(agent_sock, agent_state, my_uid).await {
+            tracing::error!("agent server error: {e}");
+        }
     });
 
     let app = build_router(state);

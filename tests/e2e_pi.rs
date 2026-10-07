@@ -1,6 +1,7 @@
 use axum::http::StatusCode;
 use serde_json::Value;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -9,16 +10,10 @@ use tempfile::tempdir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+use xmsg::agent::run_agent_server;
 use xmsg::agy::{current_uid, new_agy_store, run_register_server, AgyConfig};
 use xmsg::http::{build_router, AppState};
 use xmsg::pi::new_pi_store;
-
-fn get_self_proc_start() -> String {
-    let stat = fs::read_to_string("/proc/self/stat").expect("read /proc/self/stat");
-    let rparen = stat.rfind(')').expect("closing paren in stat");
-    let fields: Vec<&str> = stat[rparen + 1..].split_whitespace().collect();
-    fields[19].to_string()
-}
 
 fn setup_mock_proc_pi(proc_root: &Path, pid: u32) -> String {
     let pid_dir = proc_root.join(pid.to_string());
@@ -36,11 +31,14 @@ fn setup_mock_proc_pi(proc_root: &Path, pid: u32) -> String {
 #[tokio::test]
 async fn test_e2e_pi_registration_delivery_and_reply_flow() {
     let tmp = tempdir().unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+
     let proc_root = tmp.path().join("proc");
     let proc_locks = tmp.path().join("locks");
     let presence_dir = tmp.path().join("presence");
     let sessions_dir = tmp.path().join("sessions");
     let sock_path = tmp.path().join("register.sock");
+    let agent_sock_path = tmp.path().join("agent.sock");
 
     fs::create_dir_all(&proc_root).unwrap();
     fs::create_dir_all(&presence_dir).unwrap();
@@ -95,11 +93,18 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
         reply_ttl,
     });
 
-    let app = build_router(app_state);
+    let app = build_router(app_state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let http_port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
+    });
+
+    // 2b. Start agent.sock server
+    let ag_sock = agent_sock_path.clone();
+    let ag_state = app_state.clone();
+    tokio::spawn(async move {
+        let _ = run_agent_server(ag_sock, ag_state, my_uid).await;
     });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -146,6 +151,7 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
 
     // 5. Pi starts long-poll on the socket in background task
     let (delivery_tx, mut delivery_rx) = tokio::sync::mpsc::channel::<Value>(1);
+    let (keepalive_tx, keepalive_rx) = tokio::sync::oneshot::channel::<()>();
     let mut writer_clone = writer;
 
     tokio::spawn(async move {
@@ -180,6 +186,8 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
                 let _ = reader.read_line(&mut ack_line).await;
             }
         }
+
+        let _ = keepalive_rx.await;
     });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -215,8 +223,8 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
     assert!(envelope.contains("reply with the xmsg reply tool"));
     assert!(envelope.contains("Hello Pi agent, please run unit tests!"));
 
-    // 8. Test reply from recipient Pi session (201 Created)
-    let reply_resp = client
+    // 8a. Red Demo 1: HTTP POST to /v1/messages/{id}/replies returns 405 Method Not Allowed
+    let http_reply_resp = client
         .post(format!(
             "http://127.0.0.1:{http_port}/v1/messages/{message_id}/replies"
         ))
@@ -227,35 +235,59 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
         .send()
         .await
         .unwrap();
+    assert_eq!(http_reply_resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 
-    assert_eq!(reply_resp.status(), StatusCode::CREATED);
-    let reply_data: Value = reply_resp.json().await.unwrap();
-    assert_eq!(reply_data["seq"], 1);
-    assert_eq!(reply_data["text"], "All 42 tests passed cleanly!");
+    // 8b. Test reply from recipient Pi session over agent.sock
+    let agent_stream = UnixStream::connect(&agent_sock_path).await.unwrap();
+    let (ag_reader, mut ag_writer) = agent_stream.into_split();
+    let mut ag_reader = BufReader::new(ag_reader);
 
-    // 9. Test reply from non-recipient session (403 Forbidden)
-    // Setup a dummy other session
-    let twin_sock = tmp.path().join("other.sock");
-    let self_proc_start = get_self_proc_start();
-    let other_json = format!(
-        r#"{{"pid": {my_pid}, "sessionId": "other-agent", "cwd": "/tmp", "status": "idle", "kind": "interactive", "startedAt": 1000, "updatedAt": 1000, "procStart": "{self_proc_start}", "messagingSocketPath": "{}"}}"#,
-        twin_sock.display()
-    );
-    fs::write(sessions_dir.join("other.json"), other_json).unwrap();
-
-    let reject_resp = client
-        .post(format!(
-            "http://127.0.0.1:{http_port}/v1/messages/{message_id}/replies"
-        ))
-        .json(&serde_json::json!({
-            "sessionRef": "other-agent",
-            "text": "Unauthorized hijack reply"
-        }))
-        .send()
+    let reply_cmd = serde_json::json!({
+        "action": "reply",
+        "messageId": message_id,
+        "text": "All 42 tests passed cleanly!"
+    });
+    ag_writer
+        .write_all(format!("{reply_cmd}\n").as_bytes())
         .await
         .unwrap();
 
-    assert_eq!(reject_resp.status(), StatusCode::FORBIDDEN);
+    let mut reply_line = String::new();
+    ag_reader.read_line(&mut reply_line).await.unwrap();
+    let reply_resp: Value = serde_json::from_str(&reply_line).unwrap();
+    assert_eq!(reply_resp["status"], "ok");
+    assert_eq!(reply_resp["reply"]["seq"], 1);
+    assert_eq!(reply_resp["reply"]["text"], "All 42 tests passed cleanly!");
+
+    // 9. Test reply to another message (not recipient) returns error on agent.sock
+    let other_msg_record = xmsg::storage::MessageRecord {
+        id: "other-msg-123".to_string(),
+        created_at: xmsg::storage::now_epoch_secs(),
+        session_id: "other-agent".to_string(),
+        from_name: "test-orch".to_string(),
+        bytes: 10,
+        outcome: "delivered".to_string(),
+    };
+    {
+        let db_lock = db.lock().unwrap();
+        xmsg::storage::insert_message(&db_lock, &other_msg_record).unwrap();
+    }
+
+    let hijack_cmd = serde_json::json!({
+        "action": "reply",
+        "messageId": "other-msg-123",
+        "text": "Unauthorized hijack reply"
+    });
+    ag_writer
+        .write_all(format!("{hijack_cmd}\n").as_bytes())
+        .await
+        .unwrap();
+
+    let mut reject_line = String::new();
+    ag_reader.read_line(&mut reject_line).await.unwrap();
+    let reject_resp: Value = serde_json::from_str(&reject_line).unwrap();
+    assert_eq!(reject_resp["status"], "error");
+    assert_eq!(reject_resp["error"], "not_recipient");
 
     // 10. Check GET /v1/messages/{id} includes the delivered message and recipient's reply
     let msg_detail_resp = client
@@ -272,4 +304,6 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
     assert_eq!(replies.len(), 1);
     assert_eq!(replies[0]["seq"], 1);
     assert_eq!(replies[0]["text"], "All 42 tests passed cleanly!");
+
+    let _ = keepalive_tx.send(());
 }
