@@ -7,8 +7,8 @@
 ## 1. Security Architecture & Trust Model
 
 ### 1.1 Same-UID Trust Boundary
-All local IPC in `xmsg` relies on Unix domain sockets located in `$XDG_RUNTIME_DIR/xmsg/` (mode `0700` directory, socket mode `0600`, owned by the running user's UID):
-- Sockets authenticate connected peers via kernel-attested credentials (`SO_PEERCRED` UID).
+All local IPC in `xmsg` relies on Unix domain sockets located in `$XDG_RUNTIME_DIR/xmsg/` (mode `0700` directory, socket mode `0600`, owned by the running user's UID). On macOS, when `XDG_RUNTIME_DIR` is unset, the runtime dir is the per-user Darwin temp dir (`getconf DARWIN_USER_TEMP_DIR`, also a `0700` directory):
+- Sockets authenticate connected peers via kernel-attested credentials (`SO_PEERCRED` on Linux, `getpeereid` and `LOCAL_PEEREPID` on macOS). On macOS the peer PID is the last process to use the socket, not the one that connected as with `SO_PEERCRED`; they differ only when a connected socket is shared between processes before `accept`, and the UID check is unaffected.
 - Any process executing under the **same local UID** is within the trust boundary and may connect to the Unix sockets.
 - Sockets are protected against symlink attacks and race conditions on startup by verifying directory ownership and permissions prior to binding.
 
@@ -18,20 +18,20 @@ All local IPC in `xmsg` relies on Unix domain sockets located in `$XDG_RUNTIME_D
 
 ### 1.3 Attestation & Identity Derivation
 `xmsg` prevents cross-session and cross-harness impersonation among non-adversarial same-UID processes:
-- **Claude Sessions:** Discovered via `~/.claude/sessions` and verified for process liveness and starttime continuity via `/proc/<pid>/stat`.
-- **Antigravity Sessions:** Verified via presence lock holder files in `/proc/locks` (enforcing `FLOCK` only and refusing ambiguous multiple holders).
+- **Claude Sessions:** Discovered via `~/.claude/sessions` and verified for process liveness and starttime continuity via `/proc/<pid>/stat` (on macOS via `proc_pidinfo`, matching to the second the UTC `ps -o lstart` text Claude Code records as `procStart`; local-time renderings are rejected).
+- **Antigravity Sessions:** Verified via presence lock holder files in `/proc/locks` (enforcing `FLOCK` only and refusing ambiguous multiple holders). Linux only: macOS has no way to read another process's `flock` holders, so agy sessions are never listed there and `register agy` is rejected.
 - **Pi Sessions:** Session identity is **server-derived** from attested kernel process parameters:
   ```text
   sessionId = "pi:" || peer_pid || ":" || starttime
   ```
   Caller-asserted session IDs in registration payloads are completely ignored.
-- **Process Verification:** Pi peer processes are inspected for command line and script baselines in `/proc/<pid>/cmdline`. Note that this verifies process argument baselines but does not cryptographically authenticate the executable binary.
+- **Process Verification:** Pi peer processes are inspected for command line and script baselines in `/proc/<pid>/cmdline` (`KERN_PROCARGS2` on macOS). Note that this verifies process argument baselines but does not cryptographically authenticate the executable binary.
 - **Attested Badges & Harness Binding:** The attested sender badge formats as:
   ```text
   fromName = "xmsg@" || host_label || " · " || caller.harness || ":" || cleaned_name
   ```
   The harness (`claude:`, `pi:`, `agy:`) and process binding are cryptographically/kernel-attested by `xmsg`, while the display name is chosen by the session.
-- **Ancestor Process Walk:** For calls to `agent.sock` (such as MCP tools spawned in child shells), `xmsg` traverses parent PIDs upwards through `/proc/<pid>/stat` to identify the originating agent session.
+- **Ancestor Process Walk:** For calls to `agent.sock` (such as MCP tools spawned in child shells), `xmsg` traverses parent PIDs upwards through `/proc/<pid>/stat` (`proc_pidinfo` on macOS) to identify the originating agent session.
 - **Harness-Bound Reply Authorization:** All stored messages record the recipient harness (`claude`, `agy`, or `pi`). A reply is accepted only when:
   ```text
   caller.harness == msg.recipient_harness && caller.session_id == msg.session_id
@@ -76,7 +76,7 @@ flowchart TD
   HTTP --> Registry
 ```
 
-`xmsg` operates two Unix domain sockets in `$XDG_RUNTIME_DIR/xmsg/` (created with file permissions mode `0600`):
+`xmsg` operates two Unix domain sockets in `$XDG_RUNTIME_DIR/xmsg/`, or the Darwin user temp dir on macOS (created with file permissions mode `0600`):
 
 ### 2.1 `agent.sock`
 Used by active agent sessions and MCP tool instances:
@@ -181,8 +181,9 @@ cargo clippy --all-targets -- -D warnings
 # Check code formatting
 cargo fmt -- --check
 
-# Test Pi extension
+# Test Pi extension (test.mjs needs a node-based pi install; test-paths.mjs runs anywhere)
 node extensions/pi/test.mjs
+node extensions/pi/test-paths.mjs
 
 # Build Nix package
 nix build .#default --no-link
