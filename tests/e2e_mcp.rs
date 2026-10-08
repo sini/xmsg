@@ -164,6 +164,7 @@ async fn start_mcp_harness() -> McpHarness {
         notify_tx,
         reply_ttl: Duration::from_secs(3600),
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
+        fed_state: None,
     });
 
     let app = build_router(app_state.clone());

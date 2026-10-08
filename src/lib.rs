@@ -2,6 +2,7 @@ pub mod adapter;
 pub mod agent;
 pub mod agy;
 pub mod error;
+pub mod fed;
 pub mod http;
 pub mod inbox;
 pub mod mcp;

@@ -318,6 +318,7 @@ async fn test_agent_sock_reply_and_send_flow() {
         notify_tx,
         reply_ttl: Duration::from_secs(3600),
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
+        fed_state: None,
     });
 
     let s_path = agent_sock_path.clone();
@@ -346,6 +347,7 @@ async fn test_agent_sock_reply_and_send_flow() {
         return_session_id: None,
         push_replies: false,
         thread_id: "msg-001".to_string(),
+        return_host: None,
     };
     {
         let db_lock = db.lock().unwrap();
@@ -384,6 +386,7 @@ async fn test_agent_sock_reply_and_send_flow() {
         return_session_id: None,
         push_replies: false,
         thread_id: "msg-002".to_string(),
+        return_host: None,
     };
     {
         let db_lock = db.lock().unwrap();

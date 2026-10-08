@@ -166,6 +166,7 @@ async fn start_replies_harness(reply_ttl: Duration) -> RepliesHarness {
         notify_tx,
         reply_ttl,
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
+        fed_state: None,
     });
 
     let app = build_router(app_state.clone());

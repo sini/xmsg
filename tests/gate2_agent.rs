@@ -176,6 +176,7 @@ async fn setup(max_body: usize) -> Env {
         notify_tx: ntx,
         reply_ttl: ttl,
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
+        fed_state: None,
     });
 
     {
@@ -214,6 +215,7 @@ fn msg(db: &Arc<Mutex<rusqlite::Connection>>, id: &str, sid: &str, h: &str) {
             return_session_id: None,
             push_replies: false,
             thread_id: id.into(),
+            return_host: None,
         },
     )
     .unwrap();

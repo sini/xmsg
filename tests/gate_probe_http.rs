@@ -98,6 +98,7 @@ async fn start_harness() -> TestHarness {
         notify_tx,
         reply_ttl: Duration::from_secs(604800),
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
+        fed_state: None,
     });
 
     let app = build_router(app_state);

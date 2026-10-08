@@ -189,6 +189,7 @@ async fn setup_gate_harness() -> GateHarness {
         notify_tx,
         reply_ttl: Duration::from_secs(3600),
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
+        fed_state: None,
     });
 
     let ag_sock = agent_sock_path.clone();
@@ -263,6 +264,7 @@ async fn test_gate_probe_b2_pi_registration_and_cross_harness_reply_isolation() 
         return_session_id: None,
         push_replies: false,
         thread_id: "msg-b2-001".to_string(),
+        return_host: None,
     };
     {
         let db = harness.db.lock().unwrap();
