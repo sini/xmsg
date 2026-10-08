@@ -689,4 +689,40 @@ fn oracle_4_non_agy_ancestor_gets_no_identity_at_mcp_start() {
         }
         other => panic!("expected NotRecipient for missing lock, got {other:?}"),
     }
+
+    // Case 4C: Trusted exe, presence lock open, FLOCK holder equals ancestor PID (positive control)
+    let locks_content_4c = format!(
+        "1: FLOCK ADVISORY WRITE 6000 {:02x}:{:02x}:{} 0 EOF\n",
+        maj, min, ino
+    );
+    fs::write(&proc_locks, locks_content_4c).unwrap();
+
+    setup_mock_process(
+        &proc_root,
+        6000,
+        1,
+        Some(&trusted_agy),
+        Some(&lock_file),
+        "100",
+    );
+    setup_mock_process(&proc_root, 6001, 6000, None, None, "200");
+
+    let res_ok = attest_mcp_caller(
+        &proc_root,
+        &proc_locks,
+        &presence_dir,
+        &trusted_exes,
+        1000,
+        1000,
+        6001,
+    );
+    match res_ok {
+        Ok((reg, conv_id)) => {
+            assert_eq!(reg.pid, 6000);
+            assert_eq!(reg.starttime, "100");
+            assert_eq!(reg.session_key, "agy:6000:100");
+            assert_eq!(conv_id, "conv-oracle4");
+        }
+        other => panic!("expected Ok for valid agy ancestor, got {other:?}"),
+    }
 }
