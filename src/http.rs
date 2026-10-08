@@ -106,7 +106,24 @@ pub(crate) fn resolve_target_session(
 ) -> Result<ResolvedTarget, AppError> {
     match registry::resolve_session(&state.sessions_dir, ref_str) {
         Ok((session, socket_path)) => Ok(ResolvedTarget::Claude(session, socket_path)),
-        Err(AppError::Gone { session_id, pid }) => Err(AppError::Gone { session_id, pid }),
+        Err(AppError::Gone { session_id, pid }) => {
+            if crate::process::starttime(&state.agy_config.proc_root, pid).is_ok() {
+                if let Some(session) =
+                    crate::agy::resolve_agy_session(&state.agy_config, &state.agy_store, ref_str)?
+                {
+                    return Ok(ResolvedTarget::Agy(session));
+                }
+                if let Some(session) = crate::pi::resolve_pi_session(
+                    &state.agy_config.proc_root,
+                    &state.pi_store,
+                    ref_str,
+                )? {
+                    return Ok(ResolvedTarget::Pi(session));
+                }
+                return Err(AppError::Unregistered(pid));
+            }
+            Err(AppError::Gone { session_id, pid })
+        }
         Err(AppError::Ambiguous(ids)) => Err(AppError::Ambiguous(ids)),
         Err(AppError::NotFound(_)) => {
             match crate::agy::resolve_agy_session(&state.agy_config, &state.agy_store, ref_str)? {
@@ -118,7 +135,16 @@ pub(crate) fn resolve_target_session(
                         ref_str,
                     )? {
                         Some(session) => Ok(ResolvedTarget::Pi(session)),
-                        None => Err(AppError::NotFound(ref_str.to_string())),
+                        None => {
+                            if let Ok(pid) = ref_str.parse::<u32>() {
+                                if crate::process::starttime(&state.agy_config.proc_root, pid)
+                                    .is_ok()
+                                {
+                                    return Err(AppError::Unregistered(pid));
+                                }
+                            }
+                            Err(AppError::NotFound(ref_str.to_string()))
+                        }
                     }
                 }
             }
@@ -215,7 +241,7 @@ async fn send_message_handler(
     // Generate ULID message ID
     let message_id = ulid::Ulid::new().to_string();
 
-    let (session_id, recipient_harness) = match target {
+    let (session_id, recipient_harness, outcome_str) = match target {
         ResolvedTarget::Claude(session, socket_path) => {
             let body_with_footer = format!(
                 "{}\n\n[xmsg] message_id={} — reply with the xmsg reply tool",
@@ -229,19 +255,59 @@ async fn send_message_handler(
                 );
                 return Err(err);
             }
-            (session.session_id, "claude".to_string())
+            (session.session_id, "claude".to_string(), "delivered")
         }
         ResolvedTarget::Agy(session) => {
-            crate::agy::deliver_agy(
-                &state.agy_config,
-                &state.agy_store,
-                &session,
-                &from_name,
-                &message_id,
-                &req.text,
-            )
-            .await?;
-            (session.session_id, "agy".to_string())
+            let has_creds = {
+                let store_lock = state.agy_store.read().unwrap();
+                store_lock
+                    .get(&session.session_id)
+                    .or_else(|| {
+                        store_lock.values().find(|info| {
+                            info.conversation_id == session.session_id
+                                || session.name.as_deref() == Some(&info.conversation_id)
+                        })
+                    })
+                    .map(|info| info.has_credentials())
+                    .unwrap_or(false)
+            };
+
+            if has_creds {
+                crate::agy::deliver_agy(
+                    &state.agy_config,
+                    &state.agy_store,
+                    &session,
+                    &from_name,
+                    &message_id,
+                    &req.text,
+                )
+                .await?;
+                (session.session_id, "agy".to_string(), "delivered")
+            } else {
+                let envelope = format!(
+                    "[xmsg] from={} message_id={} — reply with the xmsg reply tool\n\n{}",
+                    from_name, message_id, req.text
+                );
+                let agy_msg = storage::AgyPendingMessage {
+                    id: message_id.clone(),
+                    session_id: session.session_id.clone(),
+                    created_at: storage::now_epoch_secs(),
+                    from_name: from_name.clone(),
+                    bytes: body_len,
+                    text: req.text.clone(),
+                    envelope,
+                    delivered_at: None,
+                };
+                {
+                    let db = state
+                        .db
+                        .lock()
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                    storage::insert_agy_message(&db, &agy_msg)
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                }
+                (session.session_id, "agy".to_string(), "queued")
+            }
         }
         ResolvedTarget::Pi(session) => {
             let envelope = format!(
@@ -272,7 +338,7 @@ async fn send_message_handler(
                 }
             }
             let _ = state.pi_notify_tx.send(session.session_id.clone());
-            (session.session_id, "pi".to_string())
+            (session.session_id, "pi".to_string(), "delivered")
         }
     };
 
@@ -283,7 +349,7 @@ async fn send_message_handler(
         session_id: session_id.clone(),
         from_name: from_name.clone(),
         bytes: body_len,
-        outcome: "delivered".to_string(),
+        outcome: outcome_str.to_string(),
         recipient_harness,
         return_harness: None,
         return_session_id: None,
@@ -300,12 +366,13 @@ async fn send_message_handler(
         let _ = storage::purge_messages(&db, state.reply_ttl.as_secs());
         let _ = storage::purge_replies(&db, state.reply_ttl.as_secs());
         let _ = storage::purge_pi_messages(&db, state.reply_ttl.as_secs());
+        let _ = storage::purge_agy_messages(&db, state.reply_ttl.as_secs());
     }
 
     // Invariant: Message bodies are NEVER logged under any circumstances
     eprintln!(
-        "req_id={} message_id={} session_id={} from=\"{}\" bytes={} outcome=delivered",
-        req_id, message_id, session_id, from_name, body_len
+        "req_id={} message_id={} session_id={} from=\"{}\" bytes={} outcome={}",
+        req_id, message_id, session_id, from_name, body_len, outcome_str
     );
     info!(
         target: "xmsg",
@@ -314,7 +381,7 @@ async fn send_message_handler(
         session_id = %session_id,
         from = %from_name,
         bytes = body_len,
-        outcome = "delivered"
+        outcome = outcome_str
     );
 
     Ok((
@@ -324,6 +391,7 @@ async fn send_message_handler(
             from_name,
             bytes: body_len,
             message_id,
+            outcome: Some(outcome_str.to_string()),
         }),
     )
         .into_response())

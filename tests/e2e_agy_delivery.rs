@@ -81,11 +81,11 @@ exit 0
         conv_id.to_string(),
         my_pid,
         "100".to_string(),
-        AgyCredentials {
+        Some(AgyCredentials {
             ls_address: "127.0.0.1:9999".to_string(),
             csrf_token: "super-secret-token-xyz".to_string(),
             is_stale: false,
-        },
+        }),
     );
     let initial_key = initial_info.session_key.clone();
     agy_store
@@ -178,7 +178,7 @@ exit 0
         let store = agy_store.read().unwrap();
         let creds = store.get(&initial_key).unwrap();
         assert!(
-            creds.is_stale,
+            creds.credentials.as_ref().unwrap().is_stale,
             "Store entry must be marked stale after Unauthenticated error"
         );
     }
@@ -204,11 +204,11 @@ exit 0
         conv_id.to_string(),
         my_pid,
         "100".to_string(),
-        AgyCredentials {
+        Some(AgyCredentials {
             ls_address: "127.0.0.1:9999".to_string(),
             csrf_token: "refreshed-token-456".to_string(),
             is_stale: false,
-        },
+        }),
     );
     agy_store
         .write()

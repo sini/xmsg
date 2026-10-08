@@ -426,11 +426,11 @@ fn cell_minor_2_empty_starttime_not_alive() {
         conversation_id: "conv-1".to_string(),
         pid: 1000,
         starttime: String::new(), // empty starttime!
-        credentials: AgyCredentials {
+        credentials: Some(AgyCredentials {
             ls_address: "127.0.0.1:9000".to_string(),
             csrf_token: "csrf".to_string(),
             is_stale: false,
-        },
+        }),
         registered_at: 0,
     };
 

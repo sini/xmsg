@@ -33,21 +33,8 @@ pub struct AgySessionInfo {
     pub conversation_id: String,
     pub pid: u32,
     pub starttime: String,
-    pub credentials: AgyCredentials,
+    pub credentials: Option<AgyCredentials>,
     pub registered_at: i64,
-}
-
-impl std::ops::Deref for AgySessionInfo {
-    type Target = AgyCredentials;
-    fn deref(&self) -> &Self::Target {
-        &self.credentials
-    }
-}
-
-impl std::ops::DerefMut for AgySessionInfo {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.credentials
-    }
 }
 
 impl AgySessionInfo {
@@ -55,7 +42,7 @@ impl AgySessionInfo {
         conversation_id: String,
         pid: u32,
         starttime: String,
-        credentials: AgyCredentials,
+        credentials: Option<AgyCredentials>,
     ) -> Self {
         let session_key = format!("agy:{pid}:{starttime}");
         Self {
@@ -67,6 +54,19 @@ impl AgySessionInfo {
             registered_at: crate::storage::now_epoch_secs(),
         }
     }
+
+    pub fn new_with_credentials(
+        conversation_id: String,
+        pid: u32,
+        starttime: String,
+        credentials: AgyCredentials,
+    ) -> Self {
+        Self::new(conversation_id, pid, starttime, Some(credentials))
+    }
+
+    pub fn has_credentials(&self) -> bool {
+        self.credentials.is_some()
+    }
 }
 
 #[cfg(test)]
@@ -77,7 +77,7 @@ impl From<AgyCredentials> for AgySessionInfo {
             conversation_id: String::new(),
             pid: 0,
             starttime: String::new(),
-            credentials: c,
+            credentials: Some(c),
             registered_at: 0,
         }
     }
@@ -310,10 +310,10 @@ pub fn list_agy_sessions(
                 },
                 pid: info.pid,
                 cwd: "/".to_string(),
-                status: if info.credentials.is_stale {
-                    "stale".to_string()
-                } else {
-                    "idle".to_string()
+                status: match &info.credentials {
+                    None => "idle".to_string(),
+                    Some(c) if c.is_stale => "stale".to_string(),
+                    Some(_) => "idle".to_string(),
                 },
                 kind: "interactive".to_string(),
                 entrypoint: None,
@@ -321,7 +321,7 @@ pub fn list_agy_sessions(
                 started_at: info.registered_at as u64,
                 updated_at: info.registered_at as u64,
                 harness: "agy".to_string(),
-                registered: Some(true),
+                registered: Some(info.credentials.is_some()),
             };
 
             if let Some(ref q_status) = query.status {
@@ -586,6 +586,213 @@ pub fn verify_registration(
     })
 }
 
+/// Attests that a connecting peer (e.g. `xmsg mcp`) descends from an Antigravity process
+/// holding a valid presence lock.
+pub fn attest_mcp_caller(
+    proc_root: &Path,
+    proc_locks: &Path,
+    presence_dir: &Path,
+    trusted_exes: &[PathBuf],
+    my_uid: u32,
+    peer_uid: u32,
+    peer_pid: u32,
+) -> Result<(AgyRegistration, String), AppError> {
+    // 1. Peer UID verification
+    if peer_uid != my_uid {
+        return Err(AppError::NotRecipient(format!(
+            "peer UID {peer_uid} does not match server UID {my_uid}"
+        )));
+    }
+
+    // 2. Configuration requirement: refuse if no trusted agy executable configured
+    if trusted_exes.is_empty() {
+        return Err(AppError::BadRequest(
+            "no trusted agy executable configured; set --agy-exe or XMSG_AGY_EXE".to_string(),
+        ));
+    }
+
+    // 3. Canonicalize trusted exes
+    let trusted_canons: Vec<PathBuf> = trusted_exes
+        .iter()
+        .map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        .collect();
+
+    // 4. Read presence directory entries to know target locks
+    let mut presence_locks = Vec::new();
+    if let Ok(entries) = fs::read_dir(presence_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("lock") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    if let Ok(meta) = fs::metadata(&path) {
+                        use std::os::unix::fs::MetadataExt;
+                        presence_locks.push((stem.to_string(), meta.dev(), meta.ino()));
+                    }
+                }
+            }
+        }
+    }
+
+    if presence_locks.is_empty() {
+        return Err(AppError::NotRecipient(
+            "no presence lock files found in presence directory".to_string(),
+        ));
+    }
+
+    // 5. Ancestor walk from peer_pid to find an ancestor satisfying BOTH (a) and (b)
+    let mut curr_pid = peer_pid;
+    let mut chosen = None;
+
+    for _ in 0..32 {
+        if curr_pid <= 1 {
+            break;
+        }
+
+        let st1 = match crate::process::starttime(proc_root, curr_pid) {
+            Ok(st) => st,
+            Err(_) => {
+                let Some(ppid) = crate::process::parent_pid(proc_root, curr_pid) else {
+                    break;
+                };
+                curr_pid = ppid;
+                continue;
+            }
+        };
+
+        // (a) EXECUTABLE check: kernel-reported executable path matches a trusted exe
+        let exe_matches = match crate::process::exe_path(proc_root, curr_pid) {
+            Ok(exe) => {
+                let exe_canon = fs::canonicalize(&exe).unwrap_or(exe);
+                trusted_canons.contains(&exe_canon)
+            }
+            Err(_) => false,
+        };
+
+        if exe_matches {
+            // (b) OPEN FILE check: ancestor has presence lock open
+            let open_ids = crate::process::open_file_ids(proc_root, curr_pid).unwrap_or_default();
+            for (conv_id, target_dev, target_ino) in &presence_locks {
+                if open_ids.contains(&(*target_dev, *target_ino)) {
+                    let flock_ok = if locks_supported(proc_locks) {
+                        let maj = dev_major(*target_dev);
+                        let min = dev_minor(*target_dev);
+                        match find_lock_holder(proc_locks, maj, min, *target_ino) {
+                            Ok(Some(holder)) => holder == curr_pid,
+                            _ => false,
+                        }
+                    } else {
+                        true
+                    };
+
+                    if flock_ok {
+                        chosen = Some((curr_pid, st1, conv_id.clone()));
+                        break;
+                    }
+                }
+            }
+            if chosen.is_some() {
+                break;
+            }
+        }
+
+        let Some(ppid) = crate::process::parent_pid(proc_root, curr_pid) else {
+            break;
+        };
+        curr_pid = ppid;
+    }
+
+    let (chosen_pid, initial_starttime, conv_id) = match chosen {
+        Some(triple) => triple,
+        None => {
+            return Err(AppError::NotRecipient(format!(
+                "peer PID {peer_pid} has no ancestor matching a trusted agy executable with presence lock open"
+            )));
+        }
+    };
+
+    // Verify starttime stability
+    let st2 = crate::process::starttime(proc_root, chosen_pid).map_err(|e| {
+        AppError::Internal(format!(
+            "failed to read starttime for PID {chosen_pid}: {e}"
+        ))
+    })?;
+    if initial_starttime != st2 {
+        return Err(AppError::Internal(format!(
+            "process starttime changed during verification for PID {chosen_pid}"
+        )));
+    }
+    let session_key = format!("agy:{chosen_pid}:{st2}");
+
+    Ok((
+        AgyRegistration {
+            pid: chosen_pid,
+            starttime: st2,
+            session_key,
+        },
+        conv_id,
+    ))
+}
+
+pub async fn flush_agy_queue(
+    config: &AgyConfig,
+    store: &AgyStore,
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    session_key: &str,
+    conv_id: &str,
+) {
+    let pending_msgs = {
+        let db_lock = match db.lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                tracing::error!("failed to lock db for agy queue flush: {e}");
+                return;
+            }
+        };
+        match crate::storage::fetch_undelivered_agy_messages(&db_lock, &[session_key, conv_id]) {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                tracing::error!("failed to fetch undelivered agy messages: {e}");
+                return;
+            }
+        }
+    };
+
+    if pending_msgs.is_empty() {
+        return;
+    }
+
+    let session = Session {
+        session_id: session_key.to_string(),
+        name: Some(conv_id.to_string()),
+        pid: 0,
+        cwd: "/".to_string(),
+        status: "idle".to_string(),
+        kind: "interactive".to_string(),
+        entrypoint: None,
+        version: None,
+        started_at: 0,
+        updated_at: 0,
+        harness: "agy".to_string(),
+        registered: Some(true),
+    };
+
+    for msg in pending_msgs {
+        match deliver_agy_envelope(config, store, &session, &msg.from_name, &msg.envelope).await {
+            Ok(()) => {
+                let now = crate::storage::now_epoch_secs();
+                if let Ok(db_lock) = db.lock() {
+                    let _ = crate::storage::mark_agy_message_delivered(&db_lock, &msg.id, now);
+                    let _ = crate::storage::update_message_outcome(&db_lock, &msg.id, "delivered");
+                }
+            }
+            Err(e) => {
+                tracing::error!("failed to deliver queued agy message {}: {e}", msg.id);
+                break;
+            }
+        }
+    }
+}
+
 /// Delivers a message to an Antigravity session.
 pub async fn deliver_agy(
     config: &AgyConfig,
@@ -607,6 +814,7 @@ pub async fn deliver_agy(
         from_name: from_name.to_string(),
         bytes: body_text.len(),
         message_id: message_id.to_string(),
+        outcome: None,
     })
 }
 
@@ -638,9 +846,16 @@ pub async fn deliver_agy_envelope(
                 } else {
                     session.session_id.clone()
                 };
-                (alive, target, Some(info.credentials.clone()))
+                (alive, target, info.credentials.clone())
             }
-            None => (false, session.session_id.clone(), None),
+            None => {
+                let alive = if session.pid > 0 {
+                    crate::process::starttime(&config.proc_root, session.pid).is_ok()
+                } else {
+                    false
+                };
+                (alive, session.session_id.clone(), None)
+            }
         }
     };
 
@@ -709,12 +924,16 @@ pub async fn deliver_agy_envelope(
         {
             let mut store_lock = store.write().unwrap();
             if let Some(entry) = store_lock.get_mut(&session.session_id) {
-                entry.is_stale = true;
+                if let Some(ref mut c) = entry.credentials {
+                    c.is_stale = true;
+                }
             } else if let Some(entry) = store_lock.values_mut().find(|e| {
                 e.conversation_id == session.session_id
                     || session.name.as_deref() == Some(&e.conversation_id)
             }) {
-                entry.is_stale = true;
+                if let Some(ref mut c) = entry.credentials {
+                    c.is_stale = true;
+                }
             }
         }
         let excerpt: String = combined.chars().take(200).collect();
@@ -885,6 +1104,34 @@ pub async fn run_register_server(
             if !line.trim().is_empty() {
                 let val: Result<serde_json::Value, _> = serde_json::from_str(line.trim());
                 match val {
+                    Ok(ref v)
+                        if v.get("action").and_then(|a| a.as_str()) == Some("check")
+                            || v.get("action").and_then(|a| a.as_str())
+                                == Some("has_credentials") =>
+                    {
+                        let conv_id = v
+                            .get("conversation_id")
+                            .or_else(|| v.get("conversationId"))
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("");
+                        let has_creds = {
+                            let store_lock = store_clone.read().unwrap();
+                            store_lock.values().any(|info| {
+                                (info.conversation_id == conv_id || info.session_key == conv_id)
+                                    && info
+                                        .credentials
+                                        .as_ref()
+                                        .map(|c| !c.is_stale)
+                                        .unwrap_or(false)
+                            })
+                        };
+                        let resp = serde_json::json!({
+                            "status": "ok",
+                            "hasCredentials": has_creds,
+                            "has_credentials": has_creds,
+                        });
+                        let _ = writer.write_all(format!("{resp}\n").as_bytes()).await;
+                    }
                     Ok(ref v) if v.get("harness").and_then(|h| h.as_str()) == Some("pi") => {
                         match serde_json::from_value::<crate::pi::PiRegisterRequest>(v.clone()) {
                             Ok(req) => {
@@ -930,7 +1177,7 @@ pub async fn run_register_server(
                                 &req,
                             ) {
                                 Ok(reg) => {
-                                    let session_info = AgySessionInfo::new(
+                                    let session_info = AgySessionInfo::new_with_credentials(
                                         req.conversation_id.clone(),
                                         reg.pid,
                                         reg.starttime.clone(),
@@ -949,6 +1196,15 @@ pub async fn run_register_server(
                                         "sessionId": reg.session_key,
                                     });
                                     let _ = writer.write_all(format!("{resp}\n").as_bytes()).await;
+
+                                    flush_agy_queue(
+                                        &config_clone,
+                                        &store_clone,
+                                        &db_clone,
+                                        &reg.session_key,
+                                        &req.conversation_id,
+                                    )
+                                    .await;
                                 }
                                 Err(e) => {
                                     tracing::warn!("registration rejected: {e}");

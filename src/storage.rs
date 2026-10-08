@@ -58,6 +58,19 @@ pub struct PiPendingMessage {
     pub delivered_at: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgyPendingMessage {
+    pub id: String,
+    pub session_id: String,
+    pub created_at: i64,
+    pub from_name: String,
+    pub bytes: usize,
+    pub text: String,
+    pub envelope: String,
+    pub delivered_at: Option<i64>,
+}
+
 pub fn now_epoch_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -103,10 +116,23 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             delivered_at INTEGER
         );
 
+        CREATE TABLE IF NOT EXISTS agy_pending_messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            from_name TEXT NOT NULL,
+            bytes INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            envelope TEXT NOT NULL,
+            delivered_at INTEGER
+        );
+
         CREATE INDEX IF NOT EXISTS idx_replies_message_seq ON replies(message_id, seq);
         CREATE INDEX IF NOT EXISTS idx_replies_created_at ON replies(created_at);
         CREATE INDEX IF NOT EXISTS idx_pi_pending_session ON pi_pending_messages(session_id, delivered_at);
         CREATE INDEX IF NOT EXISTS idx_pi_pending_created_at ON pi_pending_messages(created_at);
+        CREATE INDEX IF NOT EXISTS idx_agy_pending_session ON agy_pending_messages(session_id, delivered_at);
+        CREATE INDEX IF NOT EXISTS idx_agy_pending_created_at ON agy_pending_messages(created_at);
         "#,
     )?;
 
@@ -379,6 +405,83 @@ pub fn purge_pi_messages(conn: &Connection, ttl_secs: u64) -> Result<usize> {
     let cutoff = now_epoch_secs() - (ttl_secs as i64);
     conn.execute(
         "DELETE FROM pi_pending_messages WHERE created_at < ?1",
+        params![cutoff],
+    )
+}
+
+pub fn insert_agy_message(conn: &Connection, msg: &AgyPendingMessage) -> Result<bool> {
+    conn.execute(
+        "INSERT INTO agy_pending_messages (id, session_id, created_at, from_name, bytes, text, envelope, delivered_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            msg.id,
+            msg.session_id,
+            msg.created_at,
+            msg.from_name,
+            msg.bytes as i64,
+            msg.text,
+            msg.envelope,
+            msg.delivered_at,
+        ],
+    )?;
+    Ok(true)
+}
+
+pub fn fetch_undelivered_agy_messages(
+    conn: &Connection,
+    session_keys: &[&str],
+) -> Result<Vec<AgyPendingMessage>> {
+    if session_keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders: Vec<String> = (1..=session_keys.len()).map(|i| format!("?{i}")).collect();
+    let query_str = format!(
+        "SELECT id, session_id, created_at, from_name, bytes, text, envelope, delivered_at FROM agy_pending_messages WHERE session_id IN ({}) AND delivered_at IS NULL ORDER BY created_at ASC, rowid ASC",
+        placeholders.join(", ")
+    );
+    let mut stmt = conn.prepare(&query_str)?;
+    let rusqlite_params: Vec<&dyn rusqlite::ToSql> = session_keys
+        .iter()
+        .map(|s| s as &dyn rusqlite::ToSql)
+        .collect();
+    let mut rows = stmt.query(rusqlite_params.as_slice())?;
+
+    let mut result = Vec::new();
+    while let Some(row) = rows.next()? {
+        let bytes_i64: i64 = row.get(4)?;
+        result.push(AgyPendingMessage {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            created_at: row.get(2)?,
+            from_name: row.get(3)?,
+            bytes: bytes_i64 as usize,
+            text: row.get(5)?,
+            envelope: row.get(6)?,
+            delivered_at: row.get(7)?,
+        });
+    }
+    Ok(result)
+}
+
+pub fn mark_agy_message_delivered(conn: &Connection, id: &str, delivered_at: i64) -> Result<bool> {
+    let count = conn.execute(
+        "UPDATE agy_pending_messages SET delivered_at = ?1 WHERE id = ?2 AND delivered_at IS NULL",
+        params![delivered_at, id],
+    )?;
+    Ok(count > 0)
+}
+
+pub fn update_message_outcome(conn: &Connection, id: &str, outcome: &str) -> Result<bool> {
+    let count = conn.execute(
+        "UPDATE messages SET outcome = ?1 WHERE id = ?2",
+        params![outcome, id],
+    )?;
+    Ok(count > 0)
+}
+
+pub fn purge_agy_messages(conn: &Connection, ttl_secs: u64) -> Result<usize> {
+    let cutoff = now_epoch_secs() - (ttl_secs as i64);
+    conn.execute(
+        "DELETE FROM agy_pending_messages WHERE created_at < ?1",
         params![cutoff],
     )
 }

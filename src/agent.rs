@@ -155,7 +155,7 @@ pub fn resolve_caller_session(
                         started_at: info.registered_at.max(0) as u64,
                         updated_at: info.registered_at.max(0) as u64,
                         harness: "agy".to_string(),
-                        registered: Some(true),
+                        registered: Some(info.has_credentials()),
                     });
                 }
             }
@@ -341,6 +341,47 @@ pub async fn run_agent_server(
                 };
 
                 let action = req_val.get("action").and_then(|a| a.as_str()).unwrap_or("");
+
+                if action == "mcp_start" {
+                    match crate::agy::attest_mcp_caller(
+                        &state_clone.agy_config.proc_root,
+                        &state_clone.agy_config.proc_locks_path,
+                        &state_clone.agy_config.presence_dir,
+                        &state_clone.agy_config.trusted_agy_exes,
+                        my_uid,
+                        peer_uid,
+                        peer_pid,
+                    ) {
+                        Ok((reg, conv_id)) => {
+                            let session_key = reg.session_key.clone();
+                            {
+                                let mut store_lock = state_clone.agy_store.write().unwrap();
+                                store_lock.entry(session_key.clone()).or_insert_with(|| {
+                                    crate::agy::AgySessionInfo::new(
+                                        conv_id,
+                                        reg.pid,
+                                        reg.starttime,
+                                        None,
+                                    )
+                                });
+                            }
+                            let resp = serde_json::json!({
+                                "status": "ok",
+                                "sessionId": session_key,
+                            });
+                            let _ = writer.write_all(format!("{resp}\n").as_bytes()).await;
+                        }
+                        Err(e) => {
+                            let err_resp = serde_json::json!({
+                                "status": "error",
+                                "error": "unattested",
+                                "detail": e.to_string()
+                            });
+                            let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+                        }
+                    }
+                    continue;
+                }
 
                 // Resolve caller session via ancestor walk
                 let caller = match resolve_caller_session(
@@ -738,22 +779,86 @@ pub async fn run_agent_server(
                                                 inbox::deliver_to_socket(&socket_path, &line)
                                                     .await
                                                     .map(|_| {
-                                                        (session.session_id, "claude".to_string())
+                                                        (
+                                                            session.session_id,
+                                                            "claude".to_string(),
+                                                            "delivered",
+                                                        )
                                                     })
                                             }
                                             Err(e) => Err(e),
                                         }
                                     }
-                                    ResolvedTarget::Agy(session) => crate::agy::deliver_agy(
-                                        &state_clone.agy_config,
-                                        &state_clone.agy_store,
-                                        &session,
-                                        &from_name,
-                                        &message_id,
-                                        text,
-                                    )
-                                    .await
-                                    .map(|_| (session.session_id, "agy".to_string())),
+                                    ResolvedTarget::Agy(session) => {
+                                        let has_creds = {
+                                            let store_lock = state_clone.agy_store.read().unwrap();
+                                            store_lock
+                                                .get(&session.session_id)
+                                                .or_else(|| {
+                                                    store_lock.values().find(|info| {
+                                                        info.conversation_id == session.session_id
+                                                            || session.name.as_deref()
+                                                                == Some(&info.conversation_id)
+                                                    })
+                                                })
+                                                .map(|info| info.has_credentials())
+                                                .unwrap_or(false)
+                                        };
+
+                                        if has_creds {
+                                            crate::agy::deliver_agy(
+                                                &state_clone.agy_config,
+                                                &state_clone.agy_store,
+                                                &session,
+                                                &from_name,
+                                                &message_id,
+                                                text,
+                                            )
+                                            .await
+                                            .map(
+                                                |_| {
+                                                    (
+                                                        session.session_id,
+                                                        "agy".to_string(),
+                                                        "delivered",
+                                                    )
+                                                },
+                                            )
+                                        } else {
+                                            let envelope = format!(
+                                                "[xmsg] from={from_name} message_id={message_id} — reply with the xmsg reply tool\n\n{text}"
+                                            );
+                                            let agy_msg = storage::AgyPendingMessage {
+                                                id: message_id.clone(),
+                                                session_id: session.session_id.clone(),
+                                                created_at: storage::now_epoch_secs(),
+                                                from_name: from_name.clone(),
+                                                bytes: body_len,
+                                                text: text.to_string(),
+                                                envelope,
+                                                delivered_at: None,
+                                            };
+                                            let db_res = (|| -> Result<(), AppError> {
+                                                let db = state_clone.db.lock().map_err(|e| {
+                                                    AppError::Internal(e.to_string())
+                                                })?;
+                                                storage::insert_agy_message(&db, &agy_msg)
+                                                    .map_err(|e| {
+                                                        AppError::Internal(e.to_string())
+                                                    })?;
+                                                Ok(())
+                                            })(
+                                            );
+                                            match db_res {
+                                                Ok(_) => Ok((
+                                                    session.session_id,
+                                                    "agy".to_string(),
+                                                    "queued",
+                                                )),
+                                                Err(e) => Err(e),
+                                            }
+                                        }
+                                    }
                                     ResolvedTarget::Pi(session) => {
                                         let envelope = format!(
                                             "[xmsg] from={from_name} message_id={message_id} — reply with the xmsg reply tool\n\n{text}"
@@ -787,7 +892,11 @@ pub async fn run_agent_server(
                                                 let _ = state_clone
                                                     .pi_notify_tx
                                                     .send(session.session_id.clone());
-                                                Ok((session.session_id, "pi".to_string()))
+                                                Ok((
+                                                    session.session_id,
+                                                    "pi".to_string(),
+                                                    "delivered",
+                                                ))
                                             }
                                             Err(e) => Err(e),
                                         }
@@ -795,14 +904,14 @@ pub async fn run_agent_server(
                                 };
 
                                 match deliver_res {
-                                    Ok((delivered_session_id, target_harness)) => {
+                                    Ok((delivered_session_id, target_harness, outcome_str)) => {
                                         let msg_record = storage::MessageRecord {
                                             id: message_id.clone(),
                                             created_at: storage::now_epoch_secs(),
                                             session_id: delivered_session_id.clone(),
                                             from_name: from_name.clone(),
                                             bytes: body_len,
-                                            outcome: "delivered".to_string(),
+                                            outcome: outcome_str.to_string(),
                                             recipient_harness: target_harness,
                                             return_harness: Some(caller.harness.clone()),
                                             return_session_id: Some(caller.session_id.clone()),
@@ -818,7 +927,8 @@ pub async fn run_agent_server(
                                                 "sessionId": delivered_session_id,
                                                 "fromName": from_name,
                                                 "bytes": body_len,
-                                                "messageId": message_id
+                                                "messageId": message_id,
+                                                "outcome": outcome_str,
                                             }
                                         });
                                         let _ = writer
@@ -836,6 +946,14 @@ pub async fn run_agent_server(
                                             .await;
                                     }
                                 }
+                            }
+                            Err(AppError::Unregistered(pid)) => {
+                                let err_resp = serde_json::json!({
+                                    "status": "error",
+                                    "error": "unregistered",
+                                    "detail": format!("pid {pid} is unregistered")
+                                });
+                                let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
                             }
                             Err(e) => {
                                 let err_resp = serde_json::json!({

@@ -315,7 +315,8 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
     // Verify in store
     {
         let map = store.read().unwrap();
-        let creds = map.get(sid1).unwrap();
+        let info = map.get(sid1).unwrap();
+        let creds = info.credentials.as_ref().unwrap();
         assert_eq!(creds.ls_address, "127.0.0.1:4000");
         assert_eq!(creds.csrf_token, "token-initial");
         assert!(!creds.is_stale);
@@ -347,7 +348,8 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
     // Verify atomic update in store
     {
         let map = store.read().unwrap();
-        let creds = map.get(sid2).unwrap();
+        let info = map.get(sid2).unwrap();
+        let creds = info.credentials.as_ref().unwrap();
         assert_eq!(creds.ls_address, "127.0.0.1:5000");
         assert_eq!(creds.csrf_token, "token-replaced");
         assert!(!creds.is_stale);

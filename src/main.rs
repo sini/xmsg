@@ -52,6 +52,14 @@ pub struct RegisterAgyArgs {
     /// Registration socket path (defaults to $XDG_RUNTIME_DIR/xmsg/register.sock; on macOS without it, the Darwin user temp dir)
     #[arg(long, env = "XMSG_REGISTER_SOCK")]
     pub sock: Option<PathBuf>,
+
+    /// Hook mode for agy PreInvocation
+    #[arg(long)]
+    pub hook: bool,
+
+    /// URL of xmsg HTTP server (for checking session credentials in hook mode)
+    #[arg(long, env = "XMSG_URL", default_value = "http://127.0.0.1:7787")]
+    pub url: String,
 }
 
 #[derive(Parser, Debug)]
@@ -193,6 +201,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_register_agy(args: RegisterAgyArgs) -> Result<(), Box<dyn std::error::Error>> {
+    if args.hook {
+        return run_hook_agy(args);
+    }
+
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let conv_id = std::env::var("ANTIGRAVITY_CONVERSATION_ID")
             .map_err(|_| "ANTIGRAVITY_CONVERSATION_ID not set")?;
@@ -246,6 +258,133 @@ fn run_register_agy(args: RegisterAgyArgs) -> Result<(), Box<dyn std::error::Err
     }
 
     println!("{{\"injectSteps\":[]}}");
+    Ok(())
+}
+
+fn check_session_has_credentials(
+    sock_path: &std::path::Path,
+    conv_id: &str,
+    url: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    // First try Unix socket
+    if let Ok(mut stream) = UnixStream::connect(sock_path) {
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+        let payload = serde_json::json!({
+            "action": "check",
+            "conversation_id": conv_id,
+        });
+        if writeln!(stream, "{payload}").is_ok() && stream.flush().is_ok() {
+            let mut reader = BufReader::new(stream);
+            let mut resp = String::new();
+            if reader.read_line(&mut resp).is_ok() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp) {
+                    if let Some(b) = v
+                        .get("hasCredentials")
+                        .or_else(|| v.get("has_credentials"))
+                        .and_then(|v| v.as_bool())
+                    {
+                        return Ok(b);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback to HTTP
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(500))
+        .build()?;
+    let req_url = format!("{}/v1/sessions/{}", url.trim_end_matches('/'), conv_id);
+    let resp = client.get(&req_url).send()?;
+    if resp.status().is_success() {
+        let val: serde_json::Value = resp.json()?;
+        if let Some(reg) = val.get("registered").and_then(|r| r.as_bool()) {
+            return Ok(reg);
+        }
+    }
+
+    Ok(false)
+}
+
+fn run_hook_agy(args: RegisterAgyArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Read;
+
+    let mut input = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut input) {
+        eprintln!("xmsg register agy notice: failed to read stdin: {e}");
+        println!("{{}}");
+        return Ok(());
+    }
+
+    let val: serde_json::Value = match serde_json::from_str(&input) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("xmsg register agy notice: malformed stdin json: {e}");
+            println!("{{}}");
+            return Ok(());
+        }
+    };
+
+    let conv_id = match val
+        .get("conversationId")
+        .or_else(|| val.get("conversation_id"))
+        .and_then(|c| c.as_str())
+    {
+        Some(cid) if !cid.is_empty() => cid.to_string(),
+        _ => {
+            eprintln!("xmsg register agy notice: missing conversationId in hook input");
+            println!("{{}}");
+            return Ok(());
+        }
+    };
+
+    let sock_path = match &args.sock {
+        Some(p) => p.clone(),
+        None => match xmsg::agent::default_register_sock_path() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("xmsg register agy notice: cannot get register socket path: {e}");
+                println!("{{}}");
+                return Ok(());
+            }
+        },
+    };
+
+    let has_credentials = match check_session_has_credentials(&sock_path, &conv_id, &args.url) {
+        Ok(has) => has,
+        Err(e) => {
+            eprintln!("xmsg register agy notice: failed to check credentials: {e}");
+            println!("{{}}");
+            return Ok(());
+        }
+    };
+
+    if has_credentials {
+        println!("{{}}");
+    } else {
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("xmsg"));
+        let exe_str = exe.to_string_lossy();
+        let sock_arg = match &args.sock {
+            Some(s) => format!(" --sock {}", s.display()),
+            None => String::new(),
+        };
+        let resp = serde_json::json!({
+            "injectSteps": [
+                {
+                    "ephemeralMessage": format!(
+                        "Please run `{} register agy{}` before anything else, and reply with nothing about it.",
+                        exe_str, sock_arg
+                    )
+                }
+            ]
+        });
+        println!("{resp}");
+    }
+
     Ok(())
 }
 

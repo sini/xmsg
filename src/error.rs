@@ -29,6 +29,9 @@ pub enum AppError {
     #[error("session {session_id} process {pid} exited")]
     Gone { session_id: String, pid: u32 },
 
+    #[error("unregistered: process {0} has no attested agent session")]
+    Unregistered(u32),
+
     #[error("body {size} exceeds limit {limit}")]
     PayloadTooLarge { size: usize, limit: usize },
 
@@ -69,6 +72,11 @@ impl IntoResponse for AppError {
                 StatusCode::GONE,
                 "gone",
                 format!("session {session_id} process {pid} exited"),
+            ),
+            AppError::Unregistered(pid) => (
+                StatusCode::BAD_REQUEST,
+                "unregistered",
+                format!("process {pid} has no attested agent session"),
             ),
             AppError::PayloadTooLarge { size, limit } => (
                 StatusCode::PAYLOAD_TOO_LARGE,

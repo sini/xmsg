@@ -160,7 +160,8 @@ async fn test_shipped_binary_register_cli_with_server() {
         store.read().unwrap().get(conv_id).is_none(),
         "conversation_id must not be a direct store key"
     );
-    let creds = creds_opt.unwrap();
+    let info = creds_opt.unwrap();
+    let creds = info.credentials.as_ref().unwrap();
     assert_eq!(creds.ls_address, "localhost:33399");
     assert_eq!(creds.csrf_token, "token-secret-cli-99");
     assert!(!creds.is_stale);

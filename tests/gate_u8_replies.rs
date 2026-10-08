@@ -952,11 +952,11 @@ async fn test_u8_cross_harness_claude_to_agy() {
             conv_id.to_string(),
             agy_pid,
             "5000".to_string(),
-            AgyCredentials {
+            Some(AgyCredentials {
                 ls_address: "127.0.0.1:8888".to_string(),
                 csrf_token: "csrf-8888".to_string(),
                 is_stale: false,
-            },
+            }),
         ),
     );
 

@@ -135,8 +135,43 @@ TypeScript extension for Pi (`@earendil-works/pi-coding-agent`):
   - **`send`:** Sends messages over `agent.sock` to ensure kernel attestation of peer PID and return address.
   - **`reply`:** Sends replies over `agent.sock`.
 
-### 3.3 Antigravity Integration: `xmsg register agy`
-Registers local Antigravity credentials with the running `xmsg` server over `register.sock`, allowing seamless bidirectional messaging.
+### 3.3 Antigravity Integration: Automatic Registration & Hooks
+
+Antigravity (`agy`) session credentials (`ANTIGRAVITY_LS_ADDRESS`, `ANTIGRAVITY_CSRF_TOKEN`, `ANTIGRAVITY_CONVERSATION_ID`) exist only inside the interactive harness process and in the tool subshells spawned by its language server. Neither MCP server children nor external hook commands inherit these variables directly.
+
+`xmsg` implements a two-stage automatic registration lifecycle:
+
+1. **Identity at MCP Start:**
+   When `xmsg mcp` starts as an `agy` child, the server attests the ancestor process chain (verifying a trusted `agy` executable and an open presence lock held via Linux `FLOCK` in `presence_dir`). The session immediately becomes addressable as `agy:<pid>:<starttime>` without credentials (`status: "idle"`, `registered: false`). Messages sent to it are queued in its inbox (`outcome: "queued"`).
+
+2. **PreInvocation Hook (`xmsg register agy --hook`):**
+   Configured in `hooks.json` under `PreInvocation`:
+   ```json
+   {
+     "xmsg-register": {
+       "PreInvocation": [
+         {
+           "type": "command",
+           "command": "/path/to/xmsg register agy --hook"
+         }
+       ]
+     }
+   }
+   ```
+   On each turn, `agy` passes hook JSON on stdin containing `conversationId`.
+   - If that session already has push credentials registered, `xmsg` prints `{}`.
+   - If push credentials are not yet registered, `xmsg` emits an `ephemeralMessage` instructing the model to run `xmsg register agy` before anything else.
+   - On any error (malformed stdin, missing fields, or connection failure), `xmsg` logs a notice to stderr, prints `{}`, and exits 0 to ensure model execution is never blocked.
+
+3. **Credential Registration & FIFO Queue Flush:**
+   The model executes `<exe_path> register agy` via its first tool call (`run_command`). In that tool subshell, the environment contains `ANTIGRAVITY_LS_ADDRESS`, `ANTIGRAVITY_CSRF_TOKEN`, and `ANTIGRAVITY_CONVERSATION_ID`. `xmsg register agy` connects to `register.sock` and supplies the credentials. As soon as credentials register, all queued messages are flushed to the session in FIFO order (`outcome: "delivered"`). Subsequent turns find credentials active and emit `{}`.
+
+4. **Error Reporting Invariance:**
+   Sending to a live PID that has no attested agent session returns `unregistered` (`process <pid> has no attested agent session`). The outdated text `"process exited"` appears nowhere for live processes.
+
+#### Hook Injection & Scrubbing Findings (Step 0)
+Reverse engineering of `agy` (v1.3.1) revealed that in `HookInjectedStep`, field 1 (`tool_call`) has protobuf option `(google.protobuf.field_options).internal_only = true` and `deprecated = true`. When a hook attempts to return a tool call injection, `utils.ScrubInternalFields` zeroes the field to `nil`, causing `hooks.InjectSteps` to panic with `unknown injected step type: <nil>`. Conversely, field 3 (`ephemeralMessage`) is public and non-internal, making prompt injection the only reliable automatic path.
+See [docs/probes/agy-hook-injection.md](docs/probes/agy-hook-injection.md) for full disassembly and probe details.
 
 ---
 

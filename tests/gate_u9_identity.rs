@@ -429,11 +429,11 @@ async fn cell_8_liveness_reused_pid_different_starttime() {
         "conv-8".to_string(),
         5000,
         "1000".to_string(),
-        AgyCredentials {
+        Some(AgyCredentials {
             ls_address: "127.0.0.1:8888".to_string(),
             csrf_token: "secret".to_string(),
             is_stale: false,
-        },
+        }),
     );
 
     // Initial state: PID 5000 has starttime 1000

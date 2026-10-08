@@ -38,6 +38,8 @@ pub struct DeliveryResponse {
     pub bytes: usize,
     #[serde(alias = "message_id")]
     pub message_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 
 /// Sanitizes the `from` parameter for unauthenticated HTTP senders:

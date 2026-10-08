@@ -45,6 +45,9 @@ pub fn run_mcp_loop<R: BufRead, W: Write>(
     mut reader: R,
     mut writer: W,
 ) -> io::Result<()> {
+    // Attempt to register caller identity with agent server at MCP startup
+    let _ = call_agent_sock(&config.agent_sock, &json!({ "action": "mcp_start" }));
+
     let client = reqwest::blocking::Client::new();
     let mut line = String::new();
     while reader.read_line(&mut line)? > 0 {
