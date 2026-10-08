@@ -58,6 +58,18 @@ pub enum AppError {
 
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("unknown peer: {0}")]
+    UnknownPeer(String),
+    #[error("no forward: {0}")]
+    NoForward(String),
+    #[error("op denied: {0}")]
+    OpDenied(String),
+    #[error("peer rejected: {0}")]
+    PeerRejected(String),
+    #[error("peer unreachable: {0}")]
+    PeerUnreachable(String),
+    #[error("rate limited: {0}")]
+    RateLimited(String),
 }
 
 impl IntoResponse for AppError {
@@ -104,6 +116,14 @@ impl IntoResponse for AppError {
             AppError::InsecureSocketDir(d) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "insecure_socket_dir", d)
             }
+            AppError::UnknownPeer(d) => (StatusCode::BAD_REQUEST, "unknown_peer", d),
+            AppError::NoForward(d) => (StatusCode::BAD_REQUEST, "no_forward", d),
+            AppError::OpDenied(d) => (StatusCode::FORBIDDEN, "op_denied", d),
+            AppError::PeerRejected(d) => (StatusCode::FORBIDDEN, "peer_rejected", d),
+            AppError::PeerUnreachable(d) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "peer_unreachable", d)
+            }
+            AppError::RateLimited(d) => (StatusCode::TOO_MANY_REQUESTS, "rate_limited", d),
         };
 
         (

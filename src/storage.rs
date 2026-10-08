@@ -21,6 +21,8 @@ pub struct MessageRecord {
     pub push_replies: bool,
     #[serde(default)]
     pub thread_id: String,
+    #[serde(default)]
+    pub return_host: Option<String>,
 }
 
 fn default_recipient_harness() -> String {
@@ -119,8 +121,18 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             return_harness TEXT,
             return_session_id TEXT,
             push_replies INTEGER NOT NULL DEFAULT 1,
-            thread_id TEXT NOT NULL DEFAULT ''
+            thread_id TEXT NOT NULL DEFAULT '',
+            return_host TEXT NOT NULL DEFAULT ''
         );
+
+        CREATE TABLE IF NOT EXISTS outbound (
+            id TEXT PRIMARY KEY,
+            peer TEXT NOT NULL,
+            target_ref TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_outbound_created_at ON outbound(created_at);
 
         CREATE TABLE IF NOT EXISTS replies (
             seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -198,6 +210,7 @@ pub fn init_db(conn: &Connection) -> Result<()> {
     let mut has_return_session_id = false;
     let mut has_push_replies = false;
     let mut has_thread_id = false;
+    let mut has_return_host = false;
     let mut has_columns = false;
     while let Some(row) = rows.next()? {
         has_columns = true;
@@ -208,6 +221,7 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             "return_session_id" => has_return_session_id = true,
             "push_replies" => has_push_replies = true,
             "thread_id" => has_thread_id = true,
+            "return_host" => has_return_host = true,
             _ => {}
         }
     }
@@ -233,6 +247,12 @@ pub fn init_db(conn: &Connection) -> Result<()> {
         if !has_thread_id {
             conn.execute(
                 "ALTER TABLE messages ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        if !has_return_host {
+            conn.execute(
+                "ALTER TABLE messages ADD COLUMN return_host TEXT NOT NULL DEFAULT ''",
                 [],
             )?;
         }
@@ -267,7 +287,7 @@ pub fn init_db(conn: &Connection) -> Result<()> {
 
 pub fn insert_message(conn: &Connection, msg: &MessageRecord) -> Result<()> {
     conn.execute(
-        "INSERT INTO messages (id, created_at, session_id, from_name, bytes, outcome, recipient_harness, return_harness, return_session_id, push_replies, thread_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO messages (id, created_at, session_id, from_name, bytes, outcome, recipient_harness, return_harness, return_session_id, push_replies, thread_id, return_host) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             msg.id,
             msg.created_at,
@@ -280,20 +300,35 @@ pub fn insert_message(conn: &Connection, msg: &MessageRecord) -> Result<()> {
             msg.return_session_id,
             if msg.push_replies { 1i64 } else { 0i64 },
             msg.thread_id,
+            msg.return_host.as_deref().unwrap_or(""),
         ],
+    )?;
+    Ok(())
+}
+
+pub fn update_message_outcome(conn: &Connection, id: &str, outcome: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE messages SET outcome = ?1 WHERE id = ?2",
+        params![outcome, id],
     )?;
     Ok(())
 }
 
 pub fn get_message(conn: &Connection, id: &str) -> Result<Option<MessageRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT id, created_at, session_id, from_name, bytes, outcome, recipient_harness, return_harness, return_session_id, push_replies, thread_id FROM messages WHERE id = ?1",
+        "SELECT id, created_at, session_id, from_name, bytes, outcome, recipient_harness, return_harness, return_session_id, push_replies, thread_id, return_host FROM messages WHERE id = ?1",
     )?;
     let mut rows = stmt.query(params![id])?;
 
     if let Some(row) = rows.next()? {
         let bytes_i64: i64 = row.get(4)?;
         let push_replies_i64: i64 = row.get(9)?;
+        let ret_host: String = row.get(11)?;
+        let return_host = if ret_host.is_empty() {
+            None
+        } else {
+            Some(ret_host)
+        };
         Ok(Some(MessageRecord {
             id: row.get(0)?,
             created_at: row.get(1)?,
@@ -306,6 +341,49 @@ pub fn get_message(conn: &Connection, id: &str) -> Result<Option<MessageRecord>>
             return_session_id: row.get(8)?,
             push_replies: push_replies_i64 != 0,
             thread_id: row.get(10)?,
+            return_host,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboundRecord {
+    pub id: String,
+    pub peer: String,
+    pub target_ref: String,
+    pub outcome: String,
+    pub created_at: i64,
+}
+
+pub fn insert_outbound(
+    conn: &Connection,
+    id: &str,
+    peer: &str,
+    target_ref: &str,
+    outcome: &str,
+    created_at: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO outbound (id, peer, target_ref, outcome, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, peer, target_ref, outcome, created_at],
+    )?;
+    Ok(())
+}
+
+pub fn get_outbound(conn: &Connection, id: &str) -> Result<Option<OutboundRecord>> {
+    let mut stmt = conn
+        .prepare("SELECT id, peer, target_ref, outcome, created_at FROM outbound WHERE id = ?1")?;
+    let mut rows = stmt.query(params![id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(OutboundRecord {
+            id: row.get(0)?,
+            peer: row.get(1)?,
+            target_ref: row.get(2)?,
+            outcome: row.get(3)?,
+            created_at: row.get(4)?,
         }))
     } else {
         Ok(None)

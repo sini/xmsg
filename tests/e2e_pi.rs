@@ -110,6 +110,7 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
         reply_ttl,
         idempotency_ttl: Duration::from_secs(86400),
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
+        fed_state: None,
     });
 
     let app = build_router(app_state.clone());
@@ -293,6 +294,7 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
         return_session_id: None,
         push_replies: false,
         thread_id: "other-msg-123".to_string(),
+        return_host: None,
     };
     {
         let db_lock = db.lock().unwrap();

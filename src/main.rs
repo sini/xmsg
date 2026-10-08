@@ -27,7 +27,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Start the HTTP bridge server
-    Serve(ServeArgs),
+    Serve(Box<ServeArgs>),
 
     /// Run the stdio MCP server for agent harnesses
     Mcp(McpArgs),
@@ -128,6 +128,22 @@ pub struct ServeArgs {
     /// Trusted Svc daemon executable paths per name (format: NAME=PATH, repeatable or comma-separated)
     #[arg(long = "svc-exe", env = "XMSG_SVC_EXE", value_delimiter = ',')]
     pub svc_exes: Vec<String>,
+
+    /// Path to peers configuration file (JSON)
+    #[arg(long, env = "XMSG_PEERS_FILE")]
+    pub peers_file: Option<PathBuf>,
+
+    /// Federation listen address (IP:PORT), e.g. <ts-ip>:7788
+    #[arg(long, env = "XMSG_FED_LISTEN")]
+    pub fed_listen: Option<String>,
+
+    /// Path to federation TLS certificate (PEM)
+    #[arg(long, env = "XMSG_FED_CERT")]
+    pub fed_cert: Option<PathBuf>,
+
+    /// Path to federation TLS private key (PEM)
+    #[arg(long, env = "XMSG_FED_KEY")]
+    pub fed_key: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -190,7 +206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            rt.block_on(run_serve(args))?;
+            rt.block_on(run_serve(*args))?;
         }
         Commands::Mcp(args) => {
             let sessions_dirs = resolve_sessions_dirs(args.sessions_dirs);
@@ -540,6 +556,69 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    let fed_state = if let Some(peers_file) = args.peers_file {
+        let peers = xmsg::fed::load_peers_file(&peers_file)
+            .map_err(|e| format!("failed to load peers file: {e}"))?;
+
+        let (cert_der, key_der) = if let (Some(cert_path), Some(key_path)) =
+            (args.fed_cert, args.fed_key)
+        {
+            let cert_pem = std::fs::read(&cert_path)
+                .map_err(|e| format!("failed to read fed cert at {}: {e}", cert_path.display()))?;
+            let key_pem = std::fs::read(&key_path)
+                .map_err(|e| format!("failed to read fed key at {}: {e}", key_path.display()))?;
+
+            use rustls::pki_types::pem::PemObject;
+            let cert = rustls::pki_types::CertificateDer::from_pem_slice(&cert_pem)
+                .map_err(|e| format!("failed to parse cert pem: {e}"))?;
+            let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(&key_pem)
+                .map_err(|e| format!("failed to parse key pem: {e}"))?;
+            (cert.to_vec(), key.secret_der().to_vec())
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        let fs = Arc::new(xmsg::fed::FedState {
+            host_label: host_label.clone(),
+            peers: Arc::new(peers),
+            cert_der,
+            key_der,
+            whois_verifier: Arc::new(xmsg::fed::MockWhoIsVerifier::new()),
+            rate_limiter: Arc::new(xmsg::fed::RateLimiter::new(60, 20)),
+            db: db.clone(),
+            sessions_dir: sessions_dir.clone(),
+            agy_config: agy_config.clone(),
+            agy_store: agy_store.clone(),
+            pi_store: pi_store.clone(),
+            pi_notify_tx: pi_notify_tx.clone(),
+            notify_tx: notify_tx.clone(),
+            max_body: args.max_body,
+        });
+
+        if let Some(fed_listen_addr) = args.fed_listen {
+            let fs_clone = fs.clone();
+            tokio::spawn(async move {
+                match tokio::net::TcpListener::bind(&fed_listen_addr).await {
+                    Ok(listener) => {
+                        info!(listen = %fed_listen_addr, "starting federation mTLS listener");
+                        if let Err(e) = xmsg::fed::run_fed_listener(listener, fs_clone).await {
+                            tracing::error!("federation listener error: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "failed to bind federation listener on {fed_listen_addr}: {e}"
+                        );
+                    }
+                }
+            });
+        }
+
+        Some(fs)
+    } else {
+        None
+    };
+
     let state = Arc::new(AppState {
         sessions_dirs,
         agy_config,
@@ -556,6 +635,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         reply_ttl,
         idempotency_ttl,
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
+        fed_state,
     });
 
     let agent_sock = agent_sock_path.clone();

@@ -183,6 +183,7 @@ async fn start_harness(max_body: usize) -> TestHarness {
         reply_ttl: Duration::from_secs(604800),
         idempotency_ttl: Duration::from_secs(86400),
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
+        fed_state: None,
     });
 
     let app = build_router(app_state.clone());

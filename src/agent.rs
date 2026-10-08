@@ -528,6 +528,49 @@ pub async fn run_agent_server(
                         ) {
                             if !msg.push_replies {
                                 (Some("disabled".to_string()), None)
+                            } else if let Some(ret_host) = msg
+                                .return_host
+                                .as_deref()
+                                .filter(|h| !h.is_empty() && *h != state_clone.host_label)
+                            {
+                                let new_message_id = ulid::Ulid::new().to_string();
+                                let replier_name =
+                                    caller.name.as_deref().unwrap_or(&caller.session_id);
+                                let replier = crate::fed::FedReplier {
+                                    harness: caller.harness.clone(),
+                                    session_id: caller.session_id.clone(),
+                                    name: replier_name.to_string(),
+                                };
+                                let reply_envelope = crate::fed::FedReplyEnvelope {
+                                    v: 1,
+                                    id: new_message_id.clone(),
+                                    in_reply_to: message_id.to_string(),
+                                    replier,
+                                    text: text.to_string(),
+                                    created_at: storage::now_epoch_secs(),
+                                };
+                                let push_res: Result<(), &'static str> =
+                                    match &state_clone.fed_state {
+                                        Some(fed_state) => {
+                                            match crate::fed::send_federated_reply(
+                                                fed_state,
+                                                ret_host,
+                                                &reply_envelope,
+                                            )
+                                            .await
+                                            {
+                                                Ok(_) => Ok(()),
+                                                Err(AppError::Gone { .. }) => Err("sender_gone"),
+                                                Err(_) => Err("push_failed"),
+                                            }
+                                        }
+                                        None => Err("push_failed"),
+                                    };
+                                let outcome_str = match push_res {
+                                    Ok(()) => "pushed",
+                                    Err(e) => e,
+                                };
+                                (Some(outcome_str.to_string()), Some(new_message_id))
                             } else {
                                 let new_message_id = ulid::Ulid::new().to_string();
                                 let replier_name =
@@ -729,6 +772,7 @@ pub async fn run_agent_server(
                                             } else {
                                                 msg.thread_id.clone()
                                             },
+                                            return_host: None,
                                         };
                                         if let Ok(db) = state_clone.db.lock() {
                                             let _ = storage::insert_message(&db, &pushed_record);
@@ -893,6 +937,113 @@ pub async fn run_agent_server(
                             &caller.harness,
                             caller_name,
                         );
+
+                        // Check if target is cross-host
+                        let (local_ref, remote_host) = match crate::fed::split_peer_ref(target_ref)
+                        {
+                            Some((r, h)) if h != state_clone.host_label => (r, Some(h)),
+                            Some((r, _)) => (r, None),
+                            None => (target_ref, None),
+                        };
+
+                        if let Some(target_host) = remote_host {
+                            let fed_state = match &state_clone.fed_state {
+                                Some(fs) if fs.peers.contains_name(target_host) => fs.clone(),
+                                _ => {
+                                    let err_resp = serde_json::json!({
+                                        "status": "error",
+                                        "error": "unknown_peer",
+                                        "detail": format!("unknown peer host '{target_host}'")
+                                    });
+                                    let _ =
+                                        writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+                                    continue;
+                                }
+                            };
+
+                            let message_id = ulid::Ulid::new().to_string();
+                            let principal = crate::fed::FedPrincipal::Session {
+                                harness: caller.harness.clone(),
+                                session_id: caller.session_id.clone(),
+                                name: caller_name.to_string(),
+                            };
+                            let envelope = crate::fed::FedEnvelope {
+                                v: 1,
+                                id: message_id.clone(),
+                                principal,
+                                to: crate::fed::FedTarget {
+                                    r#ref: local_ref.to_string(),
+                                },
+                                body: text.to_string(),
+                                push_replies,
+                                thread_id: message_id.clone(),
+                                created_at: storage::now_epoch_secs(),
+                            };
+
+                            match crate::fed::send_federated_message(
+                                &fed_state,
+                                target_host,
+                                &envelope,
+                            )
+                            .await
+                            {
+                                Ok(delivery_resp) => {
+                                    if let Ok(db) = state_clone.db.lock() {
+                                        let _ = storage::insert_outbound(
+                                            &db,
+                                            &message_id,
+                                            target_host,
+                                            local_ref,
+                                            "delivered",
+                                            storage::now_epoch_secs(),
+                                        );
+                                        let msg_record = storage::MessageRecord {
+                                            id: message_id.clone(),
+                                            created_at: storage::now_epoch_secs(),
+                                            session_id: local_ref.to_string(),
+                                            from_name: from_name.clone(),
+                                            bytes: text.len(),
+                                            outcome: "delivered".to_string(),
+                                            recipient_harness: "claude".to_string(),
+                                            return_harness: Some(caller.harness.clone()),
+                                            return_session_id: Some(caller.session_id.clone()),
+                                            push_replies,
+                                            thread_id: message_id.clone(),
+                                            return_host: Some(state_clone.host_label.clone()),
+                                        };
+                                        let _ = storage::insert_message(&db, &msg_record);
+                                    }
+                                    let resp = serde_json::json!({
+                                        "status": "ok",
+                                        "delivery": {
+                                            "messageId": message_id,
+                                            "outcome": "delivered",
+                                            "bytes": delivery_resp.bytes,
+                                        }
+                                    });
+                                    let _ = writer.write_all(format!("{resp}\n").as_bytes()).await;
+                                }
+                                Err(e) => {
+                                    let (err_code, detail) = match e {
+                                        AppError::NoForward(d) => ("no_forward", d),
+                                        AppError::OpDenied(d) => ("op_denied", d),
+                                        AppError::PeerRejected(d) => ("peer_rejected", d),
+                                        AppError::UnknownPeer(d) => ("unknown_peer", d),
+                                        AppError::RateLimited(d) => ("rate_limited", d),
+                                        AppError::NotRecipient(d) => ("not_recipient", d),
+                                        other => ("service_unavailable", other.to_string()),
+                                    };
+                                    let err_resp = serde_json::json!({
+                                        "status": "error",
+                                        "error": err_code,
+                                        "detail": detail,
+                                    });
+                                    let _ =
+                                        writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+                                }
+                            }
+                            continue;
+                        }
 
                         let target_res = resolve_target_session(&state_clone, target_ref);
                         match target_res {
@@ -1096,6 +1247,7 @@ pub async fn run_agent_server(
                                             return_session_id: Some(caller.session_id.clone()),
                                             push_replies,
                                             thread_id: message_id.clone(),
+                                            return_host: None,
                                         };
                                         if let Ok(db) = state_clone.db.lock() {
                                             let _ = storage::insert_message(&db, &msg_record);

@@ -39,6 +39,7 @@ pub struct AppState {
     pub reply_ttl: Duration,
     pub idempotency_ttl: Duration,
     pub long_poll_semaphore: Arc<tokio::sync::Semaphore>,
+    pub fed_state: Option<Arc<crate::fed::FedState>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -311,6 +312,85 @@ async fn send_message_handler(
         }
     }
 
+    // Check if target is cross-host
+    let (ref_str, remote_host) = match crate::fed::split_peer_ref(&ref_str) {
+        Some((r, h)) if h != state.host_label => (r.to_string(), Some(h)),
+        Some((r, _)) => (r.to_string(), None),
+        None => (ref_str, None),
+    };
+
+    if let Some(target_host) = remote_host {
+        let fed_state = match &state.fed_state {
+            Some(fs) if fs.peers.contains_name(target_host) => fs.clone(),
+            _ => {
+                return Err(AppError::UnknownPeer(format!(
+                    "Unknown peer host: {target_host}"
+                )))
+            }
+        };
+
+        let message_id = ulid::Ulid::new().to_string();
+        let envelope = crate::fed::FedEnvelope {
+            v: 1,
+            id: message_id.clone(),
+            principal: crate::fed::FedPrincipal::Anonymous {
+                from: from_name.clone(),
+            },
+            to: crate::fed::FedTarget {
+                r#ref: ref_str.clone(),
+            },
+            body: req.text.clone(),
+            push_replies: false,
+            thread_id: message_id.clone(),
+            created_at: storage::now_epoch_secs(),
+        };
+
+        let delivery_resp =
+            crate::fed::send_federated_message(&fed_state, target_host, &envelope).await?;
+
+        {
+            let db = state
+                .db
+                .lock()
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            let _ = storage::insert_outbound(
+                &db,
+                &message_id,
+                target_host,
+                &ref_str,
+                "delivered",
+                storage::now_epoch_secs(),
+            );
+            if let Some(ref key) = req.idempotency_key {
+                let record = storage::IdempotencyRecord {
+                    principal: format!("http:{from_name}"),
+                    key: key.clone(),
+                    body: req.text.clone(),
+                    message_id: message_id.clone(),
+                    session_id: delivery_resp.session_id.clone(),
+                    from_name: from_name.clone(),
+                    bytes: body_len,
+                    outcome: "delivered".to_string(),
+                    created_at: storage::now_epoch_secs(),
+                };
+                let _ = storage::insert_idempotency_record(&db, &record);
+                let _ = storage::purge_idempotency_keys(&db, state.idempotency_ttl.as_secs());
+            }
+        }
+
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(DeliveryResponse {
+                session_id: delivery_resp.session_id,
+                from_name,
+                bytes: body_len,
+                message_id,
+                outcome: Some("delivered".to_string()),
+            }),
+        )
+            .into_response());
+    }
+
     // Resolve target session
     let target = resolve_target_session(&state, &ref_str).map_err(|err| {
         eprintln!(
@@ -468,6 +548,7 @@ async fn send_message_handler(
         return_session_id: None,
         push_replies: false,
         thread_id: message_id.clone(),
+        return_host: None,
     };
 
     {
