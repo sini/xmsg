@@ -3266,6 +3266,10 @@ async fn test_n2_idle_authenticated_connection_closed_within_timeout() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "needs 127.0.0.2-17 on lo0 (macOS lo0 only has 127.0.0.1); add with `sudo ifconfig lo0 alias 127.0.0.N up`"
+)]
 async fn test_n3_unauthenticated_socket_bound_leaves_slot_for_peer() {
     let (cert_a, key_a, pin_a) = generate_self_signed_ed25519("host-a").unwrap();
     let node_b = create_test_node(
@@ -3400,6 +3404,10 @@ async fn test_n7_mf5_ipv4_mapped_canonicalisation() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "needs 127.0.0.2-17 on lo0 (macOS lo0 only has 127.0.0.1); add with `sudo ifconfig lo0 alias 127.0.0.N up`"
+)]
 async fn test_n7_mf6_tcp_peer_address_source() {
     let (cert_a, key_a, pin_a) = generate_self_signed_ed25519("host-a").unwrap();
     let node_b = create_test_node(
@@ -3467,6 +3475,10 @@ async fn test_n7_mf6_tcp_peer_address_source() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "needs 127.0.0.2-17 on lo0 (macOS lo0 only has 127.0.0.1); add with `sudo ifconfig lo0 alias 127.0.0.N up`"
+)]
 async fn test_n7_f5b_semaphore_bound() {
     let node_b = create_test_node("host-b", "sess-b", Vec::new()).await;
 
