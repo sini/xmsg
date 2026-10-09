@@ -39,6 +39,8 @@
           };
           cargoLock.lockFile = ./Cargo.lock;
           doCheck = true;
+          # The tests bind loopback sockets, which the darwin sandbox refuses.
+          __darwinAllowLocalNetworking = true;
           meta = {
             description = "Fast, lightweight local HTTP bridge into live agent sessions";
             mainProgram = "xmsg";
