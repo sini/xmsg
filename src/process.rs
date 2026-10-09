@@ -469,7 +469,7 @@ mod macos {
             return Err(io::Error::last_os_error());
         }
         let info = unsafe { vpi.assume_init() };
-        let c_str = unsafe { std::ffi::CStr::from_ptr(info.pvi_cdir.vip_path.as_ptr()) };
+        let c_str = unsafe { std::ffi::CStr::from_ptr(info.pvi_cdir.vip_path.as_ptr().cast()) };
         let s = c_str
             .to_str()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
