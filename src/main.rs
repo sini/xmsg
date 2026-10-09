@@ -612,7 +612,6 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
             peers: Arc::new(peers),
             cert_der,
             key_der,
-            whois_verifier: Arc::new(xmsg::fed::MockWhoIsVerifier::new()),
             rate_limiter: Arc::new(xmsg::fed::RateLimiter::new(60, 20)),
             db: db.clone(),
             sessions_dir: sessions_dir.clone(),

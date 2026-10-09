@@ -20,7 +20,7 @@ use xmsg::agy::{flush_agy_queue, new_agy_store, AgyConfig, AgyCredentials, AgySe
 use xmsg::fed::{
     generate_self_signed_ed25519, make_tls_connector, run_fed_listener, send_federated_message,
     send_federated_reply, FedEnvelope, FedPrincipal, FedReplier, FedReplyEnvelope, FedState,
-    FedTarget, MockWhoIsVerifier, PeerConfig, PeersMap, RateLimiter,
+    FedTarget, PeerConfig, PeersMap, RateLimiter,
 };
 use xmsg::http::{build_router, AppState};
 use xmsg::pi::new_pi_store;
@@ -37,7 +37,6 @@ pub struct TestNode {
     pub db: Arc<Mutex<rusqlite::Connection>>,
     pub sessions_dir: PathBuf,
     pub fed_state: Arc<FedState>,
-    pub whois: Arc<MockWhoIsVerifier>,
     pub inbox_rx: Arc<Mutex<Vec<String>>>,
     pub _tmp_dir: TempDir,
 }
@@ -46,16 +45,14 @@ async fn create_test_node(
     name: &str,
     target_session_name: &str,
     peers: Vec<PeerConfig>,
-    no_whois: bool,
 ) -> TestNode {
-    create_test_node_full(name, target_session_name, peers, no_whois, None, None).await
+    create_test_node_full(name, target_session_name, peers, None, None).await
 }
 
 async fn create_test_node_full(
     name: &str,
     target_session_name: &str,
     peers: Vec<PeerConfig>,
-    no_whois: bool,
     listener_opt: Option<TcpListener>,
     creds_opt: Option<(Vec<u8>, Vec<u8>, String)>,
 ) -> TestNode {
@@ -63,7 +60,6 @@ async fn create_test_node_full(
         name,
         target_session_name,
         peers,
-        no_whois,
         listener_opt,
         creds_opt,
         None,
@@ -75,7 +71,6 @@ async fn create_test_node_full_inner(
     name: &str,
     target_session_name: &str,
     peers: Vec<PeerConfig>,
-    _no_whois: bool,
     listener_opt: Option<TcpListener>,
     creds_opt: Option<(Vec<u8>, Vec<u8>, String)>,
     agy_bin_opt: Option<String>,
@@ -148,14 +143,11 @@ async fn create_test_node_full_inner(
     let (notify_tx, _) = broadcast::channel(16);
     let (pi_notify_tx, _) = broadcast::channel(16);
 
-    let whois = Arc::new(MockWhoIsVerifier::new());
-
     let fed_state = Arc::new(FedState {
         host_label: name.to_string(),
         peers: peers_arc,
         cert_der: cert_der.clone(),
         key_der: key_der.clone(),
-        whois_verifier: whois.clone(),
         rate_limiter: Arc::new(RateLimiter::new(60, 20)),
         db: db.clone(),
         sessions_dir: sessions_dir.clone(),
@@ -225,7 +217,6 @@ async fn create_test_node_full_inner(
         db,
         sessions_dir,
         fed_state,
-        whois,
         inbox_rx,
         _tmp_dir: tmp,
     }
@@ -250,11 +241,10 @@ async fn test_oracle_1_attested_cross_host_send() {
             address: fed_addr_b.to_string(),
             pin: pin_b.clone(),
             allow: vec!["send".to_string(), "reply".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
         None,
         Some((cert_a, key_a, pin_a.clone())),
     )
@@ -268,11 +258,10 @@ async fn test_oracle_1_attested_cross_host_send() {
             address: node_a.fed_addr.to_string(),
             pin: pin_a,
             allow: vec!["send".to_string(), "reply".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
         Some(fed_listener_b),
         Some((cert_b, key_b, pin_b)),
     )
@@ -330,11 +319,10 @@ async fn test_oracle_2_reply_pushed_back_and_recorded() {
             address: fed_addr_b.to_string(),
             pin: pin_b.clone(),
             allow: vec!["send".to_string(), "reply".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
         Some(fed_listener_a),
         Some((cert_a, key_a, pin_a.clone())),
     )
@@ -348,11 +336,10 @@ async fn test_oracle_2_reply_pushed_back_and_recorded() {
             address: fed_addr_a.to_string(),
             pin: pin_a,
             allow: vec!["send".to_string(), "reply".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
         Some(fed_listener_b),
         Some((cert_b, key_b, pin_b)),
     )
@@ -428,7 +415,7 @@ async fn test_oracle_2_reply_pushed_back_and_recorded() {
 // =============================================================================
 #[tokio::test]
 async fn test_oracle_3_unpinned_cert_refused_at_handshake() {
-    let node_b = create_test_node("host-b", "sess-b", Vec::new(), true).await;
+    let node_b = create_test_node("host-b", "sess-b", Vec::new()).await;
 
     // Generate untrusted cert/key
     let (bad_cert, bad_key, _) = generate_self_signed_ed25519("attacker").unwrap();
@@ -455,8 +442,168 @@ async fn test_oracle_3_unpinned_cert_refused_at_handshake() {
 // =============================================================================
 // Oracle 4: Correct pin with WhoIs node mismatch gives 403 peer_rejected
 // =============================================================================
+// Unit X1.2 Oracle 1: from set, source inside -> accepted; source outside -> 403 with 0 bytes delivered
+// =============================================================================
 #[tokio::test]
-async fn test_oracle_4_whois_node_mismatch_gives_403() {
+async fn test_oracle_1_from_cidr_allowlist_enforced() {
+    let (cert_a, key_a, pin_a) = generate_self_signed_ed25519("host-a").unwrap();
+
+    // 1. Inside CIDR (127.0.0.1/32) -> Accepted (202) and delivered
+    let node_b_allow = create_test_node(
+        "host-b",
+        "sess-b",
+        vec![PeerConfig {
+            name: "host-a".to_string(),
+            address: "127.0.0.1:9999".to_string(),
+            pin: pin_a.clone(),
+            allow: vec!["send".to_string()],
+            from: Some(vec!["127.0.0.1/32".to_string()]),
+            leaf: false,
+            principals: Vec::new(),
+        }],
+    )
+    .await;
+
+    let envelope1 = FedEnvelope {
+        v: 1,
+        id: ulid::Ulid::new().to_string(),
+        principal: FedPrincipal::Session {
+            harness: "claude".to_string(),
+            session_id: "sess-a".to_string(),
+            name: "agent-a".to_string(),
+        },
+        to: FedTarget {
+            r#ref: "sess-b".to_string(),
+        },
+        body: "Payload inside CIDR".to_string(),
+        push_replies: false,
+        thread_id: "t1".to_string(),
+        created_at: 1000,
+    };
+
+    let fed_state_a1 = Arc::new(FedState {
+        host_label: "host-a".to_string(),
+        peers: Arc::new(PeersMap::new(
+            [(
+                "host-b".to_string(),
+                PeerConfig {
+                    name: "host-b".to_string(),
+                    address: node_b_allow.fed_addr.to_string(),
+                    pin: node_b_allow.pin.clone(),
+                    allow: vec!["send".to_string()],
+                    from: None,
+                    leaf: false,
+                    principals: Vec::new(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        )),
+        cert_der: cert_a.clone(),
+        key_der: key_a.clone(),
+        rate_limiter: Arc::new(RateLimiter::new(60, 20)),
+        db: node_b_allow.db.clone(),
+        sessions_dir: node_b_allow.sessions_dir.clone(),
+        agy_config: node_b_allow.fed_state.agy_config.clone(),
+        agy_store: node_b_allow.fed_state.agy_store.clone(),
+        pi_store: node_b_allow.fed_state.pi_store.clone(),
+        pi_notify_tx: node_b_allow.fed_state.pi_notify_tx.clone(),
+        notify_tx: node_b_allow.fed_state.notify_tx.clone(),
+        max_body: 65536,
+    });
+
+    let res1 = send_federated_message(&fed_state_a1, "host-b", &envelope1).await;
+    assert!(
+        res1.is_ok(),
+        "Expected success for source within from CIDR: {res1:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(node_b_allow.inbox_rx.lock().unwrap().len(), 1);
+
+    // 2. Outside CIDR (10.0.0.0/8) -> 403 PeerRejected and 0 bytes in inbox
+    let node_b_deny = create_test_node(
+        "host-b",
+        "sess-b",
+        vec![PeerConfig {
+            name: "host-a".to_string(),
+            address: "127.0.0.1:9999".to_string(),
+            pin: pin_a.clone(),
+            allow: vec!["send".to_string()],
+            from: Some(vec!["10.0.0.0/8".to_string()]),
+            leaf: false,
+            principals: Vec::new(),
+        }],
+    )
+    .await;
+
+    let envelope2 = FedEnvelope {
+        v: 1,
+        id: ulid::Ulid::new().to_string(),
+        principal: FedPrincipal::Session {
+            harness: "claude".to_string(),
+            session_id: "sess-a".to_string(),
+            name: "agent-a".to_string(),
+        },
+        to: FedTarget {
+            r#ref: "sess-b".to_string(),
+        },
+        body: "Payload outside CIDR".to_string(),
+        push_replies: false,
+        thread_id: "t2".to_string(),
+        created_at: 2000,
+    };
+
+    let fed_state_a2 = Arc::new(FedState {
+        host_label: "host-a".to_string(),
+        peers: Arc::new(PeersMap::new(
+            [(
+                "host-b".to_string(),
+                PeerConfig {
+                    name: "host-b".to_string(),
+                    address: node_b_deny.fed_addr.to_string(),
+                    pin: node_b_deny.pin.clone(),
+                    allow: vec!["send".to_string()],
+                    from: None,
+                    leaf: false,
+                    principals: Vec::new(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        )),
+        cert_der: cert_a,
+        key_der: key_a,
+        rate_limiter: Arc::new(RateLimiter::new(60, 20)),
+        db: node_b_deny.db.clone(),
+        sessions_dir: node_b_deny.sessions_dir.clone(),
+        agy_config: node_b_deny.fed_state.agy_config.clone(),
+        agy_store: node_b_deny.fed_state.agy_store.clone(),
+        pi_store: node_b_deny.fed_state.pi_store.clone(),
+        pi_notify_tx: node_b_deny.fed_state.pi_notify_tx.clone(),
+        notify_tx: node_b_deny.fed_state.notify_tx.clone(),
+        max_body: 65536,
+    });
+
+    let res2 = send_federated_message(&fed_state_a2, "host-b", &envelope2).await;
+    match res2 {
+        Err(xmsg::error::AppError::PeerRejected(detail)) => {
+            assert!(
+                detail.contains("not allowed by peer 'from' CIDR rules") || detail.contains("CIDR")
+            );
+        }
+        other => panic!("Expected PeerRejected for source outside CIDR, got {other:?}"),
+    }
+
+    // Assert inbox received 0 bytes
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(node_b_deny.inbox_rx.lock().unwrap().len(), 0);
+}
+
+// =============================================================================
+// Unit X1.2 Oracle 2: from absent -> accepted from any source (pin-only)
+// =============================================================================
+#[tokio::test]
+async fn test_oracle_2_from_absent_pin_only_accepted() {
     let (cert_a, key_a, pin_a) = generate_self_signed_ed25519("host-a").unwrap();
 
     let node_b = create_test_node(
@@ -467,16 +614,12 @@ async fn test_oracle_4_whois_node_mismatch_gives_403() {
             address: "127.0.0.1:9999".to_string(),
             pin: pin_a.clone(),
             allow: vec!["send".to_string()],
-            no_whois: false,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        false,
     )
     .await;
-
-    // Reject host-a in WhoIs verifier
-    node_b.whois.reject_node("host-a");
 
     let envelope = FedEnvelope {
         v: 1,
@@ -489,7 +632,7 @@ async fn test_oracle_4_whois_node_mismatch_gives_403() {
         to: FedTarget {
             r#ref: "sess-b".to_string(),
         },
-        body: "Attack payload".to_string(),
+        body: "Pin-only authenticated message".to_string(),
         push_replies: false,
         thread_id: "t1".to_string(),
         created_at: 1000,
@@ -505,7 +648,7 @@ async fn test_oracle_4_whois_node_mismatch_gives_403() {
                     address: node_b.fed_addr.to_string(),
                     pin: node_b.pin.clone(),
                     allow: vec!["send".to_string()],
-                    no_whois: true,
+                    from: None,
                     leaf: false,
                     principals: Vec::new(),
                 },
@@ -515,7 +658,6 @@ async fn test_oracle_4_whois_node_mismatch_gives_403() {
         )),
         cert_der: cert_a,
         key_der: key_a,
-        whois_verifier: Arc::new(MockWhoIsVerifier::new()),
         rate_limiter: Arc::new(RateLimiter::new(60, 20)),
         db: node_b.db.clone(),
         sessions_dir: node_b.sessions_dir.clone(),
@@ -528,20 +670,181 @@ async fn test_oracle_4_whois_node_mismatch_gives_403() {
     });
 
     let res = send_federated_message(&fed_state_a, "host-b", &envelope).await;
-    match res {
-        Err(xmsg::error::AppError::PeerRejected(detail)) => {
-            assert!(detail.contains("WhoIs"));
-        }
-        other => panic!("Expected PeerRejected on WhoIs mismatch, got {other:?}"),
-    }
+    assert!(res.is_ok(), "Pin-only message should be accepted: {res:?}");
 
-    // Assert inbox received 0 bytes
     tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(node_b.inbox_rx.lock().unwrap().len(), 0);
+    let inboxes = node_b.inbox_rx.lock().unwrap().clone();
+    assert_eq!(inboxes.len(), 1);
+    assert!(inboxes[0].contains("Pin-only authenticated message"));
 }
 
 // =============================================================================
-// Oracle 5: Host field in body rejected by deny_unknown_fields
+// Unit X1.2 Oracle 3: from: [] -> refused at load with error naming peer
+// =============================================================================
+#[test]
+fn test_oracle_3_empty_from_refused_at_load() {
+    let json = r#"{
+        "rogue-peer": {
+            "address": "10.0.0.1:7788",
+            "pin": "pin-12345",
+            "allow": ["send"],
+            "from": []
+        }
+    }"#;
+
+    let res = PeersMap::load_from_json(json);
+    assert!(
+        res.is_err(),
+        "empty from array must be refused at configuration load"
+    );
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("rogue-peer"),
+        "error must name the misconfigured peer, got: {err}"
+    );
+    assert!(
+        err.contains("from"),
+        "error must reference 'from', got: {err}"
+    );
+}
+
+// =============================================================================
+// Unit X1.2 Oracle 4: check applies on reply route too (reply outside from -> 403)
+// =============================================================================
+#[tokio::test]
+async fn test_oracle_4_reply_route_source_check() {
+    let (cert_b, key_b, pin_b) = generate_self_signed_ed25519("host-b").unwrap();
+
+    // Node A only allows replies from host-b if source is in 10.0.0.0/8 (outside 127.0.0.1)
+    let node_a = create_test_node(
+        "host-a",
+        "sess-a",
+        vec![PeerConfig {
+            name: "host-b".to_string(),
+            address: "127.0.0.1:9999".to_string(),
+            pin: pin_b.clone(),
+            allow: vec!["reply".to_string()],
+            from: Some(vec!["10.0.0.0/8".to_string()]),
+            leaf: false,
+            principals: Vec::new(),
+        }],
+    )
+    .await;
+
+    // Insert an outbound record so in_reply_to is valid
+    let orig_msg_id = ulid::Ulid::new().to_string();
+    {
+        let db = node_a.db.lock().unwrap();
+        storage::insert_outbound(&db, &orig_msg_id, "host-b", "sess-b", "accepted", 1000).unwrap();
+        storage::insert_message(
+            &db,
+            &storage::MessageRecord {
+                id: orig_msg_id.clone(),
+                created_at: 1000,
+                session_id: "sess-a".to_string(),
+                from_name: "xmsg@host-a · claude:sess-a".to_string(),
+                bytes: 4,
+                outcome: "accepted".to_string(),
+                recipient_harness: "claude".to_string(),
+                return_harness: Some("claude".to_string()),
+                return_session_id: Some("sess-a".to_string()),
+                return_host: None,
+                push_replies: true,
+                thread_id: "th1".to_string(),
+            },
+        )
+        .unwrap();
+    }
+
+    let fed_state_b = Arc::new(FedState {
+        host_label: "host-b".to_string(),
+        peers: Arc::new(PeersMap::new(
+            [(
+                "host-a".to_string(),
+                PeerConfig {
+                    name: "host-a".to_string(),
+                    address: node_a.fed_addr.to_string(),
+                    pin: node_a.pin.clone(),
+                    allow: vec!["reply".to_string()],
+                    from: None,
+                    leaf: false,
+                    principals: Vec::new(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        )),
+        cert_der: cert_b,
+        key_der: key_b,
+        rate_limiter: Arc::new(RateLimiter::new(60, 20)),
+        db: node_a.db.clone(),
+        sessions_dir: node_a.sessions_dir.clone(),
+        agy_config: node_a.fed_state.agy_config.clone(),
+        agy_store: node_a.fed_state.agy_store.clone(),
+        pi_store: node_a.fed_state.pi_store.clone(),
+        pi_notify_tx: node_a.fed_state.pi_notify_tx.clone(),
+        notify_tx: node_a.fed_state.notify_tx.clone(),
+        max_body: 65536,
+    });
+
+    let reply = FedReplyEnvelope {
+        v: 1,
+        id: ulid::Ulid::new().to_string(),
+        in_reply_to: orig_msg_id,
+        replier: FedReplier {
+            harness: "claude".to_string(),
+            session_id: "sess-b".to_string(),
+            name: "agent-b".to_string(),
+        },
+        text: "Valid reply from wrong source IP".to_string(),
+        created_at: 1001,
+    };
+
+    let res = send_federated_reply(&fed_state_b, "host-a", &reply).await;
+    match res {
+        Err(xmsg::error::AppError::PeerRejected(detail)) => {
+            assert!(
+                detail.contains("not allowed by peer 'from' CIDR rules") || detail.contains("CIDR")
+            );
+        }
+        other => panic!("Expected PeerRejected for reply from outside CIDR, got {other:?}"),
+    }
+
+    // Assert session inbox received 0 replies
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(node_a.inbox_rx.lock().unwrap().len(), 0);
+}
+
+// =============================================================================
+// Unit X1.2 Oracle 5: no_whois present -> load error naming the field
+// =============================================================================
+#[test]
+fn test_oracle_5_no_whois_rejected_at_load() {
+    let json = r#"{
+        "stale-peer": {
+            "address": "10.0.0.1:7788",
+            "pin": "pin-12345",
+            "allow": ["send"],
+            "no_whois": true
+        }
+    }"#;
+
+    let res = PeersMap::load_from_json(json);
+    assert!(
+        res.is_err(),
+        "stale no_whois field must be refused at configuration load"
+    );
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("no_whois"),
+        "error must name the stale field 'no_whois', got: {err}"
+    );
+    assert!(
+        err.contains("stale-peer"),
+        "error must name the peer, got: {err}"
+    );
+}
+
 // =============================================================================
 #[tokio::test]
 async fn test_oracle_5_host_field_in_body_rejected() {
@@ -555,11 +858,10 @@ async fn test_oracle_5_host_field_in_body_rejected() {
             address: "127.0.0.1:9999".to_string(),
             pin: pin_a.clone(),
             allow: vec!["send".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
     )
     .await;
 
@@ -624,11 +926,10 @@ async fn test_oracle_6_anonymous_from_with_colon_gives_400() {
             address: "127.0.0.1:9999".to_string(),
             pin: pin_a.clone(),
             allow: vec!["send".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
     )
     .await;
 
@@ -657,7 +958,7 @@ async fn test_oracle_6_anonymous_from_with_colon_gives_400() {
                     address: node_b.fed_addr.to_string(),
                     pin: node_b.pin.clone(),
                     allow: vec!["send".to_string()],
-                    no_whois: true,
+                    from: None,
                     leaf: false,
                     principals: Vec::new(),
                 },
@@ -667,7 +968,6 @@ async fn test_oracle_6_anonymous_from_with_colon_gives_400() {
         )),
         cert_der: cert_a,
         key_der: key_a,
-        whois_verifier: Arc::new(MockWhoIsVerifier::new()),
         rate_limiter: Arc::new(RateLimiter::new(60, 20)),
         db: node_b.db.clone(),
         sessions_dir: node_b.sessions_dir.clone(),
@@ -703,11 +1003,10 @@ async fn test_oracle_7_root_harness_rejected_and_badge_spoof_sanitized() {
             address: "127.0.0.1:9999".to_string(),
             pin: pin_a.clone(),
             allow: vec!["send".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
     )
     .await;
 
@@ -721,7 +1020,7 @@ async fn test_oracle_7_root_harness_rejected_and_badge_spoof_sanitized() {
                     address: node_b.fed_addr.to_string(),
                     pin: node_b.pin.clone(),
                     allow: vec!["send".to_string()],
-                    no_whois: true,
+                    from: None,
                     leaf: false,
                     principals: Vec::new(),
                 },
@@ -731,7 +1030,6 @@ async fn test_oracle_7_root_harness_rejected_and_badge_spoof_sanitized() {
         )),
         cert_der: cert_a,
         key_der: key_a,
-        whois_verifier: Arc::new(MockWhoIsVerifier::new()),
         rate_limiter: Arc::new(RateLimiter::new(60, 20)),
         db: node_b.db.clone(),
         sessions_dir: node_b.sessions_dir.clone(),
@@ -811,11 +1109,10 @@ async fn test_oracle_8_no_forward_rejected() {
             address: "127.0.0.1:9999".to_string(),
             pin: pin_a.clone(),
             allow: vec!["send".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
     )
     .await;
 
@@ -829,7 +1126,7 @@ async fn test_oracle_8_no_forward_rejected() {
                     address: node_b.fed_addr.to_string(),
                     pin: node_b.pin.clone(),
                     allow: vec!["send".to_string()],
-                    no_whois: true,
+                    from: None,
                     leaf: false,
                     principals: Vec::new(),
                 },
@@ -839,7 +1136,6 @@ async fn test_oracle_8_no_forward_rejected() {
         )),
         cert_der: cert_a,
         key_der: key_a,
-        whois_verifier: Arc::new(MockWhoIsVerifier::new()),
         rate_limiter: Arc::new(RateLimiter::new(60, 20)),
         db: node_b.db.clone(),
         sessions_dir: node_b.sessions_dir.clone(),
@@ -890,11 +1186,10 @@ async fn test_oracle_9_forged_reply_id_gives_403() {
             address: "127.0.0.1:9999".to_string(),
             pin: pin_b.clone(),
             allow: vec!["reply".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
     )
     .await;
 
@@ -908,7 +1203,7 @@ async fn test_oracle_9_forged_reply_id_gives_403() {
                     address: node_a.fed_addr.to_string(),
                     pin: node_a.pin.clone(),
                     allow: vec!["reply".to_string()],
-                    no_whois: true,
+                    from: None,
                     leaf: false,
                     principals: Vec::new(),
                 },
@@ -918,7 +1213,6 @@ async fn test_oracle_9_forged_reply_id_gives_403() {
         )),
         cert_der: cert_b,
         key_der: key_b,
-        whois_verifier: Arc::new(MockWhoIsVerifier::new()),
         rate_limiter: Arc::new(RateLimiter::new(60, 20)),
         db: node_a.db.clone(),
         sessions_dir: node_a.sessions_dir.clone(),
@@ -1016,11 +1310,10 @@ async fn test_oracle_10_duplicate_id_delivered_once() {
             address: "127.0.0.1:9999".to_string(),
             pin: pin_a.clone(),
             allow: vec!["send".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
     )
     .await;
 
@@ -1034,7 +1327,7 @@ async fn test_oracle_10_duplicate_id_delivered_once() {
                     address: node_b.fed_addr.to_string(),
                     pin: node_b.pin.clone(),
                     allow: vec!["send".to_string()],
-                    no_whois: true,
+                    from: None,
                     leaf: false,
                     principals: Vec::new(),
                 },
@@ -1044,7 +1337,6 @@ async fn test_oracle_10_duplicate_id_delivered_once() {
         )),
         cert_der: cert_a,
         key_der: key_a,
-        whois_verifier: Arc::new(MockWhoIsVerifier::new()),
         rate_limiter: Arc::new(RateLimiter::new(60, 20)),
         db: node_b.db.clone(),
         sessions_dir: node_b.sessions_dir.clone(),
@@ -1112,11 +1404,10 @@ async fn test_oracle_11_rate_limit_429() {
             address: "127.0.0.1:9999".to_string(),
             pin: pin_a.clone(),
             allow: vec!["send".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
     )
     .await;
 
@@ -1130,7 +1421,7 @@ async fn test_oracle_11_rate_limit_429() {
                     address: node_b.fed_addr.to_string(),
                     pin: node_b.pin.clone(),
                     allow: vec!["send".to_string()],
-                    no_whois: true,
+                    from: None,
                     leaf: false,
                     principals: Vec::new(),
                 },
@@ -1140,7 +1431,6 @@ async fn test_oracle_11_rate_limit_429() {
         )),
         cert_der: cert_a,
         key_der: key_a,
-        whois_verifier: Arc::new(MockWhoIsVerifier::new()),
         rate_limiter: Arc::new(RateLimiter::new(60, 20)),
         db: node_b.db.clone(),
         sessions_dir: node_b.sessions_dir.clone(),
@@ -1214,11 +1504,10 @@ async fn test_oracle_12_router_isolation() {
             address: "127.0.0.1:9999".to_string(),
             pin: pin_a.clone(),
             allow: vec!["send".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
     )
     .await;
 
@@ -1277,11 +1566,10 @@ async fn test_amendment_a_peer_without_send_gets_403_op_denied() {
             address: "127.0.0.1:9999".to_string(),
             pin: pin_a.clone(),
             allow: vec!["reply".to_string(), "list".to_string()], // NO "send"
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
     )
     .await;
 
@@ -1295,7 +1583,7 @@ async fn test_amendment_a_peer_without_send_gets_403_op_denied() {
                     address: node_b.fed_addr.to_string(),
                     pin: node_b.pin.clone(),
                     allow: vec!["send".to_string()],
-                    no_whois: true,
+                    from: None,
                     leaf: false,
                     principals: Vec::new(),
                 },
@@ -1305,7 +1593,6 @@ async fn test_amendment_a_peer_without_send_gets_403_op_denied() {
         )),
         cert_der: cert_a,
         key_der: key_a,
-        whois_verifier: Arc::new(MockWhoIsVerifier::new()),
         rate_limiter: Arc::new(RateLimiter::new(60, 20)),
         db: node_b.db.clone(),
         sessions_dir: node_b.sessions_dir.clone(),
@@ -1353,7 +1640,7 @@ async fn test_amendment_a_peer_without_send_gets_403_op_denied() {
 // =============================================================================
 #[tokio::test]
 async fn test_amendment_b_unlinked_well_formed_cert_refused() {
-    let node_b = create_test_node("host-b", "sess-b", Vec::new(), true).await;
+    let node_b = create_test_node("host-b", "sess-b", Vec::new()).await;
 
     // Well-formed ed25519 cert from unlinked node "host-c"
     let (cert_c, key_c, _) = generate_self_signed_ed25519("host-c").unwrap();
@@ -1399,7 +1686,7 @@ async fn test_amendment_c_unknown_peer_opens_no_socket() {
         }
     });
 
-    let node_a = create_test_node("host-a", "sess-a", Vec::new(), true).await;
+    let node_a = create_test_node("host-a", "sess-a", Vec::new()).await;
 
     // Send to unknown peer using the stand-in listener address as the host
     let unknown_ref = format!("sess-unknown@{stand_in_addr}");
@@ -1481,11 +1768,10 @@ exit 0
             address: "127.0.0.1:0".to_string(),
             pin: pin_a.clone(),
             allow: vec!["send".to_string(), "reply".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
         None,
         Some((cert_b, key_b, pin_b)),
         Some(fake_agy_bin.to_string_lossy().to_string()),
@@ -1517,11 +1803,10 @@ exit 0
             address: node_b.fed_addr.to_string(),
             pin: node_b.pin.clone(),
             allow: vec!["send".to_string(), "reply".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
         None,
         Some((cert_a, key_a, pin_a)),
     )
@@ -1637,7 +1922,7 @@ fn make_client_fed_state(
                     address: peer_addr,
                     pin: peer_pin,
                     allow: allow.into_iter().map(String::from).collect(),
-                    no_whois: true,
+                    from: None,
                     leaf: false,
                     principals: principals.into_iter().map(String::from).collect(),
                 },
@@ -1647,7 +1932,6 @@ fn make_client_fed_state(
         )),
         cert_der,
         key_der,
-        whois_verifier: Arc::new(MockWhoIsVerifier::new()),
         rate_limiter: Arc::new(RateLimiter::new(60, 20)),
         db: base_node.db.clone(),
         sessions_dir: base_node.sessions_dir.clone(),
@@ -1676,11 +1960,10 @@ async fn test_f2_anon_origin_reply_refused() {
             address: "127.0.0.1:9999".to_string(),
             pin: pin_b.clone(),
             allow: vec!["send".to_string(), "reply".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
     )
     .await;
 
@@ -1752,11 +2035,10 @@ async fn test_f2_push_replies_false_refused() {
             address: "127.0.0.1:9999".to_string(),
             pin: pin_b.clone(),
             allow: vec!["send".to_string(), "reply".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
     )
     .await;
 
@@ -1827,11 +2109,10 @@ async fn test_f2_unknown_harness_refused() {
             address: "127.0.0.1:9999".to_string(),
             pin: pin_b.clone(),
             allow: vec!["send".to_string(), "reply".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
     )
     .await;
 
@@ -1906,11 +2187,10 @@ async fn test_f3_http_origin_federated_send() {
             address: "127.0.0.1:9999".to_string(),
             pin: pin_a.clone(),
             allow: vec!["send".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
     )
     .await;
 
@@ -1922,11 +2202,10 @@ async fn test_f3_http_origin_federated_send() {
             address: node_b.fed_addr.to_string(),
             pin: node_b.pin.clone(),
             allow: vec!["send".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
         None,
         Some((cert_a, key_a, pin_a)),
     )
@@ -1969,11 +2248,10 @@ async fn test_f4_empty_allow_pin_refused_at_handshake() {
             address: "127.0.0.1:9999".to_string(),
             pin: pin_a,
             allow: vec![],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
     )
     .await;
 
@@ -2010,11 +2288,10 @@ async fn test_f4_one_way_link() {
             address: "127.0.0.1:9999".to_string(),
             pin: pin_a.clone(),
             allow: vec!["send".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
     )
     .await;
 
@@ -2026,11 +2303,10 @@ async fn test_f4_one_way_link() {
             address: node_b.fed_addr.to_string(),
             pin: node_b.pin.clone(),
             allow: vec![], // allow = []: A does not allow inbound from B
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
         None,
         Some((cert_a, key_a, pin_a)),
     )
@@ -2068,7 +2344,7 @@ async fn test_f4_one_way_link() {
 
 #[tokio::test]
 async fn test_f5_listener_handshake_timeout() {
-    let node_b = create_test_node("host-b", "sess-b", Vec::new(), true).await;
+    let node_b = create_test_node("host-b", "sess-b", Vec::new()).await;
     let mut idle_stream = tokio::net::TcpStream::connect(&node_b.fed_addr)
         .await
         .unwrap();
@@ -2101,7 +2377,7 @@ async fn test_f7_outbound_timeout_on_silent_peer() {
     });
 
     let (cert_a, key_a, _) = generate_self_signed_ed25519("host-a").unwrap();
-    let node_a = create_test_node("host-a", "sess-a", Vec::new(), true).await;
+    let node_a = create_test_node("host-a", "sess-a", Vec::new()).await;
 
     let fed_state = make_client_fed_state(
         "host-a",
@@ -2162,11 +2438,10 @@ async fn test_f8_verbatim_remote_outcome_relay_and_dedup() {
             address: "127.0.0.1:9999".to_string(),
             pin: pin_a.clone(),
             allow: vec!["send".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
     )
     .await;
 
@@ -2228,11 +2503,10 @@ async fn test_f9_kind_qualified_principal_filter() {
             address: "127.0.0.1:9999".to_string(),
             pin: pin_a,
             allow: vec!["send".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: vec!["svc:matrix".to_string(), "anon:genie".to_string()],
         }],
-        true,
     )
     .await;
 
@@ -2361,11 +2635,10 @@ async fn test_f10_reply_deduplication_and_rate_limit() {
             address: "127.0.0.1:9999".to_string(),
             pin: pin_b.clone(),
             allow: vec!["send".to_string(), "reply".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
     )
     .await;
 
@@ -2475,11 +2748,10 @@ async fn test_oracle_server_pin_verified() {
             address: "127.0.0.1:9".into(),
             pin: pin_a,
             allow: vec!["send".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
     )
     .await;
 
@@ -2547,11 +2819,10 @@ async fn test_oracle_reply_allow_check() {
             address: "127.0.0.1:9".into(),
             pin: pin_b.clone(),
             allow: vec!["send".to_string()],
-            no_whois: true,
+            from: None,
             leaf: false,
             principals: Vec::new(),
         }],
-        true,
         None,
         Some((cert_a.clone(), key_a.clone(), pin_a.clone())),
     )

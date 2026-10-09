@@ -421,3 +421,38 @@ nix build -L .#checks.x86_64-linux.image --no-link
 # Run Nix CI checks
 nix flake check ./ci
 ```
+
+---
+
+## 7. Cross-Host Federation
+
+`xmsg` supports secure, direct host-to-host messaging across machines over mutual TLS (mTLS) with pinned self-signed Ed25519 certificates and optional source-address bindings.
+
+### 7.1 Security Architecture & Identity
+
+Federated connections establish peer identity using cryptographic certificate pinning rather than central Certificate Authorities:
+
+- **Pinned mTLS:** Each peer generates a self-signed Ed25519 TLS certificate and computes its SHA-256 fingerprint pin (`sha256:...`). Peers must explicitly configure each other's pin in their `peers.json` configuration.
+- **Identity = Pin:** A peer's cryptographic identity is solely established by its certificate pin matching the configured peer record during TLS client authentication.
+- **Optional Source-Address Binding (`from`):** Peers may optionally bind accepted connections to one or more CIDR network blocks or bare IP addresses:
+  ```json
+  {
+    "alpha": {
+      "address": "192.168.1.50:7788",
+      "pin": "sha256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+      "allow": ["send", "reply"],
+      "from": ["192.168.1.0/24", "fd00::/8"]
+    }
+  }
+  ```
+  - **Pin-Only (`from` absent):** When `from` is omitted, the certificate pin alone authenticates incoming connections from any source IP.
+  - **Source Validation (`from` present):** When `from` is configured, after the peer's certificate pin matches, the connection's remote IP is checked against the configured CIDRs. If the source IP falls outside all listed CIDRs, the request is immediately rejected with HTTP `403 Forbidden` (`peer_rejected`) and 0 bytes are delivered.
+  - **Empty `from` Disallowed:** Configuring `"from": []` is invalid and causes an immediate configuration load error naming the peer.
+  - **Stale `no_whois` Rejected:** Previous WhoIs configurations containing `"no_whois"` are rejected at load time naming the obsolete field.
+  - **Inbound Listener Enforcement:** Source address validation applies uniformly to all inbound federated routes (`/fed/v1/messages` and `/fed/v1/replies`).
+
+### 7.2 Configuration & Operation
+
+- **Peers Map (`--peers-file`):** A JSON dictionary mapping peer hostnames to their endpoint `address`, certificate `pin`, permitted operations (`allow: ["send", "reply"]`), optional `from` CIDR list, and optional kind-qualified `principals` filters (e.g. `claude:<name>`, `svc:<name>`, `anon:<from>`, `session:<id>`).
+- **No Forwarding:** Forwarding cross-host (`to.ref` containing `@`) is strictly prohibited; receivers reject forwarded requests with `400 no_forward`.
+- **Router Isolation:** Federated TLS listeners only expose `/fed/` routes and strictly isolate local loopback routes (`/healthz`, `/v1/sessions`).

@@ -40,38 +40,110 @@ pub struct PeerConfig {
     pub pin: String,
     #[serde(default)]
     pub allow: Vec<String>,
-    #[serde(default)]
-    pub no_whois: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<Vec<String>>,
     #[serde(default)]
     pub leaf: bool,
     #[serde(default)]
     pub principals: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-enum PeersFileRaw {
-    MapWrapped {
-        peers: HashMap<String, PeerConfigRaw>,
-    },
-    MapDirect(HashMap<String, PeerConfigRaw>),
-    List(Vec<PeerConfigRaw>),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IpCidr {
+    V4 { net: u32, mask: u32 },
+    V6 { net: u128, mask: u128 },
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct PeerConfigRaw {
-    #[serde(default)]
-    pub name: Option<String>,
-    pub address: String,
-    pub pin: String,
-    #[serde(default)]
-    pub allow: Vec<String>,
-    #[serde(default)]
-    pub no_whois: bool,
-    #[serde(default)]
-    pub leaf: bool,
-    #[serde(default)]
-    pub principals: Vec<String>,
+impl IpCidr {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let s = s.trim();
+        if let Some((ip_str, prefix_str)) = s.split_once('/') {
+            let ip: IpAddr = ip_str
+                .parse()
+                .map_err(|e| format!("invalid IP in CIDR '{s}': {e}"))?;
+            let prefix: u32 = prefix_str
+                .parse()
+                .map_err(|e| format!("invalid prefix in CIDR '{s}': {e}"))?;
+            match ip {
+                IpAddr::V4(v4) => {
+                    if prefix > 32 {
+                        return Err(format!("prefix /{prefix} out of bounds for IPv4 in '{s}'"));
+                    }
+                    let mask = if prefix == 0 {
+                        0
+                    } else {
+                        (!0u32) << (32 - prefix)
+                    };
+                    let net = u32::from(v4) & mask;
+                    Ok(IpCidr::V4 { net, mask })
+                }
+                IpAddr::V6(v6) => {
+                    if prefix > 128 {
+                        return Err(format!("prefix /{prefix} out of bounds for IPv6 in '{s}'"));
+                    }
+                    let mask = if prefix == 0 {
+                        0
+                    } else {
+                        (!0u128) << (128 - prefix)
+                    };
+                    let net = u128::from(v6) & mask;
+                    Ok(IpCidr::V6 { net, mask })
+                }
+            }
+        } else {
+            let ip: IpAddr = s
+                .parse()
+                .map_err(|e| format!("invalid IP address '{s}': {e}"))?;
+            match ip {
+                IpAddr::V4(v4) => Ok(IpCidr::V4 {
+                    net: u32::from(v4),
+                    mask: !0u32,
+                }),
+                IpAddr::V6(v6) => Ok(IpCidr::V6 {
+                    net: u128::from(v6),
+                    mask: !0u128,
+                }),
+            }
+        }
+    }
+
+    pub fn contains(&self, ip: &IpAddr) -> bool {
+        let canonical_ip = match ip {
+            IpAddr::V4(v4) => IpAddr::V4(*v4),
+            IpAddr::V6(v6) => {
+                if let Some(v4) = v6.to_ipv4_mapped() {
+                    IpAddr::V4(v4)
+                } else {
+                    IpAddr::V6(*v6)
+                }
+            }
+        };
+        match (self, canonical_ip) {
+            (IpCidr::V4 { net, mask }, IpAddr::V4(v4)) => (u32::from(v4) & mask) == *net,
+            (IpCidr::V6 { net, mask }, IpAddr::V6(v6)) => (u128::from(v6) & mask) == *net,
+            _ => false,
+        }
+    }
+}
+
+pub fn check_peer_source(peer_cfg: &PeerConfig, remote_ip: &IpAddr) -> Result<(), AppError> {
+    if let Some(ref from_list) = peer_cfg.from {
+        let mut allowed = false;
+        for cidr_str in from_list {
+            if let Ok(cidr) = IpCidr::parse(cidr_str) {
+                if cidr.contains(remote_ip) {
+                    allowed = true;
+                    break;
+                }
+            }
+        }
+        if !allowed {
+            return Err(AppError::PeerRejected(format!(
+                "remote IP {remote_ip} not allowed by peer 'from' CIDR rules"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -124,67 +196,167 @@ impl PeersMap {
     }
 
     pub fn load_from_json(json_str: &str) -> Result<Self, String> {
-        let raw: PeersFileRaw = serde_json::from_str(json_str)
+        let val: serde_json::Value = serde_json::from_str(json_str)
             .map_err(|e| format!("Failed to parse peers JSON: {e}"))?;
 
+        let entries: Vec<(String, &serde_json::Map<String, serde_json::Value>)> = match &val {
+            serde_json::Value::Object(map) => {
+                if let Some(peers_val) = map.get("peers") {
+                    let peers_obj = peers_val
+                        .as_object()
+                        .ok_or_else(|| "'peers' field must be an object".to_string())?;
+                    peers_obj
+                        .iter()
+                        .map(|(k, v)| {
+                            let obj = v
+                                .as_object()
+                                .ok_or_else(|| format!("peer entry for '{k}' must be an object"))?;
+                            Ok((k.clone(), obj))
+                        })
+                        .collect::<Result<Vec<_>, String>>()?
+                } else {
+                    map.iter()
+                        .map(|(k, v)| {
+                            let obj = v
+                                .as_object()
+                                .ok_or_else(|| format!("peer entry for '{k}' must be an object"))?;
+                            Ok((k.clone(), obj))
+                        })
+                        .collect::<Result<Vec<_>, String>>()?
+                }
+            }
+            serde_json::Value::Array(list) => list
+                .iter()
+                .map(|item| {
+                    let obj = item
+                        .as_object()
+                        .ok_or_else(|| "peer list element must be an object".to_string())?;
+                    let name = obj
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .ok_or_else(|| "peer list entry missing 'name' field".to_string())?;
+                    Ok((name.to_string(), obj))
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+            _ => return Err("peers JSON must be an object or an array".to_string()),
+        };
+
         let mut map = Self::empty();
-        match raw {
-            PeersFileRaw::MapWrapped { peers } | PeersFileRaw::MapDirect(peers) => {
-                for (key_name, entry) in peers {
-                    for p in &entry.principals {
-                        let valid = p.starts_with("claude:")
-                            || p.starts_with("agy:")
-                            || p.starts_with("pi:")
-                            || p.starts_with("svc:")
-                            || p.starts_with("anon:")
-                            || p.starts_with("session:");
-                        if !valid {
-                            return Err(format!(
-                                "principal filter entry '{p}' must be kind-qualified (e.g. claude:<name>, svc:<name>, anon:<from>, session:<id>)"
-                            ));
-                        }
+        for (key_name, obj) in entries {
+            let name = obj
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or(&key_name)
+                .to_string();
+
+            // Oracle 5: A peers file that still carries no_whois is a load error naming the field
+            if obj.contains_key("no_whois") {
+                return Err(format!(
+                    "unknown field 'no_whois' in peer config for '{name}': whois has been removed in favor of 'from' CIDR allowlist"
+                ));
+            }
+
+            // Check for unknown fields
+            for k in obj.keys() {
+                match k.as_str() {
+                    "name" | "address" | "pin" | "allow" | "from" | "leaf" | "principals" => {}
+                    other => {
+                        return Err(format!(
+                            "unknown field '{other}' in peer config for '{name}'"
+                        ));
                     }
-                    let name = entry.name.unwrap_or(key_name);
-                    map.insert(PeerConfig {
-                        name,
-                        address: entry.address,
-                        pin: entry.pin,
-                        allow: entry.allow,
-                        no_whois: entry.no_whois,
-                        leaf: entry.leaf,
-                        principals: entry.principals,
-                    });
                 }
             }
-            PeersFileRaw::List(list) => {
-                for entry in list {
-                    for p in &entry.principals {
-                        let valid = p.starts_with("claude:")
-                            || p.starts_with("agy:")
-                            || p.starts_with("pi:")
-                            || p.starts_with("svc:")
-                            || p.starts_with("anon:")
-                            || p.starts_with("session:");
+
+            let address = obj
+                .get("address")
+                .and_then(|a| a.as_str())
+                .ok_or_else(|| format!("peer '{name}' missing required field 'address'"))?
+                .to_string();
+
+            let pin = obj
+                .get("pin")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| format!("peer '{name}' missing required field 'pin'"))?
+                .to_string();
+
+            let allow: Vec<String> = if let Some(al) = obj.get("allow") {
+                let arr = al
+                    .as_array()
+                    .ok_or_else(|| format!("peer '{name}': 'allow' must be an array"))?;
+                arr.iter()
+                    .map(|v| {
+                        v.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                            format!("peer '{name}': 'allow' elements must be strings")
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?
+            } else {
+                Vec::new()
+            };
+
+            // Oracle 3: from: [] is a config ERROR at load (refuse to start), naming the peer
+            let from: Option<Vec<String>> = if let Some(fr) = obj.get("from") {
+                let arr = fr
+                    .as_array()
+                    .ok_or_else(|| format!("peer '{name}': 'from' must be an array"))?;
+                if arr.is_empty() {
+                    return Err(format!(
+                        "peer '{name}' has empty 'from' list: 'from' must contain at least one CIDR, or be omitted for pin-only"
+                    ));
+                }
+                let mut cidr_strings = Vec::with_capacity(arr.len());
+                for item in arr {
+                    let s = item
+                        .as_str()
+                        .ok_or_else(|| format!("peer '{name}': 'from' items must be strings"))?;
+                    IpCidr::parse(s)
+                        .map_err(|e| format!("peer '{name}' invalid CIDR in 'from': {e}"))?;
+                    cidr_strings.push(s.to_string());
+                }
+                Some(cidr_strings)
+            } else {
+                None
+            };
+
+            let leaf = obj.get("leaf").and_then(|l| l.as_bool()).unwrap_or(false);
+
+            let principals: Vec<String> = if let Some(pr) = obj.get("principals") {
+                let arr = pr
+                    .as_array()
+                    .ok_or_else(|| format!("peer '{name}': 'principals' must be an array"))?;
+                arr.iter()
+                    .map(|v| {
+                        let s = v
+                            .as_str()
+                            .ok_or_else(|| format!("peer '{name}': 'principals' elements must be strings"))?;
+                        let valid = s.starts_with("claude:")
+                            || s.starts_with("agy:")
+                            || s.starts_with("pi:")
+                            || s.starts_with("svc:")
+                            || s.starts_with("anon:")
+                            || s.starts_with("session:");
                         if !valid {
                             return Err(format!(
-                                "principal filter entry '{p}' must be kind-qualified (e.g. claude:<name>, svc:<name>, anon:<from>, session:<id>)"
+                                "principal filter entry '{s}' must be kind-qualified (e.g. claude:<name>, svc:<name>, anon:<from>, session:<id>)"
                             ));
                         }
-                    }
-                    let name = entry
-                        .name
-                        .ok_or_else(|| "Peer list entry missing 'name' field".to_string())?;
-                    map.insert(PeerConfig {
-                        name,
-                        address: entry.address,
-                        pin: entry.pin,
-                        allow: entry.allow,
-                        no_whois: entry.no_whois,
-                        leaf: entry.leaf,
-                        principals: entry.principals,
-                    });
-                }
-            }
+                        Ok(s.to_string())
+                    })
+                    .collect::<Result<Vec<_>, String>>()?
+            } else {
+                Vec::new()
+            };
+
+            map.insert(PeerConfig {
+                name,
+                address,
+                pin,
+                allow,
+                from,
+                leaf,
+                principals,
+            });
         }
         Ok(map)
     }
@@ -377,61 +549,6 @@ impl rustls::client::danger::ServerCertVerifier for PinnedServerCertVerifier {
 }
 
 // -----------------------------------------------------------------------------
-// WhoIs Verifier Trait & Stand-ins
-// -----------------------------------------------------------------------------
-
-pub trait WhoIsVerifier: Send + Sync {
-    fn verify_node<'a>(
-        &'a self,
-        remote_ip: &'a IpAddr,
-        expected_node: &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send + 'a>>;
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct MockWhoIsVerifier {
-    pub rejected_nodes: Arc<Mutex<Vec<String>>>,
-    pub rejected_ips: Arc<Mutex<Vec<IpAddr>>>,
-}
-
-impl MockWhoIsVerifier {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn reject_node(&self, node: &str) {
-        self.rejected_nodes.lock().unwrap().push(node.to_string());
-    }
-
-    pub fn reject_ip(&self, ip: IpAddr) {
-        self.rejected_ips.lock().unwrap().push(ip);
-    }
-}
-
-impl WhoIsVerifier for MockWhoIsVerifier {
-    fn verify_node<'a>(
-        &'a self,
-        remote_ip: &'a IpAddr,
-        expected_node: &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send + 'a>>
-    {
-        let is_rejected_ip = self.rejected_ips.lock().unwrap().contains(remote_ip);
-        let is_rejected_node = self
-            .rejected_nodes
-            .lock()
-            .unwrap()
-            .contains(&expected_node.to_string());
-        Box::pin(async move {
-            if is_rejected_ip || is_rejected_node {
-                Ok(false)
-            } else {
-                Ok(true)
-            }
-        })
-    }
-}
-
-// -----------------------------------------------------------------------------
 // Token Bucket Rate Limiting
 // -----------------------------------------------------------------------------
 
@@ -589,7 +706,6 @@ pub struct FedState {
     pub peers: Arc<PeersMap>,
     pub cert_der: Vec<u8>,
     pub key_der: Vec<u8>,
-    pub whois_verifier: Arc<dyn WhoIsVerifier>,
     pub rate_limiter: Arc<RateLimiter>,
     pub db: Arc<Mutex<rusqlite::Connection>>,
     pub sessions_dir: PathBuf,
@@ -669,26 +785,8 @@ async fn fed_send_message_handler(
         }
     }
 
-    // 2. WhoIs secondary check (if not no_whois)
-    if !peer_cfg.no_whois {
-        match fed_state
-            .whois_verifier
-            .verify_node(&peer.remote_ip, &peer.name)
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                return Err(AppError::PeerRejected(
-                    "WhoIs node identity mismatch".to_string(),
-                ));
-            }
-            Err(e) => {
-                return Err(AppError::PeerRejected(format!(
-                    "WhoIs verification failed: {e}"
-                )));
-            }
-        }
-    }
+    // 2. Source IP CIDR check (if from is configured)
+    check_peer_source(peer_cfg, &peer.remote_ip)?;
 
     // 3. Rate limiting
     let principal_key = match &envelope.principal {
@@ -1020,27 +1118,8 @@ async fn fed_reply_handler(
                 .into_response());
         }
     }
-
-    // 2. WhoIs secondary check (if not no_whois)
-    if !peer_cfg.no_whois {
-        match fed_state
-            .whois_verifier
-            .verify_node(&peer.remote_ip, &peer.name)
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                return Err(AppError::PeerRejected(
-                    "WhoIs node identity mismatch".to_string(),
-                ));
-            }
-            Err(e) => {
-                return Err(AppError::PeerRejected(format!(
-                    "WhoIs verification failed: {e}"
-                )));
-            }
-        }
-    }
+    // 2. Source IP CIDR check (if from is configured)
+    check_peer_source(peer_cfg, &peer.remote_ip)?;
 
     // 3. Authorization: in_reply_to MUST exist in outbound table AND peer must match!
     let outbound = {
