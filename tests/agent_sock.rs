@@ -180,6 +180,8 @@ fn test_resolve_caller_session_ancestor_walk() {
     });
     fs::write(sessions_dir.join("1000.json"), session_json.to_string()).unwrap();
 
+    let svc_store = xmsg::svc::new_svc_store();
+
     // 1. Caller PID 3000 should resolve upwards to session claude-sess-alpha
     let resolved = resolve_caller_session(
         &proc_root,
@@ -187,6 +189,7 @@ fn test_resolve_caller_session_ancestor_walk() {
         &agy_config,
         &agy_store,
         &pi_store,
+        &svc_store,
         3000,
     )
     .unwrap();
@@ -208,6 +211,7 @@ fn test_resolve_caller_session_ancestor_walk() {
         &agy_config,
         &agy_store,
         &pi_store,
+        &svc_store,
         9999,
     ) {
         Err(AppError::NotRecipient(msg)) => {
@@ -311,6 +315,8 @@ async fn test_agent_sock_reply_and_send_flow() {
         agy_store: new_agy_store(),
         pi_store: new_pi_store(),
         pi_notify_tx,
+        svc_store: xmsg::svc::new_svc_store(),
+        svc_notify_tx: tokio::sync::broadcast::channel(16).0,
         host_label: "test-host".to_string(),
         max_body: 65536,
         request_counter: AtomicU64::new(1),

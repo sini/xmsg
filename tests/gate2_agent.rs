@@ -159,7 +159,22 @@ async fn setup(max_body: usize) -> Env {
             ptx.clone(),
         );
         tokio::spawn(async move {
-            let _ = run_register_server(a, b, c, d, vec![], vec![], e, f, ttl, uid).await;
+            let _ = run_register_server(
+                a,
+                b,
+                c,
+                d,
+                vec![],
+                vec![],
+                e,
+                f,
+                ttl,
+                uid,
+                xmsg::svc::new_svc_store(),
+                std::collections::HashMap::new(),
+                tokio::sync::broadcast::channel(16).0,
+            )
+            .await;
         });
     }
 
@@ -169,6 +184,8 @@ async fn setup(max_body: usize) -> Env {
         agy_store,
         pi_store,
         pi_notify_tx: ptx,
+        svc_store: xmsg::svc::new_svc_store(),
+        svc_notify_tx: tokio::sync::broadcast::channel(16).0,
         host_label: "h".into(),
         max_body,
         request_counter: AtomicU64::new(1),

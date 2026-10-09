@@ -9,3 +9,4 @@ pub mod pi;
 pub mod process;
 pub mod registry;
 pub mod storage;
+pub mod svc;

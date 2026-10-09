@@ -983,6 +983,9 @@ pub async fn run_register_server(
     pi_notify_tx: tokio::sync::broadcast::Sender<String>,
     reply_ttl: Duration,
     my_uid: u32,
+    svc_store: crate::svc::SvcStore,
+    trusted_svc_exes: HashMap<String, PathBuf>,
+    svc_notify_tx: tokio::sync::broadcast::Sender<String>,
 ) -> io::Result<()> {
     if let Some(parent) = sock_path.parent() {
         if let Err(e) = crate::agent::ensure_secure_socket_dir(parent, my_uid) {
@@ -1044,6 +1047,9 @@ pub async fn run_register_server(
         let trusted_pi_node_bins_clone = trusted_pi_node_bins.clone();
         let db_clone = db.clone();
         let pi_notify_tx_clone = pi_notify_tx.clone();
+        let svc_store_clone = svc_store.clone();
+        let trusted_svc_exes_clone = trusted_svc_exes.clone();
+        let svc_notify_tx_clone = svc_notify_tx.clone();
 
         tokio::spawn(async move {
             use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -1159,6 +1165,37 @@ pub async fn run_register_server(
                                 let err_resp = serde_json::json!({
                                     "status": "error",
                                     "detail": format!("invalid pi request: {e}")
+                                });
+                                let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+                            }
+                        }
+                    }
+                    Ok(ref v) if v.get("harness").and_then(|h| h.as_str()) == Some("svc") => {
+                        match serde_json::from_value::<crate::svc::SvcRegisterRequest>(v.clone()) {
+                            Ok(req) => {
+                                if let Err(e) = crate::svc::handle_svc_connection(
+                                    buf_reader,
+                                    writer,
+                                    config_clone.proc_root.clone(),
+                                    svc_store_clone,
+                                    &trusted_svc_exes_clone,
+                                    my_uid,
+                                    peer_uid,
+                                    peer_pid,
+                                    req,
+                                    db_clone,
+                                    svc_notify_tx_clone,
+                                    reply_ttl,
+                                )
+                                .await
+                                {
+                                    tracing::warn!("svc connection ended with error: {e}");
+                                }
+                            }
+                            Err(e) => {
+                                let err_resp = serde_json::json!({
+                                    "status": "error",
+                                    "detail": format!("invalid svc request: {e}")
                                 });
                                 let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
                             }

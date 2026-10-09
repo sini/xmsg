@@ -279,6 +279,9 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
             s_tx,
             reply_ttl,
             my_uid,
+            xmsg::svc::new_svc_store(),
+            std::collections::HashMap::new(),
+            tokio::sync::broadcast::channel(16).0,
         )
         .await;
     });

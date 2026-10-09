@@ -29,6 +29,8 @@ pub struct AppState {
     pub agy_store: crate::agy::AgyStore,
     pub pi_store: crate::pi::PiStore,
     pub pi_notify_tx: broadcast::Sender<String>,
+    pub svc_store: crate::svc::SvcStore,
+    pub svc_notify_tx: broadcast::Sender<String>,
     pub host_label: String,
     pub max_body: usize,
     pub request_counter: AtomicU64,
@@ -102,6 +104,7 @@ pub(crate) enum ResolvedTarget {
     Claude(registry::Session, PathBuf),
     Agy(registry::Session),
     Pi(registry::Session),
+    Svc(registry::Session),
 }
 
 pub(crate) fn resolve_target_session(
@@ -124,6 +127,13 @@ pub(crate) fn resolve_target_session(
                 )? {
                     return Ok(ResolvedTarget::Pi(session));
                 }
+                if let Some(session) = crate::svc::resolve_svc_session(
+                    &state.agy_config.proc_root,
+                    &state.svc_store,
+                    ref_str,
+                )? {
+                    return Ok(ResolvedTarget::Svc(session));
+                }
                 return Err(AppError::Unregistered(pid));
             }
             Err(AppError::Gone { session_id, pid })
@@ -140,14 +150,26 @@ pub(crate) fn resolve_target_session(
                     )? {
                         Some(session) => Ok(ResolvedTarget::Pi(session)),
                         None => {
-                            if let Ok(pid) = ref_str.parse::<u32>() {
-                                if crate::process::starttime(&state.agy_config.proc_root, pid)
-                                    .is_ok()
-                                {
-                                    return Err(AppError::Unregistered(pid));
+                            match crate::svc::resolve_svc_session(
+                                &state.agy_config.proc_root,
+                                &state.svc_store,
+                                ref_str,
+                            )? {
+                                Some(session) => Ok(ResolvedTarget::Svc(session)),
+                                None => {
+                                    if let Ok(pid) = ref_str.parse::<u32>() {
+                                        if crate::process::starttime(
+                                            &state.agy_config.proc_root,
+                                            pid,
+                                        )
+                                        .is_ok()
+                                        {
+                                            return Err(AppError::Unregistered(pid));
+                                        }
+                                    }
+                                    Err(AppError::NotFound(ref_str.to_string()))
                                 }
                             }
-                            Err(AppError::NotFound(ref_str.to_string()))
                         }
                     }
                 }
@@ -168,6 +190,9 @@ async fn list_sessions_handler(
     let mut pi_sessions =
         crate::pi::list_pi_sessions(&state.agy_config.proc_root, &state.pi_store, &query);
     sessions.append(&mut pi_sessions);
+    let mut svc_sessions =
+        crate::svc::list_svc_sessions(&state.agy_config.proc_root, &state.svc_store, &query);
+    sessions.append(&mut svc_sessions);
     (StatusCode::OK, Json(sessions))
 }
 
@@ -180,6 +205,7 @@ async fn get_session_handler(
         ResolvedTarget::Claude(s, _) => s,
         ResolvedTarget::Agy(s) => s,
         ResolvedTarget::Pi(s) => s,
+        ResolvedTarget::Svc(s) => s,
     };
     Ok((StatusCode::OK, Json(session)).into_response())
 }
@@ -343,6 +369,37 @@ async fn send_message_handler(
             }
             let _ = state.pi_notify_tx.send(session.session_id.clone());
             (session.session_id, "pi".to_string(), "delivered")
+        }
+        ResolvedTarget::Svc(session) => {
+            let envelope = format!(
+                "[xmsg] from={} message_id={} — reply with the xmsg reply tool\n\n{}",
+                from_name, message_id, req.text
+            );
+            let svc_msg = storage::SvcPendingMessage {
+                id: message_id.clone(),
+                session_id: session.session_id.clone(),
+                created_at: storage::now_epoch_secs(),
+                from_name: from_name.clone(),
+                bytes: body_len,
+                text: req.text.clone(),
+                envelope,
+                delivered_at: None,
+            };
+            {
+                let db = state
+                    .db
+                    .lock()
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                let inserted = storage::insert_svc_message(&db, &svc_msg)
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                if !inserted {
+                    return Err(AppError::ServiceUnavailable(
+                        "svc session message queue is full".to_string(),
+                    ));
+                }
+            }
+            let _ = state.svc_notify_tx.send(session.session_id.clone());
+            (session.session_id, "svc".to_string(), "delivered")
         }
     };
 

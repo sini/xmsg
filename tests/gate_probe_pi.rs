@@ -172,6 +172,9 @@ async fn setup_gate_harness() -> GateHarness {
             reg_pi_notify,
             Duration::from_secs(3600),
             my_uid,
+            xmsg::svc::new_svc_store(),
+            std::collections::HashMap::new(),
+            tokio::sync::broadcast::channel(16).0,
         )
         .await;
     });
@@ -182,6 +185,8 @@ async fn setup_gate_harness() -> GateHarness {
         agy_store,
         pi_store,
         pi_notify_tx,
+        svc_store: xmsg::svc::new_svc_store(),
+        svc_notify_tx: tokio::sync::broadcast::channel(16).0,
         host_label: "test-host".to_string(),
         max_body: 65536,
         request_counter: AtomicU64::new(1),

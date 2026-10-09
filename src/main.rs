@@ -120,6 +120,10 @@ pub struct ServeArgs {
     /// Trusted Node executable paths for Pi (defaults to accepting any executable named node/nodejs)
     #[arg(long = "pi-node-bin", env = "XMSG_PI_NODE_BIN", value_delimiter = ',')]
     pub pi_node_bins: Vec<PathBuf>,
+
+    /// Trusted Svc daemon executable paths per name (format: NAME=PATH, repeatable or comma-separated)
+    #[arg(long = "svc-exe", env = "XMSG_SVC_EXE", value_delimiter = ',')]
+    pub svc_exes: Vec<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -459,6 +463,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let db = Arc::new(Mutex::new(conn));
     let (notify_tx, _) = broadcast::channel(1024);
     let (pi_notify_tx, _) = broadcast::channel(1024);
+    let (svc_notify_tx, _) = broadcast::channel(1024);
 
     let agy_config = xmsg::agy::AgyConfig {
         trusted_agy_exes: args.agy_exes,
@@ -467,6 +472,22 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let pi_entrypoints = args.pi_entrypoints;
     let agy_store = xmsg::agy::new_agy_store();
     let pi_store = xmsg::pi::new_pi_store();
+    let svc_store = xmsg::svc::new_svc_store();
+
+    let mut trusted_svc_exes: std::collections::HashMap<String, PathBuf> =
+        std::collections::HashMap::new();
+    for entry in args.svc_exes {
+        if let Some((name, path)) = entry.split_once('=') {
+            let name = name
+                .trim()
+                .strip_prefix("svc:")
+                .unwrap_or(name.trim())
+                .to_string();
+            let path = PathBuf::from(path.trim());
+            trusted_svc_exes.insert(name, path);
+        }
+    }
+
     let my_uid = xmsg::agent::current_uid();
     let register_sock_path = match args.register_sock {
         Some(p) => p,
@@ -487,6 +508,9 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let reg_sock = register_sock_path.clone();
     let reg_db = db.clone();
     let reg_pi_notify_tx = pi_notify_tx.clone();
+    let reg_svc_store = svc_store.clone();
+    let reg_trusted_svc_exes = trusted_svc_exes.clone();
+    let reg_svc_notify_tx = svc_notify_tx.clone();
     let reply_ttl = Duration::from_secs(args.reply_ttl);
 
     tokio::spawn(async move {
@@ -501,6 +525,9 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
             reg_pi_notify_tx,
             reply_ttl,
             my_uid,
+            reg_svc_store,
+            reg_trusted_svc_exes,
+            reg_svc_notify_tx,
         )
         .await
         {
@@ -514,6 +541,8 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         agy_store,
         pi_store,
         pi_notify_tx,
+        svc_store,
+        svc_notify_tx,
         host_label,
         max_body: args.max_body,
         request_counter: AtomicU64::new(1),

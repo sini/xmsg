@@ -150,6 +150,7 @@ fn cell_g2_agent_sock_refuses_unregistered_lock_holder() {
     };
     let agy_store = new_agy_store(); // Empty: NOT registered
     let pi_store = new_pi_store();
+    let svc_store = xmsg::svc::new_svc_store();
 
     let res = resolve_caller_session(
         &proc_root,
@@ -157,6 +158,7 @@ fn cell_g2_agent_sock_refuses_unregistered_lock_holder() {
         &agy_config,
         &agy_store,
         &pi_store,
+        &svc_store,
         4000,
     );
 

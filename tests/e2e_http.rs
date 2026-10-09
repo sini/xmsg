@@ -173,6 +173,8 @@ async fn start_harness(max_body: usize) -> TestHarness {
         agy_store: xmsg::agy::new_agy_store(),
         pi_store: xmsg::pi::new_pi_store(),
         pi_notify_tx,
+        svc_store: xmsg::svc::new_svc_store(),
+        svc_notify_tx: tokio::sync::broadcast::channel(16).0,
         host_label: "test-host".to_string(),
         max_body,
         request_counter: AtomicU64::new(1),

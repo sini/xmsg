@@ -112,6 +112,7 @@ pub fn resolve_caller_session(
     _agy_config: &AgyConfig,
     agy_store: &crate::agy::AgyStore,
     pi_store: &PiStore,
+    svc_store: &crate::svc::SvcStore,
     peer_pid: u32,
 ) -> Result<Session, AppError> {
     let mut curr_pid = peer_pid;
@@ -178,6 +179,29 @@ pub fn resolve_caller_session(
                         started_at: info.registered_at as u64,
                         updated_at: info.registered_at as u64,
                         harness: "pi".to_string(),
+                        registered: Some(true),
+                    });
+                }
+            }
+        }
+
+        // 4. Check Svc sessions
+        {
+            let svc_lock = svc_store.read().unwrap();
+            for info in svc_lock.values() {
+                if info.pid == curr_pid && crate::svc::is_svc_session_alive(proc_root, info) {
+                    return Ok(Session {
+                        session_id: info.session_id.clone(),
+                        name: Some(info.name.clone()),
+                        pid: info.pid,
+                        cwd: info.cwd.clone(),
+                        status: "idle".to_string(),
+                        kind: "daemon".to_string(),
+                        entrypoint: None,
+                        version: None,
+                        started_at: info.registered_at as u64,
+                        updated_at: info.registered_at as u64,
+                        harness: "svc".to_string(),
                         registered: Some(true),
                     });
                 }
@@ -390,6 +414,7 @@ pub async fn run_agent_server(
                     &state_clone.agy_config,
                     &state_clone.agy_store,
                     &state_clone.pi_store,
+                    &state_clone.svc_store,
                     peer_pid,
                 ) {
                     Ok(c) => c,
@@ -626,6 +651,52 @@ pub async fn run_agent_server(
                                                     Ok(true) => {
                                                         let _ = state_clone
                                                             .pi_notify_tx
+                                                            .send(session.session_id.clone());
+                                                        Ok(())
+                                                    }
+                                                    Ok(false) => Err("push_failed"),
+                                                    Err(_) => Err("push_failed"),
+                                                }
+                                            }
+                                            Ok(None) => Err("sender_gone"),
+                                            Err(_) => Err("push_failed"),
+                                        }
+                                    }
+                                    "svc" => {
+                                        match crate::svc::resolve_svc_session(
+                                            &state_clone.agy_config.proc_root,
+                                            &state_clone.svc_store,
+                                            ret_session_id,
+                                        ) {
+                                            Ok(Some(session)) => {
+                                                let envelope = format!(
+                                                    "[xmsg] reply to message_id={message_id} — message_id={new_message_id}; reply with the xmsg reply tool\n\n{text}"
+                                                );
+                                                let svc_msg = storage::SvcPendingMessage {
+                                                    id: new_message_id.clone(),
+                                                    session_id: session.session_id.clone(),
+                                                    created_at: storage::now_epoch_secs(),
+                                                    from_name: replier_badge.clone(),
+                                                    bytes: text.len(),
+                                                    text: text.to_string(),
+                                                    envelope,
+                                                    delivered_at: None,
+                                                };
+                                                let insert_res = (|| -> Result<bool, AppError> {
+                                                    let db =
+                                                        state_clone.db.lock().map_err(|e| {
+                                                            AppError::Internal(e.to_string())
+                                                        })?;
+                                                    storage::insert_svc_message(&db, &svc_msg)
+                                                        .map_err(|e| {
+                                                            AppError::Internal(e.to_string())
+                                                        })
+                                                })(
+                                                );
+                                                match insert_res {
+                                                    Ok(true) => {
+                                                        let _ = state_clone
+                                                            .svc_notify_tx
                                                             .send(session.session_id.clone());
                                                         Ok(())
                                                     }
@@ -895,6 +966,51 @@ pub async fn run_agent_server(
                                                 Ok((
                                                     session.session_id,
                                                     "pi".to_string(),
+                                                    "delivered",
+                                                ))
+                                            }
+                                            Err(e) => Err(e),
+                                        }
+                                    }
+                                    ResolvedTarget::Svc(session) => {
+                                        let envelope = format!(
+                                            "[xmsg] from={from_name} message_id={message_id} — reply with the xmsg reply tool\n\n{text}"
+                                        );
+                                        let svc_msg = storage::SvcPendingMessage {
+                                            id: message_id.clone(),
+                                            session_id: session.session_id.clone(),
+                                            created_at: storage::now_epoch_secs(),
+                                            from_name: from_name.clone(),
+                                            bytes: body_len,
+                                            text: text.to_string(),
+                                            envelope,
+                                            delivered_at: None,
+                                        };
+                                        let db_res = (|| -> Result<(), AppError> {
+                                            let db = state_clone
+                                                .db
+                                                .lock()
+                                                .map_err(|e| AppError::Internal(e.to_string()))?;
+                                            let inserted =
+                                                storage::insert_svc_message(&db, &svc_msg)
+                                                    .map_err(|e| {
+                                                        AppError::Internal(e.to_string())
+                                                    })?;
+                                            if !inserted {
+                                                return Err(AppError::ServiceUnavailable(
+                                                    "svc session message queue is full".to_string(),
+                                                ));
+                                            }
+                                            Ok(())
+                                        })();
+                                        match db_res {
+                                            Ok(_) => {
+                                                let _ = state_clone
+                                                    .svc_notify_tx
+                                                    .send(session.session_id.clone());
+                                                Ok((
+                                                    session.session_id,
+                                                    "svc".to_string(),
                                                     "delivered",
                                                 ))
                                             }

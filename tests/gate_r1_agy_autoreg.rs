@@ -112,6 +112,9 @@ async fn oracle_1_hook_credential_less_and_credentialed_and_malformed() {
             pi_tx,
             Duration::from_secs(60),
             my_uid,
+            xmsg::svc::new_svc_store(),
+            std::collections::HashMap::new(),
+            tokio::sync::broadcast::channel(16).0,
         )
         .await;
     });
@@ -347,6 +350,8 @@ exit 0
         agy_store: agy_store.clone(),
         pi_store,
         pi_notify_tx,
+        svc_store: xmsg::svc::new_svc_store(),
+        svc_notify_tx: broadcast::channel(16).0,
         host_label: "test-host".to_string(),
         max_body: 65536,
         request_counter: AtomicU64::new(1),
@@ -509,6 +514,8 @@ async fn oracle_3_live_unattested_pid_returns_unregistered_without_exited() {
         agy_store: new_agy_store(),
         pi_store: xmsg::pi::new_pi_store(),
         pi_notify_tx,
+        svc_store: xmsg::svc::new_svc_store(),
+        svc_notify_tx: broadcast::channel(16).0,
         host_label: "test-host".to_string(),
         max_body: 65536,
         request_counter: AtomicU64::new(1),

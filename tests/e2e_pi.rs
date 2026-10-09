@@ -86,6 +86,9 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
             s_tx,
             reply_ttl,
             my_uid,
+            xmsg::svc::new_svc_store(),
+            std::collections::HashMap::new(),
+            tokio::sync::broadcast::channel(16).0,
         )
         .await;
     });
@@ -97,6 +100,8 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
         agy_store: agy_store.clone(),
         pi_store: pi_store.clone(),
         pi_notify_tx: pi_notify_tx.clone(),
+        svc_store: xmsg::svc::new_svc_store(),
+        svc_notify_tx: tokio::sync::broadcast::channel(16).0,
         host_label: "test-host".to_string(),
         max_body: 65536,
         request_counter: AtomicU64::new(1),

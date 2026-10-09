@@ -28,6 +28,8 @@ fn test_app_state() -> Arc<AppState> {
         agy_store: xmsg::agy::new_agy_store(),
         pi_store: xmsg::pi::new_pi_store(),
         pi_notify_tx,
+        svc_store: xmsg::svc::new_svc_store(),
+        svc_notify_tx: tokio::sync::broadcast::channel(16).0,
         host_label: "test-host".to_string(),
         max_body: 65536,
         request_counter: AtomicU64::new(1),
@@ -212,6 +214,7 @@ for i in $(seq 1 50); do
     sleep 0.05
 done
 
+if command -v python3 >/dev/null 2>&1; then
 python3 -c "import socket, sys
 s = socket.socket()
 s.settimeout(0.5)
@@ -219,6 +222,15 @@ res = s.connect_ex(('127.0.0.1', 7787))
 sys.exit(0 if res != 0 else 1) # Exit 0 if REFUSED (not bound), Exit 1 if connected (bound)
 "
 PROBE_RES=$?
+elif [ -f /proc/net/tcp ]; then
+    if grep -iq ":1E6B " /proc/net/tcp; then
+        PROBE_RES=1
+    else
+        PROBE_RES=0
+    fi
+else
+    PROBE_RES=0
+fi
 
 kill -9 $SERVER_PID 2>/dev/null || true
 wait $SERVER_PID 2>/dev/null || true

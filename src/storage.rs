@@ -71,6 +71,19 @@ pub struct AgyPendingMessage {
     pub delivered_at: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SvcPendingMessage {
+    pub id: String,
+    pub session_id: String,
+    pub created_at: i64,
+    pub from_name: String,
+    pub bytes: usize,
+    pub text: String,
+    pub envelope: String,
+    pub delivered_at: Option<i64>,
+}
+
 pub fn now_epoch_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -127,12 +140,25 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             delivered_at INTEGER
         );
 
+        CREATE TABLE IF NOT EXISTS svc_pending_messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            from_name TEXT NOT NULL,
+            bytes INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            envelope TEXT NOT NULL,
+            delivered_at INTEGER
+        );
+
         CREATE INDEX IF NOT EXISTS idx_replies_message_seq ON replies(message_id, seq);
         CREATE INDEX IF NOT EXISTS idx_replies_created_at ON replies(created_at);
         CREATE INDEX IF NOT EXISTS idx_pi_pending_session ON pi_pending_messages(session_id, delivered_at);
         CREATE INDEX IF NOT EXISTS idx_pi_pending_created_at ON pi_pending_messages(created_at);
         CREATE INDEX IF NOT EXISTS idx_agy_pending_session ON agy_pending_messages(session_id, delivered_at);
         CREATE INDEX IF NOT EXISTS idx_agy_pending_created_at ON agy_pending_messages(created_at);
+        CREATE INDEX IF NOT EXISTS idx_svc_pending_session ON svc_pending_messages(session_id, delivered_at);
+        CREATE INDEX IF NOT EXISTS idx_svc_pending_created_at ON svc_pending_messages(created_at);
         "#,
     )?;
 
@@ -482,6 +508,80 @@ pub fn purge_agy_messages(conn: &Connection, ttl_secs: u64) -> Result<usize> {
     let cutoff = now_epoch_secs() - (ttl_secs as i64);
     conn.execute(
         "DELETE FROM agy_pending_messages WHERE created_at < ?1",
+        params![cutoff],
+    )
+}
+
+pub const MAX_SVC_QUEUE_PER_SESSION: usize = 100;
+
+pub fn count_pending_svc_messages(conn: &Connection, session_id: &str) -> Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT COUNT(*) FROM svc_pending_messages WHERE session_id = ?1 AND delivered_at IS NULL",
+    )?;
+    let count: i64 = stmt.query_row(params![session_id], |row| row.get(0))?;
+    Ok(count as usize)
+}
+
+pub fn insert_svc_message(conn: &Connection, msg: &SvcPendingMessage) -> Result<bool> {
+    let pending = count_pending_svc_messages(conn, &msg.session_id)?;
+    if pending >= MAX_SVC_QUEUE_PER_SESSION {
+        return Ok(false);
+    }
+    conn.execute(
+        "INSERT INTO svc_pending_messages (id, session_id, created_at, from_name, bytes, text, envelope, delivered_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            msg.id,
+            msg.session_id,
+            msg.created_at,
+            msg.from_name,
+            msg.bytes as i64,
+            msg.text,
+            msg.envelope,
+            msg.delivered_at,
+        ],
+    )?;
+    Ok(true)
+}
+
+pub fn get_next_pending_svc_message(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Option<SvcPendingMessage>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, session_id, created_at, from_name, bytes, text, envelope, delivered_at FROM svc_pending_messages WHERE session_id = ?1 AND delivered_at IS NULL ORDER BY created_at ASC, rowid ASC LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![session_id])?;
+
+    if let Some(row) = rows.next()? {
+        let bytes_i64: i64 = row.get(4)?;
+        Ok(Some(SvcPendingMessage {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            created_at: row.get(2)?,
+            from_name: row.get(3)?,
+            bytes: bytes_i64 as usize,
+            text: row.get(5)?,
+            envelope: row.get(6)?,
+            delivered_at: row.get(7)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn ack_svc_message(conn: &Connection, session_id: &str, message_id: &str) -> Result<bool> {
+    let now = now_epoch_secs();
+    let count = conn.execute(
+        "UPDATE svc_pending_messages SET delivered_at = ?1 WHERE id = ?2 AND session_id = ?3 AND delivered_at IS NULL",
+        params![now, message_id, session_id],
+    )?;
+    Ok(count > 0)
+}
+
+pub fn purge_svc_messages(conn: &Connection, ttl_secs: u64) -> Result<usize> {
+    let cutoff = now_epoch_secs() - (ttl_secs as i64);
+    conn.execute(
+        "DELETE FROM svc_pending_messages WHERE created_at < ?1",
         params![cutoff],
     )
 }

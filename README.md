@@ -238,6 +238,86 @@ In multi-tenant setups where multiple Claude configurations exist on the same ho
 - **Default:** `~/.claude/sessions`.
 - **Deduplication & Fail-Closed Invariant:** Discovery, liveness verification, listing, and delivery inspect all configured directories. Because session IDs are globally unique, if the same session ID appears across multiple directories, an error is logged once and the duplicate session is excluded from discovery and delivery (fail-closed, no guessing).
 
+### 3.5 Daemon Harness Integration: Long-Poll & Attestation (`svc:`)
+
+`xmsg` supports long-running daemon harnesses and headless service workers using the `svc:` harness prefix (e.g. `svc:genie-expert` or `svc:dispatcher`). Unlike interactive assistants (such as Claude or Antigravity), daemons connect directly to `register.sock`, attest their executable path, and pull inbound messages using a long-polling loop with explicit acknowledgment.
+
+#### Configuration & Trust Model (`--svc-exe`)
+
+To prevent arbitrary processes from intercepting daemon traffic or squatting service names, `xmsg serve` requires trusted executable paths per service name:
+
+- **Command Line:** Repeatable `--svc-exe <NAME=PATH>` flags or comma-separated pairs:
+  ```bash
+  xmsg serve \
+    --svc-exe genie-expert=/nix/store/.../bin/genie-dispatcher \
+    --svc-exe worker=/usr/local/bin/my-worker
+  ```
+- **Environment Variable:** `XMSG_SVC_EXE`:
+  ```bash
+  export XMSG_SVC_EXE="genie-expert=/nix/store/.../bin/genie-dispatcher,worker=/usr/local/bin/my-worker"
+  xmsg serve
+  ```
+- **Attestation:** On connection to `register.sock`, `xmsg` queries kernel credentials (`SO_PEERCRED`) to verify the peer process runs under the same UID as `xmsg`. It canonicalizes `/proc/<pid>/exe` and verifies that it strictly matches the configured trusted path for `NAME`. Untrusted executables or UID mismatches are rejected immediately (`status: "error"`).
+- **Single Live Registration:** A second registration for an already-active service name is refused while the initial process remains alive. Once a daemon process exits, a replacement daemon can register immediately.
+
+#### Registration Frame
+
+The daemon connects to `$XDG_RUNTIME_DIR/xmsg/register.sock` and sends a JSON registration frame:
+
+```json
+{
+  "harness": "svc",
+  "name": "genie-expert",
+  "cwd": "/optional/working/dir"
+}
+```
+
+The server responds with the registered canonical session ID:
+
+```json
+{
+  "status": "ok",
+  "sessionId": "svc:genie-expert"
+}
+```
+
+Registered services appear in `list` / `/v1/sessions` as `svc:<name>` (with kind `"daemon"` and status `"idle"`) and are addressable as either `svc:<name>` or simply `<name>`.
+
+#### Long-Poll & Explicit Acknowledgment Semantics
+
+Communication over the registration socket uses a JSON-lines streaming protocol:
+
+1. **Long-Poll (`action: "poll"`):**
+
+   ```json
+   { "action": "poll", "waitSecs": 30 }
+   ```
+
+   If a message is queued or arrives within `waitSecs` (clamped between 0 and 60 seconds), `xmsg` pushes:
+
+   ```json
+   {
+     "action": "deliver",
+     "messageId": "01M4FG...",
+     "fromName": "xmsg@host · sender",
+     "text": "Task payload...",
+     "envelope": "[xmsg] from=... message_id=...\n\nTask payload..."
+   }
+   ```
+
+   If no message arrives within `waitSecs`, `xmsg` responds with `{"action": "timeout"}`.
+
+2. **Explicit Acknowledgment (`action: "ack"`):**
+
+   ```json
+   { "action": "ack", "messageId": "01M4FG..." }
+   ```
+
+   Server responds: `{"status": "ok"}`.
+
+3. **At-Least-Once Delivery Contract:**
+   The long-poll cursor advances **only** upon receiving an explicit `ack` frame. If a daemon crashes, disconnects, or terminates before sending an `ack`, the unacknowledged message remains at the head of the queue and will be redelivered when the daemon reconnects and polls again.
+
 ---
 
 ## 4. HTTP API Reference
