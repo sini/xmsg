@@ -1,0 +1,43 @@
+name: macOS
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    # Apple Silicon. `-latest` tracks the macOS users run and follows the
+    # repository's `ubuntu-latest`; an image migration is the breakage this job
+    # exists to catch.
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # gen-harness's `nix` column pin (evaluators.yml), upstream Nix like a
+      # stock darwin install.
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.35.2/install
+          github_access_token: ${{ github.token }}
+          # Sandbox off on purpose: the sandboxed Linux package build already
+          # gates sandbox purity, and the darwin sandbox is brittle.
+          extra_nix_config: |
+            sandbox = false
+
+      # No cache step: gen-harness dropped magic-nix-cache because its Post
+      # step re-uploads what the job just downloaded.
+
+      # The check `nix flake check ./ci` builds on Linux, for this system: the
+      # package, whose checkPhase runs `cargo test`.
+      - name: checks.package
+        run: |
+          nix --version
+          echo "sandbox = $(nix config show sandbox)"
+          sys=$(nix eval --impure --raw --expr builtins.currentSystem)
+          nix build "./ci#checks.$sys.package" -L --no-link
