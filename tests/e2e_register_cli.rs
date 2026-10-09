@@ -118,8 +118,6 @@ async fn test_shipped_binary_register_cli_with_server() {
             s_cfg,
             s_store,
             s_pi,
-            vec![],
-            vec![],
             s_db,
             s_tx,
             s_ttl,

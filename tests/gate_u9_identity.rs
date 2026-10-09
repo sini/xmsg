@@ -457,75 +457,34 @@ async fn cell_8_liveness_reused_pid_different_starttime() {
 
 /// Cell 9: Pi verification - untrusted script path refused when entrypoint configured.
 #[test]
-fn cell_9_pi_untrusted_script_path_refused() {
+fn cell_9_pi_uid_mismatch_refused() {
     let tmp = tempdir().unwrap();
     let proc_root = tmp.path().join("proc");
 
-    let node_bin = tmp.path().join("node");
-    fs::write(&node_bin, "node_binary").unwrap();
+    setup_mock_process(&proc_root, 12345, 1, None, None, "1000", Some("pi\0"));
 
-    let trusted_script = tmp.path().join("dist/cli.js");
-    fs::create_dir_all(trusted_script.parent().unwrap()).unwrap();
-    fs::write(&trusted_script, "console.log('pi');").unwrap();
-
-    let untrusted_script = tmp.path().join("evil.js");
-    fs::write(&untrusted_script, "console.log('evil');").unwrap();
-
-    let trusted_entrypoints = vec![trusted_script];
-
-    // Peer 12345 running node evil.js
-    let cmdline = format!("node\0{}\0", untrusted_script.display());
-    setup_mock_process(
-        &proc_root,
-        12345,
-        1,
-        Some(&node_bin),
-        None,
-        "1000",
-        Some(&cmdline),
-    );
-
-    let res = verify_pi_process(&proc_root, &trusted_entrypoints, &[], 1000, 1000, 12345);
+    let res = verify_pi_process(&proc_root, 1000, 1001, 12345);
     match res {
-        Err(AppError::BadRequest(msg)) => {
+        Err(AppError::NotRecipient(msg)) => {
             assert!(
-                msg.contains("script does not match any trusted pi entrypoint"),
-                "expected script mismatch error, got: {msg}"
+                msg.contains("peer UID 1001 does not match server UID 1000"),
+                "expected UID mismatch error, got: {msg}"
             );
         }
-        other => panic!("expected BadRequest for untrusted script, got: {other:?}"),
+        other => panic!("expected NotRecipient for UID mismatch, got: {other:?}"),
     }
 }
 
-/// Cell 10: Pi verification - trusted script path accepted when entrypoint configured.
+/// Cell 10: Pi verification - peer UID match accepted without script attestation.
 #[test]
-fn cell_10_pi_trusted_script_path_accepted() {
+fn cell_10_pi_uid_matching_accepted() {
     let tmp = tempdir().unwrap();
     let proc_root = tmp.path().join("proc");
 
-    let node_bin = tmp.path().join("node");
-    fs::write(&node_bin, "node_binary").unwrap();
+    setup_mock_process(&proc_root, 12345, 1, None, None, "1000", Some("pi\0"));
 
-    let trusted_script = tmp.path().join("dist/cli.js");
-    fs::create_dir_all(trusted_script.parent().unwrap()).unwrap();
-    fs::write(&trusted_script, "console.log('pi');").unwrap();
-
-    let trusted_entrypoints = vec![trusted_script.clone()];
-
-    // Peer 12345 running node dist/cli.js --opt
-    let cmdline = format!("node\0{}\0--opt\0", trusted_script.display());
-    setup_mock_process(
-        &proc_root,
-        12345,
-        1,
-        Some(&node_bin),
-        None,
-        "1000",
-        Some(&cmdline),
-    );
-
-    let res = verify_pi_process(&proc_root, &trusted_entrypoints, &[], 1000, 1000, 12345);
-    assert_eq!(res.expect("trusted pi script should be accepted"), "1000");
+    let res = verify_pi_process(&proc_root, 1000, 1000, 12345);
+    assert_eq!(res.expect("matching peer UID should be accepted"), "1000");
 }
 
 /// Live macOS probe verification test (runnable on macOS hosts with `-- --ignored`).

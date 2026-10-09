@@ -41,47 +41,8 @@ pub fn get_proc_starttime(proc_root: &Path, pid: u32) -> io::Result<String> {
     crate::process::starttime(proc_root, pid)
 }
 
-pub fn is_pi_cmdline(args: &[&str]) -> bool {
-    if args.is_empty() {
-        return false;
-    }
-    let arg0_path = Path::new(args[0]);
-    let arg0_name = arg0_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-
-    if arg0_name == "pi" {
-        return true;
-    }
-
-    let runtimes = ["node", "bun", "deno", "ts-node", "electron"];
-    if runtimes.contains(&arg0_name) && args.len() > 1 {
-        for arg in &args[1..] {
-            if arg.starts_with('-') {
-                continue;
-            }
-            let script_path = Path::new(arg);
-            let script_name = script_path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
-            if script_name == "pi"
-                || script_name == "pi.js"
-                || script_name == "pi.mjs"
-                || script_name == "pi.cjs"
-                || script_name == "pi.ts"
-            {
-                return true;
-            }
-            break;
-        }
-    }
-
-    false
-}
-
 pub fn verify_pi_process(
     proc_root: &Path,
-    trusted_entrypoints: &[std::path::PathBuf],
-    trusted_node_bins: &[std::path::PathBuf],
     my_uid: u32,
     peer_uid: u32,
     peer_pid: u32,
@@ -91,70 +52,9 @@ pub fn verify_pi_process(
             "peer UID {peer_uid} does not match server UID {my_uid}"
         )));
     }
-    let cmdline = crate::process::cmdline(proc_root, peer_pid)
-        .map_err(|e| AppError::NotFound(format!("process {peer_pid} not found: {e}")))?;
-    let args: Vec<&str> = cmdline.iter().map(String::as_str).collect();
-
-    if !trusted_entrypoints.is_empty() {
-        // 1. Kernel executable verification: must match configured node bin, or be named node/nodejs
-        let exe = crate::process::exe_path(proc_root, peer_pid)
-            .map_err(|e| AppError::NotFound(format!("process {peer_pid} exe not found: {e}")))?;
-        if !trusted_node_bins.is_empty() {
-            let exe_canon = std::fs::canonicalize(&exe).unwrap_or_else(|_| exe.clone());
-            let matches_node = trusted_node_bins.iter().any(|trusted| {
-                let trusted_canon =
-                    std::fs::canonicalize(trusted).unwrap_or_else(|_| trusted.clone());
-                exe_canon == trusted_canon
-            });
-            if !matches_node {
-                return Err(AppError::BadRequest(format!(
-                    "peer process {peer_pid} executable does not match any trusted node binary"
-                )));
-            }
-        } else {
-            let exe_name = exe.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if exe_name != "node" && exe_name != "nodejs" {
-                return Err(AppError::BadRequest(format!(
-                    "peer process {peer_pid} executable is not node"
-                )));
-            }
-        }
-
-        // 2. Script argument must be args[1], refusing any leading flags
-        let Some(script_arg) = args.get(1) else {
-            return Err(AppError::BadRequest(format!(
-                "peer process {peer_pid} has no script argument"
-            )));
-        };
-        if script_arg.starts_with('-') {
-            return Err(AppError::BadRequest(format!(
-                "peer process {peer_pid} has flag before script argument: {script_arg}"
-            )));
-        }
-
-        // 3. Resolve relative script argument against /proc/<pid>/cwd
-        let proc_cwd = crate::process::cwd(proc_root, peer_pid).map_err(|e| {
-            AppError::NotFound(format!("process {peer_pid} cwd not accessible: {e}"))
-        })?;
-        let script_path = proc_cwd.join(script_arg);
-        let script_canon = std::fs::canonicalize(&script_path).unwrap_or(script_path);
-        let matches_trusted = trusted_entrypoints.iter().any(|trusted| {
-            let trusted_canon = std::fs::canonicalize(trusted).unwrap_or_else(|_| trusted.clone());
-            script_canon == trusted_canon
-        });
-        if !matches_trusted {
-            return Err(AppError::BadRequest(format!(
-                "peer process {peer_pid} script does not match any trusted pi entrypoint"
-            )));
-        }
-    } else if !is_pi_cmdline(&args) {
-        return Err(AppError::BadRequest(format!(
-            "peer process {peer_pid} is not a pi instance"
-        )));
-    }
-
-    let starttime = get_proc_starttime(proc_root, peer_pid).map_err(|e| {
-        AppError::Internal(format!("failed to read starttime for PID {peer_pid}: {e}"))
+    let starttime = get_proc_starttime(proc_root, peer_pid).map_err(|e| match e.kind() {
+        io::ErrorKind::NotFound => AppError::NotFound(format!("process {peer_pid} not found: {e}")),
+        _ => AppError::Internal(format!("failed to read starttime for PID {peer_pid}: {e}")),
     })?;
     Ok(starttime)
 }
@@ -255,8 +155,6 @@ pub async fn handle_pi_connection<
     mut writer: W,
     proc_root: std::path::PathBuf,
     store: PiStore,
-    trusted_entrypoints: &[std::path::PathBuf],
-    trusted_node_bins: &[std::path::PathBuf],
     my_uid: u32,
     peer_uid: u32,
     peer_pid: u32,
@@ -265,14 +163,7 @@ pub async fn handle_pi_connection<
     pi_notify_tx: broadcast::Sender<String>,
     reply_ttl: Duration,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let starttime = match verify_pi_process(
-        &proc_root,
-        trusted_entrypoints,
-        trusted_node_bins,
-        my_uid,
-        peer_uid,
-        peer_pid,
-    ) {
+    let starttime = match verify_pi_process(&proc_root, my_uid, peer_uid, peer_pid) {
         Ok(st) => st,
         Err(e) => {
             let err_resp = serde_json::json!({

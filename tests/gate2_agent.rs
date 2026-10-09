@@ -164,8 +164,6 @@ async fn setup(max_body: usize) -> Env {
                 b,
                 c,
                 d,
-                vec![],
-                vec![],
                 e,
                 f,
                 ttl,
@@ -245,26 +243,11 @@ async fn gate2_identity() {
     let me = std::process::id();
     msg(&e.db, "MSG1", "victim-claude", "claude");
 
-    // ---- B2: Register as pi claiming victim id; attacker cmdline node /tmp/x/pi.js
+    // ---- B2: Register as pi claiming victim id; cmdline is just pi
     let pd = e.proc_root.join(me.to_string());
     fs::create_dir_all(&pd).unwrap();
     write_stat(&e.proc_root, me, "x", 1, "555");
-    fs::write(pd.join("cmdline"), "python3\0-c\0spin()\0").unwrap();
-
-    let s = UnixStream::connect(&e.reg).await.unwrap();
-    let (r, mut w) = s.into_split();
-    let mut r = BufReader::new(r);
-    let o = call_on(
-        &mut w,
-        &mut r,
-        &serde_json::json!({"harness":"pi","sessionId":"victim-claude","sessionName":"x"}),
-    )
-    .await;
-    // Non-pi commandline must be rejected
-    assert!(o.contains("is not a pi instance"));
-    drop(w);
-
-    fs::write(pd.join("cmdline"), "node\0/tmp/anything/pi.js\0").unwrap();
+    fs::write(pd.join("cmdline"), "pi\0").unwrap();
     let s = UnixStream::connect(&e.reg).await.unwrap();
     let (r, mut w) = s.into_split();
     let mut r = BufReader::new(r);

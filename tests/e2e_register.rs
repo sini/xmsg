@@ -273,8 +273,6 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
             s_cfg,
             s_store,
             s_pi,
-            vec![],
-            vec![],
             s_db,
             s_tx,
             reply_ttl,

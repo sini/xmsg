@@ -977,8 +977,6 @@ pub async fn run_register_server(
     config: AgyConfig,
     store: AgyStore,
     pi_store: crate::pi::PiStore,
-    trusted_pi_entrypoints: Vec<PathBuf>,
-    trusted_pi_node_bins: Vec<PathBuf>,
     db: Arc<Mutex<rusqlite::Connection>>,
     pi_notify_tx: tokio::sync::broadcast::Sender<String>,
     reply_ttl: Duration,
@@ -1043,8 +1041,6 @@ pub async fn run_register_server(
         let config_clone = config.clone();
         let store_clone = store.clone();
         let pi_store_clone = pi_store.clone();
-        let trusted_pi_entrypoints_clone = trusted_pi_entrypoints.clone();
-        let trusted_pi_node_bins_clone = trusted_pi_node_bins.clone();
         let db_clone = db.clone();
         let pi_notify_tx_clone = pi_notify_tx.clone();
         let svc_store_clone = svc_store.clone();
@@ -1146,8 +1142,6 @@ pub async fn run_register_server(
                                     writer,
                                     config_clone.proc_root.clone(),
                                     pi_store_clone,
-                                    &trusted_pi_entrypoints_clone,
-                                    &trusted_pi_node_bins_clone,
                                     my_uid,
                                     peer_uid,
                                     peer_pid,

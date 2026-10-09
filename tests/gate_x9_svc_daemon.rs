@@ -114,8 +114,6 @@ async fn setup_harness(service_name: &str) -> SvcTestHarness {
             reg_config,
             reg_store,
             reg_pi_store,
-            vec![],
-            vec![],
             reg_db,
             reg_pi_notify,
             Duration::from_secs(3600),

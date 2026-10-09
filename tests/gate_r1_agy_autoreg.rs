@@ -106,8 +106,6 @@ async fn oracle_1_hook_credential_less_and_credentialed_and_malformed() {
             agy_config,
             store_clone,
             pi_store,
-            Vec::new(),
-            Vec::new(),
             db_clone,
             pi_tx,
             Duration::from_secs(60),
