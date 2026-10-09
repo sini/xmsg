@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::{
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
     Extension, Json, Router,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
@@ -723,6 +724,9 @@ pub struct FedState {
     pub pi_notify_tx: broadcast::Sender<String>,
     pub notify_tx: broadcast::Sender<String>,
     pub max_body: usize,
+    pub is_leaf: bool,
+    pub leaf_principal: Option<String>,
+    pub outbound_replies_pushed: Arc<AtomicU64>,
 }
 
 // -----------------------------------------------------------------------------
@@ -734,6 +738,10 @@ pub fn build_fed_router(fed_state: Arc<FedState>) -> Router {
     Router::new()
         .route("/fed/v1/messages", post(fed_send_message_handler))
         .route("/fed/v1/replies", post(fed_reply_handler))
+        .route(
+            "/fed/v1/messages/{id}/replies",
+            get(fed_get_replies_handler),
+        )
         .layer(DefaultBodyLimit::max(max_body_limit))
         .with_state(fed_state)
 }
@@ -881,6 +889,12 @@ async fn fed_send_message_handler(
         }
     }
 
+    let push_replies = if peer_cfg.leaf {
+        false
+    } else {
+        envelope.push_replies
+    };
+
     // 7. Resolve local target session
     let target = match resolve_target_session_fed(&fed_state, target_ref) {
         Ok(t) => t,
@@ -902,7 +916,7 @@ async fn fed_send_message_handler(
                 return_harness: return_harness.clone(),
                 return_session_id: return_session_id.clone(),
                 return_host: Some(peer.name.clone()),
-                push_replies: envelope.push_replies,
+                push_replies,
                 thread_id: envelope.thread_id.clone(),
             };
             if let Ok(db) = fed_state.db.lock() {
@@ -931,7 +945,7 @@ async fn fed_send_message_handler(
         return_harness: return_harness.clone(),
         return_session_id: return_session_id.clone(),
         return_host: Some(peer.name.clone()),
-        push_replies: envelope.push_replies,
+        push_replies,
         thread_id: envelope.thread_id.clone(),
     };
     {
@@ -1317,6 +1331,89 @@ async fn fed_reply_handler(
         .into_response())
 }
 
+async fn fed_get_replies_handler(
+    State(fed_state): State<Arc<FedState>>,
+    Extension(peer): Extension<Arc<AuthenticatedPeer>>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<crate::http::LongPollQuery>,
+) -> Result<Response, AppError> {
+    let _peer_cfg = fed_state
+        .peers
+        .get(&peer.name)
+        .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
+
+    // Check rate limiter
+    if !fed_state
+        .rate_limiter
+        .check_and_consume(&peer.name, Some(&format!("poll:{}", peer.name)))
+    {
+        return Err(AppError::RateLimited("Rate limit exceeded".to_string()));
+    }
+
+    let msg = {
+        let db = fed_state
+            .db
+            .lock()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        storage::get_message(&db, &id)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("message '{id}'")))?
+    };
+
+    if msg.return_host.as_deref() != Some(&peer.name) {
+        return Err(AppError::OpDenied(format!(
+            "peer '{}' is not authorized to pull replies for message '{}'",
+            peer.name, id
+        )));
+    }
+
+    let after_seq = query.after.unwrap_or(0);
+    let wait_secs = query.wait.unwrap_or(0).min(60);
+
+    let rx = if wait_secs > 0 {
+        Some(fed_state.notify_tx.subscribe())
+    } else {
+        None
+    };
+
+    let existing = {
+        let db = fed_state
+            .db
+            .lock()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        storage::get_replies_after(&db, &id, after_seq)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+    };
+
+    if !existing.is_empty() || wait_secs == 0 {
+        return Ok((StatusCode::OK, Json(existing)).into_response());
+    }
+
+    let mut receiver = rx.unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(wait_secs), async {
+        loop {
+            match receiver.recv().await {
+                Ok(msg_id) if msg_id == id => break,
+                Err(broadcast::error::RecvError::Lagged(_)) => break,
+                Err(_) => break,
+                _ => {}
+            }
+        }
+    })
+    .await;
+
+    let replies = {
+        let db = fed_state
+            .db
+            .lock()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        storage::get_replies_after(&db, &id, after_seq)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+    };
+
+    Ok((StatusCode::OK, Json(replies)).into_response())
+}
+
 fn resolve_target_session_fed(
     fed_state: &FedState,
     ref_str: &str,
@@ -1545,6 +1642,10 @@ pub async fn send_federated_reply(
     peer_name: &str,
     reply: &FedReplyEnvelope,
 ) -> Result<Value, AppError> {
+    fed_state
+        .outbound_replies_pushed
+        .fetch_add(1, Ordering::SeqCst);
+
     let peer = fed_state
         .peers
         .get(peer_name)
@@ -1649,6 +1750,145 @@ pub async fn send_federated_reply(
         Err(_) => Err(AppError::PeerUnreachable(
             "Outbound call timed out after 5s".to_string(),
         )),
+    }
+}
+
+pub async fn poll_federated_replies(
+    fed_state: &FedState,
+    peer_name: &str,
+    message_id: &str,
+    after_seq: i64,
+    wait_secs: u64,
+) -> Result<Vec<storage::ReplyRecord>, AppError> {
+    let peer = fed_state
+        .peers
+        .get(peer_name)
+        .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
+
+    let poll_fut = async {
+        let connector = make_tls_connector(&fed_state.cert_der, &fed_state.key_der, &peer.pin)?;
+        let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
+            .await
+            .map_err(|e| {
+                AppError::PeerUnreachable(format!("Failed to connect to {}: {e}", peer.address))
+            })?;
+
+        let server_name = ServerName::try_from(peer_name.to_string())
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let tls_stream = connector
+            .connect(server_name, tcp_stream)
+            .await
+            .map_err(|e| map_tls_connect_error(peer_name, e))?;
+
+        let io = hyper_util::rt::TokioIo::new(tls_stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+            .await
+            .map_err(|e| AppError::PeerUnreachable(format!("HTTP handshake failed: {e}")))?;
+
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                debug!("HTTP connection closed: {e}");
+            }
+        });
+
+        let uri =
+            format!("/fed/v1/messages/{message_id}/replies?after={after_seq}&wait={wait_secs}");
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("host", peer_name)
+            .body(http_body_util::Empty::<bytes::Bytes>::new())
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let resp = sender
+            .send_request(req)
+            .await
+            .map_err(|e| AppError::PeerUnreachable(format!("Request failed: {e}")))?;
+
+        let status = resp.status();
+        let max_limit = fed_state.max_body + 4096;
+        let limited = http_body_util::Limited::new(resp.into_body(), max_limit);
+        use http_body_util::BodyExt;
+        let body_bytes = limited
+            .collect()
+            .await
+            .map_err(|_| AppError::PayloadTooLarge {
+                size: max_limit + 1,
+                limit: max_limit,
+            })?
+            .to_bytes();
+
+        if status.is_success() {
+            let replies: Vec<storage::ReplyRecord> = serde_json::from_slice(&body_bytes)
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            Ok(replies)
+        } else {
+            let err_resp: Result<WireErrorResponse, _> = serde_json::from_slice(&body_bytes);
+            if let Ok(err) = err_resp {
+                match status {
+                    StatusCode::NOT_FOUND => Err(AppError::NotFound(err.detail)),
+                    StatusCode::FORBIDDEN => Err(AppError::OpDenied(err.detail)),
+                    _ => Err(AppError::ServiceUnavailable(err.detail)),
+                }
+            } else {
+                Err(AppError::ServiceUnavailable(format!(
+                    "Remote returned status {status}"
+                )))
+            }
+        }
+    };
+
+    let timeout_duration = Duration::from_secs(wait_secs + 5);
+    match tokio::time::timeout(timeout_duration, poll_fut).await {
+        Ok(res) => res,
+        Err(_) => Err(AppError::PeerUnreachable(
+            "Outbound reply poll timed out".to_string(),
+        )),
+    }
+}
+
+pub fn parse_fed_principal(s: &str) -> Result<FedPrincipal, AppError> {
+    let s = s.trim();
+    if let Some(name) = s.strip_prefix("svc:") {
+        let re = regex::Regex::new(r"^[A-Za-z0-9._-]{1,32}$").unwrap();
+        if !re.is_match(name) {
+            return Err(AppError::BadRequest(format!(
+                "invalid service name '{name}'"
+            )));
+        }
+        Ok(FedPrincipal::Service {
+            name: name.to_string(),
+        })
+    } else if let Some(rest) = s.strip_prefix("claude:") {
+        Ok(FedPrincipal::Session {
+            harness: "claude".to_string(),
+            session_id: rest.to_string(),
+            name: rest.to_string(),
+        })
+    } else if let Some(rest) = s.strip_prefix("agy:") {
+        Ok(FedPrincipal::Session {
+            harness: "agy".to_string(),
+            session_id: rest.to_string(),
+            name: rest.to_string(),
+        })
+    } else if let Some(rest) = s.strip_prefix("pi:") {
+        Ok(FedPrincipal::Session {
+            harness: "pi".to_string(),
+            session_id: rest.to_string(),
+            name: rest.to_string(),
+        })
+    } else if let Some(from) = s.strip_prefix("anon:") {
+        Ok(FedPrincipal::Anonymous {
+            from: from.to_string(),
+        })
+    } else {
+        let re = regex::Regex::new(r"^[A-Za-z0-9._-]{1,32}$").unwrap();
+        if !re.is_match(s) {
+            return Err(AppError::BadRequest(format!("invalid principal '{s}'")));
+        }
+        Ok(FedPrincipal::Service {
+            name: s.to_string(),
+        })
     }
 }
 

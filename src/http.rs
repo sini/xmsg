@@ -42,6 +42,18 @@ pub struct AppState {
     pub fed_state: Option<Arc<crate::fed::FedState>>,
 }
 
+impl AppState {
+    pub fn is_leaf(&self) -> bool {
+        self.fed_state.as_ref().map(|f| f.is_leaf).unwrap_or(false)
+    }
+
+    pub fn leaf_principal(&self) -> Option<&str> {
+        self.fed_state
+            .as_ref()
+            .and_then(|f| f.leaf_principal.as_deref())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageDetailResponse {
@@ -249,16 +261,29 @@ async fn send_message_handler(
         return Err(AppError::BadRequest("text must not be empty".to_string()));
     }
 
-    // Sanitize sender name (enforces printable ASCII and rejects ':' and '/')
-    let from_name = match inbox::sanitize_from(&state.host_label, &req.from) {
-        Ok(name) => name,
-        Err(err) => {
-            eprintln!(
-                "req_id={} ref={} bytes={} outcome=bad_sender detail=\"{}\"",
-                req_id, ref_str, body_len, err
-            );
-            return Err(err);
-        }
+    // In leaf mode: ignore req.from, attribute strictly to leaf_principal
+    let (from_name, fed_principal, idempotency_principal) = if state.is_leaf() {
+        let p_str = state.leaf_principal().expect("leaf_principal in leaf mode");
+        let p = crate::fed::parse_fed_principal(p_str)?;
+        let name = format!("xmsg@{} · {}", state.host_label, p_str);
+        (name, p, p_str.to_string())
+    } else {
+        // Sanitize sender name (enforces printable ASCII and rejects ':' and '/')
+        let name = match inbox::sanitize_from(&state.host_label, &req.from) {
+            Ok(name) => name,
+            Err(err) => {
+                eprintln!(
+                    "req_id={} ref={} bytes={} outcome=bad_sender detail=\"{}\"",
+                    req_id, ref_str, body_len, err
+                );
+                return Err(err);
+            }
+        };
+        let p = crate::fed::FedPrincipal::Anonymous {
+            from: req.from.clone(),
+        };
+        let idemp = format!("http:{name}");
+        (name, p, idemp)
     };
 
     // Check idempotency key if supplied
@@ -273,14 +298,18 @@ async fn send_message_handler(
             ));
         }
 
-        let principal = format!("http:{from_name}");
         let existing = {
             let db = state
                 .db
                 .lock()
                 .map_err(|e| AppError::Internal(e.to_string()))?;
-            storage::get_idempotency_record(&db, &principal, key, state.idempotency_ttl.as_secs())
-                .map_err(|e| AppError::Internal(e.to_string()))?
+            storage::get_idempotency_record(
+                &db,
+                &idempotency_principal,
+                key,
+                state.idempotency_ttl.as_secs(),
+            )
+            .map_err(|e| AppError::Internal(e.to_string()))?
         };
 
         if let Some(record) = existing {
@@ -333,9 +362,7 @@ async fn send_message_handler(
         let envelope = crate::fed::FedEnvelope {
             v: 1,
             id: message_id.clone(),
-            principal: crate::fed::FedPrincipal::Anonymous {
-                from: req.from.clone(),
-            },
+            principal: fed_principal.clone(),
             to: crate::fed::FedTarget {
                 r#ref: ref_str.clone(),
             },
@@ -362,9 +389,25 @@ async fn send_message_handler(
                 outcome,
                 storage::now_epoch_secs(),
             );
+            let msg_record = MessageRecord {
+                id: message_id.clone(),
+                created_at: envelope.created_at,
+                session_id: ref_str.clone(),
+                from_name: from_name.clone(),
+                bytes: body_len,
+                outcome: outcome.to_string(),
+                recipient_harness: "fed".to_string(),
+                return_harness: Some("svc".to_string()),
+                return_session_id: state.leaf_principal().map(|s| s.to_string()),
+                return_host: Some(state.host_label.clone()),
+                push_replies: false,
+                thread_id: message_id.clone(),
+            };
+            let _ = storage::insert_message(&db, &msg_record);
+
             if let Some(ref key) = req.idempotency_key {
                 let record = storage::IdempotencyRecord {
-                    principal: format!("http:{from_name}"),
+                    principal: idempotency_principal.clone(),
                     key: key.clone(),
                     body: req.text.clone(),
                     message_id: message_id.clone(),
@@ -650,19 +693,19 @@ async fn get_replies_handler(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<LongPollQuery>,
 ) -> Result<Response, AppError> {
-    // Verify message exists
-    {
+    // 1. Verify message exists (check both messages and outbound tables)
+    let outbound = {
         let db = state
             .db
             .lock()
             .map_err(|e| AppError::Internal(e.to_string()))?;
-        if storage::get_message(&db, &id)
-            .map_err(|e| AppError::Internal(e.to_string()))?
-            .is_none()
-        {
+        let msg = storage::get_message(&db, &id).map_err(|e| AppError::Internal(e.to_string()))?;
+        let out = storage::get_outbound(&db, &id).map_err(|e| AppError::Internal(e.to_string()))?;
+        if msg.is_none() && out.is_none() {
             return Err(AppError::NotFound(format!("message '{id}'")));
         }
-    }
+        out
+    };
 
     let after_seq = query.after.unwrap_or(0);
     let wait_secs = query.wait.unwrap_or(0).min(60);
@@ -683,7 +726,58 @@ async fn get_replies_handler(
         None
     };
 
-    // Subscribe to notifications BEFORE checking database to eliminate race conditions
+    // 2. If outbound federated message, poll remote peer
+    if let Some(outbound) = outbound {
+        if let Some(ref fed_state) = state.fed_state {
+            let local_existing = {
+                let db = state
+                    .db
+                    .lock()
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                storage::get_replies_after(&db, &id, after_seq)
+                    .map_err(|e| AppError::Internal(e.to_string()))?
+            };
+            if !local_existing.is_empty() {
+                return Ok((StatusCode::OK, Json(local_existing)).into_response());
+            }
+
+            let remote_replies = crate::fed::poll_federated_replies(
+                fed_state,
+                &outbound.peer,
+                &id,
+                after_seq,
+                wait_secs,
+            )
+            .await?;
+
+            {
+                let db = state
+                    .db
+                    .lock()
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                for r in &remote_replies {
+                    let existing_all = storage::get_replies_after(&db, &id, 0)
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                    if !existing_all.iter().any(|ex| {
+                        ex.text == r.text && ex.replier_session_id == r.replier_session_id
+                    }) {
+                        let _ = storage::insert_reply(
+                            &db,
+                            &id,
+                            &r.replier_session_id,
+                            &r.text,
+                            r.push_outcome.as_deref(),
+                            r.pushed_message_id.as_deref(),
+                        );
+                    }
+                }
+            }
+
+            return Ok((StatusCode::OK, Json(remote_replies)).into_response());
+        }
+    }
+
+    // 3. Fall back to standard local long-poll for inbound/local messages
     let rx = if wait_secs > 0 {
         Some(state.notify_tx.subscribe())
     } else {

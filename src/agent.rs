@@ -519,6 +519,17 @@ pub async fn run_agent_server(
                             continue;
                         }
 
+                        let is_leaf_peer = if let Some(ret_host) = msg.return_host.as_deref() {
+                            state_clone
+                                .fed_state
+                                .as_ref()
+                                .and_then(|fs| fs.peers.get(ret_host))
+                                .map(|p| p.leaf)
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        };
+
                         let (push_outcome, pushed_message_id) = if let (
                             Some(ret_harness),
                             Some(ret_session_id),
@@ -526,7 +537,7 @@ pub async fn run_agent_server(
                             msg.return_harness.as_deref(),
                             msg.return_session_id.as_deref(),
                         ) {
-                            if !msg.push_replies {
+                            if !msg.push_replies || is_leaf_peer {
                                 (Some("disabled".to_string()), None)
                             } else if let Some(ret_host) = msg
                                 .return_host

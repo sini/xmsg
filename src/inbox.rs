@@ -26,6 +26,7 @@ pub struct InboxMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
+    #[serde(default)]
     pub from: String,
     pub text: String,
     #[serde(

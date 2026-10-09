@@ -164,6 +164,9 @@ async fn create_test_node_full_inner(
         pi_notify_tx: pi_notify_tx.clone(),
         notify_tx: notify_tx.clone(),
         max_body: 65536,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
     });
 
     let fed_listener = match listener_opt {
@@ -514,6 +517,9 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
         pi_notify_tx: node_b_allow.fed_state.pi_notify_tx.clone(),
         notify_tx: node_b_allow.fed_state.notify_tx.clone(),
         max_body: 65536,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
     });
 
     let res1 = send_federated_message(&fed_state_a1, "host-b", &envelope1).await;
@@ -586,6 +592,9 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
         pi_notify_tx: node_b_deny.fed_state.pi_notify_tx.clone(),
         notify_tx: node_b_deny.fed_state.notify_tx.clone(),
         max_body: 65536,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
     });
 
     let res2 = send_federated_message(&fed_state_a2, "host-b", &envelope2).await;
@@ -671,6 +680,9 @@ async fn test_oracle_2_from_absent_pin_only_accepted() {
         pi_notify_tx: node_b.fed_state.pi_notify_tx.clone(),
         notify_tx: node_b.fed_state.notify_tx.clone(),
         max_body: 65536,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
     });
 
     let res = send_federated_message(&fed_state_a, "host-b", &envelope).await;
@@ -789,6 +801,9 @@ async fn test_oracle_4_reply_route_source_check() {
         pi_notify_tx: node_a.fed_state.pi_notify_tx.clone(),
         notify_tx: node_a.fed_state.notify_tx.clone(),
         max_body: 65536,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
     });
 
     let reply = FedReplyEnvelope {
@@ -981,6 +996,9 @@ async fn test_oracle_6_anonymous_from_with_colon_gives_400() {
         pi_notify_tx: node_b.fed_state.pi_notify_tx.clone(),
         notify_tx: node_b.fed_state.notify_tx.clone(),
         max_body: 65536,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
     });
 
     let res = send_federated_message(&fed_state_a, "host-b", &envelope).await;
@@ -1043,6 +1061,9 @@ async fn test_oracle_7_root_harness_rejected_and_badge_spoof_sanitized() {
         pi_notify_tx: node_b.fed_state.pi_notify_tx.clone(),
         notify_tx: node_b.fed_state.notify_tx.clone(),
         max_body: 65536,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
     });
 
     // 1. harness = "root" gives 400
@@ -1146,6 +1167,9 @@ async fn test_n4_attested_name_ascii_only_u0387() {
         pi_notify_tx: node_b.fed_state.pi_notify_tx.clone(),
         notify_tx: node_b.fed_state.notify_tx.clone(),
         max_body: 65536,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
     });
 
     let env_u0387 = FedEnvelope {
@@ -1222,6 +1246,9 @@ async fn test_oracle_8_no_forward_rejected() {
         pi_notify_tx: node_b.fed_state.pi_notify_tx.clone(),
         notify_tx: node_b.fed_state.notify_tx.clone(),
         max_body: 65536,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
     });
 
     let env = FedEnvelope {
@@ -1299,6 +1326,9 @@ async fn test_oracle_9_forged_reply_id_gives_403() {
         pi_notify_tx: node_a.fed_state.pi_notify_tx.clone(),
         notify_tx: node_a.fed_state.notify_tx.clone(),
         max_body: 65536,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
     });
 
     let forged_reply = FedReplyEnvelope {
@@ -1423,6 +1453,9 @@ async fn test_oracle_10_duplicate_id_delivered_once() {
         pi_notify_tx: node_b.fed_state.pi_notify_tx.clone(),
         notify_tx: node_b.fed_state.notify_tx.clone(),
         max_body: 65536,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
     });
 
     let dup_id = ulid::Ulid::new().to_string();
@@ -1517,6 +1550,9 @@ async fn test_oracle_11_rate_limit_429() {
         pi_notify_tx: node_b.fed_state.pi_notify_tx.clone(),
         notify_tx: node_b.fed_state.notify_tx.clone(),
         max_body: 65536,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
     });
 
     // Send 20 messages (principal limit is 20/min)
@@ -1679,6 +1715,9 @@ async fn test_amendment_a_peer_without_send_gets_403_op_denied() {
         pi_notify_tx: node_b.fed_state.pi_notify_tx.clone(),
         notify_tx: node_b.fed_state.notify_tx.clone(),
         max_body: 65536,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
     });
 
     let env = FedEnvelope {
@@ -2018,6 +2057,9 @@ fn make_client_fed_state(
         pi_notify_tx: base_node.fed_state.pi_notify_tx.clone(),
         notify_tx: base_node.fed_state.notify_tx.clone(),
         max_body: 65536,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
     })
 }
 
@@ -3106,6 +3148,9 @@ async fn test_n1_offsource_flood_leaves_legit_bucket_intact() {
         pi_notify_tx: off.fed_state.pi_notify_tx.clone(),
         notify_tx: off.fed_state.notify_tx.clone(),
         max_body: 65536,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
     });
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let legit_addr = l.local_addr().unwrap();

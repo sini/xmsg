@@ -69,6 +69,14 @@ pub struct ServeArgs {
     #[arg(long, env = "XMSG_LISTEN")]
     pub listen: Option<String>,
 
+    /// Run as a leaf node (in-pod sidecar, loopback HTTP only, outbound-only federation client)
+    #[arg(long, env = "XMSG_LEAF")]
+    pub leaf: bool,
+
+    /// Principal to attribute all local requests to in leaf mode (e.g. "svc:matrix")
+    #[arg(long, env = "XMSG_LEAF_PRINCIPAL")]
+    pub leaf_principal: Option<String>,
+
     /// Path to unix domain socket for HTTP server (defaults to $XDG_RUNTIME_DIR/xmsg/http.sock; on macOS without it, the Darwin user temp dir)
     #[arg(long, env = "XMSG_HTTP_SOCK")]
     pub http_sock: Option<PathBuf>,
@@ -437,6 +445,22 @@ fn run_hook_agy(args: RegisterAgyArgs) -> Result<(), Box<dyn std::error::Error>>
 }
 
 async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    if args.leaf {
+        if args.fed_listen.is_some() {
+            return Err(
+                "`--leaf` cannot be used with `--fed-listen` (leaf mode is outbound-only)"
+                    .to_string()
+                    .into(),
+            );
+        }
+        if args.listen.is_none() {
+            return Err("`--leaf` requires `--listen`".to_string().into());
+        }
+        if args.leaf_principal.is_none() {
+            return Err("`--leaf` requires `--leaf-principal`".to_string().into());
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -534,27 +558,29 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let reply_ttl = Duration::from_secs(args.reply_ttl);
     let idempotency_ttl = Duration::from_secs(args.idempotency_ttl);
 
-    tokio::spawn(async move {
-        if let Err(e) = xmsg::agy::run_register_server(
-            reg_sock,
-            reg_config,
-            reg_store,
-            reg_pi_store,
-            reg_pi_entrypoints,
-            reg_pi_node_bins,
-            reg_db,
-            reg_pi_notify_tx,
-            reply_ttl,
-            my_uid,
-            reg_svc_store,
-            reg_trusted_svc_exes,
-            reg_svc_notify_tx,
-        )
-        .await
-        {
-            tracing::error!("register server error: {e}");
-        }
-    });
+    if !args.leaf {
+        tokio::spawn(async move {
+            if let Err(e) = xmsg::agy::run_register_server(
+                reg_sock,
+                reg_config,
+                reg_store,
+                reg_pi_store,
+                reg_pi_entrypoints,
+                reg_pi_node_bins,
+                reg_db,
+                reg_pi_notify_tx,
+                reply_ttl,
+                my_uid,
+                reg_svc_store,
+                reg_trusted_svc_exes,
+                reg_svc_notify_tx,
+            )
+            .await
+            {
+                tracing::error!("register server error: {e}");
+            }
+        });
+    }
 
     if (args.peers_file.is_some() || args.fed_listen.is_some())
         && (args.fed_cert.is_none() || args.fed_key.is_none())
@@ -622,6 +648,9 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
             pi_notify_tx: pi_notify_tx.clone(),
             notify_tx: notify_tx.clone(),
             max_body: args.max_body,
+            is_leaf: args.leaf,
+            leaf_principal: args.leaf_principal.clone(),
+            outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
         });
 
         if let Some((listener, listen_addr)) = fed_listener {
@@ -666,15 +695,25 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         fed_state,
     });
 
-    let agent_sock = agent_sock_path.clone();
-    let agent_state = state.clone();
-    tokio::spawn(async move {
-        if let Err(e) = xmsg::agent::run_agent_server(agent_sock, agent_state, my_uid).await {
-            tracing::error!("agent server error: {e}");
-        }
-    });
+    if !args.leaf {
+        let agent_sock = agent_sock_path.clone();
+        let agent_state = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = xmsg::agent::run_agent_server(agent_sock, agent_state, my_uid).await {
+                tracing::error!("agent server error: {e}");
+            }
+        });
+    }
 
     let app = build_router(state);
+
+    if args.leaf {
+        let tcp_addr = args.listen.as_ref().unwrap();
+        let tcp_listener = tokio::net::TcpListener::bind(tcp_addr).await?;
+        info!(listen = %tcp_addr, "starting leaf tcp http server");
+        axum::serve(tcp_listener, app).await?;
+        return Ok(());
+    }
 
     if let Some(ref tcp_addr) = args.listen {
         let tcp_listener = tokio::net::TcpListener::bind(tcp_addr).await?;
