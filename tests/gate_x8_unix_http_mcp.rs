@@ -171,7 +171,8 @@ fn test_oracle_1b_dir_mode_0700() {
     );
 }
 
-/// Oracle 2: No flag => no TCP listener bound (assert by probing old port 127.0.0.1:7787).
+/// Oracle 2: No flag => no TCP listener bound (assert by probing old port 127.0.0.1:7787,
+/// or via a bind tripwire on it when another process already holds the port).
 /// Mutant 2: keep default TCP bind => 127.0.0.1:7787 is bound => RED.
 #[tokio::test]
 async fn test_oracle_2_no_flag_no_tcp_bound() {
@@ -218,6 +219,26 @@ async fn test_oracle_2_no_flag_no_tcp_bound() {
         }
     }
 
+    // Without a netns (macOS, or Linux without unshare) a live xmsg daemon may
+    // already hold the old default port, and a connect probe cannot tell its
+    // listener from ours. Turn the port into a tripwire instead: keep an
+    // exact-address listener on it (the occupant's, or ours if the occupant is
+    // on a wildcard address) for the server's lifetime. A server that still
+    // binds the old default then fails `bind` and exits, which the
+    // started/alive assertions below catch.
+    let probe_addr: std::net::SocketAddr = "127.0.0.1:7787".parse().unwrap();
+    let pre_occupied =
+        std::net::TcpStream::connect_timeout(&probe_addr, Duration::from_millis(500)).is_ok();
+    let _tripwire = if pre_occupied {
+        eprintln!(
+            "127.0.0.1:7787 is already in use by another process; \
+             asserting via bind tripwire instead of connect probe"
+        );
+        std::net::TcpListener::bind(probe_addr).ok()
+    } else {
+        None
+    };
+
     let temp_dir = tempdir().expect("tempdir");
     fs::set_permissions(temp_dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let http_sock = temp_dir.path().join("http.sock");
@@ -249,21 +270,35 @@ async fn test_oracle_2_no_flag_no_tcp_bound() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let probe_addr: std::net::SocketAddr = "127.0.0.1:7787".parse().unwrap();
-    let probe_res = std::net::TcpStream::connect_timeout(&probe_addr, Duration::from_millis(500));
+    let probe_res = if pre_occupied {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        None
+    } else {
+        Some(std::net::TcpStream::connect_timeout(
+            &probe_addr,
+            Duration::from_millis(500),
+        ))
+    };
+    let early_exit = server.try_wait().expect("try_wait xmsg serve");
 
     let _ = server.kill();
     let _ = server.wait();
 
     assert!(started, "xmsg serve failed to start and bind http.sock");
+    assert!(
+        early_exit.is_none(),
+        "xmsg serve exited while it should be serving ({early_exit:?}); \
+         with --listen omitted it must not bind 127.0.0.1:7787"
+    );
 
     match probe_res {
-        Ok(_stream) => {
+        None => {}
+        Some(Ok(_stream)) => {
             panic!(
                 "TCP listener 127.0.0.1:7787 must NOT be bound when --listen is omitted, but connection succeeded!"
             );
         }
-        Err(e) => {
+        Some(Err(e)) => {
             assert_eq!(
                 e.kind(),
                 std::io::ErrorKind::ConnectionRefused,
