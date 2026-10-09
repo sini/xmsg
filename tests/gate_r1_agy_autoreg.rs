@@ -360,6 +360,7 @@ exit 0
         reply_ttl: Duration::from_secs(60),
         idempotency_ttl: Duration::from_secs(86400),
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
+        fed_state: None,
     });
 
     let app = build_router(state);
@@ -525,6 +526,7 @@ async fn oracle_3_live_unattested_pid_returns_unregistered_without_exited() {
         reply_ttl: Duration::from_secs(60),
         idempotency_ttl: Duration::from_secs(86400),
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
+        fed_state: None,
     });
 
     let app = build_router(state);

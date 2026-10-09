@@ -988,13 +988,15 @@ pub async fn run_agent_server(
                             .await
                             {
                                 Ok(delivery_resp) => {
+                                    let outcome =
+                                        delivery_resp.outcome.as_deref().unwrap_or("delivered");
                                     if let Ok(db) = state_clone.db.lock() {
                                         let _ = storage::insert_outbound(
                                             &db,
                                             &message_id,
                                             target_host,
                                             local_ref,
-                                            "delivered",
+                                            outcome,
                                             storage::now_epoch_secs(),
                                         );
                                         let msg_record = storage::MessageRecord {
@@ -1003,7 +1005,7 @@ pub async fn run_agent_server(
                                             session_id: local_ref.to_string(),
                                             from_name: from_name.clone(),
                                             bytes: text.len(),
-                                            outcome: "delivered".to_string(),
+                                            outcome: outcome.to_string(),
                                             recipient_harness: "claude".to_string(),
                                             return_harness: Some(caller.harness.clone()),
                                             return_session_id: Some(caller.session_id.clone()),
@@ -1017,7 +1019,7 @@ pub async fn run_agent_server(
                                         "status": "ok",
                                         "delivery": {
                                             "messageId": message_id,
-                                            "outcome": "delivered",
+                                            "outcome": outcome,
                                             "bytes": delivery_resp.bytes,
                                         }
                                     });

@@ -16,7 +16,7 @@ use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::broadcast;
 
 use xmsg::agent::run_agent_server;
-use xmsg::agy::{new_agy_store, AgyConfig};
+use xmsg::agy::{flush_agy_queue, new_agy_store, AgyConfig, AgyCredentials, AgySessionInfo};
 use xmsg::fed::{
     generate_self_signed_ed25519, make_tls_connector, run_fed_listener, send_federated_message,
     send_federated_reply, FedEnvelope, FedPrincipal, FedReplier, FedReplyEnvelope, FedState,
@@ -55,9 +55,30 @@ async fn create_test_node_full(
     name: &str,
     target_session_name: &str,
     peers: Vec<PeerConfig>,
+    no_whois: bool,
+    listener_opt: Option<TcpListener>,
+    creds_opt: Option<(Vec<u8>, Vec<u8>, String)>,
+) -> TestNode {
+    create_test_node_full_inner(
+        name,
+        target_session_name,
+        peers,
+        no_whois,
+        listener_opt,
+        creds_opt,
+        None,
+    )
+    .await
+}
+
+async fn create_test_node_full_inner(
+    name: &str,
+    target_session_name: &str,
+    peers: Vec<PeerConfig>,
     _no_whois: bool,
     listener_opt: Option<TcpListener>,
     creds_opt: Option<(Vec<u8>, Vec<u8>, String)>,
+    agy_bin_opt: Option<String>,
 ) -> TestNode {
     let tmp = TempDir::new().unwrap();
     let sessions_dir = tmp.path().join("sessions");
@@ -142,7 +163,7 @@ async fn create_test_node_full(
             presence_dir: tmp.path().join("presence"),
             proc_locks_path: tmp.path().join("proc_locks"),
             proc_root: proc_root.clone(),
-            agy_bin: "agy".to_string(),
+            agy_bin: agy_bin_opt.unwrap_or_else(|| "agy".to_string()),
             trusted_agy_exes: Vec::new(),
         },
         agy_store: new_agy_store(),
@@ -1298,16 +1319,20 @@ async fn test_amendment_b_unlinked_well_formed_cert_refused() {
         .unwrap();
     let server_name = ServerName::try_from("host-b".to_string()).unwrap();
 
-    let handshake_rejected = match connector.connect(server_name, tcp_stream).await {
+    let res = connector.connect(server_name, tcp_stream).await;
+    let handshake_rejected = match res {
         Err(_) => true,
         Ok(mut tls) => {
             let mut buf = [0u8; 1];
-            tls.read(&mut buf).await.is_err()
+            match tls.read(&mut buf).await {
+                Err(e) => format!("{e:?}").contains("AlertReceived"),
+                Ok(_) => false,
+            }
         }
     };
     assert!(
         handshake_rejected,
-        "Unlinked cert must be refused at handshake"
+        "Unlinked cert must be refused at handshake (AlertReceived)"
     );
 }
 
@@ -1375,5 +1400,167 @@ async fn test_amendment_c_unknown_peer_opens_no_socket() {
         conn_count.load(Ordering::SeqCst),
         0,
         "Zero connections must be opened for unknown peer"
+    );
+}
+
+// =============================================================================
+// Amendment (d): Federated send to credential-less agy session is queued,
+// then delivered once after credentials registered
+// =============================================================================
+#[tokio::test]
+async fn test_amendment_d_federated_send_to_credential_less_agy_session_queued() {
+    let tmp = TempDir::new().unwrap();
+    let delivered_log = tmp.path().join("delivered.log");
+    let fake_agy_bin = tmp.path().join("fake_agy.sh");
+    let script_content = format!(
+        r#"#!/bin/sh
+echo "===DELIVERY===" >> "{}"
+echo "$@" >> "{}"
+exit 0
+"#,
+        delivered_log.display(),
+        delivered_log.display()
+    );
+    fs::write(&fake_agy_bin, script_content).unwrap();
+    fs::set_permissions(&fake_agy_bin, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let (cert_b, key_b, pin_b) = generate_self_signed_ed25519("host-b").unwrap();
+    let (cert_a, key_a, pin_a) = generate_self_signed_ed25519("host-a").unwrap();
+
+    let node_b = create_test_node_full_inner(
+        "host-b",
+        "sess-b",
+        vec![PeerConfig {
+            name: "host-a".to_string(),
+            address: "127.0.0.1:0".to_string(),
+            pin: pin_a.clone(),
+            allow: vec!["send".to_string(), "reply".to_string()],
+            no_whois: true,
+            leaf: false,
+            principals: Vec::new(),
+        }],
+        true,
+        None,
+        Some((cert_b, key_b, pin_b)),
+        Some(fake_agy_bin.to_string_lossy().to_string()),
+    )
+    .await;
+
+    // Register credential-less agy session on node_b
+    let my_pid = std::process::id();
+    let proc_root = PathBuf::from(xmsg::process::LIVE_PROC_ROOT);
+    let my_proc_start =
+        xmsg::process::starttime(&proc_root, my_pid).unwrap_or_else(|_| "0".to_string());
+    let session_key = format!("agy:{my_pid}:{my_proc_start}");
+    let conv_id = "conv-credless-1".to_string();
+
+    let credless_session =
+        AgySessionInfo::new(conv_id.clone(), my_pid, my_proc_start.clone(), None);
+    node_b
+        .fed_state
+        .agy_store
+        .write()
+        .unwrap()
+        .insert(session_key.clone(), credless_session);
+
+    let node_a = create_test_node_full(
+        "host-a",
+        "sess-a",
+        vec![PeerConfig {
+            name: "host-b".to_string(),
+            address: node_b.fed_addr.to_string(),
+            pin: node_b.pin.clone(),
+            allow: vec!["send".to_string(), "reply".to_string()],
+            no_whois: true,
+            leaf: false,
+            principals: Vec::new(),
+        }],
+        true,
+        None,
+        Some((cert_a, key_a, pin_a)),
+    )
+    .await;
+
+    // 1. Send federated message from node_a targeting conv-credless-1@host-b via agent socket
+    let stream = UnixStream::connect(&node_a.agent_sock_path).await.unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    let send_req = serde_json::json!({
+        "action": "send",
+        "ref": format!("{}@{}", conv_id, node_b.name),
+        "text": "federated message to credential-less agy",
+        "push_replies": false,
+    });
+    writer
+        .write_all(format!("{send_req}\n").as_bytes())
+        .await
+        .unwrap();
+
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let resp: Value = serde_json::from_str(&line).unwrap();
+
+    assert_eq!(resp["status"], "ok");
+    assert_eq!(
+        resp["delivery"]["outcome"], "queued",
+        "federated message to credential-less agy session must be queued"
+    );
+
+    // 2. Verify nothing delivered yet to agy bin
+    assert!(
+        !delivered_log.exists(),
+        "delivered.log must not exist before credentials registration"
+    );
+
+    // 3. Verify message is stored in SQLite agy_pending_messages on node_b
+    let pending = {
+        let db = node_b.db.lock().unwrap();
+        storage::fetch_undelivered_agy_messages(&db, &[&session_key, &conv_id]).unwrap()
+    };
+    assert_eq!(pending.len(), 1, "exactly one pending agy message in db");
+    assert_eq!(pending[0].text, "federated message to credential-less agy");
+
+    // 4. Register credentials on node_b
+    {
+        let mut store_lock = node_b.fed_state.agy_store.write().unwrap();
+        let entry = store_lock.get_mut(&session_key).unwrap();
+        entry.credentials = Some(AgyCredentials {
+            ls_address: "127.0.0.1:9999".to_string(),
+            csrf_token: "test-token".to_string(),
+            is_stale: false,
+        });
+    }
+
+    // 5. Trigger flush
+    flush_agy_queue(
+        &node_b.fed_state.agy_config,
+        &node_b.fed_state.agy_store,
+        &node_b.db,
+        &session_key,
+        &conv_id,
+    )
+    .await;
+
+    // 6. Verify delivery
+    assert!(
+        delivered_log.exists(),
+        "delivered.log must exist after credentials registration and flush"
+    );
+    let log_content = fs::read_to_string(&delivered_log).unwrap();
+    assert!(
+        log_content.contains("federated message to credential-less agy"),
+        "delivery log must contain message body: {log_content}"
+    );
+
+    // 7. Verify no longer pending
+    let pending_after = {
+        let db = node_b.db.lock().unwrap();
+        storage::fetch_undelivered_agy_messages(&db, &[&session_key, &conv_id]).unwrap()
+    };
+    assert_eq!(
+        pending_after.len(),
+        0,
+        "pending agy messages must be empty after flush"
     );
 }

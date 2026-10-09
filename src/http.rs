@@ -348,6 +348,7 @@ async fn send_message_handler(
         let delivery_resp =
             crate::fed::send_federated_message(&fed_state, target_host, &envelope).await?;
 
+        let outcome = delivery_resp.outcome.as_deref().unwrap_or("delivered");
         {
             let db = state
                 .db
@@ -358,7 +359,7 @@ async fn send_message_handler(
                 &message_id,
                 target_host,
                 &ref_str,
-                "delivered",
+                outcome,
                 storage::now_epoch_secs(),
             );
             if let Some(ref key) = req.idempotency_key {
@@ -370,7 +371,7 @@ async fn send_message_handler(
                     session_id: delivery_resp.session_id.clone(),
                     from_name: from_name.clone(),
                     bytes: body_len,
-                    outcome: "delivered".to_string(),
+                    outcome: outcome.to_string(),
                     created_at: storage::now_epoch_secs(),
                 };
                 let _ = storage::insert_idempotency_record(&db, &record);
@@ -385,7 +386,7 @@ async fn send_message_handler(
                 from_name,
                 bytes: body_len,
                 message_id,
-                outcome: Some("delivered".to_string()),
+                outcome: delivery_resp.outcome,
             }),
         )
             .into_response());

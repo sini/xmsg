@@ -731,21 +731,53 @@ async fn fed_send_message_handler(
                     from_name: existing.from_name,
                     bytes: existing.bytes,
                     message_id: existing.id,
+                    outcome: Some(existing.outcome),
                 }),
             )
                 .into_response());
         }
     }
 
-    // 7. Pre-record message as accepted before inbox write
+    // 7. Resolve local target session
+    let target = match resolve_target_session_fed(&fed_state, target_ref) {
+        Ok(t) => t,
+        Err(err) => {
+            let pre_record = MessageRecord {
+                id: envelope.id.clone(),
+                created_at: envelope.created_at,
+                session_id: target_ref.clone(),
+                from_name: from_name.clone(),
+                bytes: body_len,
+                outcome: "not_found".to_string(),
+                recipient_harness: "claude".to_string(),
+                return_harness: return_harness.clone(),
+                return_session_id: return_session_id.clone(),
+                return_host: Some(peer.name.clone()),
+                push_replies: envelope.push_replies,
+                thread_id: envelope.thread_id.clone(),
+            };
+            if let Ok(db) = fed_state.db.lock() {
+                let _ = storage::insert_message(&db, &pre_record);
+            }
+            return Err(err);
+        }
+    };
+
+    let (target_session_id, recipient_harness) = match &target {
+        crate::http::ResolvedTarget::Claude(s, _) => (s.session_id.clone(), "claude".to_string()),
+        crate::http::ResolvedTarget::Agy(s) => (s.session_id.clone(), "agy".to_string()),
+        crate::http::ResolvedTarget::Pi(s) => (s.session_id.clone(), "pi".to_string()),
+    };
+
+    // Pre-record message as accepted before inbox delivery
     let pre_record = MessageRecord {
         id: envelope.id.clone(),
         created_at: envelope.created_at,
-        session_id: target_ref.clone(),
+        session_id: target_session_id.clone(),
         from_name: from_name.clone(),
         bytes: body_len,
         outcome: "accepted".to_string(),
-        recipient_harness: "claude".to_string(),
+        recipient_harness,
         return_harness: return_harness.clone(),
         return_session_id: return_session_id.clone(),
         return_host: Some(peer.name.clone()),
@@ -761,18 +793,6 @@ async fn fed_send_message_handler(
     }
 
     // 8. Deliver to local target session
-    let target = match resolve_target_session_fed(&fed_state, target_ref) {
-        Ok(t) => t,
-        Err(err) => {
-            let db = fed_state
-                .db
-                .lock()
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-            let _ = storage::update_message_outcome(&db, &envelope.id, "not_found");
-            return Err(err);
-        }
-    };
-
     let deliver_res = match target {
         crate::http::ResolvedTarget::Claude(session, socket_path) => {
             let body_with_footer = format!(
@@ -782,20 +802,60 @@ async fn fed_send_message_handler(
             match inbox::encode_transport_line(&from_name, &body_with_footer) {
                 Ok(line) => inbox::deliver_to_socket(&socket_path, &line)
                     .await
-                    .map(|_| (session.session_id, "claude".to_string())),
+                    .map(|_| (session.session_id, "claude".to_string(), "delivered")),
                 Err(e) => Err(e),
             }
         }
-        crate::http::ResolvedTarget::Agy(session) => crate::agy::deliver_agy(
-            &fed_state.agy_config,
-            &fed_state.agy_store,
-            &session,
-            &from_name,
-            &envelope.id,
-            &envelope.body,
-        )
-        .await
-        .map(|_| (session.session_id, "agy".to_string())),
+        crate::http::ResolvedTarget::Agy(session) => {
+            let has_creds = {
+                let store_lock = fed_state.agy_store.read().unwrap();
+                store_lock
+                    .get(&session.session_id)
+                    .or_else(|| {
+                        store_lock.values().find(|info| {
+                            info.conversation_id == session.session_id
+                                || session.name.as_deref() == Some(&info.conversation_id)
+                        })
+                    })
+                    .map(|info| info.has_credentials())
+                    .unwrap_or(false)
+            };
+
+            if has_creds {
+                crate::agy::deliver_agy(
+                    &fed_state.agy_config,
+                    &fed_state.agy_store,
+                    &session,
+                    &from_name,
+                    &envelope.id,
+                    &envelope.body,
+                )
+                .await
+                .map(|_| (session.session_id, "agy".to_string(), "delivered"))
+            } else {
+                let envelope_text = format!(
+                    "[xmsg] from={} message_id={} — reply with the xmsg reply tool\n\n{}",
+                    from_name, envelope.id, envelope.body
+                );
+                let agy_msg = storage::AgyPendingMessage {
+                    id: envelope.id.clone(),
+                    session_id: session.session_id.clone(),
+                    created_at: storage::now_epoch_secs(),
+                    from_name: from_name.clone(),
+                    bytes: body_len,
+                    text: envelope.body.clone(),
+                    envelope: envelope_text,
+                    delivered_at: None,
+                };
+                let db = fed_state
+                    .db
+                    .lock()
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                storage::insert_agy_message(&db, &agy_msg)
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                Ok((session.session_id, "agy".to_string(), "queued"))
+            }
+        }
         crate::http::ResolvedTarget::Pi(session) => {
             let envelope_text = format!(
                 "[xmsg] from={} message_id={} — reply with the xmsg reply tool\n\n{}",
@@ -815,26 +875,39 @@ async fn fed_send_message_handler(
                 .db
                 .lock()
                 .map_err(|e| AppError::Internal(e.to_string()))?;
-            storage::insert_pi_message(&db, &pi_msg)
-                .map_err(|e| AppError::Internal(e.to_string()))
-                .map(|_| {
-                    let _ = fed_state.pi_notify_tx.send(session.session_id.clone());
-                    (session.session_id, "pi".to_string())
-                })
+            let inserted = storage::insert_pi_message(&db, &pi_msg)
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            if !inserted {
+                return Err(AppError::ServiceUnavailable(
+                    "pi session message queue is full".to_string(),
+                ));
+            }
+            let _ = fed_state.pi_notify_tx.send(session.session_id.clone());
+            Ok((session.session_id, "pi".to_string(), "delivered"))
         }
     };
 
     match deliver_res {
-        Ok((target_session_id, _harness)) => Ok((
-            StatusCode::ACCEPTED,
-            Json(DeliveryResponse {
-                session_id: target_session_id,
-                from_name,
-                bytes: body_len,
-                message_id: envelope.id,
-            }),
-        )
-            .into_response()),
+        Ok((target_session_id, _harness, outcome_str)) => {
+            {
+                let db = fed_state
+                    .db
+                    .lock()
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                let _ = storage::update_message_outcome(&db, &envelope.id, outcome_str);
+            }
+            Ok((
+                StatusCode::ACCEPTED,
+                Json(DeliveryResponse {
+                    session_id: target_session_id,
+                    from_name,
+                    bytes: body_len,
+                    message_id: envelope.id,
+                    outcome: Some(outcome_str.to_string()),
+                }),
+            )
+                .into_response())
+        }
         Err(err) => {
             let db = fed_state
                 .db

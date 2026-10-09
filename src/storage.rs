@@ -306,14 +306,6 @@ pub fn insert_message(conn: &Connection, msg: &MessageRecord) -> Result<()> {
     Ok(())
 }
 
-pub fn update_message_outcome(conn: &Connection, id: &str, outcome: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE messages SET outcome = ?1 WHERE id = ?2",
-        params![outcome, id],
-    )?;
-    Ok(())
-}
-
 pub fn get_message(conn: &Connection, id: &str) -> Result<Option<MessageRecord>> {
     let mut stmt = conn.prepare(
         "SELECT id, created_at, session_id, from_name, bytes, outcome, recipient_harness, return_harness, return_session_id, push_replies, thread_id, return_host FROM messages WHERE id = ?1",
