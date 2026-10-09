@@ -6,6 +6,29 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# One upstream-Nix column, not gen-harness's three-evaluator matrix: this is not a gen library, so
+# evaluator divergence is not what its CI tests.
 jobs:
-  evaluators:
-    uses: sini/gen-harness/.github/workflows/evaluators.yml@c0ea2734feb04ac64802270a4ba481029e4f5e2b
+  nix:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          github_access_token: ${{ github.token }}
+      - name: flake checks
+        run: nix flake check ./ci --keep-going
+      - name: ci devShell
+        run: nix eval --raw "./ci#devShells.x86_64-linux.default.drvPath"
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          github_access_token: ${{ github.token }}
+      - run: nix fmt -- --ci
+        working-directory: ci
