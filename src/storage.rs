@@ -446,6 +446,41 @@ pub fn get_all_replies(conn: &Connection, message_id: &str) -> Result<Vec<ReplyR
     get_replies_after(conn, message_id, 0)
 }
 
+pub fn get_reply_by_pushed_id(
+    conn: &Connection,
+    pushed_message_id: &str,
+) -> Result<Option<ReplyRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT seq, message_id, created_at, replier_session_id, text, push_outcome, pushed_message_id FROM replies WHERE pushed_message_id = ?1 LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![pushed_message_id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(ReplyRecord {
+            seq: row.get(0)?,
+            message_id: row.get(1)?,
+            created_at: row.get(2)?,
+            replier_session_id: row.get(3)?,
+            text: row.get(4)?,
+            push_outcome: row.get(5)?,
+            pushed_message_id: row.get(6)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn update_reply_push_outcome(
+    conn: &Connection,
+    pushed_message_id: &str,
+    push_outcome: &str,
+) -> Result<bool> {
+    let count = conn.execute(
+        "UPDATE replies SET push_outcome = ?1 WHERE pushed_message_id = ?2",
+        params![push_outcome, pushed_message_id],
+    )?;
+    Ok(count > 0)
+}
+
 pub fn purge_replies(conn: &Connection, ttl_secs: u64) -> Result<usize> {
     let cutoff = now_epoch_secs() - (ttl_secs as i64);
     conn.execute("DELETE FROM replies WHERE created_at < ?1", params![cutoff])

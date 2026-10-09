@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::{DefaultBodyLimit, State},
@@ -115,8 +115,12 @@ impl PeersMap {
         self.peers_by_name.contains_key(name)
     }
 
-    pub fn allowed_pins(&self) -> &HashMap<String, String> {
-        &self.name_by_pin
+    pub fn allowed_pins(&self) -> HashMap<String, String> {
+        self.peers_by_name
+            .values()
+            .filter(|p| !p.allow.is_empty())
+            .map(|p| (p.pin.clone(), p.name.clone()))
+            .collect()
     }
 
     pub fn load_from_json(json_str: &str) -> Result<Self, String> {
@@ -127,6 +131,19 @@ impl PeersMap {
         match raw {
             PeersFileRaw::MapWrapped { peers } | PeersFileRaw::MapDirect(peers) => {
                 for (key_name, entry) in peers {
+                    for p in &entry.principals {
+                        let valid = p.starts_with("claude:")
+                            || p.starts_with("agy:")
+                            || p.starts_with("pi:")
+                            || p.starts_with("svc:")
+                            || p.starts_with("anon:")
+                            || p.starts_with("session:");
+                        if !valid {
+                            return Err(format!(
+                                "principal filter entry '{p}' must be kind-qualified (e.g. claude:<name>, svc:<name>, anon:<from>, session:<id>)"
+                            ));
+                        }
+                    }
                     let name = entry.name.unwrap_or(key_name);
                     map.insert(PeerConfig {
                         name,
@@ -141,6 +158,19 @@ impl PeersMap {
             }
             PeersFileRaw::List(list) => {
                 for entry in list {
+                    for p in &entry.principals {
+                        let valid = p.starts_with("claude:")
+                            || p.starts_with("agy:")
+                            || p.starts_with("pi:")
+                            || p.starts_with("svc:")
+                            || p.starts_with("anon:")
+                            || p.starts_with("session:");
+                        if !valid {
+                            return Err(format!(
+                                "principal filter entry '{p}' must be kind-qualified (e.g. claude:<name>, svc:<name>, anon:<from>, session:<id>)"
+                            ));
+                        }
+                    }
                     let name = entry
                         .name
                         .ok_or_else(|| "Peer list entry missing 'name' field".to_string())?;
@@ -614,21 +644,22 @@ async fn fed_send_message_handler(
                 harness,
                 name,
                 session_id,
-                ..
             } => {
                 let badge = format!("{harness}:{name}");
+                let sess_badge = format!("session:{session_id}");
+                let harness_sess = format!("{harness}:{session_id}");
                 peer_cfg
                     .principals
                     .iter()
-                    .any(|p| p == name || p == &badge || p == session_id)
+                    .any(|p| p == &badge || p == &sess_badge || p == &harness_sess)
             }
             FedPrincipal::Service { name } => {
                 let badge = format!("svc:{name}");
-                peer_cfg.principals.iter().any(|p| p == name || p == &badge)
+                peer_cfg.principals.iter().any(|p| p == &badge)
             }
             FedPrincipal::Anonymous { from } => {
                 let badge = format!("anon:{from}");
-                peer_cfg.principals.iter().any(|p| p == from || p == &badge)
+                peer_cfg.principals.iter().any(|p| p == &badge)
             }
         };
         if !authorized {
@@ -724,17 +755,26 @@ async fn fed_send_message_handler(
             .map_err(|e| AppError::Internal(e.to_string()))?
         {
             // Already delivered or processed! Return stored outcome without writing to inbox again
-            return Ok((
-                StatusCode::ACCEPTED,
-                Json(DeliveryResponse {
+            return match existing.outcome.as_str() {
+                "delivered" | "queued" | "accepted" => Ok((
+                    StatusCode::ACCEPTED,
+                    Json(DeliveryResponse {
+                        session_id: existing.session_id,
+                        from_name: existing.from_name,
+                        bytes: existing.bytes,
+                        message_id: existing.id,
+                        outcome: Some(existing.outcome),
+                    }),
+                )
+                    .into_response()),
+                "not_found" => Err(AppError::NotFound(existing.session_id)),
+                "ambiguous" => Err(AppError::Ambiguous(existing.session_id)),
+                "gone" => Err(AppError::Gone {
                     session_id: existing.session_id,
-                    from_name: existing.from_name,
-                    bytes: existing.bytes,
-                    message_id: existing.id,
-                    outcome: Some(existing.outcome),
+                    pid: 0,
                 }),
-            )
-                .into_response());
+                other => Err(AppError::BadRequest(format!("outcome: {other}"))),
+            };
         }
     }
 
@@ -742,13 +782,19 @@ async fn fed_send_message_handler(
     let target = match resolve_target_session_fed(&fed_state, target_ref) {
         Ok(t) => t,
         Err(err) => {
+            let outcome_str = match &err {
+                AppError::NotFound(_) => "not_found",
+                AppError::Ambiguous(_) => "ambiguous",
+                AppError::Gone { .. } => "gone",
+                _ => "failed",
+            };
             let pre_record = MessageRecord {
                 id: envelope.id.clone(),
                 created_at: envelope.created_at,
                 session_id: target_ref.clone(),
                 from_name: from_name.clone(),
                 bytes: body_len,
-                outcome: "not_found".to_string(),
+                outcome: outcome_str.to_string(),
                 recipient_harness: "claude".to_string(),
                 return_harness: return_harness.clone(),
                 return_session_id: return_session_id.clone(),
@@ -943,6 +989,38 @@ async fn fed_reply_handler(
         ));
     }
 
+    // Rate limiting: consume peer and principal buckets
+    let principal_key = Some(format!(
+        "{}:{}",
+        reply.replier.harness, reply.replier.session_id
+    ));
+    if !fed_state
+        .rate_limiter
+        .check_and_consume(&peer.name, principal_key.as_deref())
+    {
+        return Err(AppError::RateLimited("Rate limit exceeded".to_string()));
+    }
+
+    // Deduplicate reply by id: if already processed, return stored outcome
+    {
+        let db = fed_state
+            .db
+            .lock()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        if let Some(existing) = storage::get_reply_by_pushed_id(&db, &reply.id)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+        {
+            return Ok((
+                StatusCode::OK,
+                Json(json!({
+                    "push_outcome": existing.push_outcome.as_deref().unwrap_or("pushed"),
+                    "message_id": reply.id,
+                })),
+            )
+                .into_response());
+        }
+    }
+
     // 2. WhoIs secondary check (if not no_whois)
     if !peer_cfg.no_whois {
         match fed_state
@@ -974,7 +1052,7 @@ async fn fed_reply_handler(
             .map_err(|e| AppError::Internal(e.to_string()))?
     };
 
-    let outbound = match outbound {
+    let _outbound = match outbound {
         Some(o) if o.peer == peer.name => o,
         _ => {
             return Err(AppError::NotRecipient(format!(
@@ -994,12 +1072,45 @@ async fn fed_reply_handler(
             .map_err(|e| AppError::Internal(e.to_string()))?
     };
 
-    let (ret_harness, ret_session_id) = match orig_msg {
-        Some(m) if m.return_harness.is_some() && m.return_session_id.is_some() => {
-            (m.return_harness.unwrap(), m.return_session_id.unwrap())
+    let orig_msg = match orig_msg {
+        Some(m)
+            if m.return_harness.is_some() && m.return_session_id.is_some() && m.push_replies =>
+        {
+            m
         }
-        _ => (reply.replier.harness.clone(), outbound.target_ref.clone()),
+        _ => {
+            return Err(AppError::NotRecipient(format!(
+                "in_reply_to '{}' has no push-capable local recipient",
+                reply.in_reply_to
+            )));
+        }
     };
+
+    let ret_harness = orig_msg.return_harness.unwrap();
+    let ret_session_id = orig_msg.return_session_id.unwrap();
+
+    if !matches!(ret_harness.as_str(), "claude" | "agy" | "pi") {
+        return Err(AppError::NotRecipient(format!(
+            "unknown recipient harness '{ret_harness}'"
+        )));
+    }
+
+    // Pre-record reply in replies table before delivering to local socket
+    {
+        let db = fed_state
+            .db
+            .lock()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        storage::insert_reply(
+            &db,
+            &reply.in_reply_to,
+            &ret_session_id,
+            &reply.text,
+            Some("accepted"),
+            Some(&reply.id),
+        )
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    }
 
     // 5. Deliver pushed reply to local session
     let replier_badge =
@@ -1093,24 +1204,20 @@ async fn fed_reply_handler(
                 "sender_gone"
             }
         }
-        _ => "pushed",
+        _ => {
+            return Err(AppError::NotRecipient(format!(
+                "unknown recipient harness '{ret_harness}'"
+            )))
+        }
     };
 
-    // 6. Record reply in replies table and notify subscribers
+    // 6. Update reply outcome in replies table and notify subscribers
     {
         let db = fed_state
             .db
             .lock()
             .map_err(|e| AppError::Internal(e.to_string()))?;
-        storage::insert_reply(
-            &db,
-            &reply.in_reply_to,
-            &ret_session_id,
-            &reply.text,
-            Some(push_res),
-            Some(&reply.id),
-        )
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+        let _ = storage::update_reply_push_outcome(&db, &reply.id, push_res);
     }
     let _ = fed_state.notify_tx.send(reply.in_reply_to.clone());
 
@@ -1216,91 +1323,115 @@ pub async fn send_federated_message(
         .get(peer_name)
         .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
 
-    if !peer.allow.iter().any(|op| op == "send") {
-        return Err(AppError::OpDenied(
-            "send operation not allowed for peer".to_string(),
-        ));
-    }
+    let send_fut = async {
+        let connector = make_tls_connector(&fed_state.cert_der, &fed_state.key_der, &peer.pin)?;
+        let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
+            .await
+            .map_err(|e| {
+                AppError::PeerUnreachable(format!("Failed to connect to {}: {e}", peer.address))
+            })?;
 
-    let connector = make_tls_connector(&fed_state.cert_der, &fed_state.key_der, &peer.pin)?;
-    let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
-        .await
-        .map_err(|e| {
-            AppError::PeerUnreachable(format!("Failed to connect to {}: {e}", peer.address))
-        })?;
+        let server_name = ServerName::try_from(peer_name.to_string())
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let tls_stream = connector
+            .connect(server_name, tcp_stream)
+            .await
+            .map_err(|e| {
+                AppError::PeerUnreachable(format!("TLS handshake failed with {peer_name}: {e}"))
+            })?;
 
-    let server_name = ServerName::try_from(peer_name.to_string())
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-    let tls_stream = connector
-        .connect(server_name, tcp_stream)
-        .await
-        .map_err(|e| {
-            AppError::PeerUnreachable(format!("TLS handshake failed with {peer_name}: {e}"))
-        })?;
+        let io = hyper_util::rt::TokioIo::new(tls_stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+            .await
+            .map_err(|e| AppError::PeerUnreachable(format!("HTTP handshake failed: {e}")))?;
 
-    let io = hyper_util::rt::TokioIo::new(tls_stream);
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
-        .await
-        .map_err(|e| AppError::PeerUnreachable(format!("HTTP handshake failed: {e}")))?;
-
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            debug!("HTTP connection closed: {e}");
-        }
-    });
-
-    let body_bytes = serde_json::to_vec(envelope).map_err(|e| AppError::Internal(e.to_string()))?;
-    let req = hyper::Request::builder()
-        .method("POST")
-        .uri("/fed/v1/messages")
-        .header("content-type", "application/json")
-        .header("host", peer_name)
-        .body(http_body_util::Full::new(bytes::Bytes::from(body_bytes)))
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-
-    let resp = sender
-        .send_request(req)
-        .await
-        .map_err(|e| AppError::PeerUnreachable(format!("Request failed: {e}")))?;
-
-    let status = resp.status();
-    let body_bytes = http_body_util::BodyExt::collect(resp.into_body())
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?
-        .to_bytes();
-
-    if status.is_success() {
-        let delivery_resp: DeliveryResponse =
-            serde_json::from_slice(&body_bytes).map_err(|e| AppError::Internal(e.to_string()))?;
-        Ok(delivery_resp)
-    } else {
-        let err_resp: Result<WireErrorResponse, _> = serde_json::from_slice(&body_bytes);
-        if let Ok(err) = err_resp {
-            match status {
-                StatusCode::FORBIDDEN => {
-                    if err.error == "op_denied" {
-                        Err(AppError::OpDenied(err.detail))
-                    } else if err.error == "peer_rejected" {
-                        Err(AppError::PeerRejected(err.detail))
-                    } else {
-                        Err(AppError::NotRecipient(err.detail))
-                    }
-                }
-                StatusCode::BAD_REQUEST => {
-                    if err.error == "no_forward" {
-                        Err(AppError::NoForward(err.detail))
-                    } else {
-                        Err(AppError::BadRequest(err.detail))
-                    }
-                }
-                StatusCode::TOO_MANY_REQUESTS => Err(AppError::RateLimited(err.detail)),
-                _ => Err(AppError::ServiceUnavailable(err.detail)),
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                debug!("HTTP connection closed: {e}");
             }
+        });
+
+        let body_bytes =
+            serde_json::to_vec(envelope).map_err(|e| AppError::Internal(e.to_string()))?;
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("/fed/v1/messages")
+            .header("content-type", "application/json")
+            .header("host", peer_name)
+            .body(http_body_util::Full::new(bytes::Bytes::from(body_bytes)))
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let resp = sender
+            .send_request(req)
+            .await
+            .map_err(|e| AppError::PeerUnreachable(format!("Request failed: {e}")))?;
+
+        let status = resp.status();
+        let max_limit = fed_state.max_body + 4096;
+        let limited = http_body_util::Limited::new(resp.into_body(), max_limit);
+        use http_body_util::BodyExt;
+        let body_bytes = limited
+            .collect()
+            .await
+            .map_err(|_| AppError::PayloadTooLarge {
+                size: max_limit + 1,
+                limit: max_limit,
+            })?
+            .to_bytes();
+
+        if status.is_success() {
+            let delivery_resp: DeliveryResponse = serde_json::from_slice(&body_bytes)
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            Ok(delivery_resp)
         } else {
-            Err(AppError::ServiceUnavailable(format!(
-                "Remote returned status {status}"
-            )))
+            let err_resp: Result<WireErrorResponse, _> = serde_json::from_slice(&body_bytes);
+            if let Ok(err) = err_resp {
+                match status {
+                    StatusCode::NOT_FOUND => Err(AppError::NotFound(err.detail)),
+                    StatusCode::CONFLICT => Err(AppError::Ambiguous(err.detail)),
+                    StatusCode::GONE => Err(AppError::Gone {
+                        session_id: err.detail,
+                        pid: 0,
+                    }),
+                    StatusCode::FORBIDDEN => {
+                        if err.error == "op_denied" {
+                            Err(AppError::OpDenied(err.detail))
+                        } else if err.error == "peer_rejected" {
+                            Err(AppError::PeerRejected(err.detail))
+                        } else {
+                            Err(AppError::NotRecipient(err.detail))
+                        }
+                    }
+                    StatusCode::BAD_REQUEST => {
+                        if err.error == "no_forward" {
+                            Err(AppError::NoForward(err.detail))
+                        } else if err.error == "unknown_peer" {
+                            Err(AppError::UnknownPeer(err.detail))
+                        } else {
+                            Err(AppError::BadRequest(err.detail))
+                        }
+                    }
+                    StatusCode::TOO_MANY_REQUESTS => Err(AppError::RateLimited(err.detail)),
+                    StatusCode::PAYLOAD_TOO_LARGE => Err(AppError::PayloadTooLarge {
+                        size: 0,
+                        limit: max_limit,
+                    }),
+                    StatusCode::GATEWAY_TIMEOUT => Err(AppError::PeerUnreachable(err.detail)),
+                    _ => Err(AppError::ServiceUnavailable(err.detail)),
+                }
+            } else {
+                Err(AppError::ServiceUnavailable(format!(
+                    "Remote returned status {status}"
+                )))
+            }
         }
+    };
+
+    match tokio::time::timeout(Duration::from_secs(5), send_fut).await {
+        Ok(res) => res,
+        Err(_) => Err(AppError::PeerUnreachable(
+            "Outbound call timed out after 5s".to_string(),
+        )),
     }
 }
 
@@ -1314,75 +1445,107 @@ pub async fn send_federated_reply(
         .get(peer_name)
         .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
 
-    if !peer.allow.iter().any(|op| op == "reply") {
-        return Err(AppError::OpDenied(
-            "reply operation not allowed for peer".to_string(),
-        ));
-    }
+    let reply_fut = async {
+        let connector = make_tls_connector(&fed_state.cert_der, &fed_state.key_der, &peer.pin)?;
+        let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
+            .await
+            .map_err(|e| {
+                AppError::PeerUnreachable(format!("Failed to connect to {}: {e}", peer.address))
+            })?;
 
-    let connector = make_tls_connector(&fed_state.cert_der, &fed_state.key_der, &peer.pin)?;
-    let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
-        .await
-        .map_err(|e| {
-            AppError::PeerUnreachable(format!("Failed to connect to {}: {e}", peer.address))
-        })?;
+        let server_name = ServerName::try_from(peer_name.to_string())
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let tls_stream = connector
+            .connect(server_name, tcp_stream)
+            .await
+            .map_err(|e| {
+                AppError::PeerUnreachable(format!("TLS handshake failed with {peer_name}: {e}"))
+            })?;
 
-    let server_name = ServerName::try_from(peer_name.to_string())
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-    let tls_stream = connector
-        .connect(server_name, tcp_stream)
-        .await
-        .map_err(|e| {
-            AppError::PeerUnreachable(format!("TLS handshake failed with {peer_name}: {e}"))
-        })?;
+        let io = hyper_util::rt::TokioIo::new(tls_stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+            .await
+            .map_err(|e| AppError::PeerUnreachable(format!("HTTP handshake failed: {e}")))?;
 
-    let io = hyper_util::rt::TokioIo::new(tls_stream);
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
-        .await
-        .map_err(|e| AppError::PeerUnreachable(format!("HTTP handshake failed: {e}")))?;
-
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            debug!("HTTP connection closed: {e}");
-        }
-    });
-
-    let body_bytes = serde_json::to_vec(reply).map_err(|e| AppError::Internal(e.to_string()))?;
-    let req = hyper::Request::builder()
-        .method("POST")
-        .uri("/fed/v1/replies")
-        .header("content-type", "application/json")
-        .header("host", peer_name)
-        .body(http_body_util::Full::new(bytes::Bytes::from(body_bytes)))
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-
-    let resp = sender
-        .send_request(req)
-        .await
-        .map_err(|e| AppError::PeerUnreachable(format!("Request failed: {e}")))?;
-
-    let status = resp.status();
-    let body_bytes = http_body_util::BodyExt::collect(resp.into_body())
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?
-        .to_bytes();
-
-    if status.is_success() {
-        let val: Value =
-            serde_json::from_slice(&body_bytes).map_err(|e| AppError::Internal(e.to_string()))?;
-        Ok(val)
-    } else {
-        let err_resp: Result<WireErrorResponse, _> = serde_json::from_slice(&body_bytes);
-        if let Ok(err) = err_resp {
-            match status {
-                StatusCode::FORBIDDEN => Err(AppError::NotRecipient(err.detail)),
-                _ => Err(AppError::ServiceUnavailable(err.detail)),
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                debug!("HTTP connection closed: {e}");
             }
+        });
+
+        let body_bytes =
+            serde_json::to_vec(reply).map_err(|e| AppError::Internal(e.to_string()))?;
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri("/fed/v1/replies")
+            .header("content-type", "application/json")
+            .header("host", peer_name)
+            .body(http_body_util::Full::new(bytes::Bytes::from(body_bytes)))
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let resp = sender
+            .send_request(req)
+            .await
+            .map_err(|e| AppError::PeerUnreachable(format!("Request failed: {e}")))?;
+
+        let status = resp.status();
+        let max_limit = fed_state.max_body + 4096;
+        let limited = http_body_util::Limited::new(resp.into_body(), max_limit);
+        use http_body_util::BodyExt;
+        let body_bytes = limited
+            .collect()
+            .await
+            .map_err(|_| AppError::PayloadTooLarge {
+                size: max_limit + 1,
+                limit: max_limit,
+            })?
+            .to_bytes();
+
+        if status.is_success() {
+            let val: Value = serde_json::from_slice(&body_bytes)
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            Ok(val)
         } else {
-            Err(AppError::ServiceUnavailable(format!(
-                "Remote returned status {status}"
-            )))
+            let err_resp: Result<WireErrorResponse, _> = serde_json::from_slice(&body_bytes);
+            if let Ok(err) = err_resp {
+                match status {
+                    StatusCode::NOT_FOUND => Err(AppError::NotFound(err.detail)),
+                    StatusCode::CONFLICT => Err(AppError::Ambiguous(err.detail)),
+                    StatusCode::GONE => Err(AppError::Gone {
+                        session_id: err.detail,
+                        pid: 0,
+                    }),
+                    StatusCode::FORBIDDEN => {
+                        if err.error == "op_denied" {
+                            Err(AppError::OpDenied(err.detail))
+                        } else if err.error == "peer_rejected" {
+                            Err(AppError::PeerRejected(err.detail))
+                        } else {
+                            Err(AppError::NotRecipient(err.detail))
+                        }
+                    }
+                    StatusCode::BAD_REQUEST => Err(AppError::BadRequest(err.detail)),
+                    StatusCode::TOO_MANY_REQUESTS => Err(AppError::RateLimited(err.detail)),
+                    StatusCode::PAYLOAD_TOO_LARGE => Err(AppError::PayloadTooLarge {
+                        size: 0,
+                        limit: max_limit,
+                    }),
+                    StatusCode::GATEWAY_TIMEOUT => Err(AppError::PeerUnreachable(err.detail)),
+                    _ => Err(AppError::ServiceUnavailable(err.detail)),
+                }
+            } else {
+                Err(AppError::ServiceUnavailable(format!(
+                    "Remote returned status {status}"
+                )))
+            }
         }
+    };
+
+    match tokio::time::timeout(Duration::from_secs(5), reply_fut).await {
+        Ok(res) => res,
+        Err(_) => Err(AppError::PeerUnreachable(
+            "Outbound call timed out after 5s".to_string(),
+        )),
     }
 }
 
@@ -1416,24 +1579,50 @@ pub async fn run_fed_listener(
     listener: tokio::net::TcpListener,
     fed_state: Arc<FedState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let allowed_pins = Arc::new(fed_state.peers.allowed_pins().clone());
+    let allowed_pins = Arc::new(fed_state.peers.allowed_pins());
     let acceptor = make_tls_acceptor(&fed_state.cert_der, &fed_state.key_der, allowed_pins)?;
     let router = build_fed_router(fed_state.clone());
+    let conn_semaphore = Arc::new(tokio::sync::Semaphore::new(128));
 
     loop {
-        let (tcp_stream, remote_addr) = listener.accept().await?;
+        let (tcp_stream, remote_addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                tracing::error!("federation listener accept error: {e}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+        };
+
+        let permit = match conn_semaphore.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                debug!("federation listener at max connection capacity, dropping {remote_addr}");
+                drop(tcp_stream);
+                continue;
+            }
+        };
+
         let acceptor = acceptor.clone();
         let fed_state = fed_state.clone();
         let router = router.clone();
 
         tokio::spawn(async move {
-            let tls_stream = match acceptor.accept(tcp_stream).await {
-                Ok(s) => s,
-                Err(e) => {
-                    debug!("TLS handshake failed from {remote_addr}: {e}");
-                    return;
-                }
-            };
+            let _permit = permit;
+            let tls_stream =
+                match tokio::time::timeout(Duration::from_secs(3), acceptor.accept(tcp_stream))
+                    .await
+                {
+                    Ok(Ok(s)) => s,
+                    Ok(Err(e)) => {
+                        debug!("TLS handshake failed from {remote_addr}: {e}");
+                        return;
+                    }
+                    Err(_) => {
+                        debug!("TLS handshake timed out from {remote_addr}");
+                        return;
+                    }
+                };
 
             let (_, server_conn) = tls_stream.get_ref();
             let certs = match server_conn.peer_certificates() {
@@ -1480,10 +1669,15 @@ pub async fn run_fed_listener(
                 });
 
             let io = hyper_util::rt::TokioIo::new(tls_stream);
-            if let Err(e) =
-                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                    .serve_connection_with_upgrades(io, service)
-                    .await
+            let mut auto_builder =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+            auto_builder
+                .http1()
+                .timer(hyper_util::rt::TokioTimer::new())
+                .header_read_timeout(Duration::from_secs(5));
+            if let Err(e) = auto_builder
+                .serve_connection_with_upgrades(io, service)
+                .await
             {
                 debug!("Error serving federated connection: {e}");
             }

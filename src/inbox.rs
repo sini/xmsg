@@ -115,6 +115,12 @@ pub fn sanitize_attested_from(host_label: &str, harness: &str, caller_name: &str
             continue;
         }
 
+        if c == '·' {
+            cleaned.push('_');
+            prev_whitespace = false;
+            continue;
+        }
+
         let cat = get_general_category(c);
         if matches!(
             cat,

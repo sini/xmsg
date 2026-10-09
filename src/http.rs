@@ -334,7 +334,7 @@ async fn send_message_handler(
             v: 1,
             id: message_id.clone(),
             principal: crate::fed::FedPrincipal::Anonymous {
-                from: from_name.clone(),
+                from: req.from.clone(),
             },
             to: crate::fed::FedTarget {
                 r#ref: ref_str.clone(),

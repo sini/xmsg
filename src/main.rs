@@ -556,13 +556,38 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let fed_state = if let Some(peers_file) = args.peers_file {
-        let peers = xmsg::fed::load_peers_file(&peers_file)
-            .map_err(|e| format!("failed to load peers file: {e}"))?;
+    if (args.peers_file.is_some() || args.fed_listen.is_some())
+        && (args.fed_cert.is_none() || args.fed_key.is_none())
+    {
+        return Err(
+            "Federation requires both --fed-cert and --fed-key when --peers-file or --fed-listen is provided"
+                .to_string()
+                .into(),
+        );
+    }
 
-        let (cert_der, key_der) = if let (Some(cert_path), Some(key_path)) =
-            (args.fed_cert, args.fed_key)
-        {
+    let fed_listener = if let Some(ref fed_listen_addr) = args.fed_listen {
+        let addr: std::net::SocketAddr = fed_listen_addr
+            .parse()
+            .map_err(|e| format!("invalid --fed-listen address '{fed_listen_addr}': {e}"))?;
+        if addr.ip().is_unspecified() {
+            return Err(format!(
+                "unspecified address '{}' is forbidden for --fed-listen",
+                addr.ip()
+            )
+            .into());
+        }
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .map_err(|e| format!("failed to bind federation listener on {fed_listen_addr}: {e}"))?;
+        info!(listen = %fed_listen_addr, "bound federation mTLS listener");
+        Some((listener, fed_listen_addr.clone()))
+    } else {
+        None
+    };
+
+    let (cert_der, key_der) =
+        if let (Some(cert_path), Some(key_path)) = (args.fed_cert, args.fed_key) {
             let cert_pem = std::fs::read(&cert_path)
                 .map_err(|e| format!("failed to read fed cert at {}: {e}", cert_path.display()))?;
             let key_pem = std::fs::read(&key_path)
@@ -577,6 +602,10 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             (Vec::new(), Vec::new())
         };
+
+    let fed_state = if let Some(peers_file) = args.peers_file {
+        let peers = xmsg::fed::load_peers_file(&peers_file)
+            .map_err(|e| format!("failed to load peers file: {e}"))?;
 
         let fs = Arc::new(xmsg::fed::FedState {
             host_label: host_label.clone(),
@@ -595,27 +624,21 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
             max_body: args.max_body,
         });
 
-        if let Some(fed_listen_addr) = args.fed_listen {
+        if let Some((listener, listen_addr)) = fed_listener {
             let fs_clone = fs.clone();
             tokio::spawn(async move {
-                match tokio::net::TcpListener::bind(&fed_listen_addr).await {
-                    Ok(listener) => {
-                        info!(listen = %fed_listen_addr, "starting federation mTLS listener");
-                        if let Err(e) = xmsg::fed::run_fed_listener(listener, fs_clone).await {
-                            tracing::error!("federation listener error: {e}");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "failed to bind federation listener on {fed_listen_addr}: {e}"
-                        );
-                    }
+                info!(listen = %listen_addr, "starting federation mTLS listener");
+                if let Err(e) = xmsg::fed::run_fed_listener(listener, fs_clone).await {
+                    tracing::error!("federation listener error: {e}");
                 }
             });
         }
 
         Some(fs)
     } else {
+        if fed_listener.is_some() {
+            return Err("--fed-listen requires --peers-file".to_string().into());
+        }
         None
     };
 
