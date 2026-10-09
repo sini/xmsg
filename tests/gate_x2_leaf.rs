@@ -22,7 +22,7 @@ use xmsg::fed::{
 use xmsg::http::{build_router, AppState};
 use xmsg::inbox::DeliveryResponse;
 use xmsg::pi::new_pi_store;
-use xmsg::storage::{self, ReplyRecord};
+use xmsg::storage::{self, MessageRecord, ReplyRecord};
 
 fn get_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind free port");
@@ -553,7 +553,7 @@ async fn test_oracle_3_leaf_pull_replies_node_zero_outbound_connections() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // 1. Leaf sends message to agent-bob@target-node
+    // 1. Leaf sends message to agent-bob@target-node (asks for push: envelope.push_replies=true)
     let client = reqwest::Client::new();
     let send_url = format!("http://{leaf_http_addr}/v1/sessions/agent-bob@target-node/messages");
     let resp = client
@@ -569,7 +569,70 @@ async fn test_oracle_3_leaf_pull_replies_node_zero_outbound_connections() {
     let delivery: DeliveryResponse = resp.json().await.unwrap();
     let msg_id = delivery.message_id;
 
-    // 2. Bob replies on target-node via agent.sock
+    // Cell 3a: Verify target node's fed.rs:892 normalized push_replies to false for leaf peer
+    let stored_msg = {
+        let db = node_b_db.lock().unwrap();
+        storage::get_message(&db, &msg_id).unwrap().unwrap()
+    };
+    assert!(
+        !stored_msg.push_replies,
+        "Oracle 3 cell 3a violation: target node fed.rs:892 must normalize push_replies to false for leaf peer"
+    );
+
+    // Cell 3b: Verify reply-side guard in agent.rs:540
+    // Even if a message in target node's DB has push_replies=true and return_host is a leaf peer,
+    // agent.rs:540 must refuse to push to origin.
+    let push_msg_id = ulid::Ulid::new().to_string();
+    {
+        let db = node_b_db.lock().unwrap();
+        let pre_record = MessageRecord {
+            id: push_msg_id.clone(),
+            created_at: storage::now_epoch_secs(),
+            session_id: "agent-bob".to_string(),
+            from_name: "xmsg@leaf-node · svc:matrix".to_string(),
+            bytes: 10,
+            outcome: "delivered".to_string(),
+            recipient_harness: "claude".to_string(),
+            return_harness: Some("svc".to_string()),
+            return_session_id: Some("matrix".to_string()),
+            return_host: Some("leaf-node".to_string()),
+            push_replies: true,
+            thread_id: push_msg_id.clone(),
+        };
+        storage::insert_message(&db, &pre_record).unwrap();
+    }
+
+    let mut stream2 = UnixStream::connect(&node_b_agent_sock).await.unwrap();
+    let reply_req2 = serde_json::json!({
+        "action": "reply",
+        "message_id": push_msg_id,
+        "text": "pong to push msg"
+    });
+    stream2
+        .write_all(format!("{reply_req2}\n").as_bytes())
+        .await
+        .unwrap();
+    stream2.flush().await.unwrap();
+
+    let mut reader2 = BufReader::new(stream2);
+    let mut line2 = String::new();
+    reader2.read_line(&mut line2).await.unwrap();
+    let reply_resp2: Value = serde_json::from_str(&line2).unwrap();
+    assert_eq!(
+        reply_resp2
+            .get("reply")
+            .and_then(|r| r.get("pushOutcome"))
+            .and_then(|s| s.as_str()),
+        Some("disabled"),
+        "Oracle 3 cell 3b violation: agent.rs:540 must set pushOutcome=disabled for leaf peer"
+    );
+    assert_eq!(
+        node_b_fed_state.outbound_replies_pushed.load(Ordering::SeqCst),
+        0,
+        "Oracle 3 cell 3b violation: agent.rs:540 must skip push to leaf peer even if push_replies=true"
+    );
+
+    // 2. Bob replies to msg_id on target-node via agent.sock
     let mut stream = UnixStream::connect(&node_b_agent_sock).await.unwrap();
     let reply_req = serde_json::json!({
         "action": "reply",
@@ -592,7 +655,6 @@ async fn test_oracle_3_leaf_pull_replies_node_zero_outbound_connections() {
     );
 
     // 3. Oracle 3 core assertion: node-b made 0 outbound connections to leaf!
-    // Push was skipped because peer was marked leaf: true.
     assert_eq!(
         node_b_fed_state.outbound_replies_pushed.load(Ordering::SeqCst),
         0,

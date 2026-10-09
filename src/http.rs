@@ -367,7 +367,7 @@ async fn send_message_handler(
                 r#ref: ref_str.clone(),
             },
             body: req.text.clone(),
-            push_replies: false,
+            push_replies: true,
             thread_id: message_id.clone(),
             created_at: storage::now_epoch_secs(),
         };
@@ -400,7 +400,7 @@ async fn send_message_handler(
                 return_harness: Some("svc".to_string()),
                 return_session_id: state.leaf_principal().map(|s| s.to_string()),
                 return_host: Some(state.host_label.clone()),
-                push_replies: false,
+                push_replies: true,
                 thread_id: message_id.clone(),
             };
             let _ = storage::insert_message(&db, &msg_record);
