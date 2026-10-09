@@ -167,6 +167,7 @@ async fn start_mcp_harness() -> McpHarness {
         db: Arc::new(std::sync::Mutex::new(conn)),
         notify_tx,
         reply_ttl: Duration::from_secs(3600),
+        idempotency_ttl: Duration::from_secs(86400),
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
     });
 

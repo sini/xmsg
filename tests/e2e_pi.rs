@@ -108,6 +108,7 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
         db: db.clone(),
         notify_tx: notify_tx.clone(),
         reply_ttl,
+        idempotency_ttl: Duration::from_secs(86400),
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
     });
 

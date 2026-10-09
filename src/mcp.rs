@@ -152,7 +152,8 @@ fn handle_jsonrpc(
                     "properties": {
                         "ref": { "type": "string", "description": "Target session ID, PID, or name" },
                         "text": { "type": "string", "description": "Message content" },
-                        "push_replies": { "type": "boolean", "description": "Whether to push replies back to the sender session (default: true). Set false for poll-only replies." }
+                        "push_replies": { "type": "boolean", "description": "Whether to push replies back to the sender session (default: true). Set false for poll-only replies." },
+                        "idempotency_key": { "type": "string", "description": "Optional client-supplied idempotency key for at-most-once delivery" }
                     },
                     "required": ["ref", "text"],
                     "additionalProperties": false
@@ -341,13 +342,20 @@ fn execute_tool(
                 .get("push_replies")
                 .and_then(Value::as_bool)
                 .unwrap_or(true);
+            let idempotency_key = args
+                .get("idempotency_key")
+                .or_else(|| args.get("idempotencyKey"))
+                .and_then(Value::as_str);
 
-            let payload = json!({
+            let mut payload = json!({
                 "action": "send",
                 "ref": target_ref,
                 "text": text,
                 "push_replies": push_replies,
             });
+            if let Some(key) = idempotency_key {
+                payload["idempotency_key"] = json!(key);
+            }
 
             match call_agent_sock(&config.agent_sock, &payload) {
                 Ok(resp) => {

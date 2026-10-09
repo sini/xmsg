@@ -97,6 +97,10 @@ pub struct ServeArgs {
     #[arg(long, env = "XMSG_REPLY_TTL", default_value_t = 604800)]
     pub reply_ttl: u64,
 
+    /// Idempotency key retention window in seconds (default 24h: 86400)
+    #[arg(long, env = "XMSG_IDEMPOTENCY_TTL", default_value_t = 86400)]
+    pub idempotency_ttl: u64,
+
     /// Registration socket path (defaults to $XDG_RUNTIME_DIR/xmsg/register.sock; on macOS without it, the Darwin user temp dir)
     #[arg(long, env = "XMSG_REGISTER_SOCK")]
     pub register_sock: Option<PathBuf>,
@@ -512,6 +516,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let reg_trusted_svc_exes = trusted_svc_exes.clone();
     let reg_svc_notify_tx = svc_notify_tx.clone();
     let reply_ttl = Duration::from_secs(args.reply_ttl);
+    let idempotency_ttl = Duration::from_secs(args.idempotency_ttl);
 
     tokio::spawn(async move {
         if let Err(e) = xmsg::agy::run_register_server(
@@ -549,6 +554,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         db,
         notify_tx,
         reply_ttl,
+        idempotency_ttl,
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
     });
 

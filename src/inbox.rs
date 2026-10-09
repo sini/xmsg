@@ -23,11 +23,17 @@ pub struct InboxMessage {
     pub content: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
     pub from: String,
     pub text: String,
+    #[serde(
+        default,
+        alias = "idempotencyKey",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

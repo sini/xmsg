@@ -84,6 +84,20 @@ pub struct SvcPendingMessage {
     pub delivered_at: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct IdempotencyRecord {
+    pub principal: String,
+    pub key: String,
+    pub body: String,
+    pub message_id: String,
+    pub session_id: String,
+    pub from_name: String,
+    pub bytes: usize,
+    pub outcome: String,
+    pub created_at: i64,
+}
+
 pub fn now_epoch_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -151,6 +165,19 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             delivered_at INTEGER
         );
 
+        CREATE TABLE IF NOT EXISTS idempotency_keys (
+            principal TEXT NOT NULL,
+            key TEXT NOT NULL,
+            body TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            from_name TEXT NOT NULL,
+            bytes INTEGER NOT NULL,
+            outcome TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (principal, key)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_replies_message_seq ON replies(message_id, seq);
         CREATE INDEX IF NOT EXISTS idx_replies_created_at ON replies(created_at);
         CREATE INDEX IF NOT EXISTS idx_pi_pending_session ON pi_pending_messages(session_id, delivered_at);
@@ -159,6 +186,7 @@ pub fn init_db(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_agy_pending_created_at ON agy_pending_messages(created_at);
         CREATE INDEX IF NOT EXISTS idx_svc_pending_session ON svc_pending_messages(session_id, delivered_at);
         CREATE INDEX IF NOT EXISTS idx_svc_pending_created_at ON svc_pending_messages(created_at);
+        CREATE INDEX IF NOT EXISTS idx_idempotency_created_at ON idempotency_keys(created_at);
         "#,
     )?;
 
@@ -582,6 +610,67 @@ pub fn purge_svc_messages(conn: &Connection, ttl_secs: u64) -> Result<usize> {
     let cutoff = now_epoch_secs() - (ttl_secs as i64);
     conn.execute(
         "DELETE FROM svc_pending_messages WHERE created_at < ?1",
+        params![cutoff],
+    )
+}
+
+pub fn get_idempotency_record(
+    conn: &Connection,
+    principal: &str,
+    key: &str,
+    ttl_secs: u64,
+) -> Result<Option<IdempotencyRecord>> {
+    let now = now_epoch_secs();
+    let cutoff = now.saturating_sub(ttl_secs as i64);
+    let mut stmt = conn.prepare(
+        "SELECT principal, key, body, message_id, session_id, from_name, bytes, outcome, created_at
+         FROM idempotency_keys
+         WHERE principal = ?1 AND key = ?2 AND created_at >= ?3",
+    )?;
+    let mut rows = stmt.query(params![principal, key, cutoff])?;
+    if let Some(row) = rows.next()? {
+        let bytes_i64: i64 = row.get(6)?;
+        Ok(Some(IdempotencyRecord {
+            principal: row.get(0)?,
+            key: row.get(1)?,
+            body: row.get(2)?,
+            message_id: row.get(3)?,
+            session_id: row.get(4)?,
+            from_name: row.get(5)?,
+            bytes: bytes_i64 as usize,
+            outcome: row.get(7)?,
+            created_at: row.get(8)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn insert_idempotency_record(conn: &Connection, record: &IdempotencyRecord) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO idempotency_keys
+         (principal, key, body, message_id, session_id, from_name, bytes, outcome, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            record.principal,
+            record.key,
+            record.body,
+            record.message_id,
+            record.session_id,
+            record.from_name,
+            record.bytes as i64,
+            record.outcome,
+            record.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn purge_idempotency_keys(conn: &Connection, ttl_secs: u64) -> Result<usize> {
+    let now = now_epoch_secs();
+    let cutoff = now.saturating_sub(ttl_secs as i64);
+    conn.execute(
+        "DELETE FROM idempotency_keys WHERE created_at < ?1",
         params![cutoff],
     )
 }

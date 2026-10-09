@@ -798,6 +798,10 @@ pub async fn run_agent_server(
                             .or_else(|| req_val.get("pushReplies"))
                             .and_then(|v| v.as_bool())
                             .unwrap_or(true);
+                        let idempotency_key = req_val
+                            .get("idempotency_key")
+                            .or_else(|| req_val.get("idempotencyKey"))
+                            .and_then(|v| v.as_str());
 
                         if target_ref.is_empty() || text.is_empty() {
                             let err_resp = serde_json::json!({
@@ -807,6 +811,65 @@ pub async fn run_agent_server(
                             });
                             let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
                             continue;
+                        }
+
+                        if let Some(key) = idempotency_key {
+                            if key.is_empty()
+                                || key.len() > 128
+                                || key.chars().any(|c| c.is_control())
+                            {
+                                let err_resp = serde_json::json!({
+                                    "status": "error",
+                                    "error": "bad_request",
+                                    "detail": "invalid idempotency_key: must be 1..128 non-control chars"
+                                });
+                                let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+                                continue;
+                            }
+
+                            let principal = format!("session:{}", caller.session_id);
+                            let existing = {
+                                if let Ok(db) = state_clone.db.lock() {
+                                    storage::get_idempotency_record(
+                                        &db,
+                                        &principal,
+                                        key,
+                                        state_clone.idempotency_ttl.as_secs(),
+                                    )
+                                    .ok()
+                                    .flatten()
+                                } else {
+                                    None
+                                }
+                            };
+
+                            if let Some(record) = existing {
+                                if record.body != text {
+                                    let err_resp = serde_json::json!({
+                                        "status": "error",
+                                        "error": "conflict",
+                                        "detail": format!(
+                                            "idempotency key '{key}' was already used with a different message body"
+                                        )
+                                    });
+                                    let _ =
+                                        writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+                                    continue;
+                                }
+
+                                let ok_resp = serde_json::json!({
+                                    "status": "ok",
+                                    "delivery": {
+                                        "sessionId": record.session_id,
+                                        "fromName": record.from_name,
+                                        "bytes": record.bytes,
+                                        "messageId": record.message_id,
+                                        "outcome": record.outcome,
+                                    }
+                                });
+                                let _ = writer.write_all(format!("{ok_resp}\n").as_bytes()).await;
+                                continue;
+                            }
                         }
 
                         if text.len() > state_clone.max_body {
@@ -1036,6 +1099,29 @@ pub async fn run_agent_server(
                                         };
                                         if let Ok(db) = state_clone.db.lock() {
                                             let _ = storage::insert_message(&db, &msg_record);
+                                            if let Some(key) = idempotency_key {
+                                                let record = storage::IdempotencyRecord {
+                                                    principal: format!(
+                                                        "session:{}",
+                                                        caller.session_id
+                                                    ),
+                                                    key: key.to_string(),
+                                                    body: text.to_string(),
+                                                    message_id: message_id.clone(),
+                                                    session_id: delivered_session_id.clone(),
+                                                    from_name: from_name.clone(),
+                                                    bytes: body_len,
+                                                    outcome: outcome_str.to_string(),
+                                                    created_at: storage::now_epoch_secs(),
+                                                };
+                                                let _ = storage::insert_idempotency_record(
+                                                    &db, &record,
+                                                );
+                                                let _ = storage::purge_idempotency_keys(
+                                                    &db,
+                                                    state_clone.idempotency_ttl.as_secs(),
+                                                );
+                                            }
                                         }
                                         let ok_resp = serde_json::json!({
                                             "status": "ok",

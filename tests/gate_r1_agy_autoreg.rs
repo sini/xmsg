@@ -358,6 +358,7 @@ exit 0
         db: db.clone(),
         notify_tx,
         reply_ttl: Duration::from_secs(60),
+        idempotency_ttl: Duration::from_secs(86400),
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
     });
 
@@ -522,6 +523,7 @@ async fn oracle_3_live_unattested_pid_returns_unregistered_without_exited() {
         db,
         notify_tx,
         reply_ttl: Duration::from_secs(60),
+        idempotency_ttl: Duration::from_secs(86400),
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
     });
 

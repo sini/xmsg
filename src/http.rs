@@ -37,6 +37,7 @@ pub struct AppState {
     pub db: Arc<Mutex<rusqlite::Connection>>,
     pub notify_tx: broadcast::Sender<String>,
     pub reply_ttl: Duration,
+    pub idempotency_ttl: Duration,
     pub long_poll_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
@@ -259,6 +260,57 @@ async fn send_message_handler(
         }
     };
 
+    // Check idempotency key if supplied
+    if let Some(ref key) = req.idempotency_key {
+        if key.is_empty() || key.len() > 128 || key.chars().any(|c| c.is_control()) {
+            eprintln!(
+                "req_id={} ref={} bytes={} outcome=bad_request detail=\"invalid idempotency_key\"",
+                req_id, ref_str, body_len
+            );
+            return Err(AppError::BadRequest(
+                "invalid idempotency_key: must be 1..128 non-control chars".to_string(),
+            ));
+        }
+
+        let principal = format!("http:{from_name}");
+        let existing = {
+            let db = state
+                .db
+                .lock()
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            storage::get_idempotency_record(&db, &principal, key, state.idempotency_ttl.as_secs())
+                .map_err(|e| AppError::Internal(e.to_string()))?
+        };
+
+        if let Some(record) = existing {
+            if record.body != req.text {
+                eprintln!(
+                    "req_id={} ref={} bytes={} outcome=conflict detail=\"idempotency body mismatch\"",
+                    req_id, ref_str, body_len
+                );
+                return Err(AppError::Conflict(format!(
+                    "idempotency key '{key}' was already used with a different message body"
+                )));
+            }
+
+            eprintln!(
+                "req_id={} message_id={} session_id={} from=\"{}\" bytes={} outcome=idempotent_replay",
+                req_id, record.message_id, record.session_id, record.from_name, record.bytes
+            );
+            return Ok((
+                StatusCode::ACCEPTED,
+                Json(DeliveryResponse {
+                    session_id: record.session_id,
+                    from_name: record.from_name,
+                    bytes: record.bytes,
+                    message_id: record.message_id,
+                    outcome: Some(record.outcome),
+                }),
+            )
+                .into_response());
+        }
+    }
+
     // Resolve target session
     let target = resolve_target_session(&state, &ref_str).map_err(|err| {
         eprintln!(
@@ -424,10 +476,26 @@ async fn send_message_handler(
             .lock()
             .map_err(|e| AppError::Internal(e.to_string()))?;
         storage::insert_message(&db, &msg_record).map_err(|e| AppError::Internal(e.to_string()))?;
+        if let Some(ref key) = req.idempotency_key {
+            let record = storage::IdempotencyRecord {
+                principal: format!("http:{from_name}"),
+                key: key.clone(),
+                body: req.text.clone(),
+                message_id: message_id.clone(),
+                session_id: session_id.clone(),
+                from_name: from_name.clone(),
+                bytes: body_len,
+                outcome: outcome_str.to_string(),
+                created_at: storage::now_epoch_secs(),
+            };
+            let _ = storage::insert_idempotency_record(&db, &record);
+            let _ = storage::purge_idempotency_keys(&db, state.idempotency_ttl.as_secs());
+        }
         let _ = storage::purge_messages(&db, state.reply_ttl.as_secs());
         let _ = storage::purge_replies(&db, state.reply_ttl.as_secs());
         let _ = storage::purge_pi_messages(&db, state.reply_ttl.as_secs());
         let _ = storage::purge_agy_messages(&db, state.reply_ttl.as_secs());
+        let _ = storage::purge_svc_messages(&db, state.reply_ttl.as_secs());
     }
 
     // Invariant: Message bodies are NEVER logged under any circumstances

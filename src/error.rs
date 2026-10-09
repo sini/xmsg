@@ -55,6 +55,9 @@ pub enum AppError {
 
     #[error("insecure socket directory: {0}")]
     InsecureSocketDir(String),
+
+    #[error("conflict: {0}")]
+    Conflict(String),
 }
 
 impl IntoResponse for AppError {
@@ -68,6 +71,7 @@ impl IntoResponse for AppError {
                 format!("no live session matches '{r}'"),
             ),
             AppError::Ambiguous(d) => (StatusCode::CONFLICT, "ambiguous", d),
+            AppError::Conflict(d) => (StatusCode::CONFLICT, "conflict", d),
             AppError::Gone { session_id, pid } => (
                 StatusCode::GONE,
                 "gone",

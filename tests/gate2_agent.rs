@@ -192,6 +192,7 @@ async fn setup(max_body: usize) -> Env {
         db: db.clone(),
         notify_tx: ntx,
         reply_ttl: ttl,
+        idempotency_ttl: Duration::from_secs(86400),
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
     });
 

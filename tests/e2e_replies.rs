@@ -167,6 +167,7 @@ async fn start_replies_harness(reply_ttl: Duration) -> RepliesHarness {
         db: db.clone(),
         notify_tx,
         reply_ttl,
+        idempotency_ttl: Duration::from_secs(86400),
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
     });
 

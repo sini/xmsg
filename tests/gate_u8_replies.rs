@@ -197,6 +197,7 @@ exit 0
         db: db.clone(),
         notify_tx,
         reply_ttl: Duration::from_secs(3600),
+        idempotency_ttl: Duration::from_secs(86400),
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
     });
 
