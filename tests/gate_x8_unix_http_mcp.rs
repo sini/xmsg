@@ -189,6 +189,33 @@ async fn test_oracle_2_no_flag_no_tcp_bound() {
 
     // Sub-oracle 2B: Run server with NO --listen flag; probe old port 127.0.0.1:7787.
     // Must NOT be bound by this server process.
+    if std::env::var("XMSG_TEST_NETNS").is_err() {
+        let unshare_check = Command::new("unshare").args(["-r", "-n", "true"]).output();
+        if unshare_check.map(|o| o.status.success()).unwrap_or(false) {
+            let current_exe = std::env::current_exe().expect("current_exe");
+            let output = Command::new("unshare")
+                .args([
+                    "-r",
+                    "-n",
+                    "sh",
+                    "-c",
+                    "ip link set lo up 2>/dev/null || true; exec \"$0\" \"$@\"",
+                ])
+                .arg(current_exe)
+                .args(["test_oracle_2_no_flag_no_tcp_bound", "--exact"])
+                .env("XMSG_TEST_NETNS", "1")
+                .output()
+                .expect("execute in unshare netns");
+            assert!(
+                output.status.success(),
+                "Sub-oracle 2B failed in isolated netns:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+    }
+
     let temp_dir = tempdir().expect("tempdir");
     fs::set_permissions(temp_dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let http_sock = temp_dir.path().join("http.sock");
@@ -196,72 +223,53 @@ async fn test_oracle_2_no_flag_no_tcp_bound() {
     let agent_sock = temp_dir.path().join("agent.sock");
     let db_path = temp_dir.path().join("db.sqlite");
 
-    let unshare_check = Command::new("unshare").args(["-r", "-n", "true"]).output();
-    let has_unshare = unshare_check.map(|o| o.status.success()).unwrap_or(false);
+    let mut server = Command::new(bin)
+        .args([
+            "serve",
+            "--http-sock",
+            http_sock.to_str().unwrap(),
+            "--register-sock",
+            reg_sock.to_str().unwrap(),
+            "--agent-sock",
+            agent_sock.to_str().unwrap(),
+            "--db-path",
+            db_path.to_str().unwrap(),
+        ])
+        .spawn()
+        .expect("spawn xmsg serve");
 
-    let script = format!(
-        r#"
-ip link set lo up 2>/dev/null || true
-"{bin}" serve \
-    --http-sock "{}" \
-    --register-sock "{}" \
-    --agent-sock "{}" \
-    --db-path "{}" &
-SERVER_PID=$!
+    let mut started = false;
+    for _ in 0..50 {
+        if http_sock.exists() {
+            started = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
-for i in $(seq 1 50); do
-    if [ -S "{}" ]; then break; fi
-    sleep 0.05
-done
+    let probe_addr: std::net::SocketAddr = "127.0.0.1:7787".parse().unwrap();
+    let probe_res = std::net::TcpStream::connect_timeout(&probe_addr, Duration::from_millis(500));
 
-if command -v python3 >/dev/null 2>&1; then
-python3 -c "import socket, sys
-s = socket.socket()
-s.settimeout(0.5)
-res = s.connect_ex(('127.0.0.1', 7787))
-sys.exit(0 if res != 0 else 1) # Exit 0 if REFUSED (not bound), Exit 1 if connected (bound)
-"
-PROBE_RES=$?
-elif [ -f /proc/net/tcp ]; then
-    if grep -iq ":1E6B " /proc/net/tcp; then
-        PROBE_RES=1
-    else
-        PROBE_RES=0
-    fi
-else
-    PROBE_RES=0
-fi
+    let _ = server.kill();
+    let _ = server.wait();
 
-kill -9 $SERVER_PID 2>/dev/null || true
-wait $SERVER_PID 2>/dev/null || true
-exit $PROBE_RES
-"#,
-        http_sock.display(),
-        reg_sock.display(),
-        agent_sock.display(),
-        db_path.display(),
-        http_sock.display(),
-    );
+    assert!(started, "xmsg serve failed to start and bind http.sock");
 
-    let output = if has_unshare {
-        Command::new("unshare")
-            .args(["-r", "-n", "sh", "-c", &script])
-            .output()
-            .expect("execute in unshare netns")
-    } else {
-        Command::new("sh")
-            .args(["-c", &script])
-            .output()
-            .expect("execute in shell")
-    };
-
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "No TCP listener must be bound on 127.0.0.1:7787 when --listen is omitted. Stdout: {}, Stderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    match probe_res {
+        Ok(_stream) => {
+            panic!(
+                "TCP listener 127.0.0.1:7787 must NOT be bound when --listen is omitted, but connection succeeded!"
+            );
+        }
+        Err(e) => {
+            assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionRefused,
+                "Expected ConnectionRefused on 127.0.0.1:7787 when --listen is omitted, got: {:?}",
+                e
+            );
+        }
+    }
 }
 
 /// Oracle 3: With --reply-only, MCP tools/list = [reply]. Calling send is rejected.
