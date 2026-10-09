@@ -190,6 +190,7 @@ async fn create_test_node_full_inner(
         db: db.clone(),
         notify_tx,
         reply_ttl: Duration::from_secs(3600),
+        idempotency_ttl: Duration::from_secs(86400),
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
         fed_state: Some(fed_state.clone()),
     });
@@ -3301,6 +3302,7 @@ async fn test_n5_tls_key_load_failure_fatal_at_startup() {
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
     let mut child = tokio::process::Command::new(bin)
+        .env("XDG_RUNTIME_DIR", tmp.path())
         .args([
             "serve",
             "--listen",
@@ -3487,6 +3489,7 @@ async fn test_n7_f6_bind_fatal() {
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
     let output = std::process::Command::new(bin)
+        .env("XDG_RUNTIME_DIR", tmp.path())
         .args([
             "serve",
             "--listen",
@@ -3527,6 +3530,7 @@ async fn test_n7_f6_unspecified_address_refused() {
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
     let output = std::process::Command::new(bin)
+        .env("XDG_RUNTIME_DIR", tmp.path())
         .args([
             "serve",
             "--listen",
@@ -3566,6 +3570,7 @@ async fn test_n7_f6_cert_key_required() {
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
     let output = std::process::Command::new(bin)
+        .env("XDG_RUNTIME_DIR", tmp.path())
         .args([
             "serve",
             "--listen",

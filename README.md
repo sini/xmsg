@@ -48,6 +48,7 @@ All local IPC in `xmsg` relies on Unix domain sockets located in `$XDG_RUNTIME_D
   ```text
   caller.harness == msg.recipient_harness && caller.session_id == msg.session_id
   ```
+- **Principal-Scoped Idempotency:** Idempotency keys are partitioned by sender principal. For kernel-attested `agent.sock` callers, the principal is `session:<session_id>`, preventing cross-session key collision or interception. For unauthenticated HTTP callers, the principal is scoped as `http:<from_name>` based on the caller-declared `from` field; unauthenticated callers choosing identical sender names share that key namespace.
 
 ### 1.4 Envelope Sanitization & Breakout Protection
 
@@ -351,7 +352,8 @@ curl --unix-socket "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/xmsg/http.sock" http:
   ```json
   {
     "from": "alice-orchestrator",
-    "text": "Hello, please review unit tests."
+    "text": "Hello, please review unit tests.",
+    "idempotency_key": "optional-key-1-to-128-chars"
   }
   ```
   Returns `202 Accepted` with ULID `messageId`:
@@ -363,6 +365,14 @@ curl --unix-socket "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/xmsg/http.sock" http:
     "messageId": "01J9XYZ..."
   }
   ```
+
+#### Idempotency Key Scoping & Anonymous HTTP Limitation
+
+- **Semantics**: Providing `idempotency_key` ensures at-most-once delivery across network retries. Re-sending with the identical body returns the existing `messageId` and delivery metadata with zero duplicate side effects. Re-sending the same key with an altered body returns `409 Conflict`.
+- **Attested vs Anonymous Scoping**:
+  - Attested senders connecting over `agent.sock` (MCP, CLI tools, child agent sessions) are isolated by kernel-attested session ID (`principal = session:<session_id>`). They cannot collide with or be affected by other sessions or external HTTP callers.
+  - Anonymous HTTP senders are partitioned by their declared sender name (`principal = http:<from_name>`).
+- **Limitation**: Because HTTP endpoints do not authenticate callers, anonymous callers self-choose their `from` value. Distinct HTTP clients specifying the identical `from` name share that idempotency namespace (`http:<from_name>`). Callers requiring strong multi-tenant key isolation should communicate through attested agent sockets (`agent.sock`).
 
 ### Replies & Long-Polling
 

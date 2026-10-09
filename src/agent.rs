@@ -1014,6 +1014,25 @@ pub async fn run_agent_server(
                                             return_host: Some(state_clone.host_label.clone()),
                                         };
                                         let _ = storage::insert_message(&db, &msg_record);
+                                        if let Some(key) = idempotency_key {
+                                            let record = storage::IdempotencyRecord {
+                                                principal: format!("session:{}", caller.session_id),
+                                                key: key.to_string(),
+                                                body: text.to_string(),
+                                                message_id: message_id.clone(),
+                                                session_id: delivery_resp.session_id.clone(),
+                                                from_name: from_name.clone(),
+                                                bytes: delivery_resp.bytes,
+                                                outcome: outcome.to_string(),
+                                                created_at: storage::now_epoch_secs(),
+                                            };
+                                            let _ =
+                                                storage::insert_idempotency_record(&db, &record);
+                                            let _ = storage::purge_idempotency_keys(
+                                                &db,
+                                                state_clone.idempotency_ttl.as_secs(),
+                                            );
+                                        }
                                     }
                                     let resp = serde_json::json!({
                                         "status": "ok",
