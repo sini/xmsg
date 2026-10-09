@@ -72,10 +72,12 @@ impl McpHarness {
         McpConfig {
             sessions_dirs: vec![self.sessions_dir.clone()],
             xmsg_url: self.base_url.clone(),
+            http_sock: None,
             agent_sock: self.agent_sock.clone(),
             proc_root: self.proc_root.clone(),
             presence_dir: PathBuf::from("/tmp/nonexistent-presence"),
             proc_locks_path: PathBuf::from("/tmp/nonexistent-proc-locks"),
+            reply_only: false,
         }
     }
 }

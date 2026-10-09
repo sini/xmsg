@@ -6,10 +6,12 @@ use std::path::PathBuf;
 pub struct McpConfig {
     pub sessions_dirs: Vec<PathBuf>,
     pub xmsg_url: String,
+    pub http_sock: Option<PathBuf>,
     pub agent_sock: PathBuf,
     pub proc_root: PathBuf,
     pub presence_dir: PathBuf,
     pub proc_locks_path: PathBuf,
+    pub reply_only: bool,
 }
 
 impl McpConfig {
@@ -21,13 +23,19 @@ impl McpConfig {
                 crate::agent::default_agent_sock_path()
                     .unwrap_or_else(|_| PathBuf::from("/nonexistent/agent.sock"))
             });
+        let http_sock = std::env::var("XMSG_HTTP_SOCK")
+            .map(PathBuf::from)
+            .ok()
+            .or_else(|| crate::http::default_http_sock_path().ok());
         Self {
             sessions_dirs,
             xmsg_url,
+            http_sock,
             agent_sock,
             proc_root: PathBuf::from(crate::process::LIVE_PROC_ROOT),
             presence_dir: PathBuf::from(home).join(".gemini/antigravity-cli/presence"),
             proc_locks_path: PathBuf::from(crate::agy::LIVE_PROC_LOCKS),
+            reply_only: false,
         }
     }
 
@@ -127,48 +135,54 @@ fn handle_jsonrpc(
             })
         }),
         "tools/list" => id.map(|id| {
+            let list_tool = json!({
+                "name": "list",
+                "description": "List active agent sessions on the local host",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }
+            });
+            let send_tool = json!({
+                "name": "send",
+                "description": "Send a message to a session by ID, PID, or name. Sender identity is automatically derived from the calling session.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ref": { "type": "string", "description": "Target session ID, PID, or name" },
+                        "text": { "type": "string", "description": "Message content" },
+                        "push_replies": { "type": "boolean", "description": "Whether to push replies back to the sender session (default: true). Set false for poll-only replies." }
+                    },
+                    "required": ["ref", "text"],
+                    "additionalProperties": false
+                }
+            });
+            let reply_tool = json!({
+                "name": "reply",
+                "description": "Reply to a received message by message_id. Sender identity is automatically derived from the calling session.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "message_id": { "type": "string", "description": "ID of the message being replied to" },
+                        "text": { "type": "string", "description": "Reply text" }
+                    },
+                    "required": ["message_id", "text"],
+                    "additionalProperties": false
+                }
+            });
+
+            let tools = if config.reply_only {
+                vec![reply_tool]
+            } else {
+                vec![list_tool, send_tool, reply_tool]
+            };
+
             json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
-                    "tools": [
-                        {
-                            "name": "list",
-                            "description": "List active agent sessions on the local host",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {},
-                                "additionalProperties": false
-                            }
-                        },
-                        {
-                            "name": "send",
-                            "description": "Send a message to a session by ID, PID, or name. Sender identity is automatically derived from the calling session.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "ref": { "type": "string", "description": "Target session ID, PID, or name" },
-                                    "text": { "type": "string", "description": "Message content" },
-                                    "push_replies": { "type": "boolean", "description": "Whether to push replies back to the sender session (default: true). Set false for poll-only replies." }
-                                },
-                                "required": ["ref", "text"],
-                                "additionalProperties": false
-                            }
-                        },
-                        {
-                            "name": "reply",
-                            "description": "Reply to a received message by message_id. Sender identity is automatically derived from the calling session.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "message_id": { "type": "string", "description": "ID of the message being replied to" },
-                                    "text": { "type": "string", "description": "Reply text" }
-                                },
-                                "required": ["message_id", "text"],
-                                "additionalProperties": false
-                            }
-                        }
-                    ]
+                    "tools": tools
                 }
             })
         }),
@@ -270,9 +284,34 @@ fn execute_tool(
     name: &str,
     args: &Value,
 ) -> Value {
+    if config.reply_only && name != "reply" {
+        return tool_err(format!("tool '{name}' is not available in reply-only mode"));
+    }
+
     match name {
         "list" => {
-            let url = format!("{}/v1/sessions", config.xmsg_url);
+            let sock_path = config
+                .http_sock
+                .clone()
+                .or_else(|| crate::http::default_http_sock_path().ok());
+            if let Some(ref sock) = sock_path {
+                if sock.exists() {
+                    match crate::http::http_get_unix(sock, "/v1/sessions") {
+                        Ok((status, text)) => {
+                            if status.is_success() {
+                                return tool_ok(text);
+                            } else {
+                                return tool_err(format!("HTTP {status}: {text}"));
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("failed to query http.sock for list: {e}");
+                        }
+                    }
+                }
+            }
+
+            let url = format!("{}/v1/sessions", config.xmsg_url.trim_end_matches('/'));
             match client.get(&url).send() {
                 Ok(resp) => {
                     let status = resp.status();

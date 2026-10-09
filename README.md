@@ -8,16 +8,21 @@
 
 ### 1.1 Same-UID Trust Boundary
 
-All local IPC in `xmsg` relies on Unix domain sockets located in `$XDG_RUNTIME_DIR/xmsg/` (mode `0700` directory, socket mode `0600`, owned by the running user's UID). On macOS, when `XDG_RUNTIME_DIR` is unset, the runtime dir is the per-user Darwin temp dir (`getconf DARWIN_USER_TEMP_DIR`, also a `0700` directory):
+All local IPC in `xmsg` relies on Unix domain sockets located in `$XDG_RUNTIME_DIR/xmsg/` (`http.sock`, `agent.sock`, `register.sock` in mode `0700` directory, socket mode `0600`, owned by the running user's UID). On macOS, when `XDG_RUNTIME_DIR` is unset, the runtime dir is the per-user Darwin temp dir (`getconf DARWIN_USER_TEMP_DIR`, also a `0700` directory):
 
 - Sockets authenticate connected peers via kernel-attested credentials (`SO_PEERCRED` on Linux, `getpeereid` and `LOCAL_PEEREPID` on macOS). On macOS the peer PID is the last process to use the socket, not the one that connected as with `SO_PEERCRED`; they differ only when a connected socket is shared between processes before `accept`, and the UID check is unaffected.
 - Any process executing under the **same local UID** is within the trust boundary and may connect to the Unix sockets.
 - Sockets are protected against symlink attacks and race conditions on startup by verifying directory ownership and permissions prior to binding.
+- All HTTP API endpoints are exposed over `$XDG_RUNTIME_DIR/xmsg/http.sock` by default. Every connection undergoes a peer UID check (`peer_uid == server_uid`) before HTTP framing, dropping connections from other UIDs immediately.
 
-### 1.2 No-Authentication HTTP Posture
+### 1.2 No-Authentication HTTP Posture & Unix-Socket Default
 
 > [!WARNING]
-> **No-Auth HTTP Service**: The `xmsg` HTTP server provides **no authentication mechanisms**. It is designed solely for local inter-process communication and **MUST STRICTLY bind to the loopback interface (`127.0.0.1`)**. Never expose the HTTP port to external networks, shared interfaces, or container bridges without a dedicated authenticating proxy.
+> **No-Auth HTTP Service**: The `xmsg` HTTP server provides **no application-level authentication mechanisms**. It relies on Unix domain socket peer credentials (`SO_PEERCRED` / `getpeereid`) for access control.
+>
+> By default, `xmsg serve` binds **no TCP port whatsoever**. It listens solely on the local Unix domain socket `$XDG_RUNTIME_DIR/xmsg/http.sock`.
+>
+> A TCP loopback listener is available **only** when explicitly requested via the `--listen <IP:PORT>` CLI flag or `XMSG_LISTEN` environment variable. This is intended strictly for container / Kubernetes pod environments where loopback is an isolated, private network namespace. Never bind TCP to external or shared interfaces.
 
 ### 1.3 Attestation & Identity Derivation
 
@@ -84,23 +89,27 @@ flowchart TD
   HTTP --> Registry
 ```
 
-`xmsg` operates two Unix domain sockets in `$XDG_RUNTIME_DIR/xmsg/`, or the Darwin user temp dir on macOS (created with file permissions mode `0600`):
+`xmsg` operates three Unix domain sockets in `$XDG_RUNTIME_DIR/xmsg/`, or the Darwin user temp dir on macOS (created with file permissions mode `0600`, restricted to same-UID callers):
 
-### 2.1 `agent.sock`
+### 2.1 `http.sock`
+
+Serves the HTTP API directly over a local Unix domain socket. Peer credentials (`SO_PEERCRED` / `getpeereid`) are checked on every connection, refusing any non-matching UID prior to HTTP framing.
+
+### 2.2 `agent.sock`
 
 Used by active agent sessions and MCP tool instances:
 
 - **`send` action:** Formats an attested sender badge `xmsg@<host> · <harness>:<name>`, enforces payload limits (`max_body`), derives kernel-attested return address (`return_harness`, `return_session_id`), and delivers directly to the recipient session. Supports optional `"push_replies": bool` (defaults to `true`). Callers cannot supply or spoof return addresses.
 - **`reply` action:** Validates caller identity via ancestor walk, verifies recipient authorization against SQLite records, and records the reply. If the original message has an attested return address and `push_replies` is enabled, pushes the reply directly into the original sender's adapter (Claude channel socket, Antigravity `agentapi`, or Pi queue) with conversational threading (`thread_id`), returning `push_outcome` (`pushed`, `sender_gone`, `push_failed`, or `disabled`).
 
-### 2.2 `register.sock`
+### 2.3 `register.sock`
 
 Used by non-Claude harnesses for registration and polling:
 
 - **Antigravity Registration:** `xmsg register agy` sends session credentials (`conversation_id`, `ls_address`, `csrf_token`) over this socket to enable outbound HTTP message injection into Antigravity.
 - **Pi Registration & Polling:** The Pi extension registers its process and enters an event-driven long-poll loop to receive inbound messages.
 
-### 2.3 Return Address & Reply Push Delivery (Unit U8)
+### 2.4 Return Address & Reply Push Delivery (Unit U8)
 
 - **Strictly Derived Return Address:** The server derives `return_harness = caller.harness` and `return_session_id = caller.session_id` directly from kernel process attestation. Any caller-supplied address fields are strictly rejected. Anonymous HTTP sends have `return_harness = None` and `push_replies = false`.
 - **Push Opt-Out:** Senders can pass `"push_replies": false` to opt out of asynchronous push delivery. Replies to opt-out messages record `push_outcome = "disabled"` without attempting delivery.
@@ -134,11 +143,28 @@ Used by non-Claude harnesses for registration and polling:
 }
 ```
 
-Exposes three tools (all execute autonomously without user interaction prompts):
+Exposes three tools by default (all execute autonomously without user interaction prompts):
 
 - **`list`:** Enumerate active agent sessions across all harnesses.
 - **`send(ref, text, [push_replies])`:** Send a message to a session ref (derives attested caller identity and return address; callers cannot override the sender).
 - **`reply(message_id, text)`:** Reply to a received message by its `message_id` (enforces recipient authorization and pushes to the original sender if return address exists).
+
+#### Reply-Only Mode (`--reply-only`)
+
+For restricted subagent or responder-only sessions where the model should only be able to answer incoming messages rather than discovering or initiating new conversations, run MCP with `--reply-only` (or set `XMSG_REPLY_ONLY=1`):
+
+```json
+{
+  "mcpServers": {
+    "xmsg": {
+      "command": "xmsg",
+      "args": ["mcp", "--reply-only"]
+    }
+  }
+}
+```
+
+In reply-only mode, `tools/list` returns exclusively `[reply]`. The `list` and `send` tools are omitted from the catalog and any direct JSON-RPC calls to them fail closed with an error.
 
 ### 3.2 Pi Coding Agent Extension: `extensions/pi/`
 
@@ -215,6 +241,23 @@ In multi-tenant setups where multiple Claude configurations exist on the same ho
 ---
 
 ## 4. HTTP API Reference
+
+The HTTP API is bound by default to the local Unix domain socket `$XDG_RUNTIME_DIR/xmsg/http.sock` (mode `0600`, peer UID checked). If an explicit `--listen <IP:PORT>` (or `XMSG_LISTEN`) flag was provided on startup, it is also served over TCP.
+
+### Accessing the Unix Socket via cURL
+
+```bash
+# Health check
+curl --unix-socket "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/xmsg/http.sock" http://localhost/healthz
+
+# List active sessions
+curl --unix-socket "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/xmsg/http.sock" http://localhost/v1/sessions
+```
+
+### Migration Note (`matrix-xmsg` and External Clients)
+
+- **Default Socket Shift:** `xmsg serve` no longer binds loopback TCP port `7787` by default. Local clients and background daemons (such as `matrix-xmsg` running in the user session) must connect via Unix domain socket (`http.sock`).
+- **Container / Pod Deployments:** In Kubernetes pods or containerized setups where `matrix-xmsg` and `xmsg` share an isolated pod network namespace, start `xmsg` with `--listen 127.0.0.1:7787` (or `XMSG_LISTEN="127.0.0.1:7787"`) to bind the legacy loopback TCP port.
 
 ### Health & Sessions
 

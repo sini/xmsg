@@ -65,9 +65,13 @@ pub struct RegisterAgyArgs {
 
 #[derive(Parser, Debug)]
 pub struct ServeArgs {
-    /// Listen address (IP:PORT)
-    #[arg(long, env = "XMSG_LISTEN", default_value = "127.0.0.1:7787")]
-    pub listen: String,
+    /// Optional TCP listen address (IP:PORT), for environments like Kubernetes pods where loopback is a private netns. With no flag, no TCP socket is bound.
+    #[arg(long, env = "XMSG_LISTEN")]
+    pub listen: Option<String>,
+
+    /// Path to unix domain socket for HTTP server (defaults to $XDG_RUNTIME_DIR/xmsg/http.sock; on macOS without it, the Darwin user temp dir)
+    #[arg(long, env = "XMSG_HTTP_SOCK")]
+    pub http_sock: Option<PathBuf>,
 
     /// Host label for sender envelope prefix (defaults to hostname)
     #[arg(long, env = "XMSG_HOST_LABEL")]
@@ -132,9 +136,17 @@ pub struct McpArgs {
     #[arg(long, env = "XMSG_URL", default_value = "http://127.0.0.1:7787")]
     pub xmsg_url: String,
 
+    /// HTTP unix socket path
+    #[arg(long, env = "XMSG_HTTP_SOCK")]
+    pub http_sock: Option<PathBuf>,
+
     /// Agent socket path (defaults to $XDG_RUNTIME_DIR/xmsg/agent.sock; on macOS without it, the Darwin user temp dir)
     #[arg(long, env = "XMSG_AGENT_SOCK")]
     pub agent_sock: Option<PathBuf>,
+
+    /// Expose only the reply tool (no list, no send)
+    #[arg(long, env = "XMSG_REPLY_ONLY")]
+    pub reply_only: bool,
 }
 
 fn resolve_db_path(path: Option<PathBuf>) -> PathBuf {
@@ -175,6 +187,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Mcp(args) => {
             let sessions_dirs = resolve_sessions_dirs(args.sessions_dirs);
             let mut config = McpConfig::new(sessions_dirs, args.xmsg_url);
+            config.reply_only = args.reply_only;
+            if let Some(sock) = args.http_sock {
+                config.http_sock = Some(sock);
+            }
             if let Some(sock) = args.agent_sock {
                 config.agent_sock = sock;
             }
@@ -286,7 +302,23 @@ fn check_session_has_credentials(
         }
     }
 
-    // Fallback to HTTP
+    // Fallback to HTTP (try http.sock first, then url)
+    if let Ok(sock) = xmsg::http::default_http_sock_path() {
+        if sock.exists() {
+            if let Ok((status, body)) =
+                xmsg::http::http_get_unix(&sock, &format!("/v1/sessions/{conv_id}"))
+            {
+                if status.is_success() {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
+                        if let Some(reg) = val.get("registered").and_then(|r| r.as_bool()) {
+                            return Ok(reg);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_millis(500))
         .build()?;
@@ -400,8 +432,15 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
     }
 
+    let http_sock_path = match args.http_sock {
+        Some(p) => p,
+        None => xmsg::http::default_http_sock_path()
+            .map_err(|e| format!("cannot determine http socket path: {e}"))?,
+    };
+
     info!(
-        listen = %args.listen,
+        listen = ?args.listen,
+        http_sock = %http_sock_path.display(),
         host_label = %host_label,
         sessions_dirs = ?sessions_dirs,
         db_path = %db_path.display(),
@@ -493,7 +532,18 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let app = build_router(state);
-    let listener = tokio::net::TcpListener::bind(&args.listen).await?;
-    axum::serve(listener, app).await?;
+
+    if let Some(ref tcp_addr) = args.listen {
+        let tcp_listener = tokio::net::TcpListener::bind(tcp_addr).await?;
+        let tcp_app = app.clone();
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(tcp_listener, tcp_app).await {
+                tracing::error!("tcp http server error: {e}");
+            }
+        });
+    }
+
+    let ucred_listener = xmsg::http::bind_ucred_unix_listener(&http_sock_path, my_uid, None)?;
+    axum::serve(ucred_listener, app).await?;
     Ok(())
 }

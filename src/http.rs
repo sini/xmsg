@@ -8,7 +8,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::path::PathBuf;
+use std::fs;
+use std::io;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -517,4 +520,203 @@ async fn get_replies_handler(
     };
 
     Ok((StatusCode::OK, Json(replies)).into_response())
+}
+
+pub fn default_http_sock_path() -> Result<PathBuf, AppError> {
+    crate::agent::default_socket_dir().map(|d| d.join("http.sock"))
+}
+
+pub type PeerUidChecker = Arc<dyn Fn(&tokio::net::UnixStream) -> io::Result<u32> + Send + Sync>;
+
+pub struct UcredUnixListener {
+    pub listener: tokio::net::UnixListener,
+    pub expected_uid: u32,
+    pub peer_uid_checker: Option<PeerUidChecker>,
+}
+
+impl axum::serve::Listener for UcredUnixListener {
+    type Io = tokio::net::UnixStream;
+    type Addr = tokio::net::unix::SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            let (stream, addr) = match self.listener.accept().await {
+                Ok(res) => res,
+                Err(e) => {
+                    tracing::warn!("http unix socket accept error: {e}");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    continue;
+                }
+            };
+
+            let peer_uid = if let Some(ref checker) = self.peer_uid_checker {
+                match checker(&stream) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        tracing::warn!("http.sock peer cred check failed (seam): {e}");
+                        continue;
+                    }
+                }
+            } else {
+                match stream.peer_cred() {
+                    Ok(c) => c.uid(),
+                    Err(e) => {
+                        tracing::warn!("failed to get peer creds on http.sock: {e}");
+                        continue;
+                    }
+                }
+            };
+
+            if peer_uid != self.expected_uid {
+                tracing::warn!(
+                    "http.sock rejected connection: UID mismatch {peer_uid} != {}",
+                    self.expected_uid
+                );
+                continue;
+            }
+
+            return (stream, addr);
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.listener.local_addr()
+    }
+}
+
+pub fn bind_ucred_unix_listener(
+    sock_path: &Path,
+    expected_uid: u32,
+    peer_uid_checker: Option<PeerUidChecker>,
+) -> io::Result<UcredUnixListener> {
+    if let Some(parent) = sock_path.parent() {
+        if let Err(e) = crate::agent::ensure_secure_socket_dir(parent, expected_uid) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                e.to_string(),
+            ));
+        }
+    }
+    if sock_path.exists() {
+        if std::os::unix::net::UnixStream::connect(sock_path).is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!(
+                    "another server instance is actively listening on {}",
+                    sock_path.display()
+                ),
+            ));
+        }
+        let _ = fs::remove_file(sock_path);
+    }
+
+    let listener = tokio::net::UnixListener::bind(sock_path)?;
+    fs::set_permissions(sock_path, fs::Permissions::from_mode(0o600)).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("failed to set permissions on {}: {e}", sock_path.display()),
+        )
+    })?;
+
+    Ok(UcredUnixListener {
+        listener,
+        expected_uid,
+        peer_uid_checker,
+    })
+}
+
+pub fn http_request_unix(
+    sock_path: &Path,
+    method: &str,
+    path_and_query: &str,
+    body: Option<&str>,
+) -> io::Result<(StatusCode, String)> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(sock_path)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+
+    let req = if let Some(b) = body {
+        format!(
+            "{method} {path_and_query} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}",
+            b.len()
+        )
+    } else {
+        format!(
+            "{method} {path_and_query} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )
+    };
+    stream.write_all(req.as_bytes())?;
+
+    let mut resp_bytes = Vec::new();
+    let mut buf = [0u8; 4096];
+    let mut expected_len: Option<usize> = None;
+    let mut header_len = 0;
+
+    loop {
+        let n = stream.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        resp_bytes.extend_from_slice(&buf[..n]);
+
+        if expected_len.is_none() {
+            if let Some(idx) = resp_bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                header_len = idx + 4;
+                let header_str = String::from_utf8_lossy(&resp_bytes[..header_len]);
+                for line in header_str.lines() {
+                    let lower = line.to_ascii_lowercase();
+                    if lower.starts_with("content-length:") {
+                        if let Some(val_str) = line.split(':').nth(1) {
+                            if let Ok(cl) = val_str.trim().parse::<usize>() {
+                                expected_len = Some(cl);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(cl) = expected_len {
+            if resp_bytes.len() >= header_len + cl {
+                break;
+            }
+        }
+    }
+
+    if resp_bytes.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "connection closed by server without response",
+        ));
+    }
+
+    let resp_str = String::from_utf8_lossy(&resp_bytes);
+    let status = if let Some(line) = resp_str.lines().next() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let code = parts[1].parse::<u16>().unwrap_or(500);
+            StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+
+    let body = if let Some(idx) = resp_str.find("\r\n\r\n") {
+        resp_str[idx + 4..].to_string()
+    } else if let Some(idx) = resp_str.find("\n\n") {
+        resp_str[idx + 2..].to_string()
+    } else {
+        resp_str.to_string()
+    };
+
+    Ok((status, body))
+}
+
+pub fn http_get_unix(sock_path: &Path, path_and_query: &str) -> io::Result<(StatusCode, String)> {
+    http_request_unix(sock_path, "GET", path_and_query, None)
 }
