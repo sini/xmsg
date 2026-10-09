@@ -342,7 +342,7 @@ exit 0
         .insert(session_key.clone(), credless_session);
 
     let state = Arc::new(AppState {
-        sessions_dir: tmp.path().join("claude_sessions"),
+        sessions_dirs: vec![tmp.path().join("claude_sessions")],
         agy_config: agy_config.clone(),
         agy_store: agy_store.clone(),
         pi_store,
@@ -504,7 +504,7 @@ async fn oracle_3_live_unattested_pid_returns_unregistered_without_exited() {
     let (pi_notify_tx, _) = broadcast::channel(1024);
 
     let state = Arc::new(AppState {
-        sessions_dir: tmp.path().join("claude_sessions"),
+        sessions_dirs: vec![tmp.path().join("claude_sessions")],
         agy_config: AgyConfig::default(),
         agy_store: new_agy_store(),
         pi_store: xmsg::pi::new_pi_store(),

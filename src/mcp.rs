@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct McpConfig {
-    pub sessions_dir: PathBuf,
+    pub sessions_dirs: Vec<PathBuf>,
     pub xmsg_url: String,
     pub agent_sock: PathBuf,
     pub proc_root: PathBuf,
@@ -13,7 +13,7 @@ pub struct McpConfig {
 }
 
 impl McpConfig {
-    pub fn new(sessions_dir: PathBuf, xmsg_url: String) -> Self {
+    pub fn new(sessions_dirs: Vec<PathBuf>, xmsg_url: String) -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         let agent_sock = std::env::var("XMSG_AGENT_SOCK")
             .map(PathBuf::from)
@@ -22,7 +22,7 @@ impl McpConfig {
                     .unwrap_or_else(|_| PathBuf::from("/nonexistent/agent.sock"))
             });
         Self {
-            sessions_dir,
+            sessions_dirs,
             xmsg_url,
             agent_sock,
             proc_root: PathBuf::from(crate::process::LIVE_PROC_ROOT),

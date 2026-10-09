@@ -162,7 +162,7 @@ async fn start_harness(max_body: usize) -> TestHarness {
 
     let (pi_notify_tx, _) = tokio::sync::broadcast::channel(16);
     let app_state = Arc::new(AppState {
-        sessions_dir: sess_dir.path().to_path_buf(),
+        sessions_dirs: vec![sess_dir.path().to_path_buf()],
         agy_config: xmsg::agy::AgyConfig {
             presence_dir: sess_dir.path().join("presence"),
             proc_locks_path: sess_dir.path().join("proc_locks"),

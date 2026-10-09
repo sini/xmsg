@@ -21,7 +21,7 @@ use crate::registry::{self, SessionsQuery};
 use crate::storage::{self, MessageRecord, ReplyRecord};
 
 pub struct AppState {
-    pub sessions_dir: PathBuf,
+    pub sessions_dirs: Vec<PathBuf>,
     pub agy_config: crate::agy::AgyConfig,
     pub agy_store: crate::agy::AgyStore,
     pub pi_store: crate::pi::PiStore,
@@ -83,7 +83,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 }
 
 async fn healthz_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let dir_ok = state.sessions_dir.exists() && state.sessions_dir.is_dir();
+    let dir_ok = !state.sessions_dirs.is_empty()
+        && state.sessions_dirs.iter().any(|d| d.exists() && d.is_dir());
     let status_str = if dir_ok { "ok" } else { "sessions_dir_missing" };
     (
         StatusCode::OK,
@@ -104,7 +105,7 @@ pub(crate) fn resolve_target_session(
     state: &AppState,
     ref_str: &str,
 ) -> Result<ResolvedTarget, AppError> {
-    match registry::resolve_session(&state.sessions_dir, ref_str) {
+    match registry::resolve_session(&state.sessions_dirs, ref_str) {
         Ok((session, socket_path)) => Ok(ResolvedTarget::Claude(session, socket_path)),
         Err(AppError::Gone { session_id, pid }) => {
             if crate::process::starttime(&state.agy_config.proc_root, pid).is_ok() {
@@ -157,7 +158,7 @@ async fn list_sessions_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SessionsQuery>,
 ) -> impl IntoResponse {
-    let mut sessions = registry::list_sessions(&state.sessions_dir, &query);
+    let mut sessions = registry::list_sessions(&state.sessions_dirs, &query);
     let mut agy_sessions =
         crate::agy::list_agy_sessions(&state.agy_config, &state.agy_store, &query);
     sessions.append(&mut agy_sessions);

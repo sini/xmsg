@@ -306,7 +306,7 @@ async fn test_agent_sock_reply_and_send_flow() {
     };
 
     let app_state = Arc::new(AppState {
-        sessions_dir: sessions_dir.clone(),
+        sessions_dirs: vec![sessions_dir.clone()],
         agy_config,
         agy_store: new_agy_store(),
         pi_store: new_pi_store(),

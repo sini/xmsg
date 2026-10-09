@@ -10,6 +10,7 @@ use tracing_subscriber::EnvFilter;
 
 use xmsg::http::{build_router, AppState};
 use xmsg::mcp::{run_mcp_loop, McpConfig};
+use xmsg::registry::resolve_sessions_dirs;
 use xmsg::storage;
 
 #[derive(Parser, Debug)]
@@ -72,9 +73,13 @@ pub struct ServeArgs {
     #[arg(long, env = "XMSG_HOST_LABEL")]
     pub host_label: Option<String>,
 
-    /// Path to session metadata directory (defaults to ~/.claude/sessions)
-    #[arg(long, env = "XMSG_SESSIONS_DIR")]
-    pub sessions_dir: Option<PathBuf>,
+    /// Path to session metadata directory (repeatable, or separated by ':' in env XMSG_SESSIONS_DIR; defaults to ~/.claude/sessions)
+    #[arg(
+        long = "sessions-dir",
+        env = "XMSG_SESSIONS_DIR",
+        value_delimiter = ':'
+    )]
+    pub sessions_dirs: Vec<PathBuf>,
 
     /// Maximum request body size in bytes
     #[arg(long, env = "XMSG_MAX_BODY", default_value_t = 65536)]
@@ -115,9 +120,13 @@ pub struct ServeArgs {
 
 #[derive(Parser, Debug)]
 pub struct McpArgs {
-    /// Path to session metadata directory (defaults to ~/.claude/sessions)
-    #[arg(long, env = "XMSG_SESSIONS_DIR")]
-    pub sessions_dir: Option<PathBuf>,
+    /// Path to session metadata directory (repeatable, or separated by ':' in env XMSG_SESSIONS_DIR; defaults to ~/.claude/sessions)
+    #[arg(
+        long = "sessions-dir",
+        env = "XMSG_SESSIONS_DIR",
+        value_delimiter = ':'
+    )]
+    pub sessions_dirs: Vec<PathBuf>,
 
     /// URL of xmsg HTTP server
     #[arg(long, env = "XMSG_URL", default_value = "http://127.0.0.1:7787")]
@@ -126,23 +135,6 @@ pub struct McpArgs {
     /// Agent socket path (defaults to $XDG_RUNTIME_DIR/xmsg/agent.sock; on macOS without it, the Darwin user temp dir)
     #[arg(long, env = "XMSG_AGENT_SOCK")]
     pub agent_sock: Option<PathBuf>,
-}
-
-fn resolve_sessions_dir(dir: Option<PathBuf>) -> PathBuf {
-    match dir {
-        Some(p) => {
-            if let Ok(stripped) = p.strip_prefix("~/") {
-                if let Ok(home) = std::env::var("HOME") {
-                    return PathBuf::from(home).join(stripped);
-                }
-            }
-            p
-        }
-        None => {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".claude").join("sessions")
-        }
-    }
 }
 
 fn resolve_db_path(path: Option<PathBuf>) -> PathBuf {
@@ -181,8 +173,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rt.block_on(run_serve(args))?;
         }
         Commands::Mcp(args) => {
-            let sessions_dir = resolve_sessions_dir(args.sessions_dir);
-            let mut config = McpConfig::new(sessions_dir, args.xmsg_url);
+            let sessions_dirs = resolve_sessions_dirs(args.sessions_dirs);
+            let mut config = McpConfig::new(sessions_dirs, args.xmsg_url);
             if let Some(sock) = args.agent_sock {
                 config.agent_sock = sock;
             }
@@ -399,7 +391,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let host_label = args
         .host_label
         .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().to_string());
-    let sessions_dir = resolve_sessions_dir(args.sessions_dir);
+    let sessions_dirs = resolve_sessions_dirs(args.sessions_dirs);
     let db_path = resolve_db_path(args.db_path);
 
     if let Some(parent) = db_path.parent() {
@@ -411,7 +403,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     info!(
         listen = %args.listen,
         host_label = %host_label,
-        sessions_dir = %sessions_dir.display(),
+        sessions_dirs = ?sessions_dirs,
         db_path = %db_path.display(),
         max_body = args.max_body,
         reply_ttl = args.reply_ttl,
@@ -478,7 +470,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let state = Arc::new(AppState {
-        sessions_dir,
+        sessions_dirs,
         agy_config,
         agy_store,
         pi_store,

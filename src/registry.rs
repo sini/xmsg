@@ -1,9 +1,130 @@
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::error::AppError;
 use crate::process;
+
+pub trait SessionDirs {
+    fn to_dirs(&self) -> Vec<PathBuf>;
+}
+
+impl SessionDirs for Path {
+    fn to_dirs(&self) -> Vec<PathBuf> {
+        vec![self.to_path_buf()]
+    }
+}
+
+impl SessionDirs for PathBuf {
+    fn to_dirs(&self) -> Vec<PathBuf> {
+        vec![self.clone()]
+    }
+}
+
+impl SessionDirs for &Path {
+    fn to_dirs(&self) -> Vec<PathBuf> {
+        vec![self.to_path_buf()]
+    }
+}
+
+impl SessionDirs for [PathBuf] {
+    fn to_dirs(&self) -> Vec<PathBuf> {
+        self.to_vec()
+    }
+}
+
+impl SessionDirs for Vec<PathBuf> {
+    fn to_dirs(&self) -> Vec<PathBuf> {
+        self.clone()
+    }
+}
+
+impl SessionDirs for &[PathBuf] {
+    fn to_dirs(&self) -> Vec<PathBuf> {
+        self.to_vec()
+    }
+}
+
+impl SessionDirs for &Vec<PathBuf> {
+    fn to_dirs(&self) -> Vec<PathBuf> {
+        (*self).clone()
+    }
+}
+
+impl SessionDirs for [&Path] {
+    fn to_dirs(&self) -> Vec<PathBuf> {
+        self.iter().map(|p| p.to_path_buf()).collect()
+    }
+}
+
+impl SessionDirs for &[&Path] {
+    fn to_dirs(&self) -> Vec<PathBuf> {
+        self.iter().map(|p| p.to_path_buf()).collect()
+    }
+}
+
+pub fn expand_tilde(p: PathBuf) -> PathBuf {
+    if let Ok(stripped) = p.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(stripped);
+        }
+    }
+    p
+}
+
+pub fn resolve_sessions_dirs(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut raw_dirs = dirs;
+    if raw_dirs.is_empty() {
+        if let Ok(val) =
+            std::env::var("XMSG_SESSIONS_DIRS").or_else(|_| std::env::var("XMSG_SESSIONS_DIR"))
+        {
+            for part in val.split(':') {
+                let trimmed = part.trim();
+                if !trimmed.is_empty() {
+                    raw_dirs.push(PathBuf::from(trimmed));
+                }
+            }
+        }
+    }
+
+    if raw_dirs.is_empty() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        return vec![PathBuf::from(home).join(".claude").join("sessions")];
+    }
+
+    let mut result = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for p in raw_dirs {
+        let p_str = p.to_string_lossy();
+        let parts: Vec<&str> = if p_str.contains(':') {
+            p_str.split(':').collect()
+        } else {
+            vec![&p_str]
+        };
+
+        for part in parts {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let expanded = expand_tilde(PathBuf::from(trimmed));
+            let canonical_key =
+                std::fs::canonicalize(&expanded).unwrap_or_else(|_| expanded.clone());
+            if seen.insert(canonical_key) {
+                result.push(expanded);
+            }
+        }
+    }
+
+    if result.is_empty() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        return vec![PathBuf::from(home).join(".claude").join("sessions")];
+    }
+
+    result
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -67,65 +188,91 @@ impl From<SessionFileEntry> for Session {
     }
 }
 
-#[derive(Debug, Deserialize, Default, Clone)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct SessionsQuery {
     pub cwd: Option<String>,
     pub status: Option<String>,
 }
 
-/// Checks whether a process with `pid` is currently alive and has the expected `proc_start`.
 pub fn is_pid_live(pid: u32, expected_proc_start: &str) -> bool {
-    is_pid_live_in(Path::new(process::LIVE_PROC_ROOT), pid, expected_proc_start)
+    process::claude_proc_start_matches(Path::new(process::LIVE_PROC_ROOT), pid, expected_proc_start)
 }
 
 pub fn is_pid_live_in(proc_root: &Path, pid: u32, expected_proc_start: &str) -> bool {
     process::claude_proc_start_matches(proc_root, pid, expected_proc_start)
 }
 
-/// Reads all session files in `sessions_dir`, ignoring `.key` files and invalid entries.
-pub fn read_session_entries(sessions_dir: &Path) -> Vec<SessionFileEntry> {
-    let mut entries = Vec::new();
-    let read_dir = match std::fs::read_dir(sessions_dir) {
-        Ok(rd) => rd,
-        Err(err) => {
-            debug!(
-                "Unable to read sessions directory {}: {}",
-                sessions_dir.display(),
-                err
-            );
-            return entries;
-        }
-    };
+/// Reads all session files across `sessions_dirs`, ignoring `.key` files and invalid entries.
+/// If the same sessionId appears in multiple directories, an error is logged once
+/// and the duplicate session is excluded from the returned entries (fail closed).
+pub fn read_session_entries(sessions_dirs: &(impl SessionDirs + ?Sized)) -> Vec<SessionFileEntry> {
+    let dirs = sessions_dirs.to_dirs();
+    let mut entries: Vec<SessionFileEntry> = Vec::new();
+    let mut seen_dir: HashMap<String, usize> = HashMap::new();
+    let mut cross_dir_duplicates: HashSet<String> = HashSet::new();
 
-    for entry in read_dir.flatten() {
-        let path = entry.path();
-        // Strictly ignore anything that is not a .json file (e.g. .key files, sockets)
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("Failed reading session file {}: {}", path.display(), e);
+    for (dir_idx, dir) in dirs.iter().enumerate() {
+        let read_dir = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(err) => {
+                debug!(
+                    "Unable to read sessions directory {}: {}",
+                    dir.display(),
+                    err
+                );
                 continue;
             }
         };
 
-        match serde_json::from_str::<SessionFileEntry>(&content) {
-            Ok(entry) => entries.push(entry),
-            Err(e) => {
-                warn!("Failed parsing session file {}: {}", path.display(), e);
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            // Strictly ignore anything that is not a .json file (e.g. .key files, sockets)
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("Failed reading session file {}: {}", path.display(), e);
+                    continue;
+                }
+            };
+
+            match serde_json::from_str::<SessionFileEntry>(&content) {
+                Ok(session_entry) => {
+                    let sid = &session_entry.session_id;
+                    if let Some(&first_dir_idx) = seen_dir.get(sid) {
+                        if first_dir_idx != dir_idx && cross_dir_duplicates.insert(sid.clone()) {
+                            error!(
+                                "duplicate sessionId '{}' found across session directories; excluding session (fail closed)",
+                                sid
+                            );
+                        }
+                    } else {
+                        seen_dir.insert(sid.clone(), dir_idx);
+                    }
+                    entries.push(session_entry);
+                }
+                Err(e) => {
+                    warn!("Failed parsing session file {}: {}", path.display(), e);
+                }
             }
         }
     }
 
+    if !cross_dir_duplicates.is_empty() {
+        entries.retain(|e| !cross_dir_duplicates.contains(&e.session_id));
+    }
     entries
 }
 
-/// Lists all active (live) sessions matching optional query filters.
-pub fn list_sessions(sessions_dir: &Path, query: &SessionsQuery) -> Vec<Session> {
-    let entries = read_session_entries(sessions_dir);
+/// Lists all active (live) sessions matching optional query filters across all configured session directories.
+pub fn list_sessions(
+    sessions_dirs: &(impl SessionDirs + ?Sized),
+    query: &SessionsQuery,
+) -> Vec<Session> {
+    let entries = read_session_entries(sessions_dirs);
     let mut sessions = Vec::new();
 
     for entry in entries {
@@ -155,9 +302,13 @@ pub fn list_sessions(sessions_dir: &Path, query: &SessionsQuery) -> Vec<Session>
     sessions
 }
 
-/// Resolves a session reference (session_id, pid, or name) to a live Session and messaging socket path.
-pub fn resolve_session(sessions_dir: &Path, ref_str: &str) -> Result<(Session, PathBuf), AppError> {
-    let entries = read_session_entries(sessions_dir);
+/// Resolves a session reference (session_id, pid, or name) across all configured session directories
+/// to a live Session and messaging socket path.
+pub fn resolve_session(
+    sessions_dirs: &(impl SessionDirs + ?Sized),
+    ref_str: &str,
+) -> Result<(Session, PathBuf), AppError> {
+    let entries = read_session_entries(sessions_dirs);
 
     // Candidates matching ref_str by session_id, pid, or name
     let ref_lower = ref_str.to_ascii_lowercase();
@@ -218,11 +369,10 @@ pub fn resolve_session(sessions_dir: &Path, ref_str: &str) -> Result<(Session, P
 }
 
 /// Walks ancestor process parent PIDs up to PID 1,
-/// searching for the first ancestor that has an active session file in `sessions_dir`.
-/// Parameterized with `proc_root` to allow unit testing with synthetic proc trees.
-pub fn find_ancestor_session_in(
+/// searching for the first ancestor that has an active session file in any directory in `sessions_dirs`.
+pub fn find_ancestor_session_in_dirs(
     proc_root: &Path,
-    sessions_dir: &Path,
+    sessions_dirs: &[PathBuf],
     start_pid: u32,
 ) -> Result<Session, AppError> {
     let mut curr_pid = start_pid;
@@ -236,12 +386,14 @@ pub fn find_ancestor_session_in(
             break;
         }
 
-        let session_file = sessions_dir.join(format!("{ppid}.json"));
-        if session_file.exists() {
-            if let Ok(content) = std::fs::read_to_string(&session_file) {
-                if let Ok(entry) = serde_json::from_str::<SessionFileEntry>(&content) {
-                    if is_pid_live_in(proc_root, ppid, &entry.proc_start) {
-                        return Ok(entry.into());
+        for dir in sessions_dirs {
+            let session_file = dir.join(format!("{ppid}.json"));
+            if session_file.exists() {
+                if let Ok(content) = std::fs::read_to_string(&session_file) {
+                    if let Ok(entry) = serde_json::from_str::<SessionFileEntry>(&content) {
+                        if is_pid_live_in(proc_root, ppid, &entry.proc_start) {
+                            return Ok(entry.into());
+                        }
                     }
                 }
             }
@@ -255,11 +407,23 @@ pub fn find_ancestor_session_in(
     ))
 }
 
+/// Compatibility wrapper for single-directory ancestor walk.
+pub fn find_ancestor_session_in(
+    proc_root: &Path,
+    sessions_dir: &Path,
+    start_pid: u32,
+) -> Result<Session, AppError> {
+    find_ancestor_session_in_dirs(proc_root, &[sessions_dir.to_path_buf()], start_pid)
+}
+
 /// Convenience wrapper for live runtime ancestor walk using the running system and current PID.
-pub fn find_ancestor_session(sessions_dir: &Path) -> Result<Session, AppError> {
-    find_ancestor_session_in(
+pub fn find_ancestor_session(
+    sessions_dirs: &(impl SessionDirs + ?Sized),
+) -> Result<Session, AppError> {
+    let dirs = sessions_dirs.to_dirs();
+    find_ancestor_session_in_dirs(
         Path::new(process::LIVE_PROC_ROOT),
-        sessions_dir,
+        &dirs,
         std::process::id(),
     )
 }

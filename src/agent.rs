@@ -108,7 +108,7 @@ pub fn default_agent_sock_path() -> Result<PathBuf, AppError> {
 
 pub fn resolve_caller_session(
     proc_root: &Path,
-    sessions_dir: &Path,
+    sessions_dirs: &(impl crate::registry::SessionDirs + ?Sized),
     _agy_config: &AgyConfig,
     agy_store: &crate::agy::AgyStore,
     pi_store: &PiStore,
@@ -118,7 +118,7 @@ pub fn resolve_caller_session(
 
     for _ in 0..32 {
         // 1. Check Claude sessions
-        let claude_sessions = registry::read_session_entries(sessions_dir);
+        let claude_sessions = registry::read_session_entries(sessions_dirs);
         for entry in claude_sessions {
             if entry.pid == curr_pid
                 && registry::is_pid_live_in(proc_root, curr_pid, &entry.proc_start)
@@ -386,7 +386,7 @@ pub async fn run_agent_server(
                 // Resolve caller session via ancestor walk
                 let caller = match resolve_caller_session(
                     &state_clone.agy_config.proc_root,
-                    &state_clone.sessions_dir,
+                    &state_clone.sessions_dirs,
                     &state_clone.agy_config,
                     &state_clone.agy_store,
                     &state_clone.pi_store,
@@ -516,7 +516,7 @@ pub async fn run_agent_server(
                                 let push_res: Result<(), &'static str> = match ret_harness {
                                     "claude" => {
                                         match registry::resolve_session(
-                                            &state_clone.sessions_dir,
+                                            &state_clone.sessions_dirs,
                                             ret_session_id,
                                         ) {
                                             Ok((_session, socket_path)) => {

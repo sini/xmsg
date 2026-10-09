@@ -177,7 +177,7 @@ async fn setup_gate_harness() -> GateHarness {
     });
 
     let app_state = Arc::new(AppState {
-        sessions_dir,
+        sessions_dirs: vec![sessions_dir],
         agy_config,
         agy_store,
         pi_store,

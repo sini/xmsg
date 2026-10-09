@@ -99,7 +99,7 @@ exit 0
 
     let (pi_notify_tx, _) = broadcast::channel(16);
     let state = Arc::new(AppState {
-        sessions_dir: sess_dir,
+        sessions_dirs: vec![sess_dir],
         agy_config,
         agy_store: agy_store.clone(),
         pi_store: xmsg::pi::new_pi_store(),

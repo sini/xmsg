@@ -164,7 +164,7 @@ async fn setup(max_body: usize) -> Env {
     }
 
     let state = Arc::new(AppState {
-        sessions_dir: sessions.clone(),
+        sessions_dirs: vec![sessions.clone()],
         agy_config: cfg,
         agy_store,
         pi_store,
