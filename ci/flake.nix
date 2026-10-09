@@ -1,18 +1,26 @@
 {
   inputs = {
     gen-harness.url = "github:sini/gen-harness";
+    # ★ THE SUBJECT IS READ BY RELATIVE PATH, NEVER AS A `path:..` INPUT. Lix refuses a relative
+    # `path` node in a lock ("mutable lock"), and a Lix-written `path:..?narHash=…` lock pins a stale
+    # snapshot of the tree (den-hoag-lbtnv D1). So `outputs` below applies `../flake.nix`'s own
+    # `outputs` to the `nixpkgs` declared here, line for line as `../flake.nix` declares it.
     nixpkgs.url = "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz";
-    xmsg.url = "path:..";
   };
 
   outputs =
-    inputs@{
-      gen-harness,
-      xmsg,
-      ...
-    }:
+    inputs@{ gen-harness, nixpkgs, ... }:
+    let
+      # The published surface of THIS tree.
+      xmsg = (import ../flake.nix).outputs {
+        inherit (inputs) self;
+        inherit nixpkgs;
+      };
+    in
     gen-harness.lib.mkCi {
-      inherit inputs;
+      inputs = inputs // {
+        inherit xmsg;
+      };
       name = "xmsg";
       testModules = ./tests;
       extraModules = [

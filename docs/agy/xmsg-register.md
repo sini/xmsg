@@ -9,6 +9,7 @@ This document describes the registration mechanism and first-contact configurati
 Antigravity interactive sessions run an internal language server that binds to random loopback ports and authenticates via an ephemeral CSRF token minted at session start. Unlike Claude Code sessions (which expose dedicated Unix domain sockets listed in `~/.claude/sessions/`), Antigravity language servers require `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` to deliver messages via `agy agentapi send-message`.
 
 To enable external sessions to discover and send messages to an Antigravity session:
+
 1. The Antigravity session holds an exclusive write lock on `~/.gemini/antigravity-cli/presence/<conversation_id>.lock`.
 2. The session runs `xmsg register agy` once (or on every turn via a `PreInvocation` hook).
 3. `xmsg register agy` reads the credentials from its environment and connects to `$XDG_RUNTIME_DIR/xmsg/register.sock`.
@@ -38,6 +39,7 @@ For automatic per-turn registration and credential refreshes, add the following 
 ```
 
 ### Hook Contract
+
 - `xmsg register agy` conforms to the Antigravity hook contract:
   - It **always** prints `{"injectSteps":[]}` to stdout.
   - It **always** exits with exit code `0`.

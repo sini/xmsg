@@ -1,11 +1,11 @@
 # Adversarial Gate Review: xmsg U2 Implementation Spec
 
-**Date:** 2026-10-06  
-**Artefact Under Review:** [`docs/specs/2026-10-06-xmsg-u2-impl.md`](./2026-10-06-xmsg-u2-impl.md)  
-**Parent Design:** [`docs/specs/2026-10-06-xmsg-v1-design.md`](./2026-10-06-xmsg-v1-design.md) (Gist `sini/f65b44cb6ec09c9bd48ea1d569a8c87e` §8, §8.3, §8.5)  
-**Reviewer:** `gen-gate` (Adversarial Gate Reviewer)  
-**Default Posture:** REJECT  
-**Contact:** 1 (final)  
+**Date:** 2026-10-06\
+**Artefact Under Review:** [`docs/specs/2026-10-06-xmsg-u2-impl.md`](./2026-10-06-xmsg-u2-impl.md)\
+**Parent Design:** [`docs/specs/2026-10-06-xmsg-v1-design.md`](./2026-10-06-xmsg-v1-design.md) (Gist `sini/f65b44cb6ec09c9bd48ea1d569a8c87e` §8, §8.3, §8.5)\
+**Reviewer:** `gen-gate` (Adversarial Gate Reviewer)\
+**Default Posture:** REJECT\
+**Contact:** 1 (final)
 
 ---
 
@@ -18,6 +18,7 @@ The implementation spec fails 8 critical construction, concurrency, protocol, an
 ## Detailed Objections by Dimension
 
 ### 1. Wire Serialization Contradiction in `SendReplyRequest` (§3.2 vs §2 & §3.3)
+
 - **Defect:** In §2 line 58 and §3.3 line 220, the wire payload for `POST /v1/messages/{id}/replies` is explicitly specified as:
   ```json
   {"sessionRef": "<caller_session_id>", "text": "<text>"}
@@ -37,6 +38,7 @@ The implementation spec fails 8 critical construction, concurrency, protocol, an
 ---
 
 ### 2. Concurrency Race in Long-Polling Implementation (§3.3 Item 2)
+
 - **Defect:** §3.3 item 2 defines the long-poll resolution flow as:
   1. Parse `after` and `wait`.
   2. Query SQLite for replies with `seq > after`.
@@ -53,6 +55,7 @@ The implementation spec fails 8 critical construction, concurrency, protocol, an
 ---
 
 ### 3. Missing Wire Contracts & Schemas (§3.2)
+
 - **Defect 3A (`GET /v1/messages/{id}` Missing Response Schema):**
   Parent Design §8.2 and Impl Spec §2 line 51 state that `GET /v1/messages/{id}` returns the delivery record and all replies so far. However, §3.2 defines `MessageRecord` and `ReplyRecord`, but completely omits the composite response struct (e.g. `MessageWithRepliesResponse` or `MessageDetailResponse`). It is unspecified whether fields are flattened, camelCased, or nested under `"message"` / `"replies"`.
 - **Defect 3B (`DeliveryResponse` Wire Invariance):**
@@ -63,6 +66,7 @@ The implementation spec fails 8 critical construction, concurrency, protocol, an
 ---
 
 ### 4. Untestable Ancestor Process Walk Mockability Trap (§3.3 & §4.5)
+
 - **Defect:** In §3.3 item 4, the ancestor walk algorithm hardcodes `/proc/<curr_pid>/stat`.
   In §4 item 5, the gating oracle mandates:
   `Fixture with mock /proc: session PID 100 -> wrapper PID 101 -> mcp PID 102. Asserts ancestor walk correctly finds PID 100 through intermediate wrapper PID 101.`
@@ -74,6 +78,7 @@ The implementation spec fails 8 critical construction, concurrency, protocol, an
 ---
 
 ### 5. Tokio Async vs Rusqlite Concurrency & Missing `AppState` Design (§3.1, §3.2)
+
 - **Defect:**
   1. `rusqlite::Connection` is synchronous and `!Sync`. In Axum/Tokio, executing synchronous SQLite operations directly on async handler threads blocks worker runtimes.
   2. `AppState` in U1 only holds `sessions_dir`, `host_label`, `max_body`, and `request_counter`. The U2 spec does not update `AppState` or define how SQLite and long-poll notification handles are stored and shared.
@@ -85,6 +90,7 @@ The implementation spec fails 8 critical construction, concurrency, protocol, an
 ---
 
 ### 6. SQLite Performance Hazard: Missing Index on `replies(created_at)` (§2, §3.3)
+
 - **Defect:** §2 lines 38–40 define an index only on `replies(message_id, seq)`.
   In §3.3 line 194, TTL purge runs:
   `DELETE FROM replies WHERE created_at < now - reply_ttl;`
@@ -95,6 +101,7 @@ The implementation spec fails 8 critical construction, concurrency, protocol, an
 ---
 
 ### 7. MCP Stdio Specification & Dependency Gaps (§2, §3.3)
+
 - **Defect 7A (Departure from Parent Design `rmcp` Without Protocol Specification):**
   Parent Design §8.3 specifies building `xmsg mcp` on `rmcp` (the official Rust MCP SDK). U2 spec line 63 departs from this to implement raw stdio JSON-RPC 2.0. However, the spec fails to define the JSON-RPC wire protocol:
   - Supported methods (`initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `ping`).
@@ -108,6 +115,7 @@ The implementation spec fails 8 critical construction, concurrency, protocol, an
 ---
 
 ### 8. Gating Oracle Coverage Gaps (§4)
+
 - **Defect:** Section 4 omits critical assertions required to verify protocol boundaries:
   1. **Envelope Footer Verification:** Test 1 does not assert that the stand-in inbox socket actually received the raw payload containing `[xmsg] message_id={message_id} — reply with the xmsg reply tool`.
   2. **Error Cases on Reply Endpoint:** No test cases for:

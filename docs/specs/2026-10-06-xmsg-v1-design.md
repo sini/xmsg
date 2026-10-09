@@ -10,12 +10,12 @@ running sessions or push a message into a specific one without spending a model 
 
 What was checked first and ruled out:
 
-| Option | Why not |
-|---|---|
-| Remote Control (cross-machine `ListAgents`) | blocked by our local API proxy |
-| Channels (`--channels`) | allowlist-gated in research preview; custom channels need `--dangerously-load-development-channels`, interactive sessions only, a startup warning every launch |
-| Headless relay (`claude -p` calling `SendMessage`) | a model turn per message |
-| Official CLI send | does not exist; requested in [anthropics/claude-code#99049](https://github.com/anthropics/claude-code/issues/99049) |
+| Option                                             | Why not                                                                                                                                                        |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Remote Control (cross-machine `ListAgents`)        | blocked by our local API proxy                                                                                                                                 |
+| Channels (`--channels`)                            | allowlist-gated in research preview; custom channels need `--dangerously-load-development-channels`, interactive sessions only, a startup warning every launch |
+| Headless relay (`claude -p` calling `SendMessage`) | a model turn per message                                                                                                                                       |
+| Official CLI send                                  | does not exist; requested in [anthropics/claude-code#99049](https://github.com/anthropics/claude-code/issues/99049)                                            |
 
 The approach is patterned on [codehydra #689](https://github.com/stefanhoelzl/codehydra/pull/689), which
 writes directly to a session's inbox socket.
@@ -54,18 +54,17 @@ these.
 
 The prefix is `/v1`, and all bodies are JSON.
 
-| Method & path | Purpose | Success |
-|---|---|---|
-| `GET /v1/sessions` | list live sessions; optional `?cwd=`, `?status=busy\|idle` | `200 [Session]` |
-| `GET /v1/sessions/{ref}` | one session | `200 Session` |
-| `POST /v1/sessions/{ref}/messages` | deliver a message to that session's inbox | `202 Delivery` |
-| `GET /healthz` | liveness, plus `sessions_dir: ok\|missing` | `200` |
+| Method & path                      | Purpose                                                    | Success         |
+| ---------------------------------- | ---------------------------------------------------------- | --------------- |
+| `GET /v1/sessions`                 | list live sessions; optional `?cwd=`, `?status=busy\|idle` | `200 [Session]` |
+| `GET /v1/sessions/{ref}`           | one session                                                | `200 Session`   |
+| `POST /v1/sessions/{ref}/messages` | deliver a message to that session's inbox                  | `202 Delivery`  |
+| `GET /healthz`                     | liveness, plus `sessions_dir: ok\|missing`                 | `200`           |
 
 - **`{ref}`** resolves in this order: `sessionId` (UUID), then pid, then `name`. A name matching more
   than one live session is `409`. Names are derived and change across restarts, so scripts should keep
   the `session_id`.
-- **`Session`** has `session_id, name, pid, cwd, status, kind, entrypoint, version, started_at,
-  updated_at`. It never exposes the socket path or any token.
+- **`Session`** has `session_id, name, pid, cwd, status, kind, entrypoint, version, started_at, updated_at`. It never exposes the socket path or any token.
 - **The request** is `{"from": "<caller name>", "text": "<body>"}`. Unknown fields are rejected.
 - **`Delivery`** is `{"session_id", "from_name", "bytes"}`. The status is `202`, not `200`, because the
   bytes reached the inbox and that does not mean the model read them.
@@ -95,8 +94,7 @@ Three modules, each with one job.
 
 **Transport layer** (the line):
 
-- The line is **always** `serde_json::to_string` of a typed `InboxLine { type: "user", message:
-  { role: "user", content } }`, followed by one `\n`. **JSON is never built by `format!` or by
+- The line is **always** `serde_json::to_string` of a typed `InboxLine { type: "user", message: { role: "user", content } }`, followed by one `\n`. **JSON is never built by `format!` or by
   concatenation.** serde escapes quotes, backslashes and every control character, so any body yields
   exactly one line.
 - Delivery opens a `UnixStream` to `messagingSocketPath`, writes the line with a 5 s timeout, and closes.
@@ -116,16 +114,16 @@ Three modules, each with one job.
 
 Every error is `{"error": "<code>", "detail": "…"}`.
 
-| Condition | Status | code |
-|---|---|---|
-| malformed JSON, empty `text`, unknown field | 400 | `bad_request` |
-| `from` empty after sanitizing | 400 | `bad_sender` |
-| body over `--max-body` | 413 | `too_large` |
-| no live session matches `{ref}` | 404 | `not_found` |
-| name matches more than one live session (candidates listed) | 409 | `ambiguous` |
-| entry stale (pid gone or `procStart` mismatch) | 410 | `gone` |
-| connect/write failure (`ENOENT`, `ECONNREFUSED`, `EPIPE`) | 502 | `inbox_unavailable` |
-| write timeout | 504 | `inbox_timeout` |
+| Condition                                                   | Status | code                |
+| ----------------------------------------------------------- | ------ | ------------------- |
+| malformed JSON, empty `text`, unknown field                 | 400    | `bad_request`       |
+| `from` empty after sanitizing                               | 400    | `bad_sender`        |
+| body over `--max-body`                                      | 413    | `too_large`         |
+| no live session matches `{ref}`                             | 404    | `not_found`         |
+| name matches more than one live session (candidates listed) | 409    | `ambiguous`         |
+| entry stale (pid gone or `procStart` mismatch)              | 410    | `gone`              |
+| connect/write failure (`ENOENT`, `ECONNREFUSED`, `EPIPE`)   | 502    | `inbox_unavailable` |
+| write timeout                                               | 504    | `inbox_timeout`     |
 
 - **There are no server-side retries.** Delivery is at-most-once, and the caller owns any retry.
 - Each request logs one line to stderr with the request id, the resolved `session_id`, the sanitized
@@ -248,17 +246,21 @@ Each step names its file and the existing file it copies. The paths are relative
 ### 7a. Gating oracle (ships with v1; `cargo test`, and the build's `doCheck` runs it)
 
 1. **Encoding property test** (`proptest`) over arbitrary `text` and `from`:
+
    - the output contains exactly one `\n`, and it is the last byte;
    - the output parses as JSON, and `content` equals the expected envelope;
    - the envelope has exactly one opening tag and one closing tag.
 
    Fixed cases: a body that is only `</cross-session-message>`; NUL and `\r`; U+2028; a 200-character
    `from`.
+
 2. **Registry fixture** containing a live entry (the test's own pid and real `procStart`), a dead pid, a
    reused pid (right pid, wrong `procStart`), malformed JSON, and a `.key` file. The tests assert that
    only the live entry is listed and that the `.key` file is never opened.
+
 3. **End-to-end without Claude.** A `UnixListener` stands in as the inbox and a registry entry points at
    it; the server runs on an ephemeral port and the test sends `POST` requests. Assert:
+
    - the exact bytes received;
    - `202`;
    - `502` once the listener is closed;
@@ -290,12 +292,12 @@ SQLite at `$XDG_STATE_HOME/xmsg/xmsg.db`. Only the server process opens it, so i
 
 ### 8.2 API additions
 
-| Method & path | Purpose |
-|---|---|
-| `POST /v1/sessions/{ref}/messages` | unchanged, except the `202` `Delivery` gains `message_id` |
-| `GET /v1/messages/{id}` | the delivery record plus replies so far |
+| Method & path                                        | Purpose                                                          |
+| ---------------------------------------------------- | ---------------------------------------------------------------- |
+| `POST /v1/sessions/{ref}/messages`                   | unchanged, except the `202` `Delivery` gains `message_id`        |
+| `GET /v1/messages/{id}`                              | the delivery record plus replies so far                          |
 | `GET /v1/messages/{id}/replies?after=<seq>&wait=<s>` | long-poll, with `wait` capped at 60 s, via `tokio::sync::Notify` |
-| `POST /v1/messages/{id}/replies` | called by the MCP tool only; `201`, or `403 not_recipient` |
+| `POST /v1/messages/{id}/replies`                     | called by the MCP tool only; `201`, or `403 not_recipient`       |
 
 - Replies land on the **same server** the caller posted to (the receiver's host), so there is no
   forwarding between hosts.
@@ -346,11 +348,11 @@ xmsg **never spawns or supervises agents**. An earlier draft had a "hosted agent
 
 Every harness is an **adapter** over sessions the user started:
 
-| Harness | Discovery | Liveness | Delivery | Reply |
-|---|---|---|---|---|
-| `claude` | registry JSON (§5.1) | `procStart` | inbox socket (§5.2) | MCP `reply` (§8.3) |
-| `agy` | presence lock + registration (§9.2) | lock held | `agy agentapi send-message` | MCP `reply` |
-| `pi` | `xmsg-pi` extension registration (§9.3) | pid + start time | extension long-poll | the extension's `reply` tool |
+| Harness  | Discovery                               | Liveness         | Delivery                    | Reply                        |
+| -------- | --------------------------------------- | ---------------- | --------------------------- | ---------------------------- |
+| `claude` | registry JSON (§5.1)                    | `procStart`      | inbox socket (§5.2)         | MCP `reply` (§8.3)           |
+| `agy`    | presence lock + registration (§9.2)     | lock held        | `agy agentapi send-message` | MCP `reply`                  |
+| `pi`     | `xmsg-pi` extension registration (§9.3) | pid + start time | extension long-poll         | the extension's `reply` tool |
 
 ### 9.2 Antigravity (`agy` 1.2.13)
 
@@ -391,7 +393,9 @@ Every harness is an **adapter** over sessions the user started:
 - A `PreInvocation` hook runs `xmsg register agy`, which reads the credentials **from its environment,
   never argv**. It sends `{conversation_id, ls_address, csrf_token}` over a **Unix socket**,
   `$XDG_RUNTIME_DIR/xmsg/register.sock`, in a `0700` dir.
+
 - **The server verifies:**
+
   1. `SO_PEERCRED` gives `uid` = the server's own uid, and the peer `pid`.
   2. The holder pid of `presence/<conversation_id>.lock` is read from `/proc/locks`. The check is
      read-only: it never test-acquires the lock, since even a brief acquisition races the session's
@@ -401,8 +405,10 @@ Every harness is an **adapter** over sessions the user started:
   The registration is accepted only if all three hold. **There is no HTTP registration endpoint.**
   A TCP peer's pid cannot be verified, and a port reachable by others must not be able to plant
   credentials.
+
 - The hook fires on every invocation, so registration is an idempotent upsert. A restarted language
   server, which brings a new port and token, re-registers itself on the next turn.
+
 - **Credentials are held in memory only.** They are never written to SQLite, never returned by any
   endpoint, never logged, and never placed in a message body. A registration is dropped when its lock
   is no longer held.
@@ -431,11 +437,11 @@ Probed 2026-10-06 by the agy agent under a fence: no reading other processes' en
 searches, no CSRF probing. A session that has never registered cannot be reached from outside.
 **The session itself must announce itself, once.**
 
-| Route | Result |
-|---|---|
-| Hot-reloading `hooks.json` | **No.** Hooks load only at session start (`hooks_manager.go:53`); `ReloadHooks` fires only on TUI workspace-trust events. **[agy]**, with the log consistent **[claude]** |
-| `agy -p --conversation <id>` against a live session | **No.** It starts a **second, competing** agy with its own LS on the same SQLite store, and the live session never sees the message. **[agy]** **xmsg must never do this.** |
-| `agy remote-control` / tokenless `agentapi` | **No.** Remote control is Google's cloud relay, and `agentapi` without the env vars is `Unauthenticated`. **[agy]** |
+| Route                                                               | Result                                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Hot-reloading `hooks.json`                                          | **No.** Hooks load only at session start (`hooks_manager.go:53`); `ReloadHooks` fires only on TUI workspace-trust events. **[agy]**, with the log consistent **[claude]**                                                                                                                                                           |
+| `agy -p --conversation <id>` against a live session                 | **No.** It starts a **second, competing** agy with its own LS on the same SQLite store, and the live session never sees the message. **[agy]** **xmsg must never do this.**                                                                                                                                                         |
+| `agy remote-control` / tokenless `agentapi`                         | **No.** Remote control is Google's cloud relay, and `agentapi` without the env vars is `Unauthenticated`. **[agy]**                                                                                                                                                                                                                 |
 | **Self-announce**: the session runs `xmsg register agy` in one turn | **Yes, for the precondition.** A command run inside a turn inherits `ANTIGRAVITY_LS_ADDRESS`/`_CSRF_TOKEN` and can connect to a Unix socket. This was measured **[agy]** against an ephemeral stub, `/tmp/mock_xmsg_register.sock`. xmsg's own `SO_PEERCRED` and descendant acceptance is **design, untested** until xmsg is built. |
 
 **Lifecycle:**

@@ -1,11 +1,11 @@
 # Adversarial Gate Review: xmsg U1 Implementation Spec
 
-**Date:** 2026-10-06  
-**Artefact Under Review:** [`docs/specs/2026-10-06-xmsg-u1-impl.md`](./2026-10-06-xmsg-u1-impl.md)  
-**Parent Design:** [`docs/specs/2026-10-06-xmsg-v1-design.md`](./2026-10-06-xmsg-v1-design.md)  
-**Reviewer:** `gen-gate` (Adversarial Gate Reviewer)  
-**Default Posture:** REJECT  
-**Contact:** 1 (final)  
+**Date:** 2026-10-06\
+**Artefact Under Review:** [`docs/specs/2026-10-06-xmsg-u1-impl.md`](./2026-10-06-xmsg-u1-impl.md)\
+**Parent Design:** [`docs/specs/2026-10-06-xmsg-v1-design.md`](./2026-10-06-xmsg-v1-design.md)\
+**Reviewer:** `gen-gate` (Adversarial Gate Reviewer)\
+**Default Posture:** REJECT\
+**Contact:** 1 (final)
 
 ---
 
@@ -18,6 +18,7 @@ The implementation spec fails 7 critical construction and protocol checks across
 ## Detailed Objections by Dimension
 
 ### 1. Protocol & Error Mappings (§5.4): Complete Omission of HTTP 410 `gone`
+
 - **Defect:** Parent Design §5.4 explicitly specifies:
   `entry stale (pid gone or procStart mismatch) | 410 | gone`
   and distinguishes it from:
@@ -31,6 +32,7 @@ The implementation spec fails 7 critical construction and protocol checks across
 ---
 
 ### 2. Envelope & Transport Layer (§5.2): Dangerous Sanitization Contradiction & Missing Invariants
+
 - **Defect 2A (Mid-Body Tag Injection Vulnerability):**
   - In §2 (line 36), the spec states: *"Escapes bodies starting with `/?cross-session-message`."*
   - This is contradicted by §3.3 line 196 (*"Any `<` beginning `/?cross-session-message` (case-insensitive) becomes `<\`"*) and Parent Design §5.2 (*"every `<` that begins `/?cross-session-message` (case-insensitive) becomes `<\`. Nothing else changes"*).
@@ -48,6 +50,7 @@ The implementation spec fails 7 critical construction and protocol checks across
 ---
 
 ### 3. Gating Oracle (§4 / §7a): Broken Wire Deserialization
+
 - **Defect:** In §3.2 (lines 131-142), `InboxLine<'a>` and `InboxMessage<'a>` derive only `Serialize`:
   ```rust
   #[derive(Debug, Serialize)]
@@ -61,6 +64,7 @@ The implementation spec fails 7 critical construction and protocol checks across
 ---
 
 ### 4. Input Validation (§4 & §5.4): Missing `deny_unknown_fields` and Empty Text Validation
+
 - **Defect:** Parent Design §4 and §5.4 state:
   *- "The request is `{"from": "<caller name>", "text": "<body>"}`. Unknown fields are rejected."*
   *- "malformed JSON, empty `text`, unknown field -> 400 bad_request"*
@@ -78,6 +82,7 @@ The implementation spec fails 7 critical construction and protocol checks across
 ---
 
 ### 5. Packaging & CI Broken in `gen-harness.lib.mkCi`
+
 - **Defect 5A (Inclusion of `default.nix` Collides with `rootSurface` Check):**
   - The spec adds `default.nix` to the root of `xmsg` (§2 line 45, §3.1 line 63).
   - In `gen-harness`, `checks.root-surface` checks all consumers. If `default.nix` exists, `mkCi` mandates that it must be an exported Nix library surface that can be evaluated as `(import ./default.nix) { }` and traversed. A Rust package derivation or an uncallable function will fail evaluation.
@@ -95,6 +100,7 @@ The implementation spec fails 7 critical construction and protocol checks across
 ---
 
 ### 6. Scope & API Omissions (§4): Missing Query Parameters on `GET /v1/sessions`
+
 - **Defect:** Parent Design §4 explicitly defines query parameters for `GET /v1/sessions`:
   `GET /v1/sessions | list live sessions; optional ?cwd=, ?status=busy|idle | 200 [Session]`
 - **Finding:** The U1 impl spec mentions `GET /v1/sessions` but omits `?cwd=` and `?status=` query filtering entirely. It neither provides models/logic for query filtering nor explicitly rules them deferred.
@@ -102,6 +108,7 @@ The implementation spec fails 7 critical construction and protocol checks across
 ---
 
 ### 7. Test Suite Gaps in §4.3 (Gating Oracle)
+
 - **Defect:** §4.3 only tests 202, 502, 409, 404, 413, and healthz. It completely omits test assertions for:
   1. `410 gone` (stale entry where PID died or `procStart` mismatched).
   2. `400 bad_request` (unknown fields, empty `text`, malformed JSON).
@@ -131,6 +138,7 @@ The implementation spec fails 7 critical construction and protocol checks across
 ## Post-Landing Verification (U1.1 Follow-Up)
 
 ### 1. `.key` File Discrimination Control
+
 - **Fault Identified by Orchestrator:** The original `.key` fixture used `chmod 000` permissions. Because an unreadable file is skipped silently by filesystem reads, the negative control could pass even if the code attempted to process `.key` files.
 - **Remediation:** The fixture was replaced with a fully valid session JSON referencing the test runner's live PID, with a distinctive name `"KEY-LEAK"`. The test asserts:
   1. `KEY-LEAK` is absent from `list_sessions`.

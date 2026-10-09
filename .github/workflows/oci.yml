@@ -1,0 +1,45 @@
+name: OCI Image
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  oci:
+    runs-on: ubuntu-latest
+    if: github.repository == 'sini/xmsg' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Build OCI image
+        run: |
+          nix build .#image --out-link result-image
+
+      - name: Run image oracle check
+        run: |
+          nix build .#checks.x86_64-linux.image
+
+      - name: Push image to GHCR
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker load < result-image
+          SHA_SHORT=$(git rev-parse --short HEAD)
+          docker tag ghcr.io/sini/xmsg:latest "ghcr.io/sini/xmsg:sha-$SHA_SHORT"
+          docker push ghcr.io/sini/xmsg:latest
+          docker push "ghcr.io/sini/xmsg:sha-$SHA_SHORT"
