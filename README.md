@@ -439,7 +439,7 @@ Federated connections establish peer identity using cryptographic certificate pi
   {
     "alpha": {
       "address": "192.168.1.50:7788",
-      "pin": "sha256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+      "pin": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "allow": ["send", "reply"],
       "from": ["192.168.1.0/24", "fd00::/8"]
     }

@@ -606,15 +606,16 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let fed_state = if let Some(peers_file) = args.peers_file {
         let peers = xmsg::fed::load_peers_file(&peers_file)
             .map_err(|e| format!("failed to load peers file: {e}"))?;
+        let peers_arc = Arc::new(peers);
 
         let fs = Arc::new(xmsg::fed::FedState {
             host_label: host_label.clone(),
-            peers: Arc::new(peers),
-            cert_der,
-            key_der,
+            peers: peers_arc.clone(),
+            cert_der: cert_der.clone(),
+            key_der: key_der.clone(),
             rate_limiter: Arc::new(xmsg::fed::RateLimiter::new(60, 20)),
             db: db.clone(),
-            sessions_dir: sessions_dir.clone(),
+            sessions_dir: sessions_dirs.first().cloned().unwrap_or_default(),
             agy_config: agy_config.clone(),
             agy_store: agy_store.clone(),
             pi_store: pi_store.clone(),
@@ -624,10 +625,15 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         });
 
         if let Some((listener, listen_addr)) = fed_listener {
+            let allowed_pins = Arc::new(peers_arc.allowed_pins());
+            let acceptor = xmsg::fed::make_tls_acceptor(&cert_der, &key_der, allowed_pins)
+                .map_err(|e| format!("failed to initialize federation TLS acceptor: {e}"))?;
             let fs_clone = fs.clone();
             tokio::spawn(async move {
                 info!(listen = %listen_addr, "starting federation mTLS listener");
-                if let Err(e) = xmsg::fed::run_fed_listener(listener, fs_clone).await {
+                if let Err(e) =
+                    xmsg::fed::run_fed_listener_with_acceptor(listener, fs_clone, acceptor).await
+                {
                     tracing::error!("federation listener error: {e}");
                 }
             });

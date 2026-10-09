@@ -115,7 +115,7 @@ pub fn sanitize_attested_from(host_label: &str, harness: &str, caller_name: &str
             continue;
         }
 
-        if c == '·' {
+        if !c.is_ascii() {
             cleaned.push('_');
             prev_whitespace = false;
             continue;

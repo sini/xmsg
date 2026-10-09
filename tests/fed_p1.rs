@@ -18,9 +18,9 @@ use tokio::sync::broadcast;
 use xmsg::agent::run_agent_server;
 use xmsg::agy::{flush_agy_queue, new_agy_store, AgyConfig, AgyCredentials, AgySessionInfo};
 use xmsg::fed::{
-    generate_self_signed_ed25519, make_tls_connector, run_fed_listener, send_federated_message,
-    send_federated_reply, FedEnvelope, FedPrincipal, FedReplier, FedReplyEnvelope, FedState,
-    FedTarget, PeerConfig, PeersMap, RateLimiter,
+    generate_self_signed_ed25519, generate_self_signed_ed25519_pem, make_tls_connector,
+    run_fed_listener, send_federated_message, send_federated_reply, FedEnvelope, FedPrincipal,
+    FedReplier, FedReplyEnvelope, FedState, FedTarget, PeerConfig, PeersMap, RateLimiter,
 };
 use xmsg::http::{build_router, AppState};
 use xmsg::pi::new_pi_store;
@@ -142,6 +142,7 @@ async fn create_test_node_full_inner(
 
     let (notify_tx, _) = broadcast::channel(16);
     let (pi_notify_tx, _) = broadcast::channel(16);
+    let (svc_notify_tx, _) = broadcast::channel(16);
 
     let fed_state = Arc::new(FedState {
         host_label: name.to_string(),
@@ -176,11 +177,13 @@ async fn create_test_node_full_inner(
     });
 
     let app_state = Arc::new(AppState {
-        sessions_dir: sessions_dir.clone(),
+        sessions_dirs: vec![sessions_dir.clone()],
         agy_config: fed_state.agy_config.clone(),
         agy_store: fed_state.agy_store.clone(),
         pi_store: fed_state.pi_store.clone(),
         pi_notify_tx,
+        svc_store: xmsg::svc::new_svc_store(),
+        svc_notify_tx,
         host_label: name.to_string(),
         max_body: 65536,
         request_counter: AtomicU64::new(1),
@@ -1092,6 +1095,79 @@ async fn test_oracle_7_root_harness_rejected_and_badge_spoof_sanitized() {
     );
     assert!(inboxes[0].contains("xmsg@host-a · claude:x _ claude:y"));
     assert!(!inboxes[0].contains(" · claude:y"));
+}
+
+#[tokio::test]
+async fn test_n4_attested_name_ascii_only_u0387() {
+    let (cert_a, key_a, pin_a) = generate_self_signed_ed25519("host-a").unwrap();
+
+    let node_b = create_test_node(
+        "host-b",
+        "sess-b",
+        vec![PeerConfig {
+            name: "host-a".to_string(),
+            address: "127.0.0.1:9999".to_string(),
+            pin: pin_a.clone(),
+            allow: vec!["send".to_string()],
+            from: None,
+            leaf: false,
+            principals: Vec::new(),
+        }],
+    )
+    .await;
+
+    let fed_state_a = Arc::new(FedState {
+        host_label: "host-a".to_string(),
+        peers: Arc::new(PeersMap::new(
+            [(
+                "host-b".to_string(),
+                PeerConfig {
+                    name: "host-b".to_string(),
+                    address: node_b.fed_addr.to_string(),
+                    pin: node_b.pin.clone(),
+                    allow: vec!["send".to_string()],
+                    from: None,
+                    leaf: false,
+                    principals: Vec::new(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        )),
+        cert_der: cert_a,
+        key_der: key_a,
+        rate_limiter: Arc::new(RateLimiter::new(60, 20)),
+        db: node_b.db.clone(),
+        sessions_dir: node_b.sessions_dir.clone(),
+        agy_config: node_b.fed_state.agy_config.clone(),
+        agy_store: node_b.fed_state.agy_store.clone(),
+        pi_store: node_b.fed_state.pi_store.clone(),
+        pi_notify_tx: node_b.fed_state.pi_notify_tx.clone(),
+        notify_tx: node_b.fed_state.notify_tx.clone(),
+        max_body: 65536,
+    });
+
+    let env_u0387 = FedEnvelope {
+        v: 1,
+        id: ulid::Ulid::new().to_string(),
+        principal: FedPrincipal::Session {
+            harness: "claude".to_string(),
+            session_id: "s1".to_string(),
+            name: "x \u{0387} claude:y".to_string(),
+        },
+        to: FedTarget {
+            r#ref: "sess-b".to_string(),
+        },
+        body: "homoglyph spoof attempt".to_string(),
+        push_replies: false,
+        thread_id: "t-u0387".to_string(),
+        created_at: 1000,
+    };
+    let res = send_federated_message(&fed_state_a, "host-b", &env_u0387).await;
+    assert!(res.is_ok());
+
+    let resp = res.unwrap();
+    assert_eq!(resp.from_name, "xmsg@host-a · claude:x _ claude:y");
 }
 
 // =============================================================================
@@ -2266,7 +2342,10 @@ async fn test_f4_empty_allow_pin_refused_at_handshake() {
         Err(_) => true,
         Ok(mut tls) => {
             let mut buf = [0u8; 1];
-            tls.read(&mut buf).await.is_err()
+            match tokio::time::timeout(Duration::from_millis(500), tls.read(&mut buf)).await {
+                Ok(read_res) => read_res.is_err() || matches!(read_res, Ok(0)),
+                Err(_) => false, // Handshake accepted, socket held open: rejected = false
+            }
         }
     };
 
@@ -2801,8 +2880,8 @@ async fn test_oracle_server_pin_verified() {
 
     assert!(rg.is_ok(), "Matching server pin must succeed: {rg:?}");
     assert!(
-        matches!(rb, Err(xmsg::error::AppError::PeerUnreachable(_))),
-        "Mismatched server pin must fail with PeerUnreachable, got: {rb:?}"
+        matches!(rb, Err(xmsg::error::AppError::PeerRejected(_))),
+        "Mismatched server pin must fail with PeerRejected, got: {rb:?}"
     );
 }
 
@@ -2884,4 +2963,632 @@ async fn test_oracle_reply_allow_check() {
     );
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(node_a.inbox_rx.lock().unwrap().len(), 0);
+}
+
+fn seed_origin(node: &TestNode, peer_name: &str) -> String {
+    let id = ulid::Ulid::new().to_string();
+    let db = node.db.lock().unwrap();
+    storage::insert_outbound(&db, &id, peer_name, "sess-b", "accepted", 1000).unwrap();
+    storage::insert_message(
+        &db,
+        &storage::MessageRecord {
+            id: id.clone(),
+            created_at: 1000,
+            session_id: "sess-a".to_string(),
+            from_name: "xmsg@host-a · claude:sess-a".to_string(),
+            bytes: 4,
+            outcome: "accepted".to_string(),
+            recipient_harness: "claude".to_string(),
+            return_harness: Some("claude".to_string()),
+            return_session_id: Some("sess-a".to_string()),
+            push_replies: true,
+            thread_id: "th".to_string(),
+            return_host: None,
+        },
+    )
+    .unwrap();
+    id
+}
+
+// =============================================================================
+// Unit X1.3: Conditions N1, N2, N3, N5, N7 Tests
+// =============================================================================
+
+#[tokio::test]
+async fn test_n1_offsource_replay_known_reply_id_rejected() {
+    let (cert_b, key_b, pin_b) = generate_self_signed_ed25519("host-b").unwrap();
+    let node_a = create_test_node(
+        "host-a",
+        "sess-a",
+        vec![PeerConfig {
+            name: "host-b".to_string(),
+            address: "127.0.0.1:9".to_string(),
+            pin: pin_b.clone(),
+            allow: vec!["reply".to_string()],
+            from: Some(vec!["10.0.0.0/8".to_string()]),
+            leaf: false,
+            principals: Vec::new(),
+        }],
+    )
+    .await;
+    let orig = seed_origin(&node_a, "host-b");
+    let known = ulid::Ulid::new().to_string();
+    {
+        let db = node_a.db.lock().unwrap();
+        storage::insert_reply(
+            &db,
+            &orig,
+            "sess-a",
+            "earlier",
+            Some("pushed"),
+            Some(&known),
+        )
+        .unwrap();
+    }
+    let b = make_client_fed_state(
+        "host-b",
+        cert_b,
+        key_b,
+        "host-a",
+        node_a.fed_addr.to_string(),
+        node_a.pin.clone(),
+        vec!["reply"],
+        vec![],
+        &node_a,
+    );
+    let replay = send_federated_reply(
+        &b,
+        "host-a",
+        &FedReplyEnvelope {
+            v: 1,
+            id: known,
+            in_reply_to: orig,
+            replier: FedReplier {
+                harness: "claude".to_string(),
+                session_id: "s2".to_string(),
+                name: "agent-b".to_string(),
+            },
+            text: "r".to_string(),
+            created_at: 1,
+        },
+    )
+    .await;
+    assert!(
+        matches!(replay, Err(xmsg::error::AppError::PeerRejected(_))),
+        "Off-source replay of known reply ID must return 403 PeerRejected, got: {replay:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_n1_offsource_flood_leaves_legit_bucket_intact() {
+    let (cert_a, key_a, pin_a) = generate_self_signed_ed25519("host-a").unwrap();
+    let off = create_test_node(
+        "host-r",
+        "sess-b",
+        vec![PeerConfig {
+            name: "host-a".to_string(),
+            address: "127.0.0.1:9".to_string(),
+            pin: pin_a.clone(),
+            allow: vec!["send".to_string(), "reply".to_string()],
+            from: Some(vec!["10.0.0.0/8".to_string()]),
+            leaf: false,
+            principals: Vec::new(),
+        }],
+    )
+    .await;
+    let legit_state = Arc::new(FedState {
+        host_label: "host-r".to_string(),
+        peers: Arc::new(PeersMap::new(
+            [(
+                "host-a".to_string(),
+                PeerConfig {
+                    name: "host-a".to_string(),
+                    address: "127.0.0.1:9".to_string(),
+                    pin: pin_a.clone(),
+                    allow: vec!["send".to_string(), "reply".to_string()],
+                    from: Some(vec!["127.0.0.1/32".to_string()]),
+                    leaf: false,
+                    principals: Vec::new(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        )),
+        cert_der: off.cert_der.clone(),
+        key_der: off.key_der.clone(),
+        rate_limiter: off.fed_state.rate_limiter.clone(),
+        db: off.db.clone(),
+        sessions_dir: off.sessions_dir.clone(),
+        agy_config: off.fed_state.agy_config.clone(),
+        agy_store: off.fed_state.agy_store.clone(),
+        pi_store: off.fed_state.pi_store.clone(),
+        pi_notify_tx: off.fed_state.pi_notify_tx.clone(),
+        notify_tx: off.fed_state.notify_tx.clone(),
+        max_body: 65536,
+    });
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let legit_addr = l.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = run_fed_listener(l, legit_state).await;
+    });
+
+    let atk = make_client_fed_state(
+        "host-a",
+        cert_a.clone(),
+        key_a.clone(),
+        "host-r",
+        off.fed_addr.to_string(),
+        off.pin.clone(),
+        vec!["reply"],
+        vec![],
+        &off,
+    );
+    let good = make_client_fed_state(
+        "host-a",
+        cert_a,
+        key_a,
+        "host-r",
+        legit_addr.to_string(),
+        off.pin.clone(),
+        vec!["reply"],
+        vec![],
+        &off,
+    );
+    let orig = seed_origin(&off, "host-a");
+
+    for i in 0..62 {
+        let r = send_federated_reply(
+            &atk,
+            "host-r",
+            &FedReplyEnvelope {
+                v: 1,
+                id: ulid::Ulid::new().to_string(),
+                in_reply_to: orig.clone(),
+                replier: FedReplier {
+                    harness: "claude".to_string(),
+                    session_id: format!("s{i}"),
+                    name: "agent-a".to_string(),
+                },
+                text: "r".to_string(),
+                created_at: 1,
+            },
+        )
+        .await;
+        assert!(
+            matches!(r, Err(xmsg::error::AppError::PeerRejected(_))),
+            "Off-source request {i} must be PeerRejected, got: {r:?}"
+        );
+    }
+
+    let legit = send_federated_reply(
+        &good,
+        "host-r",
+        &FedReplyEnvelope {
+            v: 1,
+            id: ulid::Ulid::new().to_string(),
+            in_reply_to: orig,
+            replier: FedReplier {
+                harness: "claude".to_string(),
+                session_id: "legit".to_string(),
+                name: "agent-a".to_string(),
+            },
+            text: "legit".to_string(),
+            created_at: 1,
+        },
+    )
+    .await;
+    assert!(
+        legit.is_ok(),
+        "In-source legitimate reply must succeed, but got: {legit:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_n2_idle_authenticated_connection_closed_within_timeout() {
+    let (cert_a, key_a, pin_a) = generate_self_signed_ed25519("host-a").unwrap();
+    let node_b = create_test_node(
+        "host-b",
+        "sess-b",
+        vec![PeerConfig {
+            name: "host-a".to_string(),
+            address: "127.0.0.1:9".to_string(),
+            pin: pin_a,
+            allow: vec!["send".to_string()],
+            from: None,
+            leaf: false,
+            principals: Vec::new(),
+        }],
+    )
+    .await;
+
+    let connector = make_tls_connector(&cert_a, &key_a, &node_b.pin).unwrap();
+    let tcp = tokio::net::TcpStream::connect(&node_b.fed_addr)
+        .await
+        .unwrap();
+    let mut tls = connector
+        .connect(ServerName::try_from("host-b").unwrap(), tcp)
+        .await
+        .unwrap();
+
+    let mut buf = [0u8; 1];
+    let read_res = tokio::time::timeout(Duration::from_secs(7), tls.read(&mut buf)).await;
+    match read_res {
+        Ok(Ok(0)) | Ok(Err(_)) => {} // Connection closed by server
+        Ok(Ok(n)) => panic!("Unexpected data read from server: {n} bytes"),
+        Err(_) => panic!("Idle authenticated connection was NOT closed within timeout"),
+    }
+}
+
+#[tokio::test]
+async fn test_n3_unauthenticated_socket_bound_leaves_slot_for_peer() {
+    let (cert_a, key_a, pin_a) = generate_self_signed_ed25519("host-a").unwrap();
+    let node_b = create_test_node(
+        "host-b",
+        "sess-b",
+        vec![PeerConfig {
+            name: "host-a".to_string(),
+            address: "127.0.0.1:9".to_string(),
+            pin: pin_a,
+            allow: vec!["send".to_string()],
+            from: None,
+            leaf: false,
+            principals: Vec::new(),
+        }],
+    )
+    .await;
+
+    let a = make_client_fed_state(
+        "host-a",
+        cert_a,
+        key_a,
+        "host-b",
+        node_b.fed_addr.to_string(),
+        node_b.pin.clone(),
+        vec!["send"],
+        vec![],
+        &node_b,
+    );
+
+    let mut idle_sockets = Vec::new();
+    for _ in 0..128 {
+        let sock = tokio::net::TcpSocket::new_v4().unwrap();
+        sock.bind("127.0.0.2:0".parse().unwrap()).unwrap();
+        if let Ok(stream) = sock.connect(node_b.fed_addr).await {
+            idle_sockets.push(stream);
+        }
+    }
+
+    let env = FedEnvelope {
+        v: 1,
+        id: ulid::Ulid::new().to_string(),
+        principal: FedPrincipal::Session {
+            harness: "claude".to_string(),
+            session_id: "s1".to_string(),
+            name: "agent-a".to_string(),
+        },
+        to: FedTarget {
+            r#ref: "sess-b".to_string(),
+        },
+        body: "hello".to_string(),
+        push_replies: false,
+        thread_id: "t1".to_string(),
+        created_at: 1000,
+    };
+
+    let send_res = send_federated_message(&a, "host-b", &env).await;
+    assert!(
+        send_res.is_ok(),
+        "Legitimate send must succeed even when 128 idle sockets exist from one source, got: {send_res:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_n5_tls_key_load_failure_fatal_at_startup() {
+    let tmp = TempDir::new().unwrap();
+    let cert_file = tmp.path().join("cert.pem");
+    let key_file = tmp.path().join("key.pem");
+    let peers_file = tmp.path().join("peers.json");
+
+    let (cert_pem, _, _) = generate_self_signed_ed25519_pem("host-test").unwrap();
+    std::fs::write(&cert_file, cert_pem).unwrap();
+
+    std::fs::write(
+        &key_file,
+        "-----BEGIN PRIVATE KEY-----\naW52YWxpZA==\n-----END PRIVATE KEY-----\n",
+    )
+    .unwrap();
+    std::fs::write(&peers_file, "{}").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_xmsg");
+    let mut child = tokio::process::Command::new(bin)
+        .args([
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--fed-listen",
+            "127.0.0.1:0",
+            "--peers-file",
+            peers_file.to_str().unwrap(),
+            "--fed-cert",
+            cert_file.to_str().unwrap(),
+            "--fed-key",
+            key_file.to_str().unwrap(),
+            "--db-path",
+            tmp.path().join("test.db").to_str().unwrap(),
+            "--sessions-dir",
+            tmp.path().join("sessions").to_str().unwrap(),
+        ])
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let res = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+    match res {
+        Ok(Ok(status)) => {
+            assert!(
+                !status.success(),
+                "Startup with invalid key must fail fatally, but succeeded!"
+            );
+        }
+        Ok(Err(e)) => panic!("Child wait failed: {e}"),
+        Err(_) => {
+            let _ = child.kill().await;
+            panic!(
+                "Startup with invalid key did not exit fatally within 3s: server remained alive"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_n7_mf5_ipv4_mapped_canonicalisation() {
+    use std::net::IpAddr;
+    use xmsg::fed::IpCidr;
+    let cidr = IpCidr::parse("127.0.0.1/32").unwrap();
+    let mapped_ip: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+    assert!(
+        cidr.contains(&mapped_ip),
+        "127.0.0.1/32 CIDR must contain ::ffff:127.0.0.1"
+    );
+}
+
+#[tokio::test]
+async fn test_n7_mf6_tcp_peer_address_source() {
+    let (cert_a, key_a, pin_a) = generate_self_signed_ed25519("host-a").unwrap();
+    let node_b = create_test_node(
+        "host-b",
+        "sess-b",
+        vec![PeerConfig {
+            name: "host-a".to_string(),
+            address: "127.0.0.1:9".to_string(),
+            pin: pin_a,
+            allow: vec!["send".to_string()],
+            from: Some(vec!["127.0.0.2/32".to_string()]),
+            leaf: false,
+            principals: Vec::new(),
+        }],
+    )
+    .await;
+
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.2:0".parse().unwrap()).unwrap();
+    let tcp_stream = socket.connect(node_b.fed_addr).await.unwrap();
+
+    let connector = make_tls_connector(&cert_a, &key_a, &node_b.pin).unwrap();
+    let tls_stream = connector
+        .connect(ServerName::try_from("host-b").unwrap(), tcp_stream)
+        .await
+        .unwrap();
+
+    let io = hyper_util::rt::TokioIo::new(tls_stream);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await.unwrap();
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    let env = FedEnvelope {
+        v: 1,
+        id: ulid::Ulid::new().to_string(),
+        principal: FedPrincipal::Session {
+            harness: "claude".to_string(),
+            session_id: "s1".to_string(),
+            name: "a".to_string(),
+        },
+        to: FedTarget {
+            r#ref: "sess-b".to_string(),
+        },
+        body: "from-127-0-0-2".to_string(),
+        push_replies: false,
+        thread_id: "t1".to_string(),
+        created_at: 1000,
+    };
+    let body_bytes = serde_json::to_vec(&env).unwrap();
+    let req = hyper::Request::builder()
+        .method("POST")
+        .uri("/fed/v1/messages")
+        .header("content-type", "application/json")
+        .header("host", "host-b")
+        .body(http_body_util::Full::new(bytes::Bytes::from(body_bytes)))
+        .unwrap();
+
+    let resp = sender.send_request(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::ACCEPTED,
+        "TCP peer address 127.0.0.2 must match from=['127.0.0.2/32']"
+    );
+}
+
+#[tokio::test]
+async fn test_n7_f5b_semaphore_bound() {
+    let node_b = create_test_node("host-b", "sess-b", Vec::new()).await;
+
+    let mut held_sockets = Vec::new();
+    for i in 1..=16 {
+        for _ in 0..8 {
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            let bind_addr: SocketAddr = format!("127.0.0.{i}:0").parse().unwrap();
+            socket.bind(bind_addr).unwrap();
+            if let Ok(stream) = socket.connect(node_b.fed_addr).await {
+                held_sockets.push(stream);
+            }
+        }
+    }
+    assert_eq!(held_sockets.len(), 128, "Must hold exactly 128 sockets");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let probe_socket = tokio::net::TcpSocket::new_v4().unwrap();
+    probe_socket.bind("127.0.0.17:0".parse().unwrap()).unwrap();
+    let mut stream129 = probe_socket.connect(node_b.fed_addr).await.unwrap();
+    let mut buf = [0u8; 1];
+    let res = tokio::time::timeout(Duration::from_millis(500), stream129.read(&mut buf)).await;
+    match res {
+        Ok(Ok(0)) | Ok(Err(_)) => {} // Dropped by server because semaphore is full
+        other => panic!("129th socket should be dropped at semaphore boundary, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_n7_f9_bare_principal_refused_at_load() {
+    let json = r#"{
+        "peer-a": {
+            "address": "127.0.0.1:9",
+            "pin": "sha256:1234",
+            "allow": ["send"],
+            "principals": ["alice"]
+        }
+    }"#;
+    let res = PeersMap::load_from_json(json);
+    assert!(
+        res.is_err(),
+        "Bare principal 'alice' must be refused at load time"
+    );
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("principal filter entry 'alice'") && err.contains("kind-qualified"),
+        "Error message must name the invalid principal, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_n7_f6_bind_fatal() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bound_addr = listener.local_addr().unwrap();
+
+    let tmp = TempDir::new().unwrap();
+    let cert_file = tmp.path().join("cert.pem");
+    let key_file = tmp.path().join("key.pem");
+    let peers_file = tmp.path().join("peers.json");
+
+    let (cert_pem, key_pem, _) = generate_self_signed_ed25519_pem("host-test").unwrap();
+    std::fs::write(&cert_file, cert_pem).unwrap();
+    std::fs::write(&key_file, key_pem).unwrap();
+    std::fs::write(&peers_file, "{}").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_xmsg");
+    let output = std::process::Command::new(bin)
+        .args([
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--fed-listen",
+            &bound_addr.to_string(),
+            "--peers-file",
+            peers_file.to_str().unwrap(),
+            "--fed-cert",
+            cert_file.to_str().unwrap(),
+            "--fed-key",
+            key_file.to_str().unwrap(),
+            "--db-path",
+            tmp.path().join("test.db").to_str().unwrap(),
+            "--sessions-dir",
+            tmp.path().join("sessions").to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "Binding to already-bound port must fail fatally"
+    );
+}
+
+#[tokio::test]
+async fn test_n7_f6_unspecified_address_refused() {
+    let tmp = TempDir::new().unwrap();
+    let cert_file = tmp.path().join("cert.pem");
+    let key_file = tmp.path().join("key.pem");
+    let peers_file = tmp.path().join("peers.json");
+
+    let (cert_pem, key_pem, _) = generate_self_signed_ed25519_pem("host-test").unwrap();
+    std::fs::write(&cert_file, cert_pem).unwrap();
+    std::fs::write(&key_file, key_pem).unwrap();
+    std::fs::write(&peers_file, "{}").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_xmsg");
+    let output = std::process::Command::new(bin)
+        .args([
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--fed-listen",
+            "0.0.0.0:9999",
+            "--peers-file",
+            peers_file.to_str().unwrap(),
+            "--fed-cert",
+            cert_file.to_str().unwrap(),
+            "--fed-key",
+            key_file.to_str().unwrap(),
+            "--db-path",
+            tmp.path().join("test.db").to_str().unwrap(),
+            "--sessions-dir",
+            tmp.path().join("sessions").to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "0.0.0.0 address must be refused for --fed-listen"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unspecified address") && stderr.contains("forbidden"),
+        "Stderr must name unspecified address forbidden, got: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn test_n7_f6_cert_key_required() {
+    let tmp = TempDir::new().unwrap();
+    let peers_file = tmp.path().join("peers.json");
+    std::fs::write(&peers_file, "{}").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_xmsg");
+    let output = std::process::Command::new(bin)
+        .args([
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--fed-listen",
+            "127.0.0.1:9999",
+            "--peers-file",
+            peers_file.to_str().unwrap(),
+            "--db-path",
+            tmp.path().join("test.db").to_str().unwrap(),
+            "--sessions-dir",
+            tmp.path().join("sessions").to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "--fed-listen without cert/key must fail fatally"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("requires both --fed-cert and --fed-key"),
+        "Stderr must state cert/key requirement, got: {stderr}"
+    );
 }

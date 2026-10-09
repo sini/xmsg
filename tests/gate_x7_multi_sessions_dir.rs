@@ -129,6 +129,7 @@ async fn start_test_server(sessions_dirs: Vec<PathBuf>) -> TestHttpServer {
         reply_ttl: Duration::from_secs(3600),
         idempotency_ttl: Duration::from_secs(86400),
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
+        fed_state: None,
     });
 
     let app = build_router(state);

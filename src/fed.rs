@@ -187,6 +187,14 @@ impl PeersMap {
         self.peers_by_name.contains_key(name)
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.peers_by_name.is_empty()
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &PeerConfig> {
+        self.peers_by_name.values()
+    }
+
     pub fn allowed_pins(&self) -> HashMap<String, String> {
         self.peers_by_name
             .values()
@@ -785,10 +793,7 @@ async fn fed_send_message_handler(
         }
     }
 
-    // 2. Source IP CIDR check (if from is configured)
-    check_peer_source(peer_cfg, &peer.remote_ip)?;
-
-    // 3. Rate limiting
+    // 2. Rate limiting
     let principal_key = match &envelope.principal {
         FedPrincipal::Session {
             harness,
@@ -911,6 +916,7 @@ async fn fed_send_message_handler(
         crate::http::ResolvedTarget::Claude(s, _) => (s.session_id.clone(), "claude".to_string()),
         crate::http::ResolvedTarget::Agy(s) => (s.session_id.clone(), "agy".to_string()),
         crate::http::ResolvedTarget::Pi(s) => (s.session_id.clone(), "pi".to_string()),
+        crate::http::ResolvedTarget::Svc(s) => (s.session_id.clone(), "svc".to_string()),
     };
 
     // Pre-record message as accepted before inbox delivery
@@ -1029,6 +1035,9 @@ async fn fed_send_message_handler(
             let _ = fed_state.pi_notify_tx.send(session.session_id.clone());
             Ok((session.session_id, "pi".to_string(), "delivered"))
         }
+        crate::http::ResolvedTarget::Svc(_) => {
+            unreachable!("svc targets not resolved in federation")
+        }
     };
 
     match deliver_res {
@@ -1118,10 +1127,8 @@ async fn fed_reply_handler(
                 .into_response());
         }
     }
-    // 2. Source IP CIDR check (if from is configured)
-    check_peer_source(peer_cfg, &peer.remote_ip)?;
 
-    // 3. Authorization: in_reply_to MUST exist in outbound table AND peer must match!
+    // 2. Authorization: in_reply_to MUST exist in outbound table AND peer must match!
     let outbound = {
         let db = fed_state
             .db
@@ -1392,6 +1399,27 @@ pub fn make_tls_acceptor(
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(server_config)))
 }
 
+fn map_tls_connect_error(peer_name: &str, e: std::io::Error) -> AppError {
+    if let Some(rustls_err) = e
+        .get_ref()
+        .and_then(|err| err.downcast_ref::<rustls::Error>())
+    {
+        if matches!(rustls_err, rustls::Error::InvalidCertificate(_)) {
+            return AppError::PeerRejected(format!(
+                "server TLS pin mismatch for {peer_name}: {rustls_err}"
+            ));
+        }
+    }
+    let s = e.to_string();
+    if s.contains("invalid peer certificate")
+        || s.contains("UnknownIssuer")
+        || s.contains("InvalidCertificate")
+    {
+        return AppError::PeerRejected(format!("server TLS pin mismatch for {peer_name}: {s}"));
+    }
+    AppError::PeerUnreachable(format!("TLS handshake failed with {peer_name}: {e}"))
+}
+
 pub async fn send_federated_message(
     fed_state: &FedState,
     peer_name: &str,
@@ -1415,9 +1443,7 @@ pub async fn send_federated_message(
         let tls_stream = connector
             .connect(server_name, tcp_stream)
             .await
-            .map_err(|e| {
-                AppError::PeerUnreachable(format!("TLS handshake failed with {peer_name}: {e}"))
-            })?;
+            .map_err(|e| map_tls_connect_error(peer_name, e))?;
 
         let io = hyper_util::rt::TokioIo::new(tls_stream);
         let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
@@ -1537,9 +1563,7 @@ pub async fn send_federated_reply(
         let tls_stream = connector
             .connect(server_name, tcp_stream)
             .await
-            .map_err(|e| {
-                AppError::PeerUnreachable(format!("TLS handshake failed with {peer_name}: {e}"))
-            })?;
+            .map_err(|e| map_tls_connect_error(peer_name, e))?;
 
         let io = hyper_util::rt::TokioIo::new(tls_stream);
         let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
@@ -1650,9 +1674,68 @@ pub fn generate_self_signed_ed25519(host_name: &str) -> Result<(Vec<u8>, Vec<u8>
     Ok((cert_der, key_der, pin))
 }
 
+pub fn generate_self_signed_ed25519_pem(
+    host_name: &str,
+) -> Result<(String, String, String), String> {
+    let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)
+        .map_err(|e| format!("Failed to generate keypair: {e}"))?;
+    let mut params = rcgen::CertificateParams::new(vec![host_name.to_string()])
+        .map_err(|e| format!("Failed to create cert params: {e}"))?;
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, host_name);
+    let cert = params
+        .self_signed(&key_pair)
+        .map_err(|e| format!("Failed to sign cert: {e}"))?;
+
+    let cert_pem = cert.pem();
+    let key_pem = key_pair.serialize_pem();
+    let pin = spki_sha256_from_der(cert.der())?;
+    Ok((cert_pem, key_pem, pin))
+}
+
 // -----------------------------------------------------------------------------
 // Run Federated Listener
 // -----------------------------------------------------------------------------
+
+const MAX_UNAUTH_PER_IP: usize = 8;
+const MAX_CONNS_PER_PEER: usize = 8;
+
+struct UnauthIpGuard {
+    ip: IpAddr,
+    counts: Arc<Mutex<HashMap<IpAddr, usize>>>,
+}
+
+impl Drop for UnauthIpGuard {
+    fn drop(&mut self) {
+        if let Ok(mut counts) = self.counts.lock() {
+            if let Some(count) = counts.get_mut(&self.ip) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    counts.remove(&self.ip);
+                }
+            }
+        }
+    }
+}
+
+struct PeerConnGuard {
+    peer_name: String,
+    counts: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+impl Drop for PeerConnGuard {
+    fn drop(&mut self) {
+        if let Ok(mut counts) = self.counts.lock() {
+            if let Some(count) = counts.get_mut(&self.peer_name) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    counts.remove(&self.peer_name);
+                }
+            }
+        }
+    }
+}
 
 pub async fn run_fed_listener(
     listener: tokio::net::TcpListener,
@@ -1660,8 +1743,18 @@ pub async fn run_fed_listener(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let allowed_pins = Arc::new(fed_state.peers.allowed_pins());
     let acceptor = make_tls_acceptor(&fed_state.cert_der, &fed_state.key_der, allowed_pins)?;
+    run_fed_listener_with_acceptor(listener, fed_state, acceptor).await
+}
+
+pub async fn run_fed_listener_with_acceptor(
+    listener: tokio::net::TcpListener,
+    fed_state: Arc<FedState>,
+    acceptor: tokio_rustls::TlsAcceptor,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let router = build_fed_router(fed_state.clone());
     let conn_semaphore = Arc::new(tokio::sync::Semaphore::new(128));
+    let unauth_ip_counts: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+    let peer_conn_counts: Arc<Mutex<HashMap<String, usize>>> = Arc::new(Mutex::new(HashMap::new()));
 
     loop {
         let (tcp_stream, remote_addr) = match listener.accept().await {
@@ -1670,6 +1763,23 @@ pub async fn run_fed_listener(
                 tracing::error!("federation listener accept error: {e}");
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 continue;
+            }
+        };
+
+        // N3: Cap pre-handshake connections per source IP before taking a permit
+        let remote_ip = remote_addr.ip();
+        let unauth_guard = {
+            let mut counts = unauth_ip_counts.lock().unwrap();
+            let count = counts.entry(remote_ip).or_insert(0);
+            if *count >= MAX_UNAUTH_PER_IP {
+                debug!("pre-handshake connection cap reached for {remote_addr}, dropping");
+                drop(tcp_stream);
+                continue;
+            }
+            *count += 1;
+            UnauthIpGuard {
+                ip: remote_ip,
+                counts: unauth_ip_counts.clone(),
             }
         };
 
@@ -1685,9 +1795,11 @@ pub async fn run_fed_listener(
         let acceptor = acceptor.clone();
         let fed_state = fed_state.clone();
         let router = router.clone();
+        let peer_conn_counts = peer_conn_counts.clone();
 
         tokio::spawn(async move {
             let _permit = permit;
+            let unauth_guard = unauth_guard;
             let tls_stream =
                 match tokio::time::timeout(Duration::from_secs(3), acceptor.accept(tcp_stream))
                     .await
@@ -1702,6 +1814,9 @@ pub async fn run_fed_listener(
                         return;
                     }
                 };
+
+            // TLS handshake complete: release pre-handshake socket slot
+            drop(unauth_guard);
 
             let (_, server_conn) = tls_stream.get_ref();
             let certs = match server_conn.peer_certificates() {
@@ -1720,26 +1835,59 @@ pub async fn run_fed_listener(
                 }
             };
 
-            let peer_name = match fed_state.peers.get_by_pin(&client_pin) {
-                Some(p) => p.name.clone(),
+            let peer_config = match fed_state.peers.get_by_pin(&client_pin) {
+                Some(p) => p.clone(),
                 None => {
                     debug!("Client pin not in peers list: {client_pin}");
                     return;
                 }
             };
 
+            // N2: Cap connections per authenticated peer
+            let peer_guard = {
+                let mut counts = peer_conn_counts.lock().unwrap();
+                let count = counts.entry(peer_config.name.clone()).or_insert(0);
+                if *count >= MAX_CONNS_PER_PEER {
+                    debug!(
+                        "connection cap reached for peer {}, dropping",
+                        peer_config.name
+                    );
+                    return;
+                }
+                *count += 1;
+                PeerConnGuard {
+                    peer_name: peer_config.name.clone(),
+                    counts: peer_conn_counts.clone(),
+                }
+            };
+
             let peer_info = Arc::new(AuthenticatedPeer {
-                name: peer_name,
+                name: peer_config.name.clone(),
                 pin: client_pin,
                 remote_ip: remote_addr.ip(),
             });
+
+            // N1: Perform source address check ONCE PER CONNECTION in run_fed_listener
+            let reject_msg = check_peer_source(&peer_config, &peer_info.remote_ip)
+                .err()
+                .map(|e| match e {
+                    AppError::PeerRejected(msg) => msg,
+                    other => other.to_string(),
+                });
 
             let router = router.clone();
             let service =
                 hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                     let mut router = router.clone();
                     let peer_info = peer_info.clone();
+                    let reject_msg = reject_msg.clone();
                     async move {
+                        if let Some(msg) = reject_msg {
+                            use axum::response::IntoResponse;
+                            return Ok::<_, std::convert::Infallible>(
+                                AppError::PeerRejected(msg).into_response(),
+                            );
+                        }
                         let mut req = req.map(axum::body::Body::new);
                         req.extensions_mut().insert(peer_info);
                         use tower::Service;
@@ -1748,16 +1896,13 @@ pub async fn run_fed_listener(
                 });
 
             let io = hyper_util::rt::TokioIo::new(tls_stream);
-            let mut auto_builder =
-                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
-            auto_builder
-                .http1()
+            let mut http1_builder = hyper::server::conn::http1::Builder::new();
+            http1_builder
                 .timer(hyper_util::rt::TokioTimer::new())
                 .header_read_timeout(Duration::from_secs(5));
-            if let Err(e) = auto_builder
-                .serve_connection_with_upgrades(io, service)
-                .await
-            {
+
+            let _peer_guard = peer_guard;
+            if let Err(e) = http1_builder.serve_connection(io, service).await {
                 debug!("Error serving federated connection: {e}");
             }
         });
