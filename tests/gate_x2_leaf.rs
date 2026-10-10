@@ -50,51 +50,83 @@ async fn test_oracle_1_leaf_binds_no_harness_sockets_or_fed_listener() {
     fs::write(&key_file, key_pem).unwrap();
     fs::write(&peers_file, "{}").unwrap();
 
-    let port = get_free_port();
-    let listen_addr = format!("127.0.0.1:{port}");
     let bin = env!("CARGO_BIN_EXE_xmsg");
 
     let register_sock = runtime_dir.join("xmsg/register.sock");
     let agent_sock = runtime_dir.join("xmsg/agent.sock");
     let http_sock = runtime_dir.join("xmsg/http.sock");
 
-    let mut child = std::process::Command::new(bin)
-        .env("XDG_RUNTIME_DIR", &runtime_dir)
-        .args([
-            "serve",
-            "--leaf",
-            "--leaf-principal",
-            "svc:matrix",
-            "--listen",
-            &listen_addr,
-            "--peers-file",
-            peers_file.to_str().unwrap(),
-            "--fed-cert",
-            cert_file.to_str().unwrap(),
-            "--fed-key",
-            key_file.to_str().unwrap(),
-            "--db-path",
-            tmp.path().join("leaf.db").to_str().unwrap(),
-            "--sessions-dir",
-            tmp.path().join("sessions").to_str().unwrap(),
-        ])
-        .spawn()
-        .expect("spawn leaf serve");
+    // get_free_port() releases the port before the child binds it at the end
+    // of its startup, and the other tests in this binary bind and connect on
+    // loopback meanwhile. If one of them takes the port, the child exits with
+    // AddrInUse: start it again on a fresh port instead of failing.
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(1))
+        .build()
+        .unwrap();
+    let mut attempt = 0;
+    let mut child = loop {
+        attempt += 1;
+        let port = get_free_port();
+        let listen_addr = format!("127.0.0.1:{port}");
 
-    // Wait for HTTP server to become responsive
-    let client = reqwest::Client::new();
-    let healthz_url = format!("http://{listen_addr}/healthz");
-    let mut ready = false;
-    for _ in 0..50 {
-        if let Ok(resp) = client.get(&healthz_url).send().await {
-            if resp.status().is_success() {
-                ready = true;
+        let mut child = std::process::Command::new(bin)
+            .env("XDG_RUNTIME_DIR", &runtime_dir)
+            .args([
+                "serve",
+                "--leaf",
+                "--leaf-principal",
+                "svc:matrix",
+                "--listen",
+                &listen_addr,
+                "--peers-file",
+                peers_file.to_str().unwrap(),
+                "--fed-cert",
+                cert_file.to_str().unwrap(),
+                "--fed-key",
+                key_file.to_str().unwrap(),
+                "--db-path",
+                tmp.path().join("leaf.db").to_str().unwrap(),
+                "--sessions-dir",
+                tmp.path().join("sessions").to_str().unwrap(),
+            ])
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn leaf serve");
+
+        // Wait for HTTP server to become responsive
+        let healthz_url = format!("http://{listen_addr}/healthz");
+        let mut ready = false;
+        let mut exited = None;
+        for _ in 0..50 {
+            if let Some(status) = child.try_wait().unwrap() {
+                exited = Some(status);
                 break;
             }
+            if let Ok(resp) = client.get(&healthz_url).send().await {
+                if resp.status().is_success() {
+                    ready = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(ready, "Leaf HTTP server should respond on --listen");
+        if ready {
+            break child;
+        }
+
+        let mut stderr = String::new();
+        if exited.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let _ = std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr);
+        if exited.is_some() && stderr.contains("AddrInUse") && attempt < 3 {
+            eprintln!("leaf serve lost {listen_addr} before binding it, retrying: {stderr}");
+            continue;
+        }
+        panic!("Leaf HTTP server should respond on --listen (exit: {exited:?}): {stderr}");
+    };
 
     // Oracle 1 assertions: no register.sock, no agent.sock, no http.sock
     assert!(
