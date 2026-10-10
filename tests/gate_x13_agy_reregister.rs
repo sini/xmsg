@@ -10,7 +10,7 @@ use tempfile::tempdir;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 
-use xmsg::agy::{dev_major, dev_minor, new_agy_store, AgyConfig, AgyStore};
+use xmsg::agy::{dev_major, dev_minor, new_agy_store, AgyConfig};
 use xmsg::http::{build_router, AppState};
 use xmsg::storage;
 
@@ -47,7 +47,6 @@ fn setup_mock_process(
 struct RunningServer {
     base_url: String,
     agent_sock: PathBuf,
-    agy_store: AgyStore,
     #[allow(dead_code)]
     db: Arc<Mutex<rusqlite::Connection>>,
     agent_task: tokio::task::JoinHandle<()>,
@@ -91,7 +90,7 @@ async fn start_test_server(
     let state = Arc::new(AppState {
         sessions_dirs: vec![sessions_dir],
         agy_config,
-        agy_store: agy_store.clone(),
+        agy_store,
         pi_store: xmsg::pi::new_pi_store(),
         pi_notify_tx,
         svc_store: xmsg::svc::new_svc_store(),
@@ -133,7 +132,6 @@ async fn start_test_server(
     RunningServer {
         base_url,
         agent_sock,
-        agy_store,
         db,
         agent_task,
         http_task,
@@ -260,11 +258,9 @@ async fn oracle_1_restart_preserves_agy_addressability_and_queues() {
     )
     .await;
 
-    // Immediately after start, Server 2's in-memory agy_store is empty
-    assert!(
-        server2.agy_store.read().unwrap().is_empty(),
-        "restarted server starts with empty agy_store"
-    );
+    // Server 2 starts from a fresh agy_store, so anything listed below came
+    // from re-registration. Asserting it is still empty here would race the
+    // child, which reconnects as soon as agent.sock accepts.
 
     // 5. Within bounded time, xmsg mcp child reconnects and re-registers stage 1
     let mut registered_s2 = false;
