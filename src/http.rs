@@ -132,31 +132,37 @@ impl ResolvedTarget {
     }
 }
 
-pub(crate) fn resolve_target_session(
-    state: &AppState,
+pub(crate) fn resolve_target(
+    sessions_dirs: &[PathBuf],
+    agy_config: &crate::agy::AgyConfig,
+    agy_store: &crate::agy::AgyStore,
+    pi_store: &crate::pi::PiStore,
+    svc_store: &crate::svc::SvcStore,
     ref_str: &str,
 ) -> Result<ResolvedTarget, AppError> {
-    match registry::resolve_session(&state.sessions_dirs, ref_str) {
+    let claude_ref = ref_str
+        .strip_prefix("claude:")
+        .or_else(|| ref_str.strip_prefix("session:"))
+        .unwrap_or(ref_str);
+
+    match registry::resolve_session(sessions_dirs, claude_ref) {
         Ok((session, socket_path)) => Ok(ResolvedTarget::Claude(session, socket_path)),
         Err(AppError::Gone { session_id, pid }) => {
-            if crate::process::starttime(&state.agy_config.proc_root, pid).is_ok() {
+            if crate::process::starttime(&agy_config.proc_root, pid).is_ok() {
                 if let Some(session) =
-                    crate::agy::resolve_agy_session(&state.agy_config, &state.agy_store, ref_str)?
+                    crate::agy::resolve_agy_session(agy_config, agy_store, ref_str)?
                 {
                     return Ok(ResolvedTarget::Agy(session));
                 }
-                if let Some(session) = crate::pi::resolve_pi_session(
-                    &state.agy_config.proc_root,
-                    &state.pi_store,
-                    ref_str,
-                )? {
+                let pi_ref = ref_str.strip_prefix("pi:").unwrap_or(ref_str);
+                if let Some(session) =
+                    crate::pi::resolve_pi_session(&agy_config.proc_root, pi_store, pi_ref)?
+                {
                     return Ok(ResolvedTarget::Pi(session));
                 }
-                if let Some(session) = crate::svc::resolve_svc_session(
-                    &state.agy_config.proc_root,
-                    &state.svc_store,
-                    ref_str,
-                )? {
+                if let Some(session) =
+                    crate::svc::resolve_svc_session(&agy_config.proc_root, svc_store, ref_str)?
+                {
                     return Ok(ResolvedTarget::Svc(session));
                 }
                 return Err(AppError::Unregistered(pid));
@@ -165,43 +171,44 @@ pub(crate) fn resolve_target_session(
         }
         Err(AppError::Ambiguous(ids)) => Err(AppError::Ambiguous(ids)),
         Err(AppError::NotFound(_)) => {
-            match crate::agy::resolve_agy_session(&state.agy_config, &state.agy_store, ref_str)? {
-                Some(session) => Ok(ResolvedTarget::Agy(session)),
-                None => {
-                    match crate::pi::resolve_pi_session(
-                        &state.agy_config.proc_root,
-                        &state.pi_store,
-                        ref_str,
-                    )? {
-                        Some(session) => Ok(ResolvedTarget::Pi(session)),
-                        None => {
-                            match crate::svc::resolve_svc_session(
-                                &state.agy_config.proc_root,
-                                &state.svc_store,
-                                ref_str,
-                            )? {
-                                Some(session) => Ok(ResolvedTarget::Svc(session)),
-                                None => {
-                                    if let Ok(pid) = ref_str.parse::<u32>() {
-                                        if crate::process::starttime(
-                                            &state.agy_config.proc_root,
-                                            pid,
-                                        )
-                                        .is_ok()
-                                        {
-                                            return Err(AppError::Unregistered(pid));
-                                        }
-                                    }
-                                    Err(AppError::NotFound(ref_str.to_string()))
-                                }
-                            }
-                        }
-                    }
+            if let Some(session) = crate::agy::resolve_agy_session(agy_config, agy_store, ref_str)?
+            {
+                return Ok(ResolvedTarget::Agy(session));
+            }
+            let pi_ref = ref_str.strip_prefix("pi:").unwrap_or(ref_str);
+            if let Some(session) =
+                crate::pi::resolve_pi_session(&agy_config.proc_root, pi_store, pi_ref)?
+            {
+                return Ok(ResolvedTarget::Pi(session));
+            }
+            if let Some(session) =
+                crate::svc::resolve_svc_session(&agy_config.proc_root, svc_store, ref_str)?
+            {
+                return Ok(ResolvedTarget::Svc(session));
+            }
+            if let Ok(pid) = ref_str.parse::<u32>() {
+                if crate::process::starttime(&agy_config.proc_root, pid).is_ok() {
+                    return Err(AppError::Unregistered(pid));
                 }
             }
+            Err(AppError::NotFound(ref_str.to_string()))
         }
         Err(err) => Err(err),
     }
+}
+
+pub(crate) fn resolve_target_session(
+    state: &AppState,
+    ref_str: &str,
+) -> Result<ResolvedTarget, AppError> {
+    resolve_target(
+        &state.sessions_dirs,
+        &state.agy_config,
+        &state.agy_store,
+        &state.pi_store,
+        &state.svc_store,
+        ref_str,
+    )
 }
 
 async fn list_sessions_handler(
@@ -237,7 +244,17 @@ async fn get_session_handler(
     let target = resolve_target_session(&state, &ref_str)?;
     let session = match target {
         ResolvedTarget::Claude(s, _) => s,
-        ResolvedTarget::Agy(s) => s,
+        ResolvedTarget::Agy(s) => {
+            if s.status == "unregistered" {
+                let raw_ref = ref_str.strip_prefix("agy:").unwrap_or(&ref_str);
+                if !s.session_id.eq_ignore_ascii_case(&ref_str)
+                    && !s.session_id.eq_ignore_ascii_case(raw_ref)
+                {
+                    return Err(AppError::NotFound(ref_str));
+                }
+            }
+            s
+        }
         ResolvedTarget::Pi(s) => s,
         ResolvedTarget::Svc(s) => s,
     };

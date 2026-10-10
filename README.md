@@ -224,6 +224,15 @@ See [docs/probes/agy-hook-injection.md](docs/probes/agy-hook-injection.md) for f
 
 When `xmsg serve` restarts while an `agy` session remains active, in-memory registration state is discarded, but the running `xmsg mcp` child process automatically re-establishes stage-1 registration. By holding a persistent connection to `agent.sock` and reconnecting with backoff whenever connection to the server is lost and restored, `xmsg mcp` kernel-attests itself to the restarted server within a bounded time. The session is restored to the session catalog as addressable with `registered: false` (queuing inbound messages and replies without dropping them). On the session's next turn, the `PreInvocation` hook detects that push credentials are not yet registered and triggers `xmsg register agy`, promoting the session back to `registered: true` and flushing all queued messages in FIFO order. A restarted server does not list sessions whose `xmsg mcp` child has exited, preventing ghost sessions.
 
+#### Unregistered Session Message Queuing (Unit X20)
+
+When an Antigravity session is live (its presence lock is held by a running process) but unregistered (e.g. before initial credential registration or immediately following an `xmsg` restart prior to the session's next turn):
+
+- Inbound messages addressed either to the session's conversation ID or to its previous `agy:<pid>:<starttime>` key (verified against the live process's PID and start time) are accepted (`202 Accepted`) and stored in `agy_pending_messages` under the conversation ID (`outcome: "queued"`).
+- Target resolution verifies that the presence lock is actively held by a running process and that any supplied start time matches the current process start time, refusing recycled PIDs (`not_found`).
+- As soon as the session registers credentials via `xmsg register agy`, all pending messages queued under its conversation ID or session key are flushed and delivered in FIFO order exactly once (`outcome: "delivered"`).
+- Both local HTTP/agent sends and federated inbound messages share this target resolution and queuing behavior.
+
 ### 3.4 Multi-Directory Claude Session Discovery (`--sessions-dir`)
 
 In multi-tenant setups where multiple Claude configurations exist on the same host (such as `genie` running one `CLAUDE_CONFIG_DIR` per subscription token, giving each user or agent instance separate session directories), `xmsg` accepts multiple session directories:

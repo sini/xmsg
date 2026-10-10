@@ -362,6 +362,9 @@ pub fn list_agy_sessions(
                     Ok(Some(pid)) => pid,
                     _ => continue,
                 };
+                if crate::process::starttime(&config.proc_root, holder_pid).is_err() {
+                    continue;
+                }
                 let session = Session {
                     session_id: conversation_id.clone(),
                     name: Some(conversation_id.clone()),
@@ -399,25 +402,63 @@ pub fn resolve_agy_session(
     let all = list_agy_sessions(config, store, &query);
 
     let ref_lower = ref_str.to_ascii_lowercase();
-    let ref_pid = ref_str.parse::<u32>().ok();
+    let raw = ref_str.strip_prefix("agy:").unwrap_or(ref_str);
+    let raw_lower = raw.to_ascii_lowercase();
+    let ref_pid = raw.parse::<u32>().ok();
+
+    let pid_starttime = raw
+        .split_once(':')
+        .and_then(|(p, st)| p.parse::<u32>().ok().map(|pid| (pid, st)));
 
     let matched: Vec<Session> = all
         .into_iter()
         .filter(|s| {
-            if s.session_id.to_ascii_lowercase() == ref_lower {
-                return true;
-            }
-            if let Some(pid) = ref_pid {
-                if s.pid == pid {
+            if s.status == "unregistered" {
+                // 1. By conversation id (as listed)
+                if s.session_id.to_ascii_lowercase() == raw_lower {
                     return true;
                 }
-            }
-            if let Some(ref name) = s.name {
-                if name.to_ascii_lowercase() == ref_lower {
+                if let Some(ref name) = s.name {
+                    if name.to_ascii_lowercase() == raw_lower {
+                        return true;
+                    }
+                }
+                // 2. By agy:<pid>:<starttime> key where pid AND starttime match the lock holder
+                if let Some((target_pid, expected_st)) = pid_starttime {
+                    if s.pid == target_pid {
+                        if let Ok(actual_st) = crate::process::starttime(&config.proc_root, s.pid) {
+                            return actual_st == expected_st;
+                        }
+                    }
+                }
+                false
+            } else {
+                // Registered session in store
+                if s.session_id.to_ascii_lowercase() == ref_lower {
                     return true;
                 }
+                if s.session_id
+                    .strip_prefix("agy:")
+                    .unwrap_or(&s.session_id)
+                    .to_ascii_lowercase()
+                    == raw_lower
+                {
+                    return true;
+                }
+                if let Some(pid) = ref_pid {
+                    if s.pid == pid {
+                        return true;
+                    }
+                }
+                if let Some(ref name) = s.name {
+                    if name.to_ascii_lowercase() == ref_lower
+                        || name.to_ascii_lowercase() == raw_lower
+                    {
+                        return true;
+                    }
+                }
+                false
             }
-            false
         })
         .collect();
 

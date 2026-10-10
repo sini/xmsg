@@ -85,7 +85,12 @@ pub(crate) fn target_matches_allowlist(
                 b.push(format!("{}:{name}", s.harness));
             }
             b.push(format!("session:{}", s.session_id));
-            b.push(format!("{}:{}", s.harness, s.session_id));
+            let harness_prefix = format!("{}:", s.harness);
+            if s.session_id.starts_with(&harness_prefix) {
+                b.push(s.session_id.clone());
+            } else {
+                b.push(format!("{}:{}", s.harness, s.session_id));
+            }
             b
         }
     };
@@ -2599,46 +2604,14 @@ fn resolve_target_session_fed(
     fed_state: &FedState,
     ref_str: &str,
 ) -> Result<crate::http::ResolvedTarget, AppError> {
-    let claude_ref = ref_str
-        .strip_prefix("claude:")
-        .or_else(|| ref_str.strip_prefix("session:"))
-        .unwrap_or(ref_str);
-    match crate::registry::resolve_session(&fed_state.sessions_dir, claude_ref) {
-        Ok((session, socket_path)) => Ok(crate::http::ResolvedTarget::Claude(session, socket_path)),
-        Err(AppError::Gone { session_id, pid }) => Err(AppError::Gone { session_id, pid }),
-        Err(AppError::Ambiguous(ids)) => Err(AppError::Ambiguous(ids)),
-        Err(AppError::NotFound(_)) => {
-            let agy_ref = ref_str.strip_prefix("agy:").unwrap_or(ref_str);
-            match crate::agy::resolve_agy_session(
-                &fed_state.agy_config,
-                &fed_state.agy_store,
-                agy_ref,
-            )? {
-                Some(session) => Ok(crate::http::ResolvedTarget::Agy(session)),
-                None => {
-                    let pi_ref = ref_str.strip_prefix("pi:").unwrap_or(ref_str);
-                    match crate::pi::resolve_pi_session(
-                        &fed_state.agy_config.proc_root,
-                        &fed_state.pi_store,
-                        pi_ref,
-                    )? {
-                        Some(session) => Ok(crate::http::ResolvedTarget::Pi(session)),
-                        None => {
-                            match crate::svc::resolve_svc_session(
-                                &fed_state.agy_config.proc_root,
-                                &fed_state.svc_store,
-                                ref_str,
-                            )? {
-                                Some(session) => Ok(crate::http::ResolvedTarget::Svc(session)),
-                                None => Err(AppError::NotFound(ref_str.to_string())),
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Err(err) => Err(err),
-    }
+    crate::http::resolve_target(
+        std::slice::from_ref(&fed_state.sessions_dir),
+        &fed_state.agy_config,
+        &fed_state.agy_store,
+        &fed_state.pi_store,
+        &fed_state.svc_store,
+        ref_str,
+    )
 }
 
 // -----------------------------------------------------------------------------
