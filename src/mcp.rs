@@ -1,6 +1,10 @@
 use serde_json::{json, Value};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct McpConfig {
@@ -48,6 +52,165 @@ impl McpConfig {
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2024-11-05"];
 pub const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
 
+pub struct RegistrationWorkerGuard {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for RegistrationWorkerGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+pub fn spawn_registration_worker(
+    config: &McpConfig,
+    stop: Arc<AtomicBool>,
+) -> io::Result<RegistrationWorkerGuard> {
+    let config_clone = config.clone();
+    let stop_clone = stop.clone();
+    let handle = std::thread::Builder::new()
+        .name("xmsg-mcp-reregister".to_string())
+        .spawn(move || {
+            run_registration_loop(&config_clone, stop_clone);
+        })?;
+    Ok(RegistrationWorkerGuard {
+        stop,
+        handle: Some(handle),
+    })
+}
+
+enum RegResult {
+    Ok(UnixStream),
+    Unattested,
+    Io,
+}
+
+fn connect_and_register(config: &McpConfig, stop: &AtomicBool) -> RegResult {
+    if stop.load(Ordering::Relaxed) {
+        return RegResult::Io;
+    }
+
+    let sock_path = &config.agent_sock;
+    let my_uid = crate::agent::current_uid();
+    if let Some(parent) = sock_path.parent() {
+        if crate::agent::ensure_secure_socket_dir(parent, my_uid).is_err() {
+            return RegResult::Io;
+        }
+    }
+
+    let stream = match UnixStream::connect(sock_path) {
+        Ok(s) => s,
+        Err(_) => return RegResult::Io,
+    };
+
+    if stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .is_err()
+        || stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .is_err()
+    {
+        return RegResult::Io;
+    }
+
+    let payload = json!({ "action": "mcp_start" });
+    let line = format!("{payload}\n");
+    let mut writer = &stream;
+    if writer.write_all(line.as_bytes()).is_err() || writer.flush().is_err() {
+        return RegResult::Io;
+    }
+
+    let mut reader = BufReader::new(&stream);
+    let mut resp_line = String::new();
+    if reader.read_line(&mut resp_line).is_err() {
+        return RegResult::Io;
+    }
+
+    let resp_val: Value = match serde_json::from_str(&resp_line) {
+        Ok(v) => v,
+        Err(_) => return RegResult::Io,
+    };
+
+    if resp_val.get("status").and_then(Value::as_str) == Some("ok") {
+        RegResult::Ok(stream)
+    } else {
+        let err = resp_val.get("error").and_then(Value::as_str).unwrap_or("");
+        if err == "unattested" {
+            RegResult::Unattested
+        } else {
+            RegResult::Io
+        }
+    }
+}
+
+fn hold_connection(stream: &mut UnixStream, stop: &AtomicBool) {
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+    let mut buf = [0u8; 64];
+    while !stop.load(Ordering::Relaxed) {
+        match stream.read(&mut buf) {
+            Ok(0) => {
+                tracing::debug!("xmsg agent socket EOF; will reconnect");
+                break;
+            }
+            Ok(_) => {}
+            Err(ref e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            Err(e) => {
+                tracing::debug!("xmsg agent socket read error: {e}; will reconnect");
+                break;
+            }
+        }
+    }
+}
+
+fn sleep_with_stop_check(duration: Duration, stop: &AtomicBool) {
+    let step = Duration::from_millis(50);
+    let mut elapsed = Duration::ZERO;
+    while elapsed < duration && !stop.load(Ordering::Relaxed) {
+        let to_sleep = (duration - elapsed).min(step);
+        std::thread::sleep(to_sleep);
+        elapsed += to_sleep;
+    }
+}
+
+fn run_registration_loop(config: &McpConfig, stop: Arc<AtomicBool>) {
+    let min_backoff = Duration::from_millis(100);
+    let max_backoff = Duration::from_secs(1);
+    let mut backoff = min_backoff;
+    let mut consecutive_unattested = 0;
+
+    while !stop.load(Ordering::Relaxed) {
+        match connect_and_register(config, &stop) {
+            RegResult::Ok(mut stream) => {
+                backoff = min_backoff;
+                consecutive_unattested = 0;
+                hold_connection(&mut stream, &stop);
+            }
+            RegResult::Unattested => {
+                consecutive_unattested += 1;
+                let delay = if consecutive_unattested > 5 {
+                    Duration::from_secs(5)
+                } else {
+                    backoff
+                };
+                sleep_with_stop_check(delay, &stop);
+                backoff = (backoff * 2).min(max_backoff);
+            }
+            RegResult::Io => {
+                sleep_with_stop_check(backoff, &stop);
+                backoff = (backoff * 2).min(max_backoff);
+            }
+        }
+    }
+}
+
 pub fn run_mcp_loop<R: BufRead, W: Write>(
     config: &McpConfig,
     mut reader: R,
@@ -55,6 +218,10 @@ pub fn run_mcp_loop<R: BufRead, W: Write>(
 ) -> io::Result<()> {
     // Attempt to register caller identity with agent server at MCP startup
     let _ = call_agent_sock(&config.agent_sock, &json!({ "action": "mcp_start" }));
+
+    // Spawn background worker to hold connection and re-register if server restarts
+    let stop = Arc::new(AtomicBool::new(false));
+    let _worker_guard = spawn_registration_worker(config, stop)?;
 
     let client = reqwest::blocking::Client::new();
     let mut line = String::new();

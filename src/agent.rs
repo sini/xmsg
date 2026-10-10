@@ -258,11 +258,18 @@ pub async fn run_agent_server(
         )
     })?;
 
+    let mut tasks = tokio::task::JoinSet::new();
+
     loop {
-        let (stream, _) = match listener.accept().await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("agent server accept error: {e}");
+        let (stream, _) = tokio::select! {
+            res = listener.accept() => match res {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("agent server accept error: {e}");
+                    continue;
+                }
+            },
+            Some(_) = tasks.join_next() => {
                 continue;
             }
         };
@@ -294,7 +301,7 @@ pub async fn run_agent_server(
 
         let state_clone = state.clone();
 
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             let (reader, mut writer) = stream.into_split();
             let mut buf_reader = BufReader::new(reader);
             let mut byte_buf = Vec::new();
@@ -646,24 +653,66 @@ pub async fn run_agent_server(
                                             ret_session_id,
                                         ) {
                                             Ok(Some(session)) => {
+                                                let has_creds = {
+                                                    let store_lock = state_clone.agy_store.read().unwrap();
+                                                    store_lock
+                                                        .get(&session.session_id)
+                                                        .or_else(|| {
+                                                            store_lock.values().find(|info| {
+                                                                info.conversation_id == session.session_id
+                                                                    || session.name.as_deref()
+                                                                        == Some(&info.conversation_id)
+                                                            })
+                                                        })
+                                                        .map(|info| info.has_credentials())
+                                                        .unwrap_or(false)
+                                                };
+
                                                 let envelope = format!(
                                                     "[xmsg] reply to message_id={message_id} — message_id={new_message_id}; reply with the xmsg reply tool\n\n{text}"
                                                 );
-                                                match crate::agy::deliver_agy_envelope(
-                                                    &state_clone.agy_config,
-                                                    &state_clone.agy_store,
-                                                    &session,
-                                                    &replier_badge,
-                                                    &envelope,
-                                                )
-                                                .await
-                                                {
-                                                    Ok(()) => Ok(()),
-                                                    Err(AppError::Gone { .. })
-                                                    | Err(AppError::CredentialsStale(_)) => {
-                                                        Err("sender_gone")
+
+                                                if has_creds {
+                                                    match crate::agy::deliver_agy_envelope(
+                                                        &state_clone.agy_config,
+                                                        &state_clone.agy_store,
+                                                        &session,
+                                                        &replier_badge,
+                                                        &envelope,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(()) => Ok(()),
+                                                        Err(AppError::Gone { .. })
+                                                        | Err(AppError::CredentialsStale(_)) => {
+                                                            Err("sender_gone")
+                                                        }
+                                                        Err(_) => Err("push_failed"),
                                                     }
-                                                    Err(_) => Err("push_failed"),
+                                                } else {
+                                                    let agy_msg = storage::AgyPendingMessage {
+                                                        id: new_message_id.clone(),
+                                                        session_id: session.session_id.clone(),
+                                                        created_at: storage::now_epoch_secs(),
+                                                        from_name: replier_badge.clone(),
+                                                        bytes: text.len(),
+                                                        text: text.to_string(),
+                                                        envelope,
+                                                        delivered_at: None,
+                                                    };
+                                                    let insert_res = (|| -> Result<(), AppError> {
+                                                        let db = state_clone
+                                                            .db
+                                                            .lock()
+                                                            .map_err(|e| AppError::Internal(e.to_string()))?;
+                                                        storage::insert_agy_message(&db, &agy_msg)
+                                                            .map_err(|e| AppError::Internal(e.to_string()))?;
+                                                        Ok(())
+                                                    })();
+                                                    match insert_res {
+                                                        Ok(()) => Ok(()),
+                                                        Err(_) => Err("push_failed"),
+                                                    }
                                                 }
                                             }
                                             Ok(None) => Err("sender_gone"),
@@ -777,7 +826,28 @@ pub async fn run_agent_server(
                                             session_id: ret_session_id.to_string(),
                                             from_name: replier_badge,
                                             bytes: text.len(),
-                                            outcome: "delivered".to_string(),
+                                            outcome: if ret_harness == "agy" {
+                                                let has_creds = {
+                                                    let store_lock = state_clone.agy_store.read().unwrap();
+                                                    store_lock
+                                                        .get(ret_session_id)
+                                                        .or_else(|| {
+                                                            store_lock.values().find(|info| {
+                                                                info.conversation_id == ret_session_id
+                                                                    || info.session_key == ret_session_id
+                                                            })
+                                                        })
+                                                        .map(|info| info.has_credentials())
+                                                        .unwrap_or(false)
+                                                };
+                                                if has_creds {
+                                                    "delivered".to_string()
+                                                } else {
+                                                    "queued".to_string()
+                                                }
+                                            } else {
+                                                "delivered".to_string()
+                                            },
                                             recipient_harness: ret_harness.to_string(),
                                             return_harness: Some(caller.harness.clone()),
                                             return_session_id: Some(caller.session_id.clone()),
