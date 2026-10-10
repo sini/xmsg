@@ -335,6 +335,10 @@ impl PeersMap {
         self.peers_by_name.is_empty()
     }
 
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.peers_by_name.keys()
+    }
+
     pub fn values(&self) -> impl Iterator<Item = &PeerConfig> {
         self.peers_by_name.values()
     }
@@ -1319,6 +1323,39 @@ pub enum FedPrincipal {
     Anonymous { from: String },
 }
 
+impl FedPrincipal {
+    pub fn badge(&self) -> String {
+        match self {
+            FedPrincipal::Session { harness, name, .. } if !name.is_empty() => {
+                format!("{harness}:{name}")
+            }
+            FedPrincipal::Session {
+                harness,
+                session_id,
+                ..
+            } => {
+                format!("{harness}:{session_id}")
+            }
+            FedPrincipal::Service { name } => {
+                format!("svc:{name}")
+            }
+            FedPrincipal::Anonymous { from } => {
+                format!("anon:{from}")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FedInboxMessage {
+    pub id: String,
+    pub origin: storage::SvcOrigin,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FedTarget {
@@ -1486,6 +1523,8 @@ pub fn build_fed_router(fed_state: Arc<FedState>) -> Router {
             get(fed_get_replies_handler),
         )
         .route("/fed/v1/sessions", get(fed_list_sessions_handler))
+        .route("/fed/v1/inbox", get(fed_get_inbox_handler))
+        .route("/fed/v1/inbox/{id}/ack", post(fed_ack_inbox_handler))
         .layer(DefaultBodyLimit::max(max_body_limit))
         .with_state(fed_state)
 }
@@ -1875,6 +1914,7 @@ async fn fed_send_message_handler(
                 delivered_at: None,
                 origin: storage::SvcOrigin::Fed {
                     host: peer.name.clone(),
+                    principal: Some(envelope.principal.badge()),
                 },
             };
             let db = fed_state
@@ -2167,6 +2207,10 @@ async fn fed_reply_handler(
                     delivered_at: None,
                     origin: storage::SvcOrigin::Fed {
                         host: peer.name.clone(),
+                        principal: Some(format!(
+                            "{}:{}",
+                            reply.replier.harness, reply.replier.name
+                        )),
                     },
                 };
                 if let Ok(db) = fed_state.db.lock() {
@@ -2359,6 +2403,198 @@ async fn fed_list_sessions_handler(
     Ok((StatusCode::OK, Json(entries)).into_response())
 }
 
+#[derive(Debug, Deserialize)]
+pub struct FedInboxQuery {
+    pub wait: Option<u64>,
+}
+
+async fn fed_get_inbox_handler(
+    State(fed_state): State<Arc<FedState>>,
+    Extension(peer): Extension<Arc<AuthenticatedPeer>>,
+    Query(query): Query<FedInboxQuery>,
+) -> Result<Response, AppError> {
+    let peer_cfg = fed_state
+        .peers
+        .get(&peer.name)
+        .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
+
+    if !peer_cfg.leaf {
+        return Err(AppError::OpDenied("peer is not a leaf".to_string()));
+    }
+
+    if !fed_state
+        .rate_limiter
+        .check_and_consume(&peer.name, Some(&format!("inbox:{}", peer.name)))
+    {
+        return Err(AppError::RateLimited("Rate limit exceeded".to_string()));
+    }
+
+    let wait_secs = query.wait.unwrap_or(0).min(60);
+
+    let rx = if wait_secs > 0 {
+        Some(fed_state.notify_tx.subscribe())
+    } else {
+        None
+    };
+
+    let existing = {
+        let db = fed_state
+            .db
+            .lock()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        storage::get_next_peer_mailbox_message(&db, &peer.name)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+    };
+
+    if let Some(msg) = existing {
+        let inbox_msg = FedInboxMessage {
+            id: msg.id,
+            origin: msg.origin,
+            body: msg.body,
+            to: Some(msg.target_ref),
+        };
+        return Ok((StatusCode::OK, Json(Some(inbox_msg))).into_response());
+    }
+
+    if wait_secs == 0 {
+        return Ok((StatusCode::OK, Json(None::<FedInboxMessage>)).into_response());
+    }
+
+    let mut receiver = rx.unwrap();
+    let peer_name_clone = peer.name.clone();
+    let _ = tokio::time::timeout(Duration::from_secs(wait_secs), async {
+        loop {
+            match receiver.recv().await {
+                Ok(notif_target) if notif_target == peer_name_clone => break,
+                Err(broadcast::error::RecvError::Lagged(_)) => break,
+                Err(_) => break,
+                _ => {}
+            }
+        }
+    })
+    .await;
+
+    let msg_after = {
+        let db = fed_state
+            .db
+            .lock()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        storage::get_next_peer_mailbox_message(&db, &peer.name)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+    };
+
+    let inbox_msg = msg_after.map(|m| FedInboxMessage {
+        id: m.id,
+        origin: m.origin,
+        body: m.body,
+        to: Some(m.target_ref),
+    });
+
+    Ok((StatusCode::OK, Json(inbox_msg)).into_response())
+}
+
+async fn fed_ack_inbox_handler(
+    State(fed_state): State<Arc<FedState>>,
+    Extension(peer): Extension<Arc<AuthenticatedPeer>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Response, AppError> {
+    let peer_cfg = fed_state
+        .peers
+        .get(&peer.name)
+        .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
+
+    if !peer_cfg.leaf {
+        return Err(AppError::OpDenied("peer is not a leaf".to_string()));
+    }
+
+    let deleted = {
+        let db = fed_state
+            .db
+            .lock()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        storage::delete_peer_mailbox_message(&db, &peer.name, &id)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+    };
+
+    if !deleted {
+        return Err(AppError::NotFound(format!(
+            "message '{id}' not found in mailbox for peer '{}'",
+            peer.name
+        )));
+    }
+
+    Ok((StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response())
+}
+
+pub fn queue_leaf_mailbox_message(
+    fed_state: &FedState,
+    peer_name: &str,
+    target_ref: &str,
+    envelope: &FedEnvelope,
+    from_name: &str,
+) -> Result<DeliveryResponse, AppError> {
+    let peer_cfg = fed_state
+        .peers
+        .get(peer_name)
+        .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
+
+    if let Some(ref allowed_targets) = peer_cfg.targets {
+        if !target_ref_could_match(target_ref, allowed_targets) {
+            return Err(AppError::OpDenied(
+                "target not allowed for peer".to_string(),
+            ));
+        }
+    }
+
+    let origin = storage::SvcOrigin::Fed {
+        host: fed_state.host_label.clone(),
+        principal: Some(envelope.principal.badge()),
+    };
+
+    let envelope_json =
+        serde_json::to_string(envelope).map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let mailbox_msg = storage::PeerMailboxMessage {
+        id: envelope.id.clone(),
+        peer: peer_name.to_string(),
+        target_ref: target_ref.to_string(),
+        created_at: envelope.created_at,
+        from_name: from_name.to_string(),
+        bytes: envelope.body.len(),
+        body: envelope.body.clone(),
+        envelope: envelope_json,
+        origin,
+    };
+
+    let db = fed_state
+        .db
+        .lock()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    storage::insert_peer_mailbox(&db, &mailbox_msg)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let _ = storage::insert_outbound(
+        &db,
+        &envelope.id,
+        peer_name,
+        target_ref,
+        "queued",
+        envelope.created_at,
+    );
+
+    // Notify any waiting long-pollers
+    let _ = fed_state.notify_tx.send(peer_name.to_string());
+
+    Ok(DeliveryResponse {
+        session_id: target_ref.to_string(),
+        from_name: from_name.to_string(),
+        bytes: envelope.body.len(),
+        message_id: envelope.id.clone(),
+        outcome: Some("queued".to_string()),
+    })
+}
+
 fn resolve_target_session_fed(
     fed_state: &FedState,
     ref_str: &str,
@@ -2524,6 +2760,35 @@ pub async fn send_federated_message(
         .peers
         .get(peer_name)
         .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
+
+    if peer.leaf {
+        let from_name = match &envelope.principal {
+            FedPrincipal::Session {
+                harness,
+                session_id,
+                name,
+            } => {
+                if !name.is_empty() {
+                    format!("xmsg@{} · {}:{}", fed_state.host_label, harness, name)
+                } else {
+                    format!("xmsg@{} · {}:{}", fed_state.host_label, harness, session_id)
+                }
+            }
+            FedPrincipal::Service { name } => {
+                format!("xmsg@{} · svc:{}", fed_state.host_label, name)
+            }
+            FedPrincipal::Anonymous { from } => {
+                format!("xmsg@{} · {}", fed_state.host_label, from)
+            }
+        };
+        return queue_leaf_mailbox_message(
+            fed_state,
+            peer_name,
+            &envelope.to.r#ref,
+            envelope,
+            &from_name,
+        );
+    }
 
     let send_fut = async {
         let connector = make_tls_connector_for_peer(fed_state, peer)?;
@@ -2843,6 +3108,181 @@ pub async fn poll_federated_replies(
             "Outbound reply poll timed out".to_string(),
         )),
     }
+}
+
+pub async fn get_federated_inbox(
+    fed_state: &FedState,
+    peer_name: &str,
+    wait_secs: u64,
+) -> Result<Option<FedInboxMessage>, AppError> {
+    let peer = fed_state
+        .peers
+        .get(peer_name)
+        .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
+
+    let poll_fut = async {
+        let connector = make_tls_connector_for_peer(fed_state, peer)?;
+        let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
+            .await
+            .map_err(|e| {
+                AppError::PeerUnreachable(format!("Failed to connect to {}: {e}", peer.address))
+            })?;
+
+        let server_name = ServerName::try_from(peer_name.to_string())
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let tls_stream = connector
+            .connect(server_name, tcp_stream)
+            .await
+            .map_err(|e| map_tls_connect_error(peer_name, e))?;
+
+        let io = hyper_util::rt::TokioIo::new(tls_stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+            .await
+            .map_err(|e| AppError::PeerUnreachable(format!("HTTP handshake failed: {e}")))?;
+
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                debug!("HTTP connection closed: {e}");
+            }
+        });
+
+        let uri = format!("/fed/v1/inbox?wait={wait_secs}");
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("host", peer_name)
+            .body(http_body_util::Empty::<bytes::Bytes>::new())
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let resp = sender
+            .send_request(req)
+            .await
+            .map_err(|e| AppError::PeerUnreachable(format!("Request failed: {e}")))?;
+
+        let status = resp.status();
+        let max_limit = fed_state.max_body + 4096;
+        let limited = http_body_util::Limited::new(resp.into_body(), max_limit);
+        use http_body_util::BodyExt;
+        let body_bytes = limited
+            .collect()
+            .await
+            .map_err(|_| AppError::PayloadTooLarge {
+                size: max_limit + 1,
+                limit: max_limit,
+            })?
+            .to_bytes();
+
+        if status.is_success() {
+            let msg: Option<FedInboxMessage> = serde_json::from_slice(&body_bytes)
+                .map_err(|e| AppError::Internal(format!("failed to parse inbox message: {e}")))?;
+            Ok(msg)
+        } else {
+            let err_resp: Result<WireErrorResponse, _> = serde_json::from_slice(&body_bytes);
+            if let Ok(err) = err_resp {
+                match status {
+                    StatusCode::NOT_FOUND => Err(AppError::NotFound(err.detail)),
+                    StatusCode::FORBIDDEN => Err(AppError::OpDenied(err.detail)),
+                    _ => Err(AppError::ServiceUnavailable(err.detail)),
+                }
+            } else {
+                Err(AppError::ServiceUnavailable(format!(
+                    "Remote returned status {status}"
+                )))
+            }
+        }
+    };
+
+    let timeout_duration = Duration::from_secs(wait_secs + 5);
+    match tokio::time::timeout(timeout_duration, poll_fut).await {
+        Ok(res) => res,
+        Err(_) => Ok(None),
+    }
+}
+
+pub async fn ack_federated_inbox(
+    fed_state: &FedState,
+    peer_name: &str,
+    message_id: &str,
+) -> Result<(), AppError> {
+    let peer = fed_state
+        .peers
+        .get(peer_name)
+        .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
+
+    let ack_fut = async {
+        let connector = make_tls_connector_for_peer(fed_state, peer)?;
+        let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
+            .await
+            .map_err(|e| {
+                AppError::PeerUnreachable(format!("Failed to connect to {}: {e}", peer.address))
+            })?;
+
+        let server_name = ServerName::try_from(peer_name.to_string())
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let tls_stream = connector
+            .connect(server_name, tcp_stream)
+            .await
+            .map_err(|e| map_tls_connect_error(peer_name, e))?;
+
+        let io = hyper_util::rt::TokioIo::new(tls_stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+            .await
+            .map_err(|e| AppError::PeerUnreachable(format!("HTTP handshake failed: {e}")))?;
+
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                debug!("HTTP connection closed: {e}");
+            }
+        });
+
+        let uri = format!("/fed/v1/inbox/{message_id}/ack");
+        let req = hyper::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("host", peer_name)
+            .body(http_body_util::Empty::<bytes::Bytes>::new())
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let resp = sender
+            .send_request(req)
+            .await
+            .map_err(|e| AppError::PeerUnreachable(format!("Request failed: {e}")))?;
+
+        let status = resp.status();
+        let max_limit = 4096;
+        let limited = http_body_util::Limited::new(resp.into_body(), max_limit);
+        use http_body_util::BodyExt;
+        let body_bytes = limited
+            .collect()
+            .await
+            .map_err(|_| AppError::PayloadTooLarge {
+                size: max_limit + 1,
+                limit: max_limit,
+            })?
+            .to_bytes();
+
+        if status.is_success() {
+            Ok(())
+        } else {
+            let err_resp: Result<WireErrorResponse, _> = serde_json::from_slice(&body_bytes);
+            if let Ok(err) = err_resp {
+                match status {
+                    StatusCode::NOT_FOUND => Err(AppError::NotFound(err.detail)),
+                    StatusCode::FORBIDDEN => Err(AppError::OpDenied(err.detail)),
+                    _ => Err(AppError::ServiceUnavailable(err.detail)),
+                }
+            } else {
+                Err(AppError::ServiceUnavailable(format!(
+                    "Remote returned status {status}"
+                )))
+            }
+        }
+    };
+
+    let timeout_duration = Duration::from_secs(10);
+    tokio::time::timeout(timeout_duration, ack_fut)
+        .await
+        .map_err(|_| AppError::PeerUnreachable("ack request timed out".to_string()))?
 }
 
 pub async fn list_federated_sessions(

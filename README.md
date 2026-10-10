@@ -317,7 +317,7 @@ Communication over the registration socket uses a JSON-lines streaming protocol:
    The `origin` object provides structured, tamper-proof sender attestation resolved at enqueue time:
 
    - `{"kind": "local", "harness": <harness>, "sessionId": <session_id>}`: For local senders attested on this instance via `agent.sock` or kernel-attested callers in leaf mode.
-   - `{"kind": "fed", "host": <peer_host_label>}`: For inbound messages arriving over mTLS federation from an authenticated peer host.
+   - `{"kind": "fed", "host": <peer_host_label>, "principal": <sender_badge>}`: For inbound messages arriving over mTLS federation from an authenticated peer host. `principal` carries the sender badge asserted by the sending node (e.g. `claude:alice` or `svc:guard`), as verified by the peer host and gated by `principals` filters. It is asserted by the authenticated peer, not proven end to end.
    - `{"kind": "anonymous"}`: For unattested senders (e.g. plain HTTP sends without leaf attestation) or pre-migration rows.
 
    Daemons and services must use `origin` rather than parsing display strings (`fromName` or `envelope`) for security and authorization decisions.
@@ -583,3 +583,16 @@ To support short-lived certificates and automated certificate rotation without s
 - **Atomic Swap & Fail-Closed Validation:** When a change is detected, `xmsg` builds and validates the complete new TLS configuration (server acceptor, client auth credentials, private key pairing, and peer CA trust anchors). If any file is invalid, corrupt, unparseable, contains an empty certificate bundle, or the private key does not match the public certificate, the reload is aborted, the existing active configuration remains in service without interruption, an error is logged, and reload is retried on the next interval. `xmsg` never runs with a partial or broken configuration.
 - **Connection Continuity:** New inbound and outbound connections immediately adopt the reloaded TLS certificates and CA anchors. Pre-existing, established connections are preserved and not torn down.
 - **Peers File Restart Requirement:** The peers configuration file (`--peers-file`) itself is **NOT** reloaded dynamically. Structural peer policy updates (such as adding/removing peers, editing addresses, adjusting `allow` actions, or altering `pin` fingerprints) still require restarting `xmsg`.
+
+### 7.5 Leaf Node Mode & Durable Mailbox Queueing (`--leaf`, `--leaf-register-sock`)
+
+For workloads running inside containers or Kubernetes pods (e.g. `genie-guard` or bot workers), `xmsg` operates in outbound-only leaf mode:
+
+- **Leaf Server (`--leaf`):** Serves loopback HTTP and additionally binds `$XDG_RUNTIME_DIR/xmsg/register.sock` (configurable via `--leaf-register-sock`, mode `0600`).
+- **Admission Invariant:** Daemons registering on `register.sock` in leaf mode must match the configured `--leaf-principal` (`svc:<name>`) and run under the same UID as `xmsg` (`SO_PEERCRED`). Because containers in a pod do not share a PID namespace, `/proc/<pid>/exe` attestation is omitted; `--svc-exe` is refused at startup when combined with `--leaf` naming both flags.
+- **Hub-Side Durable Mailbox:** When any local or federated sender addresses `<ref>@<leaf-peer>` where `<leaf-peer>` is marked `"leaf": true`, the hub does not push over TCP. Instead, after gating against the peer's `targets` filter, the hub stores the message in a durable `peer_mailbox` (subject to body TTL).
+- **Federated Inbox Routes (`/fed/v1/inbox`):**
+  - `GET /fed/v1/inbox?wait=<s>`: Long-polls the hub (clamped between 0 and 60 seconds), returning at most one pending message with its `id`, `origin`, and `body`. Non-leaf peers receive HTTP `403 Forbidden` (`op_denied`).
+  - `POST /fed/v1/inbox/{id}/ack`: Removes the message from the peer's mailbox upon explicit acknowledgment. Returns HTTP `404 Not Found` if the ID does not exist in that peer's mailbox. Unacknowledged messages remain queued and are returned on the next poll. Mailboxes are strictly isolated per peer.
+- **Strict Acknowledgment Ordering:** A leaf background task long-polls the hub inbox, enqueues inbound messages into the local `svc` inbox, and forwards `POST /fed/v1/inbox/{id}/ack` to the hub **only after** the local service daemon explicitly acknowledges the delivery over `register.sock`. If the daemon terminates before acknowledging, the unacknowledged message is redelivered when the daemon reconnects.
+- **Reply Routing & Attribution:** Svc replies sent over `register.sock` (`action: "reply"`) route back to the originating hub over `/fed/v1/replies`, attributed to the leaf principal.

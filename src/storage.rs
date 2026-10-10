@@ -78,8 +78,12 @@ pub struct AgyPendingMessage {
 pub enum SvcOrigin {
     #[serde(rename = "local", rename_all = "camelCase")]
     Local { harness: String, session_id: String },
-    #[serde(rename = "fed")]
-    Fed { host: String },
+    #[serde(rename = "fed", rename_all = "camelCase")]
+    Fed {
+        host: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        principal: Option<String>,
+    },
     #[serde(rename = "anonymous")]
     Anonymous,
 }
@@ -212,6 +216,19 @@ pub fn init_db(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_svc_pending_session ON svc_pending_messages(session_id, delivered_at);
         CREATE INDEX IF NOT EXISTS idx_svc_pending_created_at ON svc_pending_messages(created_at);
         CREATE INDEX IF NOT EXISTS idx_idempotency_created_at ON idempotency_keys(created_at);
+
+        CREATE TABLE IF NOT EXISTS peer_mailbox (
+            id TEXT PRIMARY KEY,
+            peer TEXT NOT NULL,
+            target_ref TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            from_name TEXT NOT NULL,
+            bytes INTEGER NOT NULL,
+            body TEXT NOT NULL,
+            envelope TEXT NOT NULL,
+            origin TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_peer_mailbox_peer_created ON peer_mailbox(peer, created_at);
         "#,
     )?;
 
@@ -816,4 +833,106 @@ pub fn purge_idempotency_keys(conn: &Connection, ttl_secs: u64) -> Result<usize>
         "DELETE FROM idempotency_keys WHERE created_at < ?1",
         params![cutoff],
     )
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerMailboxMessage {
+    pub id: String,
+    pub peer: String,
+    pub target_ref: String,
+    pub created_at: i64,
+    pub from_name: String,
+    pub bytes: usize,
+    pub body: String,
+    pub envelope: String,
+    pub origin: SvcOrigin,
+}
+
+pub fn insert_peer_mailbox(conn: &Connection, msg: &PeerMailboxMessage) -> Result<bool> {
+    let origin_json = serde_json::to_string(&msg.origin)
+        .unwrap_or_else(|_| "{\"kind\":\"anonymous\"}".to_string());
+    conn.execute(
+        "INSERT INTO peer_mailbox (id, peer, target_ref, created_at, from_name, bytes, body, envelope, origin)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            msg.id,
+            msg.peer,
+            msg.target_ref,
+            msg.created_at,
+            msg.from_name,
+            msg.bytes as i64,
+            msg.body,
+            msg.envelope,
+            origin_json,
+        ],
+    )?;
+    Ok(true)
+}
+
+pub fn get_next_peer_mailbox_message(
+    conn: &Connection,
+    peer: &str,
+) -> Result<Option<PeerMailboxMessage>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, peer, target_ref, created_at, from_name, bytes, body, envelope, origin
+         FROM peer_mailbox
+         WHERE peer = ?1
+         ORDER BY created_at ASC, rowid ASC
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![peer])?;
+    if let Some(row) = rows.next()? {
+        let bytes_i64: i64 = row.get(5)?;
+        let origin_str: String = row.get(8)?;
+        let origin: SvcOrigin = serde_json::from_str(&origin_str).unwrap_or(SvcOrigin::Anonymous);
+        Ok(Some(PeerMailboxMessage {
+            id: row.get(0)?,
+            peer: row.get(1)?,
+            target_ref: row.get(2)?,
+            created_at: row.get(3)?,
+            from_name: row.get(4)?,
+            bytes: bytes_i64 as usize,
+            body: row.get(6)?,
+            envelope: row.get(7)?,
+            origin,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn delete_peer_mailbox_message(conn: &Connection, peer: &str, id: &str) -> Result<bool> {
+    let count = conn.execute(
+        "DELETE FROM peer_mailbox WHERE peer = ?1 AND id = ?2",
+        params![peer, id],
+    )?;
+    Ok(count > 0)
+}
+
+pub fn count_peer_mailbox_messages(conn: &Connection, peer: &str) -> Result<usize> {
+    let mut stmt = conn.prepare("SELECT COUNT(*) FROM peer_mailbox WHERE peer = ?1")?;
+    let count: i64 = stmt.query_row(params![peer], |row| row.get(0))?;
+    Ok(count as usize)
+}
+
+pub fn purge_peer_mailbox(conn: &Connection, ttl_secs: u64) -> Result<usize> {
+    let now = now_epoch_secs();
+    let cutoff = now.saturating_sub(ttl_secs as i64);
+    conn.execute(
+        "DELETE FROM peer_mailbox WHERE created_at < ?1",
+        params![cutoff],
+    )
+}
+
+pub fn is_svc_message_acked(conn: &Connection, id: &str) -> Result<bool> {
+    let mut stmt =
+        conn.prepare("SELECT delivered_at FROM svc_pending_messages WHERE id = ?1 LIMIT 1")?;
+    let mut rows = stmt.query(params![id])?;
+    if let Some(row) = rows.next()? {
+        let delivered_at: Option<i64> = row.get(0)?;
+        Ok(delivered_at.is_some())
+    } else {
+        Ok(false)
+    }
 }

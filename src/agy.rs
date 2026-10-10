@@ -1180,6 +1180,9 @@ pub async fn run_register_server(
                                     db_clone,
                                     svc_notify_tx_clone,
                                     reply_ttl,
+                                    false,
+                                    None,
+                                    None,
                                 )
                                 .await
                                 {

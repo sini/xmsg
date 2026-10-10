@@ -671,6 +671,7 @@ async fn send_message_handler(
         let _ = storage::purge_pi_messages(&db, state.reply_ttl.as_secs());
         let _ = storage::purge_agy_messages(&db, state.reply_ttl.as_secs());
         let _ = storage::purge_svc_messages(&db, state.reply_ttl.as_secs());
+        let _ = storage::purge_peer_mailbox(&db, state.reply_ttl.as_secs());
     }
 
     // Invariant: Message bodies are NEVER logged under any circumstances

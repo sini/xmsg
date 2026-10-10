@@ -96,11 +96,17 @@ async fn test_oracle_1_leaf_binds_no_harness_sockets_or_fed_listener() {
     }
     assert!(ready, "Leaf HTTP server should respond on --listen");
 
-    // Oracle 1 assertions: no register.sock, no agent.sock, no http.sock
+    // In X19, leaf mode additionally serves register.sock (mode 0600) for its svc daemon
     assert!(
-        !register_sock.exists(),
-        "Oracle 1 violation: leaf mode must NOT bind register.sock (found: {})",
+        register_sock.exists(),
+        "X19: leaf mode additionally serves register.sock (expected: {})",
         register_sock.display()
+    );
+    let meta = fs::metadata(&register_sock).unwrap();
+    assert_eq!(
+        meta.permissions().mode() & 0o777,
+        0o600,
+        "register.sock must have mode 0600"
     );
     assert!(
         !agent_sock.exists(),

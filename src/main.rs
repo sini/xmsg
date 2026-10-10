@@ -117,6 +117,10 @@ pub struct ServeArgs {
     #[arg(long, env = "XMSG_AGENT_SOCK")]
     pub agent_sock: Option<PathBuf>,
 
+    /// Leaf register socket path (defaults to $XDG_RUNTIME_DIR/xmsg/register.sock)
+    #[arg(long, env = "XMSG_LEAF_REGISTER_SOCK")]
+    pub leaf_register_sock: Option<PathBuf>,
+
     /// Trusted Antigravity executable paths (comma-separated or multiple flags)
     #[arg(long = "agy-exe", env = "XMSG_AGY_EXE", value_delimiter = ',')]
     pub agy_exes: Vec<PathBuf>,
@@ -451,6 +455,13 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         if args.leaf_principal.is_none() {
             return Err("`--leaf` requires `--leaf-principal`".to_string().into());
         }
+        if !args.svc_exes.is_empty() {
+            return Err(
+                "`--leaf` cannot be used with `--svc-exe` (leaf mode admits only --leaf-principal by UID, without exe attestation)"
+                    .to_string()
+                    .into(),
+            );
+        }
     }
 
     tracing_subscriber::fmt()
@@ -524,8 +535,8 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let my_uid = xmsg::agent::current_uid();
-    let register_sock_path = match args.register_sock {
-        Some(p) => p,
+    let register_sock_path = match &args.register_sock {
+        Some(p) => p.clone(),
         None => xmsg::agent::default_register_sock_path()
             .map_err(|e| format!("cannot determine register socket path: {e}"))?,
     };
@@ -694,21 +705,21 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let state = Arc::new(AppState {
         sessions_dirs,
-        agy_config,
+        agy_config: agy_config.clone(),
         agy_store,
         pi_store,
         pi_notify_tx,
-        svc_store,
-        svc_notify_tx,
+        svc_store: svc_store.clone(),
+        svc_notify_tx: svc_notify_tx.clone(),
         host_label,
         max_body: args.max_body,
         request_counter: AtomicU64::new(1),
-        db,
+        db: db.clone(),
         notify_tx,
         reply_ttl,
         idempotency_ttl,
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
-        fed_state,
+        fed_state: fed_state.clone(),
     });
 
     if !args.leaf {
@@ -724,6 +735,57 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let app = build_router(state);
 
     if args.leaf {
+        let leaf_reg_sock = args
+            .leaf_register_sock
+            .or_else(|| args.register_sock.clone())
+            .unwrap_or_else(|| {
+                xmsg::agent::default_register_sock_path().expect("default register sock")
+            });
+        let leaf_p = args.leaf_principal.clone().unwrap();
+        let leaf_proc_root = agy_config.proc_root.clone();
+        let leaf_svc_store = svc_store.clone();
+        let leaf_db = db.clone();
+        let leaf_svc_notify_tx = svc_notify_tx.clone();
+        let leaf_fed_state = fed_state.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = xmsg::svc::run_leaf_register_server(
+                leaf_reg_sock,
+                leaf_proc_root,
+                leaf_svc_store,
+                my_uid,
+                leaf_db,
+                leaf_svc_notify_tx,
+                reply_ttl,
+                leaf_p,
+                leaf_fed_state,
+            )
+            .await
+            {
+                tracing::error!("leaf register server error: {e}");
+            }
+        });
+
+        if let Some(ref fs) = fed_state {
+            for peer_name in fs.peers.keys() {
+                let fs_clone = fs.clone();
+                let peer_clone = peer_name.clone();
+                let leaf_p_clone = args.leaf_principal.clone().unwrap();
+                let db_clone = db.clone();
+                let svc_notify_tx_clone = svc_notify_tx.clone();
+                tokio::spawn(async move {
+                    xmsg::svc::run_leaf_inbox_task(
+                        fs_clone,
+                        peer_clone,
+                        leaf_p_clone,
+                        db_clone,
+                        svc_notify_tx_clone,
+                    )
+                    .await;
+                });
+            }
+        }
+
         let tcp_addr = args.listen.as_ref().unwrap();
         let tcp_listener = tokio::net::TcpListener::bind(tcp_addr).await?;
         info!(listen = %tcp_addr, "starting leaf tcp http server");
