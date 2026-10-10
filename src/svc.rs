@@ -683,6 +683,66 @@ pub async fn run_leaf_inbox_task(
                     leaf_principal.clone()
                 };
 
+                let ret_host = match &msg.origin {
+                    storage::SvcOrigin::Fed { host, .. } => host.clone(),
+                    _ => peer_name.clone(),
+                };
+
+                // F1 (liveness): If target is not the leaf principal, do not enqueue it locally.
+                // Ack at the hub and reply not_found to the sender.
+                if target_session_id != leaf_principal {
+                    tracing::warn!(
+                        "message {} target '{target_session_id}' does not match leaf principal '{leaf_principal}'; rejecting and acking at hub",
+                        msg.id
+                    );
+
+                    let replier_name = leaf_principal
+                        .strip_prefix("svc:")
+                        .unwrap_or(&leaf_principal);
+                    let replier = crate::fed::FedReplier {
+                        harness: "svc".to_string(),
+                        session_id: format!("svc:{replier_name}"),
+                        name: replier_name.to_string(),
+                    };
+
+                    let reply_text = serde_json::json!({
+                        "error": "not_found",
+                        "detail": format!("{target_session_id} is not served by this leaf"),
+                    })
+                    .to_string();
+
+                    let reply_envelope = crate::fed::FedReplyEnvelope {
+                        v: 1,
+                        id: ulid::Ulid::new().to_string(),
+                        in_reply_to: msg.id.clone(),
+                        replier,
+                        text: reply_text,
+                        created_at: storage::now_epoch_secs(),
+                    };
+
+                    let _ =
+                        crate::fed::send_federated_reply(&fed_state, &ret_host, &reply_envelope)
+                            .await;
+
+                    let mut ack_backoff = 100u64;
+                    loop {
+                        match crate::fed::ack_federated_inbox(&fed_state, &peer_name, &msg.id).await
+                        {
+                            Ok(()) => break,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to ack rejected message {} to hub {}: {e}, retrying",
+                                    msg.id,
+                                    peer_name
+                                );
+                                tokio::time::sleep(Duration::from_millis(ack_backoff)).await;
+                                ack_backoff = (ack_backoff * 2).min(5000);
+                            }
+                        }
+                    }
+                    continue;
+                }
+
                 let from_name = match &msg.origin {
                     storage::SvcOrigin::Fed { host, principal } => match principal {
                         Some(p) => format!("xmsg@{host} · {p}"),
@@ -695,11 +755,6 @@ pub async fn run_leaf_inbox_task(
                     "[xmsg] from={} message_id={} — reply with the xmsg reply tool\n\n{}",
                     from_name, msg.id, msg.body
                 );
-
-                let ret_host = match &msg.origin {
-                    storage::SvcOrigin::Fed { host, .. } => host.clone(),
-                    _ => peer_name.clone(),
-                };
 
                 let msg_record = storage::MessageRecord {
                     id: msg.id.clone(),
@@ -728,13 +783,37 @@ pub async fn run_leaf_inbox_task(
                     origin: msg.origin.clone(),
                 };
 
-                let already_acked = {
-                    if let Ok(conn) = db.lock() {
-                        let _ = storage::insert_message(&conn, &msg_record);
-                        let _ = storage::insert_svc_message(&conn, &svc_msg);
-                        storage::is_svc_message_acked(&conn, &msg.id).unwrap_or(false)
-                    } else {
-                        false
+                // F2 (no silent loss or spin): propagate storage errors, do not ack hub, back off and repoll
+                let store_res = (|| -> Result<bool, AppError> {
+                    let mut conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+                    let tx = conn
+                        .transaction()
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                    storage::insert_message(&tx, &msg_record)
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                    let queued = storage::insert_svc_message(&tx, &svc_msg)
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                    if !queued {
+                        return Err(AppError::ServiceUnavailable(
+                            "svc message queue is full".to_string(),
+                        ));
+                    }
+                    let is_acked = storage::is_svc_message_acked(&tx, &msg.id)
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                    tx.commit().map_err(|e| AppError::Internal(e.to_string()))?;
+                    Ok(is_acked)
+                })();
+
+                let already_acked = match store_res {
+                    Ok(acked) => acked,
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to store message {} locally: {e}; backing off without acking hub",
+                            msg.id
+                        );
+                        tokio::time::sleep(Duration::from_millis(backoff_millis)).await;
+                        backoff_millis = (backoff_millis * 2).min(max_backoff_millis);
+                        continue;
                     }
                 };
 

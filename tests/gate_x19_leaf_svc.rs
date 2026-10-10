@@ -1223,3 +1223,230 @@ async fn test_oracle_7_startup_refusal_leaf_with_svc_exe() {
         "Error output must name '--svc-exe': {stderr}"
     );
 }
+
+// =============================================================================
+// Oracle 8: Liveness: misaddressed send (to non-leaf principal) gets not_found reply
+// and does NOT block the inbox; subsequent send to registered svc arrives promptly.
+// Mutant: restore today's svc:<to> delivery => RED (timeout).
+// =============================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_oracle_8_misaddressed_message_does_not_stall_inbox() {
+    let creds_hub = generate_self_signed_ed25519("hub").unwrap();
+    let creds_leaf = generate_self_signed_ed25519("leaf").unwrap();
+
+    let hub = create_hub_test_node(
+        "hub",
+        vec![PeerConfig {
+            name: "leaf".to_string(),
+            address: "127.0.0.1:54328".to_string(),
+            pin: Some(creds_leaf.2.clone()),
+            ca: None,
+            identities: None,
+            allow: vec!["send".to_string(), "reply".to_string()],
+            from: None,
+            leaf: true,
+            principals: Vec::new(),
+            targets: None,
+        }],
+        creds_hub.clone(),
+    )
+    .await;
+
+    let leaf = create_leaf_test_node(
+        "leaf",
+        vec![PeerConfig {
+            name: "hub".to_string(),
+            address: hub.fed_addr.to_string(),
+            pin: Some(creds_hub.2.clone()),
+            ca: None,
+            identities: None,
+            allow: vec!["send".to_string(), "reply".to_string()],
+            from: None,
+            leaf: false,
+            principals: Vec::new(),
+            targets: None,
+        }],
+        creds_leaf.clone(),
+        "svc:guard",
+    )
+    .await;
+
+    let (_sock, claude_rx) =
+        create_claude_session_fixture(&hub.proc_root, &hub.sessions_dir, "sess-alice", "alice");
+
+    // 1. Connect svc:guard daemon to leaf
+    let (mut reader, mut writer) = connect_svc(&leaf.reg_sock).await;
+    let reg_frame = serde_json::json!({ "harness": "svc", "name": "guard" });
+    writer
+        .write_all(format!("{reg_frame}\n").as_bytes())
+        .await
+        .unwrap();
+    let reg_resp = read_json_line(&mut reader).await;
+    assert_eq!(reg_resp["status"], "ok");
+
+    // 2. Hub session sends misaddressed message to svc:other@leaf
+    let resp1 = send_via_agent_sock(&hub.agent_sock, "svc:other@leaf", "Task for other").await;
+    assert_eq!(resp1["status"], "ok");
+    assert_eq!(resp1["delivery"]["outcome"], "queued");
+    let msg1_id = resp1["delivery"]["messageId"].as_str().unwrap().to_string();
+
+    // Verify Claude session on hub receives not_found reply for msg1
+    let mut got_not_found_reply = false;
+    for _ in 0..60 {
+        let lines = claude_rx.lock().unwrap().clone();
+        if let Some(line) = lines
+            .iter()
+            .find(|l| l.contains(&format!("reply to message_id={msg1_id}")))
+        {
+            assert!(line.contains("not_found"));
+            assert!(line.contains("svc:other is not served by this leaf"));
+            got_not_found_reply = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        got_not_found_reply,
+        "Hub session should receive not_found reply for misaddressed message"
+    );
+
+    // 3. Hub session sends valid message to svc:guard@leaf
+    let resp2 = send_via_agent_sock(&hub.agent_sock, "svc:guard@leaf", "Task for guard").await;
+    assert_eq!(resp2["status"], "ok");
+    assert_eq!(resp2["delivery"]["outcome"], "queued");
+    let msg2_id = resp2["delivery"]["messageId"].as_str().unwrap().to_string();
+
+    // 4. Svc daemon on leaf polls: must receive msg2 within bounded test deadline!
+    let poll_res = tokio::time::timeout(Duration::from_secs(3), async {
+        let poll_frame = serde_json::json!({ "action": "poll", "waitSecs": 5 });
+        writer
+            .write_all(format!("{poll_frame}\n").as_bytes())
+            .await
+            .unwrap();
+        read_json_line(&mut reader).await
+    })
+    .await;
+
+    assert!(
+        poll_res.is_ok(),
+        "Daemon must receive msg2 without inbox stall"
+    );
+    let deliver_resp = poll_res.unwrap();
+    assert_eq!(deliver_resp["action"], "deliver");
+    assert_eq!(deliver_resp["messageId"], msg2_id);
+    assert_eq!(deliver_resp["text"], "Task for guard");
+}
+
+// =============================================================================
+// Oracle 9: F2: Storage error during inbox processing does NOT ack the hub and
+// does NOT spin; upon store recovery, the unacked message is repolled and delivered.
+// Mutant: ignore the store error => RED (task spins forever, message lost).
+// =============================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_oracle_9_storage_error_does_not_ack_and_recovers() {
+    let creds_hub = generate_self_signed_ed25519("hub").unwrap();
+    let creds_leaf = generate_self_signed_ed25519("leaf").unwrap();
+
+    let hub = create_hub_test_node(
+        "hub",
+        vec![PeerConfig {
+            name: "leaf".to_string(),
+            address: "127.0.0.1:54329".to_string(),
+            pin: Some(creds_leaf.2.clone()),
+            ca: None,
+            identities: None,
+            allow: vec!["send".to_string(), "reply".to_string()],
+            from: None,
+            leaf: true,
+            principals: Vec::new(),
+            targets: None,
+        }],
+        creds_hub.clone(),
+    )
+    .await;
+
+    let leaf = create_leaf_test_node(
+        "leaf",
+        vec![PeerConfig {
+            name: "hub".to_string(),
+            address: hub.fed_addr.to_string(),
+            pin: Some(creds_hub.2.clone()),
+            ca: None,
+            identities: None,
+            allow: vec!["send".to_string(), "reply".to_string()],
+            from: None,
+            leaf: false,
+            principals: Vec::new(),
+            targets: None,
+        }],
+        creds_leaf.clone(),
+        "svc:guard",
+    )
+    .await;
+
+    let (_sock, _rx) =
+        create_claude_session_fixture(&hub.proc_root, &hub.sessions_dir, "sess-alice", "alice");
+
+    // 1. Simulate a failing store by installing a trigger on svc_pending_messages that raises FAIL
+    {
+        let conn = leaf.db.lock().unwrap();
+        conn.execute(
+            "CREATE TRIGGER fail_insert BEFORE INSERT ON svc_pending_messages
+             BEGIN
+                 SELECT RAISE(FAIL, 'simulated disk error');
+             END;",
+            [],
+        )
+        .unwrap();
+    }
+
+    // 2. Hub queues a message for svc:guard@leaf
+    let resp =
+        send_via_agent_sock(&hub.agent_sock, "svc:guard@leaf", "Message during failure").await;
+    assert_eq!(resp["status"], "ok");
+    let msg_id = resp["delivery"]["messageId"].as_str().unwrap().to_string();
+
+    // 3. Wait 400ms: leaf task will try to store, fail, back off, and MUST NOT ack hub
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    {
+        let hub_conn = hub.db.lock().unwrap();
+        let queued = xmsg::storage::count_peer_mailbox_messages(&hub_conn, "leaf").unwrap();
+        assert_eq!(
+            queued, 1,
+            "Hub mailbox message MUST NOT be acked when leaf store fails"
+        );
+    }
+
+    // 4. Recover the store by dropping the failing trigger
+    {
+        let conn = leaf.db.lock().unwrap();
+        conn.execute("DROP TRIGGER fail_insert", []).unwrap();
+    }
+
+    // 5. Connect daemon to leaf register.sock
+    let (mut reader, mut writer) = connect_svc(&leaf.reg_sock).await;
+    let reg_frame = serde_json::json!({ "harness": "svc", "name": "guard" });
+    writer
+        .write_all(format!("{reg_frame}\n").as_bytes())
+        .await
+        .unwrap();
+    let _ = read_json_line(&mut reader).await;
+
+    // 6. Daemon polls: leaf background task recovers, stores repolled message, delivers to svc
+    let poll_res = tokio::time::timeout(Duration::from_secs(4), async {
+        let poll_frame = serde_json::json!({ "action": "poll", "waitSecs": 5 });
+        writer
+            .write_all(format!("{poll_frame}\n").as_bytes())
+            .await
+            .unwrap();
+        read_json_line(&mut reader).await
+    })
+    .await;
+
+    assert!(poll_res.is_ok(), "Daemon must receive recovered message");
+    let deliver_resp = poll_res.unwrap();
+    assert_eq!(deliver_resp["action"], "deliver");
+    assert_eq!(deliver_resp["messageId"], msg_id);
+    assert_eq!(deliver_resp["text"], "Message during failure");
+}
