@@ -32,7 +32,7 @@ struct WireErrorResponse {
 // Peers Configuration & File Format
 // -----------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct PeerConfig {
     #[serde(default)]
@@ -47,6 +47,69 @@ pub struct PeerConfig {
     pub leaf: bool,
     #[serde(default)]
     pub principals: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targets: Option<Vec<String>>,
+}
+
+pub(crate) fn target_matches_allowlist(
+    target: &crate::http::ResolvedTarget,
+    targets: &[String],
+) -> bool {
+    if targets.is_empty() {
+        return false;
+    }
+    let badges: Vec<String> = match target {
+        crate::http::ResolvedTarget::Svc(s) => {
+            let mut b = Vec::new();
+            if let Some(ref name) = s.name {
+                b.push(format!("svc:{name}"));
+            }
+            if s.session_id.starts_with("svc:") {
+                b.push(s.session_id.clone());
+            } else {
+                b.push(format!("svc:{}", s.session_id));
+            }
+            b.push(format!("session:{}", s.session_id));
+            b
+        }
+        crate::http::ResolvedTarget::Claude(s, _)
+        | crate::http::ResolvedTarget::Agy(s)
+        | crate::http::ResolvedTarget::Pi(s) => {
+            let mut b = Vec::new();
+            if let Some(ref name) = s.name {
+                b.push(format!("{}:{name}", s.harness));
+            }
+            b.push(format!("session:{}", s.session_id));
+            b.push(format!("{}:{}", s.harness, s.session_id));
+            b
+        }
+    };
+    targets.iter().any(|t| badges.iter().any(|b| b == t))
+}
+
+pub(crate) fn target_ref_could_match(target_ref: &str, targets: &[String]) -> bool {
+    if targets.is_empty() {
+        return false;
+    }
+    for t in targets {
+        if t == target_ref {
+            return true;
+        }
+        if let Some(name) = t.strip_prefix("svc:") {
+            if target_ref == name || target_ref == t {
+                return true;
+            }
+        } else if let Some(id) = t.strip_prefix("session:") {
+            if target_ref == id || target_ref == t {
+                return true;
+            }
+        } else if let Some((_harness, name)) = t.split_once(':') {
+            if target_ref == name || target_ref == t {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,7 +331,8 @@ impl PeersMap {
             // Check for unknown fields
             for k in obj.keys() {
                 match k.as_str() {
-                    "name" | "address" | "pin" | "allow" | "from" | "leaf" | "principals" => {}
+                    "name" | "address" | "pin" | "allow" | "from" | "leaf" | "principals"
+                    | "targets" => {}
                     other => {
                         return Err(format!(
                             "unknown field '{other}' in peer config for '{name}'"
@@ -357,6 +421,32 @@ impl PeersMap {
                 Vec::new()
             };
 
+            let targets: Option<Vec<String>> = if let Some(trg) = obj.get("targets") {
+                let arr = trg
+                    .as_array()
+                    .ok_or_else(|| format!("peer '{name}': 'targets' must be an array"))?;
+                let mut target_list = Vec::with_capacity(arr.len());
+                for v in arr {
+                    let s = v.as_str().ok_or_else(|| {
+                        format!("peer '{name}': 'targets' elements must be strings")
+                    })?;
+                    let valid = s.starts_with("claude:")
+                        || s.starts_with("agy:")
+                        || s.starts_with("pi:")
+                        || s.starts_with("svc:")
+                        || s.starts_with("session:");
+                    if !valid {
+                        return Err(format!(
+                            "target filter entry '{s}' must be kind-qualified (e.g. svc:<name>, claude:<name>, session:<id>)"
+                        ));
+                    }
+                    target_list.push(s.to_string());
+                }
+                Some(target_list)
+            } else {
+                None
+            };
+
             map.insert(PeerConfig {
                 name,
                 address,
@@ -365,6 +455,7 @@ impl PeersMap {
                 from,
                 leaf,
                 principals,
+                targets,
             });
         }
         Ok(map)
@@ -803,7 +894,113 @@ async fn fed_send_message_handler(
         }
     }
 
-    // 2. Rate limiting
+    // 2. Validate to.ref: forwarding is forbidden
+    let target_ref = &envelope.to.r#ref;
+    if target_ref.contains('@') {
+        return Err(AppError::NoForward(
+            "Forwarding cross-host is not permitted".to_string(),
+        ));
+    }
+
+    // 3. Resolve local target session and check target allowlist BEFORE rate-limiting or queueing
+    let target = match resolve_target_session_fed(&fed_state, target_ref) {
+        Ok(t) => {
+            if let Some(ref allowed_targets) = peer_cfg.targets {
+                if !target_matches_allowlist(&t, allowed_targets) {
+                    return Err(AppError::OpDenied(
+                        "target not allowed for peer".to_string(),
+                    ));
+                }
+            }
+            t
+        }
+        Err(err) => {
+            if let Some(ref allowed_targets) = peer_cfg.targets {
+                if !target_ref_could_match(target_ref, allowed_targets) {
+                    return Err(AppError::OpDenied(
+                        "target not allowed for peer".to_string(),
+                    ));
+                }
+            }
+            // Target is allowed but not found / gone / ambiguous:
+            // Check rate limiter and record failure outcome
+            let principal_key = match &envelope.principal {
+                FedPrincipal::Session {
+                    harness,
+                    session_id,
+                    ..
+                } => Some(format!("{harness}:{session_id}")),
+                FedPrincipal::Service { name } => Some(format!("svc:{name}")),
+                FedPrincipal::Anonymous { from } => Some(format!("anon:{from}")),
+            };
+            if !fed_state
+                .rate_limiter
+                .check_and_consume(&peer.name, principal_key.as_deref())
+            {
+                return Err(AppError::RateLimited("Rate limit exceeded".to_string()));
+            }
+
+            let (from_name, return_harness, return_session_id) = match &envelope.principal {
+                FedPrincipal::Session {
+                    harness,
+                    session_id,
+                    name,
+                } => {
+                    if !matches!(harness.as_str(), "claude" | "agy" | "pi" | "svc") {
+                        return Err(AppError::BadRequest(format!("invalid harness '{harness}'")));
+                    }
+                    let sanitized = inbox::sanitize_attested_from(&peer.name, harness, name);
+                    (sanitized, Some(harness.clone()), Some(session_id.clone()))
+                }
+                FedPrincipal::Service { name } => {
+                    let re = regex::Regex::new(r"^[A-Za-z0-9._-]{1,32}$").unwrap();
+                    if !re.is_match(name) {
+                        return Err(AppError::BadRequest(format!(
+                            "invalid service name '{name}'"
+                        )));
+                    }
+                    let badge = format!("xmsg@{} · svc:{}", peer.name, name);
+                    (badge, Some("svc".to_string()), Some(name.clone()))
+                }
+                FedPrincipal::Anonymous { from } => {
+                    let sanitized = inbox::sanitize_from(&peer.name, from)?;
+                    (sanitized, None, None)
+                }
+            };
+            let push_replies = if peer_cfg.leaf {
+                false
+            } else {
+                envelope.push_replies
+            };
+            let body_len = envelope.body.len();
+            let outcome_str = match &err {
+                AppError::NotFound(_) => "not_found",
+                AppError::Ambiguous(_) => "ambiguous",
+                AppError::Gone { .. } => "gone",
+                _ => "failed",
+            };
+            let pre_record = MessageRecord {
+                id: envelope.id.clone(),
+                created_at: envelope.created_at,
+                session_id: target_ref.clone(),
+                from_name,
+                bytes: body_len,
+                outcome: outcome_str.to_string(),
+                recipient_harness: "claude".to_string(),
+                return_harness,
+                return_session_id,
+                return_host: Some(peer.name.clone()),
+                push_replies,
+                thread_id: envelope.thread_id.clone(),
+            };
+            if let Ok(db) = fed_state.db.lock() {
+                let _ = storage::insert_message(&db, &pre_record);
+            }
+            return Err(err);
+        }
+    };
+
+    // 4. Rate limiting: consume rate limit for authorized, resolved target
     let principal_key = match &envelope.principal {
         FedPrincipal::Session {
             harness,
@@ -818,14 +1015,6 @@ async fn fed_send_message_handler(
         .check_and_consume(&peer.name, principal_key.as_deref())
     {
         return Err(AppError::RateLimited("Rate limit exceeded".to_string()));
-    }
-
-    // 4. Validate to.ref: forwarding is forbidden
-    let target_ref = &envelope.to.r#ref;
-    if target_ref.contains('@') {
-        return Err(AppError::NoForward(
-            "Forwarding cross-host is not permitted".to_string(),
-        ));
     }
 
     // 5. Validate principal and sanitize badge
@@ -895,37 +1084,6 @@ async fn fed_send_message_handler(
         false
     } else {
         envelope.push_replies
-    };
-
-    // 7. Resolve local target session
-    let target = match resolve_target_session_fed(&fed_state, target_ref) {
-        Ok(t) => t,
-        Err(err) => {
-            let outcome_str = match &err {
-                AppError::NotFound(_) => "not_found",
-                AppError::Ambiguous(_) => "ambiguous",
-                AppError::Gone { .. } => "gone",
-                _ => "failed",
-            };
-            let pre_record = MessageRecord {
-                id: envelope.id.clone(),
-                created_at: envelope.created_at,
-                session_id: target_ref.clone(),
-                from_name: from_name.clone(),
-                bytes: body_len,
-                outcome: outcome_str.to_string(),
-                recipient_harness: "claude".to_string(),
-                return_harness: return_harness.clone(),
-                return_session_id: return_session_id.clone(),
-                return_host: Some(peer.name.clone()),
-                push_replies,
-                thread_id: envelope.thread_id.clone(),
-            };
-            if let Ok(db) = fed_state.db.lock() {
-                let _ = storage::insert_message(&db, &pre_record);
-            }
-            return Err(err);
-        }
     };
 
     let (target_session_id, recipient_harness) = match &target {

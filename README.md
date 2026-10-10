@@ -479,6 +479,20 @@ Federated connections establish peer identity using cryptographic certificate pi
 
 ### 7.2 Configuration & Operation
 
-- **Peers Map (`--peers-file`):** A JSON dictionary mapping peer hostnames to their endpoint `address`, certificate `pin`, permitted operations (`allow: ["send", "reply"]`), optional `from` CIDR list, and optional kind-qualified `principals` filters (e.g. `claude:<name>`, `svc:<name>`, `anon:<from>`, `session:<id>`).
+- **Peers Map (`--peers-file`):** A JSON dictionary mapping peer hostnames to their configuration options:
+
+  | Field        | Type                    | Description                                                                                  |
+  | ------------ | ----------------------- | -------------------------------------------------------------------------------------------- |
+  | `address`    | string                  | Target endpoint socket address (`host:port`).                                                |
+  | `pin`        | string                  | Expected SHA-256 certificate fingerprint pin (`sha256:...`).                                 |
+  | `allow`      | list[string]            | Permitted operations (`"send"`, `"reply"`).                                                  |
+  | `from`       | list[string] (optional) | Permitted source IP CIDR blocks (e.g. `["192.168.1.0/24"]`).                                 |
+  | `leaf`       | bool (optional)         | If true, outbound replies to this peer are not pushed. Default `false`.                      |
+  | `principals` | list[string] (optional) | Sender principal filters (`svc:<name>`, `claude:<name>`, `session:<id>`, `anon:<from>`).     |
+  | `targets`    | list[string] (optional) | Permitted local target principal filters (`svc:<name>`, `<harness>:<name>`, `session:<id>`). |
+
+  - **Target Filtering (`targets`):** When `targets` is configured, a federated `send` from that peer is refused with HTTP `403 Forbidden` (`op_denied`, "target not allowed for peer") before rate-limiting or queueing unless the resolved local target matches an entry (`svc:<name>` for a service daemon, `<harness>:<name>` and `session:<id>` for a session). An empty present list (`"targets": []`) refuses all targets. When `targets` is omitted, every local target is reachable. Replies on the federated reply route are not gated by `targets`.
+
 - **No Forwarding:** Forwarding cross-host (`to.ref` containing `@`) is strictly prohibited; receivers reject forwarded requests with `400 no_forward`.
+
 - **Router Isolation:** Federated TLS listeners only expose `/fed/` routes and strictly isolate local loopback routes (`/healthz`, `/v1/sessions`).
