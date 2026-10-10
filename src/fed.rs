@@ -722,6 +722,8 @@ pub struct FedState {
     pub agy_store: crate::agy::AgyStore,
     pub pi_store: crate::pi::PiStore,
     pub pi_notify_tx: broadcast::Sender<String>,
+    pub svc_store: crate::svc::SvcStore,
+    pub svc_notify_tx: broadcast::Sender<String>,
     pub notify_tx: broadcast::Sender<String>,
     pub max_body: usize,
     pub is_leaf: bool,
@@ -1049,8 +1051,37 @@ async fn fed_send_message_handler(
             let _ = fed_state.pi_notify_tx.send(session.session_id.clone());
             Ok((session.session_id, "pi".to_string(), "delivered"))
         }
-        crate::http::ResolvedTarget::Svc(_) => {
-            unreachable!("svc targets not resolved in federation")
+        crate::http::ResolvedTarget::Svc(session) => {
+            let envelope_text = format!(
+                "[xmsg] from={} message_id={} — reply with the xmsg reply tool\n\n{}",
+                from_name, envelope.id, envelope.body
+            );
+            let svc_msg = storage::SvcPendingMessage {
+                id: envelope.id.clone(),
+                session_id: session.session_id.clone(),
+                created_at: storage::now_epoch_secs(),
+                from_name: from_name.clone(),
+                bytes: body_len,
+                text: envelope.body.clone(),
+                envelope: envelope_text,
+                delivered_at: None,
+                origin: storage::SvcOrigin::Fed {
+                    host: peer.name.clone(),
+                },
+            };
+            let db = fed_state
+                .db
+                .lock()
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            let inserted = storage::insert_svc_message(&db, &svc_msg)
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            if !inserted {
+                return Err(AppError::ServiceUnavailable(
+                    "svc session message queue is full".to_string(),
+                ));
+            }
+            let _ = fed_state.svc_notify_tx.send(session.session_id.clone());
+            Ok((session.session_id, "svc".to_string(), "delivered"))
         }
     };
 
@@ -1304,6 +1335,47 @@ async fn fed_reply_handler(
                 "sender_gone"
             }
         }
+        "svc" => {
+            let session_opt = crate::svc::resolve_svc_session(
+                &fed_state.agy_config.proc_root,
+                &fed_state.svc_store,
+                &ret_session_id,
+            )
+            .ok()
+            .flatten();
+            if let Some(session) = session_opt {
+                let envelope_text = format!(
+                    "[xmsg] reply to message_id={} from={} message_id={} — reply with the xmsg reply tool\n\n{}",
+                    reply.in_reply_to, replier_badge, reply.id, reply.text
+                );
+                let svc_msg = storage::SvcPendingMessage {
+                    id: reply.id.clone(),
+                    session_id: session.session_id.clone(),
+                    created_at: storage::now_epoch_secs(),
+                    from_name: replier_badge.clone(),
+                    bytes: reply.text.len(),
+                    text: reply.text.clone(),
+                    envelope: envelope_text,
+                    delivered_at: None,
+                    origin: storage::SvcOrigin::Fed {
+                        host: peer.name.clone(),
+                    },
+                };
+                if let Ok(db) = fed_state.db.lock() {
+                    let inserted = storage::insert_svc_message(&db, &svc_msg).unwrap_or(false);
+                    if inserted {
+                        let _ = fed_state.svc_notify_tx.send(session.session_id.clone());
+                        "pushed"
+                    } else {
+                        "push_failed"
+                    }
+                } else {
+                    "push_failed"
+                }
+            } else {
+                "sender_gone"
+            }
+        }
         _ => {
             return Err(AppError::NotRecipient(format!(
                 "unknown recipient harness '{ret_harness}'"
@@ -1436,7 +1508,16 @@ fn resolve_target_session_fed(
                         ref_str,
                     )? {
                         Some(session) => Ok(crate::http::ResolvedTarget::Pi(session)),
-                        None => Err(AppError::NotFound(ref_str.to_string())),
+                        None => {
+                            match crate::svc::resolve_svc_session(
+                                &fed_state.agy_config.proc_root,
+                                &fed_state.svc_store,
+                                ref_str,
+                            )? {
+                                Some(session) => Ok(crate::http::ResolvedTarget::Svc(session)),
+                                None => Err(AppError::NotFound(ref_str.to_string())),
+                            }
+                        }
                     }
                 }
             }

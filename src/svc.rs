@@ -349,6 +349,7 @@ pub async fn handle_svc_connection<
                         "fromName": msg.from_name,
                         "text": msg.text,
                         "envelope": msg.envelope,
+                        "origin": msg.origin,
                     });
                     writer.write_all(format!("{resp}\n").as_bytes()).await?;
                 } else if wait_secs == 0 {
@@ -381,6 +382,7 @@ pub async fn handle_svc_connection<
                             "fromName": msg.from_name,
                             "text": msg.text,
                             "envelope": msg.envelope,
+                            "origin": msg.origin,
                         });
                         writer.write_all(format!("{resp}\n").as_bytes()).await?;
                     } else {

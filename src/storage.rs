@@ -74,6 +74,17 @@ pub struct AgyPendingMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SvcOrigin {
+    #[serde(rename = "local", rename_all = "camelCase")]
+    Local { harness: String, session_id: String },
+    #[serde(rename = "fed")]
+    Fed { host: String },
+    #[serde(rename = "anonymous")]
+    Anonymous,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SvcPendingMessage {
     pub id: String,
@@ -84,6 +95,7 @@ pub struct SvcPendingMessage {
     pub text: String,
     pub envelope: String,
     pub delivered_at: Option<i64>,
+    pub origin: SvcOrigin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -174,7 +186,8 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             bytes INTEGER NOT NULL,
             text TEXT NOT NULL,
             envelope TEXT NOT NULL,
-            delivered_at INTEGER
+            delivered_at INTEGER,
+            origin TEXT NOT NULL DEFAULT '{"kind":"anonymous"}'
         );
 
         CREATE TABLE IF NOT EXISTS idempotency_keys (
@@ -280,6 +293,25 @@ pub fn init_db(conn: &Connection) -> Result<()> {
         if !has_pushed_message_id {
             conn.execute("ALTER TABLE replies ADD COLUMN pushed_message_id TEXT", [])?;
         }
+    }
+
+    // Migration check: ensure origin exists on svc_pending_messages table
+    let mut stmt = conn.prepare("PRAGMA table_info(svc_pending_messages)")?;
+    let mut rows = stmt.query([])?;
+    let mut has_origin = false;
+    let mut has_svc_pending_columns = false;
+    while let Some(row) = rows.next()? {
+        has_svc_pending_columns = true;
+        let col_name: String = row.get(1)?;
+        if col_name == "origin" {
+            has_origin = true;
+        }
+    }
+    if has_svc_pending_columns && !has_origin {
+        conn.execute(
+            "ALTER TABLE svc_pending_messages ADD COLUMN origin TEXT NOT NULL DEFAULT '{\"kind\":\"anonymous\"}'",
+            [],
+        )?;
     }
 
     Ok(())
@@ -660,8 +692,10 @@ pub fn insert_svc_message(conn: &Connection, msg: &SvcPendingMessage) -> Result<
     if pending >= MAX_SVC_QUEUE_PER_SESSION {
         return Ok(false);
     }
+    let origin_json = serde_json::to_string(&msg.origin)
+        .unwrap_or_else(|_| "{\"kind\":\"anonymous\"}".to_string());
     conn.execute(
-        "INSERT INTO svc_pending_messages (id, session_id, created_at, from_name, bytes, text, envelope, delivered_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO svc_pending_messages (id, session_id, created_at, from_name, bytes, text, envelope, delivered_at, origin) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             msg.id,
             msg.session_id,
@@ -671,6 +705,7 @@ pub fn insert_svc_message(conn: &Connection, msg: &SvcPendingMessage) -> Result<
             msg.text,
             msg.envelope,
             msg.delivered_at,
+            origin_json,
         ],
     )?;
     Ok(true)
@@ -681,12 +716,14 @@ pub fn get_next_pending_svc_message(
     session_id: &str,
 ) -> Result<Option<SvcPendingMessage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, session_id, created_at, from_name, bytes, text, envelope, delivered_at FROM svc_pending_messages WHERE session_id = ?1 AND delivered_at IS NULL ORDER BY created_at ASC, rowid ASC LIMIT 1",
+        "SELECT id, session_id, created_at, from_name, bytes, text, envelope, delivered_at, origin FROM svc_pending_messages WHERE session_id = ?1 AND delivered_at IS NULL ORDER BY created_at ASC, rowid ASC LIMIT 1",
     )?;
     let mut rows = stmt.query(params![session_id])?;
 
     if let Some(row) = rows.next()? {
         let bytes_i64: i64 = row.get(4)?;
+        let origin_str: String = row.get(8)?;
+        let origin: SvcOrigin = serde_json::from_str(&origin_str).unwrap_or(SvcOrigin::Anonymous);
         Ok(Some(SvcPendingMessage {
             id: row.get(0)?,
             session_id: row.get(1)?,
@@ -696,6 +733,7 @@ pub fn get_next_pending_svc_message(
             text: row.get(5)?,
             envelope: row.get(6)?,
             delivered_at: row.get(7)?,
+            origin,
         }))
     } else {
         Ok(None)

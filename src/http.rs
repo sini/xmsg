@@ -551,6 +551,35 @@ async fn send_message_handler(
                 "[xmsg] from={} message_id={} — reply with the xmsg reply tool\n\n{}",
                 from_name, message_id, req.text
             );
+            let origin = if state.is_leaf() {
+                if let Some(p_str) = state.leaf_principal() {
+                    if let Ok(p) = crate::fed::parse_fed_principal(p_str) {
+                        match p {
+                            crate::fed::FedPrincipal::Session {
+                                harness,
+                                session_id,
+                                ..
+                            } => storage::SvcOrigin::Local {
+                                harness,
+                                session_id,
+                            },
+                            crate::fed::FedPrincipal::Service { name } => {
+                                storage::SvcOrigin::Local {
+                                    harness: "svc".to_string(),
+                                    session_id: format!("svc:{name}"),
+                                }
+                            }
+                            _ => storage::SvcOrigin::Anonymous,
+                        }
+                    } else {
+                        storage::SvcOrigin::Anonymous
+                    }
+                } else {
+                    storage::SvcOrigin::Anonymous
+                }
+            } else {
+                storage::SvcOrigin::Anonymous
+            };
             let svc_msg = storage::SvcPendingMessage {
                 id: message_id.clone(),
                 session_id: session.session_id.clone(),
@@ -560,6 +589,7 @@ async fn send_message_handler(
                 text: req.text.clone(),
                 envelope,
                 delivered_at: None,
+                origin,
             };
             {
                 let db = state

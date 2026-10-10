@@ -735,6 +735,10 @@ pub async fn run_agent_server(
                                                     text: text.to_string(),
                                                     envelope,
                                                     delivered_at: None,
+                                                    origin: storage::SvcOrigin::Local {
+                                                        harness: caller.harness.clone(),
+                                                        session_id: caller.session_id.clone(),
+                                                    },
                                                 };
                                                 let insert_res = (|| -> Result<bool, AppError> {
                                                     let db =
@@ -1231,6 +1235,10 @@ pub async fn run_agent_server(
                                             text: text.to_string(),
                                             envelope,
                                             delivered_at: None,
+                                            origin: storage::SvcOrigin::Local {
+                                                harness: caller.harness.clone(),
+                                                session_id: caller.session_id.clone(),
+                                            },
                                         };
                                         let db_res = (|| -> Result<(), AppError> {
                                             let db = state_clone

@@ -629,6 +629,8 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
             agy_store: agy_store.clone(),
             pi_store: pi_store.clone(),
             pi_notify_tx: pi_notify_tx.clone(),
+            svc_store: svc_store.clone(),
+            svc_notify_tx: svc_notify_tx.clone(),
             notify_tx: notify_tx.clone(),
             max_body: args.max_body,
             is_leaf: args.leaf,

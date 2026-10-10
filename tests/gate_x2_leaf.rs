@@ -23,6 +23,7 @@ use xmsg::http::{build_router, AppState};
 use xmsg::inbox::DeliveryResponse;
 use xmsg::pi::new_pi_store;
 use xmsg::storage::{self, MessageRecord, ReplyRecord};
+use xmsg::svc::new_svc_store;
 
 fn get_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind free port");
@@ -154,6 +155,7 @@ async fn test_oracle_2_body_from_ignored_and_attributed_to_leaf_principal() {
 
     let (node_b_notify_tx, _) = broadcast::channel(16);
     let (node_b_pi_notify_tx, _) = broadcast::channel(16);
+    let (node_b_svc_notify_tx, _) = broadcast::channel(16);
 
     let node_b_fed_state = Arc::new(FedState {
         host_label: "target-node".to_string(),
@@ -173,6 +175,8 @@ async fn test_oracle_2_body_from_ignored_and_attributed_to_leaf_principal() {
         agy_store: new_agy_store(),
         pi_store: new_pi_store(),
         pi_notify_tx: node_b_pi_notify_tx,
+        svc_store: new_svc_store(),
+        svc_notify_tx: node_b_svc_notify_tx,
         notify_tx: node_b_notify_tx,
         max_body: 65536,
         is_leaf: false,
@@ -259,6 +263,8 @@ async fn test_oracle_2_body_from_ignored_and_attributed_to_leaf_principal() {
         agy_store: new_agy_store(),
         pi_store: new_pi_store(),
         pi_notify_tx: leaf_pi_notify_tx.clone(),
+        svc_store: new_svc_store(),
+        svc_notify_tx: leaf_svc_notify_tx.clone(),
         notify_tx: leaf_notify_tx.clone(),
         max_body: 65536,
         is_leaf: true,
@@ -401,6 +407,8 @@ async fn test_oracle_3_leaf_pull_replies_node_zero_outbound_connections() {
         agy_store: new_agy_store(),
         pi_store: new_pi_store(),
         pi_notify_tx: node_b_pi_notify_tx.clone(),
+        svc_store: new_svc_store(),
+        svc_notify_tx: node_b_svc_notify_tx.clone(),
         notify_tx: node_b_notify_tx.clone(),
         max_body: 65536,
         is_leaf: false,
@@ -518,6 +526,8 @@ async fn test_oracle_3_leaf_pull_replies_node_zero_outbound_connections() {
         agy_store: new_agy_store(),
         pi_store: new_pi_store(),
         pi_notify_tx: leaf_pi_notify_tx.clone(),
+        svc_store: new_svc_store(),
+        svc_notify_tx: leaf_svc_notify_tx.clone(),
         notify_tx: leaf_notify_tx.clone(),
         max_body: 65536,
         is_leaf: true,

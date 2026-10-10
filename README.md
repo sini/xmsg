@@ -300,10 +300,23 @@ Communication over the registration socket uses a JSON-lines streaming protocol:
      "action": "deliver",
      "messageId": "01M4FG...",
      "fromName": "xmsg@host · sender",
+     "origin": {
+       "kind": "local",
+       "harness": "claude",
+       "sessionId": "b0682ca7-..."
+     },
      "text": "Task payload...",
      "envelope": "[xmsg] from=... message_id=...\n\nTask payload..."
    }
    ```
+
+   The `origin` object provides structured, tamper-proof sender attestation resolved at enqueue time:
+
+   - `{"kind": "local", "harness": <harness>, "sessionId": <session_id>}`: For local senders attested on this instance via `agent.sock` or kernel-attested callers in leaf mode.
+   - `{"kind": "fed", "host": <peer_host_label>}`: For inbound messages arriving over mTLS federation from an authenticated peer host.
+   - `{"kind": "anonymous"}`: For unattested senders (e.g. plain HTTP sends without leaf attestation) or pre-migration rows.
+
+   Daemons and services must use `origin` rather than parsing display strings (`fromName` or `envelope`) for security and authorization decisions.
 
    If no message arrives within `waitSecs`, `xmsg` responds with `{"action": "timeout"}`.
 
