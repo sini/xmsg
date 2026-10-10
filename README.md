@@ -22,7 +22,7 @@ All local IPC in `xmsg` relies on Unix domain sockets located in `$XDG_RUNTIME_D
 >
 > By default, `xmsg serve` binds **no TCP port whatsoever**. It listens solely on the local Unix domain socket `$XDG_RUNTIME_DIR/xmsg/http.sock`.
 >
-> A TCP loopback listener is available **only** when explicitly requested via the `--listen <IP:PORT>` CLI flag or `XMSG_LISTEN` environment variable. This is intended strictly for container / Kubernetes pod environments where loopback is an isolated, private network namespace. Never bind TCP to external or shared interfaces.
+> A TCP loopback listener is available **only** when explicitly requested via the `--listen <IP:PORT>` CLI flag or `XMSG_LISTEN` environment variable. This is intended strictly for clients that explicitly configure `XMSG_URL` or for container / Kubernetes pod environments where loopback is an isolated, private network namespace. Never bind TCP to external or shared interfaces.
 
 ### 1.3 Attestation & Identity Derivation
 
@@ -174,7 +174,7 @@ TypeScript extension for Pi (`@earendil-works/pi-coding-agent`):
 - Defaults session display name to the directory basename of the working directory.
 - Delivers incoming messages into Pi with `expandPromptTemplates: false` to prevent remote command or prompt template injection.
 - Registers three tools:
-  - **`list`:** Queries active sessions via local HTTP.
+  - **`list`:** Queries active sessions over `$XDG_RUNTIME_DIR/xmsg/http.sock` via Unix domain socket (or `XMSG_URL` when explicitly configured as an override).
   - **`send`:** Sends messages over `agent.sock` to ensure kernel attestation of peer PID and return address.
   - **`reply`:** Sends replies over `agent.sock`.
 
@@ -351,10 +351,10 @@ curl --unix-socket "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/xmsg/http.sock" http:
 curl --unix-socket "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/xmsg/http.sock" http://localhost/v1/sessions
 ```
 
-### Migration Note (`matrix-xmsg` and External Clients)
+### Migration Note (`matrix-xmsg`, `xmsg-pi`, and External Clients)
 
-- **Default Socket Shift:** `xmsg serve` no longer binds loopback TCP port `7787` by default. Local clients and background daemons (such as `matrix-xmsg` running in the user session) must connect via Unix domain socket (`http.sock`).
-- **Container / Pod Deployments:** In Kubernetes pods or containerized setups where `matrix-xmsg` and `xmsg` share an isolated pod network namespace, start `xmsg` with `--listen 127.0.0.1:7787` (or `XMSG_LISTEN="127.0.0.1:7787"`) to bind the legacy loopback TCP port.
+- **Default Socket Shift:** `xmsg serve` no longer binds loopback TCP port `7787` by default. Local clients and background daemons (such as `matrix-xmsg` and `xmsg-pi`) connect via Unix domain socket (`http.sock`). TCP (`--listen`) is now only for clients that explicitly configure `XMSG_URL` or run in container/pod environments with isolated namespaces.
+- **Container / Pod Deployments:** In Kubernetes pods or containerized setups where clients and `xmsg` share an isolated pod network namespace and use TCP via `XMSG_URL`, start `xmsg` with `--listen 127.0.0.1:7787` (or `XMSG_LISTEN="127.0.0.1:7787"`) to bind the loopback TCP port.
 
 ### Health & Sessions
 

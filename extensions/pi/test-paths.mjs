@@ -17,9 +17,9 @@ registerHooks({
   },
 });
 
-const { defaultRegisterSockPath, defaultAgentSockPath } = await import("./index.ts");
+const { defaultRegisterSockPath, defaultAgentSockPath, defaultHttpSockPath, defaultXmsgUrl } = await import("./index.ts");
 
-const keys = ["XDG_RUNTIME_DIR", "XMSG_REGISTER_SOCK", "XMSG_AGENT_SOCK"];
+const keys = ["XDG_RUNTIME_DIR", "XMSG_REGISTER_SOCK", "XMSG_AGENT_SOCK", "XMSG_HTTP_SOCK", "XMSG_URL"];
 for (const k of keys) delete process.env[k];
 
 // What the xmsg binary falls back to when XDG_RUNTIME_DIR is unset or blank.
@@ -35,15 +35,24 @@ for (const blank of [undefined, "", "   "]) {
   const label = `XDG_RUNTIME_DIR=${JSON.stringify(blank)}`;
   assert.equal(defaultRegisterSockPath(), fallbackSock("register.sock"), label);
   assert.equal(defaultAgentSockPath(), fallbackSock("agent.sock"), label);
+  assert.equal(defaultHttpSockPath(), fallbackSock("http.sock"), label);
 }
 
 process.env.XDG_RUNTIME_DIR = "/run/user/1000";
 assert.equal(defaultRegisterSockPath(), "/run/user/1000/xmsg/register.sock");
 assert.equal(defaultAgentSockPath(), "/run/user/1000/xmsg/agent.sock");
+assert.equal(defaultHttpSockPath(), "/run/user/1000/xmsg/http.sock");
 
 process.env.XMSG_REGISTER_SOCK = "/custom/register.sock";
 process.env.XMSG_AGENT_SOCK = "/custom/agent.sock";
+process.env.XMSG_HTTP_SOCK = "/custom/http.sock";
 assert.equal(defaultRegisterSockPath(), "/custom/register.sock");
 assert.equal(defaultAgentSockPath(), "/custom/agent.sock");
+assert.equal(defaultHttpSockPath(), "/custom/http.sock");
+
+assert.equal(defaultXmsgUrl(), undefined);
+process.env.XMSG_URL = "http://127.0.0.1:8888/";
+assert.equal(defaultXmsgUrl(), "http://127.0.0.1:8888");
+delete process.env.XMSG_URL;
 
 console.log("✔ socket paths follow XMSG_*_SOCK, then a non-blank XDG_RUNTIME_DIR, then the platform runtime dir");

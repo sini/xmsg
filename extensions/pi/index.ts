@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 import readline from "node:readline";
@@ -54,6 +55,17 @@ export function defaultAgentSockPath(): string | undefined {
   return undefined;
 }
 
+export function defaultHttpSockPath(): string | undefined {
+  if (process.env.XMSG_HTTP_SOCK) {
+    return process.env.XMSG_HTTP_SOCK;
+  }
+  const runtimeDir = defaultRuntimeDir();
+  if (runtimeDir) {
+    return path.join(runtimeDir, "xmsg", "http.sock");
+  }
+  return undefined;
+}
+
 export function verifySecureSocketDir(sockPath: string): boolean {
   try {
     const dir = path.dirname(sockPath);
@@ -83,13 +95,18 @@ export function verifySecureSocketDir(sockPath: string): boolean {
   }
 }
 
-export function defaultXmsgUrl(): string {
-  return (process.env.XMSG_URL || "http://127.0.0.1:7787").replace(/\/$/, "");
+export function defaultXmsgUrl(): string | undefined {
+  const url = process.env.XMSG_URL;
+  if (url && url.trim()) {
+    return url.trim().replace(/\/$/, "");
+  }
+  return undefined;
 }
 
 export interface ExtensionOptions {
   sockPath?: string;
   agentSockPath?: string;
+  httpSockPath?: string;
   xmsgUrl?: string;
   pollWaitSecs?: number;
   reconnectDelayMs?: number;
@@ -99,7 +116,8 @@ export class XmsgPiBridge {
   private pi: ExtensionAPI;
   private sockPath?: string;
   private agentSockPath?: string;
-  private xmsgUrl: string;
+  private httpSockPath?: string;
+  private xmsgUrl?: string;
   private pollWaitSecs: number;
   private reconnectDelayMs: number;
   private socket?: net.Socket;
@@ -113,6 +131,7 @@ export class XmsgPiBridge {
     this.pi = pi;
     this.sockPath = options.sockPath || defaultRegisterSockPath();
     this.agentSockPath = options.agentSockPath || defaultAgentSockPath();
+    this.httpSockPath = options.httpSockPath || defaultHttpSockPath();
     this.xmsgUrl = options.xmsgUrl || defaultXmsgUrl();
     this.pollWaitSecs = options.pollWaitSecs ?? 30;
     this.reconnectDelayMs = options.reconnectDelayMs ?? 1500;
@@ -346,26 +365,104 @@ export class XmsgPiBridge {
       description: "List active agent sessions on the local host",
       parameters: Type.Object({}),
       execute: async () => {
-        try {
-          const res = await fetch(`${this.xmsgUrl}/v1/sessions`);
-          if (!res.ok) {
-            const errText = await res.text();
+        if (this.xmsgUrl) {
+          try {
+            const res = await fetch(`${this.xmsgUrl}/v1/sessions`);
+            if (!res.ok) {
+              const errText = await res.text();
+              return {
+                content: [{ type: "text", text: `HTTP ${res.status}: ${errText}` }],
+                details: { error: "http_error", status: res.status },
+              };
+            }
+            const data = await res.json();
             return {
-              content: [{ type: "text", text: `HTTP ${res.status}: ${errText}` }],
-              details: { error: "http_error", status: res.status },
+              content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+              details: data,
+            };
+          } catch (err: any) {
+            return {
+              content: [{ type: "text", text: `Error listing sessions: ${err.message}` }],
+              details: { error: "fetch_error", detail: err.message },
             };
           }
-          const data = await res.json();
+        }
+
+        const sockPath = this.httpSockPath || defaultHttpSockPath();
+        if (!sockPath) {
+          const expectedPath = "$XDG_RUNTIME_DIR/xmsg/http.sock";
           return {
-            content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-            details: data,
-          };
-        } catch (err: any) {
-          return {
-            content: [{ type: "text", text: `Error listing sessions: ${err.message}` }],
-            details: { error: "fetch_error", detail: err.message },
+            content: [{ type: "text", text: `Error listing sessions: http.sock path unknown (XDG_RUNTIME_DIR unset; expected ${expectedPath})` }],
+            details: { error: "http_sock_unknown", socketPath: expectedPath },
           };
         }
+
+        if (!verifySecureSocketDir(sockPath)) {
+          return {
+            content: [{ type: "text", text: `Error listing sessions: socket directory failed security check or does not exist for ${sockPath}` }],
+            details: { error: "insecure_socket_dir", socketPath: sockPath },
+          };
+        }
+
+        return new Promise((resolve) => {
+          let req: http.ClientRequest;
+          try {
+            req = http.request(
+              {
+                socketPath: sockPath,
+                path: "/v1/sessions",
+                method: "GET",
+                headers: {
+                  host: "localhost",
+                },
+              },
+              (res) => {
+                let data = "";
+                res.setEncoding("utf8");
+                res.on("data", (chunk) => {
+                  data += chunk;
+                });
+                res.on("end", () => {
+                  const status = res.statusCode ?? 200;
+                  if (status < 200 || status >= 300) {
+                    resolve({
+                      content: [{ type: "text", text: `HTTP ${status}: ${data}` }],
+                      details: { error: "http_error", status, socketPath: sockPath },
+                    });
+                    return;
+                  }
+                  try {
+                    const json = JSON.parse(data);
+                    resolve({
+                      content: [{ type: "text", text: JSON.stringify(json, null, 2) }],
+                      details: json,
+                    });
+                  } catch (err: any) {
+                    resolve({
+                      content: [{ type: "text", text: `Error parsing sessions response from ${sockPath}: ${err.message}` }],
+                      details: { error: "parse_error", socketPath: sockPath, detail: err.message },
+                    });
+                  }
+                });
+              },
+            );
+          } catch (err: any) {
+            resolve({
+              content: [{ type: "text", text: `Error connecting to http socket (${sockPath}): ${err.message}` }],
+              details: { error: "socket_error", socketPath: sockPath, detail: err.message },
+            });
+            return;
+          }
+
+          req.on("error", (err: any) => {
+            resolve({
+              content: [{ type: "text", text: `Error connecting to http socket (${sockPath}): ${err.message}` }],
+              details: { error: "socket_error", socketPath: sockPath, detail: err.message },
+            });
+          });
+
+          req.end();
+        });
       },
     });
   }

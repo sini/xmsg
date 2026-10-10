@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import net from "node:net";
 import fs from "node:fs";
-import path from "node:path";
+import http from "node:http";
+import net from "node:net";
 import os from "node:os";
+import path from "node:path";
 import { execSync } from "node:child_process";
 
 function getPiNodeModules() {
@@ -289,6 +290,157 @@ async function runTest3() {
   console.log("✔ Test 3 passed: Pi reply and send tools connect to agent.sock correctly");
 }
 
+async function runTest4_oracle1() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ext-oracle1-"));
+  fs.chmodSync(tmpDir, 0o700);
+  const xmsgDir = path.join(tmpDir, "xmsg");
+  fs.mkdirSync(xmsgDir, { mode: 0o700 });
+  const sockPath = path.join(xmsgDir, "http.sock");
+
+  let fakeSocketReqReceived = false;
+  const socketServer = http.createServer((req, res) => {
+    if (req.url === "/v1/sessions" && req.method === "GET") {
+      fakeSocketReqReceived = true;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify([{ sessionId: "oracle-1-sess", name: "sess-1", harness: "claude" }]));
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+
+  await new Promise((resolve) => socketServer.listen(sockPath, resolve));
+
+  const savedEnv = {
+    XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
+    XMSG_URL: process.env.XMSG_URL,
+    XMSG_HTTP_SOCK: process.env.XMSG_HTTP_SOCK,
+  };
+  process.env.XDG_RUNTIME_DIR = tmpDir;
+  delete process.env.XMSG_URL;
+  delete process.env.XMSG_HTTP_SOCK;
+
+  try {
+    const mockPi = new MockExtensionAPI();
+    const bridge = new XmsgPiBridge(mockPi);
+    bridge.registerListTool();
+
+    const listTool = mockPi.tools.find((t) => t.name === "list");
+    assert.ok(listTool, "list tool must be registered");
+
+    const result = await listTool.execute("call-oracle-1", {});
+
+    assert.equal(fakeSocketReqReceived, true, "Oracle 1: fake server on http.sock must receive GET /v1/sessions");
+    assert.ok(Array.isArray(result.details), "Oracle 1: result details must be an array of sessions");
+    assert.equal(result.details[0].sessionId, "oracle-1-sess");
+    console.log("✔ Oracle 1 passed: With no XMSG_URL and a fake server on http.sock, list returns server sessions");
+  } finally {
+    await new Promise((r) => socketServer.close(r));
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+async function runTest5_oracle2() {
+  let fakeTcpReqReceived = false;
+  const tcpServer = http.createServer((req, res) => {
+    if (req.url === "/v1/sessions" && req.method === "GET") {
+      fakeTcpReqReceived = true;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify([{ sessionId: "oracle-2-tcp-sess", name: "sess-tcp" }]));
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+
+  await new Promise((resolve) => tcpServer.listen(0, "127.0.0.1", resolve));
+  const port = tcpServer.address().port;
+
+  const savedEnv = {
+    XMSG_URL: process.env.XMSG_URL,
+  };
+  process.env.XMSG_URL = `http://127.0.0.1:${port}`;
+
+  try {
+    const mockPi = new MockExtensionAPI();
+    const bridge = new XmsgPiBridge(mockPi);
+    bridge.registerListTool();
+
+    const listTool = mockPi.tools.find((t) => t.name === "list");
+    assert.ok(listTool, "list tool must be registered");
+
+    const result = await listTool.execute("call-oracle-2", {});
+
+    assert.equal(fakeTcpReqReceived, true, "Oracle 2: fake TCP server at XMSG_URL must receive GET /v1/sessions");
+    assert.ok(Array.isArray(result.details), "Oracle 2: result details must be an array of sessions");
+    assert.equal(result.details[0].sessionId, "oracle-2-tcp-sess");
+    console.log("✔ Oracle 2 passed: With XMSG_URL set to TCP fake, list uses it as override");
+  } finally {
+    await new Promise((r) => tcpServer.close(r));
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+async function runTest6_oracle3() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ext-oracle3-"));
+  fs.chmodSync(tmpDir, 0o700);
+  const xmsgDir = path.join(tmpDir, "xmsg");
+  fs.mkdirSync(xmsgDir, { mode: 0o700 });
+  const expectedSockPath = path.join(xmsgDir, "http.sock");
+  // NOTE: No socket server is created or listening at expectedSockPath!
+
+  const savedEnv = {
+    XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
+    XMSG_URL: process.env.XMSG_URL,
+    XMSG_HTTP_SOCK: process.env.XMSG_HTTP_SOCK,
+  };
+  process.env.XDG_RUNTIME_DIR = tmpDir;
+  delete process.env.XMSG_URL;
+  delete process.env.XMSG_HTTP_SOCK;
+
+  let fetchCalled = false;
+  let fetchUrl = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, ...args) => {
+    fetchCalled = true;
+    fetchUrl = String(url);
+    return originalFetch(url, ...args);
+  };
+
+  try {
+    const mockPi = new MockExtensionAPI();
+    const bridge = new XmsgPiBridge(mockPi);
+    bridge.registerListTool();
+
+    const listTool = mockPi.tools.find((t) => t.name === "list");
+    assert.ok(listTool, "list tool must be registered");
+
+    const result = await listTool.execute("call-oracle-3", {});
+
+    assert.equal(fetchCalled, false, `Oracle 3: list must make NO connection to TCP or call fetch (called: ${fetchUrl})`);
+    assert.ok(result.content && result.content[0] && result.content[0].text, "result must contain text content");
+    assert.ok(
+      result.content[0].text.includes(expectedSockPath),
+      `Oracle 3: error message must name socket path (${expectedSockPath}), got: ${result.content[0].text}`,
+    );
+    console.log("✔ Oracle 3 passed: With no socket and no XMSG_URL, list returns error naming socket path and makes no TCP connection");
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
 // Socket path resolution is covered by test-paths.mjs, which runs without pi.
 
 async function main() {
@@ -296,6 +448,9 @@ async function main() {
     await runTest1();
     await runTest2();
     await runTest3();
+    await runTest4_oracle1();
+    await runTest5_oracle2();
+    await runTest6_oracle3();
     console.log("\nALL EXTENSION TESTS PASSED!");
     process.exit(0);
   } catch (err) {
