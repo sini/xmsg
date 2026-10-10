@@ -362,12 +362,15 @@ export class XmsgPiBridge {
     this.pi.registerTool({
       name: "list",
       label: "List",
-      description: "List active agent sessions on the local host",
-      parameters: Type.Object({}),
-      execute: async () => {
+      description: "List active agent sessions on the local host, or on a federated peer when host is specified",
+      parameters: Type.Object({
+        host: Type.Optional(Type.String({ description: "Optional federated peer host name to list sessions from" })),
+      }),
+      execute: async ({ host }: { host?: string } = {}) => {
+        const queryPath = host ? `/v1/sessions?peer=${encodeURIComponent(host)}` : "/v1/sessions";
         if (this.xmsgUrl) {
           try {
-            const res = await fetch(`${this.xmsgUrl}/v1/sessions`);
+            const res = await fetch(`${this.xmsgUrl}${queryPath}`);
             if (!res.ok) {
               const errText = await res.text();
               return {
@@ -410,7 +413,7 @@ export class XmsgPiBridge {
             req = http.request(
               {
                 socketPath: sockPath,
-                path: "/v1/sessions",
+                path: queryPath,
                 method: "GET",
                 headers: {
                   host: "localhost",

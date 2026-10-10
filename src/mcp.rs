@@ -258,7 +258,7 @@ pub fn run_mcp_loop<R: BufRead, W: Write>(
     Ok(())
 }
 
-fn handle_jsonrpc(
+pub fn handle_jsonrpc(
     config: &McpConfig,
     client: &reqwest::blocking::Client,
     msg: &Value,
@@ -304,10 +304,15 @@ fn handle_jsonrpc(
         "tools/list" => id.map(|id| {
             let list_tool = json!({
                 "name": "list",
-                "description": "List active agent sessions on the local host",
+                "description": "List active agent sessions on the local host, or on a federated peer when host is specified",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "host": {
+                            "type": "string",
+                            "description": "Optional federated peer host name to list sessions from"
+                        }
+                    },
                     "additionalProperties": false
                 }
             });
@@ -446,7 +451,7 @@ fn call_agent_sock(sock_path: &std::path::Path, payload: &Value) -> Result<Value
     }
 }
 
-fn execute_tool(
+pub fn execute_tool(
     config: &McpConfig,
     client: &reqwest::blocking::Client,
     name: &str,
@@ -458,13 +463,18 @@ fn execute_tool(
 
     match name {
         "list" => {
+            let host_opt = args.get("host").and_then(|v| v.as_str());
+            let path = match host_opt {
+                Some(host) => format!("/v1/sessions?peer={host}"),
+                None => "/v1/sessions".to_string(),
+            };
             let sock_path = config
                 .http_sock
                 .clone()
                 .or_else(|| crate::http::default_http_sock_path().ok());
             if let Some(ref sock) = sock_path {
                 if sock.exists() {
-                    match crate::http::http_get_unix(sock, "/v1/sessions") {
+                    match crate::http::http_get_unix(sock, &path) {
                         Ok((status, text)) => {
                             if status.is_success() {
                                 return tool_ok(text);
@@ -479,7 +489,7 @@ fn execute_tool(
                 }
             }
 
-            let url = format!("{}/v1/sessions", config.xmsg_url.trim_end_matches('/'));
+            let url = format!("{}{path}", config.xmsg_url.trim_end_matches('/'));
             match client.get(&url).send() {
                 Ok(resp) => {
                     let status = resp.status();

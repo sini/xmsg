@@ -475,7 +475,7 @@ Federated connections establish peer identity using cryptographic certificate pi
   - **Source Validation (`from` present):** When `from` is configured, after the peer's certificate pin matches, the connection's remote IP is checked against the configured CIDRs. If the source IP falls outside all listed CIDRs, the request is immediately rejected with HTTP `403 Forbidden` (`peer_rejected`) and 0 bytes are delivered.
   - **Empty `from` Disallowed:** Configuring `"from": []` is invalid and causes an immediate configuration load error naming the peer.
   - **Stale `no_whois` Rejected:** Previous WhoIs configurations containing `"no_whois"` are rejected at load time naming the obsolete field.
-  - **Inbound Listener Enforcement:** Source address validation applies uniformly to all inbound federated routes (`/fed/v1/messages` and `/fed/v1/replies`).
+  - **Inbound Listener Enforcement:** Source address validation applies uniformly to all inbound federated routes (`/fed/v1/messages`, `/fed/v1/replies`, and `/fed/v1/sessions`).
 
 ### 7.2 Trust models: pinned and CA-signed
 
@@ -555,7 +555,7 @@ No CRL (Certificate Revocation List) or OCSP (Online Certificate Status Protocol
   | `pin`        | string (optional)       | Expected SHA-256 certificate fingerprint pin (`sha256:...`). Mutually exclusive with `ca`.   |
   | `ca`         | string (optional)       | Path to PEM trust anchor bundle file. Mutually exclusive with `pin`; requires `identities`.  |
   | `identities` | list[string] (optional) | Non-empty list of allowed URI SANs or prefix patterns ending in `/*`. Required with `ca`.    |
-  | `allow`      | list[string]            | Permitted operations (`"send"`, `"reply"`).                                                  |
+  | `allow`      | list[string]            | Permitted operations (`"send"`, `"reply"`, `"list"`).                                        |
   | `from`       | list[string] (optional) | Permitted source IP CIDR blocks (e.g. `["192.168.1.0/24"]`).                                 |
   | `leaf`       | bool (optional)         | If true, outbound replies to this peer are not pushed. Default `false`.                      |
   | `principals` | list[string] (optional) | Sender principal filters (`svc:<name>`, `claude:<name>`, `session:<id>`, `anon:<from>`).     |
@@ -563,6 +563,13 @@ No CRL (Certificate Revocation List) or OCSP (Online Certificate Status Protocol
 
   - **Target Filtering (`targets`) & Canonical Prefix Stripping:** When `targets` is configured, a federated `send` from that peer is refused with HTTP `403 Forbidden` (`op_denied`, "target not allowed for peer") before rate-limiting or queueing unless the resolved local target matches an entry (`svc:<name>` for a service daemon, `<harness>:<name>` and `session:<id>` for a session). An empty present list (`"targets": []`) refuses all targets. When `targets` is omitted, every local target is reachable. Replies on the federated reply route are not gated by `targets`.
     - *Target Resolution & Prefix Stripping (P1):* Federated targets frequently specify the destination harness using canonical prefixes (`claude:sess-target`, `agy:sess-id`, `session:sess-id`, `pi:sess-id`). Before querying the local session stores (which index sessions by their bare IDs or directories), `resolve_target_session_fed` strips these harness prefixes. This enables callers across hosts to address sessions using standard harness-qualified target names. This does not bypass policy: the X14 `targets` allowlist evaluation runs immediately after target resolution on the fully resolved target principal and badges.
+
+- **Federated Session Listing (`GET /fed/v1/sessions` & `GET /v1/sessions?peer=<name>`):**
+
+  - **Inbound Route (`GET /fed/v1/sessions`):** Remote peers authenticate over mTLS and must have `"list"` in their configured `allow` list, or requests are refused with HTTP `403 Forbidden` (`op_denied`).
+  - **Target Filtering:** When the peer has `targets` configured, `xmsg` filters local sessions using the exact same badge matching rules as `send` (`target_matches_allowlist`), returning only sessions and service daemons that the peer is permitted to message. When `targets` is omitted, all local sessions are visible.
+  - **Minimal Field Set:** To preserve host isolation and privacy, each entry returned on the federated wire route carries only `name`, `sessionId`, `harness`, `kind`, and `status`. Host-internal details (`cwd`, `pid`, timestamps, versions, entrypoints) are stripped.
+  - **Client-Side Query (`GET /v1/sessions?peer=<name>`):** Local clients query remote peer sessions over `http.sock`. `xmsg` looks up `<name>` in the peers map, calls the remote peer's `/fed/v1/sessions` over the outbound mTLS connector, and returns entries with `ref` set to `<sessionId>@<name>` (the exact address format accepted by `send`). If `<name>` is unknown, HTTP `404 Not Found` is returned. If the remote peer refuses or is unreachable, the error status is passed through naming the peer.
 
 - **No Forwarding:** Forwarding cross-host (`to.ref` containing `@`) is strictly prohibited; receivers reject forwarded requests with `400 no_forward`.
 

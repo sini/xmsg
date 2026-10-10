@@ -1344,6 +1344,18 @@ pub struct FedReplier {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FedSessionEntry {
+    pub name: Option<String>,
+    pub session_id: String,
+    pub harness: String,
+    pub kind: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<String>,
+}
+
 // -----------------------------------------------------------------------------
 // Authenticated Peer Context
 // -----------------------------------------------------------------------------
@@ -1473,6 +1485,7 @@ pub fn build_fed_router(fed_state: Arc<FedState>) -> Router {
             "/fed/v1/messages/{id}/replies",
             get(fed_get_replies_handler),
         )
+        .route("/fed/v1/sessions", get(fed_list_sessions_handler))
         .layer(DefaultBodyLimit::max(max_body_limit))
         .with_state(fed_state)
 }
@@ -2281,6 +2294,71 @@ async fn fed_get_replies_handler(
     Ok((StatusCode::OK, Json(replies)).into_response())
 }
 
+async fn fed_list_sessions_handler(
+    State(fed_state): State<Arc<FedState>>,
+    Extension(peer): Extension<Arc<AuthenticatedPeer>>,
+) -> Result<Response, AppError> {
+    let peer_cfg = fed_state
+        .current_peers()
+        .get(&peer.name)
+        .cloned()
+        .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
+
+    // Refused with 403 op_denied unless peer's allow contains "list"
+    if !peer_cfg.allow.iter().any(|op| op == "list") {
+        return Err(AppError::OpDenied(
+            "list operation not allowed for peer".to_string(),
+        ));
+    }
+
+    // Source address check
+    check_peer_source(&peer_cfg, &peer.remote_ip)?;
+
+    // Rate limiting: consume peer bucket
+    if !fed_state
+        .rate_limiter
+        .check_and_consume(&peer.name, Some(&format!("list:{}", peer.name)))
+    {
+        return Err(AppError::RateLimited("Rate limit exceeded".to_string()));
+    }
+
+    let query = crate::registry::SessionsQuery::default();
+    let mut sessions = crate::registry::list_sessions(&fed_state.sessions_dir, &query);
+    let mut agy_sessions =
+        crate::agy::list_agy_sessions(&fed_state.agy_config, &fed_state.agy_store, &query);
+    sessions.append(&mut agy_sessions);
+    let mut pi_sessions =
+        crate::pi::list_pi_sessions(&fed_state.agy_config.proc_root, &fed_state.pi_store, &query);
+    sessions.append(&mut pi_sessions);
+    let mut svc_sessions = crate::svc::list_svc_sessions(
+        &fed_state.agy_config.proc_root,
+        &fed_state.svc_store,
+        &query,
+    );
+    sessions.append(&mut svc_sessions);
+
+    if let Some(ref allowed_targets) = peer_cfg.targets {
+        sessions.retain(|s| {
+            let target = crate::http::ResolvedTarget::from_session(s.clone());
+            target_matches_allowlist(&target, allowed_targets)
+        });
+    }
+
+    let entries: Vec<FedSessionEntry> = sessions
+        .into_iter()
+        .map(|s| FedSessionEntry {
+            name: s.name,
+            session_id: s.session_id,
+            harness: s.harness,
+            kind: s.kind,
+            status: s.status,
+            r#ref: None,
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(entries)).into_response())
+}
+
 fn resolve_target_session_fed(
     fed_state: &FedState,
     ref_str: &str,
@@ -2764,6 +2842,124 @@ pub async fn poll_federated_replies(
         Err(_) => Err(AppError::PeerUnreachable(
             "Outbound reply poll timed out".to_string(),
         )),
+    }
+}
+
+pub async fn list_federated_sessions(
+    fed_state: &FedState,
+    peer_name: &str,
+) -> Result<Vec<FedSessionEntry>, AppError> {
+    let peer = fed_state
+        .current_peers()
+        .get(peer_name)
+        .cloned()
+        .ok_or_else(|| AppError::NotFound(format!("peer '{peer_name}'")))?;
+
+    let list_fut = async {
+        let connector = make_tls_connector_for_peer(fed_state, &peer)?;
+        let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
+            .await
+            .map_err(|e| {
+                AppError::PeerUnreachable(format!(
+                    "Failed to connect to peer '{peer_name}' at {}: {e}",
+                    peer.address
+                ))
+            })?;
+
+        let server_name = ServerName::try_from(peer_name.to_string())
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let tls_stream = connector
+            .connect(server_name, tcp_stream)
+            .await
+            .map_err(|e| map_tls_connect_error(peer_name, e))?;
+
+        let io = hyper_util::rt::TokioIo::new(tls_stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+            .await
+            .map_err(|e| {
+                AppError::PeerUnreachable(format!(
+                    "HTTP handshake failed with peer '{peer_name}': {e}"
+                ))
+            })?;
+
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                debug!("HTTP connection closed: {e}");
+            }
+        });
+
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri("/fed/v1/sessions")
+            .header("host", peer_name)
+            .body(http_body_util::Empty::<bytes::Bytes>::new())
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let resp = sender.send_request(req).await.map_err(|e| {
+            AppError::PeerUnreachable(format!("Request to peer '{peer_name}' failed: {e}"))
+        })?;
+
+        let status = resp.status();
+        let max_limit = fed_state.max_body + 4096;
+        let limited = http_body_util::Limited::new(resp.into_body(), max_limit);
+        use http_body_util::BodyExt;
+        let body_bytes = limited
+            .collect()
+            .await
+            .map_err(|_| AppError::PayloadTooLarge {
+                size: max_limit + 1,
+                limit: max_limit,
+            })?
+            .to_bytes();
+
+        if status.is_success() {
+            let mut entries: Vec<FedSessionEntry> =
+                serde_json::from_slice(&body_bytes).map_err(|e| {
+                    AppError::Internal(format!(
+                        "Failed to parse sessions from peer '{peer_name}': {e}"
+                    ))
+                })?;
+            for entry in &mut entries {
+                entry.r#ref = Some(format!("{}@{}", entry.session_id, peer_name));
+            }
+            Ok(entries)
+        } else {
+            let err_resp: Result<WireErrorResponse, _> = serde_json::from_slice(&body_bytes);
+            if let Ok(err) = err_resp {
+                let detail = format!("peer '{peer_name}': {}", err.detail);
+                match status {
+                    StatusCode::NOT_FOUND => Err(AppError::NotFound(detail)),
+                    StatusCode::FORBIDDEN => {
+                        if err.error == "op_denied" {
+                            Err(AppError::OpDenied(detail))
+                        } else if err.error == "peer_rejected" {
+                            Err(AppError::PeerRejected(detail))
+                        } else {
+                            Err(AppError::OpDenied(detail))
+                        }
+                    }
+                    StatusCode::TOO_MANY_REQUESTS => Err(AppError::RateLimited(detail)),
+                    StatusCode::BAD_REQUEST => Err(AppError::BadRequest(detail)),
+                    StatusCode::CONFLICT => Err(AppError::Ambiguous(detail)),
+                    StatusCode::GONE => Err(AppError::Gone {
+                        session_id: detail,
+                        pid: 0,
+                    }),
+                    _ => Err(AppError::ServiceUnavailable(detail)),
+                }
+            } else {
+                Err(AppError::ServiceUnavailable(format!(
+                    "Peer '{peer_name}' returned status {status}"
+                )))
+            }
+        }
+    };
+
+    match tokio::time::timeout(Duration::from_secs(5), list_fut).await {
+        Ok(res) => res,
+        Err(_) => Err(AppError::PeerUnreachable(format!(
+            "Outbound list call to peer '{peer_name}' timed out after 5s"
+        ))),
     }
 }
 

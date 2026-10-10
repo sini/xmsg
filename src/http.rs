@@ -121,6 +121,17 @@ pub(crate) enum ResolvedTarget {
     Svc(registry::Session),
 }
 
+impl ResolvedTarget {
+    pub(crate) fn from_session(session: registry::Session) -> Self {
+        match session.harness.as_str() {
+            "svc" => ResolvedTarget::Svc(session),
+            "agy" => ResolvedTarget::Agy(session),
+            "pi" => ResolvedTarget::Pi(session),
+            _ => ResolvedTarget::Claude(session, PathBuf::new()),
+        }
+    }
+}
+
 pub(crate) fn resolve_target_session(
     state: &AppState,
     ref_str: &str,
@@ -196,7 +207,16 @@ pub(crate) fn resolve_target_session(
 async fn list_sessions_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SessionsQuery>,
-) -> impl IntoResponse {
+) -> Result<Response, AppError> {
+    if let Some(ref peer_name) = query.peer {
+        let fed_state = state
+            .fed_state
+            .as_ref()
+            .ok_or_else(|| AppError::NotFound(format!("peer '{peer_name}'")))?;
+        let entries = crate::fed::list_federated_sessions(fed_state, peer_name).await?;
+        return Ok((StatusCode::OK, Json(entries)).into_response());
+    }
+
     let mut sessions = registry::list_sessions(&state.sessions_dirs, &query);
     let mut agy_sessions =
         crate::agy::list_agy_sessions(&state.agy_config, &state.agy_store, &query);
@@ -207,7 +227,7 @@ async fn list_sessions_handler(
     let mut svc_sessions =
         crate::svc::list_svc_sessions(&state.agy_config.proc_root, &state.svc_store, &query);
     sessions.append(&mut svc_sessions);
-    (StatusCode::OK, Json(sessions))
+    Ok((StatusCode::OK, Json(sessions)).into_response())
 }
 
 async fn get_session_handler(

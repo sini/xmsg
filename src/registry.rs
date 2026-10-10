@@ -192,6 +192,7 @@ impl From<SessionFileEntry> for Session {
 pub struct SessionsQuery {
     pub cwd: Option<String>,
     pub status: Option<String>,
+    pub peer: Option<String>,
 }
 
 pub fn is_pid_live(pid: u32, expected_proc_start: &str) -> bool {
