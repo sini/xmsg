@@ -477,21 +477,92 @@ Federated connections establish peer identity using cryptographic certificate pi
   - **Stale `no_whois` Rejected:** Previous WhoIs configurations containing `"no_whois"` are rejected at load time naming the obsolete field.
   - **Inbound Listener Enforcement:** Source address validation applies uniformly to all inbound federated routes (`/fed/v1/messages` and `/fed/v1/replies`).
 
-### 7.2 Configuration & Operation
+### 7.2 Trust models: pinned and CA-signed
+
+`xmsg` supports two distinct, mutually exclusive trust models for authenticating federation peers:
+
+#### When to use which
+
+- **Pinned certificates (`pin`):** Best for 1:1 direct peerings, edge/leaf nodes, local development clusters, or tightly coupled environments without PKI infrastructure. Direct public key fingerprint verification with zero CA dependencies.
+- **CA-signed certificates (`ca` + `identities`):** Best for larger organizations, service meshes, dynamic agent deployments, and SPIFFE/SPIRE environments (including cert-manager, step-ca, or hand-rolled CAs). Peers rotate certificates independently against trusted root/intermediate anchors without updating `peers.json` across the entire fleet on every rotation.
+
+#### Peer entry formats & examples
+
+A peer entry carries **EXACTLY ONE trust mechanism**: either `pin`, or `ca` (path to a PEM bundle of one or more trust anchors) plus `identities` (a non-empty list of URI patterns). Specifying both or neither is an immediate configuration error at load time.
+
+```json
+{
+  "alpha-pinned": {
+    "address": "192.168.1.50:7788",
+    "pin": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "allow": ["send", "reply"]
+  },
+  "beta-spiffe": {
+    "address": "10.0.0.12:7788",
+    "ca": "/etc/xmsg/spire-bundle.pem",
+    "identities": [
+      "spiffe://example.org/ns/prod/sa/worker"
+    ],
+    "allow": ["send", "reply"]
+  },
+  "gamma-wildcard": {
+    "address": "10.0.0.15:7788",
+    "ca": "/etc/xmsg/ca.pem",
+    "identities": [
+      "spiffe://example.org/ns/matrix/*"
+    ],
+    "allow": ["send"]
+  }
+}
+```
+
+- **Exact SPIFFE ID:** `"identities": ["spiffe://example.org/ns/prod/sa/worker"]` matches only that exact URI.
+- **Prefix Wildcard (`/*`):** `"identities": ["spiffe://example.org/ns/matrix/*"]` matches any URI with that prefix base plus at least one additional path segment (e.g. `spiffe://example.org/ns/matrix/bot1` or `spiffe://example.org/ns/matrix/agents/reviewer`), but does NOT match `spiffe://example.org/ns/matrix` or `spiffe://example.org/ns/matrix-other/bot1`. No other wildcard syntax is supported.
+- **Hand CA:** Any standard PEM certificate bundle containing one or more X.509 root or intermediate trust anchors may be supplied in `"ca"`.
+
+#### The URI SAN rule
+
+- **Strict Identity Source:** Peer identity for CA-authenticated certificates is extracted exclusively from the certificate's **Uniform Resource Identifier (URI) Subject Alternative Name (SAN)**. Common Name (CN) and DNS SANs are NEVER used as identity.
+- **Exactly One URI SAN:** A CA-authenticated certificate must carry **EXACTLY ONE URI SAN** (conforming to SPIFFE X.509-SVID specifications). Certificates with zero or multiple URI SANs are refused at the TLS handshake.
+
+#### Verification & peer matching
+
+- **Inbound (Server):** When a remote peer connects, `xmsg` validates the presented certificate chain against each configured CA peer's bundle (signatures, current validity period at `now`, client auth key usage), extracts the URI SAN, and identifies the peer whose `identities` match AND whose bundle validated the chain.
+  - Exactly one CA peer matched ⇒ that peer's policy applies.
+  - None matched ⇒ handshake refused.
+  - Multiple CA peers matched ⇒ handshake refused (fail closed; logged as overlap).
+  - Pinned peers take precedence only when the certificate pin matches; a certificate never matches both a pin and a CA entry silently (refuse and log).
+- **Outbound (Client):** When this node connects to a CA peer, it verifies the server's chain against that peer's CA bundle and requires the server's single URI SAN to match that peer's `identities`. If the server presents an untrusted CA chain or wrong/missing URI SAN, the send fails and nothing is delivered.
+- **Own Credentials:** `--fed-cert` accepts a certificate chain (leaf certificate first, followed by intermediate CAs) and presents it during mTLS handshakes. `--fed-key` remains unchanged. A node may federate with pinned and CA peers simultaneously.
+
+#### Authorization stays per peer
+
+A valid CA signature establishes **authentication only**. All authorization controls (`allow`, `from`, `leaf`, `principals`, `targets`) apply identically to both pinned and CA-signed peers. Once an incoming connection is authenticated to a specific peer entry, that peer's policies govern allowed operations and target sessions.
+
+#### Revocation note
+
+No CRL (Certificate Revocation List) or OCSP (Online Certificate Status Protocol) verification is performed. Certificate revocation must be managed through **short certificate lifetimes** (such as standard hourly or daily X.509-SVID rotation via SPIRE or step-ca).
+
+---
+
+### 7.3 Configuration & Operation
 
 - **Peers Map (`--peers-file`):** A JSON dictionary mapping peer hostnames to their configuration options:
 
   | Field        | Type                    | Description                                                                                  |
   | ------------ | ----------------------- | -------------------------------------------------------------------------------------------- |
-  | `address`    | string                  | Target endpoint socket address (`host:port`).                                                |
-  | `pin`        | string                  | Expected SHA-256 certificate fingerprint pin (`sha256:...`).                                 |
+  | `address`    | string                  | Target endpoint socket address (`host:port`). Required.                                      |
+  | `pin`        | string (optional)       | Expected SHA-256 certificate fingerprint pin (`sha256:...`). Mutually exclusive with `ca`.   |
+  | `ca`         | string (optional)       | Path to PEM trust anchor bundle file. Mutually exclusive with `pin`; requires `identities`.  |
+  | `identities` | list[string] (optional) | Non-empty list of allowed URI SANs or prefix patterns ending in `/*`. Required with `ca`.    |
   | `allow`      | list[string]            | Permitted operations (`"send"`, `"reply"`).                                                  |
   | `from`       | list[string] (optional) | Permitted source IP CIDR blocks (e.g. `["192.168.1.0/24"]`).                                 |
   | `leaf`       | bool (optional)         | If true, outbound replies to this peer are not pushed. Default `false`.                      |
   | `principals` | list[string] (optional) | Sender principal filters (`svc:<name>`, `claude:<name>`, `session:<id>`, `anon:<from>`).     |
   | `targets`    | list[string] (optional) | Permitted local target principal filters (`svc:<name>`, `<harness>:<name>`, `session:<id>`). |
 
-  - **Target Filtering (`targets`):** When `targets` is configured, a federated `send` from that peer is refused with HTTP `403 Forbidden` (`op_denied`, "target not allowed for peer") before rate-limiting or queueing unless the resolved local target matches an entry (`svc:<name>` for a service daemon, `<harness>:<name>` and `session:<id>` for a session). An empty present list (`"targets": []`) refuses all targets. When `targets` is omitted, every local target is reachable. Replies on the federated reply route are not gated by `targets`.
+  - **Target Filtering (`targets`) & Canonical Prefix Stripping:** When `targets` is configured, a federated `send` from that peer is refused with HTTP `403 Forbidden` (`op_denied`, "target not allowed for peer") before rate-limiting or queueing unless the resolved local target matches an entry (`svc:<name>` for a service daemon, `<harness>:<name>` and `session:<id>` for a session). An empty present list (`"targets": []`) refuses all targets. When `targets` is omitted, every local target is reachable. Replies on the federated reply route are not gated by `targets`.
+    - *Target Resolution & Prefix Stripping (P1):* Federated targets frequently specify the destination harness using canonical prefixes (`claude:sess-target`, `agy:sess-id`, `session:sess-id`, `pi:sess-id`). Before querying the local session stores (which index sessions by their bare IDs or directories), `resolve_target_session_fed` strips these harness prefixes. This enables callers across hosts to address sessions using standard harness-qualified target names. This does not bypass policy: the X14 `targets` allowlist evaluation runs immediately after target resolution on the fully resolved target principal and badges.
 
 - **No Forwarding:** Forwarding cross-host (`to.ref` containing `@`) is strictly prohibited; receivers reject forwarded requests with `400 no_forward`.
 

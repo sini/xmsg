@@ -595,7 +595,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let (cert_der, key_der) =
+    let (cert_der, cert_chain_der, key_der) =
         if let (Some(cert_path), Some(key_path)) = (args.fed_cert, args.fed_key) {
             let cert_pem = std::fs::read(&cert_path)
                 .map_err(|e| format!("failed to read fed cert at {}: {e}", cert_path.display()))?;
@@ -603,13 +603,21 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("failed to read fed key at {}: {e}", key_path.display()))?;
 
             use rustls::pki_types::pem::PemObject;
-            let cert = rustls::pki_types::CertificateDer::from_pem_slice(&cert_pem)
-                .map_err(|e| format!("failed to parse cert pem: {e}"))?;
+            let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+                rustls::pki_types::CertificateDer::pem_slice_iter(&cert_pem)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| format!("failed to parse cert pem: {e}"))?;
+            if certs.is_empty() {
+                return Err("cert file contains 0 certificates".to_string().into());
+            }
             let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(&key_pem)
                 .map_err(|e| format!("failed to parse key pem: {e}"))?;
-            (cert.to_vec(), key.secret_der().to_vec())
+            let cert_der = certs[0].to_vec();
+            let cert_chain_der: Vec<Vec<u8>> = certs.into_iter().map(|c| c.to_vec()).collect();
+            let key_der = key.secret_der().to_vec();
+            (cert_der, cert_chain_der, key_der)
         } else {
-            (Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new())
         };
 
     let fed_state = if let Some(peers_file) = args.peers_file {
@@ -621,6 +629,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
             host_label: host_label.clone(),
             peers: peers_arc.clone(),
             cert_der: cert_der.clone(),
+            cert_chain_der: cert_chain_der.clone(),
             key_der: key_der.clone(),
             rate_limiter: Arc::new(xmsg::fed::RateLimiter::new(60, 20)),
             db: db.clone(),
@@ -639,9 +648,9 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         });
 
         if let Some((listener, listen_addr)) = fed_listener {
-            let allowed_pins = Arc::new(peers_arc.allowed_pins());
-            let acceptor = xmsg::fed::make_tls_acceptor(&cert_der, &key_der, allowed_pins)
-                .map_err(|e| format!("failed to initialize federation TLS acceptor: {e}"))?;
+            let acceptor =
+                xmsg::fed::make_tls_acceptor(&fs.cert_chain(), &key_der, peers_arc.clone())
+                    .map_err(|e| format!("failed to initialize federation TLS acceptor: {e}"))?;
             let fs_clone = fs.clone();
             tokio::spawn(async move {
                 info!(listen = %listen_addr, "starting federation mTLS listener");

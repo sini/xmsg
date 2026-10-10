@@ -16,7 +16,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::error::AppError;
 use crate::inbox::{self, DeliveryResponse};
@@ -38,7 +38,12 @@ pub struct PeerConfig {
     #[serde(default)]
     pub name: String,
     pub address: String,
-    pub pin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identities: Option<Vec<String>>,
     #[serde(default)]
     pub allow: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -210,17 +215,49 @@ pub fn check_peer_source(peer_cfg: &PeerConfig, remote_ip: &IpAddr) -> Result<()
     Ok(())
 }
 
+pub fn uri_matches_identity(uri: &str, pattern: &str) -> bool {
+    if let Some(prefix_base) = pattern.strip_suffix("/*") {
+        if uri.contains('?') || uri.contains('#') {
+            return false;
+        }
+        let path_part = uri.split_once("://").map(|(_, p)| p).unwrap_or(uri);
+        if path_part.contains("//") {
+            return false;
+        }
+        for seg in path_part.split('/') {
+            if seg == "." || seg == ".." {
+                return false;
+            }
+        }
+        let prefix_with_slash = format!("{prefix_base}/");
+        let Some(rem) = uri.strip_prefix(&prefix_with_slash) else {
+            return false;
+        };
+        if rem.is_empty() || rem.ends_with('/') {
+            return false;
+        }
+        true
+    } else {
+        uri == pattern
+    }
+}
+
+pub fn uri_matches_any_identity(uri: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|p| uri_matches_identity(uri, p))
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PeersMap {
     peers_by_name: HashMap<String, PeerConfig>,
     name_by_pin: HashMap<String, String>,
+    ca_bundles_by_name: HashMap<String, Vec<rustls::pki_types::TrustAnchor<'static>>>,
 }
 
 impl PeersMap {
     pub fn new(peers: HashMap<String, PeerConfig>) -> Self {
         let mut map = Self::default();
         for (_, peer) in peers {
-            map.insert(peer);
+            let _ = map.insert(peer);
         }
         map
     }
@@ -229,11 +266,35 @@ impl PeersMap {
         Self::default()
     }
 
-    pub fn insert(&mut self, mut peer: PeerConfig) {
-        let norm_pin = normalize_pin(&peer.pin);
-        peer.pin = norm_pin.clone();
-        self.name_by_pin.insert(norm_pin, peer.name.clone());
+    pub fn insert(&mut self, mut peer: PeerConfig) -> Result<(), String> {
+        if self.peers_by_name.contains_key(&peer.name) {
+            return Err(format!("duplicate peer name '{}'", peer.name));
+        }
+        if let Some(ref pin) = peer.pin {
+            let norm_pin = normalize_pin(pin);
+            peer.pin = Some(norm_pin.clone());
+            self.name_by_pin.insert(norm_pin, peer.name.clone());
+        }
         self.peers_by_name.insert(peer.name.clone(), peer);
+        Ok(())
+    }
+
+    pub fn insert_with_anchors(
+        &mut self,
+        mut peer: PeerConfig,
+        anchors: Vec<rustls::pki_types::TrustAnchor<'static>>,
+    ) -> Result<(), String> {
+        if self.peers_by_name.contains_key(&peer.name) {
+            return Err(format!("duplicate peer name '{}'", peer.name));
+        }
+        if let Some(ref pin) = peer.pin {
+            let norm_pin = normalize_pin(pin);
+            peer.pin = Some(norm_pin.clone());
+            self.name_by_pin.insert(norm_pin, peer.name.clone());
+        }
+        self.ca_bundles_by_name.insert(peer.name.clone(), anchors);
+        self.peers_by_name.insert(peer.name.clone(), peer);
+        Ok(())
     }
 
     pub fn get(&self, name: &str) -> Option<&PeerConfig> {
@@ -245,6 +306,17 @@ impl PeersMap {
         self.name_by_pin
             .get(&norm)
             .and_then(|name| self.peers_by_name.get(name))
+    }
+
+    pub fn ca_peers(&self) -> Vec<&PeerConfig> {
+        self.peers_by_name
+            .values()
+            .filter(|p| p.ca.is_some() || self.ca_bundles_by_name.contains_key(&p.name))
+            .collect()
+    }
+
+    pub fn get_ca_anchors(&self, name: &str) -> Option<&[rustls::pki_types::TrustAnchor<'static>]> {
+        self.ca_bundles_by_name.get(name).map(|v| v.as_slice())
     }
 
     pub fn contains_name(&self, name: &str) -> bool {
@@ -263,7 +335,7 @@ impl PeersMap {
         self.peers_by_name
             .values()
             .filter(|p| !p.allow.is_empty())
-            .map(|p| (p.pin.clone(), p.name.clone()))
+            .filter_map(|p| p.pin.as_ref().map(|pin| (pin.clone(), p.name.clone())))
             .collect()
     }
 
@@ -321,6 +393,10 @@ impl PeersMap {
                 .unwrap_or(&key_name)
                 .to_string();
 
+            if map.contains_name(&name) {
+                return Err(format!("duplicate peer name '{name}'"));
+            }
+
             // Oracle 5: A peers file that still carries no_whois is a load error naming the field
             if obj.contains_key("no_whois") {
                 return Err(format!(
@@ -331,8 +407,8 @@ impl PeersMap {
             // Check for unknown fields
             for k in obj.keys() {
                 match k.as_str() {
-                    "name" | "address" | "pin" | "allow" | "from" | "leaf" | "principals"
-                    | "targets" => {}
+                    "name" | "address" | "pin" | "ca" | "identities" | "allow" | "from"
+                    | "leaf" | "principals" | "targets" => {}
                     other => {
                         return Err(format!(
                             "unknown field '{other}' in peer config for '{name}'"
@@ -347,11 +423,86 @@ impl PeersMap {
                 .ok_or_else(|| format!("peer '{name}' missing required field 'address'"))?
                 .to_string();
 
-            let pin = obj
-                .get("pin")
-                .and_then(|p| p.as_str())
-                .ok_or_else(|| format!("peer '{name}' missing required field 'pin'"))?
-                .to_string();
+            let has_pin = obj.contains_key("pin");
+            let has_ca = obj.contains_key("ca");
+            let has_identities = obj.contains_key("identities");
+
+            if has_pin && has_ca {
+                return Err(format!(
+                    "peer '{name}' specifies both 'pin' and 'ca': exactly one trust mechanism is allowed"
+                ));
+            }
+            if !has_pin && !has_ca {
+                return Err(format!(
+                    "peer '{name}' missing trust mechanism: must specify either 'pin' or 'ca'"
+                ));
+            }
+            if has_pin && has_identities {
+                return Err(format!(
+                    "peer '{name}' specifies 'identities' with 'pin': 'identities' is only valid with 'ca'"
+                ));
+            }
+            if has_ca && !has_identities {
+                return Err(format!(
+                    "peer '{name}' specifies 'ca' but missing required 'identities'"
+                ));
+            }
+
+            let pin: Option<String> = if has_pin {
+                let p = obj
+                    .get("pin")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| format!("peer '{name}': 'pin' must be a string"))?;
+                Some(p.to_string())
+            } else {
+                None
+            };
+
+            let (ca, identities, ca_anchors) = if has_ca {
+                let ca_str = obj
+                    .get("ca")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| format!("peer '{name}': 'ca' must be a file path string"))?;
+                let ca_path = PathBuf::from(ca_str);
+                let pem_bytes = std::fs::read(&ca_path).map_err(|e| {
+                    format!(
+                        "peer '{name}': failed to read CA file {}: {e}",
+                        ca_path.display()
+                    )
+                })?;
+                let anchors =
+                    parse_ca_bundle_pem(&pem_bytes).map_err(|e| format!("peer '{name}': {e}"))?;
+
+                let ids_val = obj
+                    .get("identities")
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| format!("peer '{name}': 'identities' must be an array"))?;
+                if ids_val.is_empty() {
+                    return Err(format!(
+                        "peer '{name}': 'identities' must contain at least one identity"
+                    ));
+                }
+                let mut ids = Vec::with_capacity(ids_val.len());
+                for item in ids_val {
+                    let s = item.as_str().ok_or_else(|| {
+                        format!("peer '{name}': 'identities' elements must be strings")
+                    })?;
+                    if s.is_empty() {
+                        return Err(format!(
+                            "peer '{name}': empty identity pattern is not allowed"
+                        ));
+                    }
+                    if s.contains('*') && (!s.ends_with("/*") || s[..s.len() - 2].contains('*')) {
+                        return Err(format!(
+                            "peer '{name}': invalid identity pattern '{s}': wildcards only supported as a single trailing '/*'"
+                        ));
+                    }
+                    ids.push(s.to_string());
+                }
+                (Some(ca_path), Some(ids), Some(anchors))
+            } else {
+                (None, None, None)
+            };
 
             let allow: Vec<String> = if let Some(al) = obj.get("allow") {
                 let arr = al
@@ -447,16 +598,23 @@ impl PeersMap {
                 None
             };
 
-            map.insert(PeerConfig {
-                name,
+            let peer_config = PeerConfig {
+                name: name.clone(),
                 address,
                 pin,
+                ca,
+                identities,
                 allow,
                 from,
                 leaf,
                 principals,
                 targets,
-            });
+            };
+            if let Some(anchors) = ca_anchors {
+                map.insert_with_anchors(peer_config, anchors)?;
+            } else {
+                map.insert(peer_config)?;
+            }
         }
         Ok(map)
     }
@@ -465,6 +623,82 @@ impl PeersMap {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read peers file {}: {e}", path.display()))?;
         Self::load_from_json(&content)
+    }
+
+    pub fn resolve_incoming_peer(
+        &self,
+        leaf: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+    ) -> Result<(PeerConfig, Option<String>), AppError> {
+        let client_pin = spki_sha256_from_der(leaf.as_ref())
+            .map_err(|e| AppError::Internal(format!("Failed to compute SPKI pin: {e}")))?;
+        let norm_pin = normalize_pin(&client_pin);
+        let any_pin_match = self.get_by_pin(&norm_pin);
+
+        let uris = extract_uri_sans(leaf.as_ref()).unwrap_or_default();
+        let mut ca_matches: Vec<(&PeerConfig, String)> = Vec::new();
+
+        if uris.len() == 1 {
+            let uri = &uris[0];
+            let now = UnixTime::now();
+            for peer in self.ca_peers().into_iter().filter(|p| !p.allow.is_empty()) {
+                if let Some(ref identities) = peer.identities {
+                    if uri_matches_any_identity(uri, identities) {
+                        if let Some(anchors) = self.get_ca_anchors(&peer.name) {
+                            if verify_cert_chain(
+                                leaf,
+                                intermediates,
+                                anchors,
+                                now,
+                                webpki::KeyUsage::client_auth(),
+                            )
+                            .is_ok()
+                            {
+                                ca_matches.push((peer, uri.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(pin_peer) = any_pin_match {
+            if !ca_matches.is_empty() {
+                tracing::warn!(
+                    "Presented certificate matches both pinned peer '{}' and CA peer(s); refusing (fail closed)",
+                    pin_peer.name
+                );
+                return Err(AppError::PeerRejected(format!(
+                    "client certificate matches both pinned peer '{}' and CA peer(s); refusing (fail closed)",
+                    pin_peer.name
+                )));
+            }
+            if pin_peer.allow.is_empty() {
+                return Err(AppError::PeerRejected(format!(
+                    "peer '{}' has empty allow list (outbound-only)",
+                    pin_peer.name
+                )));
+            }
+            return Ok((pin_peer.clone(), None));
+        }
+
+        if ca_matches.len() > 1 {
+            tracing::warn!(
+                "Presented certificate matches multiple CA peers; refusing (fail closed)"
+            );
+            return Err(AppError::PeerRejected(
+                "client certificate matches multiple CA peers; refusing (fail closed)".to_string(),
+            ));
+        }
+
+        if ca_matches.len() == 1 {
+            let (peer, uri) = ca_matches.remove(0);
+            return Ok((peer.clone(), Some(uri)));
+        }
+
+        Err(AppError::PeerRejected(
+            "client certificate did not match any allowed pin or CA peer".to_string(),
+        ))
     }
 }
 
@@ -502,6 +736,103 @@ pub fn spki_sha256_from_der(cert_der: &[u8]) -> Result<String, String> {
     use sha2::Digest;
     let hash = sha2::Sha256::digest(spki_bytes);
     Ok(hex::encode(hash))
+}
+
+pub fn extract_uri_sans(cert_der: &[u8]) -> Result<Vec<String>, String> {
+    let (_, cert) = x509_parser::parse_x509_certificate(cert_der)
+        .map_err(|e| format!("Failed to parse X.509 certificate: {e}"))?;
+    let mut uris = Vec::new();
+    for ext in cert.extensions() {
+        if let x509_parser::extensions::ParsedExtension::SubjectAlternativeName(san) =
+            ext.parsed_extension()
+        {
+            for name in &san.general_names {
+                if let x509_parser::extensions::GeneralName::URI(uri) = name {
+                    uris.push(uri.to_string());
+                }
+            }
+        }
+    }
+    Ok(uris)
+}
+
+pub fn parse_ca_bundle_pem(
+    pem_bytes: &[u8],
+) -> Result<Vec<rustls::pki_types::TrustAnchor<'static>>, String> {
+    use rustls::pki_types::pem::PemObject;
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(pem_bytes)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("failed to parse CA PEM bundle: {e}"))?;
+
+    if certs.is_empty() {
+        return Err("CA PEM bundle contains 0 certificates".to_string());
+    }
+
+    let mut anchors = Vec::with_capacity(certs.len());
+    for cert in &certs {
+        let is_ca = {
+            let (_, parsed) = x509_parser::parse_x509_certificate(cert.as_ref())
+                .map_err(|e| format!("failed to parse certificate in CA bundle: {e}"))?;
+            let mut found_ca = false;
+            for ext in parsed.extensions() {
+                if let x509_parser::extensions::ParsedExtension::BasicConstraints(bc) =
+                    ext.parsed_extension()
+                {
+                    found_ca = bc.ca;
+                    break;
+                }
+            }
+            found_ca
+        };
+        if !is_ca {
+            return Err(
+                "CA PEM bundle contains a certificate that is not a CA (basicConstraints CA:TRUE required)"
+                    .to_string(),
+            );
+        }
+
+        let ta = webpki::anchor_from_trusted_cert(cert)
+            .map_err(|e| format!("failed to parse trust anchor from certificate: {e}"))?;
+        anchors.push(ta.to_owned());
+    }
+    Ok(anchors)
+}
+
+pub fn verify_cert_chain(
+    end_entity: &CertificateDer<'_>,
+    intermediates: &[CertificateDer<'_>],
+    anchors: &[rustls::pki_types::TrustAnchor<'_>],
+    now: UnixTime,
+    usage: webpki::KeyUsage,
+) -> Result<(), rustls::Error> {
+    let ee = webpki::EndEntityCert::try_from(end_entity)
+        .map_err(|_| rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding))?;
+
+    ee.verify_for_usage(
+        webpki::ALL_VERIFICATION_ALGS,
+        anchors,
+        intermediates,
+        now,
+        usage,
+        None,
+        None,
+    )
+    .map_err(|e| match e {
+        webpki::Error::CertExpired { .. } => {
+            rustls::Error::InvalidCertificate(rustls::CertificateError::Expired)
+        }
+        webpki::Error::CertNotValidYet { .. } => {
+            rustls::Error::InvalidCertificate(rustls::CertificateError::NotValidYet)
+        }
+        webpki::Error::UnknownIssuer => {
+            rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)
+        }
+        _ => rustls::Error::InvalidCertificate(
+            rustls::CertificateError::ApplicationVerificationFailure,
+        ),
+    })?;
+
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -611,6 +942,225 @@ impl rustls::client::danger::ServerCertVerifier for PinnedServerCertVerifier {
                 rustls::CertificateError::UnknownIssuer,
             ))
         }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+#[derive(Debug)]
+pub struct CombinedClientCertVerifier {
+    peers: Arc<PeersMap>,
+}
+
+impl CombinedClientCertVerifier {
+    pub fn new(peers: Arc<PeersMap>) -> Self {
+        Self { peers }
+    }
+}
+
+impl rustls::server::danger::ClientCertVerifier for CombinedClientCertVerifier {
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: UnixTime,
+    ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+        let pin = spki_sha256_from_der(end_entity.as_ref()).map_err(|_| {
+            rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+        })?;
+        let norm_pin = normalize_pin(&pin);
+        let any_pin_match = self.peers.get_by_pin(&norm_pin);
+
+        let uris = extract_uri_sans(end_entity.as_ref()).unwrap_or_default();
+        let mut ca_matches: Vec<&PeerConfig> = Vec::new();
+
+        if uris.len() == 1 {
+            let uri = &uris[0];
+            for peer in self
+                .peers
+                .ca_peers()
+                .into_iter()
+                .filter(|p| !p.allow.is_empty())
+            {
+                if let Some(ref identities) = peer.identities {
+                    if uri_matches_any_identity(uri, identities) {
+                        if let Some(anchors) = self.peers.get_ca_anchors(&peer.name) {
+                            if verify_cert_chain(
+                                end_entity,
+                                intermediates,
+                                anchors,
+                                now,
+                                webpki::KeyUsage::client_auth(),
+                            )
+                            .is_ok()
+                            {
+                                ca_matches.push(peer);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Silent overlap: refuse if both pin and CA match (including outbound-only pinned peers)
+        if let Some(pin_peer) = any_pin_match {
+            if !ca_matches.is_empty() {
+                tracing::warn!(
+                    "Presented certificate matches both pinned peer '{}' and CA peer(s); refusing (fail closed)",
+                    pin_peer.name
+                );
+                return Err(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::ApplicationVerificationFailure,
+                ));
+            }
+            if pin_peer.allow.is_empty() {
+                return Err(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::ApplicationVerificationFailure,
+                ));
+            }
+            return Ok(rustls::server::danger::ClientCertVerified::assertion());
+        }
+
+        if ca_matches.len() > 1 {
+            tracing::warn!(
+                "Presented certificate matches multiple CA peers; refusing (fail closed)"
+            );
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            ));
+        }
+
+        if ca_matches.len() == 1 {
+            return Ok(rustls::server::danger::ClientCertVerified::assertion());
+        }
+
+        Err(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::UnknownIssuer,
+        ))
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+#[derive(Debug)]
+pub struct CaServerCertVerifier {
+    anchors: Vec<rustls::pki_types::TrustAnchor<'static>>,
+    allowed_identities: Vec<String>,
+}
+
+impl CaServerCertVerifier {
+    pub fn new(
+        anchors: Vec<rustls::pki_types::TrustAnchor<'static>>,
+        allowed_identities: Vec<String>,
+    ) -> Self {
+        Self {
+            anchors,
+            allowed_identities,
+        }
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for CaServerCertVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        verify_cert_chain(
+            end_entity,
+            intermediates,
+            &self.anchors,
+            now,
+            webpki::KeyUsage::server_auth(),
+        )?;
+
+        let uris = extract_uri_sans(end_entity.as_ref()).map_err(|_| {
+            rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+        })?;
+        if uris.len() != 1 {
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            ));
+        }
+
+        if !uri_matches_any_identity(&uris[0], &self.allowed_identities) {
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            ));
+        }
+
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
@@ -794,6 +1344,7 @@ pub struct FedReplier {
 pub struct AuthenticatedPeer {
     pub name: String,
     pub pin: String,
+    pub uri: Option<String>,
     pub remote_ip: IpAddr,
 }
 
@@ -805,6 +1356,7 @@ pub struct FedState {
     pub host_label: String,
     pub peers: Arc<PeersMap>,
     pub cert_der: Vec<u8>,
+    pub cert_chain_der: Vec<Vec<u8>>,
     pub key_der: Vec<u8>,
     pub rate_limiter: Arc<RateLimiter>,
     pub db: Arc<Mutex<rusqlite::Connection>>,
@@ -820,6 +1372,19 @@ pub struct FedState {
     pub is_leaf: bool,
     pub leaf_principal: Option<String>,
     pub outbound_replies_pushed: Arc<AtomicU64>,
+}
+
+impl FedState {
+    pub fn cert_chain(&self) -> Vec<CertificateDer<'static>> {
+        if !self.cert_chain_der.is_empty() {
+            self.cert_chain_der
+                .iter()
+                .map(|c| CertificateDer::from(c.clone()))
+                .collect()
+        } else {
+            vec![CertificateDer::from(self.cert_der.clone())]
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -902,7 +1467,6 @@ async fn fed_send_message_handler(
         ));
     }
 
-    // 3. Resolve local target session and check target allowlist BEFORE rate-limiting or queueing
     let target = match resolve_target_session_fed(&fed_state, target_ref) {
         Ok(t) => {
             if let Some(ref allowed_targets) = peer_cfg.targets {
@@ -1648,22 +2212,28 @@ fn resolve_target_session_fed(
     fed_state: &FedState,
     ref_str: &str,
 ) -> Result<crate::http::ResolvedTarget, AppError> {
-    match crate::registry::resolve_session(&fed_state.sessions_dir, ref_str) {
+    let claude_ref = ref_str
+        .strip_prefix("claude:")
+        .or_else(|| ref_str.strip_prefix("session:"))
+        .unwrap_or(ref_str);
+    match crate::registry::resolve_session(&fed_state.sessions_dir, claude_ref) {
         Ok((session, socket_path)) => Ok(crate::http::ResolvedTarget::Claude(session, socket_path)),
         Err(AppError::Gone { session_id, pid }) => Err(AppError::Gone { session_id, pid }),
         Err(AppError::Ambiguous(ids)) => Err(AppError::Ambiguous(ids)),
         Err(AppError::NotFound(_)) => {
+            let agy_ref = ref_str.strip_prefix("agy:").unwrap_or(ref_str);
             match crate::agy::resolve_agy_session(
                 &fed_state.agy_config,
                 &fed_state.agy_store,
-                ref_str,
+                agy_ref,
             )? {
                 Some(session) => Ok(crate::http::ResolvedTarget::Agy(session)),
                 None => {
+                    let pi_ref = ref_str.strip_prefix("pi:").unwrap_or(ref_str);
                     match crate::pi::resolve_pi_session(
                         &fed_state.agy_config.proc_root,
                         &fed_state.pi_store,
-                        ref_str,
+                        pi_ref,
                     )? {
                         Some(session) => Ok(crate::http::ResolvedTarget::Pi(session)),
                         None => {
@@ -1712,13 +2282,48 @@ pub fn make_tls_connector(
     Ok(tokio_rustls::TlsConnector::from(Arc::new(client_config)))
 }
 
+pub fn make_tls_connector_for_peer(
+    fed_state: &FedState,
+    peer: &PeerConfig,
+) -> Result<tokio_rustls::TlsConnector, AppError> {
+    let client_cert = fed_state.cert_chain();
+    let key = PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+        fed_state.key_der.clone(),
+    ));
+
+    let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> =
+        if let Some(ref pin) = peer.pin {
+            Arc::new(PinnedServerCertVerifier::new(pin))
+        } else if let Some(anchors) = fed_state.peers.get_ca_anchors(&peer.name) {
+            let identities = peer.identities.clone().unwrap_or_default();
+            Arc::new(CaServerCertVerifier::new(anchors.to_vec(), identities))
+        } else {
+            return Err(AppError::Internal(format!(
+                "peer '{}' has neither pin nor valid CA bundle",
+                peer.name
+            )));
+        };
+
+    let client_config = rustls::ClientConfig::builder_with_provider(
+        rustls::crypto::ring::default_provider().into(),
+    )
+    .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+    .map_err(|e| AppError::Internal(format!("TLS config error: {e}")))?
+    .dangerous()
+    .with_custom_certificate_verifier(verifier)
+    .with_client_auth_cert(client_cert, key)
+    .map_err(|e| AppError::Internal(format!("Client cert error: {e}")))?;
+
+    Ok(tokio_rustls::TlsConnector::from(Arc::new(client_config)))
+}
+
 pub fn make_tls_acceptor(
-    cert_der: &[u8],
+    cert_chain: &[CertificateDer<'static>],
     key_der: &[u8],
-    allowed_pins: Arc<HashMap<String, String>>,
+    peers: Arc<PeersMap>,
 ) -> Result<tokio_rustls::TlsAcceptor, AppError> {
-    let verifier = Arc::new(PinnedClientCertVerifier::new(allowed_pins));
-    let server_cert = vec![CertificateDer::from(cert_der.to_vec())];
+    let verifier = Arc::new(CombinedClientCertVerifier::new(peers));
+    let server_cert = cert_chain.to_vec();
     let key = PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
         key_der.to_vec(),
     ));
@@ -1742,7 +2347,7 @@ fn map_tls_connect_error(peer_name: &str, e: std::io::Error) -> AppError {
     {
         if matches!(rustls_err, rustls::Error::InvalidCertificate(_)) {
             return AppError::PeerRejected(format!(
-                "server TLS pin mismatch for {peer_name}: {rustls_err}"
+                "server TLS certificate verification failed for {peer_name}: {rustls_err}"
             ));
         }
     }
@@ -1750,8 +2355,11 @@ fn map_tls_connect_error(peer_name: &str, e: std::io::Error) -> AppError {
     if s.contains("invalid peer certificate")
         || s.contains("UnknownIssuer")
         || s.contains("InvalidCertificate")
+        || s.contains("ApplicationVerificationFailure")
     {
-        return AppError::PeerRejected(format!("server TLS pin mismatch for {peer_name}: {s}"));
+        return AppError::PeerRejected(format!(
+            "server TLS certificate verification failed for {peer_name}: {s}"
+        ));
     }
     AppError::PeerUnreachable(format!("TLS handshake failed with {peer_name}: {e}"))
 }
@@ -1767,7 +2375,7 @@ pub async fn send_federated_message(
         .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
 
     let send_fut = async {
-        let connector = make_tls_connector(&fed_state.cert_der, &fed_state.key_der, &peer.pin)?;
+        let connector = make_tls_connector_for_peer(fed_state, peer)?;
         let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
             .await
             .map_err(|e| {
@@ -1891,7 +2499,7 @@ pub async fn send_federated_reply(
         .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
 
     let reply_fut = async {
-        let connector = make_tls_connector(&fed_state.cert_der, &fed_state.key_der, &peer.pin)?;
+        let connector = make_tls_connector_for_peer(fed_state, peer)?;
         let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
             .await
             .map_err(|e| {
@@ -2005,7 +2613,7 @@ pub async fn poll_federated_replies(
         .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
 
     let poll_fut = async {
-        let connector = make_tls_connector(&fed_state.cert_der, &fed_state.key_der, &peer.pin)?;
+        let connector = make_tls_connector_for_peer(fed_state, peer)?;
         let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
             .await
             .map_err(|e| {
@@ -2220,8 +2828,11 @@ pub async fn run_fed_listener(
     listener: tokio::net::TcpListener,
     fed_state: Arc<FedState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let allowed_pins = Arc::new(fed_state.peers.allowed_pins());
-    let acceptor = make_tls_acceptor(&fed_state.cert_der, &fed_state.key_der, allowed_pins)?;
+    let acceptor = make_tls_acceptor(
+        &fed_state.cert_chain(),
+        &fed_state.key_der,
+        fed_state.peers.clone(),
+    )?;
     run_fed_listener_with_acceptor(listener, fed_state, acceptor).await
 }
 
@@ -2306,21 +2917,26 @@ pub async fn run_fed_listener_with_acceptor(
                 }
             };
 
-            let client_pin = match spki_sha256_from_der(certs[0].as_ref()) {
-                Ok(p) => p,
-                Err(e) => {
-                    debug!("Failed to calculate SPKI pin from client cert: {e}");
-                    return;
-                }
-            };
+            let leaf = &certs[0];
+            let intermediates = &certs[1..];
 
-            let peer_config = match fed_state.peers.get_by_pin(&client_pin) {
-                Some(p) => p.clone(),
-                None => {
-                    debug!("Client pin not in peers list: {client_pin}");
-                    return;
-                }
-            };
+            let (peer_config, verified_uri) =
+                match fed_state.peers.resolve_incoming_peer(leaf, intermediates) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        debug!("Failed to resolve peer from TLS certificate: {e}");
+                        return;
+                    }
+                };
+
+            if let Some(ref uri) = verified_uri {
+                info!(
+                    "Authenticated federated CA peer '{}' with verified URI SAN '{}'",
+                    peer_config.name, uri
+                );
+            }
+
+            let client_pin = spki_sha256_from_der(leaf.as_ref()).unwrap_or_default();
 
             // N2: Cap connections per authenticated peer
             let peer_guard = {
@@ -2343,6 +2959,7 @@ pub async fn run_fed_listener_with_acceptor(
             let peer_info = Arc::new(AuthenticatedPeer {
                 name: peer_config.name.clone(),
                 pin: client_pin,
+                uri: verified_uri,
                 remote_ip: remote_addr.ip(),
             });
 
