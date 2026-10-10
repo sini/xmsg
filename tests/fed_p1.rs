@@ -171,6 +171,7 @@ async fn create_test_node_full_inner(
         is_leaf: false,
         leaf_principal: None,
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     });
 
     let fed_listener = match listener_opt {
@@ -545,6 +546,7 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
         is_leaf: false,
         leaf_principal: None,
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     });
 
     let res1 = send_federated_message(&fed_state_a1, "host-b", &envelope1).await;
@@ -629,6 +631,7 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
         is_leaf: false,
         leaf_principal: None,
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     });
 
     let res2 = send_federated_message(&fed_state_a2, "host-b", &envelope2).await;
@@ -726,6 +729,7 @@ async fn test_oracle_2_from_absent_pin_only_accepted() {
         is_leaf: false,
         leaf_principal: None,
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     });
 
     let res = send_federated_message(&fed_state_a, "host-b", &envelope).await;
@@ -856,6 +860,7 @@ async fn test_oracle_4_reply_route_source_check() {
         is_leaf: false,
         leaf_principal: None,
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     });
 
     let reply = FedReplyEnvelope {
@@ -1063,6 +1068,7 @@ async fn test_oracle_6_anonymous_from_with_colon_gives_400() {
         is_leaf: false,
         leaf_principal: None,
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     });
 
     let res = send_federated_message(&fed_state_a, "host-b", &envelope).await;
@@ -1137,6 +1143,7 @@ async fn test_oracle_7_root_harness_rejected_and_badge_spoof_sanitized() {
         is_leaf: false,
         leaf_principal: None,
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     });
 
     // 1. harness = "root" gives 400
@@ -1252,6 +1259,7 @@ async fn test_n4_attested_name_ascii_only_u0387() {
         is_leaf: false,
         leaf_principal: None,
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     });
 
     let env_u0387 = FedEnvelope {
@@ -1340,6 +1348,7 @@ async fn test_oracle_8_no_forward_rejected() {
         is_leaf: false,
         leaf_principal: None,
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     });
 
     let env = FedEnvelope {
@@ -1429,6 +1438,7 @@ async fn test_oracle_9_forged_reply_id_gives_403() {
         is_leaf: false,
         leaf_principal: None,
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     });
 
     let forged_reply = FedReplyEnvelope {
@@ -1565,6 +1575,7 @@ async fn test_oracle_10_duplicate_id_delivered_once() {
         is_leaf: false,
         leaf_principal: None,
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     });
 
     let dup_id = ulid::Ulid::new().to_string();
@@ -1671,6 +1682,7 @@ async fn test_oracle_11_rate_limit_429() {
         is_leaf: false,
         leaf_principal: None,
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     });
 
     // Send 20 messages (principal limit is 20/min)
@@ -1848,6 +1860,7 @@ async fn test_amendment_a_peer_without_send_gets_403_op_denied() {
         is_leaf: false,
         leaf_principal: None,
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     });
 
     let env = FedEnvelope {
@@ -2202,6 +2215,7 @@ fn make_client_fed_state(
         is_leaf: false,
         leaf_principal: None,
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     })
 }
 
@@ -3344,6 +3358,7 @@ async fn test_n1_offsource_flood_leaves_legit_bucket_intact() {
         is_leaf: false,
         leaf_principal: None,
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     });
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let legit_addr = l.local_addr().unwrap();

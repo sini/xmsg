@@ -140,6 +140,10 @@ pub struct ServeArgs {
     /// Path to federation TLS private key (PEM)
     #[arg(long, env = "XMSG_FED_KEY")]
     pub fed_key: Option<PathBuf>,
+
+    /// Dynamic federation TLS credential and CA reload interval in seconds (default: 30)
+    #[arg(long, env = "XMSG_FED_RELOAD_INTERVAL_SECS", default_value = "30")]
+    pub fed_reload_interval_secs: u64,
 }
 
 #[derive(Parser, Debug)]
@@ -596,10 +600,10 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let (cert_der, cert_chain_der, key_der) =
-        if let (Some(cert_path), Some(key_path)) = (args.fed_cert, args.fed_key) {
-            let cert_pem = std::fs::read(&cert_path)
+        if let (Some(cert_path), Some(key_path)) = (&args.fed_cert, &args.fed_key) {
+            let cert_pem = std::fs::read(cert_path)
                 .map_err(|e| format!("failed to read fed cert at {}: {e}", cert_path.display()))?;
-            let key_pem = std::fs::read(&key_path)
+            let key_pem = std::fs::read(key_path)
                 .map_err(|e| format!("failed to read fed key at {}: {e}", key_path.display()))?;
 
             use rustls::pki_types::pem::PemObject;
@@ -645,12 +649,30 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
             is_leaf: args.leaf,
             leaf_principal: args.leaf_principal.clone(),
             outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+            dynamic_tls: Default::default(),
         });
 
+        if let (Some(cert_path), Some(key_path)) = (&args.fed_cert, &args.fed_key) {
+            let reloader = xmsg::fed::CredentialReloader::new(
+                cert_path.clone(),
+                key_path.clone(),
+                peers_arc.clone(),
+                fs.dynamic_tls.clone(),
+            )
+            .map_err(|e| format!("failed to initialize credential reloader: {e}"))?;
+
+            if args.fed_reload_interval_secs > 0 {
+                Arc::new(reloader)
+                    .start_watcher(Duration::from_secs(args.fed_reload_interval_secs));
+            }
+        }
+
         if let Some((listener, listen_addr)) = fed_listener {
-            let acceptor =
-                xmsg::fed::make_tls_acceptor(&fs.cert_chain(), &key_der, peers_arc.clone())
-                    .map_err(|e| format!("failed to initialize federation TLS acceptor: {e}"))?;
+            let acceptor = match fs.get_tls_acceptor() {
+                Some(a) => a,
+                None => xmsg::fed::make_tls_acceptor(&fs.cert_chain(), &key_der, peers_arc.clone())
+                    .map_err(|e| format!("failed to initialize federation TLS acceptor: {e}"))?,
+            };
             let fs_clone = fs.clone();
             tokio::spawn(async move {
                 info!(listen = %listen_addr, "starting federation mTLS listener");

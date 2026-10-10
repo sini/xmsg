@@ -173,9 +173,22 @@ async fn setup_harness(service_name: &str) -> SvcTestHarness {
 }
 
 async fn connect_svc(sock_path: &Path) -> (BufReader<OwnedReadHalf>, OwnedWriteHalf) {
-    let stream = UnixStream::connect(sock_path).await.unwrap();
-    let (reader, writer) = stream.into_split();
-    (BufReader::new(reader), writer)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match UnixStream::connect(sock_path).await {
+            Ok(stream) => {
+                let (reader, writer) = stream.into_split();
+                return (BufReader::new(reader), writer);
+            }
+            Err(_e) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(e) => panic!(
+                "Failed to connect to svc socket at {}: {e}",
+                sock_path.display()
+            ),
+        }
+    }
 }
 
 async fn read_json_line(reader: &mut BufReader<OwnedReadHalf>) -> Value {

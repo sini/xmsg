@@ -377,6 +377,7 @@ async fn create_fed_test_node(
         is_leaf: false,
         leaf_principal: None,
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     });
 
     let fed_listener = match listener_opt {

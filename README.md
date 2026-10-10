@@ -567,3 +567,12 @@ No CRL (Certificate Revocation List) or OCSP (Online Certificate Status Protocol
 - **No Forwarding:** Forwarding cross-host (`to.ref` containing `@`) is strictly prohibited; receivers reject forwarded requests with `400 no_forward`.
 
 - **Router Isolation:** Federated TLS listeners only expose `/fed/` routes and strictly isolate local loopback routes (`/healthz`, `/v1/sessions`).
+
+### 7.4 Dynamic Credential & CA Bundle Reloading
+
+To support short-lived certificates and automated certificate rotation without service disruption (e.g. SPIRE agent rotations, cert-manager renewals, Kubernetes Secret volume updates):
+
+- **Automatic Polling & Detection:** `xmsg` polls the files configured by `--fed-cert`, `--fed-key`, and each peer's `ca` bundle at a configurable interval (`--fed-reload-interval-secs`, environment variable `XMSG_FED_RELOAD_INTERVAL_SECS`, default: 30 seconds). Changes are detected by comparing SHA-256 content hashes, ensuring atomic symlink swaps (such as Kubernetes `..data` directory rotations) are detected reliably even when file modification times (mtime) on the symlink do not change.
+- **Atomic Swap & Fail-Closed Validation:** When a change is detected, `xmsg` builds and validates the complete new TLS configuration (server acceptor, client auth credentials, private key pairing, and peer CA trust anchors). If any file is invalid, corrupt, unparseable, contains an empty certificate bundle, or the private key does not match the public certificate, the reload is aborted, the existing active configuration remains in service without interruption, an error is logged, and reload is retried on the next interval. `xmsg` never runs with a partial or broken configuration.
+- **Connection Continuity:** New inbound and outbound connections immediately adopt the reloaded TLS certificates and CA anchors. Pre-existing, established connections are preserved and not torn down.
+- **Peers File Restart Requirement:** The peers configuration file (`--peers-file`) itself is **NOT** reloaded dynamically. Structural peer policy updates (such as adding/removing peers, editing addresses, adjusting `allow` actions, or altering `pin` fingerprints) still require restarting `xmsg`.

@@ -319,6 +319,14 @@ impl PeersMap {
         self.ca_bundles_by_name.get(name).map(|v| v.as_slice())
     }
 
+    pub fn update_ca_anchors(
+        &mut self,
+        name: &str,
+        anchors: Vec<rustls::pki_types::TrustAnchor<'static>>,
+    ) {
+        self.ca_bundles_by_name.insert(name.to_string(), anchors);
+    }
+
     pub fn contains_name(&self, name: &str) -> bool {
         self.peers_by_name.contains_key(name)
     }
@@ -1352,6 +1360,29 @@ pub struct AuthenticatedPeer {
 // Federation State
 // -----------------------------------------------------------------------------
 
+#[derive(Clone)]
+pub struct DynamicTls {
+    pub cert_der: Vec<u8>,
+    pub cert_chain_der: Vec<Vec<u8>>,
+    pub key_der: Vec<u8>,
+    pub ca_anchors: HashMap<String, Vec<rustls::pki_types::TrustAnchor<'static>>>,
+    pub acceptor: tokio_rustls::TlsAcceptor,
+    pub peers: Arc<PeersMap>,
+}
+
+impl DynamicTls {
+    pub fn cert_chain(&self) -> Vec<CertificateDer<'static>> {
+        if !self.cert_chain_der.is_empty() {
+            self.cert_chain_der
+                .iter()
+                .map(|c| CertificateDer::from(c.clone()))
+                .collect()
+        } else {
+            vec![CertificateDer::from(self.cert_der.clone())]
+        }
+    }
+}
+
 pub struct FedState {
     pub host_label: String,
     pub peers: Arc<PeersMap>,
@@ -1372,10 +1403,16 @@ pub struct FedState {
     pub is_leaf: bool,
     pub leaf_principal: Option<String>,
     pub outbound_replies_pushed: Arc<AtomicU64>,
+    pub dynamic_tls: Arc<std::sync::RwLock<Option<DynamicTls>>>,
 }
 
 impl FedState {
     pub fn cert_chain(&self) -> Vec<CertificateDer<'static>> {
+        if let Ok(guard) = self.dynamic_tls.read() {
+            if let Some(ref dyn_tls) = *guard {
+                return dyn_tls.cert_chain();
+            }
+        }
         if !self.cert_chain_der.is_empty() {
             self.cert_chain_der
                 .iter()
@@ -1384,6 +1421,42 @@ impl FedState {
         } else {
             vec![CertificateDer::from(self.cert_der.clone())]
         }
+    }
+
+    pub fn key_der(&self) -> Vec<u8> {
+        if let Ok(guard) = self.dynamic_tls.read() {
+            if let Some(ref dyn_tls) = *guard {
+                return dyn_tls.key_der.clone();
+            }
+        }
+        self.key_der.clone()
+    }
+
+    pub fn current_peers(&self) -> Arc<PeersMap> {
+        if let Ok(guard) = self.dynamic_tls.read() {
+            if let Some(ref dyn_tls) = *guard {
+                return dyn_tls.peers.clone();
+            }
+        }
+        self.peers.clone()
+    }
+
+    pub fn get_ca_anchors(
+        &self,
+        peer_name: &str,
+    ) -> Option<Vec<rustls::pki_types::TrustAnchor<'static>>> {
+        self.current_peers()
+            .get_ca_anchors(peer_name)
+            .map(|s| s.to_vec())
+    }
+
+    pub fn get_tls_acceptor(&self) -> Option<tokio_rustls::TlsAcceptor> {
+        if let Ok(guard) = self.dynamic_tls.read() {
+            if let Some(ref dyn_tls) = *guard {
+                return Some(dyn_tls.acceptor.clone());
+            }
+        }
+        None
     }
 }
 
@@ -2288,15 +2361,15 @@ pub fn make_tls_connector_for_peer(
 ) -> Result<tokio_rustls::TlsConnector, AppError> {
     let client_cert = fed_state.cert_chain();
     let key = PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
-        fed_state.key_der.clone(),
+        fed_state.key_der(),
     ));
 
     let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> =
         if let Some(ref pin) = peer.pin {
             Arc::new(PinnedServerCertVerifier::new(pin))
-        } else if let Some(anchors) = fed_state.peers.get_ca_anchors(&peer.name) {
+        } else if let Some(anchors) = fed_state.get_ca_anchors(&peer.name) {
             let identities = peer.identities.clone().unwrap_or_default();
-            Arc::new(CaServerCertVerifier::new(anchors.to_vec(), identities))
+            Arc::new(CaServerCertVerifier::new(anchors, identities))
         } else {
             return Err(AppError::Internal(format!(
                 "peer '{}' has neither pin nor valid CA bundle",
@@ -2828,11 +2901,14 @@ pub async fn run_fed_listener(
     listener: tokio::net::TcpListener,
     fed_state: Arc<FedState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let acceptor = make_tls_acceptor(
-        &fed_state.cert_chain(),
-        &fed_state.key_der,
-        fed_state.peers.clone(),
-    )?;
+    let acceptor = match fed_state.get_tls_acceptor() {
+        Some(a) => a,
+        None => make_tls_acceptor(
+            &fed_state.cert_chain(),
+            &fed_state.key_der(),
+            fed_state.current_peers(),
+        )?,
+    };
     run_fed_listener_with_acceptor(listener, fed_state, acceptor).await
 }
 
@@ -2882,7 +2958,9 @@ pub async fn run_fed_listener_with_acceptor(
             }
         };
 
-        let acceptor = acceptor.clone();
+        let current_acceptor = fed_state
+            .get_tls_acceptor()
+            .unwrap_or_else(|| acceptor.clone());
         let fed_state = fed_state.clone();
         let router = router.clone();
         let peer_conn_counts = peer_conn_counts.clone();
@@ -2890,20 +2968,22 @@ pub async fn run_fed_listener_with_acceptor(
         tokio::spawn(async move {
             let _permit = permit;
             let unauth_guard = unauth_guard;
-            let tls_stream =
-                match tokio::time::timeout(Duration::from_secs(3), acceptor.accept(tcp_stream))
-                    .await
-                {
-                    Ok(Ok(s)) => s,
-                    Ok(Err(e)) => {
-                        debug!("TLS handshake failed from {remote_addr}: {e}");
-                        return;
-                    }
-                    Err(_) => {
-                        debug!("TLS handshake timed out from {remote_addr}");
-                        return;
-                    }
-                };
+            let tls_stream = match tokio::time::timeout(
+                Duration::from_secs(3),
+                current_acceptor.accept(tcp_stream),
+            )
+            .await
+            {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
+                    debug!("TLS handshake failed from {remote_addr}: {e}");
+                    return;
+                }
+                Err(_) => {
+                    debug!("TLS handshake timed out from {remote_addr}");
+                    return;
+                }
+            };
 
             // TLS handshake complete: release pre-handshake socket slot
             drop(unauth_guard);
@@ -2920,14 +3000,16 @@ pub async fn run_fed_listener_with_acceptor(
             let leaf = &certs[0];
             let intermediates = &certs[1..];
 
-            let (peer_config, verified_uri) =
-                match fed_state.peers.resolve_incoming_peer(leaf, intermediates) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        debug!("Failed to resolve peer from TLS certificate: {e}");
-                        return;
-                    }
-                };
+            let (peer_config, verified_uri) = match fed_state
+                .current_peers()
+                .resolve_incoming_peer(leaf, intermediates)
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    debug!("Failed to resolve peer from TLS certificate: {e}");
+                    return;
+                }
+            };
 
             if let Some(ref uri) = verified_uri {
                 info!(
@@ -3002,5 +3084,248 @@ pub async fn run_fed_listener_with_acceptor(
                 debug!("Error serving federated connection: {e}");
             }
         });
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Dynamic Credential & CA Bundle Reloader (Unit X17)
+// -----------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct DummyServerCertVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for DummyServerCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+pub struct CredentialReloader {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    pub ca_paths: HashMap<String, PathBuf>,
+    pub file_hashes: Mutex<HashMap<PathBuf, Vec<u8>>>,
+    pub dynamic_tls: Arc<std::sync::RwLock<Option<DynamicTls>>>,
+    pub peers: Arc<PeersMap>,
+}
+
+impl CredentialReloader {
+    pub fn new(
+        cert_path: PathBuf,
+        key_path: PathBuf,
+        peers: Arc<PeersMap>,
+        dynamic_tls: Arc<std::sync::RwLock<Option<DynamicTls>>>,
+    ) -> Result<Self, AppError> {
+        let mut ca_paths = HashMap::new();
+        for peer in peers.ca_peers() {
+            if let Some(ref ca_path) = peer.ca {
+                ca_paths.insert(peer.name.clone(), ca_path.clone());
+            }
+        }
+
+        let reloader = Self {
+            cert_path,
+            key_path,
+            ca_paths,
+            file_hashes: Mutex::new(HashMap::new()),
+            dynamic_tls,
+            peers,
+        };
+
+        // Populate initial configuration and hashes
+        reloader.check_and_reload()?;
+        Ok(reloader)
+    }
+
+    pub fn compute_file_hash(path: &Path) -> Result<Vec<u8>, std::io::Error> {
+        let bytes = std::fs::read(path)?;
+        use sha2::Digest;
+        Ok(sha2::Sha256::digest(&bytes).to_vec())
+    }
+
+    pub fn check_and_reload(&self) -> Result<bool, AppError> {
+        let mut current_hashes = HashMap::new();
+
+        let cert_hash = match Self::compute_file_hash(&self.cert_path) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::error!("failed to read cert file {}: {e}", self.cert_path.display());
+                return Err(AppError::Internal(format!("failed to read cert file: {e}")));
+            }
+        };
+        current_hashes.insert(self.cert_path.clone(), cert_hash);
+
+        let key_hash = match Self::compute_file_hash(&self.key_path) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::error!("failed to read key file {}: {e}", self.key_path.display());
+                return Err(AppError::Internal(format!("failed to read key file: {e}")));
+            }
+        };
+        current_hashes.insert(self.key_path.clone(), key_hash);
+
+        for (peer_name, ca_path) in &self.ca_paths {
+            let ca_hash = match Self::compute_file_hash(ca_path) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::error!(
+                        "failed to read CA file {} for peer {peer_name}: {e}",
+                        ca_path.display()
+                    );
+                    return Err(AppError::Internal(format!("failed to read CA file: {e}")));
+                }
+            };
+            current_hashes.insert(ca_path.clone(), ca_hash);
+        }
+
+        let changed = {
+            let old_hashes = self.file_hashes.lock().unwrap();
+            *old_hashes != current_hashes
+        };
+
+        if !changed {
+            return Ok(false);
+        }
+
+        match self.build_tls_config() {
+            Ok(new_dyn_tls) => {
+                *self.dynamic_tls.write().unwrap() = Some(new_dyn_tls);
+                *self.file_hashes.lock().unwrap() = current_hashes;
+                tracing::info!("successfully reloaded federation TLS credentials and CA bundles");
+                Ok(true)
+            }
+            Err(e) => {
+                tracing::error!(
+                    "invalid TLS credentials during reload; keeping previous configuration: {e}"
+                );
+                Err(e)
+            }
+        }
+    }
+
+    fn build_tls_config(&self) -> Result<DynamicTls, AppError> {
+        let cert_pem = std::fs::read(&self.cert_path).map_err(|e| {
+            AppError::Internal(format!(
+                "failed to read cert file {}: {e}",
+                self.cert_path.display()
+            ))
+        })?;
+        let key_pem = std::fs::read(&self.key_path).map_err(|e| {
+            AppError::Internal(format!(
+                "failed to read key file {}: {e}",
+                self.key_path.display()
+            ))
+        })?;
+
+        use rustls::pki_types::pem::PemObject;
+        let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+            rustls::pki_types::CertificateDer::pem_slice_iter(&cert_pem)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| AppError::Internal(format!("failed to parse cert pem: {e}")))?;
+        if certs.is_empty() {
+            return Err(AppError::Internal(
+                "cert file contains 0 certificates".to_string(),
+            ));
+        }
+
+        let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(&key_pem)
+            .map_err(|e| AppError::Internal(format!("failed to parse key pem: {e}")))?;
+
+        let cert_der = certs[0].to_vec();
+        let cert_chain_der: Vec<Vec<u8>> = certs.iter().map(|c| c.to_vec()).collect();
+        let key_der = key.secret_der().to_vec();
+
+        let mut ca_anchors = HashMap::new();
+        let mut new_peers = (*self.peers).clone();
+
+        for (peer_name, ca_path) in &self.ca_paths {
+            let ca_pem = std::fs::read(ca_path).map_err(|e| {
+                AppError::Internal(format!("failed to read CA file {}: {e}", ca_path.display()))
+            })?;
+            let anchors = parse_ca_bundle_pem(&ca_pem).map_err(|e| {
+                AppError::Internal(format!(
+                    "failed to parse CA bundle for peer '{peer_name}': {e}"
+                ))
+            })?;
+            if anchors.is_empty() {
+                return Err(AppError::Internal(format!(
+                    "CA bundle for peer '{peer_name}' contains 0 certificates"
+                )));
+            }
+            new_peers.update_ca_anchors(peer_name, anchors.clone());
+            ca_anchors.insert(peer_name.clone(), anchors);
+        }
+
+        let new_peers_arc = Arc::new(new_peers);
+
+        // Validate key matches cert and build acceptor
+        let acceptor = make_tls_acceptor(&certs, &key_der, new_peers_arc.clone())?;
+
+        // Also validate client auth config with certs & key (ensures key matches cert)
+        let _ = rustls::ClientConfig::builder_with_provider(
+            rustls::crypto::ring::default_provider().into(),
+        )
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .map_err(|e| AppError::Internal(format!("TLS config error: {e}")))?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(DummyServerCertVerifier))
+        .with_client_auth_cert(certs, key)
+        .map_err(|e| {
+            AppError::Internal(format!("Client cert error (key does not match cert): {e}"))
+        })?;
+
+        Ok(DynamicTls {
+            cert_der,
+            cert_chain_der,
+            key_der,
+            ca_anchors,
+            acceptor,
+            peers: new_peers_arc,
+        })
+    }
+
+    pub fn start_watcher(self: Arc<Self>, interval: Duration) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut interval_timer = tokio::time::interval(interval);
+            interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval_timer.tick().await; // consume first immediate tick
+            loop {
+                interval_timer.tick().await;
+                if let Err(e) = self.check_and_reload() {
+                    tracing::error!("federation credential reload check failed: {e}");
+                }
+            }
+        })
     }
 }

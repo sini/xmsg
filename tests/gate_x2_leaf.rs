@@ -186,6 +186,7 @@ async fn test_oracle_2_body_from_ignored_and_attributed_to_leaf_principal() {
         is_leaf: false,
         leaf_principal: None,
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     });
 
     let fs_clone = node_b_fed_state.clone();
@@ -278,6 +279,7 @@ async fn test_oracle_2_body_from_ignored_and_attributed_to_leaf_principal() {
         is_leaf: true,
         leaf_principal: Some("svc:matrix".to_string()),
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     });
 
     let leaf_app_state = Arc::new(AppState {
@@ -426,6 +428,7 @@ async fn test_oracle_3_leaf_pull_replies_node_zero_outbound_connections() {
         is_leaf: false,
         leaf_principal: None,
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     });
 
     let fs_clone = node_b_fed_state.clone();
@@ -549,6 +552,7 @@ async fn test_oracle_3_leaf_pull_replies_node_zero_outbound_connections() {
         is_leaf: true,
         leaf_principal: Some("svc:matrix".to_string()),
         outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
     });
 
     let leaf_app_state = Arc::new(AppState {
