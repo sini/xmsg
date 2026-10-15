@@ -21,6 +21,7 @@ env:
     agy-hook
     hermes-plugin
     opencode-plugin
+    opencode2-plugin
     package
     peers-render
     pre-xl1-compat
