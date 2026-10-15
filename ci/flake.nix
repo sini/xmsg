@@ -15,6 +15,9 @@
     # The hermes switch and the hermes-plugin check run against hermes-agent at nix-config's pin
     # (its `hermes-agent` node). Its own lock is kept, so its package is nix-config's.
     hermes-agent.url = "github:NousResearch/hermes-agent/c538ec5f402e8078248becacd474e47a08c6e79a";
+    # nixpkgs packages opencode 1.x only; the opencode2-plugin check runs llm-agents.nix's
+    # opencode2 (2.x). Its own lock is kept, so its package is the one llm-agents.nix publishes.
+    llm-agents.url = "github:numtide/llm-agents.nix/493c34b1bed086861b0e968a40d00bd06522f003";
   };
 
   outputs =

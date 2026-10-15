@@ -8,7 +8,8 @@
 #   inject step) has no sandbox oracle.
 # - `opencode-plugin` (XH2 oracles 8-11, release, restart): the real opencode, with the plugin file the module
 #   renders, against a real `xmsg serve` and a mock model on loopback
-#   (extensions/opencode/check.py).
+#   (extensions/opencode/check.py). This is nixpkgs' opencode, 1.x.
+# - `opencode2-plugin`: the same oracles against opencode 2.x, llm-agents.nix's `opencode2`.
 # - `hermes-plugin` (XH3 oracles 1-6): the real hermes CLI on a pty, and hermes's tui_gateway
 #   (the desktop host), with the plugin and config.yaml settings the module renders, against a
 #   real `xmsg serve` and a mock model on loopback (extensions/hermes/check.py).
@@ -24,7 +25,12 @@
       ...
     }:
     let
-      inherit (inputs) xmsg home-manager hermes-agent;
+      inherit (inputs)
+        xmsg
+        home-manager
+        hermes-agent
+        llm-agents
+        ;
       xmsgPkg = xmsg.packages.${system}.default;
 
       hooksJson =
@@ -110,6 +116,13 @@
       hermesPlugin = lib.head hermesCfg.extraPlugins;
       hermesSettings = pkgs.writeText "hermes-settings.json" (builtins.toJSON hermesCfg.settings);
 
+      opencodeCheck =
+        name: opencode:
+        pkgs.runCommand "xmsg-${name}" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+          python3 ${../../extensions/opencode/check.py} ${lib.getExe xmsgPkg} ${lib.getExe opencode} ${opencodePlugin}
+          touch $out
+        '';
+
       nodeCheck =
         name: script:
         pkgs.runCommand "xmsg-${name}"
@@ -131,12 +144,8 @@
         pi-extension = nodeCheck "pi-extension" "test.mjs";
         pi-paths = nodeCheck "pi-paths" "test-paths.mjs";
 
-        opencode-plugin =
-          pkgs.runCommand "xmsg-opencode-plugin" { nativeBuildInputs = [ pkgs.python3 ]; }
-            ''
-              python3 ${../../extensions/opencode/check.py} ${lib.getExe xmsgPkg} ${lib.getExe pkgs.opencode} ${opencodePlugin}
-              touch $out
-            '';
+        opencode-plugin = opencodeCheck "opencode-plugin" pkgs.opencode;
+        opencode2-plugin = opencodeCheck "opencode2-plugin" llm-agents.packages.${system}.opencode2;
 
         hermes-plugin =
           pkgs.runCommand "xmsg-hermes-plugin"

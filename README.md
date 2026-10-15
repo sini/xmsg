@@ -224,22 +224,31 @@ TypeScript extension for Pi (`@earendil-works/pi-coding-agent`):
 
 ### 3.2.1 opencode plugin: `extensions/opencode/xmsg.ts`
 
-opencode loads `<config>/opencode/plugin/xmsg.ts` on start. The plugin holds one `register.sock` connection per
-opencode process (2.3.1):
+opencode loads `<config>/opencode/plugin/xmsg.ts` on start. The file's default export serves both plugin APIs:
+opencode 1.x calls its `server` function, opencode 2.x its `setup`. On 1.x the plugin holds one `register.sock`
+connection per opencode process (2.3.1). On 2.x the plugin runs in the opencode server, by default a background
+service (`opencode service`) that every TUI attaches to (`--standalone` gives a TUI a server of its own). The server
+sets the plugin up once per project directory, so it holds one connection per directory it serves, each carrying
+that directory's sessions:
 
-- **Registration.** A session registers at its first `chat.message`, so a session started in this process, or
-  resumed with `-s`, gets an address once it is used, and the many stored sessions an opencode server can reach do
-  not. Registration finishes before the turn's first tool call is answered.
+- **Registration.** A session registers at its first user prompt (1.x `chat.message`, 2.x the session `prompt`
+  hook), so a session started in this process, or resumed with `-s`, gets an address once it is used, and the many
+  stored sessions an opencode server can reach do not. Registration finishes before the turn's first tool call is
+  answered.
 - **Tools.** `xmsg_list`, `xmsg_send`, `xmsg_reply` and `xmsg_replies`, sent as frames under the calling session
-  (`ToolContext.sessionID`). The arguments are all required: `xmsg_replies` takes `wait` (0 for none), and
-  `xmsg_list` has no filters.
+  (`ToolContext.sessionID`). On 2.x they are kept out of Code Mode, so the model calls them by name. The arguments
+  are all required: `xmsg_replies` takes `wait` (0 for none), and `xmsg_list` has no filters.
 - **Child sessions** (a `task` subagent) act as their root conversation: the plugin walks `parentID` to the root
   and calls under the root's session. A child is never registered (HA7).
-- **Push.** A delivered message goes into its session with `promptAsync`, which starts the session if it is idle;
-  in a running turn, opencode takes it as it takes any mid-turn prompt. The plugin acks only after `promptAsync`
-  accepted it.
+- **Push.** A delivered message goes into its session as a user prompt (1.x `promptAsync`, 2.x `session.prompt`),
+  which starts the session if it is idle; in a running turn, opencode takes it as it takes any mid-turn prompt. The
+  plugin acks only after opencode accepted the prompt.
 - **Release.** Deleting a session releases its address. Switching sessions in the TUI does not: the opencode server
-  can still deliver to every session it registered.
+  can still deliver to every session it registered. On 2.x a session also outlives its TUI: quitting the TUI leaves
+  it registered, and a message delivered to it starts a turn in the service, which runs and can answer with no TUI
+  attached; the turn shows when the session is opened again. Only deleting the session, or stopping the service,
+  releases it. Reloading the plugin (opencode watches the file) closes its connection, releasing every address on
+  it; each session registers again at its next prompt.
 
 There is no MCP entry for opencode: the plugin's tools are the attested path.
 
