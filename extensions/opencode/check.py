@@ -3,11 +3,12 @@
 home-manager switch renders in its plugin/ directory, against a real `xmsg serve`. The model
 is a mock OpenAI-compatible server on loopback: a user message `CALL <tool> <json>` makes it
 call that tool once, and anything else gets the answer `ok`. A fake plugin connection on
-register.sock is the receiver whose deliveries show each send's attribution.
+register.sock is the receiver whose deliveries show each send's attribution. It drives either
+opencode 1.x or 2.x, by the major version `opencode --version` reports: the plugin serves both.
 
 usage: check.py <xmsg> <opencode> <plugin.ts>
 Exits non-zero naming the first oracle that fails."""
-import http.server, json, os, socket, subprocess, sys, threading, time, urllib.request, uuid
+import base64, http.server, json, os, re, socket, subprocess, sys, threading, time, urllib.request, uuid
 
 XMSG, OPENCODE, PLUGIN = sys.argv[1:4]
 TMP = os.environ.get("TMPDIR", "/tmp")
@@ -172,13 +173,24 @@ class Receiver:
 # --- opencode --------------------------------------------------------------------------
 
 
+# 2.x serves its API under /api behind basic auth with the server password, and a prompt is
+# queued: the turn is awaited separately.
+VERSION = subprocess.run([OPENCODE, "--version"], capture_output=True, text=True, env=dict(os.environ, HOME=TMP)).stdout
+MAJOR = re.search(r"\bv?(\d+)\.", VERSION)
+V2 = MAJOR is not None and MAJOR.group(1) != "1"
+API = "/api" if V2 else ""
+PASSWORD = uuid.uuid4().hex
+AUTH = {"authorization": "Basic " + base64.b64encode(f"opencode:{PASSWORD}".encode()).decode()} if V2 else {}
+
+
 def oc(method, path, body=None, timeout=60):
-    req = urllib.request.Request(f"{OC}{path}", method=method,
+    req = urllib.request.Request(f"{OC}{API}{path}", method=method,
                                  data=json.dumps(body).encode() if body is not None else None,
-                                 headers={"content-type": "application/json"})
+                                 headers={"content-type": "application/json", **AUTH})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         raw = r.read()
-        return json.loads(raw) if raw else None
+        out = json.loads(raw) if raw else None
+        return out["data"] if V2 and isinstance(out, dict) and "data" in out else out
 
 
 def new_session(parent=None):
@@ -186,7 +198,10 @@ def new_session(parent=None):
 
 
 def say(session, text):
-    return oc("POST", f"/session/{session}/message", {"parts": [{"type": "text", "text": text}]}, timeout=120)
+    if not V2:
+        return oc("POST", f"/session/{session}/message", {"parts": [{"type": "text", "text": text}]}, timeout=120)
+    oc("POST", f"/session/{session}/prompt", {"text": text})
+    oc("POST", f"/experimental/session/{session}/wait", timeout=120)
 
 
 def call_tool(session, tool, args):
@@ -198,6 +213,8 @@ def entry(label):
 
 
 def user_texts(session):
+    if V2:
+        return [m["text"] for m in oc("GET", f"/session/{session}/message") if m["type"] == "user"]
     out = []
     for m in oc("GET", f"/session/{session}/message"):
         if m["info"]["role"] == "user":
@@ -239,10 +256,17 @@ threading.Thread(target=mock.serve_forever, daemon=True).start()
 port = free_port()
 OC = f"http://127.0.0.1:{port}"
 env["OPENCODE_CONFIG_CONTENT"] = json.dumps({
+    "update": "disable", "share": "disabled", "model": "mock/m",
+    "providers": {"mock": {"package": "@opencode/ai/providers/openai-compatible", "name": "mock",
+                           "settings": {"baseURL": f"http://127.0.0.1:{mock_port}/v1"},
+                           "models": {"m": {"name": "m", "capabilities": {"tools": True}}}}},
+} if V2 else {
     "autoupdate": False, "share": "disabled", "model": "mock/m", "small_model": "mock/m",
     "provider": {"mock": {"npm": "@ai-sdk/openai-compatible", "name": "mock",
                           "options": {"baseURL": f"http://127.0.0.1:{mock_port}/v1"}, "models": {"m": {"name": "m"}}}},
 })
+if V2:
+    env["OPENCODE_SERVER_PASSWORD"] = PASSWORD
 procs.append(subprocess.Popen([OPENCODE, "serve", "--port", str(port), "--hostname", "127.0.0.1"], cwd=work, env=env,
                               stdout=open(os.path.join(TMP, "opencode.log"), "w"), stderr=subprocess.STDOUT))
 
