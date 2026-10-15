@@ -8,6 +8,8 @@
 // send their frames on that connection under the root's session, so the server attributes
 // them to its address. A pushed message is handed to its session with `promptAsync` and
 // acked once that accepts it. A deleted session releases its address.
+//
+// `Xmsg` holds the behaviour; the plugin function below wires it to opencode's API.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
@@ -194,90 +196,121 @@ class Connection {
   }
 }
 
+// The opencode calls the behaviour needs.
+interface Host {
+  parentOf(session: string): Promise<string | undefined>;
+  // Prompts `text` into `session`; true once opencode accepted it.
+  prompt(session: string, text: string): Promise<boolean>;
+}
+
+class Xmsg {
+  private conn: Connection;
+
+  constructor(
+    sock: string,
+    private host: Host,
+  ) {
+    this.conn = new Connection(sock, (a) => host.prompt(a.session, a.envelope));
+  }
+
+  // HA7: a child session acts as its root conversation.
+  private async rootOf(id: string): Promise<string> {
+    for (let parent = await this.host.parentOf(id); parent; parent = await this.host.parentOf(id)) id = parent;
+    return id;
+  }
+
+  async prompted(session: string) {
+    try {
+      if (!(await this.host.parentOf(session))) await this.conn.register(session);
+    } catch (e) {
+      console.warn(`[xmsg] registering ${session}: ${e}`);
+    }
+  }
+
+  async deleted(session: string) {
+    await this.conn.release(session).catch(() => {});
+  }
+
+  async run(frame: Answer, sessionID: string): Promise<string> {
+    const session = await this.rootOf(sessionID);
+    await this.conn.settled(session);
+    return JSON.stringify(await this.conn.call({ ...frame, session }));
+  }
+}
+
+const str = (description: string) => ({ type: "string", description });
+const TOOLS: { name: string; description: string; args: Answer; frame: (a: Answer) => Answer }[] = [
+  {
+    name: "xmsg_list",
+    description:
+      "List the xmsg recipients you can message: by default live recipients (with harness and registered_at); with status='inactive', parked and closed instances seen within `within` seconds (default 86400 = 24h, capped at reply TTL, with harness and last_seen; a peer older than XL1 lists no inactive entries).",
+    args: {
+      name: str("only recipients with this label or service name"),
+      node: str("ask only this node"),
+      kind: str("service or instance"),
+      status: str("live (default) or inactive"),
+      within: { type: "number", description: "for status='inactive', seconds to look back (default 86400)" },
+    },
+    frame: (a) => ({
+      action: "list",
+      ...(a?.name != null ? { name: a.name } : {}),
+      ...(a?.node != null ? { node: a.node } : {}),
+      ...(a?.kind != null ? { kind: a.kind } : {}),
+      ...(a?.status != null ? { status: a.status } : {}),
+      ...(a?.within != null ? { within: a.within } : {}),
+    }),
+  },
+  {
+    name: "xmsg_send",
+    description: "Send a message to an xmsg recipient. `to` is an address (id@node) or a label.",
+    args: { to: str("recipient address or label"), text: str("message text") },
+    frame: (a) => ({ action: "send", to: a.to, text: a.text }),
+  },
+  {
+    name: "xmsg_reply",
+    description: "Reply to an xmsg message you received, by its message_id.",
+    args: { message_id: str("the message_id you are replying to"), text: str("reply text") },
+    frame: (a) => ({ action: "reply", message_id: a.message_id, text: a.text }),
+  },
+  {
+    name: "xmsg_replies",
+    description: "Read the replies to a message you sent, waiting up to `wait` seconds (0 to 60) for the first.",
+    args: { message_id: str("the message_id you sent"), wait: { type: "number", description: "seconds to wait" } },
+    frame: (a) => ({ action: "replies", message_id: a.message_id, wait: a.wait }),
+  },
+];
+
+const noSock = () => console.warn("[xmsg] XDG_RUNTIME_DIR is not set; the xmsg plugin is off");
+
 export const XmsgPlugin = async ({ client }: any) => {
   const sock = registerSockPath();
-  if (!sock) {
-    console.warn("[xmsg] XDG_RUNTIME_DIR is not set; the xmsg plugin is off");
-    return {};
-  }
+  if (!sock) return noSock(), {};
 
   const parentOf = async (id: string): Promise<string | undefined> => {
     const res = await client.session.get({ path: { id } });
     if (res.error) throw new Error(`session ${id}: ${JSON.stringify(res.error)}`);
     return res.data?.parentID;
   };
-  // HA7: a child session acts as its root conversation.
-  const rootOf = async (id: string): Promise<string> => {
-    for (let parent = await parentOf(id); parent; parent = await parentOf(id)) id = parent;
-    return id;
-  };
-
-  const conn = new Connection(sock, async (a) => {
-    const res = await client.session
-      .promptAsync({ path: { id: a.session }, body: { parts: [{ type: "text", text: a.envelope }] } })
-      .catch((e: unknown) => ({ error: e }));
-    return !res.error;
+  const xmsg = new Xmsg(sock, {
+    parentOf,
+    prompt: async (id, text) => {
+      const res = await client.session
+        .promptAsync({ path: { id }, body: { parts: [{ type: "text", text }] } })
+        .catch((e: unknown) => ({ error: e }));
+      return !res.error;
+    },
   });
 
-  const run = async (frame: Answer, sessionID: string) => {
-    const session = await rootOf(sessionID);
-    await conn.settled(session);
-    return JSON.stringify(await conn.call({ ...frame, session }));
-  };
-  const str = (description: string) => ({ type: "string", description });
-
   return {
-    "chat.message": async (input: { sessionID: string }) => {
-      try {
-        if (!(await parentOf(input.sessionID))) await conn.register(input.sessionID);
-      } catch (e) {
-        console.warn(`[xmsg] registering ${input.sessionID}: ${e}`);
-      }
-    },
+    "chat.message": (input: { sessionID: string }) => xmsg.prompted(input.sessionID),
     event: async ({ event }: any) => {
-      if (event.type === "session.deleted") await conn.release(event.properties.info.id).catch(() => {});
+      if (event.type === "session.deleted") await xmsg.deleted(event.properties.info.id);
     },
-    tool: {
-      xmsg_list: {
-        description:
-          "List the xmsg recipients you can message: by default live recipients (with harness and registered_at); with status='inactive', parked and closed instances seen within `within` seconds (default 86400 = 24h, capped at reply TTL, with harness and last_seen; a peer older than XL1 lists no inactive entries).",
-        args: {
-          name: str("only recipients with this label or service name"),
-          node: str("ask only this node"),
-          kind: str("service or instance"),
-          status: str("live (default) or inactive"),
-          within: { type: "number", description: "for status='inactive', seconds to look back (default 86400)" },
-        },
-        execute: (a: Answer, ctx: any) =>
-          run(
-            {
-              action: "list",
-              ...(a?.name != null ? { name: a.name } : {}),
-              ...(a?.node != null ? { node: a.node } : {}),
-              ...(a?.kind != null ? { kind: a.kind } : {}),
-              ...(a?.status != null ? { status: a.status } : {}),
-              ...(a?.within != null ? { within: a.within } : {}),
-            },
-            ctx.sessionID,
-          ),
-      },
-      xmsg_send: {
-        description: "Send a message to an xmsg recipient. `to` is an address (id@node) or a label.",
-        args: { to: str("recipient address or label"), text: str("message text") },
-        execute: (a: Answer, ctx: any) => run({ action: "send", to: a.to, text: a.text }, ctx.sessionID),
-      },
-      xmsg_reply: {
-        description: "Reply to an xmsg message you received, by its message_id.",
-        args: { message_id: str("the message_id you are replying to"), text: str("reply text") },
-        execute: (a: Answer, ctx: any) =>
-          run({ action: "reply", message_id: a.message_id, text: a.text }, ctx.sessionID),
-      },
-      xmsg_replies: {
-        description: "Read the replies to a message you sent, waiting up to `wait` seconds (0 to 60) for the first.",
-        args: { message_id: str("the message_id you sent"), wait: { type: "number", description: "seconds to wait" } },
-        execute: (a: Answer, ctx: any) =>
-          run({ action: "replies", message_id: a.message_id, wait: a.wait }, ctx.sessionID),
-      },
-    },
+    tool: Object.fromEntries(
+      TOOLS.map((t) => [
+        t.name,
+        { description: t.description, args: t.args, execute: (a: Answer, ctx: any) => xmsg.run(t.frame(a), ctx.sessionID) },
+      ]),
+    ),
   };
 };
