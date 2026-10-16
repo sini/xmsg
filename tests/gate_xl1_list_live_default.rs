@@ -42,6 +42,8 @@ const ID_LIVE: &str = "11111111-1111-4111-8111-111111111111";
 const ID_PARKED: &str = "22222222-2222-4222-8222-222222222222";
 const ID_OLD_PARKED: &str = "33333333-3333-4333-8333-333333333333";
 const ID_EXPIRED_SEEN: &str = "44444444-4444-4444-8444-444444444444";
+const ID_EXPIRED_SEEN_WITH_QUEUE: &str = "55555555-5555-4555-8555-555555555555";
+const ID_EXPIRED_SEEN_WITH_AGY_PENDING: &str = "66666666-6666-4666-8666-666666666666";
 
 const URI_A: &str = "spiffe://xl1.test/host/a/user/sini";
 const URI_B: &str = "spiffe://xl1.test/host/b/user/eve";
@@ -763,12 +765,30 @@ async fn test_oracle_4_and_4b_inactive_window_and_instance_seen_pruning() {
             storage::mark_live(&conn, ID_PARKED, "claude", seen_1h_ago).unwrap();
             storage::mark_live(&conn, ID_OLD_PARKED, "claude", seen_48h_ago).unwrap();
             storage::mark_live(&conn, ID_EXPIRED_SEEN, "claude", seen_8d_ago).unwrap();
+
+            // Plant an 8d-old instance_seen row that has an undelivered, unexpired instance_queue message:
+            storage::mark_live(&conn, ID_EXPIRED_SEEN_WITH_QUEUE, "claude", seen_8d_ago).unwrap();
+            conn.execute(
+                "INSERT INTO instance_queue (id, instance_id, created_at, expires_at, from_name, body, delivered_at) \
+                 VALUES ('01MSGQUEUE0000000000000001', ?1, ?2, ?3, 'sender@sini.a', 'queued-body', NULL)",
+                rusqlite::params![ID_EXPIRED_SEEN_WITH_QUEUE, now - 60, now + 3_600],
+            )
+            .unwrap();
+
+            // Plant an 8d-old instance_seen row that has an undelivered, unexpired agy_pending_messages row:
+            storage::mark_live(&conn, ID_EXPIRED_SEEN_WITH_AGY_PENDING, "agy", seen_8d_ago).unwrap();
+            conn.execute(
+                "INSERT INTO agy_pending_messages (id, session_id, created_at, from_name, bytes, text, envelope, delivered_at) \
+                 VALUES ('01MSGAGY000000000000000001', ?1, ?2, 'sender@sini.a', 12, 'pending-body', 'pending-body', NULL)",
+                rusqlite::params![ID_EXPIRED_SEEN_WITH_AGY_PENDING, now - 60],
+            )
+            .unwrap();
         }
 
         // 1. Default inactive query (`status=inactive`, no `within` -> defaults to 24h = 86400s):
         //    - returns ID_PARKED (1h ago) with `last_seen == seen_1h_ago`
         //    - excludes ID_OLD_PARKED (48h ago)
-        //    - prunes ID_EXPIRED_SEEN (8d ago) during sync
+        //    - prunes ID_EXPIRED_SEEN (8d ago, no queued messages) during sync
         let (st, res_default) = a.http_get("/v1/recipients?status=inactive").await;
         assert_eq!(st, 200, "{res_default}");
         let recs = res_default["recipients"].as_array().unwrap();
@@ -803,10 +823,13 @@ async fn test_oracle_4_and_4b_inactive_window_and_instance_seen_pruning() {
             "Widened 72h window must return both 1h and 48h parked instances: {res_wide}"
         );
 
-        // 3. Oracle 4b: Verify ID_EXPIRED_SEEN row is gone from `instance_seen` in SQLite after sync
+        // 3. Oracle 4b:
+        //    - ID_EXPIRED_SEEN (8d old, no queued messages) is gone from `instance_seen` after sync;
+        //    - ID_EXPIRED_SEEN_WITH_QUEUE (8d old, undelivered unexpired instance_queue row) survives sync;
+        //    - ID_EXPIRED_SEEN_WITH_AGY_PENDING (8d old, undelivered unexpired agy_pending_messages row) survives sync.
         {
             let conn = rusqlite::Connection::open(&a.db_path).unwrap();
-            let count: i64 = conn
+            let count_pruned: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM instance_seen WHERE id = ?1",
                     [ID_EXPIRED_SEEN],
@@ -814,8 +837,32 @@ async fn test_oracle_4_and_4b_inactive_window_and_instance_seen_pruning() {
                 )
                 .unwrap();
             assert_eq!(
-                count, 0,
-                "instance_seen row older than reply_ttl cap must be pruned after sync"
+                count_pruned, 0,
+                "instance_seen row older than reply_ttl cap with no queued messages must be pruned after sync"
+            );
+
+            let count_with_queue: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM instance_seen WHERE id = ?1",
+                    [ID_EXPIRED_SEEN_WITH_QUEUE],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                count_with_queue, 1,
+                "instance_seen row older than reply_ttl with an undelivered, unexpired instance_queue message must survive sync"
+            );
+
+            let count_with_agy_pending: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM instance_seen WHERE id = ?1",
+                    [ID_EXPIRED_SEEN_WITH_AGY_PENDING],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                count_with_agy_pending, 1,
+                "instance_seen row older than reply_ttl with an undelivered, unexpired agy_pending_messages row must survive sync"
             );
         }
     })
