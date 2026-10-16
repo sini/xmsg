@@ -128,6 +128,7 @@ async fn wait_for_ready_to_connect(stdout: &mut BufReader<tokio::process::ChildS
 // Defect 1 Oracles: SO_PEERPIDFD pinning of Unix socket peer credentials
 // =============================================================================
 
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_xf1_peerpidfd_rejects_reaped_recycled_root_pid_and_fallback() {
     // Ensure test seam starts clean.
@@ -444,6 +445,234 @@ async fn test_xf1_peerpidfd_rejects_reaped_recycled_root_pid_and_fallback() {
     .expect("fallback PeerCred must still resolve live caller via proc_root");
     drop(db_guard);
     assert_eq!(fallback_session.session_id, "sess-victim");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_xf1_live_peer_cred_attests_caller() {
+    let tmp = tempdir().unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+
+    let proc_root = tmp.path().join("proc");
+    fs::create_dir_all(&proc_root).unwrap();
+
+    let sessions_dir = tmp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+
+    let victim_pid = 500u32;
+    write_fake_stat(&proc_root, victim_pid, 1, "1000");
+    let victim_inbox_sock = short_sock::sock_path(&sessions_dir, "victim");
+    let _victim_listener = UnixListener::bind(&victim_inbox_sock).unwrap();
+    let victim_json = json!({
+        "pid": victim_pid,
+        "sessionId": "sess-victim",
+        "name": "Victim",
+        "cwd": "/workspace",
+        "status": "idle",
+        "kind": "interactive",
+        "startedAt": 1000,
+        "updatedAt": 2000,
+        "procStart": "1000",
+        "messagingSocketPath": victim_inbox_sock.display().to_string()
+    });
+    fs::write(
+        sessions_dir.join(format!("{victim_pid}-sess-victim.json")),
+        victim_json.to_string(),
+    )
+    .unwrap();
+
+    let target_pid = 600u32;
+    write_fake_stat(&proc_root, target_pid, 1, "2000");
+    let target_inbox_sock = short_sock::sock_path(&sessions_dir, "target");
+    let target_listener = UnixListener::bind(&target_inbox_sock).unwrap();
+    let target_received = Arc::new(Mutex::new(Vec::<String>::new()));
+    let target_rx = target_received.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = target_listener.accept().await {
+            let mut buf = Vec::new();
+            let _ = s.read_to_end(&mut buf).await;
+            if let Ok(line) = String::from_utf8(buf) {
+                target_rx.lock().unwrap().push(line);
+            }
+        }
+    });
+    let target_json = json!({
+        "pid": target_pid,
+        "sessionId": "sess-target",
+        "name": "Target",
+        "cwd": "/workspace",
+        "status": "idle",
+        "kind": "interactive",
+        "startedAt": 1000,
+        "updatedAt": 2000,
+        "procStart": "2000",
+        "messagingSocketPath": target_inbox_sock.display().to_string()
+    });
+    fs::write(
+        sessions_dir.join(format!("{target_pid}-sess-target.json")),
+        target_json.to_string(),
+    )
+    .unwrap();
+
+    let presence_dir = tmp.path().join("presence");
+    fs::create_dir_all(&presence_dir).unwrap();
+    let agy_config = AgyConfig {
+        presence_dir,
+        proc_locks_path: tmp.path().join("locks"),
+        proc_root: proc_root.clone(),
+        agy_bin: "false".to_string(),
+        trusted_agy_exes: Vec::new(),
+    };
+
+    let db_conn = rusqlite::Connection::open_in_memory().unwrap();
+    storage::init_db(&db_conn).unwrap();
+    let db = Arc::new(Mutex::new(db_conn));
+
+    let (notify_tx, _) = tokio::sync::broadcast::channel(32);
+    let (pi_notify_tx, _) = tokio::sync::broadcast::channel(32);
+    let (svc_notify_tx, _) = tokio::sync::broadcast::channel(32);
+
+    let state = Arc::new(AppState {
+        sessions_dirs: vec![sessions_dir.clone()],
+        max_body: 65536,
+        request_counter: std::sync::atomic::AtomicU64::new(0),
+        fed_state: None,
+        db: db.clone(),
+        notify_tx,
+        pi_notify_tx,
+        svc_notify_tx,
+        reply_ttl: Duration::from_secs(3600),
+        idempotency_ttl: Duration::from_secs(86400),
+        long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(64)),
+        node_name: "node-test".to_string(),
+        agy_config: agy_config.clone(),
+        agy_store: new_agy_store(),
+        pi_store: new_pi_store(),
+        svc_store: new_svc_store(),
+    });
+
+    xmsg::claim::sync_claims(&db, &proc_root, &state.sessions_dirs[..], "node-test")
+        .await
+        .unwrap();
+
+    // 1. Direct `process::peer_cred` + `Ancestry::from_peer` + `resolve_caller_session_peer`
+    // while the peer process is alive with its socket open (`read_resp = true`).
+    let raw_sock = short_sock::sock_path(tmp.path(), "raw_live");
+    let raw_listener = UnixListener::bind(&raw_sock).unwrap();
+    let mut child_raw = spawn_std_socket_helper(&raw_sock, "ping\n", true, true);
+    let pid_raw = child_raw.id().expect("child_raw pid");
+    let mut raw_stdout = BufReader::new(child_raw.stdout.take().unwrap());
+    let mut raw_stdin = child_raw.stdin.take().unwrap();
+    wait_for_ready_to_connect(&mut raw_stdout).await;
+    write_fake_stat(&proc_root, pid_raw, victim_pid, "3333");
+    raw_stdin.write_all(b"go\n").await.unwrap();
+
+    let (mut accepted_raw, _) = raw_listener.accept().await.unwrap();
+    let peer_raw = process::peer_cred(&accepted_raw).expect("peer_cred on live accepted socket");
+    assert_eq!(peer_raw.uid, xmsg::agy::current_uid());
+    assert_eq!(peer_raw.pid, Some(pid_raw));
+
+    let mut walk = Ancestry::from_peer(&proc_root, &peer_raw);
+    let steps: Vec<(u32, String)> = walk.by_ref().collect();
+    assert_eq!(
+        steps,
+        vec![(pid_raw, "3333".to_string()), (victim_pid, "1000".to_string())]
+    );
+    assert_eq!(walk.end(), Some(WalkEnd::Root));
+
+    let db_guard = db.lock().unwrap();
+    let resolved = resolve_caller_session_peer(
+        &proc_root,
+        &state.sessions_dirs[..],
+        &agy_config,
+        &state.agy_store,
+        &state.pi_store,
+        &state.svc_store,
+        Some(&*db_guard),
+        &peer_raw,
+    )
+    .expect("live peer must resolve to sess-victim");
+    drop(db_guard);
+    assert_eq!(resolved.session_id, "sess-victim");
+
+    accepted_raw.write_all(b"pong\n").await.unwrap();
+    drop(accepted_raw);
+    let _ = child_raw.wait().await;
+
+    // 2. End-to-end live peer attestation over `agent.sock` and `http.sock`.
+    let agent_sock = short_sock::sock_path(tmp.path(), "agent_live");
+    let uid = xmsg::agy::current_uid();
+    let agent_listener = UnixListener::bind(&agent_sock).unwrap();
+    fs::set_permissions(&agent_sock, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let http_sock = short_sock::sock_path(tmp.path(), "http_live");
+    let http_listener = bind_ucred_unix_listener(&http_sock, uid, None).unwrap();
+
+    let state_for_agent = state.clone();
+    tokio::spawn(async move {
+        let _ = run_agent_server_with_listener(agent_listener, state_for_agent, uid).await;
+    });
+
+    let app = build_router(state.clone());
+    tokio::spawn(async move {
+        let make_svc = app.into_make_service_with_connect_info::<HttpPeer>();
+        let _ = axum::serve(http_listener, make_svc).await;
+    });
+
+    // Live child on agent.sock
+    let mut live_agent = spawn_std_socket_helper(
+        &agent_sock,
+        "{\"action\":\"send\",\"to\":\"Target\",\"text\":\"legit-via-agent-sock\"}\n",
+        true,
+        true,
+    );
+    let live_agent_pid = live_agent.id().expect("live_agent pid");
+    let mut agent_stdout = BufReader::new(live_agent.stdout.take().unwrap());
+    let mut agent_stdin = live_agent.stdin.take().unwrap();
+    wait_for_ready_to_connect(&mut agent_stdout).await;
+    write_fake_stat(&proc_root, live_agent_pid, victim_pid, "5555");
+    agent_stdin.write_all(b"go\n").await.unwrap();
+
+    let mut resp_line = String::new();
+    loop {
+        resp_line.clear();
+        let n = agent_stdout.read_line(&mut resp_line).await.unwrap();
+        assert!(n > 0, "EOF before helper printed response JSON");
+        if resp_line.trim().starts_with('{') {
+            break;
+        }
+    }
+    let resp_json: Value = serde_json::from_str(resp_line.trim()).unwrap();
+    assert_eq!(resp_json["status"], "ok", "{resp_json}");
+    let _ = live_agent.wait().await;
+
+    // Live child on http.sock (no `from` field, so attestation via `HttpPeer` is required)
+    let body = "{\"to\":\"Target\",\"text\":\"legit-via-http-sock\"}";
+    let req = format!(
+        "POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let mut live_http = spawn_std_socket_helper(&http_sock, &req, true, true);
+    let live_http_pid = live_http.id().expect("live_http pid");
+    let mut http_stdout = BufReader::new(live_http.stdout.take().unwrap());
+    let mut http_stdin = live_http.stdin.take().unwrap();
+    wait_for_ready_to_connect(&mut http_stdout).await;
+    write_fake_stat(&proc_root, live_http_pid, victim_pid, "6666");
+    http_stdin.write_all(b"go\n").await.unwrap();
+
+    let mut http_resp = String::new();
+    http_stdout.read_to_string(&mut http_resp).await.unwrap();
+    assert!(
+        http_resp.contains("202 Accepted") && http_resp.contains("\"outcome\":\"delivered\""),
+        "live child on http.sock must be attested and get 202 Accepted, got: {http_resp}"
+    );
+    let _ = live_http.wait().await;
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let msgs = target_received.lock().unwrap();
+    assert_eq!(msgs.len(), 2, "Target should receive both messages: {msgs:?}");
+    assert!(msgs[0].contains("legit-via-agent-sock") && msgs[0].contains("sess-victim@node-test"));
+    assert!(msgs[1].contains("legit-via-http-sock") && msgs[1].contains("sess-victim@node-test"));
 }
 
 // =============================================================================

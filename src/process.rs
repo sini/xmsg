@@ -92,6 +92,7 @@ pub enum WalkEnd {
 enum PeerPin {
     #[cfg(target_os = "linux")]
     Pinned(std::sync::Arc<std::os::fd::OwnedFd>),
+    #[cfg(target_os = "linux")]
     Dead,
     Unpinned,
 }
@@ -280,6 +281,7 @@ impl PeerCred {
 
     fn check_pin_alive(&self, expected_pid: u32) -> bool {
         match &self.pin {
+            #[cfg(target_os = "linux")]
             PeerPin::Dead => false,
             PeerPin::Unpinned => expected_pid > 0,
             #[cfg(target_os = "linux")]
