@@ -693,111 +693,137 @@ struct TestNode {
     child: ChildGuard,
 }
 
-async fn spawn_test_node(
+async fn spawn_test_node<F>(
     name: &str,
-    fed_port: u16,
-    http_port: u16,
     cert_pem: &str,
     key_pem: &str,
-    peers_json: Value,
-) -> TestNode {
-    let tmp = tempdir().unwrap();
-    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    mut make_peers_json: F,
+) -> TestNode
+where
+    F: FnMut(u16, u16) -> Value,
+{
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let fed_port = get_free_port();
+        let http_port = get_free_port();
+        let peers_json = make_peers_json(fed_port, http_port);
 
-    let cert_file = tmp.path().join("cert.pem");
-    let key_file = tmp.path().join("key.pem");
-    let peers_file = tmp.path().join("peers.json");
-    let db_path = tmp.path().join("node.db");
-    let stderr_path = tmp.path().join("stderr.log");
+        let tmp = tempdir().unwrap();
+        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
 
-    fs::write(&cert_file, cert_pem.as_bytes()).unwrap();
-    fs::write(&key_file, key_pem.as_bytes()).unwrap();
-    fs::write(&peers_file, peers_json.to_string()).unwrap();
+        let cert_file = tmp.path().join("cert.pem");
+        let key_file = tmp.path().join("key.pem");
+        let peers_file = tmp.path().join("peers.json");
+        let db_path = tmp.path().join("node.db");
+        let stderr_path = tmp.path().join("stderr.log");
 
-    let run_dir = tmp.path().join("run");
-    fs::create_dir_all(&run_dir).unwrap();
-    fs::set_permissions(&run_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(&cert_file, cert_pem.as_bytes()).unwrap();
+        fs::write(&key_file, key_pem.as_bytes()).unwrap();
+        fs::write(&peers_file, peers_json.to_string()).unwrap();
 
-    let sessions_dir = tmp.path().join("sessions");
-    fs::create_dir_all(&sessions_dir).unwrap();
-    fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let run_dir = tmp.path().join("run");
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::set_permissions(&run_dir, fs::Permissions::from_mode(0o700)).unwrap();
 
-    let agent_sock = run_dir.join("agent.sock");
-    let register_sock = run_dir.join("register.sock");
-    let http_sock = run_dir.join("http.sock");
-    let stderr_file = fs::File::create(&stderr_path).unwrap();
-    let stdout_file = stderr_file.try_clone().unwrap();
+        let sessions_dir = tmp.path().join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o700)).unwrap();
 
-    let bin = env!("CARGO_BIN_EXE_xmsg");
-    let child = tokio::process::Command::new(bin)
-        .env("RUST_LOG", "info")
-        .env("XDG_RUNTIME_DIR", &run_dir)
-        .env("HOME", &run_dir)
-        .args([
-            "serve",
-            "--listen",
-            &format!("127.0.0.1:{http_port}"),
-            "--fed-listen",
-            &format!("127.0.0.1:{fed_port}"),
-            "--peers-file",
-            peers_file.to_str().unwrap(),
-            "--fed-cert",
-            cert_file.to_str().unwrap(),
-            "--fed-key",
-            key_file.to_str().unwrap(),
-            "--db-path",
-            db_path.to_str().unwrap(),
-            "--sessions-dir",
-            sessions_dir.to_str().unwrap(),
-            "--register-sock",
-            register_sock.to_str().unwrap(),
-            "--agent-sock",
-            agent_sock.to_str().unwrap(),
-            "--http-sock",
-            http_sock.to_str().unwrap(),
-        ])
-        .stdout(std::process::Stdio::from(stdout_file))
-        .stderr(std::process::Stdio::from(stderr_file))
-        .spawn()
-        .expect("spawn test node");
+        let agent_sock = run_dir.join("agent.sock");
+        let register_sock = run_dir.join("register.sock");
+        let http_sock = run_dir.join("http.sock");
+        let stderr_file = fs::File::create(&stderr_path).unwrap();
+        let stdout_file = stderr_file.try_clone().unwrap();
 
-    let mut guard = ChildGuard::new(child);
+        let bin = env!("CARGO_BIN_EXE_xmsg");
+        let child = tokio::process::Command::new(bin)
+            .env("RUST_LOG", "info")
+            .env("XDG_RUNTIME_DIR", &run_dir)
+            .env("HOME", &run_dir)
+            .args([
+                "serve",
+                "--listen",
+                &format!("127.0.0.1:{http_port}"),
+                "--fed-listen",
+                &format!("127.0.0.1:{fed_port}"),
+                "--peers-file",
+                peers_file.to_str().unwrap(),
+                "--fed-cert",
+                cert_file.to_str().unwrap(),
+                "--fed-key",
+                key_file.to_str().unwrap(),
+                "--db-path",
+                db_path.to_str().unwrap(),
+                "--sessions-dir",
+                sessions_dir.to_str().unwrap(),
+                "--register-sock",
+                register_sock.to_str().unwrap(),
+                "--agent-sock",
+                agent_sock.to_str().unwrap(),
+                "--http-sock",
+                http_sock.to_str().unwrap(),
+            ])
+            .stdout(std::process::Stdio::from(stdout_file))
+            .stderr(std::process::Stdio::from(stderr_file))
+            .spawn()
+            .expect("spawn test node");
 
-    let mut ready = false;
-    for _ in 0..600 {
-        if guard.child_mut().try_wait().unwrap().is_some() {
-            break;
+        let mut guard = ChildGuard::new(child);
+
+        let mut ready = false;
+        let mut exited = None;
+        for _ in 0..600 {
+            if let Ok(Some(status)) = guard.child_mut().try_wait() {
+                exited = Some(status);
+                break;
+            }
+            if agent_sock.exists()
+                && tokio::net::TcpStream::connect(("127.0.0.1", fed_port))
+                    .await
+                    .is_ok()
+                && tokio::net::TcpStream::connect(("127.0.0.1", http_port))
+                    .await
+                    .is_ok()
+            {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        if agent_sock.exists()
-            && tokio::net::TcpStream::connect(("127.0.0.1", fed_port))
-                .await
-                .is_ok()
-            && tokio::net::TcpStream::connect(("127.0.0.1", http_port))
-                .await
-                .is_ok()
+
+        if ready {
+            return TestNode {
+                _tmp: tmp,
+                name: name.to_string(),
+                fed_port,
+                http_port,
+                agent_sock,
+                http_sock,
+                sessions_dir,
+                db_path,
+                stderr_path,
+                child: guard,
+            };
+        }
+
+        let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
+        if exited.is_some()
+            && (stderr.contains("AddrInUse")
+                || stderr.contains("address already in use")
+                || stderr.contains("Address already in use")
+                || stderr.contains("failed to bind federation listener"))
+            && attempt < 5
         {
-            ready = true;
-            break;
+            eprintln!(
+                "node {name} lost port (fed={fed_port}, http={http_port}) before binding, retrying (attempt {attempt}): {stderr}"
+            );
+            continue;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(
-        ready,
-        "node {name} failed to start; stderr: {}",
-        fs::read_to_string(&stderr_path).unwrap_or_default()
-    );
-
-    TestNode {
-        _tmp: tmp,
-        name: name.to_string(),
-        fed_port,
-        http_port,
-        agent_sock,
-        http_sock,
-        sessions_dir,
-        db_path,
-        stderr_path,
-        child: guard,
+        panic!(
+            "node {name} exited prematurely: {:?}, stderr:\n{}",
+            exited, stderr
+        );
     }
 }
 
@@ -932,34 +958,33 @@ async fn test_xf1_dial_out_pulled_reply_answerable_end_to_end() {
     let (cert_a, key_a, pin_a) = generate_self_signed_ed25519_pem("node-a").unwrap();
     let (cert_b, key_b, pin_b) = generate_self_signed_ed25519_pem("node-b").unwrap();
 
-    let port_a = get_free_port();
-    let http_a = get_free_port();
-    let port_b = get_free_port();
-    let http_b = get_free_port();
-
-    let peers_a = json!({
-        "peers": {
-            "node-b": {
-                "address": format!("127.0.0.1:{port_b}"),
-                "pin": normalize_pin(&pin_b),
-                "dial": "outbound",
-                "allow": ["send", "reply", "inbox"]
+    let node_b = spawn_test_node("node-b", &cert_b, &key_b, |_, _| {
+        json!({
+            "peers": {
+                "node-a": {
+                    "pin": normalize_pin(&pin_a),
+                    "leaf": true,
+                    "allow": ["send", "reply", "inbox"]
+                }
             }
-        }
-    });
+        })
+    })
+    .await;
+    let port_b = node_b.fed_port;
 
-    let peers_b = json!({
-        "peers": {
-            "node-a": {
-                "pin": normalize_pin(&pin_a),
-                "leaf": true,
-                "allow": ["send", "reply", "inbox"]
+    let node_a = spawn_test_node("node-a", &cert_a, &key_a, |_, _| {
+        json!({
+            "peers": {
+                "node-b": {
+                    "address": format!("127.0.0.1:{port_b}"),
+                    "pin": normalize_pin(&pin_b),
+                    "dial": "outbound",
+                    "allow": ["send", "reply", "inbox"]
+                }
             }
-        }
-    });
-
-    let node_b = spawn_test_node("node-b", port_b, http_b, &cert_b, &key_b, peers_b).await;
-    let node_a = spawn_test_node("node-a", port_a, http_a, &cert_a, &key_a, peers_a).await;
+        })
+    })
+    .await;
 
     let (_sock_a, rx_a) = create_claude_session_fixture(&node_a.sessions_dir, "alice", "Alice");
     let (_sock_b, rx_b) = create_claude_session_fixture(&node_b.sessions_dir, "bob", "Bob");
@@ -1098,34 +1123,34 @@ async fn test_xf1_dial_out_anonymous_stored_reply_and_poller_refuses_unid_reply(
     let (cert_a, key_a, pin_a) = generate_self_signed_ed25519_pem("node-a").unwrap();
     let (cert_b, key_b, pin_b) = generate_self_signed_ed25519_pem("node-b").unwrap();
 
-    let port_a = get_free_port();
-    let http_a = get_free_port();
-    let port_b = get_free_port();
-    let http_b = get_free_port();
-
-    let peers_a = json!({
-        "peers": {
-            "node-b": {
-                "address": format!("127.0.0.1:{port_b}"),
-                "pin": normalize_pin(&pin_b),
-                "dial": "outbound",
-                "allow": ["send", "reply", "inbox"]
+    let node_b = spawn_test_node("node-b", &cert_b, &key_b, |_, _| {
+        json!({
+            "peers": {
+                "node-a": {
+                    "pin": normalize_pin(&pin_a),
+                    "leaf": true,
+                    "allow": ["send", "reply", "inbox"]
+                }
             }
-        }
-    });
+        })
+    })
+    .await;
+    let port_b = node_b.fed_port;
 
-    let peers_b = json!({
-        "peers": {
-            "node-a": {
-                "pin": normalize_pin(&pin_a),
-                "leaf": true,
-                "allow": ["send", "reply", "inbox"]
+    let node_a = spawn_test_node("node-a", &cert_a, &key_a, |_, _| {
+        json!({
+            "peers": {
+                "node-b": {
+                    "address": format!("127.0.0.1:{port_b}"),
+                    "pin": normalize_pin(&pin_b),
+                    "dial": "outbound",
+                    "allow": ["send", "reply", "inbox"]
+                }
             }
-        }
-    });
-
-    let node_b = spawn_test_node("node-b", port_b, http_b, &cert_b, &key_b, peers_b).await;
-    let node_a = spawn_test_node("node-a", port_a, http_a, &cert_a, &key_a, peers_a).await;
+        })
+    })
+    .await;
+    let http_a = node_a.http_port;
 
     // Create Bob on Node B, and Alice on Node A (created AFTER the anonymous HTTP send so the
     // test process's PID is not traced to Alice during the anonymous HTTP send).
