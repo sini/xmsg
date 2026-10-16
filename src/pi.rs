@@ -51,12 +51,23 @@ pub fn verify_pi_process(
     peer_uid: u32,
     peer_pid: u32,
 ) -> Result<String, AppError> {
+    let peer = crate::process::PeerCred::unpinned(peer_uid, peer_pid);
+    verify_pi_process_peer(proc_root, my_uid, &peer)
+}
+
+pub fn verify_pi_process_peer(
+    proc_root: &Path,
+    my_uid: u32,
+    peer: &crate::process::PeerCred,
+) -> Result<String, AppError> {
+    let peer_uid = peer.uid;
+    let peer_pid = peer.pid.unwrap_or(0);
     if peer_uid != my_uid {
         return Err(AppError::NotRecipient(format!(
             "peer UID {peer_uid} does not match server UID {my_uid}"
         )));
     }
-    let starttime = get_proc_starttime(proc_root, peer_pid).map_err(|e| match e.kind() {
+    let starttime = peer.starttime(proc_root).map_err(|e| match e.kind() {
         io::ErrorKind::NotFound => AppError::NotFound(format!("process {peer_pid} not found: {e}")),
         _ => AppError::Internal(format!("failed to read starttime for PID {peer_pid}: {e}")),
     })?;
@@ -158,8 +169,8 @@ pub async fn handle_pi_connection<
     R: tokio::io::AsyncBufRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 >(
-    mut buf_reader: R,
-    mut writer: W,
+    buf_reader: R,
+    writer: W,
     proc_root: std::path::PathBuf,
     store: PiStore,
     my_uid: u32,
@@ -170,7 +181,40 @@ pub async fn handle_pi_connection<
     pi_notify_tx: broadcast::Sender<String>,
     reply_ttl: Duration,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let starttime = match verify_pi_process(&proc_root, my_uid, peer_uid, peer_pid) {
+    let peer = crate::process::PeerCred::unpinned(peer_uid, peer_pid);
+    handle_pi_connection_peer(
+        buf_reader,
+        writer,
+        proc_root,
+        store,
+        my_uid,
+        peer,
+        req,
+        db,
+        pi_notify_tx,
+        reply_ttl,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_pi_connection_peer<
+    R: tokio::io::AsyncBufRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+>(
+    mut buf_reader: R,
+    mut writer: W,
+    proc_root: std::path::PathBuf,
+    store: PiStore,
+    my_uid: u32,
+    peer: crate::process::PeerCred,
+    req: PiRegisterRequest,
+    db: Arc<Mutex<rusqlite::Connection>>,
+    pi_notify_tx: broadcast::Sender<String>,
+    reply_ttl: Duration,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let peer_pid = peer.pid.unwrap_or(0);
+    let starttime = match verify_pi_process_peer(&proc_root, my_uid, &peer) {
         Ok(st) => st,
         Err(e) => {
             let err_resp = serde_json::json!({

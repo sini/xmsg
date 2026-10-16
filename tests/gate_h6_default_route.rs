@@ -782,6 +782,7 @@ async fn test_oracle_6_direct_dial_out_pulled_reply_answerable_without_hub() {
                 .expect("Bob should receive message from outbound client A");
             assert!(b_msg.contains("Direct dial-out send to Bob"));
             let msg_id = extract_message_id(&b_msg).expect("message_id in Bob's delivery footer");
+            rx_b.lock().unwrap().clear();
 
             // Bob replies to Alice. Since Node A is outbound, Node B stores the reply.
             let reply_resp = reply_via_agent_sock(
@@ -798,10 +799,14 @@ async fn test_oracle_6_direct_dial_out_pulled_reply_answerable_without_hub() {
                 .expect("Alice should receive Bob's reply via pull poller");
             assert!(a_reply.contains("Bob replying over stored replies"));
             let reply_id = extract_reply_id(&a_reply).expect("reply_id in Alice's delivery footer");
+            assert_eq!(
+                reply_resp["reply"]["pushedMessageId"], reply_id,
+                "Node B must stamp pushedMessageId on stored reply so both nodes agree on reply_id"
+            );
 
             // Alice answers Bob's reply!
-            // If record_pushed_reply was called, Node A knows reply_id and routes back to Bob.
-            // If Mutant M2 (skip record_pushed_reply) is active, Node A fails to find reply_id -> RED!
+            // If record_pushed_reply was called and Node B recorded reply_id in messages/outbound,
+            // Node A knows reply_id and routes back to Bob, and Node B pushes it into Bob's inbox.
             let answer_resp = reply_via_agent_sock(
                 &node_a.agent_sock,
                 &reply_id,
@@ -811,6 +816,18 @@ async fn test_oracle_6_direct_dial_out_pulled_reply_answerable_without_hub() {
             assert_eq!(
                 answer_resp["status"], "ok",
                 "Alice's reply to pulled reply must succeed (proves record_pushed_reply): {answer_resp}"
+            );
+            assert_eq!(
+                answer_resp["reply"]["pushOutcome"], "pushed",
+                "Alice's reply to pulled reply must push into Bob's inbox on Node B: {answer_resp}"
+            );
+
+            let b_answer = wait_for_inbox_message(&rx_b, Duration::from_secs(5))
+                .await
+                .expect("Bob on Node B must receive Alice's answer in his inbox");
+            assert!(
+                b_answer.contains("Alice answering Bob's pulled reply"),
+                "Bob's inbox should contain Alice's answer, got: {b_answer}"
             );
 
             // Verify in Node A's database that the pulled reply was indeed recorded by record_pushed_reply

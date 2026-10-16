@@ -87,6 +87,19 @@ pub fn verify_svc_process(
     peer_pid: u32,
     name: &str,
 ) -> Result<String, AppError> {
+    let peer = crate::process::PeerCred::unpinned(peer_uid, peer_pid);
+    verify_svc_process_peer(proc_root, trusted_exes, my_uid, &peer, name)
+}
+
+pub fn verify_svc_process_peer(
+    proc_root: &Path,
+    trusted_exes: &HashMap<String, PathBuf>,
+    my_uid: u32,
+    peer: &crate::process::PeerCred,
+    name: &str,
+) -> Result<String, AppError> {
+    let peer_uid = peer.uid;
+    let peer_pid = peer.pid.unwrap_or(0);
     if peer_uid != my_uid {
         return Err(AppError::NotRecipient(format!(
             "peer UID {peer_uid} does not match server UID {my_uid}"
@@ -102,7 +115,8 @@ pub fn verify_svc_process(
         }
     };
 
-    let exe = crate::process::exe_path(proc_root, peer_pid)
+    let exe = peer
+        .exe_path(proc_root)
         .map_err(|e| AppError::NotFound(format!("process {peer_pid} exe not found: {e}")))?;
 
     let exe_canon = std::fs::canonicalize(&exe).unwrap_or_else(|_| exe.clone());
@@ -115,7 +129,7 @@ pub fn verify_svc_process(
         )));
     }
 
-    let starttime = crate::process::starttime(proc_root, peer_pid).map_err(|e| {
+    let starttime = peer.starttime(proc_root).map_err(|e| {
         AppError::Internal(format!("failed to read starttime for PID {peer_pid}: {e}"))
     })?;
 
@@ -184,8 +198,8 @@ pub async fn handle_svc_connection<
     R: tokio::io::AsyncBufRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 >(
-    mut buf_reader: R,
-    mut writer: W,
+    buf_reader: R,
+    writer: W,
     state: Arc<crate::http::AppState>,
     trusted_svc_exes: &HashMap<String, PathBuf>,
     my_uid: u32,
@@ -195,6 +209,38 @@ pub async fn handle_svc_connection<
     leaf_mode: bool,
     leaf_principal: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let peer = crate::process::PeerCred::unpinned(peer_uid, peer_pid);
+    handle_svc_connection_peer(
+        buf_reader,
+        writer,
+        state,
+        trusted_svc_exes,
+        my_uid,
+        peer,
+        req,
+        leaf_mode,
+        leaf_principal,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_svc_connection_peer<
+    R: tokio::io::AsyncBufRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+>(
+    mut buf_reader: R,
+    mut writer: W,
+    state: Arc<crate::http::AppState>,
+    trusted_svc_exes: &HashMap<String, PathBuf>,
+    my_uid: u32,
+    peer: crate::process::PeerCred,
+    req: SvcRegisterRequest,
+    leaf_mode: bool,
+    leaf_principal: Option<String>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let peer_uid = peer.uid;
+    let peer_pid = peer.pid.unwrap_or(0);
     let proc_root = state.agy_config.proc_root.clone();
     let store = state.svc_store.clone();
     let db = state.db.clone();
@@ -247,16 +293,21 @@ pub async fn handle_svc_connection<
             .into());
         }
 
-        crate::process::starttime(&proc_root, peer_pid).unwrap_or_else(|_| "0".to_string())
+        if !peer.is_pin_alive() {
+            let err_resp = serde_json::json!({
+                "status": "error",
+                "detail": format!("peer process {peer_pid} is no longer alive"),
+            });
+            let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+            return Err(AppError::NotFound(format!(
+                "peer process {peer_pid} is no longer alive"
+            ))
+            .into());
+        }
+
+        peer.starttime(&proc_root).unwrap_or_else(|_| "0".to_string())
     } else {
-        match verify_svc_process(
-            &proc_root,
-            trusted_svc_exes,
-            my_uid,
-            peer_uid,
-            peer_pid,
-            &name,
-        ) {
+        match verify_svc_process_peer(&proc_root, trusted_svc_exes, my_uid, &peer, &name) {
             Ok(st) => st,
             Err(e) => {
                 let err_resp = serde_json::json!({
@@ -487,16 +538,13 @@ pub async fn run_leaf_register_server(
             }
         };
 
-        let ucred = match stream.peer_cred() {
-            Ok(u) => u,
+        let peer = match crate::process::peer_cred(&stream) {
+            Ok(p) => p,
             Err(e) => {
                 tracing::warn!("failed to get peer cred: {e}");
                 continue;
             }
         };
-
-        let peer_uid = ucred.uid();
-        let peer_pid = ucred.pid().unwrap_or(0) as u32;
 
         let state_clone = state.clone();
         let leaf_principal_clone = leaf_principal.clone();
@@ -531,14 +579,13 @@ pub async fn run_leaf_register_server(
             };
 
             let empty_map = HashMap::new();
-            if let Err(e) = handle_svc_connection(
+            if let Err(e) = handle_svc_connection_peer(
                 buf_reader,
                 writer,
                 state_clone,
                 &empty_map,
                 my_uid,
-                peer_uid,
-                peer_pid,
+                peer,
                 req,
                 true,
                 Some(leaf_principal_clone),

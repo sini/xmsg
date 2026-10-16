@@ -540,7 +540,11 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            std::env::var("RUST_LOG")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .and_then(|v| EnvFilter::try_new(v).ok())
+                .unwrap_or_else(|| EnvFilter::new("info")),
         )
         .with_target(false)
         .init();

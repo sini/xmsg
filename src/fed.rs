@@ -4339,10 +4339,19 @@ pub fn spawn_outbound_reply_poller(
                             if let (Some(ret_harness), Some(ret_session_id)) =
                                 (&orig.return_harness, &orig.return_session_id)
                             {
-                                let reply_id = r
+                                let Some(reply_id) = r
                                     .pushed_message_id
                                     .clone()
-                                    .unwrap_or_else(|| format!("{}-{}", message_id, r.seq));
+                                    .filter(|id| !id.is_empty())
+                                else {
+                                    tracing::warn!(
+                                        message_id = %message_id,
+                                        seq = r.seq,
+                                        peer = %peer_name,
+                                        "refusing pulled reply without authoritative pushed_message_id"
+                                    );
+                                    continue;
+                                };
                                 let replier_badge = inbox::sender_label(
                                     &peer_name,
                                     "",

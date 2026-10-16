@@ -320,8 +320,8 @@ async fn poll(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_plugin_connection<R, W>(
-    mut reader: R,
-    mut writer: W,
+    reader: R,
+    writer: W,
     state: Arc<AppState>,
     harness: &'static str,
     my_uid: u32,
@@ -332,9 +332,26 @@ where
     R: tokio::io::AsyncBufRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    let peer = crate::process::PeerCred::unpinned(peer_uid, peer_pid);
+    handle_plugin_connection_peer(reader, writer, state, harness, my_uid, peer).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_plugin_connection_peer<R, W>(
+    mut reader: R,
+    mut writer: W,
+    state: Arc<AppState>,
+    harness: &'static str,
+    my_uid: u32,
+    peer: crate::process::PeerCred,
+) -> Result<(), AppError>
+where
+    R: tokio::io::AsyncBufRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let peer_pid = peer.pid.unwrap_or(0);
     let starttime =
-        match crate::pi::verify_pi_process(&state.agy_config.proc_root, my_uid, peer_uid, peer_pid)
-        {
+        match crate::pi::verify_pi_process_peer(&state.agy_config.proc_root, my_uid, &peer) {
             Ok(st) => st,
             Err(e) => {
                 let _ = writer

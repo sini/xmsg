@@ -475,6 +475,24 @@ pub fn verify_registration(
     peer_pid: u32,
     req: &AgyRegisterRequest,
 ) -> Result<AgyRegistration, AppError> {
+    let peer = crate::process::PeerCred::unpinned(peer_uid, peer_pid);
+    verify_registration_peer(proc_root, proc_locks, presence_dir, trusted_exes, my_uid, &peer, req)
+}
+
+/// Like [`verify_registration`], starting from a [`crate::process::PeerCred`] whose root
+/// pid may be pinned by an `SO_PEERPIDFD` file descriptor.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_registration_peer(
+    proc_root: &Path,
+    proc_locks: &Path,
+    presence_dir: &Path,
+    trusted_exes: &[PathBuf],
+    my_uid: u32,
+    peer: &crate::process::PeerCred,
+    req: &AgyRegisterRequest,
+) -> Result<AgyRegistration, AppError> {
+    let peer_uid = peer.uid;
+    let peer_pid = peer.pid.unwrap_or(0);
     // 1. Peer UID verification
     if peer_uid != my_uid {
         return Err(AppError::NotRecipient(format!(
@@ -515,11 +533,11 @@ pub fn verify_registration(
         .map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
         .collect();
 
-    // 5. Ancestor walk from peer_pid to find an ancestor satisfying BOTH (a) and (b)
+    // 5. Ancestor walk from peer to find an ancestor satisfying BOTH (a) and (b)
     let mut chosen_ancestor = None;
 
     // `st1` is the start the walk read; the step 7 re-read must still equal it.
-    for (curr_pid, st1) in crate::process::Ancestry::new(proc_root, peer_pid).take(32) {
+    for (curr_pid, st1) in crate::process::Ancestry::from_peer(proc_root, peer).take(32) {
         if curr_pid <= 1 {
             break;
         }
@@ -612,6 +630,22 @@ pub fn attest_mcp_caller(
     peer_uid: u32,
     peer_pid: u32,
 ) -> Result<(AgyRegistration, String), AppError> {
+    let peer = crate::process::PeerCred::unpinned(peer_uid, peer_pid);
+    attest_mcp_caller_peer(proc_root, proc_locks, presence_dir, trusted_exes, my_uid, &peer)
+}
+
+/// Like [`attest_mcp_caller`], starting from a [`crate::process::PeerCred`] whose root pid
+/// may be pinned by an `SO_PEERPIDFD` file descriptor.
+pub fn attest_mcp_caller_peer(
+    proc_root: &Path,
+    proc_locks: &Path,
+    presence_dir: &Path,
+    trusted_exes: &[PathBuf],
+    my_uid: u32,
+    peer: &crate::process::PeerCred,
+) -> Result<(AgyRegistration, String), AppError> {
+    let peer_uid = peer.uid;
+    let peer_pid = peer.pid.unwrap_or(0);
     // 1. Peer UID verification
     if peer_uid != my_uid {
         return Err(AppError::NotRecipient(format!(
@@ -654,11 +688,11 @@ pub fn attest_mcp_caller(
         ));
     }
 
-    // 5. Ancestor walk from peer_pid to find an ancestor satisfying BOTH (a) and (b)
+    // 5. Ancestor walk from peer to find an ancestor satisfying BOTH (a) and (b)
     let mut chosen = None;
 
     // `st1` is the start the walk read; the final re-read must still equal it.
-    for (curr_pid, st1) in crate::process::Ancestry::new(proc_root, peer_pid).take(32) {
+    for (curr_pid, st1) in crate::process::Ancestry::from_peer(proc_root, peer).take(32) {
         if curr_pid <= 1 {
             break;
         }
@@ -1444,16 +1478,13 @@ pub async fn run_register_server(
             }
         };
 
-        let ucred = match stream.peer_cred() {
-            Ok(c) => c,
+        let peer = match crate::process::peer_cred(&stream) {
+            Ok(p) => p,
             Err(e) => {
                 tracing::warn!("failed to get peer creds: {e}");
                 continue;
             }
         };
-
-        let peer_uid = ucred.uid();
-        let peer_pid = ucred.pid().map(|p| p as u32).unwrap_or(0);
 
         let config_clone = config.clone();
         let store_clone = store.clone();
@@ -1576,14 +1607,13 @@ pub async fn run_register_server(
                     Ok(ref v) if v.get("harness").and_then(|h| h.as_str()) == Some("pi") => {
                         match serde_json::from_value::<crate::pi::PiRegisterRequest>(v.clone()) {
                             Ok(req) => {
-                                if let Err(e) = crate::pi::handle_pi_connection(
+                                if let Err(e) = crate::pi::handle_pi_connection_peer(
                                     buf_reader,
                                     writer,
                                     config_clone.proc_root.clone(),
                                     pi_store_clone,
                                     my_uid,
-                                    peer_uid,
-                                    peer_pid,
+                                    peer,
                                     req,
                                     db_clone,
                                     pi_notify_tx_clone,
@@ -1613,14 +1643,13 @@ pub async fn run_register_server(
                             Ok(hello) => {
                                 let harness = crate::plugin::harness(&hello.harness)
                                     .expect("matched a plugin harness");
-                                if let Err(e) = crate::plugin::handle_plugin_connection(
+                                if let Err(e) = crate::plugin::handle_plugin_connection_peer(
                                     buf_reader,
                                     writer,
                                     state_clone,
                                     harness,
                                     my_uid,
-                                    peer_uid,
-                                    peer_pid,
+                                    peer,
                                 )
                                 .await
                                 {
@@ -1636,14 +1665,13 @@ pub async fn run_register_server(
                     Ok(ref v) if v.get("harness").and_then(|h| h.as_str()) == Some("svc") => {
                         match serde_json::from_value::<crate::svc::SvcRegisterRequest>(v.clone()) {
                             Ok(req) => {
-                                if let Err(e) = crate::svc::handle_svc_connection(
+                                if let Err(e) = crate::svc::handle_svc_connection_peer(
                                     buf_reader,
                                     writer,
                                     state_clone,
                                     &trusted_svc_exes_clone,
                                     my_uid,
-                                    peer_uid,
-                                    peer_pid,
+                                    peer,
                                     req,
                                     false,
                                     None,
@@ -1664,14 +1692,13 @@ pub async fn run_register_server(
                     }
                     Ok(v) => match serde_json::from_value::<AgyRegisterRequest>(v) {
                         Ok(req) => {
-                            match verify_registration(
+                            match verify_registration_peer(
                                 &config_clone.proc_root,
                                 &config_clone.proc_locks_path,
                                 &config_clone.presence_dir,
                                 &config_clone.trusted_agy_exes,
                                 my_uid,
-                                peer_uid,
-                                peer_pid,
+                                &peer,
                                 &req,
                             ) {
                                 Ok(reg) => {

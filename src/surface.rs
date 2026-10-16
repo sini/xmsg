@@ -163,6 +163,16 @@ pub fn leaf_service_name(principal: &str) -> &str {
 /// `pid` through the claim table, to a Claude instance's address, an agy or pi session, or
 /// a registered service. Every surface that identifies a caller by pid reads this.
 pub async fn trace_caller(state: &AppState, pid: u32) -> Result<Session, AppError> {
+    let peer = crate::process::PeerCred::unpinned(0, pid);
+    trace_caller_peer(state, &peer).await
+}
+
+/// Like [`trace_caller`], starting from a [`crate::process::PeerCred`] whose root pid may
+/// be pinned by an `SO_PEERPIDFD` file descriptor.
+pub async fn trace_caller_peer(
+    state: &AppState,
+    peer: &crate::process::PeerCred,
+) -> Result<Session, AppError> {
     let _ = crate::claim::sync_claims(
         &state.db,
         &state.agy_config.proc_root,
@@ -171,7 +181,7 @@ pub async fn trace_caller(state: &AppState, pid: u32) -> Result<Session, AppErro
     )
     .await;
     let db = state.db.lock().ok();
-    crate::agent::resolve_caller_session(
+    crate::agent::resolve_caller_session_peer(
         &state.agy_config.proc_root,
         &state.sessions_dirs,
         &state.agy_config,
@@ -179,7 +189,7 @@ pub async fn trace_caller(state: &AppState, pid: u32) -> Result<Session, AppErro
         &state.pi_store,
         &state.svc_store,
         db.as_deref(),
-        pid,
+        peer,
     )
 }
 
@@ -1457,14 +1467,18 @@ async fn deliver_reply(
             Some(outcome)
         }
     };
-    // A reply pushed to a remote origin is a message sent there, which its receiver may
-    // answer: recorded as sent, with its recipient in `outbound` (A7's reply rule).
+    // A reply pushed to or stored for a remote origin is a message sent there, which its
+    // receiver may answer: recorded as sent, with its recipient in `outbound` (A7's reply
+    // rule; XF1 Defect 2). When `dest_session_id` is `None` (an anonymous sender on a
+    // dial-out/leaf node has no inbox and no reply rights), `pushed_id` remains `None` and
+    // no `messages`/`outbound` row is recorded; the anonymous sender reads the reply via
+    // `GET /v1/messages/{id}/replies`.
     let dest_session_id = if caller_is_sender {
         Some(msg.session_id.clone())
     } else {
         msg.return_session_id.clone()
     };
-    if let (Some(host), Some("pushed"), Some(to)) =
+    if let (Some(host), Some("pushed" | "stored"), Some(to)) =
         (remote_host.as_deref(), push_outcome, dest_session_id.as_deref())
     {
         if let Ok(db) = state.db.lock() {
@@ -1515,13 +1529,28 @@ async fn deliver_reply(
             );
             let _ = storage::mark_outbound_resolved(&db, &reply_id);
         }
+        if push_outcome == Some("pushed") {
+            if let Some(ref fed_state) = state.fed_state {
+                if fed_state
+                    .current_peers()
+                    .get(host)
+                    .is_some_and(|p| p.is_outbound())
+                {
+                    crate::fed::spawn_outbound_reply_poller(
+                        fed_state.clone(),
+                        host.to_string(),
+                        reply_id.clone(),
+                    );
+                }
+            }
+        }
     }
     // The pushed copy's ID: a local push that landed, or the envelope a remote origin
-    // received (which deduplicates by it).
-    let pushed_id = match (remote_host, push_outcome) {
-        (Some(_), Some("stored")) | (_, None) => None,
-        (Some(_), Some(_)) | (None, Some("pushed")) => Some(reply_id.as_str()),
-        (None, Some(_)) => None,
+    // received or will pull (which deduplicates and replies by it).
+    let pushed_id = match (remote_host.as_deref(), push_outcome, dest_session_id.as_deref()) {
+        (Some(_), Some("stored"), None) | (_, None, _) => None,
+        (Some(_), Some(_), _) | (None, Some("pushed"), _) => Some(reply_id.as_str()),
+        (None, Some(_), _) => None,
     };
 
     let record = {

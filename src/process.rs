@@ -88,6 +88,256 @@ pub enum WalkEnd {
     Reused(u32),
 }
 
+#[derive(Debug, Clone)]
+enum PeerPin {
+    #[cfg(target_os = "linux")]
+    Pinned(std::sync::Arc<std::os::fd::OwnedFd>),
+    Dead,
+    Unpinned,
+}
+
+/// Credentials and root-PID pin for a peer connected over a Unix stream socket.
+///
+/// On Linux kernels supporting `SO_PEERPIDFD` (>= 6.5), holds an `OwnedFd` `pidfd` referring
+/// to the peer's kernel `struct pid`. Because the kernel cannot recycle numeric PID `P` while
+/// `/proc/self/fdinfo/<pidfd>` reports `Pid:\t<P>` (`P > 0`), checking the `pidfd` before and
+/// after reading the root's `<proc_root>/<P>/stat` guarantees the walk starts from the peer
+/// process that called `connect()`, never a replacement process that reused `P`.
+#[derive(Debug, Clone)]
+pub struct PeerCred {
+    pub uid: u32,
+    pub pid: Option<u32>,
+    pin: PeerPin,
+}
+
+#[cfg(target_os = "linux")]
+static PEERPIDFD_FALLBACK_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "linux")]
+static FORCE_PEERPIDFD_ERRNO: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Test seam: forces `getsockopt(SO_PEERPIDFD)` to fail with `errno` (or `0` to use the kernel).
+pub fn set_force_peerpidfd_errno_for_test(errno: i32) {
+    #[cfg(target_os = "linux")]
+    {
+        FORCE_PEERPIDFD_ERRNO.store(errno, std::sync::atomic::Ordering::SeqCst);
+        if errno != 0 {
+            PEERPIDFD_FALLBACK_WARNED.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = errno;
+}
+
+/// Test seam: returns whether the `SO_PEERPIDFD` unavailable fallback path was taken since reset.
+pub fn peerpidfd_fallback_warned_for_test() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        PEERPIDFD_FALLBACK_WARNED.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn pidfd_live_pid(fd: &std::os::fd::OwnedFd) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    let content = fs::read_to_string(format!("/proc/self/fdinfo/{}", fd.as_raw_fd())).ok()?;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("Pid:") {
+            let pid: i64 = rest.trim().parse().ok()?;
+            return (pid > 0).then(|| u32::try_from(pid).ok()).flatten();
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn getsockopt_peerpidfd(stream: &tokio::net::UnixStream) -> io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let forced = FORCE_PEERPIDFD_ERRNO.load(std::sync::atomic::Ordering::SeqCst);
+    if forced != 0 {
+        return Err(io::Error::from_raw_os_error(forced));
+    }
+    let mut pidfd: libc::c_int = -1;
+    let mut len: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: `stream.as_raw_fd()` is a valid socket fd; `pidfd` and `len` are properly aligned.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERPIDFD,
+            (&mut pidfd as *mut libc::c_int).cast(),
+            &mut len,
+        )
+    };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if pidfd < 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "SO_PEERPIDFD returned negative fd",
+        ));
+    }
+    // SAFETY: the kernel returned a fresh file descriptor owned by this process.
+    Ok(unsafe { OwnedFd::from_raw_fd(pidfd) })
+}
+
+/// Reads the peer's UID and pins its PID via `SO_PEERPIDFD` on Linux, falling back to
+/// `SO_PEERCRED` (with a one-time warning log) only when the kernel does not support
+/// `SO_PEERPIDFD` (`ENOPROTOOPT` / `ENOSYS` / `EOPNOTSUPP`) or on non-Linux targets.
+pub fn peer_cred(stream: &tokio::net::UnixStream) -> io::Result<PeerCred> {
+    let ucred = stream.peer_cred()?;
+    let uid = ucred.uid();
+    let fallback_pid = ucred
+        .pid()
+        .and_then(|p| u32::try_from(p).ok())
+        .filter(|&p| p > 0);
+
+    #[cfg(target_os = "linux")]
+    {
+        match getsockopt_peerpidfd(stream) {
+            Ok(fd) => match pidfd_live_pid(&fd) {
+                Some(live_pid) => Ok(PeerCred {
+                    uid,
+                    pid: Some(live_pid),
+                    pin: PeerPin::Pinned(std::sync::Arc::new(fd)),
+                }),
+                None => Ok(PeerCred {
+                    uid,
+                    pid: fallback_pid,
+                    pin: PeerPin::Dead,
+                }),
+            },
+            Err(e)
+                if matches!(
+                    e.raw_os_error(),
+                    Some(libc::ENOPROTOOPT | libc::ENOSYS | libc::EOPNOTSUPP)
+                ) =>
+            {
+                if !PEERPIDFD_FALLBACK_WARNED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    tracing::warn!(
+                        "SO_PEERPIDFD unavailable on this kernel ({e}); falling back to SO_PEERCRED for peer PID resolution"
+                    );
+                }
+                Ok(PeerCred {
+                    uid,
+                    pid: fallback_pid,
+                    pin: PeerPin::Unpinned,
+                })
+            }
+            Err(_) => Ok(PeerCred {
+                uid,
+                pid: fallback_pid,
+                pin: PeerPin::Dead,
+            }),
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(PeerCred {
+            uid,
+            pid: fallback_pid,
+            pin: PeerPin::Unpinned,
+        })
+    }
+}
+
+impl PeerCred {
+    /// Constructs an unpinned `PeerCred` from a bare `(uid, pid)` pair (for non-socket callers
+    /// and unit tests that supply a numeric PID directly).
+    pub fn unpinned(uid: u32, pid: u32) -> Self {
+        PeerCred {
+            uid,
+            pid: (pid > 0).then_some(pid),
+            pin: PeerPin::Unpinned,
+        }
+    }
+
+    pub fn pid_or_zero(&self) -> u32 {
+        self.pid.unwrap_or(0)
+    }
+
+    pub fn is_pinned(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            matches!(self.pin, PeerPin::Pinned(_))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
+    pub fn is_pin_alive(&self) -> bool {
+        self.pid.is_some_and(|p| self.check_pin_alive(p))
+    }
+
+    fn check_pin_alive(&self, expected_pid: u32) -> bool {
+        match &self.pin {
+            PeerPin::Dead => false,
+            PeerPin::Unpinned => expected_pid > 0,
+            #[cfg(target_os = "linux")]
+            PeerPin::Pinned(fd) => pidfd_live_pid(fd) == Some(expected_pid),
+        }
+    }
+
+    /// Reads the start time of this peer in `proc_root`, bracketed by `pidfd` liveness checks
+    /// when pinned so a recycled numeric PID is never read.
+    pub fn starttime(&self, proc_root: &Path) -> io::Result<String> {
+        let pid = self
+            .pid
+            .filter(|&p| p > 0)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "peer has no valid PID"))?;
+        if !self.check_pin_alive(pid) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("peer process {pid} already reaped"),
+            ));
+        }
+        let st = starttime(proc_root, pid)?;
+        if !self.check_pin_alive(pid) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("peer process {pid} reaped during starttime read"),
+            ));
+        }
+        Ok(st)
+    }
+
+    /// Reads the executable path of this peer in `proc_root`, bracketed by `pidfd` liveness checks.
+    pub fn exe_path(&self, proc_root: &Path) -> io::Result<std::path::PathBuf> {
+        let pid = self
+            .pid
+            .filter(|&p| p > 0)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "peer has no valid PID"))?;
+        if !self.check_pin_alive(pid) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("peer process {pid} already reaped"),
+            ));
+        }
+        let exe = exe_path(proc_root, pid)?;
+        if !self.check_pin_alive(pid) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("peer process {pid} reaped during exe_path read"),
+            ));
+        }
+        Ok(exe)
+    }
+
+    /// Checks that the peer is still alive with `expected_start`.
+    pub fn is_alive(&self, proc_root: &Path, expected_start: &str) -> bool {
+        self.starttime(proc_root).ok().as_deref() == Some(expected_start)
+    }
+}
+
 /// The ancestry walk every identity-attributing caller takes: yields `(pid, start)` for the
 /// start PID and then each ancestor, where `start` is the token to match the process against.
 /// Match against it rather than re-reading the start: a re-read can see a reused PID.
@@ -100,6 +350,7 @@ pub struct Ancestry<'a> {
     proc_root: &'a Path,
     /// The PID to yield next and the start recorded when it was read as a parent.
     next: Option<(u32, Option<String>)>,
+    root_pin: Option<PeerCred>,
     end: Option<WalkEnd>,
 }
 
@@ -108,6 +359,36 @@ impl<'a> Ancestry<'a> {
         Ancestry {
             proc_root,
             next: Some((start_pid, None)),
+            root_pin: None,
+            end: None,
+        }
+    }
+
+    /// Starts an ancestry walk pinned to `peer` (whose root PID is guarded by `SO_PEERPIDFD`
+    /// on Linux when available). If the peer process has already been reaped before or during
+    /// the root step's `read_link`, the walk yields nothing and [`Ancestry::end`] is
+    /// [`WalkEnd::Reused`].
+    pub fn from_peer(proc_root: &'a Path, peer: &PeerCred) -> Self {
+        let Some(start_pid) = peer.pid.filter(|&p| p > 0) else {
+            return Ancestry {
+                proc_root,
+                next: None,
+                root_pin: None,
+                end: Some(WalkEnd::Unreadable(0)),
+            };
+        };
+        if !peer.check_pin_alive(start_pid) {
+            return Ancestry {
+                proc_root,
+                next: None,
+                root_pin: None,
+                end: Some(WalkEnd::Reused(start_pid)),
+            };
+        }
+        Ancestry {
+            proc_root,
+            next: Some((start_pid, None)),
+            root_pin: Some(peer.clone()),
             end: None,
         }
     }
@@ -123,10 +404,23 @@ impl Iterator for Ancestry<'_> {
 
     fn next(&mut self) -> Option<(u32, String)> {
         let (pid, recorded) = self.next.take()?;
+        let root_pin = self.root_pin.take();
+        if let Some(ref peer) = root_pin {
+            if !peer.check_pin_alive(pid) {
+                self.end = Some(WalkEnd::Reused(pid));
+                return None;
+            }
+        }
         let Some(link) = read_link(self.proc_root, pid) else {
             self.end = Some(WalkEnd::Unreadable(pid));
             return None;
         };
+        if let Some(ref peer) = root_pin {
+            if !peer.check_pin_alive(pid) {
+                self.end = Some(WalkEnd::Reused(pid));
+                return None;
+            }
+        }
         if recorded.is_some_and(|r| r != link.start) {
             self.end = Some(WalkEnd::Reused(pid));
             return None;

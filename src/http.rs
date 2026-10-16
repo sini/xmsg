@@ -345,11 +345,11 @@ pub(crate) async fn resolve_target_session(
 }
 
 /// How an HTTP caller reached this server. Only `http.sock` carries peer credentials, so
-/// only it yields a pid to trace (A15); a request with no `HttpPeer` (the TCP `--listen`
+/// only it yields a peer to trace (A15); a request with no `HttpPeer` (the TCP `--listen`
 /// listener) has none (AM-2).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct HttpPeer {
-    pub pid: Option<u32>,
+    pub peer: Option<crate::process::PeerCred>,
 }
 
 impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, UcredUnixListener>>
@@ -357,12 +357,7 @@ impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, Ucre
 {
     fn connect_info(stream: axum::serve::IncomingStream<'_, UcredUnixListener>) -> Self {
         HttpPeer {
-            pid: stream
-                .io()
-                .peer_cred()
-                .ok()
-                .and_then(|c| c.pid())
-                .and_then(|p| u32::try_from(p).ok()),
+            peer: crate::process::peer_cred(stream.io()).ok(),
         }
     }
 }
@@ -374,9 +369,9 @@ type PeerInfo = Option<axum::Extension<axum::extract::ConnectInfo<HttpPeer>>>;
 /// no peer credentials (TCP), the caller is the leaf principal in leaf mode and anonymous
 /// otherwise.
 async fn http_sender(state: &AppState, peer: &PeerInfo, from: Option<&str>) -> Sender {
-    let pid = peer.as_ref().and_then(|p| (p.0).0.pid);
-    if let Some(pid) = pid {
-        if let Ok(session) = surface::trace_caller(state, pid).await {
+    let cred = peer.as_ref().and_then(|p| (p.0).0.peer.as_ref());
+    if let Some(cred) = cred {
+        if let Ok(session) = surface::trace_caller_peer(state, cred).await {
             return Sender::Session(session);
         }
     } else if let Some(p) = state.leaf_principal().filter(|_| state.is_leaf()) {

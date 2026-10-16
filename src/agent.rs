@@ -216,14 +216,39 @@ pub fn default_agent_sock_path() -> Result<PathBuf, AppError> {
 pub fn resolve_caller_session(
     proc_root: &Path,
     sessions_dirs: &(impl crate::registry::SessionDirs + ?Sized),
-    _agy_config: &AgyConfig,
+    agy_config: &AgyConfig,
     agy_store: &crate::agy::AgyStore,
     pi_store: &PiStore,
     svc_store: &crate::svc::SvcStore,
     conn: Option<&rusqlite::Connection>,
     peer_pid: u32,
 ) -> Result<Session, AppError> {
-    let mut walk = crate::process::Ancestry::new(proc_root, peer_pid);
+    let peer = crate::process::PeerCred::unpinned(0, peer_pid);
+    resolve_caller_session_peer(
+        proc_root,
+        sessions_dirs,
+        agy_config,
+        agy_store,
+        pi_store,
+        svc_store,
+        conn,
+        &peer,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_caller_session_peer(
+    proc_root: &Path,
+    sessions_dirs: &(impl crate::registry::SessionDirs + ?Sized),
+    _agy_config: &AgyConfig,
+    agy_store: &crate::agy::AgyStore,
+    pi_store: &PiStore,
+    svc_store: &crate::svc::SvcStore,
+    conn: Option<&rusqlite::Connection>,
+    peer: &crate::process::PeerCred,
+) -> Result<Session, AppError> {
+    let peer_pid = peer.pid_or_zero();
+    let mut walk = crate::process::Ancestry::from_peer(proc_root, peer);
 
     for (curr_pid, st) in walk.by_ref().take(32) {
         // Each store is matched against `st`, the start the walk read, never a re-read.
@@ -386,6 +411,14 @@ pub async fn run_agent_server(
         )
     })?;
 
+    run_agent_server_with_listener(listener, state, my_uid).await
+}
+
+pub async fn run_agent_server_with_listener(
+    listener: UnixListener,
+    state: Arc<AppState>,
+    my_uid: u32,
+) -> io::Result<()> {
     let mut tasks = tokio::task::JoinSet::new();
 
     loop {
@@ -402,7 +435,7 @@ pub async fn run_agent_server(
             }
         };
 
-        let ucred = match stream.peer_cred() {
+        let peer = match process::peer_cred(&stream) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("failed to get peer creds on agent.sock: {e}");
@@ -410,22 +443,21 @@ pub async fn run_agent_server(
             }
         };
 
-        let peer_uid = ucred.uid();
-        let peer_pid = ucred.pid().map(|p| p as u32).unwrap_or(0);
+        let peer_uid = peer.uid;
+        let peer_pid = peer.pid_or_zero();
 
         if peer_uid != my_uid {
             tracing::warn!("agent.sock rejected connection: UID mismatch {peer_uid} != {my_uid}");
             continue;
         }
 
-        let initial_starttime =
-            match crate::pi::get_proc_starttime(&state.agy_config.proc_root, peer_pid) {
-                Ok(st) => st,
-                Err(e) => {
-                    tracing::warn!("failed to get starttime for peer PID {peer_pid}: {e}");
-                    continue;
-                }
-            };
+        let initial_starttime = match peer.starttime(&state.agy_config.proc_root) {
+            Ok(st) => st,
+            Err(e) => {
+                tracing::warn!("failed to get starttime for peer PID {peer_pid}: {e}");
+                continue;
+            }
+        };
 
         let state_clone = state.clone();
 
@@ -459,11 +491,7 @@ pub async fn run_agent_server(
                 }
 
                 // Verify peer PID is still live and starttime has not changed
-                if crate::pi::get_proc_starttime(&state_clone.agy_config.proc_root, peer_pid)
-                    .ok()
-                    .as_deref()
-                    != Some(initial_starttime.as_str())
-                {
+                if !peer.is_alive(&state_clone.agy_config.proc_root, &initial_starttime) {
                     tracing::warn!("peer PID {peer_pid} died or starttime changed");
                     break;
                 }
@@ -497,7 +525,7 @@ pub async fn run_agent_server(
 
                 let caller_needed = matches!(frame, AgentFrame::Send { .. } | AgentFrame::Reply { .. });
                 let caller = if caller_needed {
-                    match surface::trace_caller(&state_clone, peer_pid).await {
+                    match surface::trace_caller_peer(&state_clone, &peer).await {
                         Ok(c) => Some(c),
                         Err(e) => {
                             let err = e.frame();
@@ -511,14 +539,13 @@ pub async fn run_agent_server(
 
                 let resp: Result<serde_json::Value, AppError> = match frame {
                     AgentFrame::McpStart { .. } => {
-                    match crate::agy::attest_mcp_caller(
+                    match crate::agy::attest_mcp_caller_peer(
                         &state_clone.agy_config.proc_root,
                         &state_clone.agy_config.proc_locks_path,
                         &state_clone.agy_config.presence_dir,
                         &state_clone.agy_config.trusted_agy_exes,
                         my_uid,
-                        peer_uid,
-                        peer_pid,
+                        &peer,
                     ) {
                         Ok((reg, conv_id)) => {
                             let session_key = conv_id.clone();
@@ -577,7 +604,7 @@ pub async fn run_agent_server(
                             .ok()
                             .and_then(|active_pairs| {
                                 let proc_root = &state_clone.agy_config.proc_root;
-                                process::Ancestry::new(proc_root, peer_pid)
+                                process::Ancestry::from_peer(proc_root, &peer)
                                     .take(32)
                                     .find_map(|(pid, st)| {
                                         active_pairs.iter().find_map(|(c, _)| {
