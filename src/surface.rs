@@ -262,8 +262,12 @@ pub fn parse_to(to: &str) -> Result<(&str, Option<&str>), AppError> {
 // list
 // -----------------------------------------------------------------------------
 
-/// One entry of `list` (A13, A-12, A16): its address, kind, label and status (`live` or
-/// `parked`), the node holding it and the user it belongs to.
+/// Default `within` window for `list` with `status: "inactive"` (24 hours).
+pub const DEFAULT_INACTIVE_WITHIN_SECS: u64 = 86_400;
+
+/// One entry of `list` (A13, A-12, A16, XL1): its address, kind, label and status (`live`,
+/// `parked` or `closed`), the node holding it, the user it belongs to, and its timestamp
+/// (`registered_at` when live, `last_seen` when inactive).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Recipient {
@@ -274,6 +278,10 @@ pub struct Recipient {
     pub status: String,
     pub node: String,
     pub user: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registered_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<i64>,
 }
 
 /// What `list` returns: the recipients, and how each node asked answered (A-12).
@@ -294,10 +302,20 @@ pub struct ListQuery {
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub within: Option<u64>,
+    #[serde(default)]
     pub host: Option<String>,
 }
 
-fn entry(id: &str, service: bool, label: Option<String>, status: &str, user: &str) -> FedListEntry {
+fn live_entry(
+    id: &str,
+    service: bool,
+    label: Option<String>,
+    user: &str,
+    registered_at: i64,
+) -> FedListEntry {
     FedListEntry {
         id: id.to_string(),
         kind: if service { "service" } else { "instance" }.to_string(),
@@ -309,8 +327,22 @@ fn entry(id: &str, service: bool, label: Option<String>, status: &str, user: &st
                 .and_then(inbox::clean_label)
                 .filter(|l| l != id)
         },
+        status: "live".to_string(),
+        user: user.to_string(),
+        registered_at: Some(registered_at),
+        last_seen: None,
+    }
+}
+
+fn inactive_entry(id: &str, status: &str, user: &str, last_seen: i64) -> FedListEntry {
+    FedListEntry {
+        id: id.to_string(),
+        kind: "instance".to_string(),
+        label: None,
         status: status.to_string(),
         user: user.to_string(),
+        registered_at: None,
+        last_seen: Some(last_seen),
     }
 }
 
@@ -322,11 +354,16 @@ fn recipient(e: FedListEntry, node: &str) -> Recipient {
         status: e.status,
         node: node.to_string(),
         user: e.user,
+        registered_at: e.registered_at,
+        last_seen: e.last_seen,
     }
 }
 
-/// The recipients the caller may see (A4): this node's and every peer's, each peer asked
-/// concurrently and bounded by the list timeout (A-1, D14). `node` asks only that node.
+/// The recipients the caller may see (A4, XL1): this node's and every peer's, each peer
+/// asked concurrently and bounded by the list timeout (A-1, D14). `node` asks only that
+/// node. Default `list` (`status` omitted or `"live"`) returns only live recipients;
+/// `status: "inactive"` returns parked and closed instances seen within `within` seconds
+/// (default 24h, capped at `reply_ttl`).
 pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, AppError> {
     if query.host.is_some() {
         return Err(AppError::BadRequest(
@@ -340,6 +377,26 @@ pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, App
             )));
         }
     }
+    let inactive_mode = match query.status.as_deref() {
+        None | Some("live") => false,
+        Some("inactive") => true,
+        Some(other) => {
+            return Err(AppError::BadRequest(format!(
+                "status '{other}' is not 'live' or 'inactive'"
+            )));
+        }
+    };
+    if !inactive_mode && query.within.is_some() {
+        return Err(AppError::BadRequest(
+            "'within' is only valid when status is 'inactive'".to_string(),
+        ));
+    }
+    let max_within = state.reply_ttl.as_secs();
+    let within_secs = query
+        .within
+        .unwrap_or(DEFAULT_INACTIVE_WITHIN_SECS)
+        .min(max_within);
+
     let node = state.node_name.as_str();
     let fed_state = state.fed_state.as_ref();
     let (local, peers): (bool, Vec<String>) = match (query.node.as_deref(), fed_state) {
@@ -360,7 +417,12 @@ pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, App
             Some(fs) => crate::fed::own_user(fs),
             None => crate::node::own_user(None),
         };
-        for e in listing(&state.local(), state.reply_ttl, &user).await? {
+        let local_entries = if inactive_mode {
+            listing_inactive(&state.local(), state.reply_ttl, within_secs, &user).await?
+        } else {
+            listing_live(&state.local(), state.reply_ttl, &user).await?
+        };
+        for e in local_entries {
             recipients.push(recipient(e, node));
         }
         nodes.push(crate::fed::NodeStatus::ok(node));
@@ -379,8 +441,20 @@ pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, App
             answers.push(res.map_err(|e| AppError::Internal(e.to_string()))?);
         }
         answers.sort_by(|a, b| a.0.cmp(&b.0));
+        let now = storage::now_epoch_secs();
+        let cutoff = now.saturating_sub(within_secs as i64);
         for (key, entries, status) in answers {
-            recipients.extend(entries.into_iter().map(|e| recipient(e, &key)));
+            for e in entries {
+                if inactive_mode {
+                    // Older peers do not stamp `last_seen` on parked entries, so they
+                    // cannot be windowed and are excluded from inactive results (XL1).
+                    if e.status != "live" && e.last_seen.is_some_and(|ts| ts >= cutoff) {
+                        recipients.push(recipient(e, &key));
+                    }
+                } else if e.status == "live" {
+                    recipients.push(recipient(e, &key));
+                }
+            }
             nodes.push(status);
         }
     }
@@ -395,11 +469,10 @@ pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, App
     Ok(ListResult { recipients, nodes })
 }
 
-/// This node's recipients for `user`'s listing (A4, A-12, A16): live Claude, agy and pi
-/// instances, plugin sessions (opencode), registered services, and the instances parked
-/// here (A14): observed, not running now, and within their parked lifetime. A pi or a
-/// plugin session is never parked (AM-9).
-pub(crate) async fn listing(
+/// This node's live recipients (XL1): live Claude, agy and pi instances, plugin sessions
+/// (opencode, hermes), and registered services, each carrying its `registered_at`. Also
+/// prunes `instance_seen` rows older than `reply_ttl`.
+pub(crate) async fn listing_live(
     local: &Local<'_>,
     reply_ttl: Duration,
     user: &str,
@@ -412,33 +485,74 @@ pub(crate) async fn listing(
         local.node_name,
     )
     .await?;
+    {
+        let db = local.db.lock().map_err(db_err)?;
+        let _ = storage::purge_instance_seen(&db, storage::now_epoch_secs(), reply_ttl.as_secs() as i64);
+    }
     let mut out: Vec<FedListEntry> = pairs
         .into_iter()
-        .map(|(claim, e)| entry(&claim.address(), false, e.name, "live", user))
+        .map(|(claim, e)| live_entry(&claim.address(), false, e.name, user, claim.created_at))
         .collect();
     for s in crate::agy::list_agy_sessions(local.agy_config, local.agy_store, &query) {
-        out.push(entry(&s.session_id, false, None, "live", user));
+        out.push(live_entry(&s.session_id, false, None, user, s.started_at as i64));
     }
     let proc_root = &local.agy_config.proc_root;
     for s in crate::pi::list_pi_sessions(proc_root, local.pi_store, &query) {
-        out.push(entry(&s.session_id, false, s.name, "live", user));
+        out.push(live_entry(&s.session_id, false, s.name, user, s.started_at as i64));
     }
     let plugin_sessions =
         crate::plugin::sessions(&*local.db.lock().map_err(db_err)?).map_err(db_err)?;
     for s in plugin_sessions {
-        out.push(entry(&s.session_id, false, s.name, "live", user));
+        out.push(live_entry(&s.session_id, false, s.name, user, s.started_at as i64));
     }
     for s in crate::svc::list_svc_sessions(proc_root, local.svc_store, &query) {
-        out.push(entry(&s.session_id, true, None, "live", user));
+        out.push(live_entry(&s.session_id, true, None, user, s.started_at as i64));
     }
+    Ok(out)
+}
+
+/// This node's inactive recipients within `within_secs` (capped at `reply_ttl`, XL1):
+/// parked Claude/agy instances and closed pi/plugin sessions, each carrying `last_seen`.
+pub(crate) async fn listing_inactive(
+    local: &Local<'_>,
+    reply_ttl: Duration,
+    within_secs: u64,
+    user: &str,
+) -> Result<Vec<FedListEntry>, AppError> {
+    let live = listing_live(local, reply_ttl, user).await?;
+    let now = storage::now_epoch_secs();
+    let ttl_secs = reply_ttl.as_secs() as i64;
+    let capped_within = (within_secs as i64).min(ttl_secs);
+    let inactive = {
+        let db = local.db.lock().map_err(db_err)?;
+        storage::inactive_instances(&db, now, ttl_secs, capped_within).map_err(db_err)?
+    };
+    let mut out = Vec::new();
+    for item in inactive {
+        if !live.iter().any(|e| e.id == item.id) {
+            out.push(inactive_entry(&item.id, &item.status, user, item.last_seen));
+        }
+    }
+    Ok(out)
+}
+
+/// This node's full recipient set for federation and mesh/handoff resolution (A4, A-12,
+/// A16, A14, XL1): live recipients with `registered_at`, plus parked instances within their
+/// parked lifetime with `last_seen`. A pi or plugin session is never parked (AM-9).
+pub(crate) async fn listing(
+    local: &Local<'_>,
+    reply_ttl: Duration,
+    user: &str,
+) -> Result<Vec<FedListEntry>, AppError> {
+    let mut out = listing_live(local, reply_ttl, user).await?;
     let parked = {
         let db = local.db.lock().map_err(db_err)?;
         storage::parked_instances(&db, storage::now_epoch_secs(), reply_ttl.as_secs() as i64)
             .map_err(db_err)?
     };
-    for id in parked {
+    for (id, last_live) in parked {
         if !out.iter().any(|e| e.id == id) {
-            out.push(entry(&id, false, None, "parked", user));
+            out.push(inactive_entry(&id, "parked", user, last_live));
         }
     }
     Ok(out)
@@ -1132,6 +1246,7 @@ async fn deliver_send(
             let _ = storage::purge_peer_mailbox(&db, ttl);
             let _ = storage::purge_forwarded_messages(&db, ttl);
             let _ = storage::purge_instance_queue(&db, ttl);
+            let _ = storage::purge_instance_seen(&db, storage::now_epoch_secs(), ttl as i64);
         }
         Err(e) => {
             tracing::warn!(target: "xmsg", message_id = %message_id, "delivered message's record not completed: {e}");

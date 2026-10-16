@@ -283,17 +283,23 @@ impl Node {
 
     /// `list` on this node, which observes its Claude fakes (A14): the status of `id` here.
     async fn status_of(&self, id: &str) -> Option<String> {
-        let url = format!(
-            "http://127.0.0.1:{}/v1/recipients?node={}",
-            self.http_port, self.name
-        );
-        let v: Value = reqwest::get(url).await.unwrap().json().await.unwrap();
-        v["recipients"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["address"] == format!("{id}@{}", self.name))
-            .map(|r| r["status"].as_str().unwrap().to_string())
+        for suffix in ["", "&status=inactive"] {
+            let url = format!(
+                "http://127.0.0.1:{}/v1/recipients?node={}{suffix}",
+                self.http_port, self.name
+            );
+            let v: Value = reqwest::get(url).await.unwrap().json().await.unwrap();
+            if let Some(status) = v["recipients"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["address"] == format!("{id}@{}", self.name))
+                .map(|r| r["status"].as_str().unwrap().to_string())
+            {
+                return Some(status);
+            }
+        }
+        None
     }
 }
 

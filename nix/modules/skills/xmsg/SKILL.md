@@ -20,13 +20,20 @@ Every recipient has an address:
 
 ## Listing recipients: `list`
 
-Call **`list`**, optionally with `name`, `node` or `kind` (`service` or `instance`). Each entry gives:
+Call **`list`**, optionally with `name`, `node`, `kind` (`service` or `instance`), `status` (`live` or `inactive`) and `within`.
+
+By default (`status` omitted or `live`), `list` shows only **live** recipients, and each entry carries `registered_at` (epoch seconds when it registered on its node).
+
+To see inactive instances (`parked` and `closed`), call `list` with `status: "inactive"`, and optionally `within` (seconds to look back; defaults to 86400 = 24 hours, capped at the parked lifetime, i.e. the reply TTL). Each inactive entry carries `last_seen` (epoch seconds when it was last seen live). A peer older than XL1 lists no inactive entries.
+
+Each entry gives:
 
 - `address`: `id@node` or `name@node`;
 - `kind`: `service` or `instance`;
 - `label`: an instance's own description (a service has none);
-- `status`: `live`, or `parked` for an instance that is not running now and would be queued for;
-- `user`: the user the recipient belongs to.
+- `status`: `live`, `parked` (an instance that is not running now and would be queued for), or `closed`;
+- `user`: the user the recipient belongs to;
+- `registered_at` (when `live`) or `last_seen` (when `inactive`).
 
 Without `node`, `list` covers this node and every node it can reach. With `node`, it asks only that node.
 

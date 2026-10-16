@@ -908,7 +908,10 @@ impl Claude {
 
 /// `list` on `node`, which observes its Claude fakes (A14).
 async fn observe(node: &Node) -> Value {
-    let url = format!("http://127.0.0.1:{}/v1/recipients", node.http_port);
+    let url = format!(
+        "http://127.0.0.1:{}/v1/recipients?status=inactive",
+        node.http_port
+    );
     reqwest::get(url).await.unwrap().json().await.unwrap()
 }
 

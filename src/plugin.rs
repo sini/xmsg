@@ -105,6 +105,10 @@ enum Frame {
         node: Option<String>,
         #[serde(default)]
         kind: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        within: Option<u64>,
     },
     Send {
         request_id: String,
@@ -547,6 +551,8 @@ where
                 name,
                 node,
                 kind,
+                status,
+                within,
             } => {
                 let caller =
                     held(&*db.lock().map_err(db_err)?, &conn_id, &session).map_err(db_err)?;
@@ -560,6 +566,8 @@ where
                         name,
                         node,
                         kind,
+                        status,
+                        within,
                         host: None,
                     };
                     let res = surface::list(&state, &query).await.map(

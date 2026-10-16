@@ -2199,8 +2199,9 @@ pub struct FedReplyEnvelope {
     pub created_at: i64,
 }
 
-/// One entry of a node's `list` answer (A4, A-12, A16): an instance ID or a service name,
-/// its kind, label and status, and the user it belongs to. The asking node adds the node.
+/// One entry of a node's `list` answer (A4, A-12, A16, XL1): an instance ID or a service
+/// name, its kind, label and status, the user it belongs to, and its timestamp
+/// (`registered_at` when live, `last_seen` when inactive). The asking node adds the node.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FedListEntry {
@@ -2210,6 +2211,10 @@ pub struct FedListEntry {
     pub label: Option<String>,
     pub status: String,
     pub user: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registered_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<i64>,
 }
 
 /// A dial-out client's answer to a mailbox `list` query: its entries, or `denied` when its

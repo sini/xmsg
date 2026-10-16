@@ -1738,22 +1738,95 @@ pub fn seen_instance(
 /// or a plugin session (AM-9: both are bound to their process or registration), and
 /// within their parked lifetime: `ttl_secs` after last live, or as long as their queue.
 /// The caller leaves out the ones live now.
-pub fn parked_instances(conn: &Connection, now: i64, ttl_secs: i64) -> Result<Vec<String>> {
+pub fn parked_instances(conn: &Connection, now: i64, ttl_secs: i64) -> Result<Vec<(String, i64)>> {
     let mut stmt = conn.prepare(
-        "SELECT id, harness FROM instance_seen s WHERE harness != 'pi' AND (last_live + ?2 > ?1 \
+        "SELECT id, harness, last_live FROM instance_seen s WHERE harness != 'pi' AND (last_live + ?2 > ?1 \
          OR EXISTS (SELECT 1 FROM instance_queue q WHERE q.instance_id = s.id AND q.delivered_at IS NULL AND q.expires_at > ?1) \
          OR EXISTS (SELECT 1 FROM agy_pending_messages a WHERE a.session_id = s.id AND a.delivered_at IS NULL AND a.created_at >= ?1 - ?2)) \
          ORDER BY id",
     )?;
     let rows = stmt
         .query_map(params![now, ttl_secs], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
         })?
         .collect::<Result<Vec<_>>>()?;
     Ok(rows
         .into_iter()
-        .filter(|(_, harness)| crate::plugin::harness(harness).is_none())
-        .map(|(id, _)| id)
+        .filter(|(_, harness, _)| crate::plugin::harness(harness).is_none())
+        .map(|(id, _, last_live)| (id, last_live))
+        .collect())
+}
+
+/// Prunes `instance_seen` rows whose `last_live` is older than `ttl_secs` (the longest
+/// `within` window accepted) and which hold no unexpired queued messages.
+pub fn purge_instance_seen(conn: &Connection, now: i64, ttl_secs: i64) -> Result<usize> {
+    conn.execute(
+        "DELETE FROM instance_seen WHERE last_live + ?2 <= ?1 \
+         AND NOT EXISTS (SELECT 1 FROM instance_queue q WHERE q.instance_id = instance_seen.id AND q.delivered_at IS NULL AND q.expires_at > ?1) \
+         AND NOT EXISTS (SELECT 1 FROM agy_pending_messages a WHERE a.session_id = instance_seen.id AND a.delivered_at IS NULL AND a.created_at >= ?1 - ?2)",
+        params![now, ttl_secs],
+    )
+}
+
+/// An inactive instance in `instance_seen` within `within_secs` of `now` (XL1): its ID,
+/// its status (`parked` for a Claude or agy instance within its parked lifetime, `closed`
+/// for a pi or plugin session), and when it was last seen live. The caller leaves out the
+/// ones live now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InactiveInstance {
+    pub id: String,
+    pub status: String,
+    pub last_seen: i64,
+}
+
+pub fn inactive_instances(
+    conn: &Connection,
+    now: i64,
+    ttl_secs: i64,
+    within_secs: i64,
+) -> Result<Vec<InactiveInstance>> {
+    let cutoff = now.saturating_sub(within_secs);
+    let mut stmt = conn.prepare(
+        "SELECT id, harness, last_live, \
+         (last_live + ?2 > ?1 \
+          OR EXISTS (SELECT 1 FROM instance_queue q WHERE q.instance_id = s.id AND q.delivered_at IS NULL AND q.expires_at > ?1) \
+          OR EXISTS (SELECT 1 FROM agy_pending_messages a WHERE a.session_id = s.id AND a.delivered_at IS NULL AND a.created_at >= ?1 - ?2)) \
+         FROM instance_seen s WHERE last_live >= ?3 ORDER BY id",
+    )?;
+    let rows = stmt
+        .query_map(params![now, ttl_secs, cutoff], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, bool>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, harness, last_seen, within_parked_ttl)| {
+            let is_ephemeral = harness == "pi" || crate::plugin::harness(&harness).is_some();
+            if is_ephemeral {
+                Some(InactiveInstance {
+                    id,
+                    status: "closed".to_string(),
+                    last_seen,
+                })
+            } else if within_parked_ttl {
+                Some(InactiveInstance {
+                    id,
+                    status: "parked".to_string(),
+                    last_seen,
+                })
+            } else {
+                None
+            }
+        })
         .collect())
 }
 

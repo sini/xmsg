@@ -302,8 +302,16 @@ def _str(description):
 
 
 TOOLS = [
-    ("xmsg_list", "list", (), _schema(
-        "xmsg_list", "List the xmsg recipients you can message: their address, kind, label and status.", {})),
+    ("xmsg_list", "list", ("name", "node", "kind", "status", "within"), _schema(
+        "xmsg_list",
+        "List the xmsg recipients you can message: by default live recipients (with registered_at); with status='inactive', parked and closed instances seen within `within` seconds (default 86400 = 24h, capped at reply TTL, with last_seen; a peer older than XL1 lists no inactive entries).",
+        {
+            "name": _str("only recipients with this label or service name"),
+            "node": _str("ask only this node"),
+            "kind": _str("service or instance"),
+            "status": _str("live (default) or inactive"),
+            "within": {"type": "number", "description": "for status='inactive', seconds to look back (default 86400)"},
+        })),
     ("xmsg_send", "send", ("to", "text"), _schema(
         "xmsg_send", "Send a message to an xmsg recipient. `to` is an address (id@node) or a label.",
         {"to": _str("recipient address or label"), "text": _str("message text")}, ("to", "text"))),

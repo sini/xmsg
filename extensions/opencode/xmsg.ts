@@ -172,9 +172,27 @@ export const XmsgPlugin = async ({ client }: any) => {
     },
     tool: {
       xmsg_list: {
-        description: "List the xmsg recipients you can message: their address, kind, label and status.",
-        args: {},
-        execute: (_: Answer, ctx: any) => run({ action: "list" }, ctx.sessionID),
+        description:
+          "List the xmsg recipients you can message: by default live recipients (with registered_at); with status='inactive', parked and closed instances seen within `within` seconds (default 86400 = 24h, capped at reply TTL, with last_seen; a peer older than XL1 lists no inactive entries).",
+        args: {
+          name: str("only recipients with this label or service name"),
+          node: str("ask only this node"),
+          kind: str("service or instance"),
+          status: str("live (default) or inactive"),
+          within: { type: "number", description: "for status='inactive', seconds to look back (default 86400)" },
+        },
+        execute: (a: Answer, ctx: any) =>
+          run(
+            {
+              action: "list",
+              ...(a?.name != null ? { name: a.name } : {}),
+              ...(a?.node != null ? { node: a.node } : {}),
+              ...(a?.kind != null ? { kind: a.kind } : {}),
+              ...(a?.status != null ? { status: a.status } : {}),
+              ...(a?.within != null ? { within: a.within } : {}),
+            },
+            ctx.sessionID,
+          ),
       },
       xmsg_send: {
         description: "Send a message to an xmsg recipient. `to` is an address (id@node) or a label.",

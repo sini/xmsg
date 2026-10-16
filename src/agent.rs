@@ -33,6 +33,10 @@ pub enum AgentFrame {
         node: Option<String>,
         #[serde(default)]
         kind: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        within: Option<u64>,
     },
     Send {
         #[serde(default)]
@@ -638,13 +642,22 @@ pub async fn run_agent_server_with_listener(
                     }
                         continue;
                     }
-                    AgentFrame::List { name, node, kind, .. } => {
+                    AgentFrame::List {
+                        name,
+                        node,
+                        kind,
+                        status,
+                        within,
+                        ..
+                    } => {
                         let query = surface::ListQuery {
-                name,
-                node,
-                kind,
-                host: None,
-            };
+                            name,
+                            node,
+                            kind,
+                            status,
+                            within,
+                            host: None,
+                        };
                         surface::list(&state_clone, &query)
                             .await
                             .map(|r| serde_json::json!({ "status": "ok", "recipients": r.recipients, "nodes": r.nodes }))

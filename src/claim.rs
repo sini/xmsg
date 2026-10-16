@@ -272,6 +272,8 @@ pub fn sync_claims_entries(
                 .map_err(|e| AppError::Internal(e.to_string()))?;
         }
     }
+    storage::purge_instance_seen(conn, now, 604_800)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     // 2. Discover newly observed processes. A released (ID, process) row is not a holder:
     //    a process that presents X again after switching away is a new observation (D-2).

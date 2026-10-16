@@ -362,16 +362,21 @@ export class XmsgPiBridge {
     this.pi.registerTool({
       name: "list",
       label: "List",
-      description: "List the recipients you can message: each entry gives its address (id@node for an instance, name@node for a service), its kind (service or instance), its label and its status. Filter by name, node or kind; node lists a federated peer.",
+      description: "List the recipients you can message: by default shows live recipients (with registered_at); with status='inactive' shows parked and closed instances seen within `within` seconds (default 86400 = 24h, capped at reply TTL, with last_seen; a peer older than XL1 lists no inactive entries). Filter by name, node or kind; node lists a federated peer.",
       parameters: Type.Object({
         name: Type.Optional(Type.String({ description: "Only recipients with this label or service name" })),
         node: Type.Optional(Type.String({ description: "List this node (a federated peer) instead of the local one" })),
         kind: Type.Optional(Type.Union([Type.Literal("service"), Type.Literal("instance")], { description: "Only services or only instances" })),
+        status: Type.Optional(Type.Union([Type.Literal("live"), Type.Literal("inactive")], { description: "Whether to list live recipients (default) or inactive (parked and closed) instances" })),
+        within: Type.Optional(Type.Integer({ minimum: 0, description: "For status='inactive', include entries seen within this many seconds (default 86400 = 24h, capped at reply TTL)" })),
       }),
-      execute: async (_toolCallId: string, params: { name?: string; node?: string; kind?: string } = {}) => {
+      execute: async (_toolCallId: string, params: { name?: string; node?: string; kind?: string; status?: string; within?: number } = {}) => {
         const query = new URLSearchParams();
-        for (const key of ["name", "node", "kind"] as const) {
+        for (const key of ["name", "node", "kind", "status"] as const) {
           if (params?.[key]) query.set(key, params[key] as string);
+        }
+        if (params?.within !== undefined && params?.within !== null) {
+          query.set("within", String(params.within));
         }
         const qs = query.toString();
         const queryPath = qs ? `/v1/recipients?${qs}` : "/v1/recipients";

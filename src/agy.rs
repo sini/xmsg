@@ -365,6 +365,12 @@ pub fn list_agy_sessions(
                 if crate::process::starttime(&config.proc_root, holder_pid).is_err() {
                     continue;
                 }
+                let lock_mtime = fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
                 let session = Session {
                     session_id: conversation_id.clone(),
                     name: Some(conversation_id.clone()),
@@ -374,8 +380,8 @@ pub fn list_agy_sessions(
                     kind: "interactive".to_string(),
                     entrypoint: None,
                     version: None,
-                    started_at: 0,
-                    updated_at: 0,
+                    started_at: lock_mtime,
+                    updated_at: lock_mtime,
                     harness: "agy".to_string(),
                     registered: Some(false),
                 };

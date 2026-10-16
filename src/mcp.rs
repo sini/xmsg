@@ -437,13 +437,15 @@ pub fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "list",
-            "description": "List the recipients you can message, on this node and every node it can reach: each entry gives its address (id@node for an instance, name@node for a service), its kind (service or instance), its label, its status (live or parked) and the user it belongs to; nodes gives each node asked as ok, unreachable or timeout (a node that withholds list is unreachable, detail withholds list). Filter by name, node or kind; node asks only that node.",
+            "description": "List the recipients you can message, on this node and every node it can reach. By default (`status` omitted or \"live\"), shows only live recipients, each carrying `registered_at` (epoch seconds when it registered on its node). With `status: \"inactive\"`, shows parked and closed instances seen within `within` seconds (default 86400 = 24h, capped at the reply TTL), each carrying `last_seen` (a peer older than XL1 lists no inactive entries). Each entry gives its address (`id@node` for an instance, `name@node` for a service), kind (`service` or `instance`), label, status (`live`, `parked` or `closed`), user, and `registered_at` or `last_seen`; `nodes` gives each node asked as `ok`, `unreachable` or `timeout` (a node that withholds list is `unreachable`, detail `withholds list`). Filter by `name`, `node` or `kind`; `node` asks only that node.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "Only recipients with this label or service name" },
                     "node": { "type": "string", "description": "Ask only this node (this one or a federated peer)" },
-                    "kind": { "type": "string", "enum": ["service", "instance"], "description": "Only services or only instances" }
+                    "kind": { "type": "string", "enum": ["service", "instance"], "description": "Only services or only instances" },
+                    "status": { "type": "string", "enum": ["live", "inactive"], "description": "Whether to list live recipients (default) or inactive (parked and closed) instances" },
+                    "within": { "type": "integer", "minimum": 0, "description": "For status='inactive', include entries seen within this many seconds (default 86400 = 24h, capped at reply TTL)" }
                 },
                 "additionalProperties": false
             }
@@ -554,9 +556,19 @@ pub fn execute_tool(
     match name {
         "list" => {
             let mut url = reqwest::Url::parse("http://xmsg/v1/recipients").expect("static url");
-            for k in ["name", "node", "kind"] {
+            for k in ["name", "node", "kind", "status"] {
                 if let Some(v) = str_arg(k) {
                     url.query_pairs_mut().append_pair(k, v);
+                }
+            }
+            if let Some(within_val) = args.get("within") {
+                match within_val.as_u64() {
+                    Some(w) => {
+                        url.query_pairs_mut().append_pair("within", &w.to_string());
+                    }
+                    None => {
+                        return tool_err("error: 'within' must be a non-negative integer".to_string());
+                    }
                 }
             }
             let path = match url.query() {

@@ -724,13 +724,21 @@ async fn test_oracle_4_no_cwd_or_pid() {
             "entry must NOT contain registered: {entry:?}"
         );
 
-        // Assert exact key set on client route (A13, A16): address, kind, label, status,
-        // node, user
+        // Assert exact key set on client route (A13, A16, XL1): address, kind, label,
+        // node, registered_at, status, user
         let mut keys: Vec<String> = obj.keys().cloned().collect();
         keys.sort();
         assert_eq!(
             keys,
-            vec!["address", "kind", "label", "node", "status", "user"],
+            vec![
+                "address",
+                "kind",
+                "label",
+                "node",
+                "registered_at",
+                "status",
+                "user"
+            ],
             "exact key set mismatch on entry: {entry:?}"
         );
     }
