@@ -91,10 +91,23 @@ pub enum WalkEnd {
 #[derive(Debug, Clone)]
 enum PeerPin {
     #[cfg(target_os = "linux")]
-    Pinned(std::sync::Arc<std::os::fd::OwnedFd>),
+    Visible(std::sync::Arc<std::os::fd::OwnedFd>),
+    #[cfg(target_os = "linux")]
+    Unmapped(std::sync::Arc<std::os::fd::OwnedFd>),
     #[cfg(target_os = "linux")]
     Dead,
     Unpinned,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PidfdState {
+    /// Exited / reaped process (`Pid: -1` in `/proc/self/fdinfo/<pidfd>`).
+    Dead,
+    /// Live process in a PID namespace not visible to the reader (`Pid: 0`).
+    Unmapped,
+    /// Live process visible in the reader's PID namespace (`Pid: > 0`).
+    Visible(u32),
 }
 
 /// Credentials and root-PID pin for a peer connected over a Unix stream socket.
@@ -103,7 +116,9 @@ enum PeerPin {
 /// to the peer's kernel `struct pid`. Because the kernel cannot recycle numeric PID `P` while
 /// `/proc/self/fdinfo/<pidfd>` reports `Pid:\t<P>` (`P > 0`), checking the `pidfd` before and
 /// after reading the root's `<proc_root>/<P>/stat` guarantees the walk starts from the peer
-/// process that called `connect()`, never a replacement process that reused `P`.
+/// process that called `connect()`, never a replacement process that reused `P`. A live peer in
+/// a separate PID namespace reports `Pid:\t0` ([`PidfdState::Unmapped`]) while alive and
+/// `Pid:\t-1` ([`PidfdState::Dead`]) once reaped.
 #[derive(Debug, Clone)]
 pub struct PeerCred {
     pub uid: u32,
@@ -118,6 +133,10 @@ static PEERPIDFD_FALLBACK_WARNED: std::sync::atomic::AtomicBool =
 #[cfg(target_os = "linux")]
 static FORCE_PEERPIDFD_ERRNO: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
+#[cfg(target_os = "linux")]
+static FORCE_PIDFD_PID: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(i64::MIN);
+
 /// Test seam: forces `getsockopt(SO_PEERPIDFD)` to fail with `errno` (or `0` to use the kernel).
 pub fn set_force_peerpidfd_errno_for_test(errno: i32) {
     #[cfg(target_os = "linux")]
@@ -129,6 +148,17 @@ pub fn set_force_peerpidfd_errno_for_test(errno: i32) {
     }
     #[cfg(not(target_os = "linux"))]
     let _ = errno;
+}
+
+/// Test seam: forces `pidfd_state` to observe `pid` (`Some(0)` for alive-unmapped,
+/// `Some(-1)` for dead, `Some(p)` for visible, or `None` to read kernel fdinfo).
+pub fn set_force_pidfd_pid_for_test(pid: Option<i64>) {
+    #[cfg(target_os = "linux")]
+    {
+        FORCE_PIDFD_PID.store(pid.unwrap_or(i64::MIN), std::sync::atomic::Ordering::SeqCst);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = pid;
 }
 
 /// Test seam: returns whether the `SO_PEERPIDFD` unavailable fallback path was taken since reset.
@@ -144,16 +174,36 @@ pub fn peerpidfd_fallback_warned_for_test() -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn pidfd_live_pid(fd: &std::os::fd::OwnedFd) -> Option<u32> {
+fn pidfd_state(fd: &std::os::fd::OwnedFd) -> PidfdState {
     use std::os::fd::AsRawFd;
-    let content = fs::read_to_string(format!("/proc/self/fdinfo/{}", fd.as_raw_fd())).ok()?;
+    let forced = FORCE_PIDFD_PID.load(std::sync::atomic::Ordering::SeqCst);
+    if forced != i64::MIN {
+        return match forced {
+            0 => PidfdState::Unmapped,
+            p if p > 0 => u32::try_from(p)
+                .map(PidfdState::Visible)
+                .unwrap_or(PidfdState::Dead),
+            _ => PidfdState::Dead,
+        };
+    }
+    let Ok(content) = fs::read_to_string(format!("/proc/self/fdinfo/{}", fd.as_raw_fd())) else {
+        return PidfdState::Dead;
+    };
     for line in content.lines() {
         if let Some(rest) = line.strip_prefix("Pid:") {
-            let pid: i64 = rest.trim().parse().ok()?;
-            return (pid > 0).then(|| u32::try_from(pid).ok()).flatten();
+            let Ok(pid) = rest.trim().parse::<i64>() else {
+                return PidfdState::Dead;
+            };
+            return match pid {
+                0 => PidfdState::Unmapped,
+                p if p > 0 => u32::try_from(p)
+                    .map(PidfdState::Visible)
+                    .unwrap_or(PidfdState::Dead),
+                _ => PidfdState::Dead,
+            };
         }
     }
-    None
+    PidfdState::Dead
 }
 
 #[cfg(target_os = "linux")]
@@ -202,13 +252,18 @@ pub fn peer_cred(stream: &tokio::net::UnixStream) -> io::Result<PeerCred> {
     #[cfg(target_os = "linux")]
     {
         match getsockopt_peerpidfd(stream) {
-            Ok(fd) => match pidfd_live_pid(&fd) {
-                Some(live_pid) => Ok(PeerCred {
+            Ok(fd) => match pidfd_state(&fd) {
+                PidfdState::Visible(live_pid) => Ok(PeerCred {
                     uid,
                     pid: Some(live_pid),
-                    pin: PeerPin::Pinned(std::sync::Arc::new(fd)),
+                    pin: PeerPin::Visible(std::sync::Arc::new(fd)),
                 }),
-                None => Ok(PeerCred {
+                PidfdState::Unmapped => Ok(PeerCred {
+                    uid,
+                    pid: None,
+                    pin: PeerPin::Unmapped(std::sync::Arc::new(fd)),
+                }),
+                PidfdState::Dead => Ok(PeerCred {
                     uid,
                     pid: fallback_pid,
                     pin: PeerPin::Dead,
@@ -267,7 +322,19 @@ impl PeerCred {
     pub fn is_pinned(&self) -> bool {
         #[cfg(target_os = "linux")]
         {
-            matches!(self.pin, PeerPin::Pinned(_))
+            matches!(self.pin, PeerPin::Visible(_) | PeerPin::Unmapped(_))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
+    /// Whether this peer is pinned by `SO_PEERPIDFD` in another PID namespace (`Pid: 0`).
+    pub fn is_unmapped(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            matches!(self.pin, PeerPin::Unmapped(_))
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -276,16 +343,26 @@ impl PeerCred {
     }
 
     pub fn is_pin_alive(&self) -> bool {
-        self.pid.is_some_and(|p| self.check_pin_alive(p))
+        match &self.pin {
+            #[cfg(target_os = "linux")]
+            PeerPin::Dead => false,
+            #[cfg(target_os = "linux")]
+            PeerPin::Unmapped(fd) => pidfd_state(fd) == PidfdState::Unmapped,
+            #[cfg(target_os = "linux")]
+            PeerPin::Visible(fd) => self
+                .pid
+                .is_some_and(|p| p > 0 && pidfd_state(fd) == PidfdState::Visible(p)),
+            PeerPin::Unpinned => self.pid.is_some_and(|p| p > 0),
+        }
     }
 
     fn check_pin_alive(&self, expected_pid: u32) -> bool {
         match &self.pin {
             #[cfg(target_os = "linux")]
-            PeerPin::Dead => false,
+            PeerPin::Dead | PeerPin::Unmapped(_) => false,
             PeerPin::Unpinned => expected_pid > 0,
             #[cfg(target_os = "linux")]
-            PeerPin::Pinned(fd) => pidfd_live_pid(fd) == Some(expected_pid),
+            PeerPin::Visible(fd) => pidfd_state(fd) == PidfdState::Visible(expected_pid),
         }
     }
 
@@ -336,6 +413,10 @@ impl PeerCred {
 
     /// Checks that the peer is still alive with `expected_start`.
     pub fn is_alive(&self, proc_root: &Path, expected_start: &str) -> bool {
+        #[cfg(target_os = "linux")]
+        if let PeerPin::Unmapped(fd) = &self.pin {
+            return expected_start == "0" && pidfd_state(fd) == PidfdState::Unmapped;
+        }
         self.starttime(proc_root).ok().as_deref() == Some(expected_start)
     }
 }

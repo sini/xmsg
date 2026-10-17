@@ -455,11 +455,15 @@ pub async fn run_agent_server_with_listener(
             continue;
         }
 
-        let initial_starttime = match peer.starttime(&state.agy_config.proc_root) {
-            Ok(st) => st,
-            Err(e) => {
-                tracing::warn!("failed to get starttime for peer PID {peer_pid}: {e}");
-                continue;
+        let initial_starttime = if peer.is_unmapped() && peer.is_pin_alive() {
+            "0".to_string()
+        } else {
+            match peer.starttime(&state.agy_config.proc_root) {
+                Ok(st) => st,
+                Err(e) => {
+                    tracing::warn!("failed to get starttime for peer PID {peer_pid}: {e}");
+                    continue;
+                }
             }
         };
 
