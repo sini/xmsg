@@ -9,7 +9,9 @@
 // them to its address. A pushed message is handed to its session with `promptAsync` and
 // acked once that accepts it. A deleted session releases its address.
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 
@@ -26,6 +28,40 @@ function registerSockPath(): string | undefined {
   return dir ? path.join(dir, "xmsg", "register.sock") : undefined;
 }
 
+function reclaimStorePath(): string {
+  const stateHome = process.env.XDG_STATE_HOME?.trim() || path.join(os.homedir(), ".local", "state");
+  return path.join(stateHome, "opencode", "xmsg-reclaim.json");
+}
+
+interface ReclaimEntry {
+  id: string;
+  address: string;
+  reclaim: string;
+}
+
+function loadReclaimStore(filePath: string): Record<string, ReclaimEntry> {
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+// Crash window (HA8 Change 7): if the plugin process dies after the server rotates the
+// secret on a reclaim response and before this atomic file write completes, the stored
+// secret on disk is stale; the next reclaim attempt receives `denied` ("reclaim refused")
+// and falls back to minting a fresh address (any messages queued to the old address are lost).
+function saveReclaimStore(filePath: string, store: Record<string, ReclaimEntry>): void {
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+  fs.writeFileSync(tmpPath, JSON.stringify(store), { mode: 0o600 });
+  fs.chmodSync(tmpPath, 0o600);
+  fs.renameSync(tmpPath, filePath);
+}
+
 type Answer = Record<string, any>;
 
 class Connection {
@@ -36,6 +72,7 @@ class Connection {
   private registered = new Map<string, Promise<Answer>>();
   private roots = new Set<string>();
   private ready?: Promise<void>;
+  private storePath = reclaimStorePath();
 
   constructor(
     private sock: string,
@@ -66,7 +103,7 @@ class Connection {
         this.waiting.delete(a.request_id);
       });
       s.on("close", () => {
-        // Every address on a closed connection is released (P6): register again.
+        // Every address on a closed connection is detached (HA8): register again with reclaim.
         if (this.socket === s) this.socket = undefined;
         this.ready = undefined;
         this.registered.clear();
@@ -88,11 +125,36 @@ class Connection {
     });
   }
 
+  private async doRegister(root: string): Promise<Answer> {
+    const store = loadReclaimStore(this.storePath);
+    const saved = store[root];
+    let a = await this.call({
+      action: "register",
+      session: root,
+      ...(saved ? { reclaim: { id: saved.id, secret: saved.reclaim } } : {}),
+    });
+    if (saved && a.status === "error" && a.error === "denied") {
+      // Stale or expired reclaim window: delete saved entry and mint a fresh address.
+      const latest = loadReclaimStore(this.storePath);
+      delete latest[root];
+      saveReclaimStore(this.storePath, latest);
+      a = await this.call({ action: "register", session: root });
+    }
+    if (a.status === "ok" && a.address && a.reclaim) {
+      // Persist the new/rotated secret atomically BEFORE acting on the registration.
+      const id = String(a.address).split("@")[0];
+      const latest = loadReclaimStore(this.storePath);
+      latest[root] = { id, address: a.address, reclaim: a.reclaim };
+      saveReclaimStore(this.storePath, latest);
+    }
+    return a;
+  }
+
   register(root: string): Promise<Answer> {
     this.roots.add(root);
     let r = this.registered.get(root);
     if (!r) {
-      r = this.call({ action: "register", session: root });
+      r = this.doRegister(root);
       this.registered.set(root, r);
       r.catch(() => this.registered.delete(root));
     }
@@ -100,6 +162,11 @@ class Connection {
   }
 
   async release(session: string) {
+    const latest = loadReclaimStore(this.storePath);
+    if (session in latest) {
+      delete latest[session];
+      saveReclaimStore(this.storePath, latest);
+    }
     if (!this.roots.delete(session)) return;
     this.registered.delete(session);
     await this.call({ action: "release", session });

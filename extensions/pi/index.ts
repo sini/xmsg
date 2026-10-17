@@ -103,11 +103,48 @@ export function defaultXmsgUrl(): string | undefined {
   return undefined;
 }
 
+import os from "node:os";
+
+export function defaultReclaimPath(): string {
+  const dir = process.env.PI_CODING_AGENT_SESSION_DIR?.trim() || path.join(os.homedir(), ".pi", "agent");
+  return path.join(dir, "xmsg-reclaim.json");
+}
+
+interface ReclaimEntry {
+  id: string;
+  address: string;
+  reclaim: string;
+}
+
+function loadReclaimStore(filePath: string): Record<string, ReclaimEntry> {
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+// Crash window (HA8 Change 7): if the plugin process dies after the server rotates the
+// secret on a reclaim response and before this atomic file write completes, the stored
+// secret on disk is stale; the next reclaim attempt receives `denied` ("reclaim refused")
+// and falls back to minting a fresh address (any messages queued to the old address are lost).
+function saveReclaimStore(filePath: string, store: Record<string, ReclaimEntry>): void {
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+  fs.writeFileSync(tmpPath, JSON.stringify(store), { mode: 0o600 });
+  fs.chmodSync(tmpPath, 0o600);
+  fs.renameSync(tmpPath, filePath);
+}
+
 export interface ExtensionOptions {
   sockPath?: string;
   agentSockPath?: string;
   httpSockPath?: string;
   xmsgUrl?: string;
+  reclaimPath?: string;
   pollWaitSecs?: number;
   reconnectDelayMs?: number;
 }
@@ -118,11 +155,13 @@ export class XmsgPiBridge {
   private agentSockPath?: string;
   private httpSockPath?: string;
   private xmsgUrl?: string;
+  private reclaimPath: string;
   private pollWaitSecs: number;
   private reconnectDelayMs: number;
   private socket?: net.Socket;
   private rl?: readline.Interface;
   private running = false;
+  private piSessionId?: string;
   private currentSessionId?: string;
   private currentSessionName?: string;
   private currentCwd?: string;
@@ -133,11 +172,13 @@ export class XmsgPiBridge {
     this.agentSockPath = options.agentSockPath || defaultAgentSockPath();
     this.httpSockPath = options.httpSockPath || defaultHttpSockPath();
     this.xmsgUrl = options.xmsgUrl || defaultXmsgUrl();
+    this.reclaimPath = options.reclaimPath || defaultReclaimPath();
     this.pollWaitSecs = options.pollWaitSecs ?? 30;
     this.reconnectDelayMs = options.reconnectDelayMs ?? 1500;
   }
 
   public setSession(sessionId: string, sessionName?: string, cwd?: string) {
+    this.piSessionId = sessionId;
     this.currentSessionId = sessionId;
     const resolvedCwd = cwd || process.cwd();
     this.currentCwd = resolvedCwd;
@@ -181,7 +222,7 @@ export class XmsgPiBridge {
 
   private async connectLoop() {
     while (this.running) {
-      if (!this.currentSessionId) {
+      if (!this.piSessionId) {
         await new Promise((r) => setTimeout(r, 500));
         continue;
       }
@@ -200,9 +241,13 @@ export class XmsgPiBridge {
 
   private runConnection(): Promise<void> {
     return new Promise((resolve, reject) => {
-      if (!this.sockPath) {
+      if (!this.sockPath || !this.piSessionId) {
         return resolve();
       }
+      const piKey = this.piSessionId;
+      const store = loadReclaimStore(this.reclaimPath);
+      const saved = store[piKey];
+
       const socket = net.connect(this.sockPath);
       this.socket = socket;
 
@@ -227,12 +272,13 @@ export class XmsgPiBridge {
 
       (async () => {
         try {
-          // 1. Send registration
-          const regPayload = {
+          // 1. Send registration (with reclaim token if saved for this pi session ID)
+          const regPayload: Record<string, any> = {
             harness: "pi",
-            sessionId: this.currentSessionId,
+            sessionId: piKey,
             sessionName: this.currentSessionName,
             cwd: this.currentCwd,
+            ...(saved ? { reclaim: { id: saved.id, secret: saved.reclaim } } : {}),
           };
           socket.write(JSON.stringify(regPayload) + "\n");
 
@@ -241,7 +287,24 @@ export class XmsgPiBridge {
           if (regRespItem.done) throw new Error("Socket closed before registration response");
           const regResp = JSON.parse(regRespItem.value);
           if (regResp.status !== "ok") {
+            if (saved && regResp.error === "denied") {
+              // Stale or expired reclaim window: clear the saved token so the next
+              // reconnect mints a fresh address cleanly.
+              const latest = loadReclaimStore(this.reclaimPath);
+              delete latest[piKey];
+              saveReclaimStore(this.reclaimPath, latest);
+            }
             throw new Error(`Registration failed: ${regResp.detail || JSON.stringify(regResp)}`);
+          }
+          // Persist the new/rotated secret atomically BEFORE acting on the registration.
+          if (regResp.sessionId && regResp.reclaim) {
+            const latest = loadReclaimStore(this.reclaimPath);
+            latest[piKey] = {
+              id: regResp.sessionId,
+              address: regResp.address || regResp.sessionId,
+              reclaim: regResp.reclaim,
+            };
+            saveReclaimStore(this.reclaimPath, latest);
           }
           if (regResp.sessionId) {
             this.currentSessionId = regResp.sessionId;

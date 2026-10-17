@@ -70,17 +70,20 @@ fn db_err(e: impl std::fmt::Display) -> AppError {
     AppError::Internal(e.to_string())
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
 type PauseSlot = (
     tokio::sync::oneshot::Sender<String>,
     tokio::sync::oneshot::Receiver<()>,
 );
 
+#[cfg(any(test, feature = "test-hooks"))]
 static POST_DELIVER_PAUSE: std::sync::LazyLock<
     Mutex<std::collections::HashMap<String, PauseSlot>>,
 > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// Arms a one-shot pause on `node_name` right after `deliver` or `push_reply` wakes the
 /// recipient and before `deliver_send` or `deliver_reply` completes or returns (XF2).
+#[cfg(any(test, feature = "test-hooks"))]
 pub fn pause_after_deliver_for_test(
     node_name: &str,
 ) -> (
@@ -96,6 +99,7 @@ pub fn pause_after_deliver_for_test(
     (entered_rx, release_tx)
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
 async fn run_post_deliver_pause(node_name: &str, id: &str) {
     let slot = POST_DELIVER_PAUSE
         .lock()
@@ -106,6 +110,10 @@ async fn run_post_deliver_pause(node_name: &str, id: &str) {
         let _ = release_rx.await;
     }
 }
+
+#[cfg(not(any(test, feature = "test-hooks")))]
+#[inline(always)]
+async fn run_post_deliver_pause(_node_name: &str, _id: &str) {}
 
 // -----------------------------------------------------------------------------
 // Senders
@@ -930,7 +938,45 @@ pub async fn push_reply(
                         "push_failed"
                     }
                 }
-                Ok(None) => "sender_gone",
+                Ok(None) => {
+                    let now = storage::now_epoch_secs();
+                    let ttl_secs = 604_800i64;
+                    let reclaimable = local
+                        .db
+                        .lock()
+                        .ok()
+                        .and_then(|db| {
+                            storage::seen_instance(&db, ret_session_id, now, ttl_secs)
+                                .ok()
+                                .flatten()
+                        })
+                        .is_some_and(|s| {
+                            s.harness == h && s.reclaimable && now < s.last_live + ttl_secs
+                        });
+                    if reclaimable {
+                        let pi_msg = storage::PiPendingMessage {
+                            id: reply_id.to_string(),
+                            session_id: ret_session_id.to_string(),
+                            created_at: now,
+                            from_name: replier_label.to_string(),
+                            bytes: text.len(),
+                            text: text.to_string(),
+                            envelope,
+                            delivered_at: None,
+                        };
+                        let inserted = match local.db.lock() {
+                            Ok(db) => storage::insert_pi_message(&db, &pi_msg).unwrap_or(false),
+                            Err(_) => false,
+                        };
+                        if inserted {
+                            "pushed"
+                        } else {
+                            "push_failed"
+                        }
+                    } else {
+                        "sender_gone"
+                    }
+                }
                 Err(_) => "push_failed",
             }
         }

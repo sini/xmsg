@@ -314,12 +314,19 @@ pub(crate) async fn resolve_target(
         };
         return match seen.harness.as_str() {
             _ if !parked => Err(AppError::NotFound(ref_str.to_string())),
-            // A pi ID is bound to its process, and a plugin session's address to its
-            // registration: never queued (AM-9, AM-10, harness gate v0 C3).
-            h if h == "pi" || crate::plugin::harness(h).is_some() => Err(AppError::Gone {
-                session_id: ref_str.to_string(),
-                pid: 0,
-            }),
+            // HA8: a detached or exited pi/plugin session with `reclaim_hash` set is parked
+            // and queues into `pi_pending_messages`; an explicitly released or expired one
+            // answers `gone`.
+            h if h == "pi" || crate::plugin::harness(h).is_some() => {
+                if seen.reclaimable && now < seen.last_live + ttl.as_secs() as i64 {
+                    Ok(ResolvedTarget::Pi(parked_session(h)))
+                } else {
+                    Err(AppError::Gone {
+                        session_id: ref_str.to_string(),
+                        pid: 0,
+                    })
+                }
+            }
             // An agy conversation between turns queues where its credentials would.
             "agy" => Ok(ResolvedTarget::Agy(parked_session("agy"))),
             _ => Ok(ResolvedTarget::Parked {

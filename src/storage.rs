@@ -379,7 +379,8 @@ const SCHEMA_N: &str = r#"
         CREATE TABLE IF NOT EXISTS instance_seen (
             id TEXT PRIMARY KEY,
             harness TEXT NOT NULL,
-            last_live INTEGER NOT NULL
+            last_live INTEGER NOT NULL,
+            reclaim_hash TEXT
         );
 
         CREATE TABLE IF NOT EXISTS fork_notices (
@@ -428,6 +429,14 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             conn.execute_batch(
                 "ALTER TABLE outbound ADD COLUMN via_mailbox INTEGER NOT NULL DEFAULT 0",
             )?;
+        }
+        let has_reclaim_hash: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('instance_seen') WHERE name = 'reclaim_hash'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_reclaim_hash {
+            conn.execute_batch("ALTER TABLE instance_seen ADD COLUMN reclaim_hash TEXT")?;
         }
         return Ok(());
     }
@@ -1700,7 +1709,7 @@ pub fn purge_instance_queue(conn: &Connection, ttl_secs: u64) -> Result<usize> {
 }
 
 /// Records that instance `id` of `harness` was live at `now`: the "ever observed" record
-/// A14's queue and D-1's lifetime read.
+/// A14's queue and D-1's lifetime read. Preserves any existing `reclaim_hash` (HA8).
 pub fn mark_live(conn: &Connection, id: &str, harness: &str, now: i64) -> Result<()> {
     conn.execute(
         "INSERT INTO instance_seen (id, harness, last_live) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET harness = excluded.harness, last_live = MAX(last_live, excluded.last_live)",
@@ -1709,14 +1718,156 @@ pub fn mark_live(conn: &Connection, id: &str, harness: &str, now: i64) -> Result
     Ok(())
 }
 
-/// An instance observed before: its harness, when it was last live, and whether it has an
-/// unexpired queued message at `now`: in A14's queue, or in agy's queue within `ttl_secs`
-/// of its send (D-1: a parked listing lasts as long as its queue).
+/// A reclaim token presented on `register.sock` (HA8): `{id, secret}`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReclaimToken {
+    pub id: String,
+    pub secret: String,
+}
+
+/// Mints a fresh 128-bit (16-byte) secret using `getrandom`, returning `(secret_hex, sha256_hex)`.
+/// Only `sha256_hex` is ever stored in SQLite (HA8).
+pub fn mint_reclaim_secret() -> std::result::Result<(String, String), crate::error::AppError> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|e| crate::error::AppError::Internal(format!("getrandom failed: {e}")))?;
+    let secret = hex::encode(bytes);
+    let hash = hash_reclaim_secret(&secret);
+    Ok((secret, hash))
+}
+
+pub fn hash_reclaim_secret(secret: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(secret.as_bytes());
+    hex::encode(digest)
+}
+
+/// Verifies `secret` against `stored_hash_hex` in constant time over the 32-byte SHA-256
+/// digests using `subtle::ConstantTimeEq` (HA8).
+pub fn verify_reclaim_secret(secret: &str, stored_hash_hex: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    use subtle::ConstantTimeEq;
+    let Ok(stored_bytes) = hex::decode(stored_hash_hex) else {
+        return false;
+    };
+    if stored_bytes.len() != 32 {
+        return false;
+    }
+    let candidate = Sha256::digest(secret.as_bytes());
+    bool::from(candidate.as_slice().ct_eq(stored_bytes.as_slice()))
+}
+
+/// Records a freshly minted reclaimable instance `id` of `harness` at `now`, storing only
+/// the SHA-256 hash of the newly minted 128-bit secret and returning the secret (HA8).
+pub fn mint_reclaimable_instance(
+    conn: &Connection,
+    id: &str,
+    harness: &str,
+    now: i64,
+) -> std::result::Result<String, crate::error::AppError> {
+    let (secret, hash) = mint_reclaim_secret()?;
+    conn.execute(
+        "INSERT INTO instance_seen (id, harness, last_live, reclaim_hash) VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(id) DO UPDATE SET harness = excluded.harness, last_live = MAX(last_live, excluded.last_live), reclaim_hash = excluded.reclaim_hash",
+        params![id, harness, now, hash],
+    )
+    .map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+    Ok(secret)
+}
+
+/// Permanently releases `id` (`Frame::Release`): clears `reclaim_hash` so the address
+/// cannot be reclaimed, answers `gone` on send, and lists as `closed` in inactive `list` (HA8).
+pub fn clear_reclaim_hash(conn: &Connection, id: &str, now: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE instance_seen SET reclaim_hash = NULL, last_live = MAX(last_live, ?2) WHERE id = ?1",
+        params![id, now],
+    )?;
+    Ok(())
+}
+
+/// Validates a reclaim request `(raw_id, secret)` for `calling_harness` at `now` within
+/// `ttl_secs`, checking the secret in constant time BEFORE checking liveness so a wrong
+/// secret reveals nothing about whether `id` exists or is live (HA8). On success, rotates
+/// the secret and returns `(bare_id, new_secret)`.
+#[allow(clippy::too_many_arguments)]
+pub fn reclaim_instance<F>(
+    conn: &Connection,
+    raw_id: &str,
+    node_name: &str,
+    calling_harness: &str,
+    secret: &str,
+    now: i64,
+    ttl_secs: i64,
+    is_live_elsewhere: F,
+) -> std::result::Result<(String, String), crate::error::AppError>
+where
+    F: FnOnce(&Connection, &str) -> std::result::Result<bool, crate::error::AppError>,
+{
+    use crate::error::AppError;
+    let denied = || AppError::Denied("reclaim refused".to_string());
+
+    let bare_id = match raw_id.split_once('@') {
+        Some((id, node)) if node == node_name => id,
+        Some(_) => return Err(denied()),
+        None => raw_id,
+    };
+    if !crate::claim::is_instance_ref(bare_id) || bare_id.contains('~') {
+        return Err(denied());
+    }
+
+    let row: Option<(String, i64, Option<String>)> = match conn.query_row(
+        "SELECT harness, last_live, reclaim_hash FROM instance_seen WHERE id = ?1",
+        params![bare_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ) {
+        Ok(r) => Some(r),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(AppError::Internal(e.to_string())),
+    };
+
+    let Some((stored_harness, last_live, Some(stored_hash))) = row else {
+        // Run a dummy hash verification so the timing matches a present row.
+        let _ = verify_reclaim_secret(
+            secret,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        return Err(denied());
+    };
+
+    let secret_ok = verify_reclaim_secret(secret, &stored_hash);
+    let harness_ok = stored_harness == calling_harness;
+    let within_window = now < last_live.saturating_add(ttl_secs);
+    if !secret_ok || !harness_ok || !within_window {
+        return Err(denied());
+    }
+
+    if is_live_elsewhere(conn, bare_id)? {
+        return Err(AppError::LiveElsewhere(format!(
+            "instance {bare_id}@{node_name} is already live"
+        )));
+    }
+
+    let (new_secret, new_hash) = mint_reclaim_secret()?;
+    conn.execute(
+        "UPDATE instance_seen SET last_live = MAX(last_live, ?1), reclaim_hash = ?2 WHERE id = ?3",
+        params![now, new_hash, bare_id],
+    )
+    .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    Ok((bare_id.to_string(), new_secret))
+}
+
+/// An instance observed before: its harness, when it was last live, whether it has an
+/// unexpired queued message at `now` (in A14's queue, agy's queue, or pi/plugin's queue
+/// within `ttl_secs` of its send; D-1: a parked listing lasts as long as its queue), and
+/// whether it holds a reclaim hash (HA8).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeenInstance {
     pub harness: String,
     pub last_live: i64,
     pub queued: bool,
+    pub reclaimable: bool,
 }
 
 pub fn seen_instance(
@@ -1726,17 +1877,25 @@ pub fn seen_instance(
     ttl_secs: i64,
 ) -> Result<Option<SeenInstance>> {
     let row = conn.query_row(
-        "SELECT harness, last_live FROM instance_seen WHERE id = ?1",
+        "SELECT harness, last_live, reclaim_hash IS NOT NULL FROM instance_seen WHERE id = ?1",
         params![id],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, bool>(2)?,
+            ))
+        },
     );
-    let (harness, last_live) = match row {
+    let (harness, last_live, reclaimable) = match row {
         Ok(r) => r,
         Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
         Err(e) => return Err(e),
     };
     let queued: i64 = conn.query_row(
-        "SELECT (SELECT COUNT(*) FROM instance_queue WHERE instance_id = ?1 AND delivered_at IS NULL AND expires_at > ?2) + (SELECT COUNT(*) FROM agy_pending_messages WHERE session_id = ?1 AND delivered_at IS NULL AND created_at >= ?2 - ?3)",
+        "SELECT (SELECT COUNT(*) FROM instance_queue WHERE instance_id = ?1 AND delivered_at IS NULL AND expires_at > ?2) \
+         + (SELECT COUNT(*) FROM agy_pending_messages WHERE session_id = ?1 AND delivered_at IS NULL AND created_at >= ?2 - ?3) \
+         + (SELECT COUNT(*) FROM pi_pending_messages WHERE session_id = ?1 AND delivered_at IS NULL AND created_at >= ?2 - ?3)",
         params![id, now, ttl_secs],
         |r| r.get(0),
     )?;
@@ -1744,12 +1903,13 @@ pub fn seen_instance(
         harness,
         last_live,
         queued: queued > 0,
+        reclaimable,
     }))
 }
 
-/// The instances that may be parked here at `now` (A14, D-1): observed before, not a pi
-/// or a plugin session (AM-9: both are bound to their process or registration), and
-/// within their parked lifetime: `ttl_secs` after last live, or as long as their queue.
+/// The instances that may be parked here at `now` (A14, D-1, HA8): observed before and
+/// within their parked lifetime (`ttl_secs` after last live, or as long as their queue for
+/// Claude/agy; for pi/plugin sessions, inside the reclaim window with `reclaim_hash` set).
 /// The caller leaves out the ones live now.
 pub fn parked_instances(
     conn: &Connection,
@@ -1757,9 +1917,11 @@ pub fn parked_instances(
     ttl_secs: i64,
 ) -> Result<Vec<(String, String, i64)>> {
     let mut stmt = conn.prepare(
-        "SELECT id, harness, last_live FROM instance_seen s WHERE harness != 'pi' AND (last_live + ?2 > ?1 \
+        "SELECT id, harness, last_live, reclaim_hash IS NOT NULL, (last_live + ?2 > ?1) \
+         FROM instance_seen s WHERE (last_live + ?2 > ?1 \
          OR EXISTS (SELECT 1 FROM instance_queue q WHERE q.instance_id = s.id AND q.delivered_at IS NULL AND q.expires_at > ?1) \
-         OR EXISTS (SELECT 1 FROM agy_pending_messages a WHERE a.session_id = s.id AND a.delivered_at IS NULL AND a.created_at >= ?1 - ?2)) \
+         OR EXISTS (SELECT 1 FROM agy_pending_messages a WHERE a.session_id = s.id AND a.delivered_at IS NULL AND a.created_at >= ?1 - ?2) \
+         OR EXISTS (SELECT 1 FROM pi_pending_messages p WHERE p.session_id = s.id AND p.delivered_at IS NULL AND p.created_at >= ?1 - ?2)) \
          ORDER BY id",
     )?;
     let rows = stmt
@@ -1768,12 +1930,25 @@ pub fn parked_instances(
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, i64>(2)?,
+                r.get::<_, bool>(3)?,
+                r.get::<_, bool>(4)?,
             ))
         })?
         .collect::<Result<Vec<_>>>()?;
     Ok(rows
         .into_iter()
-        .filter(|(_, harness, _)| crate::plugin::harness(harness).is_none())
+        .filter_map(|(id, harness, last_live, has_reclaim, within_window)| {
+            let is_reclaim_harness = harness == "pi" || crate::plugin::harness(&harness).is_some();
+            if is_reclaim_harness {
+                if has_reclaim && within_window {
+                    Some((id, harness, last_live))
+                } else {
+                    None
+                }
+            } else {
+                Some((id, harness, last_live))
+            }
+        })
         .collect())
 }
 
@@ -1783,15 +1958,17 @@ pub fn purge_instance_seen(conn: &Connection, now: i64, ttl_secs: i64) -> Result
     conn.execute(
         "DELETE FROM instance_seen WHERE last_live + ?2 <= ?1 \
          AND NOT EXISTS (SELECT 1 FROM instance_queue q WHERE q.instance_id = instance_seen.id AND q.delivered_at IS NULL AND q.expires_at > ?1) \
-         AND NOT EXISTS (SELECT 1 FROM agy_pending_messages a WHERE a.session_id = instance_seen.id AND a.delivered_at IS NULL AND a.created_at >= ?1 - ?2)",
+         AND NOT EXISTS (SELECT 1 FROM agy_pending_messages a WHERE a.session_id = instance_seen.id AND a.delivered_at IS NULL AND a.created_at >= ?1 - ?2) \
+         AND NOT EXISTS (SELECT 1 FROM pi_pending_messages p WHERE p.session_id = instance_seen.id AND p.delivered_at IS NULL AND p.created_at >= ?1 - ?2)",
         params![now, ttl_secs],
     )
 }
 
-/// An inactive instance in `instance_seen` within `within_secs` of `now` (XL1): its ID,
+/// An inactive instance in `instance_seen` within `within_secs` of `now` (XL1, HA8): its ID,
 /// its harness, its status (`parked` for a Claude or agy instance within its parked
-/// lifetime, `closed` for a pi or plugin session), and when it was last seen live. The
-/// caller leaves out the ones live now.
+/// lifetime or a reclaimable pi/plugin session inside the reclaim window with `reclaim_hash`
+/// set; `closed` for a released or expired pi or plugin session), and when it was last seen
+/// live. The caller leaves out the ones live now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InactiveInstance {
     pub id: String,
@@ -1811,7 +1988,9 @@ pub fn inactive_instances(
         "SELECT id, harness, last_live, \
          (last_live + ?2 > ?1 \
           OR EXISTS (SELECT 1 FROM instance_queue q WHERE q.instance_id = s.id AND q.delivered_at IS NULL AND q.expires_at > ?1) \
-          OR EXISTS (SELECT 1 FROM agy_pending_messages a WHERE a.session_id = s.id AND a.delivered_at IS NULL AND a.created_at >= ?1 - ?2)) \
+          OR EXISTS (SELECT 1 FROM agy_pending_messages a WHERE a.session_id = s.id AND a.delivered_at IS NULL AND a.created_at >= ?1 - ?2)), \
+         reclaim_hash IS NOT NULL, \
+         (last_live + ?2 > ?1) \
          FROM instance_seen s WHERE last_live >= ?3 ORDER BY id",
     )?;
     let rows = stmt
@@ -1821,31 +2000,41 @@ pub fn inactive_instances(
                 r.get::<_, String>(1)?,
                 r.get::<_, i64>(2)?,
                 r.get::<_, bool>(3)?,
+                r.get::<_, bool>(4)?,
+                r.get::<_, bool>(5)?,
             ))
         })?
         .collect::<Result<Vec<_>>>()?;
     Ok(rows
         .into_iter()
-        .filter_map(|(id, harness, last_seen, within_parked_ttl)| {
-            let is_ephemeral = harness == "pi" || crate::plugin::harness(&harness).is_some();
-            if is_ephemeral {
-                Some(InactiveInstance {
-                    id,
-                    harness,
-                    status: "closed".to_string(),
-                    last_seen,
-                })
-            } else if within_parked_ttl {
-                Some(InactiveInstance {
-                    id,
-                    harness,
-                    status: "parked".to_string(),
-                    last_seen,
-                })
-            } else {
-                None
-            }
-        })
+        .filter_map(
+            |(id, harness, last_seen, within_parked_ttl, has_reclaim, within_reclaim_window)| {
+                let is_reclaim_harness =
+                    harness == "pi" || crate::plugin::harness(&harness).is_some();
+                if is_reclaim_harness {
+                    let status = if has_reclaim && within_reclaim_window {
+                        "parked"
+                    } else {
+                        "closed"
+                    };
+                    Some(InactiveInstance {
+                        id,
+                        harness,
+                        status: status.to_string(),
+                        last_seen,
+                    })
+                } else if within_parked_ttl {
+                    Some(InactiveInstance {
+                        id,
+                        harness,
+                        status: "parked".to_string(),
+                        last_seen,
+                    })
+                } else {
+                    None
+                }
+            },
+        )
         .collect())
 }
 

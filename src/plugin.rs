@@ -7,8 +7,8 @@
 //! to a tool frame and a delivery to the pending `poll` are told apart on the one
 //! connection. Tool frames are answered while a `poll` is pending.
 //!
-//! - `register {session}` → `{address}`; `release {session}`; `continues {from, to}` →
-//!   `{address}`, `from`'s address moved to `to`.
+//! - `register {session, reclaim?}` → `{address, reclaim}`; `detach {session}`;
+//!   `release {session}`; `continues {from, to}` → `{address}`, `from`'s address moved to `to`.
 //! - `list`, `send`, `reply`, `replies`: `agent.sock`'s frames field for field, plus the
 //!   `session` they act as. A frame naming a session this connection does not hold is
 //!   refused `denied`.
@@ -16,9 +16,11 @@
 //!   is pending per connection, and a second is refused `conflict`. `ack {session,
 //!   message_id}` after the harness accepted it.
 //!
-//! A released session's address, and every address of a closed connection, answers `gone`
-//! and is never queued for (AM-9). A plugin process maps to no address, so a caller whose
-//! ancestry reaches it is anonymous (A15, harness gate v0 C2).
+//! A detached session (via `detach` or a closed connection) stays parked and reclaimable
+//! inside the `reply_ttl` window so messages queue for it (HA8). A permanently released
+//! session (`release`) clears `reclaim_hash`, answers `gone`, and is `closed` in inactive
+//! `list`. A plugin process maps to no address, so a caller whose ancestry reaches it is
+//! anonymous (A15, harness gate v0 C2).
 //!
 //! The registrations live in temporary tables of the server's one database connection, so
 //! they end with the server; a plugin session's queue is `pi_pending_messages`, keyed by
@@ -74,6 +76,12 @@ pub struct PluginHello {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum Frame {
     Register {
+        request_id: String,
+        session: String,
+        #[serde(default)]
+        reclaim: Option<storage::ReclaimToken>,
+    },
+    Detach {
         request_id: String,
         session: String,
     },
@@ -201,8 +209,9 @@ pub fn is_plugin_process(conn: &Connection, pid: u32, starttime: &str) -> rusqli
     .map(|n| n > 0)
 }
 
-/// Releases `address`: it answers `gone` from now on (AM-9).
-fn release(conn: &Connection, address: &str, harness: &str) -> rusqlite::Result<()> {
+/// Detaches `address` from live `plugin_sessions` while keeping `reclaim_hash` intact
+/// so the session remains parked and reclaimable inside the `reply_ttl` window (HA8).
+fn detach(conn: &Connection, address: &str, harness: &str) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM plugin_sessions WHERE address = ?1",
         params![address],
@@ -210,7 +219,14 @@ fn release(conn: &Connection, address: &str, harness: &str) -> rusqlite::Result<
     storage::mark_live(conn, address, harness, now_epoch_secs())
 }
 
-/// Ends a connection however it ends: every address on it is released.
+/// Permanently releases `address`: clears `reclaim_hash` so it answers `gone` from now on
+/// and shows as `closed` in inactive `list` (HA8 §3.1).
+fn release(conn: &Connection, address: &str, harness: &str) -> rusqlite::Result<()> {
+    detach(conn, address, harness)?;
+    storage::clear_reclaim_hash(conn, address, now_epoch_secs())
+}
+
+/// Ends a connection however it ends: every address on it is detached (stays reclaimable).
 struct Closing(Arc<Mutex<Connection>>, String);
 
 impl Drop for Closing {
@@ -226,8 +242,8 @@ impl Drop for Closing {
             })
             .unwrap_or_default();
         for (address, harness) in held {
-            if let Err(e) = release(&conn, &address, &harness) {
-                tracing::warn!("releasing plugin address {address}: {e}");
+            if let Err(e) = detach(&conn, &address, &harness) {
+                tracing::warn!("detaching plugin address {address}: {e}");
             }
         }
         let _ = conn.execute("DELETE FROM plugin_procs WHERE conn = ?1", params![self.1]);
@@ -443,6 +459,7 @@ where
             Frame::Register {
                 request_id,
                 session,
+                reclaim,
             } => {
                 let res = (|| {
                     if session.trim().is_empty() {
@@ -454,14 +471,50 @@ where
                             "session '{session}' is already registered on this connection"
                         )));
                     }
-                    let address = crate::claim::mint_uuid_v4();
+                    let now = now_epoch_secs();
+                    let (address, secret) = if let Some(r) = reclaim {
+                        storage::reclaim_instance(
+                            &c,
+                            &r.id,
+                            node,
+                            harness,
+                            &r.secret,
+                            now,
+                            state.reply_ttl.as_secs() as i64,
+                            |conn, id| {
+                                Ok(crate::plugin::session(conn, id).map_err(db_err)?.is_some())
+                            },
+                        )?
+                    } else {
+                        let id = crate::claim::mint_uuid_v4();
+                        let sec = storage::mint_reclaimable_instance(&c, &id, harness, now)
+                            .map_err(db_err)?;
+                        (id, sec)
+                    };
                     c.execute(
                         "INSERT INTO plugin_sessions (address, conn, harness, session, registered_at, pid) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        params![address, conn_id, harness, session, now_epoch_secs(), peer_pid],
+                        params![address, conn_id, harness, session, now, peer_pid],
                     )
                     .map_err(db_err)?;
-                    storage::mark_live(&c, &address, harness, now_epoch_secs()).map_err(db_err)?;
-                    Ok(json!({ "status": "ok", "address": address_of(&address) }))
+                    Ok(json!({
+                        "status": "ok",
+                        "address": address_of(&address),
+                        "reclaim": secret,
+                    }))
+                })();
+                let _ = tx.send(answer(res, &request_id));
+            }
+            Frame::Detach {
+                request_id,
+                session,
+            } => {
+                let res = (|| {
+                    let c = db.lock().map_err(db_err)?;
+                    let s = held(&c, &conn_id, &session)
+                        .map_err(db_err)?
+                        .ok_or_else(|| not_held(&session))?;
+                    detach(&c, &s.session_id, harness).map_err(db_err)?;
+                    Ok(json!({ "status": "ok" }))
                 })();
                 let _ = tx.send(answer(res, &request_id));
             }

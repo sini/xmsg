@@ -312,8 +312,9 @@ status, _ = wait_until(lambda: (lambda r: r if r[0] == 410 else None)(
     xmsg_http("POST", "/v1/messages", {"to": e2["address"], "from": "ci", "text": "x"})), 20, f"{s2}'s address gone")
 ok(f"deleting {s2} releases {e2['address']} (gone)")
 
-# A restarted server: the plugin reconnects and registers its roots again, with new
-# addresses, and the old ones answer gone (HA4).
+# HA8: a restarted server detaches the old connection; the plugin reconnects and reclaims
+# its roots' exact addresses using the stored reclaim secrets, and receives messages queued
+# while disconnected.
 server.kill()
 server.wait()
 for name in ("http.sock", "register.sock", "agent.sock"):
@@ -322,12 +323,14 @@ for name in ("http.sock", "register.sock", "agent.sock"):
     except FileNotFoundError:
         pass
 server = serve()
-e1b = wait_until(lambda: (lambda e: e if e and e["address"] != e1["address"] else None)(entry(s1)), 30,
-                 f"{s1} registered again after the restart")
-status, body = xmsg_http("POST", "/v1/messages", {"to": e1["address"], "from": "ci", "text": "x"})
-if status != 410:
-    fail(f"restart: {s1}'s old address {e1['address']} answers {status} {body}, not gone")
-ok(f"restart: {s1} registers again as {e1b['address']}; {e1['address']} is gone")
+e1b = wait_until(lambda: (lambda e: e if e and e["address"] == e1["address"] else None)(entry(s1)), 30,
+                 f"{s1} reclaimed {e1['address']} after the restart")
+body_reclaimed = f"reclaimed {uuid.uuid4().hex}"
+status, body = xmsg_http("POST", "/v1/messages", {"to": e1["address"], "from": "ci", "text": body_reclaimed})
+if status != 202:
+    fail(f"restart: {s1}'s reclaimed address {e1['address']} answers {status} {body}, not 202")
+wait_until(lambda: any(body_reclaimed in t for t in user_texts(s1)), 30, f"the message to reclaimed {s1}")
+ok(f"restart (HA8): {s1} reclaims {e1b['address']} and receives messages")
 
 for p in procs:
     p.kill()

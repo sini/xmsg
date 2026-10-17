@@ -527,21 +527,23 @@ async fn test_oracle_2_ttl_and_lifetime() {
 }
 
 // =============================================================================
-// Oracle 3 (AM-9, AM-10, D-4). An exited pi gives `gone`, and an exited `X~2` gives
-// `gone`. Neither is queued.
-// Mutant: queue them => RED.
+// Oracle 3 (AM-9, AM-10, D-4; HA8). An exited pi is parked and reclaimable (HA8: queues
+// inside reply_ttl), an explicitly released pi gives `gone`, and an exited `X~2` gives
+// `gone`.
+// Mutant: queue a released pi or exited fork => RED.
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oracle_3_exited_pi_and_fork_are_gone() {
     let node = Node::start(Spec::default());
 
-    // pi: its ID is bound to its registration (B3).
+    // pi: HA8 makes a plain exit detach (parked & reclaimable), while explicit release is gone.
     let (pi, resp) = Registration::open(
         &node.register_sock,
         json!({ "harness": "pi", "sessionName": "pi-a" }),
     )
     .await;
     let pi_id = resp["sessionId"].as_str().unwrap().to_string();
+    let secret = resp["reclaim"].as_str().unwrap().to_string();
     let (status, body) = node.send(&pi_id, "to the live pi").await;
     assert_eq!(status, 202, "control, the live pi: {body}");
     drop(pi);
@@ -551,8 +553,22 @@ async fn test_oracle_3_exited_pi_and_fork_are_gone() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let (status, body) = node.send(&pi_id, "to the exited pi").await;
-    assert_eq!(status, 410, "an exited pi: {body}");
+    // HA8: a detached (exited) pi is parked inside reply_ttl and queues messages.
+    let (status, body) = node.send(&pi_id, "to the detached pi").await;
+    assert_eq!(status, 202, "a detached pi queues under HA8: {body}");
+    assert_eq!(body["outcome"], "queued", "{body}");
+
+    // Reclaim and explicitly release: a permanently released pi answers `gone`.
+    let (mut pi2, _) = Registration::open(
+        &node.register_sock,
+        json!({ "harness": "pi", "sessionName": "pi-a", "reclaim": { "id": pi_id, "secret": secret } }),
+    )
+    .await;
+    let rel = pi2.call(json!({ "action": "release" })).await;
+    assert_eq!(rel["status"], "ok", "{rel}");
+    drop(pi2);
+    let (status, body) = node.send(&pi_id, "to the released pi").await;
+    assert_eq!(status, 410, "a released pi: {body}");
     assert_eq!(body["error"], "gone", "{body}");
 
     // X~2: P1 holds X, P2 holds X~2, and P2 exits.

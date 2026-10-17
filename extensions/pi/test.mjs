@@ -455,6 +455,134 @@ async function runTest6_oracle3() {
   }
 }
 
+async function runTest7_ha8_reclaim() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ext-ha8-"));
+  fs.chmodSync(tmpDir, 0o700);
+  const sockPath = path.join(tmpDir, "test.sock");
+  const reclaimPath = path.join(tmpDir, "xmsg-reclaim.json");
+
+  const registrations = [];
+  let denyNextReclaim = false;
+
+  const server = net.createServer((socket) => {
+    socket.on("error", () => {});
+    let buf = "";
+    socket.on("data", (chunk) => {
+      buf += chunk.toString();
+      let lines = buf.split("\n");
+      buf = lines.pop();
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const msg = JSON.parse(line);
+        if (msg.harness === "pi") {
+          registrations.push(msg);
+          if (msg.reclaim && denyNextReclaim) {
+            denyNextReclaim = false;
+            socket.write(JSON.stringify({ status: "error", error: "denied", detail: "reclaim refused" }) + "\n");
+            socket.end();
+            return;
+          }
+          if (msg.reclaim) {
+            socket.write(
+              JSON.stringify({
+                status: "ok",
+                sessionId: msg.reclaim.id,
+                address: `${msg.reclaim.id}@node`,
+                reclaim: "rotated-secret-2",
+              }) + "\n",
+            );
+          } else {
+            const minted = `minted-${registrations.length}`;
+            socket.write(
+              JSON.stringify({
+                status: "ok",
+                sessionId: minted,
+                address: `${minted}@node`,
+                reclaim: `secret-${registrations.length}`,
+              }) + "\n",
+            );
+          }
+        } else if (msg.action === "poll") {
+          socket.write(JSON.stringify({ action: "timeout" }) + "\n");
+        }
+      }
+    });
+  });
+
+  await new Promise((resolve) => server.listen(sockPath, resolve));
+
+  try {
+    // 1. Fresh registration writes mode 0600 reclaim file
+    const mockPi1 = new MockExtensionAPI();
+    const bridge1 = new XmsgPiBridge(mockPi1, { sockPath, reclaimPath, pollWaitSecs: 1, reconnectDelayMs: 50 });
+    bridge1.setSession("native-pi-1", "pi-1", "/tmp/w");
+    bridge1.start();
+    for (let i = 0; i < 40 && registrations.length < 1; i++) await new Promise((r) => setTimeout(r, 25));
+    await new Promise((r) => setTimeout(r, 50));
+    bridge1.stop();
+
+    assert.equal(registrations.length, 1);
+    assert.equal(registrations[0].reclaim, undefined);
+    const stat = fs.statSync(reclaimPath);
+    assert.equal(stat.mode & 0o777, 0o600, "xmsg-reclaim.json must have mode 0600");
+    let stored = JSON.parse(fs.readFileSync(reclaimPath, "utf8"));
+    assert.deepEqual(stored["native-pi-1"], {
+      id: "minted-1",
+      address: "minted-1@node",
+      reclaim: "secret-1",
+    });
+
+    // 2. Restarting with the same native pi session ID presents the reclaim token and stores rotated secret
+    const mockPi2 = new MockExtensionAPI();
+    const bridge2 = new XmsgPiBridge(mockPi2, { sockPath, reclaimPath, pollWaitSecs: 1, reconnectDelayMs: 50 });
+    bridge2.setSession("native-pi-1", "pi-1", "/tmp/w");
+    bridge2.start();
+    for (let i = 0; i < 40 && registrations.length < 2; i++) await new Promise((r) => setTimeout(r, 25));
+    await new Promise((r) => setTimeout(r, 50));
+    bridge2.stop();
+
+    assert.equal(registrations.length, 2);
+    assert.deepEqual(registrations[1].reclaim, { id: "minted-1", secret: "secret-1" });
+    stored = JSON.parse(fs.readFileSync(reclaimPath, "utf8"));
+    assert.equal(stored["native-pi-1"].reclaim, "rotated-secret-2");
+
+    // 3. When reclaim is denied (expired window), the stale entry is deleted and the next reconnect mints fresh
+    denyNextReclaim = true;
+    const mockPi3 = new MockExtensionAPI();
+    const bridge3 = new XmsgPiBridge(mockPi3, { sockPath, reclaimPath, pollWaitSecs: 1, reconnectDelayMs: 50 });
+    bridge3.setSession("native-pi-1", "pi-1", "/tmp/w");
+    bridge3.start();
+    for (let i = 0; i < 60 && registrations.length < 4; i++) await new Promise((r) => setTimeout(r, 25));
+    await new Promise((r) => setTimeout(r, 50));
+    bridge3.stop();
+
+    assert.equal(registrations.length, 4);
+    assert.deepEqual(registrations[2].reclaim, { id: "minted-1", secret: "rotated-secret-2" });
+    assert.equal(registrations[3].reclaim, undefined, "After denied reclaim, reconnect must mint fresh");
+    stored = JSON.parse(fs.readFileSync(reclaimPath, "utf8"));
+    assert.equal(stored["native-pi-1"].id, "minted-4");
+
+    // 4. A new session ID (/new) mints fresh without touching native-pi-1's entry
+    const mockPi4 = new MockExtensionAPI();
+    const bridge4 = new XmsgPiBridge(mockPi4, { sockPath, reclaimPath, pollWaitSecs: 1, reconnectDelayMs: 50 });
+    bridge4.setSession("native-pi-2", "pi-2", "/tmp/w");
+    bridge4.start();
+    for (let i = 0; i < 40 && registrations.length < 5; i++) await new Promise((r) => setTimeout(r, 25));
+    await new Promise((r) => setTimeout(r, 50));
+    bridge4.stop();
+
+    assert.equal(registrations[4].reclaim, undefined);
+    stored = JSON.parse(fs.readFileSync(reclaimPath, "utf8"));
+    assert.equal(stored["native-pi-1"].id, "minted-4");
+    assert.equal(stored["native-pi-2"].id, "minted-5");
+    console.log("✔ Test 7 (HA8) passed: Pi extension stores 0600 reclaim secret, reclaims on restart, rotates secret, falls back on denied, and mints fresh on /new");
+  } finally {
+    await new Promise((r) => server.close(r));
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 // Socket path resolution is covered by test-paths.mjs, which runs without pi.
 
 async function main() {
@@ -465,6 +593,7 @@ async function main() {
     await runTest4_oracle1();
     await runTest5_oracle2();
     await runTest6_oracle3();
+    await runTest7_ha8_reclaim();
     console.log("\nALL EXTENSION TESTS PASSED!");
     process.exit(0);
   } catch (err) {

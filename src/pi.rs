@@ -23,6 +23,8 @@ pub struct PiRegisterRequest {
     #[serde(alias = "session_name")]
     pub session_name: Option<String>,
     pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reclaim: Option<storage::ReclaimToken>,
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +195,7 @@ pub async fn handle_pi_connection<
         db,
         pi_notify_tx,
         reply_ttl,
+        crate::node::local_node_name(),
     )
     .await
 }
@@ -212,21 +215,53 @@ pub async fn handle_pi_connection_peer<
     db: Arc<Mutex<rusqlite::Connection>>,
     pi_notify_tx: broadcast::Sender<String>,
     reply_ttl: Duration,
+    node_name: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let peer_pid = peer.pid.unwrap_or(0);
     let starttime = match verify_pi_process_peer(&proc_root, my_uid, &peer) {
         Ok(st) => st,
         Err(e) => {
-            let err_resp = serde_json::json!({
-                "status": "error",
-                "detail": e.to_string(),
-            });
+            let err_resp = e.frame();
             let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
             return Err(e.into());
         }
     };
 
-    let session_id = crate::claim::mint_uuid_v4();
+    let now = now_epoch_secs();
+    let (session_id, secret) = match req.reclaim {
+        Some(reclaim) => {
+            let res = {
+                let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+                storage::reclaim_instance(
+                    &conn,
+                    &reclaim.id,
+                    &node_name,
+                    "pi",
+                    &reclaim.secret,
+                    now,
+                    reply_ttl.as_secs() as i64,
+                    |_, id| Ok(resolve_pi_session(&proc_root, &store, id)?.is_some()),
+                )
+            };
+            match res {
+                Ok(pair) => pair,
+                Err(e) => {
+                    let err_resp = e.frame();
+                    let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+                    return Err(e.into());
+                }
+            }
+        }
+        None => {
+            let id = crate::claim::mint_uuid_v4();
+            let secret = {
+                let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+                storage::mint_reclaimable_instance(&conn, &id, "pi", now)?
+            };
+            (id, secret)
+        }
+    };
+
     let conflict = {
         let store_lock = store.read().unwrap();
         if let Some(existing) = store_lock.get(&session_id) {
@@ -236,15 +271,11 @@ pub async fn handle_pi_connection_peer<
         }
     };
     if conflict {
-        let err_resp = serde_json::json!({
-            "status": "error",
-            "detail": "session already registered under different process",
-        });
+        let err =
+            AppError::LiveElsewhere(format!("instance {session_id}@{node_name} is already live"));
+        let err_resp = err.frame();
         let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
-        return Err(AppError::BadRequest(
-            "session already registered under different process".to_string(),
-        )
-        .into());
+        return Err(err.into());
     }
 
     {
@@ -254,27 +285,47 @@ pub async fn handle_pi_connection_peer<
             pid: peer_pid,
             starttime: starttime.clone(),
             cwd: req.cwd.unwrap_or_else(|| "/".to_string()),
-            registered_at: now_epoch_secs(),
+            registered_at: now,
         };
         store.write().unwrap().insert(session_id.clone(), info);
     }
-    // The ever-observed record, so that once this process exits its ID answers `gone`
-    // (AM-9, AM-10); stamped again when the connection ends, however it ends.
-    struct MarkLive(Arc<Mutex<rusqlite::Connection>>, String);
-    impl Drop for MarkLive {
+
+    // Stamps `last_live` and detaches from `store` when the connection ends, however it ends.
+    struct ClosingPi {
+        db: Arc<Mutex<rusqlite::Connection>>,
+        store: PiStore,
+        session_id: String,
+        peer_pid: u32,
+        starttime: String,
+    }
+    impl Drop for ClosingPi {
         fn drop(&mut self) {
-            if let Ok(conn) = self.0.lock() {
-                let _ = storage::mark_live(&conn, &self.1, "pi", now_epoch_secs());
+            if let Ok(mut store_lock) = self.store.write() {
+                if let Some(info) = store_lock.get(&self.session_id) {
+                    if info.pid == self.peer_pid && info.starttime == self.starttime {
+                        store_lock.remove(&self.session_id);
+                    }
+                }
+            }
+            if let Ok(conn) = self.db.lock() {
+                let _ = storage::mark_live(&conn, &self.session_id, "pi", now_epoch_secs());
             }
         }
     }
-    drop(MarkLive(db.clone(), session_id.clone()));
-    let _mark_on_end = MarkLive(db.clone(), session_id.clone());
+    let _closing = ClosingPi {
+        db: db.clone(),
+        store: store.clone(),
+        session_id: session_id.clone(),
+        peer_pid,
+        starttime: starttime.clone(),
+    };
 
-    // Write initial registration ok with server-derived sessionId
+    // Write initial registration ok with server-derived sessionId, address and reclaim secret (HA8).
     let ok_resp = serde_json::json!({
         "status": "ok",
         "sessionId": session_id,
+        "address": format!("{session_id}@{node_name}"),
+        "reclaim": secret,
     });
     writer.write_all(format!("{ok_resp}\n").as_bytes()).await?;
 
@@ -417,6 +468,20 @@ pub async fn handle_pi_connection_peer<
                 let resp = serde_json::json!({ "status": "ok" });
                 writer.write_all(format!("{resp}\n").as_bytes()).await?;
             }
+            "release" => {
+                {
+                    let conn = db.lock().unwrap();
+                    let now = storage::now_epoch_secs();
+                    let _ = storage::mark_live(&conn, &session_id, "pi", now);
+                    let _ = storage::clear_reclaim_hash(&conn, &session_id, now);
+                }
+                {
+                    let mut store_lock = store.write().unwrap();
+                    store_lock.remove(&session_id);
+                }
+                let resp = serde_json::json!({ "status": "ok" });
+                writer.write_all(format!("{resp}\n").as_bytes()).await?;
+            }
             _ => {
                 let err = serde_json::json!({ "status": "error", "detail": format!("unknown action: {action}") });
                 writer.write_all(format!("{err}\n").as_bytes()).await?;
@@ -424,13 +489,5 @@ pub async fn handle_pi_connection_peer<
         }
     }
 
-    {
-        let mut store_lock = store.write().unwrap();
-        if let Some(info) = store_lock.get(&session_id) {
-            if info.pid == peer_pid && info.starttime == starttime {
-                store_lock.remove(&session_id);
-            }
-        }
-    }
     Ok(())
 }

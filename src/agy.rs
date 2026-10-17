@@ -1698,6 +1698,7 @@ pub async fn run_register_server(
                                     db_clone,
                                     pi_notify_tx_clone,
                                     reply_ttl,
+                                    state_clone.node_name.clone(),
                                 )
                                 .await
                                 {
@@ -1707,6 +1708,7 @@ pub async fn run_register_server(
                             Err(e) => {
                                 let err_resp = serde_json::json!({
                                     "status": "error",
+                                    "error": "bad_request",
                                     "detail": format!("invalid pi request: {e}")
                                 });
                                 let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;

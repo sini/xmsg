@@ -2056,6 +2056,7 @@ dependencies = [
  "bytes",
  "clap",
  "gethostname",
+ "getrandom 0.3.4",
  "hex",
  "http-body-util",
  "hyper",
@@ -2071,6 +2072,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "subtle",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2081,6 +2083,7 @@ dependencies = [
  "ulid",
  "unicode-general-category",
  "x509-parser",
+ "xmsg",
 ]
 
 [[package]]

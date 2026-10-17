@@ -465,13 +465,14 @@ if s2 == s1 or e2["address"] != e1["address"]:
     fail(f"3: after the compression the hermes entry is {e2}, not a continuation of {s1} at {e1['address']}")
 ok(f"3: {s1} continued as {s2}, which keeps {e1['address']} and receives its messages")
 
-# 2. /new releases the old address (C3), and a send to it injects nothing into the new session.
+# 2 (HA8): /new detaches the old session (since it stays resumable in state.db via /resume);
+# a send to it is queued for the parked address and injects nothing into the new session.
 type_line("/new now")
 time.sleep(3)
 text = f"after-new-{uuid.uuid4().hex[:8]}"
 sent = recv.send(e1["address"], text)
-if sent.get("error") != "gone":
-    fail(f"2: after /new, a send to {e1['address']} answers {sent}, not gone")
+if sent.get("outcome") != "queued":
+    fail(f"2: after /new, a send to detached {e1['address']} answers {sent}, not queued")
 time.sleep(5)
 if anywhere(text):
     fail(f"2: the message to the old address reached the model in the new session")
@@ -481,22 +482,28 @@ if e3["address"] == e1["address"] or e3["label"] in (s1, s2):
     fail(f"2: the new session's entry is {e3}")
 if anywhere(text):
     fail(f"2: the message to the old address reached the model in the new session")
-ok(f"2: after /new {e1['address']} is gone and {e3['label']} has {e3['address']}")
+ok(f"2 (HA8): after /new {e1['address']} is parked/queued and {e3['label']} has {e3['address']}")
 
-# 2, /resume (no plugin hook): the CLI moves back to an ended session. A message to the session
-# it left is never injected into the resumed one, and that address is released (pins the CLI's
-# `session_id`).
+# 2, /resume (no plugin hook, HA8): the CLI moves back to `s2` (which continued from `s1` via
+# `continues`, moving the stored reclaim key from `s1` to `s2`). A message to `e3` (the session
+# it left) triggers `observe(s2)` on delivery, which detaches `e3` (leaving that message queued
+# for `e3` and never injected into `s2`) and reclaims `s2` at `e1['address']`, delivering the
+# message `text` that was queued for `e1['address']` while `s2` was detached!
 type_line(f"/resume {s2}")
 time.sleep(4)
-text = f"after-resume-{uuid.uuid4().hex[:8]}"
-sent = recv.send(e3["address"], text)
-time.sleep(10)
-if anywhere(text):
+text_e3 = f"after-resume-{uuid.uuid4().hex[:8]}"
+sent = recv.send(e3["address"], text_e3)
+wait_until(lambda: seen(text), 60, f"the queued message {text} delivered to reclaimed {s2} at {e1['address']}")
+time.sleep(5)
+if anywhere(text_e3):
     fail(f"2 resume: after /resume {s2}, the message to {e3['label']}'s address reached the model")
+(e2_reclaimed,) = hermes_entries()
+if e2_reclaimed["label"] != s2 or e2_reclaimed["address"] != e1["address"]:
+    fail(f"2 resume: after /resume {s2}, hermes entry is {e2_reclaimed}, expected {s2} at {e1['address']}")
 again = recv.send(e3["address"], "again")
-if again.get("error") != "gone":
-    fail(f"2 resume: after /resume {s2}, a send to {e3['address']} answers {again}, not gone")
-ok(f"2 resume: after /resume {s2}, {e3['address']} is gone and its message reached no session")
+if again.get("outcome") != "queued":
+    fail(f"2 resume: after /resume {s2}, a send to detached {e3['address']} answers {again}, not queued")
+ok(f"2 resume (HA8): /resume {s2} reclaims {e1['address']} (after continues {s1}->{s2}) and receives its queued message; {e3['address']} is detached/queued")
 
 # 2, a background delegate: it keeps running after /new, and its call acts as the ended
 # session: it answers gone, and the new session keeps its address.
@@ -598,20 +605,22 @@ wait_until(lambda: seen(text), 60, "the pushed message in the desktop session")
 wait_until(lambda: acked(sent["message_id"]), 20, "the desktop message acked")
 ok(f"desktop: with allow_gateway_injection a push to {key} runs in it and is acked")
 
-# 2, desktop close: a closed session's address is released (on_session_finalize), so a send to
-# it answers gone and nothing of it blocks another session of the same process.
+# 2, desktop close (HA8): a closed session in tui_gateway stays resumable in state.db, so
+# on_session_finalize detaches it (parked & queued), and nothing of it blocks another session
+# of the same process; resuming it reclaims the same address and delivers the queued message.
 key2, e2, _ = d.session()
 d.rpc("session.close", {"session_id": sid})
 time.sleep(3)
-sent = recv.send(e["address"], f"to-closed-{uuid.uuid4().hex[:8]}")
-if sent.get("error") != "gone" or entry(key):
-    fail(f"2 close: after session.close of {key}, a send to {e['address']} answers {sent}; listed: {entry(key)}")
+closed_text = f"to-closed-{uuid.uuid4().hex[:8]}"
+sent_closed = recv.send(e["address"], closed_text)
+if sent_closed.get("outcome") != "queued" or entry(key):
+    fail(f"2 close: after session.close of {key}, a send to {e['address']} answers {sent_closed}; listed: {entry(key)}")
 text = f"desktop-live-{uuid.uuid4().hex[:8]}"
 sent = recv.send(e2["address"], text)
 wait_until(lambda: seen(text), 60, f"the message to the live desktop session {key2}")
 wait_until(lambda: acked(sent["message_id"]), 20, f"the message to {key2} acked")
 d.close()
-ok(f"2 close: closed {key} answers gone, and {key2} in the same process still receives")
+ok(f"2 close (HA8): closed {key} is detached/queued, and {key2} in the same process still receives")
 
 # 6. A refused injection stays pending: without allow_gateway_injection, inject_message returns
 # False on this host (plugins_injection.py), so the message is neither acked nor injected.

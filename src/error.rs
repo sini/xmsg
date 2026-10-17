@@ -39,6 +39,11 @@ pub enum AppError {
     #[error("not live here: {0}")]
     NotLive(String),
 
+    /// A reclaim token was presented for an instance ID that is currently live on another
+    /// connection (HA8).
+    #[error("live elsewhere: {0}")]
+    LiveElsewhere(String),
+
     #[error("session {session_id} process {pid} exited")]
     Gone { session_id: String, pid: u32 },
 
@@ -104,6 +109,7 @@ impl AppError {
             AppError::Ambiguous(_) => (StatusCode::CONFLICT, "ambiguous"),
             AppError::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             AppError::NotLive(_) => (StatusCode::CONFLICT, "not_live"),
+            AppError::LiveElsewhere(_) => (StatusCode::CONFLICT, "live_elsewhere"),
             AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             AppError::Gone { .. } => (StatusCode::GONE, "gone"),
             AppError::PayloadTooLarge { .. } => {
@@ -133,7 +139,9 @@ impl AppError {
     pub fn detail(&self) -> String {
         match self {
             AppError::NotFound(r) => format!("no live recipient matches '{r}'"),
-            AppError::UnknownPeer(n) => format!("unknown node '{n}' (omit 'node' to list all nodes)"),
+            AppError::UnknownPeer(n) => {
+                format!("unknown node '{n}' (omit 'node' to list all nodes)")
+            }
             AppError::Unregistered(pid) => format!("process {pid} has no attested agent session"),
             // pid 0: no process is known, as for a released plugin address or a peer's `gone`.
             AppError::Gone { session_id, pid: 0 } => format!("session {session_id} is gone"),
@@ -150,6 +158,7 @@ impl AppError {
             | AppError::Ambiguous(d)
             | AppError::Unavailable(d)
             | AppError::NotLive(d)
+            | AppError::LiveElsewhere(d)
             | AppError::Conflict(d)
             | AppError::InboxUnavailable(d)
             | AppError::Denied(d)

@@ -468,19 +468,20 @@ async fn oracle_6_release_and_close() {
         "S1 is no longer listed: {listed:?}"
     );
 
-    // The connection closes while this process lives.
+    // HA8: when the connection closes without explicit `release`, S2 is detached (not
+    // listed live, parked inside reply_ttl, and queues messages for reclaim).
     drop(a);
-    let mut status = 0;
     for _ in 0..100 {
-        (status, _) = node.send(&s2, "after close").await;
-        if status == 410 {
+        if !node.list().await.iter().any(|e| e["address"] == s2) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    let (status, body) = node.send(&s2, "after close").await;
     assert_eq!(
-        status, 410,
-        "S2's address is gone once its connection closes"
+        (status, &body["outcome"]),
+        (202, &json!("queued")),
+        "S2's address is detached and queues once its connection closes (HA8): {body}"
     );
 }
 

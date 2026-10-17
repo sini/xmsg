@@ -50,18 +50,55 @@ def _register_sock():
     return os.path.join(d, "xmsg", "register.sock") if d else None
 
 
+def _reclaim_store_path():
+    home = os.environ.get("HERMES_HOME", "").strip() or os.path.expanduser("~/.hermes")
+    return os.path.join(home, "xmsg-reclaim.json")
+
+
+def _load_reclaim_store(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+# Crash window (HA8 Change 7): if the plugin process dies after the server rotates the
+# secret on a reclaim response and before this atomic file write completes, the stored
+# secret on disk is stale; the next reclaim attempt receives `denied` ("reclaim refused")
+# and falls back to minting a fresh address (any messages queued to the old address are lost).
+def _save_reclaim_store(path, store):
+    d = os.path.dirname(path)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}.{time.time_ns()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(store, f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 class Connection:
     """The process's one connection. Frames carry a `request_id`; a reader thread hands each
     answer to its caller, so tool frames are answered while the poll is pending."""
 
-    def __init__(self, path, deliver):
+    def __init__(self, path, deliver, store_path=None):
         self.path, self.deliver = path, deliver
+        self.store_path = store_path or _reclaim_store_path()
         self.lock = threading.Lock()
         self.sock = None
         self.waiting = {}
         self.n = 0
         # Sessions held on the current connection, and the sessions this process wants held
-        # (registered again, with new addresses, after a reconnect: P6).
+        # (re-registered with their reclaim tokens after a reconnect: HA8).
         self.held = set()
         self.wanted = set()
         threading.Thread(target=self._poll_loop, name="xmsg-poll", daemon=True).start()
@@ -121,13 +158,45 @@ class Connection:
         self.wanted.add(session)
         if session in self.held:
             return
-        a = self.call({"action": "register", "session": session})
+        store = _load_reclaim_store(self.store_path)
+        saved = store.get(session)
+        frame = {"action": "register", "session": session}
+        if isinstance(saved, dict) and saved.get("id") and saved.get("reclaim"):
+            frame["reclaim"] = {"id": saved["id"], "secret": saved["reclaim"]}
+        a = self.call(frame)
+        if "reclaim" in frame and a.get("status") == "error" and a.get("error") == "denied":
+            # Stale or expired reclaim window: delete saved entry and mint a fresh address.
+            latest = _load_reclaim_store(self.store_path)
+            latest.pop(session, None)
+            _save_reclaim_store(self.store_path, latest)
+            a = self.call({"action": "register", "session": session})
         if a.get("status") == "ok":
+            # Persist the new/rotated secret atomically BEFORE acting on the registration.
+            addr = a.get("address", "")
+            secret = a.get("reclaim", "")
+            if addr and secret:
+                inst_id = addr.split("@", 1)[0]
+                latest = _load_reclaim_store(self.store_path)
+                latest[session] = {"id": inst_id, "address": addr, "reclaim": secret}
+                _save_reclaim_store(self.store_path, latest)
             self.held.add(session)
         else:
             logger.warning("xmsg: registering %s: %s", session, a)
 
+    def detach(self, session):
+        """Detaches `session` from this connection while keeping its reclaim secret on disk
+        and its `reclaim_hash` on the server so a later `/resume` or restart reclaims it (HA8 §3.1)."""
+        self.wanted.discard(session)
+        if session in self.held:
+            self.held.discard(session)
+            self.call({"action": "detach", "session": session})
+
     def release(self, session):
+        """Permanently ends `session`: deletes its stored secret and clears `reclaim_hash` on the server."""
+        latest = _load_reclaim_store(self.store_path)
+        if session in latest:
+            latest.pop(session, None)
+            _save_reclaim_store(self.store_path, latest)
         self.wanted.discard(session)
         if session in self.held:
             self.held.discard(session)
@@ -138,6 +207,12 @@ class Connection:
         if a.get("status") != "ok":
             logger.warning("xmsg: continues %s -> %s: %s", frm, to, a)
             return False
+        # Move the stored reclaim entry from `frm` to `to` on disk (HA8 §2.4).
+        latest = _load_reclaim_store(self.store_path)
+        entry = latest.pop(frm, None)
+        if entry is not None:
+            latest[to] = entry
+            _save_reclaim_store(self.store_path, latest)
         self.wanted.discard(frm)
         self.held.discard(frm)
         self.wanted.add(to)
@@ -203,7 +278,7 @@ class Xmsg:
             return False
 
     def observe(self, session):
-        """`session`, a root, is live: hold its address, moving or releasing what it replaces."""
+        """`session`, a root, is live: hold its address, moving or detaching what it replaces."""
         with self.lock:
             self.ended.discard(session)
             if session in self.conn.wanted:
@@ -217,7 +292,7 @@ class Xmsg:
                     self.moved[p] = session
                     return
             if cli and prev:
-                self.conn.release(prev[0])
+                self.conn.detach(prev[0])
             self.conn.register(session)
 
     def pre_llm_call(self, session_id="", parent_session_id="", **_):
@@ -233,16 +308,17 @@ class Xmsg:
         return None
 
     def on_session_finalize(self, session_id="", **_):
-        """A session ended: a desktop session closed, or the CLI's `/new` or exit. Its address is
-        released (harness C3); this is the one release on those paths."""
+        """A session finalized: a desktop/TUI session closed, or the CLI's `/new` or exit.
+        In hermes these sessions stay resumable in state.db via `/resume` or `session.resume`,
+        so this is a detach (HA8 §3.1): the address becomes parked and reclaimable."""
         try:
             with self.lock:
                 if self.current == session_id:
                     self.current = None
                 self.ended.add(session_id)
-                self.conn.release(session_id)
+                self.conn.detach(session_id)
         except OSError:
-            logger.warning("xmsg: releasing %s", session_id, exc_info=True)
+            logger.warning("xmsg: detaching %s", session_id, exc_info=True)
 
     def on_session_reset(self, session_id="", **_):
         """The CLI's `/new`: the new session is registered (the old one was finalized)."""

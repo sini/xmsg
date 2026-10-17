@@ -1287,6 +1287,7 @@ async fn test_oracle_8_pi_server_minted_uuid_v4() {
         session_id: Some("asserted-custom-pi-id-z".to_string()),
         session_name: Some("pi-worker".to_string()),
         cwd: Some("/workspace".to_string()),
+        reclaim: None,
     };
 
     let (client_read, server_write) = tokio::io::duplex(1024);
@@ -1344,6 +1345,7 @@ async fn test_oracle_8_pi_server_minted_uuid_v4() {
         session_id: Some("asserted-custom-pi-id-z".to_string()),
         session_name: Some("pi-worker".to_string()),
         cwd: Some("/workspace".to_string()),
+        reclaim: None,
     };
     let (client_read2, server_write2) = tokio::io::duplex(1024);
     let (server_read2, _client_write2) = tokio::io::duplex(1024);
