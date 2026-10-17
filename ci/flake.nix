@@ -6,6 +6,7 @@
     # snapshot of the tree (den-hoag-lbtnv D1). So `outputs` below applies `../flake.nix`'s own
     # `outputs` to the `nixpkgs` declared here, line for line as `../flake.nix` declares it.
     nixpkgs.url = "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz";
+    crane.url = "github:ipetkov/crane";
     # The flake modules are evaluated against home-manager at nix-config's pin (its
     # `home-manager-unstable` node), so a module change that nix-config cannot take reds here.
     home-manager = {
@@ -18,12 +19,17 @@
   };
 
   outputs =
-    inputs@{ gen-harness, nixpkgs, ... }:
+    inputs@{
+      gen-harness,
+      nixpkgs,
+      crane,
+      ...
+    }:
     let
       # The published surface of THIS tree.
       xmsg = (import ../flake.nix).outputs {
         inherit (inputs) self;
-        inherit nixpkgs;
+        inherit nixpkgs crane;
       };
     in
     gen-harness.lib.mkCi {

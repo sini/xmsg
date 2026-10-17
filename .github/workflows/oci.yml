@@ -7,6 +7,7 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -26,13 +27,47 @@ jobs:
       - name: Magic Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@main
 
+      - name: Configure Attic substituter
+        env:
+          ATTIC_PUBLIC_KEY: ${{ vars.ATTIC_PUBLIC_KEY }}
+        run: |
+          if [ -z "${ATTIC_PUBLIC_KEY:-}" ]; then
+            echo "ATTIC_PUBLIC_KEY is not set; skipping Attic substituter configuration"
+            exit 0
+          fi
+          sudo mkdir -p /etc/nix
+          {
+            echo "extra-substituters = https://attic.json64.dev/ci"
+            echo "extra-trusted-public-keys = ${ATTIC_PUBLIC_KEY}"
+          } | sudo tee -a /etc/nix/nix.conf >/dev/null
+          if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nix-daemon 2>/dev/null; then
+            sudo systemctl restart nix-daemon
+          fi
+
       - name: Build OCI image
         run: |
-          nix build .#image --out-link result-image
+          nix build -L --no-link --print-out-paths .#packages.x86_64-linux.cargoArtifacts | tee -a /tmp/attic-paths
+          nix build -L .#image --out-link result-image --print-out-paths | tee -a /tmp/attic-paths
 
       - name: Run image oracle check
         run: |
-          nix build .#checks.x86_64-linux.image
+          nix build -L --no-link --print-out-paths .#checks.x86_64-linux.image | tee -a /tmp/attic-paths
+
+      - name: Push to Attic cache
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          if [ -z "${ATTIC_TOKEN:-}" ]; then
+            echo "ATTIC_TOKEN is not set; skipping Attic cache push"
+            exit 0
+          fi
+          if [ ! -s /tmp/attic-paths ]; then
+            echo "No paths to push; skipping Attic cache push"
+            exit 0
+          fi
+          nix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev "$ATTIC_TOKEN"
+          nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci
 
       - name: Push image to GHCR
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'

@@ -1,10 +1,17 @@
 {
   description = "xmsg: Fast, lightweight local HTTP bridge into live agent sessions";
 
-  inputs.nixpkgs.url = "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz";
+  inputs = {
+    nixpkgs.url = "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz";
+    crane.url = "github:ipetkov/crane";
+  };
 
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      nixpkgs,
+      crane,
+    }:
     let
       systems = [
         "x86_64-linux"
@@ -15,10 +22,10 @@
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
       # Bound here rather than read through `self`, so the modules' default package resolves
       # when ci/flake.nix applies these outputs with its own `self`.
-      packages = forAllSystems (pkgs: {
-        default = pkgs.rustPlatform.buildRustPackage {
-          pname = "xmsg";
-          version = "0.1.0";
+      packages = forAllSystems (
+        pkgs:
+        let
+          craneLib = crane.mkLib pkgs;
           src = nixpkgs.lib.cleanSourceWith {
             src = ./.;
             filter =
@@ -37,39 +44,56 @@
                 || nixpkgs.lib.hasSuffix ".nix" base
               );
           };
-          cargoLock.lockFile = ./Cargo.lock;
-          doCheck = true;
-          # The tests bind loopback sockets, which the darwin sandbox refuses.
-          __darwinAllowLocalNetworking = true;
-          meta = {
-            description = "Fast, lightweight local HTTP bridge into live agent sessions";
-            mainProgram = "xmsg";
-            license = nixpkgs.lib.licenses.mit;
+          commonArgs = {
+            pname = "xmsg";
+            version = "0.1.0";
+            inherit src;
+            strictDeps = true;
+            CARGO_PROFILE = "release";
+            # The tests bind loopback sockets, which the darwin sandbox refuses.
+            __darwinAllowLocalNetworking = true;
           };
-        };
+          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+        in
+        {
+          inherit cargoArtifacts;
 
-        image = pkgs.dockerTools.buildLayeredImage {
-          name = "ghcr.io/sini/xmsg";
-          tag = "latest";
-          contents = [
-            pkgs.cacert
-            self.packages.${pkgs.system}.default
-          ];
-          extraCommands = ''
-            mkdir -p -m 1777 tmp
-            mkdir -p -m 0755 var/lib/xmsg
-          '';
-          config = {
-            User = "10001:10001";
-            Entrypoint = [ "${self.packages.${pkgs.system}.default}/bin/xmsg" ];
-            Cmd = [ "serve" ];
-            WorkingDir = "/var/lib/xmsg";
-            Env = [
-              "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+          default = craneLib.buildPackage (
+            commonArgs
+            // {
+              inherit cargoArtifacts;
+              doCheck = true;
+              meta = {
+                description = "Fast, lightweight local HTTP bridge into live agent sessions";
+                mainProgram = "xmsg";
+                license = nixpkgs.lib.licenses.mit;
+              };
+            }
+          );
+
+          image = pkgs.dockerTools.buildLayeredImage {
+            name = "ghcr.io/sini/xmsg";
+            tag = "latest";
+            contents = [
+              pkgs.cacert
+              self.packages.${pkgs.system}.default
             ];
+            extraCommands = ''
+              mkdir -p -m 1777 tmp
+              mkdir -p -m 0755 var/lib/xmsg
+            '';
+            config = {
+              User = "10001:10001";
+              Entrypoint = [ "${self.packages.${pkgs.system}.default}/bin/xmsg" ];
+              Cmd = [ "serve" ];
+              WorkingDir = "/var/lib/xmsg";
+              Env = [
+                "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+              ];
+            };
           };
-        };
-      });
+        }
+      );
     in
     {
       inherit packages;
