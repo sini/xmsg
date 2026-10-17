@@ -582,7 +582,7 @@ async fn test_oracle_6_post_delivery_failure_still_delivered() {
     let (_t, target) = slow_target(&node, Duration::ZERO);
     let db = rusqlite::Connection::open(tmp.path().join("xmsg.db")).unwrap();
     db.execute_batch(
-        "CREATE TRIGGER gate_fail BEFORE UPDATE ON messages BEGIN SELECT RAISE(ABORT, 'gate'); END;",
+        "CREATE TRIGGER gate_fail BEFORE UPDATE OF outcome ON messages WHEN NEW.outcome <> 'pending' BEGIN SELECT RAISE(ABORT, 'gate'); END;",
     )
     .unwrap();
     let (st1, r1) = keyed(&node, ID_T, "once", "k-uf").await;
