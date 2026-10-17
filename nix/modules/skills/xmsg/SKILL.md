@@ -30,6 +30,7 @@ Each entry gives:
 
 - `address`: `id@node` or `name@node`;
 - `kind`: `service` or `instance`;
+- `harness`: `claude`, `agy`, `pi`, `opencode`, `hermes`, or `svc` (omitted when a pre-XL1 peer did not report it);
 - `label`: an instance's own description (a service has none);
 - `status`: `live`, `parked` (an instance that is not running now and would be queued for), or `closed`;
 - `user`: the user the recipient belongs to;

@@ -362,7 +362,7 @@ export class XmsgPiBridge {
     this.pi.registerTool({
       name: "list",
       label: "List",
-      description: "List the recipients you can message: by default shows live recipients (with registered_at); with status='inactive' shows parked and closed instances seen within `within` seconds (default 86400 = 24h, capped at reply TTL, with last_seen; a peer older than XL1 lists no inactive entries). Filter by name, node or kind; node lists a federated peer.",
+      description: "List the recipients you can message: by default shows live recipients (with harness and registered_at); with status='inactive' shows parked and closed instances seen within `within` seconds (default 86400 = 24h, capped at reply TTL, with harness and last_seen; a peer older than XL1 lists no inactive entries). Filter by name, node or kind; node lists a federated peer.",
       parameters: Type.Object({
         name: Type.Optional(Type.String({ description: "Only recipients with this label or service name" })),
         node: Type.Optional(Type.String({ description: "List this node (a federated peer) instead of the local one" })),

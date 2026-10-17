@@ -297,11 +297,14 @@ pub fn resolve_caller_session_peer(
                 {
                     return Ok(Session {
                         session_id: info.conversation_id.clone(),
-                        name: if !info.conversation_id.is_empty() {
-                            Some(info.conversation_id.clone())
-                        } else {
-                            None
-                        },
+                        name: info
+                            .label
+                            .as_deref()
+                            .and_then(crate::inbox::clean_label)
+                            .or_else(|| {
+                                (!info.conversation_id.is_empty())
+                                    .then(|| info.conversation_id.clone())
+                            }),
                         pid: info.pid,
                         cwd: "/".to_string(),
                         status: "idle".to_string(),
@@ -562,12 +565,17 @@ pub async fn run_agent_server_with_listener(
                                 store_lock.entry(session_key.clone())
                                     .and_modify(|current| {
                                         if current.pid != reg.pid || current.starttime != reg.starttime {
-                                            *current = crate::agy::AgySessionInfo::new(
+                                            let prev_label = current.label.clone();
+                                            let mut info = crate::agy::AgySessionInfo::new(
                                                 conv_id.clone(),
                                                 reg.pid,
                                                 reg.starttime.clone(),
                                                 None,
                                             );
+                                            if prev_label.is_some() {
+                                                info.label = prev_label;
+                                            }
+                                            *current = info;
                                         }
                                     })
                                     .or_insert_with(|| {

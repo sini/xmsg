@@ -815,7 +815,9 @@ impl PeersMap {
         )> = Vec::new();
         let mut default_routes: Vec<String> = Vec::new();
         let has_default_route = owned_entries.iter().any(|(_, obj)| {
-            obj.get("default_route").and_then(|v| v.as_bool()).unwrap_or(false)
+            obj.get("default_route")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
         });
         for (key_name, obj) in entries {
             if !is_wrapped
@@ -1018,7 +1020,9 @@ impl PeersMap {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             if is_default_route && address.is_empty() {
-                return Err(format!("peer '{name}' marked 'default_route' missing required field 'address'"));
+                return Err(format!(
+                    "peer '{name}' marked 'default_route' missing required field 'address'"
+                ));
             }
             if !leaf && address.is_empty() && !has_default_route {
                 return Err(format!("peer '{name}' missing required field 'address'"));
@@ -1093,9 +1097,8 @@ impl PeersMap {
             };
 
             let is_default_route: bool = if let Some(v) = obj.get("default_route") {
-                v.as_bool().ok_or_else(|| {
-                    format!("peer '{name}': 'default_route' must be a boolean")
-                })?
+                v.as_bool()
+                    .ok_or_else(|| format!("peer '{name}': 'default_route' must be a boolean"))?
             } else {
                 false
             };
@@ -2178,7 +2181,11 @@ pub struct FedInboxMessage {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FedInboxItem {
     Message(FedInboxMessage),
-    List { query: String },
+    List {
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        v: Option<u32>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2199,14 +2206,17 @@ pub struct FedReplyEnvelope {
     pub created_at: i64,
 }
 
-/// One entry of a node's `list` answer (A4, A-12, A16, XL1): an instance ID or a service
-/// name, its kind, label and status, the user it belongs to, and its timestamp
-/// (`registered_at` when live, `last_seen` when inactive). The asking node adds the node.
+/// One entry of a node's `list` answer (A4, A-12, A16, XL1, XF3): an instance ID or a
+/// service name, its kind, harness, label and status, the user it belongs to, and its
+/// timestamp (`registered_at` when live, `last_seen` when inactive). The asking node adds
+/// the node.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FedListEntry {
     pub id: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub status: String,
@@ -3075,12 +3085,8 @@ async fn fed_reply_handler(
                     .db
                     .lock()
                     .map_err(|e| AppError::Internal(e.to_string()))?;
-                let _ = storage::insert_forwarded_message(
-                    &db,
-                    &reply.id,
-                    &peer.name,
-                    reply.created_at,
-                );
+                let _ =
+                    storage::insert_forwarded_message(&db, &reply.id, &peer.name, reply.created_at);
                 let _ = storage::insert_outbound(
                     &db,
                     &reply.id,
@@ -3131,12 +3137,8 @@ async fn fed_reply_handler(
                     Some(&reply.id),
                 )
                 .map_err(|e| AppError::Internal(e.to_string()))?;
-                let _ = storage::insert_forwarded_message(
-                    &db,
-                    &reply.id,
-                    &peer.name,
-                    reply.created_at,
-                );
+                let _ =
+                    storage::insert_forwarded_message(&db, &reply.id, &peer.name, reply.created_at);
                 let _ = storage::insert_outbound(
                     &db,
                     &reply.id,
@@ -3399,9 +3401,16 @@ async fn fed_get_replies_handler(
     Ok((StatusCode::OK, Json(replies)).into_response())
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct FedListQuery {
+    #[serde(default)]
+    pub v: Option<u32>,
+}
+
 async fn fed_list_sessions_handler(
     State(fed_state): State<Arc<FedState>>,
     Extension(peer): Extension<Arc<AuthenticatedPeer>>,
+    Query(query): Query<FedListQuery>,
 ) -> Result<Response, AppError> {
     let peer_cfg = fed_state
         .current_peers()
@@ -3426,7 +3435,7 @@ async fn fed_list_sessions_handler(
         return Err(AppError::RateLimited("Rate limit exceeded".to_string()));
     }
 
-    let entries = listing_for_peer(&fed_state, &peer_cfg).await?;
+    let entries = listing_for_peer(&fed_state, &peer_cfg, query.v.unwrap_or(1) >= 2).await?;
     Ok((StatusCode::OK, Json(entries)).into_response())
 }
 
@@ -3437,10 +3446,13 @@ pub fn own_user(fed_state: &FedState) -> String {
 }
 
 /// What this node lists to `peer_cfg`'s node: its recipients, narrowed by that entry's
-/// `targets`, each carrying this node's user (A16).
+/// `targets`, each carrying this node's user (A16). When `!v2` (a plain request from a
+/// pre-XL1 reader whose `FedListEntry` uses `#[serde(deny_unknown_fields)]`), the new
+/// fields (`registered_at`, `last_seen`, `harness`) are omitted.
 async fn listing_for_peer(
     fed_state: &FedState,
     peer_cfg: &PeerConfig,
+    v2: bool,
 ) -> Result<Vec<FedListEntry>, AppError> {
     let mut entries = crate::surface::listing(
         &fed_state.local(),
@@ -3450,6 +3462,13 @@ async fn listing_for_peer(
     .await?;
     if let Some(ref allowed_targets) = peer_cfg.targets {
         entries.retain(|e| allowed_targets.contains(&e.id));
+    }
+    if !v2 {
+        for e in &mut entries {
+            e.harness = None;
+            e.registered_at = None;
+            e.last_seen = None;
+        }
     }
     Ok(entries)
 }
@@ -3516,7 +3535,7 @@ async fn fed_get_inbox_handler(
     // A `list` query waiting for this client goes first (AM-1), then its messages.
     let next_item = || -> Result<Option<FedInboxItem>, AppError> {
         if let Some(query) = fed_state.list_queries.next_for(&peer.name) {
-            return Ok(Some(FedInboxItem::List { query }));
+            return Ok(Some(FedInboxItem::List { query, v: Some(2) }));
         }
         let db = fed_state
             .db
@@ -4355,10 +4374,8 @@ pub fn spawn_outbound_reply_poller(
                             if let (Some(ret_harness), Some(ret_session_id)) =
                                 (&orig.return_harness, &orig.return_session_id)
                             {
-                                let Some(reply_id) = r
-                                    .pushed_message_id
-                                    .clone()
-                                    .filter(|id| !id.is_empty())
+                                let Some(reply_id) =
+                                    r.pushed_message_id.clone().filter(|id| !id.is_empty())
                                 else {
                                     tracing::warn!(
                                         message_id = %message_id,
@@ -4454,9 +4471,9 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
         }
 
         match get_federated_inbox(&fed_state, &peer_name, wait_secs).await {
-            Ok(Some(FedInboxItem::List { query })) => {
+            Ok(Some(FedInboxItem::List { query, v })) => {
                 backoff_millis = 100;
-                answer_list_query(&fed_state, &peer_name, &query).await;
+                answer_list_query(&fed_state, &peer_name, &query, v.unwrap_or(1) >= 2).await;
             }
             Ok(Some(FedInboxItem::Message(msg))) => {
                 backoff_millis = 100;
@@ -4557,10 +4574,7 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                             Err(e) => {
                                 if let Ok(db) = fed_state.db.lock() {
                                     let _ = storage::record_message_recipient(
-                                        &db,
-                                        &msg.id,
-                                        target_ref,
-                                        "system",
+                                        &db, &msg.id, target_ref, "system",
                                     );
                                 }
                                 match &e {
@@ -4829,7 +4843,7 @@ pub async fn list_direct_peer(
 
     let req = hyper::Request::builder()
         .method("GET")
-        .uri("/fed/v2/sessions")
+        .uri("/fed/v2/sessions?v=2")
         .header("host", peer_name)
         .body(http_body_util::Empty::<bytes::Bytes>::new())
         .map_err(|e| AppError::Internal(e.to_string()))?;
@@ -4869,12 +4883,12 @@ pub async fn list_direct_peer(
 
 /// A dial-out client answers a `list` query from `peer_key`'s mailbox, applying its own
 /// entry for that node (A-1, AM-1): `denied` unless it allows `list`.
-pub async fn answer_list_query(fed_state: &FedState, peer_key: &str, query: &str) {
+pub async fn answer_list_query(fed_state: &FedState, peer_key: &str, query: &str, v2: bool) {
     let Some(peer) = fed_state.current_peers().get(peer_key).cloned() else {
         return;
     };
     let answer = if peer.allow.iter().any(|op| op == "list") {
-        match listing_for_peer(fed_state, &peer).await {
+        match listing_for_peer(fed_state, &peer, v2).await {
             Ok(entries) => FedListAnswer::Ok { entries },
             Err(e) => {
                 tracing::warn!("list for '{peer_key}' failed: {e}");
@@ -5347,7 +5361,9 @@ impl CredentialReloader {
                 Ok(h) => h,
                 Err(e) => {
                     tracing::error!("failed to read peers file {}: {e}", peers_path.display());
-                    return Err(AppError::Internal(format!("failed to read peers file: {e}")));
+                    return Err(AppError::Internal(format!(
+                        "failed to read peers file: {e}"
+                    )));
                 }
             };
             current_hashes.insert(peers_path.clone(), peers_hash);

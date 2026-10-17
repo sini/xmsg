@@ -1751,7 +1751,11 @@ pub fn seen_instance(
 /// or a plugin session (AM-9: both are bound to their process or registration), and
 /// within their parked lifetime: `ttl_secs` after last live, or as long as their queue.
 /// The caller leaves out the ones live now.
-pub fn parked_instances(conn: &Connection, now: i64, ttl_secs: i64) -> Result<Vec<(String, i64)>> {
+pub fn parked_instances(
+    conn: &Connection,
+    now: i64,
+    ttl_secs: i64,
+) -> Result<Vec<(String, String, i64)>> {
     let mut stmt = conn.prepare(
         "SELECT id, harness, last_live FROM instance_seen s WHERE harness != 'pi' AND (last_live + ?2 > ?1 \
          OR EXISTS (SELECT 1 FROM instance_queue q WHERE q.instance_id = s.id AND q.delivered_at IS NULL AND q.expires_at > ?1) \
@@ -1770,7 +1774,6 @@ pub fn parked_instances(conn: &Connection, now: i64, ttl_secs: i64) -> Result<Ve
     Ok(rows
         .into_iter()
         .filter(|(_, harness, _)| crate::plugin::harness(harness).is_none())
-        .map(|(id, _, last_live)| (id, last_live))
         .collect())
 }
 
@@ -1786,12 +1789,13 @@ pub fn purge_instance_seen(conn: &Connection, now: i64, ttl_secs: i64) -> Result
 }
 
 /// An inactive instance in `instance_seen` within `within_secs` of `now` (XL1): its ID,
-/// its status (`parked` for a Claude or agy instance within its parked lifetime, `closed`
-/// for a pi or plugin session), and when it was last seen live. The caller leaves out the
-/// ones live now.
+/// its harness, its status (`parked` for a Claude or agy instance within its parked
+/// lifetime, `closed` for a pi or plugin session), and when it was last seen live. The
+/// caller leaves out the ones live now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InactiveInstance {
     pub id: String,
+    pub harness: String,
     pub status: String,
     pub last_seen: i64,
 }
@@ -1827,12 +1831,14 @@ pub fn inactive_instances(
             if is_ephemeral {
                 Some(InactiveInstance {
                     id,
+                    harness,
                     status: "closed".to_string(),
                     last_seen,
                 })
             } else if within_parked_ttl {
                 Some(InactiveInstance {
                     id,
+                    harness,
                     status: "parked".to_string(),
                     last_seen,
                 })

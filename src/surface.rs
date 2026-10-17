@@ -302,14 +302,16 @@ pub fn parse_to(to: &str) -> Result<(&str, Option<&str>), AppError> {
 /// Default `within` window for `list` with `status: "inactive"` (24 hours).
 pub const DEFAULT_INACTIVE_WITHIN_SECS: u64 = 86_400;
 
-/// One entry of `list` (A13, A-12, A16, XL1): its address, kind, label and status (`live`,
-/// `parked` or `closed`), the node holding it, the user it belongs to, and its timestamp
-/// (`registered_at` when live, `last_seen` when inactive).
+/// One entry of `list` (A13, A-12, A16, XL1, XF3): its address, kind, harness, label and
+/// status (`live`, `parked` or `closed`), the node holding it, the user it belongs to, and
+/// its timestamp (`registered_at` when live, `last_seen` when inactive).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Recipient {
     pub address: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub status: String,
@@ -349,6 +351,7 @@ pub struct ListQuery {
 fn live_entry(
     id: &str,
     service: bool,
+    harness: &str,
     label: Option<String>,
     user: &str,
     registered_at: i64,
@@ -356,6 +359,7 @@ fn live_entry(
     FedListEntry {
         id: id.to_string(),
         kind: if service { "service" } else { "instance" }.to_string(),
+        harness: Some(harness.to_string()),
         label: if service {
             None
         } else {
@@ -371,10 +375,17 @@ fn live_entry(
     }
 }
 
-fn inactive_entry(id: &str, status: &str, user: &str, last_seen: i64) -> FedListEntry {
+fn inactive_entry(
+    id: &str,
+    harness: &str,
+    status: &str,
+    user: &str,
+    last_seen: i64,
+) -> FedListEntry {
     FedListEntry {
         id: id.to_string(),
         kind: "instance".to_string(),
+        harness: Some(harness.to_string()),
         label: None,
         status: status.to_string(),
         user: user.to_string(),
@@ -387,6 +398,7 @@ fn recipient(e: FedListEntry, node: &str) -> Recipient {
     Recipient {
         address: format!("{}@{node}", e.id),
         kind: e.kind,
+        harness: e.harness,
         label: e.label,
         status: e.status,
         node: node.to_string(),
@@ -404,7 +416,8 @@ fn recipient(e: FedListEntry, node: &str) -> Recipient {
 pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, AppError> {
     if query.host.is_some() {
         return Err(AppError::BadRequest(
-            "unknown parameter 'host'; use 'node' instead (or omit it to list all nodes)".to_string(),
+            "unknown parameter 'host'; use 'node' instead (or omit it to list all nodes)"
+                .to_string(),
         ));
     }
     if let Some(kind) = query.kind.as_deref() {
@@ -506,9 +519,9 @@ pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, App
     Ok(ListResult { recipients, nodes })
 }
 
-/// This node's live recipients (XL1): live Claude, agy and pi instances, plugin sessions
-/// (opencode, hermes), and registered services, each carrying its `registered_at`. Also
-/// prunes `instance_seen` rows older than `reply_ttl`.
+/// This node's live recipients (XL1, XF3): live Claude, agy and pi instances, plugin
+/// sessions (opencode, hermes), and registered services, each carrying its `harness` and
+/// `registered_at`. Also prunes `instance_seen` rows older than `reply_ttl`.
 pub(crate) async fn listing_live(
     local: &Local<'_>,
     reply_ttl: Duration,
@@ -524,26 +537,67 @@ pub(crate) async fn listing_live(
     .await?;
     {
         let db = local.db.lock().map_err(db_err)?;
-        let _ = storage::purge_instance_seen(&db, storage::now_epoch_secs(), reply_ttl.as_secs() as i64);
+        let _ = storage::purge_instance_seen(
+            &db,
+            storage::now_epoch_secs(),
+            reply_ttl.as_secs() as i64,
+        );
     }
     let mut out: Vec<FedListEntry> = pairs
         .into_iter()
-        .map(|(claim, e)| live_entry(&claim.address(), false, e.name, user, claim.created_at))
+        .map(|(claim, e)| {
+            live_entry(
+                &claim.address(),
+                false,
+                "claude",
+                e.name,
+                user,
+                claim.created_at,
+            )
+        })
         .collect();
     for s in crate::agy::list_agy_sessions(local.agy_config, local.agy_store, &query) {
-        out.push(live_entry(&s.session_id, false, None, user, s.started_at as i64));
+        out.push(live_entry(
+            &s.session_id,
+            false,
+            "agy",
+            s.name,
+            user,
+            s.started_at as i64,
+        ));
     }
     let proc_root = &local.agy_config.proc_root;
     for s in crate::pi::list_pi_sessions(proc_root, local.pi_store, &query) {
-        out.push(live_entry(&s.session_id, false, s.name, user, s.started_at as i64));
+        out.push(live_entry(
+            &s.session_id,
+            false,
+            "pi",
+            s.name,
+            user,
+            s.started_at as i64,
+        ));
     }
     let plugin_sessions =
         crate::plugin::sessions(&*local.db.lock().map_err(db_err)?).map_err(db_err)?;
     for s in plugin_sessions {
-        out.push(live_entry(&s.session_id, false, s.name, user, s.started_at as i64));
+        out.push(live_entry(
+            &s.session_id,
+            false,
+            &s.harness,
+            s.name,
+            user,
+            s.started_at as i64,
+        ));
     }
     for s in crate::svc::list_svc_sessions(proc_root, local.svc_store, &query) {
-        out.push(live_entry(&s.session_id, true, None, user, s.started_at as i64));
+        out.push(live_entry(
+            &s.session_id,
+            true,
+            "svc",
+            None,
+            user,
+            s.started_at as i64,
+        ));
     }
     Ok(out)
 }
@@ -567,7 +621,13 @@ pub(crate) async fn listing_inactive(
     let mut out = Vec::new();
     for item in inactive {
         if !live.iter().any(|e| e.id == item.id) {
-            out.push(inactive_entry(&item.id, &item.status, user, item.last_seen));
+            out.push(inactive_entry(
+                &item.id,
+                &item.harness,
+                &item.status,
+                user,
+                item.last_seen,
+            ));
         }
     }
     Ok(out)
@@ -587,9 +647,9 @@ pub(crate) async fn listing(
         storage::parked_instances(&db, storage::now_epoch_secs(), reply_ttl.as_secs() as i64)
             .map_err(db_err)?
     };
-    for (id, last_live) in parked {
+    for (id, harness, last_live) in parked {
         if !out.iter().any(|e| e.id == id) {
-            out.push(inactive_entry(&id, "parked", user, last_live));
+            out.push(inactive_entry(&id, &harness, "parked", user, last_live));
         }
     }
     Ok(out)
@@ -1267,11 +1327,7 @@ async fn deliver_send(
                 }
             }
             // A-2: the outbound reply poller is armed by the sender's kind.
-            if ret_harness.is_some()
-                && peers
-                    .get(&peer_key)
-                    .is_some_and(|p| p.is_outbound())
-            {
+            if ret_harness.is_some() && peers.get(&peer_key).is_some_and(|p| p.is_outbound()) {
                 crate::fed::spawn_outbound_reply_poller(
                     fed_state.clone(),
                     peer_key.clone(),
@@ -1291,15 +1347,10 @@ async fn deliver_send(
     let (address, _recipient_harness, outcome, return_host) = match delivered {
         Ok(d) => d,
         Err(e) => {
-            if let Err(de) = state
-                .db
-                .lock()
-                .map_err(db_err)
-                .and_then(|db| {
-                    let _ = storage::delete_outbound(&db, &message_id);
-                    storage::delete_message(&db, &message_id).map_err(db_err)
-                })
-            {
+            if let Err(de) = state.db.lock().map_err(db_err).and_then(|db| {
+                let _ = storage::delete_outbound(&db, &message_id);
+                storage::delete_message(&db, &message_id).map_err(db_err)
+            }) {
                 tracing::warn!(target: "xmsg", message_id = %message_id, "undelivered message's record not removed: {de}");
             }
             return Err(e);
@@ -1307,12 +1358,9 @@ async fn deliver_send(
     };
     match state.db.lock() {
         Ok(db) => {
-            if let Err(e) = storage::complete_message(
-                &db,
-                &message_id,
-                &outcome,
-                return_host.as_deref(),
-            ) {
+            if let Err(e) =
+                storage::complete_message(&db, &message_id, &outcome, return_host.as_deref())
+            {
                 tracing::warn!(target: "xmsg", message_id = %message_id, "delivered message's record not completed: {e}");
             }
             let _ = storage::purge_idempotency_keys(&db, state.idempotency_ttl.as_secs());
@@ -1757,7 +1805,11 @@ async fn deliver_reply(
     };
     // The pushed copy's ID: a local push that landed, or the envelope a remote origin
     // received or will pull (which deduplicates and replies by it).
-    let pushed_id = match (remote_host.as_deref(), push_outcome, dest_session_id.as_deref()) {
+    let pushed_id = match (
+        remote_host.as_deref(),
+        push_outcome,
+        dest_session_id.as_deref(),
+    ) {
         (Some(_), Some("stored"), None) | (_, None, _) => None,
         (Some(_), Some(_), _) | (None, Some("pushed"), _) => Some(reply_id.as_str()),
         (None, Some(_), _) => None,

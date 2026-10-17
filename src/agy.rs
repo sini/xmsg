@@ -35,6 +35,7 @@ pub struct AgySessionInfo {
     pub starttime: String,
     pub credentials: Option<AgyCredentials>,
     pub registered_at: i64,
+    pub label: Option<String>,
 }
 
 impl AgySessionInfo {
@@ -52,6 +53,7 @@ impl AgySessionInfo {
             starttime,
             credentials,
             registered_at: crate::storage::now_epoch_secs(),
+            label: Some("agy".to_string()),
         }
     }
 
@@ -62,6 +64,13 @@ impl AgySessionInfo {
         credentials: AgyCredentials,
     ) -> Self {
         Self::new(conversation_id, pid, starttime, Some(credentials))
+    }
+
+    pub fn with_label(mut self, label: Option<&str>) -> Self {
+        if let Some(raw) = label {
+            self.label = crate::inbox::clean_label(raw);
+        }
+        self
     }
 
     pub fn has_credentials(&self) -> bool {
@@ -79,6 +88,7 @@ impl From<AgyCredentials> for AgySessionInfo {
             starttime: String::new(),
             credentials: Some(c),
             registered_at: 0,
+            label: Some("agy".to_string()),
         }
     }
 }
@@ -303,11 +313,17 @@ pub fn list_agy_sessions(
                 } else {
                     info.session_key.clone()
                 },
-                name: if info.conversation_id.is_empty() {
-                    None
-                } else {
-                    Some(info.conversation_id.clone())
-                },
+                name: info
+                    .label
+                    .as_deref()
+                    .and_then(crate::inbox::clean_label)
+                    .or_else(|| {
+                        if info.conversation_id.is_empty() {
+                            None
+                        } else {
+                            Some(info.conversation_id.clone())
+                        }
+                    }),
                 pid: info.pid,
                 cwd: "/".to_string(),
                 status: match &info.credentials {
@@ -373,7 +389,7 @@ pub fn list_agy_sessions(
                     .unwrap_or(0);
                 let session = Session {
                     session_id: conversation_id.clone(),
-                    name: Some(conversation_id.clone()),
+                    name: Some("agy".to_string()),
                     pid: holder_pid,
                     cwd: "/".to_string(),
                     status: "unregistered".to_string(),
@@ -482,7 +498,15 @@ pub fn verify_registration(
     req: &AgyRegisterRequest,
 ) -> Result<AgyRegistration, AppError> {
     let peer = crate::process::PeerCred::unpinned(peer_uid, peer_pid);
-    verify_registration_peer(proc_root, proc_locks, presence_dir, trusted_exes, my_uid, &peer, req)
+    verify_registration_peer(
+        proc_root,
+        proc_locks,
+        presence_dir,
+        trusted_exes,
+        my_uid,
+        &peer,
+        req,
+    )
 }
 
 /// Like [`verify_registration`], starting from a [`crate::process::PeerCred`] whose root
@@ -637,7 +661,14 @@ pub fn attest_mcp_caller(
     peer_pid: u32,
 ) -> Result<(AgyRegistration, String), AppError> {
     let peer = crate::process::PeerCred::unpinned(peer_uid, peer_pid);
-    attest_mcp_caller_peer(proc_root, proc_locks, presence_dir, trusted_exes, my_uid, &peer)
+    attest_mcp_caller_peer(
+        proc_root,
+        proc_locks,
+        presence_dir,
+        trusted_exes,
+        my_uid,
+        &peer,
+    )
 }
 
 /// Like [`attest_mcp_caller`], starting from a [`crate::process::PeerCred`] whose root pid
@@ -1091,6 +1122,8 @@ pub fn is_conversation_proc_watched(config: &AgyConfig, conv_id: &str) -> bool {
 pub struct AgyProcWatch {
     /// Conversations whose unreadable `environ` has already been logged.
     unreadable_logged: HashSet<String>,
+    /// Labels recorded from hook `check` requests before credentials are registered.
+    labels: HashMap<String, Option<String>>,
 }
 
 fn trusted_canons(config: &AgyConfig) -> Vec<PathBuf> {
@@ -1192,6 +1225,18 @@ fn agy_credentials_from_environ(bytes: &[u8]) -> Option<(String, String)> {
     Some((ls_address?.to_string(), csrf_token?.to_string()))
 }
 
+fn agy_label_from_environ(bytes: &[u8]) -> Option<String> {
+    for chunk in bytes.split(|&b| b == 0) {
+        if let Some(val) = chunk.strip_prefix(b"XMSG_AGY_LABEL=") {
+            return std::str::from_utf8(val)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(str::to_string);
+        }
+    }
+    None
+}
+
 /// Looks for the credentials in the subtree of the attested agy `holder_pid` and registers
 /// `conv_id` from the first process carrying both. Returns whether it registered.
 ///
@@ -1250,8 +1295,11 @@ async fn register_from_subtree(
             continue;
         }
 
-        let creds = match fs::read(proc_root.join(p.to_string()).join("environ")) {
-            Ok(bytes) => agy_credentials_from_environ(&bytes),
+        let (creds, env_label) = match fs::read(proc_root.join(p.to_string()).join("environ")) {
+            Ok(bytes) => (
+                agy_credentials_from_environ(&bytes),
+                agy_label_from_environ(&bytes),
+            ),
             Err(e) => {
                 // Fallback rule: an unreadable environ leaves the conversation to the hook
                 // request. Logged once per conversation, never with values.
@@ -1262,7 +1310,7 @@ async fn register_from_subtree(
                         "cannot read environ of an agy descendant ({e}); the hook request covers this conversation"
                     );
                 }
-                None
+                (None, None)
             }
         };
 
@@ -1293,7 +1341,7 @@ async fn register_from_subtree(
                 &req,
             ) {
                 Ok(reg) => {
-                    let session_info = AgySessionInfo::new_with_credentials(
+                    let mut session_info = AgySessionInfo::new_with_credentials(
                         conv_id.to_string(),
                         reg.pid,
                         reg.starttime,
@@ -1303,6 +1351,13 @@ async fn register_from_subtree(
                             is_stale: false,
                         },
                     );
+                    if let Some(ref raw) = env_label {
+                        session_info = session_info.with_label(Some(raw));
+                    } else if let Some(lbl) = watch.labels.get(conv_id) {
+                        session_info.label = lbl.clone();
+                    } else if let Some(existing) = store.read().unwrap().get(&reg.session_key) {
+                        session_info.label = existing.label.clone();
+                    }
                     store
                         .write()
                         .unwrap()
@@ -1371,7 +1426,7 @@ pub async fn run_agy_proc_watcher(
     store: AgyStore,
     db: Arc<Mutex<rusqlite::Connection>>,
     my_uid: u32,
-    mut arm_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    mut arm_rx: tokio::sync::mpsc::UnboundedReceiver<(String, Option<String>)>,
     reply_ttl: Duration,
 ) {
     if !locks_supported(&config.proc_locks_path) || config.trusted_agy_exes.is_empty() {
@@ -1386,14 +1441,24 @@ pub async fn run_agy_proc_watcher(
         .collect();
     loop {
         if armed.is_empty() {
-            let Some(conv_id) = arm_rx.recv().await else {
+            let Some((conv_id, label)) = arm_rx.recv().await else {
                 return;
             };
+            if let Some(raw) = label {
+                watch
+                    .labels
+                    .insert(conv_id.clone(), crate::inbox::clean_label(&raw));
+            }
             armed.insert(conv_id);
         } else {
             tokio::time::sleep(AGY_PROC_WATCH_INTERVAL).await;
         }
-        while let Ok(conv_id) = arm_rx.try_recv() {
+        while let Ok((conv_id, label)) = arm_rx.try_recv() {
+            if let Some(raw) = label {
+                watch
+                    .labels
+                    .insert(conv_id.clone(), crate::inbox::clean_label(&raw));
+            }
             armed.insert(conv_id);
         }
         let ids: Vec<String> = armed.drain().collect();
@@ -1459,7 +1524,7 @@ pub async fn run_register_server(
     let stand_down_counts: Arc<tokio::sync::RwLock<HashMap<String, u32>>> =
         Arc::new(tokio::sync::RwLock::new(HashMap::new()));
 
-    let (arm_tx, arm_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (arm_tx, arm_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Option<String>)>();
     let watcher_config = config.clone();
     let watcher_store = store.clone();
     let watcher_db = db.clone();
@@ -1571,6 +1636,15 @@ pub async fn run_register_server(
                             .or_else(|| v.get("conversationId"))
                             .and_then(|c| c.as_str())
                             .unwrap_or("");
+                        let raw_label = v.get("label").and_then(|l| l.as_str()).map(str::to_string);
+                        if let Some(ref raw) = raw_label {
+                            let mut store_lock = store_clone.write().unwrap();
+                            for info in store_lock.values_mut() {
+                                if info.conversation_id == conv_id || info.session_key == conv_id {
+                                    info.label = crate::inbox::clean_label(raw);
+                                }
+                            }
+                        }
                         let has_creds = {
                             let store_lock = store_clone.read().unwrap();
                             store_lock.values().any(|info| {
@@ -1590,7 +1664,7 @@ pub async fn run_register_server(
                             if is_watched {
                                 // Arm the watcher: this turn's commands are where the
                                 // credentials appear.
-                                let _ = arm_tx_clone.send(conv_id.to_string());
+                                let _ = arm_tx_clone.send((conv_id.to_string(), raw_label));
                                 let mut counts = stand_down_counts_clone.write().await;
                                 let count = counts.entry(conv_id.to_string()).or_insert(0);
                                 *count += 1;
@@ -1696,69 +1770,84 @@ pub async fn run_register_server(
                             }
                         }
                     }
-                    Ok(v) => match serde_json::from_value::<AgyRegisterRequest>(v) {
-                        Ok(req) => {
-                            match verify_registration_peer(
-                                &config_clone.proc_root,
-                                &config_clone.proc_locks_path,
-                                &config_clone.presence_dir,
-                                &config_clone.trusted_agy_exes,
-                                my_uid,
-                                &peer,
-                                &req,
-                            ) {
-                                Ok(reg) => {
-                                    let session_info = AgySessionInfo::new_with_credentials(
-                                        req.conversation_id.clone(),
-                                        reg.pid,
-                                        reg.starttime.clone(),
-                                        AgyCredentials {
-                                            ls_address: req.ls_address,
-                                            csrf_token: req.csrf_token,
-                                            is_stale: false,
-                                        },
-                                    );
-                                    {
-                                        let mut store_lock = store_clone.write().unwrap();
-                                        store_lock.insert(reg.session_key.clone(), session_info);
-                                    }
-                                    stand_down_counts_clone
-                                        .write()
-                                        .await
-                                        .remove(&req.conversation_id);
-                                    let resp = serde_json::json!({
-                                        "status": "ok",
-                                        "sessionId": reg.session_key,
-                                    });
-                                    let _ = writer.write_all(format!("{resp}\n").as_bytes()).await;
+                    Ok(v) => {
+                        let raw_label = v.get("label").and_then(|l| l.as_str()).map(str::to_string);
+                        match serde_json::from_value::<AgyRegisterRequest>(v) {
+                            Ok(req) => {
+                                match verify_registration_peer(
+                                    &config_clone.proc_root,
+                                    &config_clone.proc_locks_path,
+                                    &config_clone.presence_dir,
+                                    &config_clone.trusted_agy_exes,
+                                    my_uid,
+                                    &peer,
+                                    &req,
+                                ) {
+                                    Ok(reg) => {
+                                        let mut session_info = AgySessionInfo::new_with_credentials(
+                                            req.conversation_id.clone(),
+                                            reg.pid,
+                                            reg.starttime.clone(),
+                                            AgyCredentials {
+                                                ls_address: req.ls_address,
+                                                csrf_token: req.csrf_token,
+                                                is_stale: false,
+                                            },
+                                        );
+                                        if let Some(ref raw) = raw_label {
+                                            session_info = session_info.with_label(Some(raw));
+                                        } else if let Some(existing) =
+                                            store_clone.read().unwrap().get(&reg.session_key)
+                                        {
+                                            session_info.label = existing.label.clone();
+                                        }
+                                        {
+                                            let mut store_lock = store_clone.write().unwrap();
+                                            store_lock
+                                                .insert(reg.session_key.clone(), session_info);
+                                        }
+                                        stand_down_counts_clone
+                                            .write()
+                                            .await
+                                            .remove(&req.conversation_id);
+                                        let resp = serde_json::json!({
+                                            "status": "ok",
+                                            "sessionId": reg.session_key,
+                                        });
+                                        let _ =
+                                            writer.write_all(format!("{resp}\n").as_bytes()).await;
 
-                                    flush_agy_queue(
-                                        &config_clone,
-                                        &store_clone,
-                                        &db_clone,
-                                        &reg.session_key,
-                                        &req.conversation_id,
-                                        reply_ttl,
-                                    )
-                                    .await;
-                                }
-                                Err(e) => {
-                                    tracing::warn!("registration rejected: {e}");
-                                    let err_resp = serde_json::json!({
-                                        "status": "error",
-                                        "detail": e.to_string()
-                                    });
-                                    let _ =
-                                        writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+                                        flush_agy_queue(
+                                            &config_clone,
+                                            &store_clone,
+                                            &db_clone,
+                                            &reg.session_key,
+                                            &req.conversation_id,
+                                            reply_ttl,
+                                        )
+                                        .await;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("registration rejected: {e}");
+                                        let err_resp = serde_json::json!({
+                                            "status": "error",
+                                            "detail": e.to_string()
+                                        });
+                                        let _ = writer
+                                            .write_all(format!("{err_resp}\n").as_bytes())
+                                            .await;
+                                    }
                                 }
                             }
+                            Err(_) => {
+                                let _ = writer
+                                    .write_all(
+                                        b"{\"status\":\"error\",\"detail\":\"invalid json\"}\n",
+                                    )
+                                    .await;
+                            }
                         }
-                        Err(_) => {
-                            let _ = writer
-                                .write_all(b"{\"status\":\"error\",\"detail\":\"invalid json\"}\n")
-                                .await;
-                        }
-                    },
+                    }
                     Err(_) => {
                         let _ = writer
                             .write_all(b"{\"status\":\"error\",\"detail\":\"invalid json\"}\n")

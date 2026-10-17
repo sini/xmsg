@@ -244,11 +244,9 @@ pub(crate) async fn resolve_target(
     if let Some(res) = claude_by_id.filter(|_| instance) {
         return res.map(|(session, sock)| ResolvedTarget::Claude(session, sock));
     }
-    if let Some(session) = crate::agy::list_agy_sessions(agy_config, agy_store, &query)
-        .into_iter()
-        .find(|s| is_id(&s.session_id))
-    {
-        return Ok(ResolvedTarget::Agy(session));
+    let agy_sessions = crate::agy::list_agy_sessions(agy_config, agy_store, &query);
+    if let Some(session) = agy_sessions.iter().find(|s| is_id(&s.session_id)) {
+        return Ok(ResolvedTarget::Agy(session.clone()));
     }
     let mut pi_sessions = crate::pi::list_pi_sessions(proc_root, pi_store, &query);
     pi_sessions.extend(
@@ -272,6 +270,12 @@ pub(crate) async fn resolve_target(
         .into_iter()
         .map(|(session, sock)| ResolvedTarget::Claude(session, sock))
         .collect();
+    labelled.extend(
+        agy_sessions
+            .into_iter()
+            .filter(|s| s.name.as_deref().is_some_and(is))
+            .map(ResolvedTarget::Agy),
+    );
     labelled.extend(
         pi_sessions
             .into_iter()

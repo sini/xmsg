@@ -268,6 +268,7 @@ fn cell_minor_2_empty_starttime_not_alive() {
             is_stale: false,
         }),
         registered_at: 0,
+        label: None,
     };
 
     let alive = is_agy_session_alive(&proc_root, &info);

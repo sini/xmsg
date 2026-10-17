@@ -226,6 +226,12 @@ in
         hooks = builtins.fromJSON (
           builtins.unsafeDiscardStringContext (file linux ".gemini/config/hooks.json").source.text
         );
+        hooksCustomLabel = builtins.fromJSON (
+          builtins.unsafeDiscardStringContext
+            (file (hmEval "x86_64-linux" {
+              programs.xmsg.harnesses.agy.label = "work";
+            }) ".gemini/config/hooks.json").source.text
+        );
       };
       expected = {
         mcp = {
@@ -237,6 +243,12 @@ in
           {
             type = "command";
             command = "${exe} register agy --hook";
+          }
+        ];
+        hooksCustomLabel.xmsg-register.PreInvocation = [
+          {
+            type = "command";
+            command = "${exe} register agy --hook --label work";
           }
         ];
       };

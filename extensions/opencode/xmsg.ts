@@ -173,7 +173,7 @@ export const XmsgPlugin = async ({ client }: any) => {
     tool: {
       xmsg_list: {
         description:
-          "List the xmsg recipients you can message: by default live recipients (with registered_at); with status='inactive', parked and closed instances seen within `within` seconds (default 86400 = 24h, capped at reply TTL, with last_seen; a peer older than XL1 lists no inactive entries).",
+          "List the xmsg recipients you can message: by default live recipients (with harness and registered_at); with status='inactive', parked and closed instances seen within `within` seconds (default 86400 = 24h, capped at reply TTL, with harness and last_seen; a peer older than XL1 lists no inactive entries).",
         args: {
           name: str("only recipients with this label or service name"),
           node: str("ask only this node"),

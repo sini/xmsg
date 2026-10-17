@@ -437,7 +437,7 @@ pub fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "list",
-            "description": "List the recipients you can message, on this node and every node it can reach. By default (`status` omitted or \"live\"), shows only live recipients, each carrying `registered_at` (epoch seconds when it registered on its node). With `status: \"inactive\"`, shows parked and closed instances seen within `within` seconds (default 86400 = 24h, capped at the reply TTL), each carrying `last_seen` (a peer older than XL1 lists no inactive entries). Each entry gives its address (`id@node` for an instance, `name@node` for a service), kind (`service` or `instance`), label, status (`live`, `parked` or `closed`), user, and `registered_at` or `last_seen`; `nodes` gives each node asked as `ok`, `unreachable` or `timeout` (a node that withholds list is `unreachable`, detail `withholds list`). Filter by `name`, `node` or `kind`; `node` asks only that node.",
+            "description": "List the recipients you can message, on this node and every node it can reach. By default (`status` omitted or \"live\"), shows only live recipients, each carrying `registered_at` (epoch seconds when it registered on its node). With `status: \"inactive\"`, shows parked and closed instances seen within `within` seconds (default 86400 = 24h, capped at the reply TTL), each carrying `last_seen` (a peer older than XL1 lists no inactive entries). Each entry gives its address (`id@node` for an instance, `name@node` for a service), kind (`service` or `instance`), harness (`claude`, `agy`, `pi`, `opencode`, `hermes` or `svc`; omitted when a pre-XL1 peer did not report it), label, status (`live`, `parked` or `closed`), user, and `registered_at` or `last_seen`; `nodes` gives each node asked as `ok`, `unreachable` or `timeout` (a node that withholds list is `unreachable`, detail `withholds list`). Filter by `name`, `node` or `kind`; `node` asks only that node.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -567,7 +567,9 @@ pub fn execute_tool(
                         url.query_pairs_mut().append_pair("within", &w.to_string());
                     }
                     None => {
-                        return tool_err("error: 'within' must be a non-negative integer".to_string());
+                        return tool_err(
+                            "error: 'within' must be a non-negative integer".to_string(),
+                        );
                     }
                 }
             }
@@ -640,10 +642,7 @@ pub fn execute_tool(
             match call_agent_sock_within(&config.agent_sock, &payload, Duration::from_secs(5)) {
                 Ok(resp) => {
                     let reply_val = resp.get("reply").cloned().unwrap_or(Value::Null);
-                    let new_id = match reply_val
-                        .get("pushedMessageId")
-                        .and_then(Value::as_str)
-                    {
+                    let new_id = match reply_val.get("pushedMessageId").and_then(Value::as_str) {
                         Some(id) => id,
                         None => {
                             return tool_err(
@@ -656,7 +655,8 @@ pub fn execute_tool(
                         Some(o) => o,
                         None => {
                             return tool_err(
-                                "reply failed: missing 'pushOutcome' in socket response".to_string(),
+                                "reply failed: missing 'pushOutcome' in socket response"
+                                    .to_string(),
                             );
                         }
                     };

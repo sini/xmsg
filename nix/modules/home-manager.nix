@@ -317,7 +317,14 @@ in
           description = "Tool-name prefixes allowed in `programs.claude-code.settings.permissions.allow` for `{list,send,reply,replies}`. Home Manager packages `programs.claude-code.mcpServers.xmsg` into its `hm` plugin (`mcp__plugin_hm_xmsg__*`), while a server registered outside that plugin uses `mcp__xmsg__*`.";
         };
       };
-      agy.enable = mkEnableOption "the xmsg MCP server, skill and PreInvocation hook in Antigravity (`programs.antigravity-cli`); the module owns `~/.gemini/config/hooks.json`";
+      agy = {
+        enable = mkEnableOption "the xmsg MCP server, skill and PreInvocation hook in Antigravity (`programs.antigravity-cli`); the module owns `~/.gemini/config/hooks.json`";
+        label = mkOption {
+          type = types.str;
+          default = "agy";
+          description = "Label assigned to registered Antigravity sessions (`--label` on `xmsg register agy`).";
+        };
+      };
       pi.enable = mkEnableOption "the xmsg pi extension and skill (`~/.pi/agent`)";
       opencode.enable = mkEnableOption "the xmsg opencode plugin and skill (`$XDG_CONFIG_HOME/opencode`); no MCP entry and no `opencode.json`";
       hermes.enable = mkEnableOption "the xmsg hermes plugin and skill (`services.hermes-agent`); the plugin may inject on the TUI and desktop host (`plugins.entries.xmsg.allow_gateway_injection`)";
@@ -455,7 +462,11 @@ in
           xmsg-register.PreInvocation = [
             {
               type = "command";
-              command = "${exe} register agy --hook";
+              command =
+                "${exe} register agy --hook"
+                + lib.optionalString (
+                  cfg.harnesses.agy.label != "agy"
+                ) " --label ${lib.escapeShellArg cfg.harnesses.agy.label}";
             }
           ];
         }

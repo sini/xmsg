@@ -299,13 +299,13 @@ pub async fn handle_svc_connection_peer<
                 "detail": format!("peer process {peer_pid} is no longer alive"),
             });
             let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
-            return Err(AppError::NotFound(format!(
-                "peer process {peer_pid} is no longer alive"
-            ))
-            .into());
+            return Err(
+                AppError::NotFound(format!("peer process {peer_pid} is no longer alive")).into(),
+            );
         }
 
-        peer.starttime(&proc_root).unwrap_or_else(|_| "0".to_string())
+        peer.starttime(&proc_root)
+            .unwrap_or_else(|_| "0".to_string())
     } else {
         match verify_svc_process_peer(&proc_root, trusted_svc_exes, my_uid, &peer, &name) {
             Ok(st) => st,
@@ -611,9 +611,10 @@ pub async fn run_leaf_inbox_task(
 
     loop {
         match crate::fed::get_federated_inbox(&fed_state, &peer_name, wait_secs).await {
-            Ok(Some(crate::fed::FedInboxItem::List { query })) => {
+            Ok(Some(crate::fed::FedInboxItem::List { query, v })) => {
                 backoff_millis = 100;
-                crate::fed::answer_list_query(&fed_state, &peer_name, &query).await;
+                crate::fed::answer_list_query(&fed_state, &peer_name, &query, v.unwrap_or(1) >= 2)
+                    .await;
             }
             Ok(Some(crate::fed::FedInboxItem::Message(msg))) => {
                 backoff_millis = 100;

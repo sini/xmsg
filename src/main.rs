@@ -75,6 +75,10 @@ pub struct RegisterAgyArgs {
     /// URL of xmsg HTTP server (for checking session credentials in hook mode)
     #[arg(long, env = "XMSG_URL", default_value = "http://127.0.0.1:7787")]
     pub url: String,
+
+    /// Label to assign to the registered Antigravity session
+    #[arg(long, env = "XMSG_AGY_LABEL", default_value = "agy")]
+    pub label: String,
 }
 
 #[derive(Parser, Debug)]
@@ -320,6 +324,7 @@ fn run_register_agy(args: RegisterAgyArgs) -> Result<(), Box<dyn std::error::Err
             "conversation_id": conv_id,
             "ls_address": ls_addr,
             "csrf_token": csrf_token,
+            "label": args.label,
         });
 
         writeln!(stream, "{payload}")?;
@@ -358,6 +363,7 @@ fn check_session_has_credentials(
     sock_path: &std::path::Path,
     conv_id: &str,
     url: &str,
+    label: &str,
 ) -> Result<SessionCheckResult, Box<dyn std::error::Error>> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
@@ -369,6 +375,7 @@ fn check_session_has_credentials(
         let payload = serde_json::json!({
             "action": "check",
             "conversation_id": conv_id,
+            "label": label,
         });
         if writeln!(stream, "{payload}").is_ok() && stream.flush().is_ok() {
             let mut reader = BufReader::new(stream);
@@ -480,7 +487,7 @@ fn run_hook_agy(args: RegisterAgyArgs) -> Result<(), Box<dyn std::error::Error>>
         },
     };
 
-    let check = match check_session_has_credentials(&sock_path, &conv_id, &args.url) {
+    let check = match check_session_has_credentials(&sock_path, &conv_id, &args.url, &args.label) {
         Ok(res) => res,
         Err(e) => {
             eprintln!("xmsg register agy notice: failed to check credentials: {e}");
@@ -498,12 +505,26 @@ fn run_hook_agy(args: RegisterAgyArgs) -> Result<(), Box<dyn std::error::Error>>
             Some(s) => format!(" --sock {}", s.display()),
             None => String::new(),
         };
+        let label_arg = if args.label != "agy" {
+            let escaped = if args
+                .label
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            {
+                args.label.clone()
+            } else {
+                format!("'{}'", args.label.replace('\'', "'\\''"))
+            };
+            format!(" --label {escaped}")
+        } else {
+            String::new()
+        };
         let resp = serde_json::json!({
             "injectSteps": [
                 {
                     "userMessage": format!(
-                        "Please run `{} register agy{}` before anything else. This is xmsg's automatic registration request and needs no reply.",
-                        exe_str, sock_arg
+                        "Please run `{} register agy{}{}` before anything else. This is xmsg's automatic registration request and needs no reply.",
+                        exe_str, sock_arg, label_arg
                     )
                 }
             ]
