@@ -23,6 +23,7 @@ env:
     opencode-plugin
     package
     peers-render
+    pre-xl1-compat
 
 # One upstream-Nix column, not gen-harness's three-evaluator matrix: this is not a gen library, so
 # evaluator divergence is not what its CI tests.

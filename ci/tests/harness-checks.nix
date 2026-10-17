@@ -14,6 +14,9 @@
 #   real `xmsg serve` and a mock model on loopback (extensions/hermes/check.py).
 # - `pi-extension`, `pi-paths`: the pi extension's own node tests (extensions/pi). The
 #   extension's darwin `getconf DARWIN_USER_TEMP_DIR` fallback is not covered by CI.
+# - `pre-xl1-compat` (XF3.1): runs `gate_xf3_list_compat_and_agy_label` with `XMSG_PRE_XL1_BIN`
+#   pointing at the pre-XL1 (`9096199`) binary (`doCheck = false`) and asserts that the live
+#   two-binary subprocess oracle actually ran (no skip line).
 { inputs, ... }:
 {
   perSystem =
@@ -24,8 +27,26 @@
       ...
     }:
     let
-      inherit (inputs) xmsg home-manager hermes-agent;
+      inherit (inputs)
+        xmsg
+        home-manager
+        hermes-agent
+        ;
       xmsgPkg = xmsg.packages.${system}.default;
+      xmsgPreXl1Src = pkgs.fetchFromGitHub {
+        owner = "sini";
+        repo = "xmsg";
+        rev = "909619979ce2669ed2051a08d2f587d60b1f0d21";
+        hash = "sha256-JGE3MFESq632euR3kWgONgv9P9VO9fuZTHgIJ+NP7uk=";
+      };
+      xmsgPreXl1 = pkgs.rustPlatform.buildRustPackage {
+        pname = "xmsg-pre-xl1";
+        version = "0.1.0";
+        src = xmsgPreXl1Src;
+        cargoLock.lockFile = "${xmsgPreXl1Src}/Cargo.lock";
+        doCheck = false;
+        meta.mainProgram = "xmsg";
+      };
 
       hooksJson =
         (home-manager.lib.homeManagerConfiguration {
@@ -216,6 +237,25 @@
               echo "agy-hook: the rendered hook registered $conv, addressed as $conv"
               touch $out
             '';
+
+        pre-xl1-compat = xmsgPkg.overrideAttrs {
+          pname = "xmsg-pre-xl1-compat";
+          dontBuild = true;
+          XMSG_PRE_XL1_BIN = lib.getExe xmsgPreXl1;
+          checkPhase = ''
+            runHook preCheck
+            set -o pipefail
+            cargoWithProfile test --locked --test gate_xf3_list_compat_and_agy_label -- --nocapture 2>&1 | tee test.log
+            if grep -Fq "XMSG_PRE_XL1_BIN unset; skipping live two-binary pre-XL1 (9096199) subprocess check" test.log; then
+              echo "pre-xl1-compat: live two-binary pre-XL1 check was skipped" >&2
+              exit 1
+            fi
+            runHook postCheck
+          '';
+          installPhase = ''
+            echo "${xmsgPreXl1}" > $out
+          '';
+        };
       };
     };
 }
