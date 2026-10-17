@@ -175,6 +175,15 @@ impl ResolvedTarget {
             | ResolvedTarget::Parked { session: s, .. } => s,
         }
     }
+
+    pub(crate) fn recipient_harness(&self) -> &'static str {
+        match self {
+            ResolvedTarget::Claude(_, _) | ResolvedTarget::Parked { .. } => "claude",
+            ResolvedTarget::Agy(_) => "agy",
+            ResolvedTarget::Pi(s) => crate::plugin::harness(&s.harness).unwrap_or("pi"),
+            ResolvedTarget::Svc(_) => "svc",
+        }
+    }
 }
 
 /// Local resolution of a send's target (A11, A7, D-4), one order for every surface. Kind

@@ -70,6 +70,43 @@ fn db_err(e: impl std::fmt::Display) -> AppError {
     AppError::Internal(e.to_string())
 }
 
+type PauseSlot = (
+    tokio::sync::oneshot::Sender<String>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
+static POST_DELIVER_PAUSE: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<String, PauseSlot>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// Arms a one-shot pause on `node_name` right after `deliver` or `push_reply` wakes the
+/// recipient and before `deliver_send` or `deliver_reply` completes or returns (XF2).
+pub fn pause_after_deliver_for_test(
+    node_name: &str,
+) -> (
+    tokio::sync::oneshot::Receiver<String>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    POST_DELIVER_PAUSE
+        .lock()
+        .unwrap()
+        .insert(node_name.to_string(), (entered_tx, release_rx));
+    (entered_rx, release_tx)
+}
+
+async fn run_post_deliver_pause(node_name: &str, id: &str) {
+    let slot = POST_DELIVER_PAUSE
+        .lock()
+        .ok()
+        .and_then(|mut g| g.remove(node_name));
+    if let Some((entered_tx, release_rx)) = slot {
+        let _ = entered_tx.send(id.to_string());
+        let _ = release_rx.await;
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Senders
 // -----------------------------------------------------------------------------
@@ -1118,6 +1155,16 @@ async fn deliver_send(
             } = dest
             else {
                 let target = crate::http::resolve_target_session(state, target_ref).await?;
+                {
+                    let db = state.db.lock().map_err(db_err)?;
+                    storage::record_message_recipient(
+                        &db,
+                        &message_id,
+                        &target.session().session_id,
+                        target.recipient_harness(),
+                    )
+                    .map_err(db_err)?;
+                }
                 let (id, harness, outcome) = deliver(
                     &state.local(),
                     &target,
@@ -1127,6 +1174,7 @@ async fn deliver_send(
                     sender.origin(&state.node_name),
                 )
                 .await?;
+                run_post_deliver_pause(&state.node_name, &message_id).await;
                 break (
                     format!("{id}@{}", state.node_name),
                     harness.to_string(),
@@ -1139,6 +1187,21 @@ async fn deliver_send(
                 .as_ref()
                 .ok_or_else(|| AppError::UnknownPeer(peer_key.clone()))?
                 .clone();
+            let peers = fed_state.current_peers();
+            let leaf = peers.get(&peer_key).is_some_and(|p| p.leaf);
+            if let Ok(db) = state.db.lock() {
+                let _ = storage::record_message_recipient(&db, &message_id, &key, "fed");
+                if !leaf {
+                    let _ = storage::insert_outbound(
+                        &db,
+                        &message_id,
+                        &peer_key,
+                        &format!("{key}@{peer_key}"),
+                        storage::KEY_PENDING,
+                        now,
+                    );
+                }
+            }
             let envelope = crate::fed::FedEnvelope {
                 v: crate::fed::WIRE_VERSION,
                 id: message_id.clone(),
@@ -1157,6 +1220,9 @@ async fn deliver_send(
             {
                 Ok(resp) => resp,
                 Err(e) if node.is_none() => {
+                    if let Ok(db) = state.db.lock() {
+                        let _ = storage::delete_outbound(&db, &message_id);
+                    }
                     // A failed delivery invalidates the location, and a cache-routed send
                     // is resolved again, without the cache (A-12, gate v0 C9).
                     crate::mesh::forget(state, &key);
@@ -1166,14 +1232,17 @@ async fn deliver_send(
                     dest = crate::mesh::resolve(state, &fed_state, target_ref).await?;
                     continue;
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    if let Ok(db) = state.db.lock() {
+                        let _ = storage::delete_outbound(&db, &message_id);
+                    }
+                    return Err(e);
+                }
             };
             let outcome = resp.outcome.unwrap_or_else(|| "delivered".to_string());
             // A live listing that took the message is cached, whether delivered or held for
             // a live plugin or pi session's ack; a leaf's mailbox is not a live listing. Only
             // a fresh resolution is cached, so a location is at most the TTL old (A-12).
-            let peers = fed_state.current_peers();
-            let leaf = peers.get(&peer_key).is_some_and(|p| p.leaf);
             if id && !cached && !leaf {
                 crate::mesh::remember(state, &key, &peer_key);
             }
@@ -1181,6 +1250,22 @@ async fn deliver_send(
                 Some(n) => format!("{}@{n}", resp.session_id),
                 None => format!("{}@{peer_key}", resp.session_id),
             };
+            if let Ok(db) = state.db.lock() {
+                let _ = storage::record_message_recipient(
+                    &db,
+                    &message_id,
+                    &session_id_of(&address),
+                    "fed",
+                );
+                let _ =
+                    storage::insert_outbound(&db, &message_id, &peer_key, &address, &outcome, now);
+                let _ = storage::update_outbound_outcome(&db, &message_id, &outcome);
+                let _ = storage::update_outbound_target(&db, &message_id, &address);
+                if node.is_none() {
+                    // Resolved here: the record holds the recipient's own key (XA5's reply rule).
+                    let _ = storage::mark_outbound_resolved(&db, &message_id);
+                }
+            }
             // A-2: the outbound reply poller is armed by the sender's kind.
             if ret_harness.is_some()
                 && peers
@@ -1193,14 +1278,7 @@ async fn deliver_send(
                     message_id.clone(),
                 );
             }
-            if let Ok(db) = state.db.lock() {
-                let _ =
-                    storage::insert_outbound(&db, &message_id, &peer_key, &address, &outcome, now);
-                if node.is_none() {
-                    // Resolved here: the record holds the recipient's own key (XA5's reply rule).
-                    let _ = storage::mark_outbound_resolved(&db, &message_id);
-                }
-            }
+            run_post_deliver_pause(&state.node_name, &message_id).await;
             break (
                 address,
                 "fed".to_string(),
@@ -1210,14 +1288,17 @@ async fn deliver_send(
         })
     }
     .await;
-    let (address, recipient_harness, outcome, return_host) = match delivered {
+    let (address, _recipient_harness, outcome, return_host) = match delivered {
         Ok(d) => d,
         Err(e) => {
             if let Err(de) = state
                 .db
                 .lock()
                 .map_err(db_err)
-                .and_then(|db| storage::delete_message(&db, &message_id).map_err(db_err))
+                .and_then(|db| {
+                    let _ = storage::delete_outbound(&db, &message_id);
+                    storage::delete_message(&db, &message_id).map_err(db_err)
+                })
             {
                 tracing::warn!(target: "xmsg", message_id = %message_id, "undelivered message's record not removed: {de}");
             }
@@ -1229,9 +1310,7 @@ async fn deliver_send(
             if let Err(e) = storage::complete_message(
                 &db,
                 &message_id,
-                &session_id_of(&address),
                 &outcome,
-                &recipient_harness,
                 return_host.as_deref(),
             ) {
                 tracing::warn!(target: "xmsg", message_id = %message_id, "delivered message's record not completed: {e}");
@@ -1328,6 +1407,12 @@ pub async fn reply(
         let db = state.db.lock().map_err(db_err)?;
         let msg = storage::get_message(&db, message_id)
             .map_err(db_err)?
+            .filter(|m| {
+                !matches!(
+                    m.outcome.as_str(),
+                    "not_found" | "ambiguous" | "gone" | "failed" | "delivery_failed"
+                )
+            })
             .ok_or_else(|| AppError::NotFound(format!("message '{message_id}'")))?;
         let fwd = storage::get_forwarded_message(&db, message_id)
             .map_err(db_err)?
@@ -1518,34 +1603,32 @@ async fn deliver_reply(
             .is_some_and(|p| p.leaf)
     });
 
+    // A reply pushed to or stored for a remote origin is a message sent there, which its
+    // receiver may answer: recorded as sent, with its recipient in `outbound` (A7's reply
+    // rule; XF1 Defect 2). When `dest_session_id` is `None` (an anonymous sender on a
+    // dial-out/leaf node has no inbox and no reply rights), `pushed_id` remains `None` and
+    // no `messages`/`outbound` row is recorded; the anonymous sender reads the reply via
+    // `GET /v1/messages/{id}/replies`.
+    let dest_session_id = if caller_is_sender {
+        Some(msg.session_id.clone())
+    } else {
+        msg.return_session_id.clone()
+    };
+    let replier_label = inbox::sender_label(
+        &state.node_name,
+        &caller.harness,
+        &caller.session_id,
+        caller.name.as_deref(),
+    );
+
     // A reply always travels back to a remote origin node, which decides how it reaches
     // the sender (A-2); a local one is pushed when the sender has an inbox (A10).
+    // The pushed reply's `messages` (and `outbound`) row is recorded before the push
+    // (XF2), so a recipient that replies the instant it is woken finds the row before
+    // `deliver_reply` returns; if the push fails, the row is deleted below.
     let push_outcome = match remote_host.as_deref() {
-        Some(_) if to_leaf => Some("stored"),
         Some(host) => {
-            Some(push_federated_reply(state, caller, host, message_id, &reply_id, text).await)
-        }
-        None if !has_inbox || is_forwarded => None,
-        None => {
-            let replier_label = inbox::sender_label(
-                &state.node_name,
-                &caller.harness,
-                &caller.session_id,
-                caller.name.as_deref(),
-            );
-            let replier_origin = Sender::Session(caller.clone()).origin(&state.node_name);
-            let outcome = push_reply(
-                &state.local(),
-                &ret_harness,
-                &ret_session_id,
-                message_id,
-                &reply_id,
-                &replier_label,
-                replier_origin,
-                text,
-            )
-            .await;
-            if outcome == "pushed" {
+            if let Some(to) = dest_session_id.as_deref() {
                 if let Ok(db) = state.db.lock() {
                     if caller_is_sender {
                         let pushed = MessageRecord {
@@ -1563,7 +1646,7 @@ async fn deliver_reply(
                             } else {
                                 msg.thread_id.clone()
                             },
-                            return_host: None,
+                            return_host: Some(state.node_name.clone()),
                         };
                         let _ = storage::insert_message(&db, &pushed);
                     } else {
@@ -1577,89 +1660,101 @@ async fn deliver_reply(
                             None,
                         );
                     }
+                    let now = storage::now_epoch_secs();
+                    let _ = storage::insert_outbound(
+                        &db,
+                        &reply_id,
+                        host,
+                        &format!("{to}@{host}"),
+                        "delivered",
+                        now,
+                    );
+                    let _ = storage::mark_outbound_resolved(&db, &reply_id);
+                }
+            }
+            let outcome = if to_leaf {
+                "stored"
+            } else {
+                push_federated_reply(state, caller, host, message_id, &reply_id, text).await
+            };
+            run_post_deliver_pause(&state.node_name, &reply_id).await;
+            if matches!(outcome, "pushed" | "stored") {
+                if outcome == "pushed" && dest_session_id.is_some() {
+                    if let Some(ref fed_state) = state.fed_state {
+                        if fed_state
+                            .current_peers()
+                            .get(host)
+                            .is_some_and(|p| p.is_outbound())
+                        {
+                            crate::fed::spawn_outbound_reply_poller(
+                                fed_state.clone(),
+                                host.to_string(),
+                                reply_id.clone(),
+                            );
+                        }
+                    }
+                }
+            } else if let Ok(db) = state.db.lock() {
+                let _ = storage::delete_message(&db, &reply_id);
+                let _ = storage::delete_outbound(&db, &reply_id);
+            }
+            Some(outcome)
+        }
+        None if !has_inbox || is_forwarded => None,
+        None => {
+            if let Ok(db) = state.db.lock() {
+                if caller_is_sender {
+                    let pushed = MessageRecord {
+                        id: reply_id.to_string(),
+                        created_at: storage::now_epoch_secs(),
+                        session_id: msg.session_id.clone(),
+                        from_name: replier_label.clone(),
+                        bytes: text.len(),
+                        outcome: "delivered".to_string(),
+                        recipient_harness: msg.recipient_harness.clone(),
+                        return_harness: Some(caller.harness.clone()),
+                        return_session_id: Some(caller.session_id.clone()),
+                        thread_id: if msg.thread_id.is_empty() {
+                            msg.id.clone()
+                        } else {
+                            msg.thread_id.clone()
+                        },
+                        return_host: None,
+                    };
+                    let _ = storage::insert_message(&db, &pushed);
+                } else {
+                    record_pushed_reply(
+                        &db,
+                        &msg,
+                        &reply_id,
+                        &replier_label,
+                        text,
+                        (&caller.harness, &caller.session_id),
+                        None,
+                    );
+                }
+            }
+            let replier_origin = Sender::Session(caller.clone()).origin(&state.node_name);
+            let outcome = push_reply(
+                &state.local(),
+                &ret_harness,
+                &ret_session_id,
+                message_id,
+                &reply_id,
+                &replier_label,
+                replier_origin,
+                text,
+            )
+            .await;
+            run_post_deliver_pause(&state.node_name, &reply_id).await;
+            if outcome != "pushed" {
+                if let Ok(db) = state.db.lock() {
+                    let _ = storage::delete_message(&db, &reply_id);
                 }
             }
             Some(outcome)
         }
     };
-    // A reply pushed to or stored for a remote origin is a message sent there, which its
-    // receiver may answer: recorded as sent, with its recipient in `outbound` (A7's reply
-    // rule; XF1 Defect 2). When `dest_session_id` is `None` (an anonymous sender on a
-    // dial-out/leaf node has no inbox and no reply rights), `pushed_id` remains `None` and
-    // no `messages`/`outbound` row is recorded; the anonymous sender reads the reply via
-    // `GET /v1/messages/{id}/replies`.
-    let dest_session_id = if caller_is_sender {
-        Some(msg.session_id.clone())
-    } else {
-        msg.return_session_id.clone()
-    };
-    if let (Some(host), Some("pushed" | "stored"), Some(to)) =
-        (remote_host.as_deref(), push_outcome, dest_session_id.as_deref())
-    {
-        if let Ok(db) = state.db.lock() {
-            let label = inbox::sender_label(
-                &state.node_name,
-                &caller.harness,
-                &caller.session_id,
-                caller.name.as_deref(),
-            );
-            if caller_is_sender {
-                let pushed = MessageRecord {
-                    id: reply_id.to_string(),
-                    created_at: storage::now_epoch_secs(),
-                    session_id: msg.session_id.clone(),
-                    from_name: label,
-                    bytes: text.len(),
-                    outcome: "delivered".to_string(),
-                    recipient_harness: msg.recipient_harness.clone(),
-                    return_harness: Some(caller.harness.clone()),
-                    return_session_id: Some(caller.session_id.clone()),
-                    thread_id: if msg.thread_id.is_empty() {
-                        msg.id.clone()
-                    } else {
-                        msg.thread_id.clone()
-                    },
-                    return_host: Some(state.node_name.clone()),
-                };
-                let _ = storage::insert_message(&db, &pushed);
-            } else {
-                record_pushed_reply(
-                    &db,
-                    &msg,
-                    &reply_id,
-                    &label,
-                    text,
-                    (&caller.harness, &caller.session_id),
-                    None,
-                );
-            }
-            let now = storage::now_epoch_secs();
-            let _ = storage::insert_outbound(
-                &db,
-                &reply_id,
-                host,
-                &format!("{to}@{host}"),
-                "delivered",
-                now,
-            );
-            let _ = storage::mark_outbound_resolved(&db, &reply_id);
-        }
-        if push_outcome == Some("pushed") {
-            if let Some(ref fed_state) = state.fed_state {
-                if fed_state
-                    .current_peers()
-                    .get(host)
-                    .is_some_and(|p| p.is_outbound())
-                {
-                    crate::fed::spawn_outbound_reply_poller(
-                        fed_state.clone(),
-                        host.to_string(),
-                        reply_id.clone(),
-                    );
-                }
-            }
-        }
-    }
     // The pushed copy's ID: a local push that landed, or the envelope a remote origin
     // received or will pull (which deduplicates and replies by it).
     let pushed_id = match (remote_host.as_deref(), push_outcome, dest_session_id.as_deref()) {

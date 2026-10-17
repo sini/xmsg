@@ -468,28 +468,37 @@ pub fn upsert_message(conn: &Connection, msg: &MessageRecord) -> Result<()> {
     )
 }
 
-/// A send's record is written, with the outcome `pending`, before it is delivered; once
-/// delivered it is completed with the recipient and the outcome.
-pub fn complete_message(
+/// Records the resolved recipient on a `pending` message row before `deliver` wakes the
+/// recipient (XF2), so a recipient that replies immediately finds its own `session_id`
+/// and `recipient_harness` on the row before `deliver_send` returns.
+pub fn record_message_recipient(
     conn: &Connection,
     id: &str,
     session_id: &str,
-    outcome: &str,
     recipient_harness: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE messages SET session_id = ?2, recipient_harness = ?3 WHERE id = ?1",
+        params![id, session_id, recipient_harness],
+    )?;
+    Ok(())
+}
+
+/// A send's record is written, with the outcome `pending`, before it is delivered, and its
+/// recipient is recorded before `deliver` wakes the recipient; once delivered it is
+/// completed with the outcome and return host.
+pub fn complete_message(
+    conn: &Connection,
+    id: &str,
+    outcome: &str,
     return_host: Option<&str>,
 ) -> Result<()> {
     conn.execute(
         // `queued` never replaces `delivered`: the ack can land before this send's record.
-        "UPDATE messages SET session_id = ?2,
-         outcome = CASE WHEN outcome = 'delivered' AND ?3 = 'queued' THEN outcome ELSE ?3 END,
-         recipient_harness = ?4, return_host = ?5 WHERE id = ?1",
-        params![
-            id,
-            session_id,
-            outcome,
-            recipient_harness,
-            return_host.unwrap_or("")
-        ],
+        "UPDATE messages SET
+         outcome = CASE WHEN outcome = 'delivered' AND ?2 = 'queued' THEN outcome ELSE ?2 END,
+         return_host = ?3 WHERE id = ?1",
+        params![id, outcome, return_host.unwrap_or("")],
     )?;
     Ok(())
 }
@@ -1191,7 +1200,11 @@ pub fn reconcile_pending_keys(conn: &Connection, node_name: &str) -> Result<usiz
     for (principal, key, reply_id) in pending {
         match get_reply_by_pushed_id(&tx, &reply_id)? {
             Some(r) => settle_reply_key(&tx, &principal, &key, KEY_DONE, Some(r.seq))?,
-            None => settle_reply_key(&tx, &principal, &key, KEY_FAILED, None)?,
+            None => {
+                delete_message(&tx, &reply_id)?;
+                delete_outbound(&tx, &reply_id)?;
+                settle_reply_key(&tx, &principal, &key, KEY_FAILED, None)?;
+            }
         }
     }
     tx.commit()?;
@@ -1909,11 +1922,12 @@ mod queue_tests {
         };
         for id in ["L", "F"] {
             upsert_message(&c, &msg(id, "", KEY_PENDING, "")).unwrap();
+            record_message_recipient(&c, id, "s", "opencode").unwrap();
             insert_pi_message(&c, &pi(id)).unwrap();
             assert!(ack_pi_message(&c, "s", id).unwrap());
             assert_eq!(outcome(id), "delivered", "{id}: the ack");
         }
-        complete_message(&c, "L", "s", "queued", "opencode", None).unwrap();
+        complete_message(&c, "L", "queued", None).unwrap();
         update_message_outcome(&c, "F", "queued").unwrap();
         assert_eq!(outcome("L"), "delivered", "the send's own record");
         assert_eq!(outcome("F"), "delivered", "the federated receiver's record");

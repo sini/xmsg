@@ -2747,15 +2747,8 @@ async fn fed_send_message_handler(
     }
 
     let body_len = envelope.body.len();
-    let (target_session_id, recipient_harness) = match &target {
-        crate::http::ResolvedTarget::Claude(s, _)
-        | crate::http::ResolvedTarget::Parked { session: s, .. } => {
-            (s.session_id.clone(), "claude".to_string())
-        }
-        crate::http::ResolvedTarget::Agy(s) => (s.session_id.clone(), "agy".to_string()),
-        crate::http::ResolvedTarget::Pi(s) => (s.session_id.clone(), s.harness.clone()),
-        crate::http::ResolvedTarget::Svc(s) => (s.session_id.clone(), "svc".to_string()),
-    };
+    let target_session_id = target.session().session_id.clone();
+    let recipient_harness = target.recipient_harness().to_string();
 
     // 6. Idempotent delivery (X1): an ID recorded as delivered, queued or being delivered
     // is answered from its record, never delivered again. An ID recorded as a failure was
@@ -3205,21 +3198,10 @@ async fn fed_reply_handler(
         let replier_badge = replier.render(&peer.name);
         let replier_id = replier.key().map(str::to_string);
 
-        let push_res = deliver_federated_reply_locally(
-            &fed_state,
-            &peer.name,
-            &reply.in_reply_to,
-            &reply.id,
-            &replier_badge,
-            replier,
-            &reply.text,
-            &ret_harness,
-            &ret_session_id,
-        )
-        .await?;
         // The pushed reply is a message its receiver may answer, back across federation
-        // to the replier, as a message received from that peer is (A-2).
-        if let (Some(orig), Some(id), "pushed") = (&orig_msg, &replier_id, push_res) {
+        // to the replier, as a message received from that peer is (A-2). Recorded before
+        // the push wakes the receiver (XF2), and removed if the push does not land.
+        if let (Some(orig), Some(id)) = (&orig_msg, &replier_id) {
             if let Ok(db) = fed_state.db.lock() {
                 if is_sender_followup {
                     let pushed = storage::MessageRecord {
@@ -3253,6 +3235,35 @@ async fn fed_reply_handler(
                 }
             }
         }
+
+        let push_res = match deliver_federated_reply_locally(
+            &fed_state,
+            &peer.name,
+            &reply.in_reply_to,
+            &reply.id,
+            &replier_badge,
+            replier,
+            &reply.text,
+            &ret_harness,
+            &ret_session_id,
+        )
+        .await
+        {
+            Ok(res) => {
+                if res != "pushed" {
+                    if let Ok(db) = fed_state.db.lock() {
+                        let _ = storage::delete_message(&db, &reply.id);
+                    }
+                }
+                res
+            }
+            Err(e) => {
+                if let Ok(db) = fed_state.db.lock() {
+                    let _ = storage::delete_message(&db, &reply.id);
+                }
+                return Err(e);
+            }
+        };
 
         return Ok((
             StatusCode::OK,
@@ -4369,6 +4380,17 @@ pub fn spawn_outbound_reply_poller(
                                     .canonical_name(&peer_name)
                                     .unwrap_or(&peer_name)
                                     .to_string();
+                                if let Ok(db) = fed_state.db.lock() {
+                                    crate::surface::record_pushed_reply(
+                                        &db,
+                                        &orig,
+                                        &reply_id,
+                                        &replier_badge,
+                                        &r.text,
+                                        ("fed", &r.replier_session_id),
+                                        Some(&peer_name),
+                                    );
+                                }
                                 match deliver_federated_reply_locally(
                                     &fed_state,
                                     &peer_name,
@@ -4382,23 +4404,18 @@ pub fn spawn_outbound_reply_poller(
                                 )
                                 .await
                                 {
+                                    Ok("pushed") => {}
                                     Ok("sender_gone") => {
+                                        if let Ok(db) = fed_state.db.lock() {
+                                            let _ = storage::delete_message(&db, &reply_id);
+                                        }
                                         should_stop = true;
                                     }
-                                    Ok("pushed") => {
+                                    _ => {
                                         if let Ok(db) = fed_state.db.lock() {
-                                            crate::surface::record_pushed_reply(
-                                                &db,
-                                                &orig,
-                                                &reply_id,
-                                                &replier_badge,
-                                                &r.text,
-                                                ("fed", &r.replier_session_id),
-                                                Some(&peer_name),
-                                            );
+                                            let _ = storage::delete_message(&db, &reply_id);
                                         }
                                     }
-                                    _ => {}
                                 }
                             }
                         }
@@ -4504,8 +4521,8 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                         };
 
                         // The record is written before the message is delivered, as the
-                        // federation receive path writes it: an ack that lands before
-                        // delivery returns finds it, and `queued` never replaces the
+                        // federation receive path writes it: an ack or reply that lands
+                        // before delivery returns finds it, and `queued` never replaces the
                         // `delivered` it records. `pending` is not a reached outcome, so a
                         // message whose delivery was interrupted is delivered again.
                         let pre_record = storage::MessageRecord {
@@ -4515,7 +4532,7 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                             from_name: from_name.clone(),
                             bytes: msg.body.len(),
                             outcome: storage::KEY_PENDING.to_string(),
-                            recipient_harness: String::new(),
+                            recipient_harness: target.recipient_harness().to_string(),
                             return_harness,
                             return_session_id,
                             thread_id: msg.id.clone(),
@@ -4535,21 +4552,25 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                         )
                         .await;
 
-                        let (target_session_id, recipient_harness, outcome_str) = match deliver_res
-                        {
-                            Ok((sess_id, harness, outcome)) => {
-                                (sess_id, harness.to_string(), outcome)
-                            }
+                        let outcome_str = match deliver_res {
+                            Ok((_sess_id, _harness, outcome)) => outcome,
                             Err(e) => {
-                                let outcome = match &e {
+                                if let Ok(db) = fed_state.db.lock() {
+                                    let _ = storage::record_message_recipient(
+                                        &db,
+                                        &msg.id,
+                                        target_ref,
+                                        "system",
+                                    );
+                                }
+                                match &e {
                                     AppError::Gone { .. } => "gone",
                                     AppError::NotFound(_) | AppError::NotFoundDetail(_) => {
                                         "not_found"
                                     }
                                     AppError::Ambiguous(_) => "ambiguous",
                                     _ => "failed",
-                                };
-                                (target_ref.to_string(), "system".to_string(), outcome)
+                                }
                             }
                         };
 
@@ -4557,9 +4578,7 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                             let _ = storage::complete_message(
                                 &db,
                                 &msg.id,
-                                &target_session_id,
                                 outcome_str,
-                                &recipient_harness,
                                 Some(&ret_host),
                             );
                         }
