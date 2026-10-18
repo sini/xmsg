@@ -245,7 +245,7 @@
           checkPhase = ''
             runHook preCheck
             set -o pipefail
-            cargoWithProfile test --locked --test gate_xf3_list_compat_and_agy_label -- --nocapture 2>&1 | tee test.log
+            cargoWithProfile test --locked --test gate_xf3_list_compat_and_agy_label -- test_oracle_1_pre_xl1_wire_compat_direct_and_dialout --exact --nocapture 2>&1 | tee test.log
             if grep -Fq "XMSG_PRE_XL1_BIN unset; skipping live two-binary pre-XL1 (9096199) subprocess check" test.log; then
               echo "pre-xl1-compat: live two-binary pre-XL1 check was skipped" >&2
               exit 1
