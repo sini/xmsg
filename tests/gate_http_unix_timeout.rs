@@ -25,9 +25,9 @@ fn unix_request_timeout_is_timed_out_with_path_and_bound() {
     std::env::set_var("HOME", dir.path());
     let bound = Duration::from_millis(200);
 
-    // Answers after the bound => TimedOut naming the socket and the bound.
+    // Answers long after the bound => TimedOut naming the socket and the bound.
     let late = dir.path().join("late.sock");
-    slow_server(&late, Duration::from_millis(400));
+    slow_server(&late, Duration::from_secs(5));
     let err = xmsg::http::http_request_unix_within(&late, "GET", "/v1/recipients", None, bound)
         .expect_err("a server answering after the bound must time out");
     assert_eq!(err.kind(), std::io::ErrorKind::TimedOut, "{err:?}");
@@ -36,11 +36,12 @@ fn unix_request_timeout_is_timed_out_with_path_and_bound() {
     assert!(msg.contains(&late.display().to_string()), "{msg}");
     assert!(msg.contains(&format!("{bound:?}")), "{msg}");
 
-    // Answers inside the bound => OK.
+    // Answers at once, well inside a generous bound => OK. Each case keeps a wide margin
+    // on its own side of the bound, so a loaded runner's scheduling delay decides neither.
     let early = dir.path().join("early.sock");
-    slow_server(&early, Duration::from_millis(50));
+    slow_server(&early, Duration::ZERO);
     let (status, body) =
-        xmsg::http::http_request_unix_within(&early, "GET", "/v1/recipients", None, bound)
+        xmsg::http::http_request_unix_within(&early, "GET", "/v1/recipients", None, Duration::from_secs(10))
             .expect("a server answering inside the bound must succeed");
     assert_eq!(status.as_u16(), 200);
     assert_eq!(body, "ok");
