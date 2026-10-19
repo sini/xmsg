@@ -99,6 +99,77 @@ pub fn new_agy_store() -> AgyStore {
     Arc::new(RwLock::new(HashMap::new()))
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub enum AgyEscrowState {
+    Empty,
+    Active {
+        ls_address: String,
+        csrf_token: String,
+        label: Option<String>,
+        registered_at: i64,
+    },
+    Stale,
+}
+
+impl std::fmt::Debug for AgyEscrowState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("AgyEscrowState::Empty"),
+            Self::Active {
+                ls_address,
+                label,
+                registered_at,
+                ..
+            } => f
+                .debug_struct("AgyEscrowState::Active")
+                .field("ls_address", ls_address)
+                .field("csrf_token", &"<redacted>")
+                .field("label", label)
+                .field("registered_at", registered_at)
+                .finish(),
+            Self::Stale => f.write_str("AgyEscrowState::Stale"),
+        }
+    }
+}
+
+static AGY_ESCROW_NOTIFY: std::sync::OnceLock<tokio::sync::watch::Sender<u64>> =
+    std::sync::OnceLock::new();
+
+pub fn notify_agy_escrow() {
+    let tx = AGY_ESCROW_NOTIFY.get_or_init(|| tokio::sync::watch::channel(0).0);
+    tx.send_modify(|v| *v = v.wrapping_add(1));
+}
+
+pub fn subscribe_agy_escrow() -> tokio::sync::watch::Receiver<u64> {
+    let tx = AGY_ESCROW_NOTIFY.get_or_init(|| tokio::sync::watch::channel(0).0);
+    tx.subscribe()
+}
+
+pub fn current_agy_escrow_state(
+    store: &AgyStore,
+    session_key: &str,
+    pid: u32,
+    starttime: &str,
+) -> AgyEscrowState {
+    let store_lock = store.read().unwrap();
+    let Some(info) = store_lock.get(session_key) else {
+        return AgyEscrowState::Empty;
+    };
+    if info.pid != pid || info.starttime != starttime {
+        return AgyEscrowState::Empty;
+    }
+    match &info.credentials {
+        Some(c) if !c.is_stale => AgyEscrowState::Active {
+            ls_address: c.ls_address.clone(),
+            csrf_token: c.csrf_token.clone(),
+            label: info.label.clone(),
+            registered_at: info.registered_at,
+        },
+        Some(_) => AgyEscrowState::Stale,
+        None => AgyEscrowState::Empty,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgyRegistration {
     pub pid: u32,
@@ -1020,6 +1091,7 @@ pub async fn deliver_agy_envelope(
                 }
             }
         }
+        notify_agy_escrow();
         let excerpt: String = combined.chars().take(200).collect();
         tracing::warn!("agy delivery auth failure: {excerpt}");
         return Err(AppError::CredentialsStale(
@@ -1362,6 +1434,7 @@ async fn register_from_subtree(
                         .write()
                         .unwrap()
                         .insert(reg.session_key.clone(), session_info);
+                    notify_agy_escrow();
                     flush_agy_queue(config, store, db, &reg.session_key, conv_id, reply_ttl).await;
                     return Ok(true);
                 }
@@ -1638,12 +1711,17 @@ pub async fn run_register_server(
                             .unwrap_or("");
                         let raw_label = v.get("label").and_then(|l| l.as_str()).map(str::to_string);
                         if let Some(ref raw) = raw_label {
-                            let mut store_lock = store_clone.write().unwrap();
-                            for info in store_lock.values_mut() {
-                                if info.conversation_id == conv_id || info.session_key == conv_id {
-                                    info.label = crate::inbox::clean_label(raw);
+                            {
+                                let mut store_lock = store_clone.write().unwrap();
+                                for info in store_lock.values_mut() {
+                                    if info.conversation_id == conv_id
+                                        || info.session_key == conv_id
+                                    {
+                                        info.label = crate::inbox::clean_label(raw);
+                                    }
                                 }
                             }
+                            notify_agy_escrow();
                         }
                         let has_creds = {
                             let store_lock = store_clone.read().unwrap();
@@ -1808,6 +1886,7 @@ pub async fn run_register_server(
                                             store_lock
                                                 .insert(reg.session_key.clone(), session_info);
                                         }
+                                        notify_agy_escrow();
                                         stand_down_counts_clone
                                             .write()
                                             .await

@@ -1,9 +1,9 @@
 use serde_json::{json, Value};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -83,13 +83,25 @@ pub fn spawn_registration_worker(
     })
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct CachedAgyEscrow {
+    ls_address: String,
+    csrf_token: String,
+    label: Option<String>,
+    registered_at: i64,
+}
+
 enum RegResult {
-    Ok(UnixStream),
+    Ok(BufReader<UnixStream>),
     Unattested,
     Io,
 }
 
-fn connect_and_register(config: &McpConfig, stop: &AtomicBool) -> RegResult {
+fn connect_and_register(
+    config: &McpConfig,
+    stop: &AtomicBool,
+    cached: &Mutex<Option<CachedAgyEscrow>>,
+) -> RegResult {
     if stop.load(Ordering::Relaxed) {
         return RegResult::Io;
     }
@@ -117,17 +129,32 @@ fn connect_and_register(config: &McpConfig, stop: &AtomicBool) -> RegResult {
         return RegResult::Io;
     }
 
-    let payload = json!({
-        "action": "mcp_start",
-        "schema_version": crate::surface::MCP_SCHEMA_VERSION,
-    });
+    let snapshot = cached.lock().unwrap().clone();
+    let payload = if let Some(escrow) = snapshot {
+        let mut p = json!({
+            "action": "mcp_start",
+            "schema_version": crate::surface::MCP_SCHEMA_VERSION,
+            "ls_address": escrow.ls_address,
+            "csrf_token": escrow.csrf_token,
+            "registered_at": escrow.registered_at,
+        });
+        if let Some(lbl) = escrow.label {
+            p["label"] = Value::String(lbl);
+        }
+        p
+    } else {
+        json!({
+            "action": "mcp_start",
+            "schema_version": crate::surface::MCP_SCHEMA_VERSION,
+        })
+    };
     let line = format!("{payload}\n");
     let mut writer = &stream;
     if writer.write_all(line.as_bytes()).is_err() || writer.flush().is_err() {
         return RegResult::Io;
     }
 
-    let mut reader = BufReader::new(&stream);
+    let mut reader = BufReader::new(stream);
     let mut resp_line = String::new();
     if reader.read_line(&mut resp_line).is_err() {
         return RegResult::Io;
@@ -139,10 +166,11 @@ fn connect_and_register(config: &McpConfig, stop: &AtomicBool) -> RegResult {
     };
 
     if resp_val.get("status").and_then(Value::as_str) == Some("ok") {
-        RegResult::Ok(stream)
+        RegResult::Ok(reader)
     } else {
         let err = resp_val.get("error").and_then(Value::as_str).unwrap_or("");
         if err == "unattested" {
+            *cached.lock().unwrap() = None;
             RegResult::Unattested
         } else {
             RegResult::Io
@@ -150,16 +178,59 @@ fn connect_and_register(config: &McpConfig, stop: &AtomicBool) -> RegResult {
     }
 }
 
-fn hold_connection(stream: &mut UnixStream, stop: &AtomicBool) {
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
-    let mut buf = [0u8; 64];
+fn handle_escrow_event(trimmed: &str, cached: &Mutex<Option<CachedAgyEscrow>>) {
+    let Ok(val) = serde_json::from_str::<Value>(trimmed) else {
+        return;
+    };
+    match val.get("event").and_then(Value::as_str) {
+        Some("agy_escrow") => {
+            if let (Some(ls_address), Some(csrf_token)) = (
+                val.get("ls_address").and_then(Value::as_str),
+                val.get("csrf_token").and_then(Value::as_str),
+            ) {
+                if !ls_address.is_empty() && !csrf_token.is_empty() {
+                    let label = val.get("label").and_then(Value::as_str).map(str::to_string);
+                    let registered_at = val
+                        .get("registered_at")
+                        .and_then(Value::as_i64)
+                        .unwrap_or_else(crate::storage::now_epoch_secs);
+                    *cached.lock().unwrap() = Some(CachedAgyEscrow {
+                        ls_address: ls_address.to_string(),
+                        csrf_token: csrf_token.to_string(),
+                        label,
+                        registered_at,
+                    });
+                }
+            }
+        }
+        Some("agy_escrow_clear") => {
+            *cached.lock().unwrap() = None;
+        }
+        _ => {}
+    }
+}
+
+fn hold_connection(
+    reader: &mut BufReader<UnixStream>,
+    stop: &AtomicBool,
+    cached: &Mutex<Option<CachedAgyEscrow>>,
+) {
+    let _ = reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_millis(100)));
+    let mut line = String::new();
     while !stop.load(Ordering::Relaxed) {
-        match stream.read(&mut buf) {
+        match reader.read_line(&mut line) {
             Ok(0) => {
                 tracing::debug!("xmsg agent socket EOF; will reconnect");
                 break;
             }
-            Ok(_) => {}
+            Ok(_) => {
+                if line.ends_with('\n') {
+                    handle_escrow_event(line.trim(), cached);
+                    line.clear();
+                }
+            }
             Err(ref e)
                 if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
             {
@@ -188,13 +259,14 @@ fn run_registration_loop(config: &McpConfig, stop: Arc<AtomicBool>) {
     let max_backoff = Duration::from_secs(1);
     let mut backoff = min_backoff;
     let mut consecutive_unattested = 0;
+    let cached: Mutex<Option<CachedAgyEscrow>> = Mutex::new(None);
 
     while !stop.load(Ordering::Relaxed) {
-        match connect_and_register(config, &stop) {
-            RegResult::Ok(mut stream) => {
+        match connect_and_register(config, &stop, &cached) {
+            RegResult::Ok(mut reader) => {
                 backoff = min_backoff;
                 consecutive_unattested = 0;
-                hold_connection(&mut stream, &stop);
+                hold_connection(&mut reader, &stop, &cached);
             }
             RegResult::Unattested => {
                 consecutive_unattested += 1;

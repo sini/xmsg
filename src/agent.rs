@@ -23,6 +23,14 @@ pub enum AgentFrame {
     McpStart {
         #[serde(default)]
         schema_version: Option<u32>,
+        #[serde(default)]
+        ls_address: Option<String>,
+        #[serde(default)]
+        csrf_token: Option<String>,
+        #[serde(default)]
+        label: Option<String>,
+        #[serde(default)]
+        registered_at: Option<i64>,
     },
     List {
         #[serde(default)]
@@ -477,14 +485,85 @@ pub async fn run_agent_server_with_listener(
             let mut buf_reader = BufReader::new(reader);
             let mut byte_buf = Vec::new();
             let max_frame = state_clone.max_body * 6 + 4096;
+            let mut attested_agy_peer: Option<(String, u32, String)> = None;
+            let mut last_pushed_escrow = crate::agy::AgyEscrowState::Empty;
+            let mut escrow_rx = crate::agy::subscribe_agy_escrow();
 
             loop {
-                byte_buf.clear();
-                let n = (&mut buf_reader)
-                    .take((max_frame + 1) as u64)
-                    .read_until(b'\n', &mut byte_buf)
-                    .await
-                    .unwrap_or(0);
+                if let Some((ref session_key, reg_pid, ref reg_starttime)) = attested_agy_peer {
+                    if !peer.is_alive(&state_clone.agy_config.proc_root, &initial_starttime)
+                        || crate::process::starttime(&state_clone.agy_config.proc_root, reg_pid)
+                            .ok()
+                            .as_deref()
+                            != Some(reg_starttime.as_str())
+                    {
+                        break;
+                    }
+                    let desired = crate::agy::current_agy_escrow_state(
+                        &state_clone.agy_store,
+                        session_key,
+                        reg_pid,
+                        reg_starttime,
+                    );
+                    if desired != last_pushed_escrow {
+                        let ev = match &desired {
+                            crate::agy::AgyEscrowState::Active {
+                                ls_address,
+                                csrf_token,
+                                label,
+                                registered_at,
+                            } => Some(serde_json::json!({
+                                "event": "agy_escrow",
+                                "ls_address": ls_address,
+                                "csrf_token": csrf_token,
+                                "label": label,
+                                "registered_at": registered_at,
+                            })),
+                            crate::agy::AgyEscrowState::Stale => Some(serde_json::json!({
+                                "event": "agy_escrow_clear",
+                            })),
+                            crate::agy::AgyEscrowState::Empty => {
+                                if last_pushed_escrow != crate::agy::AgyEscrowState::Empty {
+                                    Some(serde_json::json!({
+                                        "event": "agy_escrow_clear",
+                                    }))
+                                } else {
+                                    None
+                                }
+                            }
+                        };
+                        if let Some(ev) = ev {
+                            if writer
+                                .write_all(format!("{ev}\n").as_bytes())
+                                .await
+                                .is_err()
+                                || writer.flush().await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                        last_pushed_escrow = desired;
+                    }
+                }
+
+                let n = if attested_agy_peer.is_some() {
+                    let mut limited = (&mut buf_reader).take((max_frame + 1) as u64);
+                    tokio::select! {
+                        res = limited.read_until(b'\n', &mut byte_buf) => res.unwrap_or(0),
+                        _ = escrow_rx.changed() => {
+                            continue;
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                            continue;
+                        }
+                    }
+                } else {
+                    (&mut buf_reader)
+                        .take((max_frame + 1) as u64)
+                        .read_until(b'\n', &mut byte_buf)
+                        .await
+                        .unwrap_or(0)
+                };
                 if n == 0 {
                     break;
                 }
@@ -508,7 +587,7 @@ pub async fn run_agent_server_with_listener(
                 }
 
                 let line = match std::str::from_utf8(&byte_buf) {
-                    Ok(s) => s,
+                    Ok(s) => s.to_string(),
                     Err(_) => {
                         let err_resp = serde_json::json!({
                             "status": "error",
@@ -519,6 +598,7 @@ pub async fn run_agent_server_with_listener(
                         break;
                     }
                 };
+                byte_buf.clear();
 
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
@@ -549,109 +629,234 @@ pub async fn run_agent_server_with_listener(
                 };
 
                 let resp: Result<serde_json::Value, AppError> = match frame {
-                    AgentFrame::McpStart { .. } => {
-                    match crate::agy::attest_mcp_caller_peer(
-                        &state_clone.agy_config.proc_root,
-                        &state_clone.agy_config.proc_locks_path,
-                        &state_clone.agy_config.presence_dir,
-                        &state_clone.agy_config.trusted_agy_exes,
-                        my_uid,
-                        &peer,
-                    ) {
-                        Ok((reg, conv_id)) => {
-                            let session_key = conv_id.clone();
-                            {
-                                let mut store_lock = state_clone.agy_store.write().unwrap();
-                                store_lock.entry(session_key.clone())
-                                    .and_modify(|current| {
-                                        if current.pid != reg.pid || current.starttime != reg.starttime {
-                                            let prev_label = current.label.clone();
+                    AgentFrame::McpStart {
+                        ls_address,
+                        csrf_token,
+                        label,
+                        registered_at,
+                        ..
+                    } => {
+                        let has_escrow_fields = ls_address.is_some()
+                            || csrf_token.is_some()
+                            || label.is_some()
+                            || registered_at.is_some();
+                        match crate::agy::attest_mcp_caller_peer(
+                            &state_clone.agy_config.proc_root,
+                            &state_clone.agy_config.proc_locks_path,
+                            &state_clone.agy_config.presence_dir,
+                            &state_clone.agy_config.trusted_agy_exes,
+                            my_uid,
+                            &peer,
+                        ) {
+                            Ok((reg, conv_id)) => {
+                                let escrow_creds = match (ls_address, csrf_token) {
+                                    (Some(ls), Some(csrf)) => {
+                                        if ls.trim().is_empty()
+                                            || csrf.trim().is_empty()
+                                            || ls.contains('\0')
+                                            || csrf.contains('\0')
+                                        {
+                                            let err = AppError::BadRequest(
+                                                "ls_address and csrf_token in mcp_start must be non-empty"
+                                                    .to_string(),
+                                            )
+                                            .frame();
+                                            let _ = writer
+                                                .write_all(format!("{err}\n").as_bytes())
+                                                .await;
+                                            continue;
+                                        }
+                                        Some(crate::agy::AgyCredentials {
+                                            ls_address: ls,
+                                            csrf_token: csrf,
+                                            is_stale: false,
+                                        })
+                                    }
+                                    (None, None) => None,
+                                    _ => {
+                                        let err = AppError::BadRequest(
+                                            "mcp_start credential escrow requires both ls_address and csrf_token"
+                                                .to_string(),
+                                        )
+                                        .frame();
+                                        let _ = writer
+                                            .write_all(format!("{err}\n").as_bytes())
+                                            .await;
+                                        continue;
+                                    }
+                                };
+                                let cleaned_escrow_label = label
+                                    .as_deref()
+                                    .and_then(crate::inbox::clean_label);
+                                let session_key = conv_id.clone();
+                                let mut restored_creds = false;
+                                {
+                                    let mut store_lock = state_clone.agy_store.write().unwrap();
+                                    store_lock
+                                        .entry(session_key.clone())
+                                        .and_modify(|current| {
+                                            if current.pid != reg.pid
+                                                || current.starttime != reg.starttime
+                                            {
+                                                let prev_label = current.label.clone();
+                                                restored_creds = escrow_creds.is_some();
+                                                let mut info = crate::agy::AgySessionInfo::new(
+                                                    conv_id.clone(),
+                                                    reg.pid,
+                                                    reg.starttime.clone(),
+                                                    escrow_creds.clone(),
+                                                );
+                                                if let Some(ref lbl) = cleaned_escrow_label {
+                                                    info.label = Some(lbl.clone());
+                                                } else if prev_label.is_some() {
+                                                    info.label = prev_label;
+                                                }
+                                                if let Some(reg_at) =
+                                                    registered_at.filter(|&t| t > 0)
+                                                {
+                                                    info.registered_at = reg_at;
+                                                }
+                                                *current = info;
+                                            } else {
+                                                if current.credentials.is_none()
+                                                    && escrow_creds.is_some()
+                                                {
+                                                    current.credentials = escrow_creds.clone();
+                                                    restored_creds = true;
+                                                }
+                                                if let Some(ref lbl) = cleaned_escrow_label {
+                                                    if lbl != "agy"
+                                                        || current.label.is_none()
+                                                        || current.label.as_deref() == Some("agy")
+                                                    {
+                                                        current.label = Some(lbl.clone());
+                                                    }
+                                                }
+                                                if let Some(reg_at) =
+                                                    registered_at.filter(|&t| t > 0)
+                                                {
+                                                    if current.registered_at == 0
+                                                        || reg_at < current.registered_at
+                                                    {
+                                                        current.registered_at = reg_at;
+                                                    }
+                                                }
+                                            }
+                                        })
+                                        .or_insert_with(|| {
+                                            restored_creds = escrow_creds.is_some();
                                             let mut info = crate::agy::AgySessionInfo::new(
                                                 conv_id.clone(),
                                                 reg.pid,
                                                 reg.starttime.clone(),
-                                                None,
+                                                escrow_creds,
                                             );
-                                            if prev_label.is_some() {
-                                                info.label = prev_label;
+                                            if let Some(lbl) = cleaned_escrow_label {
+                                                info.label = Some(lbl);
                                             }
-                                            *current = info;
-                                        }
-                                    })
-                                    .or_insert_with(|| {
-                                        crate::agy::AgySessionInfo::new(
-                                            conv_id,
-                                            reg.pid,
-                                            reg.starttime,
-                                        None,
-                                    )
-                                });
-                            }
-                            if let Ok(db) = state_clone.db.lock() {
-                                let _ = crate::storage::mark_live(
-                                    &db,
-                                    &session_key,
-                                    "agy",
-                                    crate::storage::now_epoch_secs(),
-                                );
-                            }
-                            let _ = crate::claim::sync_claims(
-                                &state_clone.db,
-                                &state_clone.agy_config.proc_root,
-                                &state_clone.sessions_dirs,
-                                &state_clone.node_name,
-                            ).await;
-                            let resp = serde_json::json!({
-                                "status": "ok",
-                                "sessionId": session_key,
-                                "address": session_key,
-                            });
-                            let _ = writer.write_all(format!("{resp}\n").as_bytes()).await;
-                        }
-                        Err(e) => {
-                            // Check Claude Code sessions via claim table
-                            let claude_res = crate::claim::sync_claims(
-                                &state_clone.db,
-                                &state_clone.agy_config.proc_root,
-                                &state_clone.sessions_dirs,
-                                &state_clone.node_name,
-                            )
-                            .await
-                            .ok()
-                            .and_then(|active_pairs| {
-                                let proc_root = &state_clone.agy_config.proc_root;
-                                process::Ancestry::from_peer(proc_root, &peer)
-                                    .take(32)
-                                    .find_map(|(pid, st)| {
-                                        active_pairs.iter().find_map(|(c, _)| {
-                                            (c.pid == pid
-                                                && process::claude_start_token_matches(
-                                                    proc_root,
-                                                    &st,
-                                                    &c.proc_start,
-                                                ))
-                                            .then(|| c.address())
-                                        })
-                                    })
-                            });
-
-                            if let Some(address) = claude_res {
+                                            if let Some(reg_at) = registered_at.filter(|&t| t > 0) {
+                                                info.registered_at = reg_at;
+                                            }
+                                            info
+                                        });
+                                }
+                                crate::agy::notify_agy_escrow();
+                                if let Ok(db) = state_clone.db.lock() {
+                                    let _ = crate::storage::mark_live(
+                                        &db,
+                                        &session_key,
+                                        "agy",
+                                        crate::storage::now_epoch_secs(),
+                                    );
+                                }
+                                let _ = crate::claim::sync_claims(
+                                    &state_clone.db,
+                                    &state_clone.agy_config.proc_root,
+                                    &state_clone.sessions_dirs,
+                                    &state_clone.node_name,
+                                )
+                                .await;
+                                attested_agy_peer = Some((
+                                    session_key.clone(),
+                                    reg.pid,
+                                    reg.starttime.clone(),
+                                ));
                                 let resp = serde_json::json!({
                                     "status": "ok",
-                                    "sessionId": address,
-                                    "address": address,
+                                    "sessionId": session_key,
+                                    "address": session_key,
                                 });
                                 let _ = writer.write_all(format!("{resp}\n").as_bytes()).await;
-                            } else {
-                                let err_resp = serde_json::json!({
-                                    "status": "error",
-                                    "error": "unattested",
-                                    "detail": format!("caller is not an attested agent session: {e}"),
+                                let _ = writer.flush().await;
+                                if restored_creds {
+                                    crate::agy::flush_agy_queue(
+                                        &state_clone.agy_config,
+                                        &state_clone.agy_store,
+                                        &state_clone.db,
+                                        &session_key,
+                                        &conv_id,
+                                        state_clone.reply_ttl,
+                                    )
+                                    .await;
+                                }
+                            }
+                            Err(e) => {
+                                if has_escrow_fields {
+                                    let err_resp = serde_json::json!({
+                                        "status": "error",
+                                        "error": "unattested",
+                                        "detail": format!("agy credential escrow rejected for non-agy caller: {e}"),
+                                    });
+                                    let _ = writer
+                                        .write_all(format!("{err_resp}\n").as_bytes())
+                                        .await;
+                                    continue;
+                                }
+                                // Check Claude Code sessions via claim table
+                                let claude_res = crate::claim::sync_claims(
+                                    &state_clone.db,
+                                    &state_clone.agy_config.proc_root,
+                                    &state_clone.sessions_dirs,
+                                    &state_clone.node_name,
+                                )
+                                .await
+                                .ok()
+                                .and_then(|active_pairs| {
+                                    let proc_root = &state_clone.agy_config.proc_root;
+                                    process::Ancestry::from_peer(proc_root, &peer)
+                                        .take(32)
+                                        .find_map(|(pid, st)| {
+                                            active_pairs.iter().find_map(|(c, _)| {
+                                                (c.pid == pid
+                                                    && process::claude_start_token_matches(
+                                                        proc_root,
+                                                        &st,
+                                                        &c.proc_start,
+                                                    ))
+                                                .then(|| c.address())
+                                            })
+                                        })
                                 });
-                                let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+
+                                if let Some(address) = claude_res {
+                                    let resp = serde_json::json!({
+                                        "status": "ok",
+                                        "sessionId": address,
+                                        "address": address,
+                                    });
+                                    let _ = writer.write_all(format!("{resp}\n").as_bytes()).await;
+                                } else {
+                                    let err_resp = serde_json::json!({
+                                        "status": "error",
+                                        "error": "unattested",
+                                        "detail": format!("caller is not an attested agent session: {e}"),
+                                    });
+                                    let _ = writer
+                                        .write_all(format!("{err_resp}\n").as_bytes())
+                                        .await;
+                                }
                             }
                         }
-                    }
                         continue;
                     }
                     AgentFrame::List {
