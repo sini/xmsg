@@ -79,7 +79,17 @@
       agyTurn = pkgs.writeShellScript "agy-turn" ''
         hook=$1 conv=$2 done=$3
         out=$(printf '{"conversationId":"%s"}' "$conv" | sh -c "$hook")
-        echo "agy-hook: hook printed: $out"
+        echo "agy-hook: hook printed (invocation 1, stand-down): $out"
+        printf '%s' "$out" | ${pkgs.jq}/bin/jq -e '. == {}' > /dev/null \
+          || { echo "agy-hook: expected {} on invocation 1 stand-down, got: $out" >&2; exit 1; }
+        out2=$(printf '{"conversationId":"%s"}' "$conv" | sh -c "$hook")
+        echo "agy-hook: hook printed (invocation 2, inject): $out2"
+        printf '%s' "$out2" | ${pkgs.jq}/bin/jq -e '
+          (.injectSteps | type == "array" and length == 1)
+          and (.injectSteps[0].ephemeralMessage | type == "string" and contains("register agy"))
+          and (.injectSteps[0] | has("userMessage") | not)
+        ' > /dev/null \
+          || { echo "agy-hook: expected injectSteps[0].ephemeralMessage (not userMessage), got: $out2" >&2; exit 1; }
         export ANTIGRAVITY_CONVERSATION_ID=$conv ANTIGRAVITY_LS_ADDRESS=127.0.0.1:1 ANTIGRAVITY_CSRF_TOKEN=fixture-token
         sleep 1
         touch "$done"

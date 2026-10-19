@@ -52,11 +52,11 @@ fn setup_mock_process(
 
 // ---------------------------------------------------------------------------
 // Oracle 1:
-// --hook: credential-less => exactly one userMessage naming absolute exe;
-//         no ephemeralMessage;
+// --hook: credential-less => exactly one ephemeralMessage naming absolute exe;
+//         no userMessage;
 //         credentialed    => {};
 //         malformed stdin => {} with exit 0.
-// Mutant: back to ephemeralMessage => RED; always inject => RED.
+// Mutant: userMessage => RED; always inject => RED.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
@@ -139,7 +139,7 @@ async fn oracle_1_hook_credential_less_and_credentialed_and_malformed() {
     }
     assert!(reg_sock.exists(), "register.sock must be created");
 
-    // Case 1A: credential-less session => exactly one userMessage naming absolute exe
+    // Case 1A: credential-less session => exactly one ephemeralMessage naming absolute exe
     {
         use std::io::Write;
         let mut child = Command::new(bin)
@@ -178,12 +178,12 @@ async fn oracle_1_hook_credential_less_and_credentialed_and_malformed() {
             1,
             "must inject exactly one step for credential-less session"
         );
-        let msg = steps[0]["userMessage"]
+        let msg = steps[0]["ephemeralMessage"]
             .as_str()
-            .expect("userMessage string must exist");
+            .expect("ephemeralMessage string must exist");
         assert!(
-            steps[0].get("ephemeralMessage").is_none(),
-            "must not contain ephemeralMessage"
+            steps[0].get("userMessage").is_none(),
+            "must not contain userMessage"
         );
         assert!(
             msg.contains("register agy"),

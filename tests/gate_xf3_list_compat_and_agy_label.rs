@@ -1399,11 +1399,15 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
     }
     let hook_out = hook_child.wait_with_output().unwrap();
     let hook_json: Value = serde_json::from_slice(&hook_out.stdout).unwrap();
-    let msg = hook_json["injectSteps"][0]["userMessage"]
+    assert!(
+        hook_json["injectSteps"][0].get("userMessage").is_none(),
+        "hook injectSteps must not contain userMessage, got: {hook_json}"
+    );
+    let msg = hook_json["injectSteps"][0]["ephemeralMessage"]
         .as_str()
         .unwrap_or("");
     assert!(
         msg.contains("--label work"),
-        "hook injectSteps userMessage must include '--label work' when label != 'agy', got: {msg}"
+        "hook injectSteps ephemeralMessage must include '--label work' when label != 'agy', got: {msg}"
     );
 }

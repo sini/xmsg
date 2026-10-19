@@ -299,7 +299,7 @@ Strict scope rules are enforced in code:
 - **PID Recycling Guard:** A process's start time is read before its ancestry is checked and again after its `environ` is read, and the attested `agy`'s start time is re-checked, so a recycled PID is never read past its ancestry check nor trusted.
 - **Unreadable `environ`:** where `/proc/<pid>/environ` cannot be read (a sandbox, EACCES), `xmsg` logs it once per conversation at debug level, without values, and leaves the conversation to the hook request.
 
-On Darwin and in sandboxes without accessible `/proc`, `xmsg` falls back to the PreInvocation hook request (Arm B′). While Arm A is actively watching an unregistered conversation on Linux, the PreInvocation hook stands down on the first turn (emitting `{}`), allowing Arm A to register silently when the model's first command executes. If the conversation remains unregistered on later turns (e.g. no command was run or `/proc` was unreadable), or if Arm A is not watching (Darwin/sandboxes), the hook injects a `userMessage` asking the model to run `xmsg register agy`.
+On Darwin and in sandboxes without accessible `/proc`, `xmsg` falls back to the PreInvocation hook request (Arm B′). While Arm A is actively watching an unregistered conversation on Linux, the PreInvocation hook stands down on the first turn (emitting `{}`), allowing Arm A to register silently when the model's first command executes. If the conversation remains unregistered on later turns (e.g. no command was run or `/proc` was unreadable), or if Arm A is not watching (Darwin/sandboxes), the hook injects an `ephemeralMessage` asking the model to run `xmsg register agy`.
 
 `xmsg` implements a two-stage automatic registration lifecycle:
 
@@ -327,7 +327,7 @@ On Darwin and in sandboxes without accessible `/proc`, `xmsg` falls back to the 
    - If that session already has push credentials registered, `xmsg` prints `{}`.
    - If push credentials are not yet registered:
      - When Arm A is watching and this is the first turn since becoming unregistered, `xmsg` prints `{}` (stand-down).
-     - If still unregistered on subsequent turns, or when Arm A is not watching (Darwin/sandboxes), `xmsg` emits a `userMessage` instructing the model to run `xmsg register agy` before anything else.
+     - If still unregistered on subsequent turns, or when Arm A is not watching (Darwin/sandboxes), `xmsg` emits an `ephemeralMessage` instructing the model to run `xmsg register agy` before anything else.
    - On any error (malformed stdin, missing fields, or connection failure), `xmsg` logs a notice to stderr, prints `{}`, and exits 0 to ensure model execution is never blocked.
 
 3. **Credential Registration & FIFO Queue Flush:**

@@ -231,8 +231,14 @@ fn assert_hook_injects(out: &Value, what: &str) {
     let steps = out["injectSteps"]
         .as_array()
         .unwrap_or_else(|| panic!("{what}: injectSteps array must exist, got {out}"));
-    assert_eq!(steps.len(), 1, "{what}: must inject one userMessage");
-    let msg = steps[0]["userMessage"].as_str().unwrap();
+    assert_eq!(steps.len(), 1, "{what}: must inject one ephemeralMessage");
+    assert!(
+        steps[0].get("userMessage").is_none(),
+        "{what}: must not contain userMessage, got {out}"
+    );
+    let msg = steps[0]["ephemeralMessage"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{what}: ephemeralMessage string must exist, got {out}"));
     assert!(msg.contains("register agy"), "{what}: {msg}");
 }
 
@@ -674,7 +680,7 @@ async fn oracle_3c_holder_recycled_before_listing_children_never_read() {
 
 // ---------------------------------------------------------------------------
 // Oracle 4: unreadable environ => no registration, no error surfaced, and B′'s hook output is as
-// in X27: the stand-down turn, then the userMessage injection.
+// in X27: the stand-down turn, then the ephemeralMessage injection.
 // Mutant: treat unreadable as fatal => RED.
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread")]
@@ -711,7 +717,7 @@ async fn oracle_4_unreadable_environ_leaves_registration_to_the_hook() {
 // ---------------------------------------------------------------------------
 // Oracle 5: hook stand-down:
 //   A watching + first unregistered turn => hook prints {}
-//   still unregistered at a later turn   => hook injects userMessage
+//   still unregistered at a later turn   => hook injects ephemeralMessage
 //   A not watching                       => hook injects on first turn
 // Mutants: never stand down => RED; stand down forever => RED.
 // ---------------------------------------------------------------------------
