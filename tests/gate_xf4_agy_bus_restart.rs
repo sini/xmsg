@@ -824,3 +824,178 @@ async fn c4_stale_credentials_clear_escrow_on_both_ends() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+// ---------------------------------------------------------------------------
+// Cell 5:
+// The store holds stage-2 credentials for session key K, registered by agy
+// process P1 (pid1, start1). A different agy process P2 (pid2, start2) holds
+// the presence lock for the same conversation ID K (agy-restarted-and-resumed).
+// Its xmsg mcp connects and attests. It must get agy_escrow_clear or nothing,
+// never P1's ls_address/csrf_token. After P2 registers its own stage 2, it
+// gets its own.
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn c5_restarted_agy_process_never_receives_prior_process_credentials() {
+    let tmp = tempdir().unwrap();
+    let sock_dir = tmp.path().join("sockets");
+    fs::create_dir_all(&sock_dir).unwrap();
+    fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let agent_sock = sock_dir.join("agent.sock");
+
+    let sessions_dir = tmp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    let presence_dir = tmp.path().join("presence");
+    fs::create_dir_all(&presence_dir).unwrap();
+    let proc_root = tmp.path().join("proc");
+    fs::create_dir_all(&proc_root).unwrap();
+    let proc_locks = tmp.path().join("locks");
+    let (fake_agy, _argv_log, _env_log, _fail_file) = create_fake_agy_bin(tmp.path());
+
+    let conv_id = "conv-xf4-cell5";
+    let lock_file = presence_dir.join(format!("{conv_id}.lock"));
+    fs::write(&lock_file, "lock").unwrap();
+    let meta = fs::metadata(&lock_file).unwrap();
+    let maj = dev_major(meta.dev());
+    let min = dev_minor(meta.dev());
+    let ino = meta.ino();
+
+    // P1 is the prior agy process (pid1, start1); P2 is the restarted agy process (pid2, start2)
+    // currently holding the presence lock for conv_id.
+    let pid1: u32 = 7501;
+    let start1 = "101";
+    let pid2: u32 = 7502;
+    let start2 = "202";
+
+    setup_mock_process(
+        &proc_root,
+        pid1,
+        1,
+        Some(&fake_agy),
+        Some(&lock_file),
+        start1,
+    );
+    setup_mock_process(
+        &proc_root,
+        pid2,
+        1,
+        Some(&fake_agy),
+        Some(&lock_file),
+        start2,
+    );
+
+    // P2 holds the presence lock for conv_id
+    let locks_content = format!(
+        "1: FLOCK ADVISORY WRITE {pid2} {:02x}:{:02x}:{} 0 EOF\n",
+        maj, min, ino
+    );
+    fs::write(&proc_locks, locks_content).unwrap();
+
+    let server = start_test_server(
+        agent_sock.clone(),
+        sessions_dir.clone(),
+        proc_root.clone(),
+        proc_locks.clone(),
+        presence_dir.clone(),
+        fake_agy.clone(),
+        fake_agy.to_str().unwrap().to_string(),
+    )
+    .await;
+
+    // 1. Store initially holds stage-2 credentials for conv_id registered by P1 (pid1, start1)
+    let p1_info = AgySessionInfo::new(
+        conv_id.to_string(),
+        pid1,
+        start1.to_string(),
+        Some(AgyCredentials {
+            ls_address: "127.0.0.1:45111".to_string(),
+            csrf_token: "secret-csrf-p1-must-never-leak".to_string(),
+            is_stale: false,
+        }),
+    );
+    server
+        .state
+        .agy_store
+        .write()
+        .unwrap()
+        .insert(conv_id.to_string(), p1_info.clone());
+
+    // Place the test runner process under P2 so an agent.sock connection attests as P2 (pid2, start2)
+    let self_pid = std::process::id();
+    setup_mock_process(&proc_root, self_pid, pid2, None, None, "303");
+
+    // 2. Connect as P2's xmsg mcp on agent.sock and attest via mcp_start
+    let stream = std::os::unix::net::UnixStream::connect(&agent_sock).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+
+    writeln!(writer, r#"{{"action":"mcp_start","schema_version":2}}"#).unwrap();
+    writer.flush().unwrap();
+
+    let mut start_line = String::new();
+    reader.read_line(&mut start_line).unwrap();
+    let start_resp: Value = serde_json::from_str(&start_line).unwrap();
+    assert_eq!(start_resp["status"], "ok");
+    assert_eq!(start_resp["sessionId"], conv_id);
+
+    // Ensure that if the store holds P1's stage-2 credentials (pid1, start1) while P2's held
+    // connection is attested as (pid2, start2), P2 gets agy_escrow_clear or nothing — NEVER P1's credentials.
+    server
+        .state
+        .agy_store
+        .write()
+        .unwrap()
+        .insert(conv_id.to_string(), p1_info);
+    notify_agy_escrow();
+
+    let mut maybe_frame = String::new();
+    let _ = reader.read_line(&mut maybe_frame);
+    if !maybe_frame.trim().is_empty() {
+        let ev: Value = serde_json::from_str(maybe_frame.trim()).unwrap();
+        assert_eq!(
+            ev["event"], "agy_escrow_clear",
+            "P2 must only ever receive agy_escrow_clear or nothing when store has P1's credentials, got: {ev}"
+        );
+        assert!(
+            !maybe_frame.contains("secret-csrf-p1-must-never-leak")
+                && !maybe_frame.contains("127.0.0.1:45111"),
+            "P2 must NEVER receive P1's ls_address or csrf_token, got: {maybe_frame}"
+        );
+    }
+
+    // 3. After P2 registers its own stage-2 credentials (pid2, start2), P2 gets its own
+    let p2_info = AgySessionInfo::new(
+        conv_id.to_string(),
+        pid2,
+        start2.to_string(),
+        Some(AgyCredentials {
+            ls_address: "127.0.0.1:45222".to_string(),
+            csrf_token: "secret-csrf-p2-own".to_string(),
+            is_stale: false,
+        }),
+    );
+    server
+        .state
+        .agy_store
+        .write()
+        .unwrap()
+        .insert(conv_id.to_string(), p2_info);
+    notify_agy_escrow();
+
+    let mut p2_frame = String::new();
+    reader
+        .read_line(&mut p2_frame)
+        .expect("P2 must receive its own stage-2 agy_escrow frame");
+    assert!(
+        !p2_frame.trim().is_empty(),
+        "P2 must receive a frame after registering its own stage-2 credentials"
+    );
+    let p2_ev: Value = serde_json::from_str(p2_frame.trim()).unwrap();
+    assert_eq!(p2_ev["event"], "agy_escrow");
+    assert_eq!(p2_ev["ls_address"], "127.0.0.1:45222");
+    assert_eq!(p2_ev["csrf_token"], "secret-csrf-p2-own");
+
+    server.stop().await;
+}
