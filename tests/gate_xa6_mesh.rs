@@ -1046,6 +1046,19 @@ async fn answer_list_listing_x(w: &Origin<'_>, pin: &str, port: u16) {
     assert_eq!(status, 200, "{res}");
 }
 
+/// W takes the next item in its mailbox on the node at `port`, which must be the queued message
+/// whose body contains `text`, and acknowledges it, as a dial-out client does before its next poll.
+async fn take_queued_message(w: &Origin<'_>, pin: &str, port: u16, text: &str) {
+    let (status, item) =
+        hop_client::request(w, pin, port, "GET", "/fed/v2/inbox?wait=5", None).await;
+    assert_eq!(status, 200, "{item}");
+    assert_eq!(item["kind"], "message", "{item}");
+    assert!(item["body"].as_str().unwrap_or("").contains(text), "{item}");
+    let uri = format!("/fed/v2/inbox/{}/ack", item["id"].as_str().unwrap());
+    let (status, res) = hop_client::request(w, pin, port, "POST", &uri, None).await;
+    assert_eq!(status, 200, "{res}");
+}
+
 /// A reply on `/fed/v2/replies` from `w` to the node at `port`: its HTTP status.
 async fn fed_reply(
     w: &Origin<'_>,
@@ -1103,6 +1116,10 @@ async fn test_oracle_14_a_resolved_dial_out_send_takes_replies_from_the_id_only(
         assert_eq!(fed_reply(&w, pin, port, &id, impostor, "forged").await, 403);
         let x = json!({ "id": X, "node": "x" });
         assert_eq!(fed_reply(&w, pin, port, &id, x, "from x").await, 200);
+        // W collects the queued "for x" before the next round. Without this, the next round's
+        // inbox poll can run before that round's `list` query is registered, and returns this
+        // message instead (the race behind CI run 39235033760).
+        take_queued_message(&w, pin, port, "for x").await;
 
         let sender = a.clone();
         let sent = tokio::spawn(async move { http_send(&sender, X, "for x again").await });
