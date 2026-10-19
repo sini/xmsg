@@ -76,5 +76,8 @@ jobs:
           docker load < result-image
           SHA_SHORT=$(git rev-parse --short HEAD)
           docker tag ghcr.io/sini/xmsg:latest "ghcr.io/sini/xmsg:sha-$SHA_SHORT"
-          docker push ghcr.io/sini/xmsg:latest
-          docker push "ghcr.io/sini/xmsg:sha-$SHA_SHORT"
+          # GHCR sometimes rejects a manifest with "unknown blob" for a layer it has just accepted;
+          # re-pushing uploads nothing new and retries the manifest. Bounded at 3 attempts.
+          push() { for i in 1 2 3; do docker push "$1" && return 0; echo "docker push $1 failed (attempt $i)" >&2; sleep $((i * 10)); done; return 1; }
+          push ghcr.io/sini/xmsg:latest
+          push "ghcr.io/sini/xmsg:sha-$SHA_SHORT"
