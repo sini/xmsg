@@ -602,7 +602,7 @@ pub fn insert_outbound(
     created_at: i64,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO outbound (id, peer, target_ref, outcome, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT OR IGNORE INTO outbound (id, peer, target_ref, outcome, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![id, peer, target_ref, outcome, created_at],
     )?;
     Ok(())

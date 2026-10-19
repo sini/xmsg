@@ -2837,8 +2837,8 @@ async fn test_f7_outbound_timeout_on_silent_peer() {
         Err(xmsg::error::AppError::PeerUnreachable(_))
     ));
     assert!(
-        elapsed < Duration::from_secs(8),
-        "Outbound call took {elapsed:?}, expected <= 6s"
+        elapsed >= Duration::from_secs(9) && elapsed < Duration::from_secs(13),
+        "Outbound call took {elapsed:?}, expected ~10s (two 5s connect attempts)"
     );
 }
 

@@ -692,7 +692,7 @@ pub fn execute_tool(
                 "to": to,
                 "text": text,
             });
-            agent_tool(config, &payload, None, Duration::from_secs(5))
+            agent_tool(config, &payload, None, Duration::from_secs(20))
         }
         "reply" => {
             let (Some(message_id), Some(text)) = (str_arg("message_id"), str_arg("text")) else {

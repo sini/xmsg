@@ -1263,6 +1263,7 @@ async fn deliver_send(
                 let target = crate::http::resolve_target_session(state, target_ref).await?;
                 {
                     let db = state.db.lock().map_err(db_err)?;
+                    let _ = storage::delete_outbound(&db, &message_id);
                     storage::record_message_recipient(
                         &db,
                         &message_id,
@@ -1295,6 +1296,7 @@ async fn deliver_send(
                 .clone();
             let peers = fed_state.current_peers();
             let leaf = peers.get(&peer_key).is_some_and(|p| p.leaf);
+            let outbound_target = format!("{key}@{peer_key}");
             if let Ok(db) = state.db.lock() {
                 let _ = storage::record_message_recipient(&db, &message_id, &key, "fed");
                 if !leaf {
@@ -1302,7 +1304,7 @@ async fn deliver_send(
                         &db,
                         &message_id,
                         &peer_key,
-                        &format!("{key}@{peer_key}"),
+                        &outbound_target,
                         storage::KEY_PENDING,
                         now,
                     );
@@ -1325,23 +1327,40 @@ async fn deliver_send(
             .await
             {
                 Ok(resp) => resp,
-                Err(e) if node.is_none() => {
-                    if let Ok(db) = state.db.lock() {
-                        let _ = storage::delete_outbound(&db, &message_id);
-                    }
+                Err(_) if node.is_none() && cached => {
                     // A failed delivery invalidates the location, and a cache-routed send
                     // is resolved again, without the cache (A-12, gate v0 C9).
                     crate::mesh::forget(state, &key);
-                    if !cached {
-                        return Err(e);
-                    }
                     dest = crate::mesh::resolve(state, &fed_state, target_ref).await?;
                     continue;
                 }
                 Err(e) => {
-                    if let Ok(db) = state.db.lock() {
-                        let _ = storage::delete_outbound(&db, &message_id);
+                    if node.is_none() {
+                        crate::mesh::forget(state, &key);
                     }
+                    let outcome = e.code().1;
+                    if let Ok(db) = state.db.lock() {
+                        let _ = storage::insert_outbound(
+                            &db,
+                            &message_id,
+                            &peer_key,
+                            &outbound_target,
+                            outcome,
+                            now,
+                        );
+                        let _ = storage::update_outbound_outcome(&db, &message_id, outcome);
+                    }
+                    tracing::warn!(
+                        target: "xmsg",
+                        message_id = %message_id,
+                        peer = %peer_key,
+                        address = %outbound_target,
+                        from = %from_name,
+                        bytes = text.len(),
+                        outcome = %outcome,
+                        error = %e,
+                        "federated send failed"
+                    );
                     return Err(e);
                 }
             };
@@ -1393,10 +1412,12 @@ async fn deliver_send(
     let (address, _recipient_harness, outcome, return_host) = match delivered {
         Ok(d) => d,
         Err(e) => {
-            if let Err(de) = state.db.lock().map_err(db_err).and_then(|db| {
-                let _ = storage::delete_outbound(&db, &message_id);
-                storage::delete_message(&db, &message_id).map_err(db_err)
-            }) {
+            if let Err(de) = state
+                .db
+                .lock()
+                .map_err(db_err)
+                .and_then(|db| storage::delete_message(&db, &message_id).map_err(db_err))
+            {
                 tracing::warn!(target: "xmsg", message_id = %message_id, "undelivered message's record not removed: {de}");
             }
             return Err(e);
@@ -1897,7 +1918,9 @@ pub async fn replies(
     let outbound = {
         let db = state.db.lock().map_err(db_err)?;
         let msg = storage::get_message(&db, message_id).map_err(db_err)?;
-        let out = storage::get_outbound(&db, message_id).map_err(db_err)?;
+        let out = storage::get_outbound(&db, message_id)
+            .map_err(db_err)?
+            .filter(|o| storage::outcome_reached(&o.outcome));
         if msg.is_none() && out.is_none() {
             return Err(AppError::NotFound(format!("message '{message_id}'")));
         }

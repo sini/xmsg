@@ -3835,6 +3835,12 @@ pub async fn send_federated_message(
     send_federated_message_with(fed_state, peer_name, envelope, false).await
 }
 
+/// Connect-phase timeout for one federated send connection attempt (TCP + TLS + HTTP/1 handshake).
+pub const FED_SEND_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Request/response-phase timeout once the federated HTTP/1 connection is established.
+pub const FED_SEND_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// `send_federated_message`, marked live-only when `live_only` (gate v0 C9).
 pub async fn send_federated_message_with(
     fed_state: &FedState,
@@ -3859,32 +3865,64 @@ pub async fn send_federated_message_with(
         );
     }
 
-    let send_fut = async {
-        let connector = make_tls_connector_for_peer(fed_state, peer)?;
-        let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
-            .await
-            .map_err(|e| {
-                AppError::PeerUnreachable(format!("Failed to connect to {}: {e}", peer.address))
-            })?;
+    let connector = make_tls_connector_for_peer(fed_state, peer)?;
+    let server_name = ServerName::try_from(peer_name.to_string())
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        let server_name = ServerName::try_from(peer_name.to_string())
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-        let tls_stream = connector
-            .connect(server_name, tcp_stream)
-            .await
-            .map_err(|e| map_tls_connect_error(peer_name, e))?;
+    let mut sender = None;
+    for attempt in 0..2 {
+        let server_name_clone = server_name.clone();
+        let connector_clone = connector.clone();
+        let connect_fut = async move {
+            let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
+                .await
+                .map_err(|e| {
+                    AppError::PeerUnreachable(format!("Failed to connect to {}: {e}", peer.address))
+                })?;
 
-        let io = hyper_util::rt::TokioIo::new(tls_stream);
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
-            .await
-            .map_err(|e| AppError::PeerUnreachable(format!("HTTP handshake failed: {e}")))?;
+            let tls_stream = connector_clone
+                .connect(server_name_clone, tcp_stream)
+                .await
+                .map_err(|e| map_tls_connect_error(peer_name, e))?;
 
-        tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                debug!("HTTP connection closed: {e}");
+            let io = hyper_util::rt::TokioIo::new(tls_stream);
+            let (sender, conn) = hyper::client::conn::http1::handshake(io)
+                .await
+                .map_err(|e| AppError::PeerUnreachable(format!("HTTP handshake failed: {e}")))?;
+
+            tokio::spawn(async move {
+                if let Err(e) = conn.await {
+                    debug!("HTTP connection closed: {e}");
+                }
+            });
+            Ok::<_, AppError>(sender)
+        };
+
+        match tokio::time::timeout(FED_SEND_CONNECT_TIMEOUT, connect_fut).await {
+            Ok(Ok(s)) => {
+                sender = Some(s);
+                break;
             }
-        });
+            Ok(Err(e)) => return Err(e),
+            Err(_) if attempt == 0 => {
+                tracing::warn!(
+                    target: "xmsg",
+                    peer = %peer_name,
+                    address = %peer.address,
+                    "federated send connect timed out after 5s; retrying once with a fresh connection"
+                );
+                continue;
+            }
+            Err(_) => {
+                return Err(AppError::PeerUnreachable(
+                    "Outbound call timed out after 5s".to_string(),
+                ));
+            }
+        }
+    }
+    let mut sender = sender.expect("connect loop either assigned sender or returned Err");
 
+    let req_fut = async move {
         let body_bytes =
             serde_json::to_vec(envelope).map_err(|e| AppError::Internal(e.to_string()))?;
         let mut req = hyper::Request::builder()
@@ -3950,7 +3988,7 @@ pub async fn send_federated_message_with(
         }
     };
 
-    match tokio::time::timeout(Duration::from_secs(5), send_fut).await {
+    match tokio::time::timeout(FED_SEND_REQUEST_TIMEOUT, req_fut).await {
         Ok(res) => res,
         Err(_) => Err(AppError::PeerUnreachable(
             "Outbound call timed out after 5s".to_string(),
