@@ -369,6 +369,7 @@ pub async fn handle_svc_connection_peer<
     // Handle commands from daemon
     let mut byte_buf = Vec::new();
     let max_frame = 65536 * 6 + 4096;
+    let mut in_flight: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
         byte_buf.clear();
         let n = (&mut buf_reader)
@@ -426,12 +427,13 @@ pub async fn handle_svc_connection_peer<
 
                 let pending = {
                     let conn = db.lock().unwrap();
-                    storage::get_next_pending_svc_message(&conn, &session_id)?
+                    storage::get_next_pending_svc_message_excluding(&conn, &session_id, &in_flight)?
                 };
 
                 if let Some(msg) = pending {
                     let resp = deliver_frame(&msg);
                     writer.write_all(format!("{resp}\n").as_bytes()).await?;
+                    in_flight.insert(msg.id);
                 } else if wait_secs == 0 {
                     let resp = serde_json::json!({ "action": "timeout" });
                     writer.write_all(format!("{resp}\n").as_bytes()).await?;
@@ -452,12 +454,17 @@ pub async fn handle_svc_connection_peer<
 
                     let pending_after = {
                         let conn = db.lock().unwrap();
-                        storage::get_next_pending_svc_message(&conn, &session_id)?
+                        storage::get_next_pending_svc_message_excluding(
+                            &conn,
+                            &session_id,
+                            &in_flight,
+                        )?
                     };
 
                     if let Some(msg) = pending_after {
                         let resp = deliver_frame(&msg);
                         writer.write_all(format!("{resp}\n").as_bytes()).await?;
+                        in_flight.insert(msg.id);
                     } else {
                         let resp = serde_json::json!({ "action": "timeout" });
                         writer.write_all(format!("{resp}\n").as_bytes()).await?;
@@ -469,6 +476,7 @@ pub async fn handle_svc_connection_peer<
                     let conn = db.lock().unwrap();
                     let _ = storage::ack_svc_message(&conn, &session_id, &message_id);
                 }
+                in_flight.remove(&message_id);
                 let resp = serde_json::json!({ "status": "ok" });
                 writer.write_all(format!("{resp}\n").as_bytes()).await?;
             }

@@ -1007,16 +1007,28 @@ pub fn get_next_pending_svc_message(
     conn: &Connection,
     session_id: &str,
 ) -> Result<Option<SvcPendingMessage>> {
+    get_next_pending_svc_message_excluding(conn, session_id, &std::collections::HashSet::new())
+}
+
+pub fn get_next_pending_svc_message_excluding(
+    conn: &Connection,
+    session_id: &str,
+    in_flight: &std::collections::HashSet<String>,
+) -> Result<Option<SvcPendingMessage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, session_id, created_at, from_name, bytes, text, envelope, delivered_at, origin, in_reply_to FROM svc_pending_messages WHERE session_id = ?1 AND delivered_at IS NULL ORDER BY created_at ASC, rowid ASC LIMIT 1",
+        "SELECT id, session_id, created_at, from_name, bytes, text, envelope, delivered_at, origin, in_reply_to FROM svc_pending_messages WHERE session_id = ?1 AND delivered_at IS NULL ORDER BY created_at ASC, rowid ASC",
     )?;
     let mut rows = stmt.query(params![session_id])?;
 
-    if let Some(row) = rows.next()? {
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        if in_flight.contains(&id) {
+            continue;
+        }
         let bytes_i64: i64 = row.get(4)?;
         let origin = origin_from_sql(row.get(8)?)?;
-        Ok(Some(SvcPendingMessage {
-            id: row.get(0)?,
+        return Ok(Some(SvcPendingMessage {
+            id,
             session_id: row.get(1)?,
             created_at: row.get(2)?,
             from_name: row.get(3)?,
@@ -1026,10 +1038,9 @@ pub fn get_next_pending_svc_message(
             delivered_at: row.get(7)?,
             origin,
             in_reply_to: row.get(9)?,
-        }))
-    } else {
-        Ok(None)
+        }));
     }
+    Ok(None)
 }
 
 /// The service took the message: its queue row is stamped and its record reads `delivered`.

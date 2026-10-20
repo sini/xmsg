@@ -471,8 +471,8 @@ Communication over the registration socket uses a JSON-lines streaming protocol:
 
    A reply is `{ "action": "reply", "messageId": "01M4FG...", "text": "...", "idempotencyKey": "..." }` (the key optional, Section 4, Idempotency); the server responds `{"status": "ok", "messageId": <the pushed reply's ID, or null>}`.
 
-3. **At-Least-Once Delivery Contract:**
-   The long-poll cursor advances **only** upon receiving an explicit `ack` frame. If a daemon crashes, disconnects, or terminates before sending an `ack`, the unacknowledged message remains at the head of the queue and will be redelivered when the daemon reconnects and polls again.
+3. **At-Least-Once Delivery & Per-Connection In-Flight Tracking (XF6):**
+   A message's queue row is stamped `delivered` **only** upon receiving an explicit `ack` frame. On a live `register.sock` connection, `xmsg` tracks the message IDs already handed out on that connection (`in_flight`), so a subsequent `poll` while an earlier delivery is still unacked hands out the next pending message in FIFO order rather than redelivering the unacked head. If the daemon crashes, disconnects, or terminates before sending an `ack`, the connection's `in_flight` set is dropped and every unacknowledged message remains in the queue to be redelivered in FIFO order when the daemon reconnects and polls again. A serial `poll` → `ack` → `poll` consumer receives one message at a time in order, unchanged.
 
 ---
 
