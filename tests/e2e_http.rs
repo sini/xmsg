@@ -492,6 +492,29 @@ async fn test_e2e_post_message_body_too_large_413() {
     assert_eq!(err_val["error"], "payload_too_large");
 }
 
+// A body over axum's own 2 MiB cap but under `--max-body` is read and parsed: the bad sender
+// answers, not a 413.
+#[tokio::test]
+async fn test_e2e_post_message_body_over_axum_default_within_max_body() {
+    let harness = start_harness(4 << 20).await;
+    let client = reqwest::Client::new();
+
+    let body = serde_json::json!({
+        "to": "my-worker",
+        "from": "   \"\" <> \t  ",
+        "text": "a".repeat(3 << 20)
+    });
+    let res = client
+        .post(format!("{}/v1/messages", harness.base_url))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::BAD_REQUEST);
+    let err_val: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(err_val["error"], "bad_sender");
+}
+
 #[tokio::test]
 async fn test_e2e_post_message_inbox_unavailable_502() {
     let harness = start_harness(65536).await;

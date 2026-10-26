@@ -1,6 +1,6 @@
 use axum::{
     body::Bytes,
-    extract::{rejection::QueryRejection, Path as AxumPath, Query, State},
+    extract::{rejection::QueryRejection, DefaultBodyLimit, Path as AxumPath, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -101,6 +101,9 @@ pub struct ReplyRequest {
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
+    // axum caps a body at 2 MiB on its own; a larger `--max-body` lifts it, so `parse_json` is
+    // the limit that answers.
+    let body_limit = state.max_body.max(2 << 20);
     Router::new()
         .route("/healthz", get(healthz_handler))
         .route("/v1/recipients", get(list_recipients_handler))
@@ -111,6 +114,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/messages/{id}/replies",
             get(get_replies_handler).post(reply_handler),
         )
+        .layer(DefaultBodyLimit::max(body_limit))
         .with_state(state)
 }
 
