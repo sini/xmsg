@@ -177,7 +177,9 @@ class Receiver:
 # queued: the turn is awaited separately.
 VERSION = subprocess.run([OPENCODE, "--version"], capture_output=True, text=True, env=dict(os.environ, HOME=TMP)).stdout
 MAJOR = re.search(r"\bv?(\d+)\.", VERSION)
-V2 = MAJOR is not None and MAJOR.group(1) != "1"
+if MAJOR is None:
+    sys.exit(f"opencode-plugin: cannot read a version from `opencode --version`: {VERSION!r}")
+V2 = int(MAJOR.group(1)) >= 2
 API = "/api" if V2 else ""
 PASSWORD = uuid.uuid4().hex
 AUTH = {"authorization": "Basic " + base64.b64encode(f"opencode:{PASSWORD}".encode()).decode()} if V2 else {}

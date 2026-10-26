@@ -1,7 +1,8 @@
 // xmsg for opencode (plan XH2; HA2, HA3, HA4, HA7). opencode auto-loads this file from
 // `<config>/opencode/plugin/`.
 //
-// One `register.sock` connection per opencode process, many sessions on it. A root
+// One `register.sock` connection per opencode process on 1.x, per project directory the
+// server serves on 2.x, many sessions on it. A root
 // session registers at its first user prompt and gets its own server-minted address;
 // a child session (a task subagent) acts as its root, found by walking `parentID`, and is
 // never registered. The tools `xmsg_list`, `xmsg_send`, `xmsg_reply` and `xmsg_replies`
@@ -182,8 +183,8 @@ class Connection {
     await this.registered.get(root)?.catch(() => {});
   }
 
-  // Closing the connection detaches every address on it (HA8); nothing reconnects. The
-  // next `setup` after a plugin reload reclaims them from the store.
+  // Closing the connection detaches every address on it (HA8); nothing reconnects. After a
+  // plugin reload each session reclaims its address from the store at its next prompt.
   close() {
     this.closed = true;
     this.roots.clear();
@@ -373,10 +374,11 @@ const setup = async (ctx: any) => {
   })();
 
   return async () => {
-    xmsg.close();
+    // Hook and tools go first, so no prompt or tool call reaches a closed connection.
+    await Promise.all([hook.dispose(), tools.dispose()]);
     abort.abort();
     await events;
-    await Promise.all([hook.dispose(), tools.dispose()]);
+    xmsg.close();
   };
 };
 
