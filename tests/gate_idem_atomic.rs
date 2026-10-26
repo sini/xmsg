@@ -6,6 +6,7 @@
 //! than the socket buffer keeps the delivery's write blocked until the inbox reads.
 
 use std::fs;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -23,8 +24,28 @@ const ID_T: &str = "a7a7a7a7-0000-4000-8000-00000000000a";
 const ID_R: &str = "b7b7b7b7-0000-4000-8000-00000000000b";
 const ID_S: &str = "c7c7c7c7-0000-4000-8000-00000000000c";
 
-/// Larger than any default unix socket send buffer, so a delivery blocks on the reader.
-const SLOW_BODY_LEN: usize = 600_000;
+/// Twice the unix socket buffers a delivery can fill with no reader, so its write blocks on
+/// the reader. Measured, not assumed: their defaults follow the host's kernel tuning (a
+/// builder with `net.core.wmem_default` at 1 MiB took a fixed 600 KB body unread).
+fn slow_body_len() -> usize {
+    let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
+    let opt = |name| {
+        let mut v: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                a.as_raw_fd(),
+                libc::SOL_SOCKET,
+                name,
+                (&mut v as *mut libc::c_int).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!(rc, 0, "getsockopt: {}", std::io::Error::last_os_error());
+        v as usize
+    };
+    2 * (opt(libc::SO_SNDBUF) + opt(libc::SO_RCVBUF))
+}
 
 /// The HTTP child's entry point (`http_child`): a no-op in a normal test run.
 #[test]
@@ -71,7 +92,7 @@ impl Node {
             .arg("--register-sock")
             .arg(&register_sock)
             .arg("--max-body")
-            .arg("2000000")
+            .arg((2 * slow_body_len()).to_string())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         for name in services {
@@ -271,7 +292,7 @@ async fn test_oracle_1_concurrent_sends_one_key_deliver_once() {
     let tmp = tempdir().unwrap();
     let node = Node::start(tmp.path(), &[]);
     let (_t, target) = slow_target(&node, Duration::from_millis(1000));
-    let text = "x".repeat(SLOW_BODY_LEN);
+    let text = "x".repeat(slow_body_len());
 
     let (a, b) = tokio::join!(
         node.send("ci", ID_T, &text, "k-concurrent"),
@@ -298,7 +319,7 @@ async fn test_oracle_2_retry_during_slow_delivery_is_pending_same_id() {
     let tmp = tempdir().unwrap();
     let node = Node::start(tmp.path(), &[]);
     let (_t, target) = slow_target(&node, Duration::from_millis(4000));
-    let text = "y".repeat(SLOW_BODY_LEN);
+    let text = "y".repeat(slow_body_len());
 
     let first = node.send("ci", ID_T, &text, "k-slow");
     let retry = async {
@@ -334,7 +355,7 @@ async fn test_oracle_2b_caller_hangup_still_settles() {
     let tmp = tempdir().unwrap();
     let node = Node::start(tmp.path(), &[]);
     let (_t, target) = slow_target(&node, Duration::from_millis(2500));
-    let text = "z".repeat(SLOW_BODY_LEN);
+    let text = "z".repeat(slow_body_len());
 
     let hung_up = node
         .http_within(
@@ -608,7 +629,8 @@ async fn test_oracle_7_restart_mid_delivery_retry_delivers() {
     let tmp = tempdir().unwrap();
     let mut node = Node::start(tmp.path(), &[]);
     let (_t, target) = slow_target(&node, Duration::from_millis(4000));
-    let text = "r".repeat(SLOW_BODY_LEN);
+    let len = slow_body_len();
+    let text = "r".repeat(len);
     let sock = node.http_sock.clone();
     let body =
         serde_json::json!({"to": ID_T, "from": "ci", "text": text, "idempotency_key": "k-rs"});
@@ -644,7 +666,7 @@ async fn test_oracle_7_restart_mid_delivery_retry_delivers() {
     );
     assert_eq!(after, before + 1, "the retry delivers once");
     let last = target.lines.lock().unwrap().last().unwrap().len();
-    assert!(last > SLOW_BODY_LEN, "the whole message: {last} bytes");
+    assert!(last > len, "the whole message: {last} bytes");
 }
 
 // =============================================================================
