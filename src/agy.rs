@@ -351,6 +351,54 @@ pub fn get_presence_lock_holder(
     find_lock_holder(proc_locks_path, maj, min, ino)
 }
 
+/// The FLOCK holder of the file `(dev, ino)` as seen from `pid`, which has it open: the
+/// attestation form of [`find_lock_holder`]. On live Linux it reads the `lock:` lines of
+/// `/proc/<pid>/fdinfo/<fd>` for each of `pid`'s fds on that file, each one seq_file record and
+/// so read whole. `/proc/locks` is not: its reader resumes by line index at every read(2), so a
+/// lock released anywhere on the host between two reads skips a line, the holder's included,
+/// and a held presence lock reads as unheld. A fixture `proc_locks` is read as before.
+pub fn attested_lock_holder(
+    proc_root: &Path,
+    proc_locks_path: &Path,
+    pid: u32,
+    dev: u64,
+    ino: u64,
+) -> io::Result<Option<u32>> {
+    let (maj, min) = (dev_major(dev), dev_minor(dev));
+    if proc_locks_path != Path::new(LIVE_PROC_LOCKS) {
+        return find_lock_holder(proc_locks_path, maj, min, ino);
+    }
+    use std::os::unix::fs::MetadataExt;
+    let proc_dir = proc_root.join(pid.to_string());
+    let mut holders = HashSet::new();
+    for entry in fs::read_dir(proc_dir.join("fd"))?.flatten() {
+        // An fd closed since the listing is no longer this file: skipped.
+        let Ok(meta) = fs::metadata(entry.path()) else {
+            continue;
+        };
+        if (meta.dev(), meta.ino()) != (dev, ino) {
+            continue;
+        }
+        let Ok(info) = fs::read_to_string(proc_dir.join("fdinfo").join(entry.file_name())) else {
+            continue;
+        };
+        holders.extend(
+            info.lines()
+                .filter_map(|l| l.strip_prefix("lock:"))
+                .filter_map(parse_locks_line)
+                .filter(|&(_, ma, mi, i)| (ma, mi, i) == (maj, min, ino))
+                .map(|(p, ..)| p),
+        );
+    }
+    match holders.len() {
+        0 => Ok(None),
+        1 => Ok(holders.into_iter().next()),
+        _ => Err(io::Error::other(
+            "multiple lock holders detected for presence lock",
+        )),
+    }
+}
+
 /// Lists all active agy sessions: registered sessions from store (live via starttime),
 /// plus on Linux any unregistered presence lock holders.
 pub fn list_agy_sessions(
@@ -675,11 +723,10 @@ pub fn verify_registration_peer(
         }
     };
 
-    // 6. Linux additional check: a FLOCK holder line must exist in /proc/locks AND equal chosen_pid
+    // 6. Linux additional check: a FLOCK holder line must exist AND equal chosen_pid
+    // (`attested_lock_holder`: chosen_pid's fdinfo on live /proc, else the fixture).
     if locks_supported(proc_locks) {
-        let maj = dev_major(target_dev);
-        let min = dev_minor(target_dev);
-        match find_lock_holder(proc_locks, maj, min, target_ino) {
+        match attested_lock_holder(proc_root, proc_locks, chosen_pid, target_dev, target_ino) {
             Ok(Some(flock_holder)) => {
                 if flock_holder != chosen_pid {
                     return Err(AppError::NotRecipient(format!(
@@ -820,9 +867,13 @@ pub fn attest_mcp_caller_peer(
             for (conv_id, target_dev, target_ino) in &presence_locks {
                 if open_ids.contains(&(*target_dev, *target_ino)) {
                     let flock_ok = if locks_supported(proc_locks) {
-                        let maj = dev_major(*target_dev);
-                        let min = dev_minor(*target_dev);
-                        match find_lock_holder(proc_locks, maj, min, *target_ino) {
+                        match attested_lock_holder(
+                            proc_root,
+                            proc_locks,
+                            curr_pid,
+                            *target_dev,
+                            *target_ino,
+                        ) {
                             Ok(Some(holder)) => holder == curr_pid,
                             _ => false,
                         }
@@ -1943,6 +1994,33 @@ pub async fn run_register_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn attested_lock_holder_reads_the_live_flock_from_fdinfo() {
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::io::AsRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("c.lock");
+        let f = fs::File::create(&lock).unwrap();
+        let meta = f.metadata().unwrap();
+        let holder = || {
+            attested_lock_holder(
+                Path::new("/proc"),
+                Path::new(LIVE_PROC_LOCKS),
+                std::process::id(),
+                meta.dev(),
+                meta.ino(),
+            )
+            .unwrap()
+        };
+        assert_eq!(holder(), None);
+        assert_eq!(
+            unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        assert_eq!(holder(), Some(std::process::id()));
+    }
 
     #[test]
     fn fixture_locks_are_supported_everywhere() {
