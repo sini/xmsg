@@ -350,6 +350,22 @@ pub fn get_presence_lock_holder(
     proc_locks_path: &Path,
     conversation_id: &str,
 ) -> io::Result<Option<u32>> {
+    get_presence_lock_holder_in_proc(
+        Path::new(crate::process::LIVE_PROC_ROOT),
+        presence_dir,
+        proc_locks_path,
+        conversation_id,
+    )
+}
+
+/// Finds the holder PID of a conversation's presence lock file using `proc_root` (`fdinfo` first,
+/// falling back to `proc_locks_path` only for non-live test fixtures without an `fdinfo` lock).
+pub fn get_presence_lock_holder_in_proc(
+    proc_root: &Path,
+    presence_dir: &Path,
+    proc_locks_path: &Path,
+    conversation_id: &str,
+) -> io::Result<Option<u32>> {
     let lock_path = presence_dir.join(format!("{conversation_id}.lock"));
     let meta = match fs::metadata(&lock_path) {
         Ok(m) => m,
@@ -358,20 +374,16 @@ pub fn get_presence_lock_holder(
     };
 
     use std::os::unix::fs::MetadataExt;
-    let dev = meta.dev();
-    let ino = meta.ino();
-    let maj = dev_major(dev);
-    let min = dev_minor(dev);
-
-    find_lock_holder(proc_locks_path, maj, min, ino)
+    find_lock_holder_fdinfo(proc_root, proc_locks_path, meta.dev(), meta.ino())
 }
 
 /// The FLOCK holder of the file `(dev, ino)` as seen from `pid`, which has it open: the
-/// attestation form of [`find_lock_holder`]. On live Linux it reads the `lock:` lines of
+/// attestation form of [`find_lock_holder`]. Reads the `lock:` lines of
 /// `/proc/<pid>/fdinfo/<fd>` for each of `pid`'s fds on that file, each one seq_file record and
 /// so read whole. `/proc/locks` is not: its reader resumes by line index at every read(2), so a
 /// lock released anywhere on the host between two reads skips a line, the holder's included,
-/// and a held presence lock reads as unheld. A fixture `proc_locks` is read as before.
+/// and a held presence lock reads as unheld. Falls back to `proc_locks_path` only when it is a
+/// test fixture and `fdinfo` carried no lock for `(dev, ino)`.
 pub fn attested_lock_holder(
     proc_root: &Path,
     proc_locks_path: &Path,
@@ -380,33 +392,118 @@ pub fn attested_lock_holder(
     ino: u64,
 ) -> io::Result<Option<u32>> {
     let (maj, min) = (dev_major(dev), dev_minor(dev));
-    if proc_locks_path != Path::new(LIVE_PROC_LOCKS) {
-        return find_lock_holder(proc_locks_path, maj, min, ino);
-    }
     use std::os::unix::fs::MetadataExt;
     let proc_dir = proc_root.join(pid.to_string());
     let mut holders = HashSet::new();
-    for entry in fs::read_dir(proc_dir.join("fd"))?.flatten() {
-        // An fd closed since the listing is no longer this file: skipped.
-        let Ok(meta) = fs::metadata(entry.path()) else {
-            continue;
-        };
-        if (meta.dev(), meta.ino()) != (dev, ino) {
-            continue;
+    match fs::read_dir(proc_dir.join("fd")) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                // An fd closed since the listing is no longer this file: skipped.
+                let Ok(meta) = fs::metadata(entry.path()) else {
+                    continue;
+                };
+                if (meta.dev(), meta.ino()) != (dev, ino) {
+                    continue;
+                }
+                let Ok(info) =
+                    fs::read_to_string(proc_dir.join("fdinfo").join(entry.file_name()))
+                else {
+                    continue;
+                };
+                holders.extend(
+                    info.lines()
+                        .filter_map(|l| l.strip_prefix("lock:"))
+                        .filter_map(parse_locks_line)
+                        .filter(|&(_, ma, mi, i)| (ma, mi, i) == (maj, min, ino))
+                        .map(|(p, ..)| p),
+                );
+            }
         }
-        let Ok(info) = fs::read_to_string(proc_dir.join("fdinfo").join(entry.file_name())) else {
-            continue;
-        };
-        holders.extend(
-            info.lines()
-                .filter_map(|l| l.strip_prefix("lock:"))
-                .filter_map(parse_locks_line)
-                .filter(|&(_, ma, mi, i)| (ma, mi, i) == (maj, min, ino))
-                .map(|(p, ..)| p),
-        );
+        Err(e) if proc_locks_path == Path::new(LIVE_PROC_LOCKS) => return Err(e),
+        Err(_) => {}
     }
     match holders.len() {
-        0 => Ok(None),
+        0 => {
+            if proc_locks_path != Path::new(LIVE_PROC_LOCKS) {
+                find_lock_holder(proc_locks_path, maj, min, ino)
+            } else {
+                Ok(None)
+            }
+        }
+        1 => Ok(holders.into_iter().next()),
+        _ => Err(io::Error::other(
+            "multiple lock holders detected for presence lock",
+        )),
+    }
+}
+
+/// Finds the FLOCK holder PID of `(dev, ino)` across `proc_root` by inspecting `<pid>/fd` and
+/// `<pid>/fdinfo/<fd>` for processes owned by the current UID (or in a mock `proc_root`), so
+/// listing and watcher checks never depend on a multi-read `/proc/locks` scan. Falls back to
+/// `proc_locks_path` only when it is a test fixture and `fdinfo` carried no lock for `(dev, ino)`.
+pub fn find_lock_holder_fdinfo(
+    proc_root: &Path,
+    proc_locks_path: &Path,
+    dev: u64,
+    ino: u64,
+) -> io::Result<Option<u32>> {
+    let (maj, min) = (dev_major(dev), dev_minor(dev));
+    let mut holders = HashSet::new();
+    let my_uid = current_uid();
+    let is_live_proc = proc_root == Path::new(crate::process::LIVE_PROC_ROOT);
+    if let Ok(proc_entries) = fs::read_dir(proc_root) {
+        for proc_entry in proc_entries.flatten() {
+            let Some(_pid) = proc_entry
+                .file_name()
+                .to_str()
+                .and_then(|s| s.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let proc_dir = proc_entry.path();
+            if is_live_proc {
+                use std::os::unix::fs::MetadataExt;
+                let Ok(pmeta) = fs::symlink_metadata(&proc_dir) else {
+                    continue;
+                };
+                if pmeta.uid() != my_uid {
+                    continue;
+                }
+            }
+            let Ok(fd_entries) = fs::read_dir(proc_dir.join("fd")) else {
+                continue;
+            };
+            for fd_entry in fd_entries.flatten() {
+                use std::os::unix::fs::MetadataExt;
+                let Ok(meta) = fs::metadata(fd_entry.path()) else {
+                    continue;
+                };
+                if (meta.dev(), meta.ino()) != (dev, ino) {
+                    continue;
+                }
+                let Ok(info) =
+                    fs::read_to_string(proc_dir.join("fdinfo").join(fd_entry.file_name()))
+                else {
+                    continue;
+                };
+                holders.extend(
+                    info.lines()
+                        .filter_map(|l| l.strip_prefix("lock:"))
+                        .filter_map(parse_locks_line)
+                        .filter(|&(_, ma, mi, i)| (ma, mi, i) == (maj, min, ino))
+                        .map(|(p, ..)| p),
+                );
+            }
+        }
+    }
+    match holders.len() {
+        0 => {
+            if proc_locks_path != Path::new(LIVE_PROC_LOCKS) {
+                find_lock_holder(proc_locks_path, maj, min, ino)
+            } else {
+                Ok(None)
+            }
+        }
         1 => Ok(holders.into_iter().next()),
         _ => Err(io::Error::other(
             "multiple lock holders detected for presence lock",
@@ -513,7 +610,8 @@ pub fn list_agy_sessions(
                 if seen_convs.contains(&conversation_id) {
                     continue;
                 }
-                let holder_pid = match get_presence_lock_holder(
+                let holder_pid = match get_presence_lock_holder_in_proc(
+                    &config.proc_root,
                     &config.presence_dir,
                     &config.proc_locks_path,
                     &conversation_id,
@@ -1581,11 +1679,13 @@ pub fn is_conversation_proc_watched(config: &AgyConfig, conv_id: &str) -> bool {
     use std::os::unix::fs::MetadataExt;
     let target_dev = meta.dev();
     let target_ino = meta.ino();
-    let maj = dev_major(target_dev);
-    let min = dev_minor(target_dev);
 
-    let Ok(Some(holder_pid)) = find_lock_holder(&config.proc_locks_path, maj, min, target_ino)
-    else {
+    let Ok(Some(holder_pid)) = find_lock_holder_fdinfo(
+        &config.proc_root,
+        &config.proc_locks_path,
+        target_dev,
+        target_ino,
+    ) else {
         return false;
     };
 
@@ -1654,10 +1754,10 @@ fn eligible_holder(
     use std::os::unix::fs::MetadataExt;
     let meta = fs::metadata(config.presence_dir.join(format!("{conv_id}.lock"))).ok()?;
     let (target_dev, target_ino) = (meta.dev(), meta.ino());
-    let holder_pid = find_lock_holder(
+    let holder_pid = find_lock_holder_fdinfo(
+        &config.proc_root,
         &config.proc_locks_path,
-        dev_major(target_dev),
-        dev_minor(target_dev),
+        target_dev,
         target_ino,
     )
     .ok()??;
@@ -2397,6 +2497,159 @@ mod tests {
             0
         );
         assert_eq!(holder(), Some(std::process::id()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn every_live_path_reader_survives_forced_missing_line_in_proc_locks() {
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::io::AsRawFd;
+
+        let dir = tempfile::tempdir().unwrap();
+        let presence_dir = dir.path().join("presence");
+        fs::create_dir_all(&presence_dir).unwrap();
+        let conv_id = "xr2-missing-line-conv";
+        let lock_path = presence_dir.join(format!("{conv_id}.lock"));
+        let f = fs::File::create(&lock_path).unwrap();
+        let meta = f.metadata().unwrap();
+        let (dev, ino) = (meta.dev(), meta.ino());
+        let (maj, min) = (dev_major(dev), dev_minor(dev));
+
+        // Forced-missing-line control: a proc_locks file where the target lock's line is omitted.
+        let missing_line_locks = dir.path().join("locks_missing_target");
+        fs::write(&missing_line_locks, "").unwrap();
+
+        let my_pid = std::process::id();
+        let my_uid = current_uid();
+        let my_exe = std::env::current_exe().unwrap();
+        let config = AgyConfig {
+            presence_dir: presence_dir.clone(),
+            proc_locks_path: missing_line_locks.clone(),
+            proc_root: PathBuf::from("/proc"),
+            agy_bin: "agy".to_string(),
+            trusted_agy_exes: vec![my_exe.clone()],
+            brain_dir: PathBuf::new(),
+        };
+        let store = new_agy_store();
+
+        // Before taking the flock, every reader reports no holder.
+        assert_eq!(
+            attested_lock_holder(Path::new("/proc"), &missing_line_locks, my_pid, dev, ino)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            get_presence_lock_holder(&presence_dir, &missing_line_locks, conv_id).unwrap(),
+            None
+        );
+        assert!(list_agy_sessions(&config, &store, &SessionsQuery::default()).is_empty());
+        assert!(!is_conversation_proc_watched(&config, conv_id));
+        assert!(eligible_agy_conversations(&config, &store).is_empty());
+
+        // Acquire the kernel flock on `lock_path`.
+        assert_eq!(
+            unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+
+        // Snapshot real `/proc/locks` and strip our lock's line to simulate a torn `/proc/locks`
+        // read where the kernel seq_file skipped our line.
+        let live_locks = fs::read_to_string(LIVE_PROC_LOCKS).unwrap();
+        let stripped: String = live_locks
+            .lines()
+            .filter(|l| {
+                !matches!(parse_locks_line(l), Some((_, ma, mi, i)) if (ma, mi, i) == (maj, min, ino))
+            })
+            .map(|l| format!("{l}\n"))
+            .collect();
+        fs::write(&missing_line_locks, &stripped).unwrap();
+        assert_eq!(
+            find_lock_holder(&missing_line_locks, maj, min, ino).unwrap(),
+            None,
+            "forced-missing-line control must have no line for target lock in proc_locks"
+        );
+
+        // 1. verify_registration_peer (`attested_lock_holder`) succeeds via fdinfo despite missing line.
+        let req = AgyRegisterRequest {
+            conversation_id: conv_id.to_string(),
+            ls_address: "127.0.0.1:41111".to_string(),
+            csrf_token: "tok".to_string(),
+        };
+        let reg = verify_registration(
+            Path::new("/proc"),
+            &missing_line_locks,
+            &presence_dir,
+            std::slice::from_ref(&my_exe),
+            my_uid,
+            my_uid,
+            my_pid,
+            &req,
+        )
+        .expect("XR2: verify_registration must succeed from fdinfo when proc_locks omits line");
+        assert_eq!(reg.pid, my_pid);
+
+        // 2. attest_mcp_caller_peer (`attested_lock_holder`) succeeds via fdinfo despite missing line.
+        let (mcp_reg, mcp_conv) = attest_mcp_caller(
+            Path::new("/proc"),
+            &missing_line_locks,
+            &presence_dir,
+            std::slice::from_ref(&my_exe),
+            my_uid,
+            my_uid,
+            my_pid,
+        )
+        .expect("XR2: attest_mcp_caller must succeed from fdinfo when proc_locks omits line");
+        assert_eq!(mcp_reg.pid, my_pid);
+        assert_eq!(mcp_conv, conv_id);
+
+        // 3. Listing (`get_presence_lock_holder` and `list_agy_sessions`) finds holder via fdinfo.
+        assert_eq!(
+            get_presence_lock_holder(&presence_dir, &missing_line_locks, conv_id).unwrap(),
+            Some(my_pid),
+            "XR2: get_presence_lock_holder must find holder from fdinfo when proc_locks omits line"
+        );
+        let listed = list_agy_sessions(&config, &store, &SessionsQuery::default());
+        assert_eq!(
+            listed.len(),
+            1,
+            "XR2: list_agy_sessions must list unregistered holder from fdinfo when proc_locks omits line"
+        );
+        assert_eq!(listed[0].session_id, conv_id);
+        assert_eq!(listed[0].pid, my_pid);
+
+        // 4. Hook watch check (`is_conversation_proc_watched`) succeeds via fdinfo despite missing line.
+        assert!(
+            is_conversation_proc_watched(&config, conv_id),
+            "XR2: is_conversation_proc_watched must return true from fdinfo when proc_locks omits line"
+        );
+
+        // 5. Watcher eligibility (`eligible_agy_conversations` and `scan_and_register_agy_proc` ->
+        // `eligible_holder`) keeps `conv_id` eligible via fdinfo despite missing line.
+        assert_eq!(
+            eligible_agy_conversations(&config, &store),
+            vec![conv_id.to_string()],
+            "XR2: eligible_agy_conversations must include conv_id from fdinfo when proc_locks omits line"
+        );
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::init_db(&conn).unwrap();
+        let db = Arc::new(Mutex::new(conn));
+        let mut watch = AgyProcWatch::default();
+        let still = scan_and_register_agy_proc(
+            &config,
+            &store,
+            &db,
+            my_uid,
+            &[conv_id.to_string()],
+            &mut watch,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            still,
+            vec![conv_id.to_string()],
+            "XR2: scan_and_register_agy_proc must retain conv_id from fdinfo when proc_locks omits line"
+        );
     }
 
     #[test]
