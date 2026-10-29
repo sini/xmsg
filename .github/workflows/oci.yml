@@ -17,6 +17,11 @@ jobs:
   oci:
     runs-on: ubuntu-latest
     if: github.repository == 'sini/xmsg' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
+    # An explicit `shell: bash` runs steps under `bash -eo pipefail`; the implicit default
+    # (`bash -e`) lets a failed `nix build | tee` pass.
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
