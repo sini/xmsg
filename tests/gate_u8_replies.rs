@@ -191,6 +191,7 @@ exit 0
         proc_root: proc_root.clone(),
         agy_bin: fake_agy_bin.to_string_lossy().to_string(),
         trusted_agy_exes: Vec::new(),
+            brain_dir: std::path::PathBuf::new(),
     };
 
     let state = Arc::new(AppState {

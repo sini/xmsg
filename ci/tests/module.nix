@@ -324,18 +324,60 @@ in
           args = [ "mcp" ];
         };
         skill = ../../nix/modules/skills/xmsg;
-        hooks.xmsg-register.PreInvocation = [
-          {
-            type = "command";
-            command = "${exe} register agy --hook";
-          }
-        ];
-        hooksCustomLabel.xmsg-register.PreInvocation = [
-          {
-            type = "command";
-            command = "${exe} register agy --hook --label work";
-          }
-        ];
+        hooks.xmsg-register = {
+          PreInvocation = [
+            {
+              type = "command";
+              command = "${exe} register agy --hook --event pre-invocation";
+            }
+          ];
+          PreToolUse = [
+            {
+              matcher = "call_mcp_tool|mcp_xmsg_.*";
+              hooks = [
+                {
+                  type = "command";
+                  command = "${exe} register agy --hook --event pre-tool-use";
+                  timeout = 5;
+                }
+              ];
+            }
+          ];
+          Stop = [
+            {
+              type = "command";
+              command = "${exe} register agy --hook --event stop";
+              timeout = 5;
+            }
+          ];
+        };
+        hooksCustomLabel.xmsg-register = {
+          PreInvocation = [
+            {
+              type = "command";
+              command = "${exe} register agy --hook --event pre-invocation --label work";
+            }
+          ];
+          PreToolUse = [
+            {
+              matcher = "call_mcp_tool|mcp_xmsg_.*";
+              hooks = [
+                {
+                  type = "command";
+                  command = "${exe} register agy --hook --event pre-tool-use";
+                  timeout = 5;
+                }
+              ];
+            }
+          ];
+          Stop = [
+            {
+              type = "command";
+              command = "${exe} register agy --hook --event stop";
+              timeout = 5;
+            }
+          ];
+        };
       };
     };
     test-pi = {

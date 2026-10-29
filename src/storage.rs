@@ -2179,6 +2179,51 @@ pub fn subagent_reassert_resume(
     Ok(())
 }
 
+/// Sets `turn_pid` and `turn_start` on an existing `(parent, agent_id)` row (HA9-A.agy §2.4).
+pub fn subagent_set_turn(
+    conn: &Connection,
+    parent: &str,
+    agent_id: &str,
+    turn_pid: u32,
+    turn_start: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE subagents SET turn_pid = ?3, turn_start = ?4 WHERE parent = ?1 AND agent_id = ?2",
+        params![parent, agent_id, turn_pid, turn_start],
+    )?;
+    Ok(())
+}
+
+/// Upserts an agy subagent row `(parent, agent_id)` with its descriptor-computed `name`
+/// and `agent_type`, displacing any other row under `parent` that previously held `name`
+/// without altering `turn_pid` / `turn_start` (HA9-A.agy §2.2, §2.3).
+pub fn subagent_upsert_agy(
+    conn: &Connection,
+    parent: &str,
+    agent_id: &str,
+    name: Option<&str>,
+    agent_type: Option<&str>,
+    now: i64,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    if let Some(n) = name {
+        tx.execute(
+            "UPDATE subagents SET name = NULL WHERE parent = ?1 AND name = ?2 AND agent_id != ?3",
+            params![parent, n, agent_id],
+        )?;
+    }
+    tx.execute(
+        "INSERT INTO subagents (parent, agent_id, name, agent_type, tool_use_id, bound_at, turn_pid, turn_start) \
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, NULL) \
+         ON CONFLICT(parent, agent_id) DO UPDATE SET \
+             name = ?3, \
+             agent_type = COALESCE(?4, subagents.agent_type)",
+        params![parent, agent_id, name, agent_type, now],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Clears `turn_pid` and `turn_start` on `SubagentStop` (§2.2).
 pub fn subagent_stop_turn(conn: &Connection, parent: &str, agent_id: &str) -> Result<()> {
     conn.execute(
@@ -2188,13 +2233,21 @@ pub fn subagent_stop_turn(conn: &Connection, parent: &str, agent_id: &str) -> Re
     Ok(())
 }
 
-/// Clears `turn_pid` and `turn_start` for every subagent row under `parent` (HA9-A.oc §2.2, C7:
-/// `Frame::Register` of `parent` clears stale turn columns in the same batch).
+/// Clears `turn_pid` and `turn_start` for every subagent row under `parent` (HA9-A.oc §2.2, C7,
+/// HA9-A.agy D9: re-attestation of `parent` clears stale turn columns in the same batch).
 pub fn subagent_clear_turns_for_parent(conn: &Connection, parent: &str) -> Result<()> {
     conn.execute(
         "UPDATE subagents SET turn_pid = NULL, turn_start = NULL WHERE parent = ?1",
         params![parent],
     )?;
+    Ok(())
+}
+
+/// Deletes only the `subagents` rows under `parent`, sparing `instance_queue` rows
+/// (HA9-A.agy §2.4, D9, E1: eviction of an agy parent deletes `subagents` rows only, never
+/// `instance_queue` rows).
+pub fn subagent_delete_rows_only_for_parent(conn: &Connection, parent: &str) -> Result<()> {
+    conn.execute("DELETE FROM subagents WHERE parent = ?1", params![parent])?;
     Ok(())
 }
 

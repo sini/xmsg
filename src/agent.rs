@@ -804,11 +804,23 @@ pub async fn run_agent_server_with_listener(
                                 }
                                 crate::agy::notify_agy_escrow();
                                 if let Ok(db) = state_clone.db.lock() {
+                                    let now = crate::storage::now_epoch_secs();
                                     let _ = crate::storage::mark_live(
                                         &db,
                                         &session_key,
                                         "agy",
-                                        crate::storage::now_epoch_secs(),
+                                        now,
+                                    );
+                                    let _ = crate::agy::rescan_agy_subagents(
+                                        &db,
+                                        &state_clone.agy_config.effective_brain_dir(),
+                                        &session_key,
+                                        now,
+                                    );
+                                    let _ = crate::agy::sweep_agy_subagent_queues(
+                                        &db,
+                                        &state_clone.agy_config.proc_root,
+                                        &state_clone.agy_store,
                                     );
                                 }
                                 let _ = crate::claim::sync_claims(
@@ -830,7 +842,15 @@ pub async fn run_agent_server_with_listener(
                                 });
                                 let _ = writer.write_all(format!("{resp}\n").as_bytes()).await;
                                 let _ = writer.flush().await;
-                                if restored_creds {
+                                let has_creds = restored_creds
+                                    || state_clone
+                                        .agy_store
+                                        .read()
+                                        .unwrap()
+                                        .get(&session_key)
+                                        .and_then(|info| info.credentials.as_ref())
+                                        .is_some_and(|c| !c.is_stale);
+                                if has_creds {
                                     crate::agy::flush_agy_queue(
                                         &state_clone.agy_config,
                                         &state_clone.agy_store,
@@ -1065,14 +1085,25 @@ pub fn resolve_as_agent(
         .db
         .lock()
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    let binding = crate::storage::get_subagent(&db, &parent.session_id, agent_id)
+    let maybe_binding = match crate::storage::get_subagent(&db, &parent.session_id, agent_id)
         .map_err(|e| AppError::Internal(e.to_string()))?
-        .ok_or_else(|| {
-            AppError::NotRecipient(format!(
-                "subagent '{agent_id}' is not bound under '{}'",
-                parent.session_id
-            ))
-        })?;
+    {
+        Some(b) => Some(b),
+        None if parent.harness == "agy" => crate::agy::admit_agy(
+            &db,
+            &state.agy_config.effective_brain_dir(),
+            &parent.session_id,
+            agent_id,
+            crate::storage::now_epoch_secs(),
+        )?,
+        None => None,
+    };
+    let binding = maybe_binding.ok_or_else(|| {
+        AppError::NotRecipient(format!(
+            "subagent '{agent_id}' is not bound under '{}'",
+            parent.session_id
+        ))
+    })?;
     Ok(Session {
         session_id: format!("{}/{}", binding.parent, binding.agent_id),
         name: binding.display_label().map(str::to_string),
@@ -1146,9 +1177,9 @@ async fn handle_subagent_frame(
     to: Option<&str>,
     pin_name: Option<&str>,
 ) -> Result<serde_json::Value, AppError> {
-    if parent.harness != "claude" {
+    if parent.harness != "claude" && parent.harness != "agy" {
         return Err(AppError::BadRequest(
-            "subagent frame on agent.sock is only valid for Claude sessions".to_string(),
+            "subagent frame on agent.sock is only valid for Claude or agy sessions".to_string(),
         ));
     }
     let agent_id = agent_id.trim();
@@ -1158,8 +1189,126 @@ async fn handle_subagent_frame(
         ));
     }
     let now = crate::storage::now_epoch_secs();
+    if parent.harness == "agy" {
+        return match event {
+            "start" | "SubagentStart" | "subagent_start" => {
+                if agent_id == parent.session_id {
+                    return Ok(serde_json::json!({
+                        "status": "ok",
+                        "role": "parent",
+                    }));
+                }
+                let (turn_pid, turn_start) = {
+                    let store_lock = state.agy_store.read().unwrap();
+                    store_lock
+                        .values()
+                        .find(|info| {
+                            info.session_key == parent.session_id
+                                || info.conversation_id == parent.session_id
+                        })
+                        .map(|info| (info.pid, info.starttime.clone()))
+                        .ok_or_else(|| {
+                            AppError::NotRecipient(format!(
+                                "parent agy session '{}' is not registered",
+                                parent.session_id
+                            ))
+                        })?
+                };
+                let binding = {
+                    let db = state
+                        .db
+                        .lock()
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                    let b = crate::agy::admit_agy(
+                        &db,
+                        &state.agy_config.effective_brain_dir(),
+                        &parent.session_id,
+                        agent_id,
+                        now,
+                    )?
+                    .ok_or_else(|| {
+                        AppError::NotRecipient(format!(
+                            "subagent '{agent_id}' is not bound under '{}'",
+                            parent.session_id
+                        ))
+                    })?;
+                    crate::storage::subagent_set_turn(
+                        &db,
+                        &parent.session_id,
+                        agent_id,
+                        turn_pid,
+                        &turn_start,
+                    )
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                    b
+                };
+                let child_part = binding.name.as_deref().unwrap_or(&binding.agent_id);
+                let addr = format!(
+                    "{}/{child_part}@{}",
+                    binding.parent, state.node_name
+                );
+                Ok(serde_json::json!({
+                    "status": "ok",
+                    "role": "subagent",
+                    "address": addr,
+                }))
+            }
+            "stop" | "SubagentStop" | "subagent_stop" => {
+                if agent_id == parent.session_id {
+                    return Ok(serde_json::json!({
+                        "status": "ok",
+                        "role": "parent",
+                    }));
+                }
+                {
+                    let db = state
+                        .db
+                        .lock()
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                    crate::storage::subagent_stop_turn(&db, &parent.session_id, agent_id)
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                    let _ = crate::agy::sweep_agy_subagent_queues(
+                        &db,
+                        &state.agy_config.proc_root,
+                        &state.agy_store,
+                    );
+                }
+                let has_creds = state
+                    .agy_store
+                    .read()
+                    .unwrap()
+                    .values()
+                    .any(|info| {
+                        (info.session_key == parent.session_id
+                            || info.conversation_id == parent.session_id)
+                            && info.credentials.as_ref().is_some_and(|c| !c.is_stale)
+                    });
+                if has_creds {
+                    crate::agy::flush_agy_queue(
+                        &state.agy_config,
+                        &state.agy_store,
+                        &state.db,
+                        &parent.session_id,
+                        &parent.session_id,
+                        state.reply_ttl,
+                    )
+                    .await;
+                }
+                Ok(serde_json::json!({ "status": "ok" }))
+            }
+            other => Err(AppError::BadRequest(format!(
+                "unknown agy subagent event '{other}'"
+            ))),
+        };
+    }
     match event {
         "start" | "SubagentStart" | "subagent_start" => {
+            if agent_id == parent.session_id {
+                return Ok(serde_json::json!({
+                    "status": "ok",
+                    "role": "parent",
+                }));
+            }
             let turn_start =
                 process::starttime(&state.agy_config.proc_root, parent.pid).map_err(|e| {
                     AppError::Internal(format!(
@@ -1177,7 +1326,7 @@ async fn handle_subagent_frame(
             let effective_type = agent_type
                 .filter(|s| !s.is_empty())
                 .or(meta_type.as_deref().filter(|s| !s.is_empty()));
-            {
+            let child_part = {
                 let db = state
                     .db
                     .lock()
@@ -1194,8 +1343,18 @@ async fn handle_subagent_frame(
                     now,
                 )
                 .map_err(|e| AppError::Internal(e.to_string()))?;
-            }
-            Ok(serde_json::json!({ "status": "ok" }))
+                crate::storage::get_subagent(&db, &parent.session_id, agent_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|b| b.name)
+                    .unwrap_or_else(|| agent_id.to_string())
+            };
+            let addr = format!("{}/{child_part}@{}", parent.session_id, state.node_name);
+            Ok(serde_json::json!({
+                "status": "ok",
+                "role": "subagent",
+                "address": addr,
+            }))
         }
         "bind_spawn" | "post_agent" | "spawn" => {
             let valid_name = name.filter(|n| crate::claim::validate_subagent_name(n).is_ok());

@@ -505,16 +505,37 @@ in
       # module owns the whole file.
       home.file.".gemini/config/hooks.json".source = pkgs.writeText "hooks.json" (
         builtins.toJSON {
-          xmsg-register.PreInvocation = [
-            {
-              type = "command";
-              command =
-                "${exe} register agy --hook"
-                + lib.optionalString (
-                  cfg.harnesses.agy.label != "agy"
-                ) " --label ${lib.escapeShellArg cfg.harnesses.agy.label}";
-            }
-          ];
+          xmsg-register = {
+            PreInvocation = [
+              {
+                type = "command";
+                command =
+                  "${exe} register agy --hook --event pre-invocation"
+                  + lib.optionalString (
+                    cfg.harnesses.agy.label != "agy"
+                  ) " --label ${lib.escapeShellArg cfg.harnesses.agy.label}";
+              }
+            ];
+            PreToolUse = [
+              {
+                matcher = "call_mcp_tool|mcp_xmsg_.*";
+                hooks = [
+                  {
+                    type = "command";
+                    command = "${exe} register agy --hook --event pre-tool-use";
+                    timeout = 5;
+                  }
+                ];
+              }
+            ];
+            Stop = [
+              {
+                type = "command";
+                command = "${exe} register agy --hook --event stop";
+                timeout = 5;
+              }
+            ];
+          };
         }
       );
     })

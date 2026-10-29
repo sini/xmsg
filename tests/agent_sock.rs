@@ -177,6 +177,7 @@ fn test_resolve_caller_session_ancestor_walk() {
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
+            brain_dir: std::path::PathBuf::new(),
     };
     let agy_store = new_agy_store();
     let pi_store = new_pi_store();
@@ -294,6 +295,7 @@ fn resolve_with_middle_link(
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
+            brain_dir: std::path::PathBuf::new(),
     };
     let stat = |pid: u32, ppid: u32, start: &str| {
         let dir = proc_root.join(pid.to_string());
@@ -455,6 +457,7 @@ async fn test_agent_sock_reply_and_send_flow() {
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
+            brain_dir: std::path::PathBuf::new(),
     };
 
     let app_state = Arc::new(AppState {

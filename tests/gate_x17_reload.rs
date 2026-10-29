@@ -128,6 +128,7 @@ async fn create_reloader_node(
         proc_root,
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
+            brain_dir: std::path::PathBuf::new(),
     };
     let agy_store = new_agy_store();
     let pi_store = new_pi_store();

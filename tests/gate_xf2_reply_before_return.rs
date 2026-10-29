@@ -52,6 +52,7 @@ fn build_test_state(node_name: &str) -> (TempDir, Arc<AppState>) {
         proc_root,
         agy_bin: "false".to_string(),
         trusted_agy_exes: Vec::new(),
+            brain_dir: std::path::PathBuf::new(),
     };
 
     let db_conn = rusqlite::Connection::open_in_memory().unwrap();

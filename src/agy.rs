@@ -234,17 +234,32 @@ pub fn locks_supported(proc_locks_path: &Path) -> bool {
 #[derive(Debug, Clone)]
 pub struct AgyConfig {
     pub presence_dir: PathBuf,
+    pub brain_dir: PathBuf,
     pub proc_locks_path: PathBuf,
     pub proc_root: PathBuf,
     pub agy_bin: String,
     pub trusted_agy_exes: Vec<PathBuf>,
 }
 
+impl AgyConfig {
+    pub fn effective_brain_dir(&self) -> PathBuf {
+        if !self.brain_dir.as_os_str().is_empty() {
+            self.brain_dir.clone()
+        } else {
+            self.presence_dir
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("brain")
+        }
+    }
+}
+
 impl Default for AgyConfig {
     fn default() -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         Self {
-            presence_dir: PathBuf::from(home).join(".gemini/antigravity-cli/presence"),
+            presence_dir: PathBuf::from(&home).join(".gemini/antigravity-cli/presence"),
+            brain_dir: PathBuf::from(home).join(".gemini/antigravity-cli/brain"),
             proc_locks_path: PathBuf::from(LIVE_PROC_LOCKS),
             proc_root: PathBuf::from(crate::process::LIVE_PROC_ROOT),
             agy_bin: "agy".to_string(),
@@ -470,7 +485,16 @@ pub fn list_agy_sessions(
     if !dead.is_empty() {
         let mut store_lock = store.write().unwrap();
         for d in dead {
-            store_lock.remove(&d);
+            if let Some(removed) = store_lock.remove(&d) {
+                record_evicted_agy_parent(&removed.session_key);
+                if !removed.conversation_id.is_empty()
+                    && removed.conversation_id != removed.session_key
+                {
+                    record_evicted_agy_parent(&removed.conversation_id);
+                }
+            } else {
+                record_evicted_agy_parent(&d);
+            }
         }
     }
 
@@ -925,6 +949,352 @@ pub fn attest_mcp_caller_peer(
     ))
 }
 
+static EVICTED_AGY_PARENTS: std::sync::OnceLock<Mutex<Vec<String>>> = std::sync::OnceLock::new();
+
+pub fn record_evicted_agy_parent(parent_id: &str) {
+    if parent_id.is_empty() {
+        return;
+    }
+    let list = EVICTED_AGY_PARENTS.get_or_init(|| Mutex::new(Vec::new()));
+    if let Ok(mut guard) = list.lock() {
+        guard.push(parent_id.to_string());
+    }
+}
+
+/// Purges `subagents` rows (sparing `instance_queue` rows per D9, E1) for any agy parent
+/// that `list_agy_sessions` or `deliver_agy_envelope` evicted from `store`, or whose entry in
+/// `store` is no longer live.
+pub fn purge_evicted_agy_subagents(
+    conn: &rusqlite::Connection,
+    proc_root: &Path,
+    store: &AgyStore,
+) {
+    let mut newly_dead = Vec::new();
+    {
+        let store_lock = store.read().unwrap();
+        for (id, info) in store_lock.iter() {
+            if !is_agy_session_alive(proc_root, info) {
+                newly_dead.push(id.clone());
+            }
+        }
+    }
+    if !newly_dead.is_empty() {
+        let mut store_lock = store.write().unwrap();
+        for d in newly_dead {
+            if let Some(removed) = store_lock.remove(&d) {
+                record_evicted_agy_parent(&removed.session_key);
+                if !removed.conversation_id.is_empty()
+                    && removed.conversation_id != removed.session_key
+                {
+                    record_evicted_agy_parent(&removed.conversation_id);
+                }
+            } else {
+                record_evicted_agy_parent(&d);
+            }
+        }
+    }
+    let drained: Vec<String> = match EVICTED_AGY_PARENTS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+    {
+        Ok(mut guard) => std::mem::take(&mut *guard),
+        Err(_) => Vec::new(),
+    };
+    if drained.is_empty() {
+        return;
+    }
+    let store_lock = store.read().unwrap();
+    for parent_id in drained {
+        let still_live = store_lock.values().any(|info| {
+            (info.session_key == parent_id || info.conversation_id == parent_id)
+                && is_agy_session_alive(proc_root, info)
+        });
+        if !still_live {
+            let _ = crate::storage::subagent_delete_rows_only_for_parent(conn, &parent_id);
+        }
+    }
+}
+
+/// Parsed descriptor from `brain/<P>/.system_generated/subagents/<X>.json` (HA9-A.agy §2.2).
+#[derive(Debug, Clone)]
+pub struct AgySubagentDescriptor {
+    pub conversation_id: String,
+    pub role: Option<String>,
+    pub type_name: Option<String>,
+    pub spawn_step_index: i64,
+}
+
+fn read_agy_descriptor_file(path: &Path, expected_id: &str) -> Option<AgySubagentDescriptor> {
+    let raw = fs::read_to_string(path).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let conv_id = val
+        .get("conversationId")
+        .or_else(|| val.get("id"))
+        .and_then(|v| v.as_str())?;
+    if conv_id != expected_id {
+        return None;
+    }
+    let raw_role = val
+        .get("subagentDescriptor")
+        .and_then(|d| d.get("role"))
+        .or_else(|| val.get("role"))
+        .and_then(|v| v.as_str());
+    let role = raw_role
+        .map(str::trim)
+        .filter(|r| crate::claim::validate_subagent_name(r).is_ok())
+        .map(str::to_string);
+    let type_name = val
+        .get("subagentDescriptor")
+        .and_then(|d| d.get("typeName"))
+        .or_else(|| val.get("typeName"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let spawn_step_index = val
+        .get("spawnStepIndex")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    Some(AgySubagentDescriptor {
+        conversation_id: conv_id.to_string(),
+        role,
+        type_name,
+        spawn_step_index,
+    })
+}
+
+fn read_agy_descriptors_for_parent(brain_dir: &Path, parent_id: &str) -> Vec<AgySubagentDescriptor> {
+    if !crate::claim::is_uuid_shaped(parent_id) {
+        return Vec::new();
+    }
+    let dir = brain_dir
+        .join(parent_id)
+        .join(".system_generated")
+        .join("subagents");
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !crate::claim::is_uuid_shaped(stem) {
+            continue;
+        }
+        if let Some(desc) = read_agy_descriptor_file(&path, stem) {
+            out.push(desc);
+        }
+    }
+    out.sort_by(|a, b| a.conversation_id.cmp(&b.conversation_id));
+    out
+}
+
+/// Resolves role collisions across all descriptors under one parent P (HA9-A.agy §2.3, OQ5):
+/// two children with one role under one P resolve to the descriptor with the greatest
+/// `spawnStepIndex`; a tie binds the role to neither.
+fn compute_agy_effective_names(
+    descriptors: &[AgySubagentDescriptor],
+) -> HashMap<String, Option<String>> {
+    let mut max_step_by_role: HashMap<&str, (i64, usize)> = HashMap::new();
+    for d in descriptors {
+        if let Some(ref role) = d.role {
+            match max_step_by_role.get_mut(role.as_str()) {
+                None => {
+                    max_step_by_role.insert(role.as_str(), (d.spawn_step_index, 1));
+                }
+                Some((max_step, count)) => {
+                    if d.spawn_step_index > *max_step {
+                        *max_step = d.spawn_step_index;
+                        *count = 1;
+                    } else if d.spawn_step_index == *max_step {
+                        *count += 1;
+                    }
+                }
+            }
+        }
+    }
+    let mut out = HashMap::with_capacity(descriptors.len());
+    for d in descriptors {
+        let effective = d.role.as_ref().and_then(|role| {
+            let (max_step, count) = max_step_by_role.get(role.as_str())?;
+            if d.spawn_step_index == *max_step && *count == 1 {
+                Some(role.clone())
+            } else {
+                None
+            }
+        });
+        out.insert(d.conversation_id.clone(), effective);
+    }
+    out
+}
+
+/// Admits `(parent_id, child_id)` from agy's own descriptor file (HA9-A.agy §2.2, §2.3, E4).
+/// Refuses a `child_id` that is not UUID-shaped before forming any path, and otherwise
+/// succeeds only if `brain/<P>/.system_generated/subagents/<X>.json` exists and its
+/// `conversationId` equals `child_id`.
+pub fn admit_agy(
+    conn: &rusqlite::Connection,
+    brain_dir: &Path,
+    parent_id: &str,
+    child_id: &str,
+    now: i64,
+) -> Result<Option<crate::storage::SubagentBinding>, AppError> {
+    if !crate::claim::is_uuid_shaped(parent_id) || !crate::claim::is_uuid_shaped(child_id) {
+        return Ok(None);
+    }
+    let desc_path = brain_dir
+        .join(parent_id)
+        .join(".system_generated")
+        .join("subagents")
+        .join(format!("{child_id}.json"));
+    let Some(target_desc) = read_agy_descriptor_file(&desc_path, child_id) else {
+        return Ok(None);
+    };
+    let all_descriptors = read_agy_descriptors_for_parent(brain_dir, parent_id);
+    let effective_names = compute_agy_effective_names(&all_descriptors);
+
+    // Sync any sibling rows whose role winner changed (e.g. a later `spawnStepIndex` or tie).
+    for d in &all_descriptors {
+        if d.conversation_id == child_id {
+            continue;
+        }
+        if crate::storage::get_subagent(conn, parent_id, &d.conversation_id)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .is_some()
+        {
+            let eff_name = effective_names
+                .get(&d.conversation_id)
+                .and_then(|n| n.as_deref());
+            crate::storage::subagent_upsert_agy(
+                conn,
+                parent_id,
+                &d.conversation_id,
+                eff_name,
+                d.type_name.as_deref(),
+                now,
+            )
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        }
+    }
+
+    let eff_name = effective_names
+        .get(child_id)
+        .and_then(|n| n.as_deref());
+    crate::storage::subagent_upsert_agy(
+        conn,
+        parent_id,
+        child_id,
+        eff_name,
+        target_desc.type_name.as_deref(),
+        now,
+    )
+    .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    crate::storage::get_subagent(conn, parent_id, child_id)
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// Rescans `brain/<P>/.system_generated/subagents/*.json` at P's registration or `mcp_start`,
+/// clearing the turn columns of every row under P in the same batch (HA9-A.agy §2.2, §2.4, D9).
+pub fn rescan_agy_subagents(
+    conn: &rusqlite::Connection,
+    brain_dir: &Path,
+    parent_id: &str,
+    now: i64,
+) -> Result<(), AppError> {
+    if !crate::claim::is_uuid_shaped(parent_id) {
+        return Ok(());
+    }
+    crate::storage::subagent_clear_turns_for_parent(conn, parent_id)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let all_descriptors = read_agy_descriptors_for_parent(brain_dir, parent_id);
+    let effective_names = compute_agy_effective_names(&all_descriptors);
+    for d in &all_descriptors {
+        let eff_name = effective_names
+            .get(&d.conversation_id)
+            .and_then(|n| n.as_deref());
+        crate::storage::subagent_upsert_agy(
+            conn,
+            parent_id,
+            &d.conversation_id,
+            eff_name,
+            d.type_name.as_deref(),
+            now,
+        )
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Moves undelivered `instance_queue` messages for not-in-turn subagents of live `agy` parents
+/// into their parent's `agy_pending_messages` queue with the `to=<P>/<child> agent_id=<X>`
+/// header (HA9-A.agy §2.4, §2.5, E1). While an agy parent is not live in `store`, its child's
+/// `instance_queue` rows remain untouched.
+pub fn sweep_agy_subagent_queues(
+    conn: &rusqlite::Connection,
+    proc_root: &Path,
+    store: &AgyStore,
+) -> Result<(), AppError> {
+    let now = crate::storage::now_epoch_secs();
+    let all_subagents = crate::storage::list_all_subagents(conn)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    if all_subagents.is_empty() {
+        return Ok(());
+    }
+    let live_parents: HashSet<String> = {
+        let store_lock = store.read().unwrap();
+        let mut set = HashSet::new();
+        for info in store_lock.values() {
+            if is_agy_session_alive(proc_root, info) {
+                if !info.session_key.is_empty() {
+                    set.insert(info.session_key.clone());
+                }
+                if !info.conversation_id.is_empty() {
+                    set.insert(info.conversation_id.clone());
+                }
+            }
+        }
+        set
+    };
+    for sub in all_subagents {
+        if crate::claim::is_subagent_in_turn(proc_root, &sub) {
+            continue;
+        }
+        if !live_parents.contains(&sub.parent) {
+            continue;
+        }
+        let sub_queue_id = format!("{}/{}", sub.parent, sub.agent_id);
+        let child_part = sub.name.as_deref().unwrap_or(&sub.agent_id);
+        let header = format!("to={}/{} agent_id={}", sub.parent, child_part, sub.agent_id);
+        for message in crate::storage::take_queued(conn, &sub_queue_id, now)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+        {
+            let body_with_header = format!("{header}\n{}", message.body);
+            let agy_msg = crate::storage::AgyPendingMessage {
+                id: message.id.clone(),
+                session_id: sub.parent.clone(),
+                created_at: message.created_at,
+                from_name: message.from_name.clone(),
+                bytes: body_with_header.len(),
+                text: body_with_header,
+                envelope: format!(
+                    "[xmsg] from={} message_id={}\n{header}\n\n{}",
+                    message.from_name, message.id, message.body
+                ),
+                delivered_at: None,
+            };
+            crate::storage::insert_agy_message(conn, &agy_msg)
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Delivers what is queued for a conversation that has just registered. A message older
 /// than `reply_ttl` is dropped unread, never delivered (A14).
 pub async fn flush_agy_queue(
@@ -943,9 +1313,15 @@ pub async fn flush_agy_queue(
                 return;
             }
         };
+        let now = crate::storage::now_epoch_secs();
         // A registration is an observation: the conversation is live now (A14).
-        let _ =
-            crate::storage::mark_live(&db_lock, conv_id, "agy", crate::storage::now_epoch_secs());
+        let _ = crate::storage::mark_live(&db_lock, conv_id, "agy", now);
+        let brain_dir = config.effective_brain_dir();
+        let _ = rescan_agy_subagents(&db_lock, &brain_dir, conv_id, now);
+        if session_key != conv_id {
+            let _ = rescan_agy_subagents(&db_lock, &brain_dir, session_key, now);
+        }
+        let _ = sweep_agy_subagent_queues(&db_lock, &config.proc_root, store);
         if let Err(e) = crate::storage::purge_agy_messages(&db_lock, reply_ttl.as_secs()) {
             tracing::error!("failed to purge expired agy messages: {e}");
             return;
@@ -1071,6 +1447,7 @@ pub async fn deliver_agy_envelope(
             store_lock
                 .retain(|k, v| k != &session.session_id && v.conversation_id != session.session_id);
         }
+        record_evicted_agy_parent(&session.session_id);
         return Err(AppError::Gone {
             session_id: session.session_id.clone(),
             pid: session.pid,

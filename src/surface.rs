@@ -583,15 +583,38 @@ pub(crate) async fn listing_live(
             }
         }
     }
-    for s in crate::agy::list_agy_sessions(local.agy_config, local.agy_store, &query) {
-        out.push(live_entry(
-            &s.session_id,
-            false,
-            "agy",
-            s.name,
-            user,
-            s.started_at as i64,
-        ));
+    let agy_sessions = crate::agy::list_agy_sessions(local.agy_config, local.agy_store, &query);
+    {
+        let db = local.db.lock().map_err(db_err)?;
+        crate::agy::purge_evicted_agy_subagents(&db, &local.agy_config.proc_root, local.agy_store);
+        for s in agy_sessions {
+            let parent_id = s.session_id.clone();
+            let is_registered = s.status != "unregistered";
+            out.push(live_entry(
+                &parent_id,
+                false,
+                "agy",
+                s.name,
+                user,
+                s.started_at as i64,
+            ));
+            if is_registered {
+                for sub in storage::list_subagents_for_parent(&db, &parent_id).map_err(db_err)? {
+                    let child_part = sub.name.as_deref().unwrap_or(&sub.agent_id);
+                    let sub_id = format!("{}/{child_part}", sub.parent);
+                    out.push(FedListEntry {
+                        id: sub_id,
+                        kind: "subagent".to_string(),
+                        harness: Some("agy".to_string()),
+                        label: sub.display_label().and_then(inbox::clean_label),
+                        status: "live".to_string(),
+                        user: user.to_string(),
+                        registered_at: Some(sub.bound_at),
+                        last_seen: None,
+                    });
+                }
+            }
+        }
     }
     let proc_root = &local.agy_config.proc_root;
     for s in crate::pi::list_pi_sessions(proc_root, local.pi_store, &query) {

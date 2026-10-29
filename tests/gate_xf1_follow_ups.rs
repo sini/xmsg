@@ -208,6 +208,7 @@ async fn test_xf1_peerpidfd_rejects_reaped_recycled_root_pid_and_fallback() {
         proc_root: proc_root.clone(),
         agy_bin: "false".to_string(),
         trusted_agy_exes: Vec::new(),
+            brain_dir: std::path::PathBuf::new(),
     };
 
     let db_conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -521,6 +522,7 @@ async fn test_xf1_live_peer_cred_attests_caller() {
         proc_root: proc_root.clone(),
         agy_bin: "false".to_string(),
         trusted_agy_exes: Vec::new(),
+            brain_dir: std::path::PathBuf::new(),
     };
 
     let db_conn = rusqlite::Connection::open_in_memory().unwrap();

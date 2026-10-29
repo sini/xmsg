@@ -99,6 +99,7 @@ async fn test_shipped_binary_register_cli_with_server() {
         proc_root,
         agy_bin: "agy".to_string(),
         trusted_agy_exes: vec![my_exe],
+            brain_dir: std::path::PathBuf::new(),
     };
     let store = new_agy_store();
 

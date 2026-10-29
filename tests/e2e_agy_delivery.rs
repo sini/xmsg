@@ -73,6 +73,7 @@ exit 0
         proc_root,
         agy_bin: fake_agy_bin.to_string_lossy().to_string(),
         trusted_agy_exes: Vec::new(),
+            brain_dir: std::path::PathBuf::new(),
     };
     let agy_store = new_agy_store();
 

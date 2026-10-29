@@ -288,6 +288,7 @@ pub(crate) async fn resolve_target(
         let parent_addr = parent_session.session_id.clone();
         let binding = {
             let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+            crate::agy::purge_evicted_agy_subagents(&conn, proc_root, agy_store);
             storage::resolve_subagent_in(&conn, &parent_addr, child_ref)
                 .map_err(|e| AppError::Internal(e.to_string()))?
                 .ok_or_else(|| AppError::NotFound(format!("{ref_str} (parent '{parent_addr}')")))?
@@ -354,6 +355,9 @@ pub(crate) async fn resolve_target(
         return res.map(|(session, sock)| ResolvedTarget::Claude(session, sock));
     }
     let agy_sessions = crate::agy::list_agy_sessions(agy_config, agy_store, &query);
+    if let Ok(conn) = db.lock() {
+        crate::agy::purge_evicted_agy_subagents(&conn, proc_root, agy_store);
+    }
     if let Some(session) = agy_sessions.iter().find(|s| is_id(&s.session_id)) {
         return Ok(ResolvedTarget::Agy(session.clone()));
     }

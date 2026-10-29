@@ -119,7 +119,8 @@ impl Tree {
             proc_root: self.proc_root.clone(),
             agy_bin: "agy".to_string(),
             trusted_agy_exes: vec![self.trusted_exe.clone()],
-        }
+                brain_dir: std::path::PathBuf::new(),
+    }
     }
 }
 

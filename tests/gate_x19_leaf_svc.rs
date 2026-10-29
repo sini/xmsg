@@ -158,6 +158,7 @@ async fn create_hub_test_node(
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
+            brain_dir: std::path::PathBuf::new(),
     };
 
     let agy_store = new_agy_store();
@@ -312,6 +313,7 @@ async fn create_leaf_test_node(
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
+            brain_dir: std::path::PathBuf::new(),
     };
 
     let agy_store = new_agy_store();

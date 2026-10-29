@@ -76,15 +76,30 @@ pub struct RegisterClaudeArgs {
     pub sock: Option<PathBuf>,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgyHookEvent {
+    PreInvocation,
+    PreToolUse,
+    Stop,
+}
+
 #[derive(Parser, Debug)]
 pub struct RegisterAgyArgs {
     /// Registration socket path (defaults to $XDG_RUNTIME_DIR/xmsg/register.sock; on macOS without it, the Darwin user temp dir)
     #[arg(long, env = "XMSG_REGISTER_SOCK")]
     pub sock: Option<PathBuf>,
 
-    /// Hook mode for agy PreInvocation
+    /// Agent socket path for subagent hook frames (defaults to the directory of `--sock` or $XDG_RUNTIME_DIR/xmsg/agent.sock)
+    #[arg(long, env = "XMSG_AGENT_SOCK")]
+    pub agent_sock: Option<PathBuf>,
+
+    /// Hook mode for agy hooks
     #[arg(long)]
     pub hook: bool,
+
+    /// Hook event when `--hook` is passed
+    #[arg(long, value_enum, default_value_t = AgyHookEvent::PreInvocation)]
+    pub event: AgyHookEvent,
 
     /// URL of xmsg HTTP server (for checking session credentials in hook mode)
     #[arg(long, env = "XMSG_URL", default_value = "http://127.0.0.1:7787")]
@@ -482,13 +497,136 @@ fn check_session_has_credentials(
     Ok(SessionCheckResult::default())
 }
 
+fn run_hook_agy_pre_tool_use(input: &str) -> serde_json::Value {
+    let deny = || {
+        serde_json::json!({
+            "decision": "deny",
+            "reason": "xmsg: hook could not stamp the caller",
+        })
+    };
+    let val: serde_json::Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(_) => return deny(),
+    };
+    let Some(conv_id) = val
+        .get("conversationId")
+        .or_else(|| val.get("conversation_id"))
+        .and_then(|c| c.as_str())
+        .filter(|s| !s.trim().is_empty())
+    else {
+        return deny();
+    };
+    let Some(tool_call) = val.get("toolCall").and_then(|t| t.as_object()) else {
+        return deny();
+    };
+    let Some(tool_name) = tool_call.get("name").and_then(|n| n.as_str()) else {
+        return deny();
+    };
+    let Some(args) = tool_call.get("args").and_then(|a| a.as_object()) else {
+        return deny();
+    };
+
+    if tool_name == "call_mcp_tool" {
+        let Some(server_name) = args.get("ServerName").and_then(|s| s.as_str()) else {
+            return deny();
+        };
+        if server_name != "xmsg" {
+            // OQ3: non-xmsg MCP calls get no overwrite and never "allow"; "ask" passes
+            // through agy 1.3.6's pre-tool hook without refusing the call.
+            return serde_json::json!({ "decision": "ask" });
+        }
+        let Some(raw_arguments) = args.get("Arguments") else {
+            return deny();
+        };
+        match raw_arguments {
+            serde_json::Value::Object(obj) => {
+                if obj.get("as_agent").and_then(|v| v.as_str()) == Some(conv_id) {
+                    return serde_json::json!({ "decision": "allow" });
+                }
+                let mut updated = obj.clone();
+                updated.insert(
+                    "as_agent".to_string(),
+                    serde_json::Value::String(conv_id.to_string()),
+                );
+                serde_json::json!({
+                    "decision": "allow",
+                    "overwrite": {
+                        "Arguments": serde_json::Value::Object(updated),
+                    }
+                })
+            }
+            serde_json::Value::String(s) => {
+                let parsed: serde_json::Value = match serde_json::from_str(s) {
+                    Ok(v) => v,
+                    Err(_) => return deny(),
+                };
+                let Some(obj) = parsed.as_object() else {
+                    return deny();
+                };
+                if obj.get("as_agent").and_then(|v| v.as_str()) == Some(conv_id) {
+                    return serde_json::json!({ "decision": "allow" });
+                }
+                let mut updated = obj.clone();
+                updated.insert(
+                    "as_agent".to_string(),
+                    serde_json::Value::String(conv_id.to_string()),
+                );
+                let Ok(re_serialized) = serde_json::to_string(&updated) else {
+                    return deny();
+                };
+                serde_json::json!({
+                    "decision": "allow",
+                    "overwrite": {
+                        "Arguments": serde_json::Value::String(re_serialized),
+                    }
+                })
+            }
+            _ => deny(),
+        }
+    } else if tool_name.starts_with("mcp_xmsg_") {
+        if args.get("as_agent").and_then(|v| v.as_str()) == Some(conv_id) {
+            serde_json::json!({ "decision": "allow" })
+        } else {
+            serde_json::json!({
+                "decision": "allow",
+                "overwrite": {
+                    "as_agent": conv_id,
+                }
+            })
+        }
+    } else {
+        serde_json::json!({ "decision": "ask" })
+    }
+}
+
+fn resolve_agy_hook_agent_sock(args: &RegisterAgyArgs) -> Option<PathBuf> {
+    if let Some(ref p) = args.agent_sock {
+        return Some(p.clone());
+    }
+    if let Some(ref reg_sock) = args.sock {
+        if let Some(parent) = reg_sock.parent() {
+            return Some(parent.join("agent.sock"));
+        }
+    }
+    xmsg::agent::default_agent_sock_path().ok()
+}
+
 fn run_hook_agy(args: RegisterAgyArgs) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Read;
 
     let mut input = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut input) {
-        eprintln!("xmsg register agy notice: failed to read stdin: {e}");
-        println!("{{}}");
+        if args.event == AgyHookEvent::PreToolUse {
+            println!("{}", run_hook_agy_pre_tool_use(""));
+        } else {
+            eprintln!("xmsg register agy notice: failed to read stdin: {e}");
+            println!("{{}}");
+        }
+        return Ok(());
+    }
+
+    if args.event == AgyHookEvent::PreToolUse {
+        println!("{}", run_hook_agy_pre_tool_use(&input));
         return Ok(());
     }
 
@@ -513,6 +651,39 @@ fn run_hook_agy(args: RegisterAgyArgs) -> Result<(), Box<dyn std::error::Error>>
             return Ok(());
         }
     };
+
+    if args.event == AgyHookEvent::Stop {
+        if let Some(agent_sock) = resolve_agy_hook_agent_sock(&args) {
+            let frame = serde_json::json!({
+                "action": "subagent",
+                "schema_version": xmsg::surface::MCP_SCHEMA_VERSION,
+                "event": "stop",
+                "agent_id": conv_id,
+            });
+            let _ = xmsg::mcp::call_agent_sock(&agent_sock, &frame);
+        }
+        println!("{{}}");
+        return Ok(());
+    }
+
+    // PreInvocation: first send subagent start on agent.sock (HA9-A.agy §2.4, G3).
+    // When the caller is a subagent under a registered parent P, the server answers
+    // `{"status":"ok","role":"subagent",...}` and we print `{}` so the child gets no
+    // registration ask.
+    if let Some(agent_sock) = resolve_agy_hook_agent_sock(&args) {
+        let frame = serde_json::json!({
+            "action": "subagent",
+            "schema_version": xmsg::surface::MCP_SCHEMA_VERSION,
+            "event": "start",
+            "agent_id": conv_id,
+        });
+        if let Ok(resp) = xmsg::mcp::call_agent_sock(&agent_sock, &frame) {
+            if resp.get("role").and_then(|r| r.as_str()) == Some("subagent") {
+                println!("{{}}");
+                return Ok(());
+            }
+        }
+    }
 
     let sock_path = match &args.sock {
         Some(p) => p.clone(),

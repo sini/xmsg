@@ -893,6 +893,7 @@ async fn test_oracle_7_removed_pull_loop_exits_on_reload() {
         proc_root: PathBuf::from(xmsg::process::LIVE_PROC_ROOT),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
+            brain_dir: std::path::PathBuf::new(),
     };
 
     let fs = Arc::new(FedState {
@@ -1011,6 +1012,7 @@ async fn test_oracle_8_reload_adds_pull_loop() {
         proc_root: PathBuf::from(xmsg::process::LIVE_PROC_ROOT),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
+            brain_dir: std::path::PathBuf::new(),
     };
 
     let fs = Arc::new(FedState {

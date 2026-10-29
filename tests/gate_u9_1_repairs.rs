@@ -147,6 +147,7 @@ fn cell_g2_agent_sock_refuses_unregistered_lock_holder() {
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
+            brain_dir: std::path::PathBuf::new(),
     };
     let agy_store = new_agy_store(); // Empty: NOT registered
     let pi_store = new_pi_store();

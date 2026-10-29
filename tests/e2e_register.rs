@@ -250,6 +250,7 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: vec![dummy_exe],
+            brain_dir: std::path::PathBuf::new(),
     };
     let store = new_agy_store();
 

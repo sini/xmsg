@@ -131,6 +131,7 @@ async fn start_test_http_server(
         proc_root,
         agy_bin: fake_agy_bin.to_string_lossy().to_string(),
         trusted_agy_exes: vec![fake_agy_bin],
+            brain_dir: std::path::PathBuf::new(),
     };
     let agy_store = new_agy_store();
     let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -637,7 +638,8 @@ async fn create_fed_test_node(
                 proc_root: proc_root.clone(),
                 agy_bin: "agy".to_string(),
                 trusted_agy_exes: Vec::new(),
-            },
+                    brain_dir: std::path::PathBuf::new(),
+    },
             new_agy_store(),
         )
     };
@@ -832,7 +834,8 @@ async fn test_oracle_4_federated_send_queues_unregistered_and_checks_starttime()
                         proc_root: proc_root.to_path_buf(),
                         agy_bin: fake_agy_bin.to_string_lossy().to_string(),
                         trusted_agy_exes: vec![fake_agy_bin],
-                    },
+                            brain_dir: std::path::PathBuf::new(),
+    },
                     new_agy_store(),
                 )
             },
