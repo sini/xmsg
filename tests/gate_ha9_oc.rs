@@ -622,3 +622,113 @@ async fn c11_subagent_frame_is_opencode_only() {
         .await;
     assert_eq!(accepted["status"], "ok", "{accepted}");
 }
+
+/// Cross-connection `subagent` frame guard (`start`, `stop`, `end`): connection A sending
+/// `subagent` with `session: Q` held by a different connection B is refused (`not_held`),
+/// writes no `subagents` row under Q on `start`, does not clear Q's child turn on `stop`,
+/// and does not delete Q's child row on `end`.
+#[tokio::test]
+async fn c2b_subagent_frame_requires_session_held_on_connection() {
+    let node = Node::start();
+    let mut conn_a = PluginConn::open(&node.register_sock, "opencode").await;
+    let (_a_addr, _a_bare, _a_sec) = conn_a.register("ses_root_a").await;
+
+    let mut conn_b = PluginConn::open(&node.register_sock, "opencode").await;
+    let (_q_addr, q_bare, _q_sec) = conn_b.register("ses_root_q").await;
+
+    // 1. `start`: connection A attempts to bind `ses_forged` under Q held by connection B.
+    let bad_start = conn_a
+        .call(json!({
+            "action": "subagent",
+            "event": "start",
+            "session": "ses_root_q",
+            "agent_id": "ses_forged",
+            "agent_type": "general"
+        }))
+        .await;
+    assert_eq!(bad_start["status"], "error", "{bad_start}");
+    assert_eq!(bad_start["error"], "denied", "{bad_start}");
+    assert!(
+        bad_start["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("is not registered on this connection"),
+        "{bad_start}"
+    );
+    {
+        let db = rusqlite::Connection::open(node._tmp.path().join("xmsg.db")).unwrap();
+        assert!(
+            xmsg::storage::get_subagent(&db, &q_bare, "ses_forged")
+                .unwrap()
+                .is_none(),
+            "cross-connection subagent start must not create a row under Q"
+        );
+    }
+
+    // Legitimately bind and start turn for `ses_legit_q` on connection B.
+    let ok_start = conn_b
+        .call(json!({
+            "action": "subagent",
+            "event": "start",
+            "session": "ses_root_q",
+            "agent_id": "ses_legit_q",
+            "agent_type": "general"
+        }))
+        .await;
+    assert_eq!(ok_start["status"], "ok", "{ok_start}");
+
+    // 2. `stop`: connection A attempts to stop `ses_legit_q` under Q held by connection B.
+    let bad_stop = conn_a
+        .call(json!({
+            "action": "subagent",
+            "event": "stop",
+            "session": "ses_root_q",
+            "agent_id": "ses_legit_q"
+        }))
+        .await;
+    assert_eq!(bad_stop["status"], "error", "{bad_stop}");
+    assert_eq!(bad_stop["error"], "denied", "{bad_stop}");
+    assert!(
+        bad_stop["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("is not registered on this connection"),
+        "{bad_stop}"
+    );
+    {
+        let db = rusqlite::Connection::open(node._tmp.path().join("xmsg.db")).unwrap();
+        let row = xmsg::storage::get_subagent(&db, &q_bare, "ses_legit_q")
+            .unwrap()
+            .expect("legit row under Q");
+        assert!(
+            row.turn_pid.is_some() && row.turn_start.is_some(),
+            "cross-connection subagent stop must not clear turn columns under Q: {row:?}"
+        );
+    }
+
+    // 3. `end`: connection A attempts to end/delete `ses_legit_q` under Q held by connection B.
+    let bad_end = conn_a
+        .call(json!({
+            "action": "subagent",
+            "event": "end",
+            "session": "ses_root_q",
+            "agent_id": "ses_legit_q"
+        }))
+        .await;
+    assert_eq!(bad_end["status"], "error", "{bad_end}");
+    assert_eq!(bad_end["error"], "denied", "{bad_end}");
+    assert!(
+        bad_end["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("is not registered on this connection"),
+        "{bad_end}"
+    );
+    {
+        let db = rusqlite::Connection::open(node._tmp.path().join("xmsg.db")).unwrap();
+        let row = xmsg::storage::get_subagent(&db, &q_bare, "ses_legit_q")
+            .unwrap()
+            .expect("cross-connection subagent end must not delete row under Q");
+        assert!(row.turn_pid.is_some());
+    }
+}
