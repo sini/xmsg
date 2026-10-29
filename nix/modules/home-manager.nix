@@ -43,6 +43,14 @@ let
     "send"
     "reply"
     "replies"
+    "inbox"
+  ];
+
+  claudeHook = [
+    {
+      type = "command";
+      command = "${exe} register claude --hook";
+    }
   ];
 
   # Prior to XH2, opencode's skill was linked as the directory symlink
@@ -443,9 +451,25 @@ in
         # The tools are authorized explicitly: allowed calls skip the auto-mode classifier.
         # Home Manager wraps `mcpServers.xmsg` in its generated `hm` plugin
         # (`mcp__plugin_hm_xmsg__*`); direct registrations use `mcp__xmsg__*`.
-        settings.permissions.allow = lib.concatMap (
-          prefix: map (tool: "${prefix}__${tool}") claudeTools
-        ) cfg.harnesses.claude.permissionPrefixes;
+        settings = {
+          permissions.allow = lib.concatMap (
+            prefix: map (tool: "${prefix}__${tool}") claudeTools
+          ) cfg.harnesses.claude.permissionPrefixes;
+          hooks = {
+            PreToolUse = map (prefix: {
+              matcher = "^${prefix}__(send|reply|inbox|list|replies)$";
+              hooks = claudeHook;
+            }) cfg.harnesses.claude.permissionPrefixes;
+            PostToolUse = [
+              {
+                matcher = "^(Agent|SendMessage)$";
+                hooks = claudeHook;
+              }
+            ];
+            SubagentStart = [ { hooks = claudeHook; } ];
+            SubagentStop = [ { hooks = claudeHook; } ];
+          };
+        };
       };
     })
 

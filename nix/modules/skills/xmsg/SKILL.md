@@ -6,7 +6,7 @@ description: Message other running agent sessions and services, on this node or 
 # xmsg: messaging other agent sessions
 
 xmsg runs on this node as a local service and delivers messages between running agent sessions and services,
-here and on federated nodes. You have four tools for it: `list`, `send`, `reply` and `replies`.
+here and on federated nodes. You have five tools for it: `list`, `send`, `reply`, `replies` and `inbox`.
 
 ## Addresses
 
@@ -14,6 +14,7 @@ Every recipient has an address:
 
 - `id@node` for an instance (a Claude, agy or pi session). The ID is a UUID. A second process that resumes the
   same conversation on a node gets a fork suffix, `id~2@node`, and keeps it for its life.
+- `id/child@node` for a subagent bound under an instance `id` (where `child` is its bound name or `agent_id`).
 - `name@node` for a service.
 
 `node` is the node's name. Leave `@node` off to reach this node and every node it can see.
@@ -89,6 +90,10 @@ Reply only when an answer is useful. Do not reply just to thank or to acknowledg
 
 Call **`replies`** with the `message_id` of a message you sent, and optionally `wait`: the seconds to wait for a
 first reply (at most 60). Use it after a restart or a missed push, or to send and then block for the answer.
+
+## Subagent mailbox: `inbox`
+
+If you are running as a subagent, call **`inbox`** (optionally with `wait`, up to 60 seconds) to drain messages sent to your `<parent>/<child>@<node>` address while your turn is active. Once your turn ends, messages to your sub-address fall back to your parent session with a `to=<parent>/<child> agent_id=<id>` header.
 
 ## Reading the sender
 

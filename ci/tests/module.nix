@@ -182,42 +182,75 @@ in
         failed = [ ];
       };
     };
-    test-claude = {
-      expr = {
-        mcp = linux.programs.claude-code.mcpServers.xmsg;
-        skill = linux.programs.claude-code.skills.xmsg;
-        allow = linux.programs.claude-code.settings.permissions.allow;
-        allowPluginOnly =
-          (hmEval "x86_64-linux" {
-            programs.xmsg.harnesses.claude.permissionPrefixes = [ "mcp__plugin_hm_xmsg" ];
-          }).programs.claude-code.settings.permissions.allow;
-      };
-      expected = {
-        mcp = {
-          type = "stdio";
-          command = exe;
-          args = [ "mcp" ];
-          env = { };
+    test-claude =
+      let
+        claudeHook = [
+          {
+            type = "command";
+            command = "${exe} register claude --hook";
+          }
+        ];
+      in
+      {
+        expr = {
+          mcp = linux.programs.claude-code.mcpServers.xmsg;
+          skill = linux.programs.claude-code.skills.xmsg;
+          allow = linux.programs.claude-code.settings.permissions.allow;
+          hooks = linux.programs.claude-code.settings.hooks;
+          allowPluginOnly =
+            (hmEval "x86_64-linux" {
+              programs.xmsg.harnesses.claude.permissionPrefixes = [ "mcp__plugin_hm_xmsg" ];
+            }).programs.claude-code.settings.permissions.allow;
         };
-        skill = ../../nix/modules/skills/xmsg;
-        allow = [
-          "mcp__plugin_hm_xmsg__list"
-          "mcp__plugin_hm_xmsg__send"
-          "mcp__plugin_hm_xmsg__reply"
-          "mcp__plugin_hm_xmsg__replies"
-          "mcp__xmsg__list"
-          "mcp__xmsg__send"
-          "mcp__xmsg__reply"
-          "mcp__xmsg__replies"
-        ];
-        allowPluginOnly = [
-          "mcp__plugin_hm_xmsg__list"
-          "mcp__plugin_hm_xmsg__send"
-          "mcp__plugin_hm_xmsg__reply"
-          "mcp__plugin_hm_xmsg__replies"
-        ];
+        expected = {
+          mcp = {
+            type = "stdio";
+            command = exe;
+            args = [ "mcp" ];
+            env = { };
+          };
+          skill = ../../nix/modules/skills/xmsg;
+          allow = [
+            "mcp__plugin_hm_xmsg__list"
+            "mcp__plugin_hm_xmsg__send"
+            "mcp__plugin_hm_xmsg__reply"
+            "mcp__plugin_hm_xmsg__replies"
+            "mcp__plugin_hm_xmsg__inbox"
+            "mcp__xmsg__list"
+            "mcp__xmsg__send"
+            "mcp__xmsg__reply"
+            "mcp__xmsg__replies"
+            "mcp__xmsg__inbox"
+          ];
+          hooks = {
+            PreToolUse = [
+              {
+                matcher = "^mcp__plugin_hm_xmsg__(send|reply|inbox|list|replies)$";
+                hooks = claudeHook;
+              }
+              {
+                matcher = "^mcp__xmsg__(send|reply|inbox|list|replies)$";
+                hooks = claudeHook;
+              }
+            ];
+            PostToolUse = [
+              {
+                matcher = "^(Agent|SendMessage)$";
+                hooks = claudeHook;
+              }
+            ];
+            SubagentStart = [ { hooks = claudeHook; } ];
+            SubagentStop = [ { hooks = claudeHook; } ];
+          };
+          allowPluginOnly = [
+            "mcp__plugin_hm_xmsg__list"
+            "mcp__plugin_hm_xmsg__send"
+            "mcp__plugin_hm_xmsg__reply"
+            "mcp__plugin_hm_xmsg__replies"
+            "mcp__plugin_hm_xmsg__inbox"
+          ];
+        };
       };
-    };
     test-agy = {
       expr = {
         mcp = linux.programs.antigravity-cli.mcpServers.xmsg;
@@ -345,8 +378,10 @@ in
             "`send`"
             "`reply`"
             "`replies`"
+            "`inbox`"
             "label · id@node"
             "id~n@node"
+            "id/child@node"
             "`delivered`"
             "`queued`"
             "`not_found`"
