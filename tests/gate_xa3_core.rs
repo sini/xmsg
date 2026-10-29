@@ -993,7 +993,7 @@ async fn test_oracle_10_mcp_four_tools_and_no_idempotency_key() {
     })
     .await
     .unwrap();
-    assert_eq!(res.2 .0, ["list", "send", "reply", "replies"]);
+    assert_eq!(res.2 .0, ["list", "send", "reply", "replies", "inbox"]);
     assert_eq!(res.2 .1, ["reply", "replies"], "reply-only mode");
 
     let send_schema = xmsg::mcp::tool_definitions()

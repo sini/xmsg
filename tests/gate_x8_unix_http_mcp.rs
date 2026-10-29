@@ -411,5 +411,5 @@ async fn test_oracle_3_reply_only_mcp() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, vec!["list", "send", "reply", "replies"]);
+    assert_eq!(names, vec!["list", "send", "reply", "replies", "inbox"]);
 }

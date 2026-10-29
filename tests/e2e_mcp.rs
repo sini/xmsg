@@ -305,12 +305,12 @@ async fn test_mcp_initialize_and_tools_list() {
         .expect("tools array");
     assert_eq!(
         tools.len(),
-        4,
-        "Exactly 4 tools listed: list, send, reply, replies"
+        5,
+        "Exactly 5 tools listed: list, send, reply, replies, inbox"
     );
 
     let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(tool_names, vec!["list", "send", "reply", "replies"]);
+    assert_eq!(tool_names, vec!["list", "send", "reply", "replies", "inbox"]);
 
     // Invariant: None of the tools may have requiresUserInteraction set
     for t in tools {
