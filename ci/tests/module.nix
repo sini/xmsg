@@ -182,6 +182,58 @@ in
         failed = [ ];
       };
     };
+    # XS1: sessionsDirs and extraSessionsDirs render XMSG_SESSIONS_DIR on the serve unit
+    # only when the effective list differs from the default.
+    test-sessions-dirs =
+      let
+        linuxEnv =
+          srv:
+          (hmEval "x86_64-linux" {
+            programs.xmsg.server = srv;
+          }).systemd.user.services.xmsg.Service.Environment or null;
+        darwinEnv =
+          srv:
+          (hmEval "aarch64-darwin" {
+            programs.xmsg.server = srv;
+          }).launchd.agents.xmsg.config.EnvironmentVariables or null;
+      in
+      {
+        expr = {
+          defaultLinux = linuxEnv { };
+          defaultDarwin = darwinEnv { };
+          extraLinux = linuxEnv {
+            extraSessionsDirs = [
+              "/var/lib/genie-agent/claude-public/sessions"
+              "/var/lib/genie-agent/claude-trusted/sessions"
+            ];
+          };
+          extraDarwin = darwinEnv {
+            extraSessionsDirs = [ "/var/lib/genie-agent/claude-public/sessions" ];
+          };
+          overrideLinux = linuxEnv {
+            sessionsDirs = [ "/custom/sessions" ];
+          };
+          overrideDarwin = darwinEnv {
+            sessionsDirs = [ "/custom/sessions" ];
+          };
+        };
+        expected = {
+          defaultLinux = [ ];
+          defaultDarwin = null;
+          extraLinux = [
+            "XMSG_SESSIONS_DIR=/home/alice/.claude/sessions:/var/lib/genie-agent/claude-public/sessions:/var/lib/genie-agent/claude-trusted/sessions"
+          ];
+          extraDarwin = {
+            XMSG_SESSIONS_DIR = "/Users/alice/.claude/sessions:/var/lib/genie-agent/claude-public/sessions";
+          };
+          overrideLinux = [
+            "XMSG_SESSIONS_DIR=/custom/sessions"
+          ];
+          overrideDarwin = {
+            XMSG_SESSIONS_DIR = "/custom/sessions";
+          };
+        };
+      };
     test-claude =
       let
         claudeHook = [

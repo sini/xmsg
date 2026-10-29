@@ -220,6 +220,11 @@ let
       ]
     );
 
+  defaultSessionsDirs = [ "${config.home.homeDirectory}/.claude/sessions" ];
+  effectiveSessionsDirs = map toString (srv.sessionsDirs ++ srv.extraSessionsDirs);
+  hasCustomSessionsDirs = effectiveSessionsDirs != defaultSessionsDirs;
+  sessionsDirsEnv = lib.concatStringsSep ":" effectiveSessionsDirs;
+
   # This module's own definitions, told apart from the user's (`definitionsWithLocations`).
   thisFile = toString ./home-manager.nix;
 
@@ -279,6 +284,17 @@ in
         default = { };
         example = lib.literalExpression "{ my-bot = lib.getExe pkgs.my-bot; }";
         description = "`--svc-exe NAME=PATH`: the service names xmsg admits, each only from its executable.";
+      };
+      sessionsDirs = mkOption {
+        type = types.listOf (types.either types.path types.str);
+        default = defaultSessionsDirs;
+        defaultText = lib.literalExpression ''[ "''${config.home.homeDirectory}/.claude/sessions" ]'';
+        description = "Session directories `xmsg serve` scans (`XMSG_SESSIONS_DIR`, colon-joined).";
+      };
+      extraSessionsDirs = mkOption {
+        type = types.listOf (types.either types.path types.str);
+        default = [ ];
+        description = "Additional session directories appended to `programs.xmsg.server.sessionsDirs`.";
       };
       federation = {
         enable = mkEnableOption "cross-host federation (`--fed-listen`, `--fed-cert`, `--fed-key`, `--peers-file`)";
@@ -421,6 +437,9 @@ in
         Service = {
           ExecStart = "${exe} serve ${lib.escapeShellArgs serveArgs}";
           Restart = "on-failure";
+        }
+        // lib.optionalAttrs hasCustomSessionsDirs {
+          Environment = [ "XMSG_SESSIONS_DIR=${sessionsDirsEnv}" ];
         };
         Install.WantedBy = [ "default.target" ];
       };
@@ -437,6 +456,9 @@ in
           ++ serveArgs;
           KeepAlive.SuccessfulExit = false;
           RunAtLoad = true;
+        }
+        // lib.optionalAttrs hasCustomSessionsDirs {
+          EnvironmentVariables.XMSG_SESSIONS_DIR = sessionsDirsEnv;
         };
       };
     })
