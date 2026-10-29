@@ -183,4 +183,85 @@ async fn test_shipped_binary_register_cli_with_server() {
     assert_eq!(creds.ls_address, "localhost:33399");
     assert_eq!(creds.csrf_token, "token-secret-cli-99");
     assert!(!creds.is_stale);
+
+    // XR1 Oracle 1: When the server refuses registration (e.g., conversation_id has no
+    // presence lock file -> server answers `{"status":"error","detail":"..."}`),
+    // `xmsg register agy` exits non-zero and prints the server's error text to stderr.
+    let refused_out = Command::new(bin)
+        .args(["register", "agy", "--sock", sock_path.to_str().unwrap()])
+        .env("ANTIGRAVITY_CONVERSATION_ID", "conv-refused-no-lock")
+        .env("ANTIGRAVITY_LS_ADDRESS", "localhost:33399")
+        .env("ANTIGRAVITY_CSRF_TOKEN", "token-secret-cli-99")
+        .output()
+        .expect("execute xmsg register agy on refused conversation");
+    assert!(
+        !refused_out.status.success(),
+        "XR1: xmsg register agy must exit non-zero on server refusal, got {:?}",
+        refused_out.status.code()
+    );
+    let refused_stderr = String::from_utf8_lossy(&refused_out.stderr);
+    assert!(
+        refused_stderr.contains(
+            "registration rejected by server: session conv-refused-no-lock process 0 exited"
+        ),
+        "XR1: stderr must contain the server's refusal error text, got: {refused_stderr}"
+    );
+
+    // XR1 Oracle 2: The agy PreInvocation hook (`xmsg register agy --hook`) must still not
+    // break agy's turn (exits 0) even when the server returns a refusal on `register.sock`;
+    // it surfaces the failure through the `ephemeralMessage` path instead.
+    let refusal_sock_dir = tempdir().unwrap();
+    fs::set_permissions(refusal_sock_dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let refusal_sock = refusal_sock_dir.path().join("register.sock");
+    let listener = tokio::net::UnixListener::bind(&refusal_sock).unwrap();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        if let Ok((stream, _)) = listener.accept().await {
+            let (reader, mut writer) = stream.into_split();
+            let mut line = String::new();
+            let _ = BufReader::new(reader).read_line(&mut line).await;
+            let _ = writer
+                .write_all(b"{\"status\":\"error\",\"detail\":\"mock server refusal detail\"}\n")
+                .await;
+        }
+    });
+
+    let mut hook_child = Command::new(bin)
+        .args([
+            "register",
+            "agy",
+            "--hook",
+            "--event",
+            "pre-invocation",
+            "--sock",
+            refusal_sock.to_str().unwrap(),
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    hook_child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"{\"conversationId\":\"conv-hook-refusal\"}")
+        .unwrap();
+    let hook_out = hook_child.wait_with_output().unwrap();
+    assert_eq!(
+        hook_out.status.code(),
+        Some(0),
+        "XR1: PreInvocation hook must exit 0 so it never breaks agy's turn"
+    );
+    let hook_json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&hook_out.stdout).trim())
+            .expect("PreInvocation hook stdout must be valid JSON");
+    let eph = hook_json["injectSteps"][0]["ephemeralMessage"]
+        .as_str()
+        .expect("PreInvocation hook must surface failure via ephemeralMessage");
+    assert!(
+        eph.contains("mock server refusal detail") && eph.contains("register agy"),
+        "XR1: ephemeralMessage must surface the refusal detail and registration command, got: {eph}"
+    );
 }

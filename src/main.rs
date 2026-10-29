@@ -349,7 +349,12 @@ fn run_register_agy(args: RegisterAgyArgs) -> Result<(), Box<dyn std::error::Err
         return run_hook_agy(args);
     }
 
-    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+    enum RegisterAttempt {
+        Ok,
+        Refused(String),
+    }
+
+    let result = (|| -> Result<RegisterAttempt, Box<dyn std::error::Error>> {
         let conv_id = std::env::var("ANTIGRAVITY_CONVERSATION_ID")
             .map_err(|_| "ANTIGRAVITY_CONVERSATION_ID not set")?;
         let ls_addr = std::env::var("ANTIGRAVITY_LS_ADDRESS")
@@ -391,26 +396,39 @@ fn run_register_agy(args: RegisterAgyArgs) -> Result<(), Box<dyn std::error::Err
                 let detail = val
                     .get("detail")
                     .and_then(|d| d.as_str())
+                    .or_else(|| val.get("error").and_then(|e| e.as_str()))
                     .unwrap_or("unknown error");
-                return Err(format!("registration rejected by server: {detail}").into());
+                return Ok(RegisterAttempt::Refused(format!(
+                    "registration rejected by server: {detail}"
+                )));
             }
         }
-        Ok(())
+        Ok(RegisterAttempt::Ok)
     })();
 
-    if let Err(e) = result {
-        eprintln!("xmsg register agy notice: {e}");
+    match result {
+        Ok(RegisterAttempt::Ok) => {
+            println!("{{\"injectSteps\":[]}}");
+            Ok(())
+        }
+        Ok(RegisterAttempt::Refused(msg)) => {
+            eprintln!("xmsg register agy error: {msg}");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("xmsg register agy notice: {e}");
+            println!("{{\"injectSteps\":[]}}");
+            Ok(())
+        }
     }
-
-    println!("{{\"injectSteps\":[]}}");
-    Ok(())
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct SessionCheckResult {
     pub has_credentials: bool,
     pub watching: bool,
     pub stand_down: bool,
+    pub refusal_detail: Option<String>,
 }
 
 fn check_session_has_credentials(
@@ -436,6 +454,20 @@ fn check_session_has_credentials(
             let mut resp = String::new();
             if reader.read_line(&mut resp).is_ok() {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp) {
+                    if v.get("status").and_then(|s| s.as_str()) == Some("error") {
+                        let detail = v
+                            .get("detail")
+                            .and_then(|d| d.as_str())
+                            .or_else(|| v.get("error").and_then(|e| e.as_str()))
+                            .unwrap_or("unknown error")
+                            .to_string();
+                        return Ok(SessionCheckResult {
+                            has_credentials: false,
+                            watching: false,
+                            stand_down: false,
+                            refusal_detail: Some(detail),
+                        });
+                    }
                     let has_creds = v
                         .get("hasCredentials")
                         .or_else(|| v.get("has_credentials"))
@@ -451,6 +483,7 @@ fn check_session_has_credentials(
                         has_credentials: has_creds,
                         watching,
                         stand_down,
+                        refusal_detail: None,
                     });
                 }
             }
@@ -470,6 +503,7 @@ fn check_session_has_credentials(
                                 has_credentials: reg,
                                 watching: false,
                                 stand_down: false,
+                                refusal_detail: None,
                             });
                         }
                     }
@@ -490,6 +524,7 @@ fn check_session_has_credentials(
                 has_credentials: reg,
                 watching: false,
                 stand_down: false,
+                refusal_detail: None,
             });
         }
     }
@@ -729,13 +764,23 @@ fn run_hook_agy(args: RegisterAgyArgs) -> Result<(), Box<dyn std::error::Error>>
         } else {
             String::new()
         };
+        let ephemeral = match check.refusal_detail {
+            Some(ref detail) => {
+                eprintln!("xmsg register agy notice: {detail}");
+                format!(
+                    "xmsg registration check failed ({detail}). Please run `{} register agy{}{}` before anything else. This is xmsg's automatic registration request and needs no reply.",
+                    exe_str, sock_arg, label_arg
+                )
+            }
+            None => format!(
+                "Please run `{} register agy{}{}` before anything else. This is xmsg's automatic registration request and needs no reply.",
+                exe_str, sock_arg, label_arg
+            ),
+        };
         let resp = serde_json::json!({
             "injectSteps": [
                 {
-                    "ephemeralMessage": format!(
-                        "Please run `{} register agy{}{}` before anything else. This is xmsg's automatic registration request and needs no reply.",
-                        exe_str, sock_arg, label_arg
-                    )
+                    "ephemeralMessage": ephemeral
                 }
             ]
         });
