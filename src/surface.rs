@@ -32,6 +32,8 @@ pub struct Local<'a> {
     pub pi_notify_tx: &'a broadcast::Sender<String>,
     pub svc_store: &'a crate::svc::SvcStore,
     pub svc_notify_tx: &'a broadcast::Sender<String>,
+    pub notify_tx: &'a broadcast::Sender<String>,
+    pub reply_ttl: Duration,
 }
 
 impl AppState {
@@ -46,6 +48,8 @@ impl AppState {
             pi_notify_tx: &self.pi_notify_tx,
             svc_store: &self.svc_store,
             svc_notify_tx: &self.svc_notify_tx,
+            notify_tx: &self.notify_tx,
+            reply_ttl: self.reply_ttl,
         }
     }
 }
@@ -62,6 +66,8 @@ impl crate::fed::FedState {
             pi_notify_tx: &self.pi_notify_tx,
             svc_store: &self.svc_store,
             svc_notify_tx: &self.svc_notify_tx,
+            notify_tx: &self.notify_tx,
+            reply_ttl: self.reply_ttl,
         }
     }
 }
@@ -429,9 +435,9 @@ pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, App
         ));
     }
     if let Some(kind) = query.kind.as_deref() {
-        if kind != "service" && kind != "instance" {
+        if kind != "service" && kind != "instance" && kind != "subagent" {
             return Err(AppError::BadRequest(format!(
-                "kind '{kind}' is not 'service' or 'instance'"
+                "kind '{kind}' is not 'service', 'instance' or 'subagent'"
             )));
         }
     }
@@ -543,6 +549,7 @@ pub(crate) async fn listing_live(
         local.node_name,
     )
     .await?;
+    let mut out: Vec<FedListEntry> = Vec::new();
     {
         let db = local.db.lock().map_err(db_err)?;
         let _ = storage::purge_instance_seen(
@@ -550,20 +557,32 @@ pub(crate) async fn listing_live(
             storage::now_epoch_secs(),
             reply_ttl.as_secs() as i64,
         );
-    }
-    let mut out: Vec<FedListEntry> = pairs
-        .into_iter()
-        .map(|(claim, e)| {
-            live_entry(
-                &claim.address(),
+        for (claim, e) in pairs {
+            let parent_addr = claim.address();
+            out.push(live_entry(
+                &parent_addr,
                 false,
                 "claude",
                 e.name,
                 user,
                 claim.created_at,
-            )
-        })
-        .collect();
+            ));
+            for sub in storage::list_subagents_for_parent(&db, &parent_addr).map_err(db_err)? {
+                let child_part = sub.name.as_deref().unwrap_or(&sub.agent_id);
+                let sub_id = format!("{}/{child_part}", sub.parent);
+                out.push(FedListEntry {
+                    id: sub_id,
+                    kind: "subagent".to_string(),
+                    harness: Some("claude".to_string()),
+                    label: sub.display_label().and_then(inbox::clean_label),
+                    status: "live".to_string(),
+                    user: user.to_string(),
+                    registered_at: Some(sub.bound_at),
+                    last_seen: None,
+                });
+            }
+        }
+    }
     for s in crate::agy::list_agy_sessions(local.agy_config, local.agy_store, &query) {
         out.push(live_entry(
             &s.session_id,
@@ -585,17 +604,35 @@ pub(crate) async fn listing_live(
             s.started_at as i64,
         ));
     }
-    let plugin_sessions =
-        crate::plugin::sessions(&*local.db.lock().map_err(db_err)?).map_err(db_err)?;
-    for s in plugin_sessions {
-        out.push(live_entry(
-            &s.session_id,
-            false,
-            &s.harness,
-            s.name,
-            user,
-            s.started_at as i64,
-        ));
+    {
+        let db = local.db.lock().map_err(db_err)?;
+        let plugin_sessions = crate::plugin::sessions(&db).map_err(db_err)?;
+        for s in plugin_sessions {
+            let parent_id = s.session_id.clone();
+            let parent_harness = s.harness.clone();
+            out.push(live_entry(
+                &parent_id,
+                false,
+                &parent_harness,
+                s.name,
+                user,
+                s.started_at as i64,
+            ));
+            for sub in storage::list_subagents_for_parent(&db, &parent_id).map_err(db_err)? {
+                let child_part = sub.name.as_deref().unwrap_or(&sub.agent_id);
+                let sub_id = format!("{}/{child_part}", sub.parent);
+                out.push(FedListEntry {
+                    id: sub_id,
+                    kind: "subagent".to_string(),
+                    harness: Some(parent_harness.clone()),
+                    label: sub.display_label().and_then(inbox::clean_label),
+                    status: "live".to_string(),
+                    user: user.to_string(),
+                    registered_at: Some(sub.bound_at),
+                    last_seen: None,
+                });
+            }
+        }
     }
     for s in crate::svc::list_svc_sessions(proc_root, local.svc_store, &query) {
         out.push(live_entry(
@@ -627,6 +664,7 @@ pub(crate) async fn listing_inactive(
         storage::inactive_instances(&db, now, ttl_secs, capped_within).map_err(db_err)?
     };
     let mut out = Vec::new();
+    let db = local.db.lock().map_err(db_err)?;
     for item in inactive {
         if !live.iter().any(|e| e.id == item.id) {
             out.push(inactive_entry(
@@ -636,6 +674,20 @@ pub(crate) async fn listing_inactive(
                 user,
                 item.last_seen,
             ));
+            for sub in storage::list_subagents_for_parent(&db, &item.id).map_err(db_err)? {
+                let child_part = sub.name.as_deref().unwrap_or(&sub.agent_id);
+                let sub_id = format!("{}/{child_part}", sub.parent);
+                out.push(FedListEntry {
+                    id: sub_id,
+                    kind: "subagent".to_string(),
+                    harness: Some(item.harness.clone()),
+                    label: sub.display_label().and_then(inbox::clean_label),
+                    status: item.status.clone(),
+                    user: user.to_string(),
+                    registered_at: None,
+                    last_seen: Some(item.last_seen),
+                });
+            }
         }
     }
     Ok(out)
@@ -650,14 +702,26 @@ pub(crate) async fn listing(
     user: &str,
 ) -> Result<Vec<FedListEntry>, AppError> {
     let mut out = listing_live(local, reply_ttl, user).await?;
-    let parked = {
-        let db = local.db.lock().map_err(db_err)?;
-        storage::parked_instances(&db, storage::now_epoch_secs(), reply_ttl.as_secs() as i64)
-            .map_err(db_err)?
-    };
+    let db = local.db.lock().map_err(db_err)?;
+    let parked = storage::parked_instances(&db, storage::now_epoch_secs(), reply_ttl.as_secs() as i64)
+        .map_err(db_err)?;
     for (id, harness, last_live) in parked {
         if !out.iter().any(|e| e.id == id) {
             out.push(inactive_entry(&id, &harness, "parked", user, last_live));
+            for sub in storage::list_subagents_for_parent(&db, &id).map_err(db_err)? {
+                let child_part = sub.name.as_deref().unwrap_or(&sub.agent_id);
+                let sub_id = format!("{}/{child_part}", sub.parent);
+                out.push(FedListEntry {
+                    id: sub_id,
+                    kind: "subagent".to_string(),
+                    harness: Some(harness.clone()),
+                    label: sub.display_label().and_then(inbox::clean_label),
+                    status: "parked".to_string(),
+                    user: user.to_string(),
+                    registered_at: None,
+                    last_seen: Some(last_live),
+                });
+            }
         }
     }
     Ok(out)
@@ -728,6 +792,108 @@ pub(crate) async fn deliver(
             let line = inbox::encode_transport_line(from_name, &body_with_footer)?;
             inbox::deliver_to_socket(socket_path, &line).await?;
             Ok((session.session_id.clone(), "claude", "delivered"))
+        }
+        ResolvedTarget::SubagentInTurn {
+            session,
+            expires_at,
+        } => {
+            let harness = match session.harness.as_str() {
+                "claude" => "claude",
+                "agy" => "agy",
+                "svc" => "svc",
+                h => crate::plugin::harness(h).unwrap_or("pi"),
+            };
+            let queued = storage::QueuedMessage {
+                id: message_id.to_string(),
+                instance_id: session.session_id.clone(),
+                created_at: storage::now_epoch_secs(),
+                expires_at: *expires_at,
+                from_name: from_name.to_string(),
+                body: format!(
+                    "{body}\n\n[xmsg]{ref_part} message_id={message_id} sent={sent} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
+                ),
+            };
+            {
+                let db = local.db.lock().map_err(db_err)?;
+                storage::insert_queued(&db, &queued).map_err(db_err)?;
+            }
+            let _ = local.notify_tx.send(session.session_id.clone());
+            Ok((session.session_id.clone(), harness, "queued"))
+        }
+        ResolvedTarget::SubagentFallback {
+            session,
+            parent,
+            subagent_header,
+            expires_at,
+        } => {
+            let harness = parent.recipient_harness();
+            let body_with_header = format!("{subagent_header}\n{body}");
+            let queue_for_retry = |local: &Local<'_>| -> Result<(), AppError> {
+                let queued = storage::QueuedMessage {
+                    id: message_id.to_string(),
+                    instance_id: session.session_id.clone(),
+                    created_at: storage::now_epoch_secs(),
+                    expires_at: *expires_at,
+                    from_name: from_name.to_string(),
+                    body: format!(
+                        "{body}\n\n[xmsg]{ref_part} message_id={message_id} sent={sent} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
+                    ),
+                };
+                let db = local.db.lock().map_err(db_err)?;
+                storage::insert_queued(&db, &queued).map_err(db_err)?;
+                Ok(())
+            };
+            match parent.as_ref() {
+                ResolvedTarget::Claude(_, socket_path) => {
+                    let body_with_footer = format!(
+                        "{subagent_header}\n{body}\n\n[xmsg]{ref_part} message_id={message_id} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
+                    );
+                    let line = inbox::encode_transport_line(from_name, &body_with_footer)?;
+                    match inbox::deliver_to_socket(socket_path, &line).await {
+                        Ok(()) => Ok((session.session_id.clone(), "claude", "delivered")),
+                        Err(_) => {
+                            queue_for_retry(local)?;
+                            Ok((session.session_id.clone(), "claude", "queued"))
+                        }
+                    }
+                }
+                ResolvedTarget::Pi(parent_session) => {
+                    let pi_msg = storage::PiPendingMessage {
+                        id: message_id.to_string(),
+                        session_id: parent_session.session_id.clone(),
+                        created_at: storage::now_epoch_secs(),
+                        from_name: from_name.to_string(),
+                        bytes: body.len(),
+                        text: body_with_header,
+                        envelope: format!(
+                            "[xmsg] from={from_name}{ref_part} message_id={message_id} — reply with the xmsg reply tool (tools: send, reply, list, replies)\n{subagent_header}\n\n{body}"
+                        ),
+                        delivered_at: None,
+                    };
+                    let inserted = {
+                        let db = local.db.lock().map_err(db_err)?;
+                        storage::insert_pi_message(&db, &pi_msg).map_err(db_err)?
+                    };
+                    if inserted {
+                        let _ = local.pi_notify_tx.send(parent_session.session_id.clone());
+                    } else {
+                        queue_for_retry(local)?;
+                    }
+                    Ok((session.session_id.clone(), harness, "queued"))
+                }
+                other => {
+                    let (_, h, outcome) = Box::pin(deliver(
+                        local,
+                        other,
+                        from_name,
+                        message_id,
+                        &body_with_header,
+                        origin,
+                    ))
+                    .await?;
+                    Ok((session.session_id.clone(), h, outcome))
+                }
+            }
         }
         ResolvedTarget::Agy(session) => {
             if agy_has_creds(local.agy_store, session) {
@@ -825,9 +991,144 @@ pub async fn push_reply(
     replier_origin: Origin,
     text: &str,
 ) -> &'static str {
-    let envelope = format!(
+    let mut envelope = format!(
         "[xmsg] reply to message_id={in_reply_to} — message_id={reply_id}; reply with the xmsg reply tool (tools: send, reply, list, replies)\n\n{text}"
     );
+    let mut effective_session_id = ret_session_id.to_string();
+    let mut effective_text = text.to_string();
+
+    // D4: Recognise a sub-address `<P>/<child>` BEFORE dispatching on harness.
+    if let Some((parent_ref, child_ref)) = crate::claim::split_subaddress(ret_session_id) {
+        let now = storage::now_epoch_secs();
+        let ttl_secs = local.reply_ttl.as_secs() as i64;
+        let binding = {
+            let Ok(db) = local.db.lock() else {
+                return "push_failed";
+            };
+            storage::resolve_subagent_in(&db, parent_ref, child_ref)
+                .ok()
+                .flatten()
+        };
+        let Some(binding) = binding else {
+            return "sender_gone";
+        };
+        let in_turn = crate::claim::is_subagent_in_turn(&local.agy_config.proc_root, &binding);
+        if in_turn {
+            let instance_id = format!("{}/{}", binding.parent, binding.agent_id);
+            let queued = storage::QueuedMessage {
+                id: reply_id.to_string(),
+                instance_id: instance_id.clone(),
+                created_at: now,
+                expires_at: now + ttl_secs,
+                from_name: replier_label.to_string(),
+                body: envelope,
+            };
+            let inserted = match local.db.lock() {
+                Ok(db) => {
+                    let ok = storage::insert_queued(&db, &queued).is_ok();
+                    if ok {
+                        let _ = storage::update_message_outcome(&db, reply_id, "queued");
+                    }
+                    ok
+                }
+                Err(_) => false,
+            };
+            return if inserted {
+                let _ = local.notify_tx.send(instance_id);
+                "pushed"
+            } else {
+                "push_failed"
+            };
+        }
+
+        let child_part = binding.name.as_deref().unwrap_or(&binding.agent_id);
+        let header = format!(
+            "to={}/{child_part} agent_id={}",
+            binding.parent, binding.agent_id
+        );
+        if ret_harness == "claude" {
+            let parent_live = crate::claim::resolve_claude_session_and_deliver(
+                local.db,
+                &local.agy_config.proc_root,
+                local.sessions_dirs,
+                local.node_name,
+                parent_ref,
+            )
+            .await;
+            let parent_parked = local
+                .db
+                .lock()
+                .ok()
+                .and_then(|db| {
+                    storage::seen_instance(&db, parent_ref, now, ttl_secs)
+                        .ok()
+                        .flatten()
+                })
+                .is_some_and(|s| s.harness == "claude" && now < s.last_live + ttl_secs);
+            if parent_live.is_err() && parent_parked {
+                let instance_id = format!("{}/{}", binding.parent, binding.agent_id);
+                let queued = storage::QueuedMessage {
+                    id: reply_id.to_string(),
+                    instance_id: instance_id.clone(),
+                    created_at: now,
+                    expires_at: now + ttl_secs,
+                    from_name: replier_label.to_string(),
+                    body: envelope,
+                };
+                let inserted = match local.db.lock() {
+                    Ok(db) => {
+                        let ok = storage::insert_queued(&db, &queued).is_ok();
+                        if ok {
+                            let _ = storage::update_message_outcome(&db, reply_id, "queued");
+                        }
+                        ok
+                    }
+                    Err(_) => false,
+                };
+                return if inserted {
+                    let _ = local.notify_tx.send(instance_id);
+                    "pushed"
+                } else {
+                    "push_failed"
+                };
+            }
+            return match parent_live {
+                Ok((_session, socket_path)) if socket_path.exists() => {
+                    let body_with_header = format!("{header}\n{envelope}");
+                    let Ok(line) = inbox::encode_transport_line(replier_label, &body_with_header)
+                    else {
+                        return "push_failed";
+                    };
+                    match inbox::deliver_to_socket(&socket_path, &line).await {
+                        Ok(()) => "pushed",
+                        Err(e) => {
+                            let err = e.to_string();
+                            if err.contains("Connection refused")
+                                || err.contains("No such file or directory")
+                            {
+                                "sender_gone"
+                            } else {
+                                "push_failed"
+                            }
+                        }
+                    }
+                }
+                Ok(_) | Err(AppError::Gone { .. }) | Err(AppError::NotFound(_)) => "sender_gone",
+                Err(_) => "push_failed",
+            };
+        }
+
+        // Non-claude parent fallback (D2, D4): route to `binding.parent` with `header` prepended.
+        effective_session_id = binding.parent;
+        effective_text = format!("{header}\n{text}");
+        envelope = format!(
+            "[xmsg] reply to message_id={in_reply_to} — message_id={reply_id}; reply with the xmsg reply tool (tools: send, reply, list, replies)\n{header}\n\n{text}"
+        );
+    }
+
+    let ret_session_id = effective_session_id.as_str();
+    let text = effective_text.as_str();
+
     match ret_harness {
         "claude" => {
             match crate::claim::resolve_claude_session_and_deliver(
@@ -2003,4 +2304,102 @@ pub async fn replies(
     })
     .await;
     stored(state)
+}
+
+// -----------------------------------------------------------------------------
+// inbox (HA9-A: subagent turn mailbox)
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InboxMessageItem {
+    pub id: String,
+    pub from: String,
+    pub body: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InboxResult {
+    pub address: String,
+    pub messages: Vec<InboxMessageItem>,
+}
+
+/// Drains unexpired messages queued for `caller` (`<P>/<agent_id>`) in `instance_queue`,
+/// waiting up to `wait` seconds (capped at `MAX_WAIT_SECS`) for the first message if none
+/// are waiting. Marks drained messages `delivered` in `messages`.
+pub async fn inbox(
+    state: &AppState,
+    caller: &Session,
+    wait: u64,
+) -> Result<InboxResult, AppError> {
+    let wait_secs = wait.min(MAX_WAIT_SECS);
+    let _permit = if wait_secs > 0 {
+        match state.long_poll_semaphore.clone().try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                return Err(AppError::ServiceUnavailable(
+                    "too many concurrent long-poll requests".to_string(),
+                ));
+            }
+            Err(e) => return Err(AppError::Internal(e.to_string())),
+        }
+    } else {
+        None
+    };
+
+    let address = match caller.session_id.split_once('/') {
+        Some((parent, agent_id)) => {
+            let bound_name = state
+                .db
+                .lock()
+                .ok()
+                .and_then(|db| storage::get_subagent(&db, parent, agent_id).ok().flatten())
+                .and_then(|b| b.name);
+            let child_part = bound_name.as_deref().unwrap_or(agent_id);
+            format!("{parent}/{child_part}@{}", state.node_name)
+        }
+        None => format!("{}@{}", caller.session_id, state.node_name),
+    };
+
+    let drain = |state: &AppState| -> Result<Vec<InboxMessageItem>, AppError> {
+        let now = storage::now_epoch_secs();
+        let db = state.db.lock().map_err(db_err)?;
+        let queued = storage::take_queued(&db, &caller.session_id, now).map_err(db_err)?;
+        let mut out = Vec::with_capacity(queued.len());
+        for m in queued {
+            let _ = storage::update_message_outcome(&db, &m.id, "delivered");
+            out.push(InboxMessageItem {
+                id: m.id,
+                from: m.from_name,
+                body: m.body,
+                created_at: m.created_at,
+            });
+        }
+        Ok(out)
+    };
+
+    let rx = (wait_secs > 0).then(|| state.notify_tx.subscribe());
+    let existing = drain(state)?;
+    let Some(mut receiver) = rx.filter(|_| existing.is_empty()) else {
+        return Ok(InboxResult {
+            address,
+            messages: existing,
+        });
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(wait_secs), async {
+        loop {
+            match receiver.recv().await {
+                Ok(id) if id == caller.session_id => break,
+                Err(_) => break,
+                _ => {}
+            }
+        }
+    })
+    .await;
+    Ok(InboxResult {
+        address,
+        messages: drain(state)?,
+    })
 }

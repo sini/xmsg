@@ -107,7 +107,9 @@ fn target_filter_key(target: &crate::http::ResolvedTarget) -> &str {
         crate::http::ResolvedTarget::Claude(s, _)
         | crate::http::ResolvedTarget::Agy(s)
         | crate::http::ResolvedTarget::Pi(s)
-        | crate::http::ResolvedTarget::Parked { session: s, .. } => &s.session_id,
+        | crate::http::ResolvedTarget::Parked { session: s, .. }
+        | crate::http::ResolvedTarget::SubagentInTurn { session: s, .. }
+        | crate::http::ResolvedTarget::SubagentFallback { session: s, .. } => &s.session_id,
     }
 }
 

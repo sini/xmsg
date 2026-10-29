@@ -109,6 +109,76 @@ pub fn validate_service_name(name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// HA9-A §2.1 & E3: splits a `<parent>/<child>` reference when the part before the first `/`
+/// is an instance reference (`is_instance_ref`, A11). Any other reference containing `/`
+/// (such as a label `"fix/x"` or a service name `"a/b"`) returns `None` and takes the
+/// existing service/label lookup unchanged.
+pub fn split_subaddress(ref_str: &str) -> Option<(&str, &str)> {
+    let (parent, child) = ref_str.split_once('/')?;
+    if is_instance_ref(parent) {
+        Some((parent, child))
+    } else {
+        None
+    }
+}
+
+/// HA9-A §2.1: measured Claude subagent `agent_id` shapes:
+/// - 17 lowercase hex characters (`measure-v0` §2.1);
+/// - `a<name>-<16hex>` (`spike v0.1` §2, in-process teammates).
+pub fn is_subagent_id_shaped(s: &str) -> bool {
+    let is_lower_hex = |b: u8| matches!(b, b'0'..=b'9' | b'a'..=b'f');
+    if s.len() == 17 && s.bytes().all(is_lower_hex) {
+        return true;
+    }
+    if let Some((prefix, hex_part)) = s.rsplit_once('-') {
+        if prefix.starts_with('a')
+            && prefix.len() > 1
+            && hex_part.len() == 16
+            && hex_part.bytes().all(is_lower_hex)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// HA9-A §2.1: a subagent name is accepted only if it passes `validate_service_name`,
+/// contains no `/`, and is not agent-id-shaped.
+pub fn validate_subagent_name(name: &str) -> Result<(), AppError> {
+    if name.is_empty() {
+        return Err(AppError::BadRequest(
+            "subagent name must not be empty".to_string(),
+        ));
+    }
+    validate_service_name(name)?;
+    if name.contains('/') {
+        return Err(AppError::BadRequest(format!(
+            "subagent name '{name}' contains forbidden character '/'"
+        )));
+    }
+    if is_subagent_id_shaped(name) {
+        return Err(AppError::BadRequest(format!(
+            "subagent name '{name}' is agent-id-shaped"
+        )));
+    }
+    Ok(())
+}
+
+/// HA9-A §2.4: whether a bound subagent is currently in an active turn (`turn_pid` and
+/// `turn_start` match a live parent process in `proc_root`).
+pub fn is_subagent_in_turn(proc_root: &Path, row: &storage::SubagentBinding) -> bool {
+    let (Some(pid), Some(start)) = (row.turn_pid, row.turn_start.as_deref()) else {
+        return false;
+    };
+    if pid == 0 || start.is_empty() {
+        return false;
+    }
+    match process::starttime(proc_root, pid) {
+        Ok(st) => process::claude_start_token_matches(proc_root, &st, start),
+        Err(_) => false,
+    }
+}
+
 pub fn get_active_claim_for_proc(
     conn: &Connection,
     pid: u32,
@@ -505,18 +575,22 @@ pub async fn deliver_fork_notices(
     }
 }
 
-/// A queued message taken for a live holder of its plain ID (A14).
+/// A queued message taken for a live holder of its plain ID (A14) or a not-in-turn
+/// subagent falling back to its live parent (HA9-A §2.4, E4).
 #[derive(Debug, Clone)]
 pub struct QueuedDelivery {
     pub message: storage::QueuedMessage,
     pub socket_path: PathBuf,
+    pub subagent_header: Option<String>,
 }
 
-/// Takes what is queued for every live plain-ID holder in one scan's pairs. A queue drains
-/// when its conversation is next observed, and a taken message is marked delivered, so the
-/// observation after that delivers nothing again.
+/// Takes what is queued for every live plain-ID holder in one scan's pairs, and for every
+/// not-in-turn subagent of any active parent claim (regardless of suffix; HA9-A §2.4, E4).
+/// A queue drains when its conversation is next observed, and a taken message is marked
+/// delivered, so the observation after that delivers nothing again.
 pub fn take_queued_for(
     conn: &Connection,
+    proc_root: &Path,
     active_pairs: &[(InstanceClaim, SessionFileEntry)],
 ) -> Result<Vec<QueuedDelivery>, AppError> {
     let now = now_epoch_secs();
@@ -528,7 +602,68 @@ pub fn take_queued_for(
             out.push(QueuedDelivery {
                 message,
                 socket_path: PathBuf::from(&entry.messaging_socket_path),
+                subagent_header: None,
             });
+        }
+    }
+    // OQ2 (recommended arm: fallback) + E4 + D3: sweep every not-in-turn child (`turn_pid`
+    // NULL or dead) across all `subagents` rows, whatever the parent's harness.
+    let all_subagents =
+        storage::list_all_subagents(conn).map_err(|e| AppError::Internal(e.to_string()))?;
+    for sub in all_subagents {
+        if is_subagent_in_turn(proc_root, &sub) {
+            continue;
+        }
+        let sub_queue_id = format!("{}/{}", sub.parent, sub.agent_id);
+        let child_part = sub.name.as_deref().unwrap_or(&sub.agent_id);
+        let header = format!("to={}/{} agent_id={}", sub.parent, child_part, sub.agent_id);
+        if let Some((_, entry)) = active_pairs.iter().find(|(c, _)| c.address() == sub.parent) {
+            for message in storage::take_queued(conn, &sub_queue_id, now)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+            {
+                out.push(QueuedDelivery {
+                    message,
+                    socket_path: PathBuf::from(&entry.messaging_socket_path),
+                    subagent_header: Some(header.clone()),
+                });
+            }
+        } else {
+            let is_plugin_or_pi = crate::plugin::session(conn, &sub.parent)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .is_some()
+                || storage::seen_instance(conn, &sub.parent, now, 604_800)
+                    .map_err(|e| AppError::Internal(e.to_string()))?
+                    .is_some_and(|s| {
+                        (s.harness == "pi" || crate::plugin::harness(&s.harness).is_some())
+                            && s.reclaimable
+                            && now < s.last_live + 604_800
+                    });
+            if is_plugin_or_pi {
+                for message in storage::take_queued(conn, &sub_queue_id, now)
+                    .map_err(|e| AppError::Internal(e.to_string()))?
+                {
+                    let body_with_header = format!("{header}\n{}", message.body);
+                    let pi_msg = storage::PiPendingMessage {
+                        id: message.id.clone(),
+                        session_id: sub.parent.clone(),
+                        created_at: message.created_at,
+                        from_name: message.from_name.clone(),
+                        bytes: message.body.len(),
+                        text: body_with_header,
+                        envelope: format!(
+                            "[xmsg] from={} message_id={}\n{header}\n\n{}",
+                            message.from_name, message.id, message.body
+                        ),
+                        delivered_at: None,
+                    };
+                    if !storage::insert_pi_message(conn, &pi_msg)
+                        .map_err(|e| AppError::Internal(e.to_string()))?
+                    {
+                        storage::untake_queued(conn, &message.id)
+                            .map_err(|e| AppError::Internal(e.to_string()))?;
+                    }
+                }
+            }
         }
     }
     Ok(out)
@@ -539,7 +674,11 @@ pub fn take_queued_for(
 pub async fn deliver_queued(db: &std::sync::Mutex<Connection>, deliveries: Vec<QueuedDelivery>) {
     let mut outcomes = Vec::new();
     for d in deliveries {
-        let res = match inbox::encode_transport_line(&d.message.from_name, &d.message.body) {
+        let body = match &d.subagent_header {
+            Some(hdr) => format!("{hdr}\n{}", d.message.body),
+            None => d.message.body.clone(),
+        };
+        let res = match inbox::encode_transport_line(&d.message.from_name, &body) {
             Ok(line) => inbox::deliver_to_socket(&d.socket_path, &line).await,
             Err(e) => Err(e),
         };
@@ -585,7 +724,7 @@ pub async fn with_claims<T>(
     let (out, notices, queued) = {
         let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
         let (pairs, notices) = sync_claims_db(&conn, proc_root, sessions_dirs, node_name)?;
-        let queued = take_queued_for(&conn, &pairs)?;
+        let queued = take_queued_for(&conn, proc_root, &pairs)?;
         (f(&conn, &pairs), notices, queued)
     };
     if !notices.is_empty() || !queued.is_empty() {

@@ -158,6 +158,20 @@ pub(crate) enum ResolvedTarget {
         session: registry::Session,
         expires_at: i64,
     },
+    /// HA9-A §2.4: a subagent currently in a turn (or under a parked Claude parent),
+    /// queued into `instance_queue` under `<P>/<agent_id>`.
+    SubagentInTurn {
+        session: registry::Session,
+        expires_at: i64,
+    },
+    /// HA9-A §2.4 (OQ2 recommended arm, D1, D2): a subagent not in a turn whose parent P
+    /// is reachable, falling back to P with `to=<P>/<child> agent_id=<id>`.
+    SubagentFallback {
+        session: registry::Session,
+        parent: Box<ResolvedTarget>,
+        subagent_header: String,
+        expires_at: i64,
+    },
 }
 
 impl ResolvedTarget {
@@ -165,6 +179,8 @@ impl ResolvedTarget {
     pub(crate) fn is_parked(&self) -> bool {
         match self {
             ResolvedTarget::Parked { .. } => true,
+            ResolvedTarget::SubagentInTurn { session: s, .. } => s.status == "parked",
+            ResolvedTarget::SubagentFallback { parent, .. } => parent.is_parked(),
             ResolvedTarget::Agy(s) => s.status == "parked",
             _ => false,
         }
@@ -176,13 +192,22 @@ impl ResolvedTarget {
             | ResolvedTarget::Agy(s)
             | ResolvedTarget::Pi(s)
             | ResolvedTarget::Svc(s)
-            | ResolvedTarget::Parked { session: s, .. } => s,
+            | ResolvedTarget::Parked { session: s, .. }
+            | ResolvedTarget::SubagentInTurn { session: s, .. }
+            | ResolvedTarget::SubagentFallback { session: s, .. } => s,
         }
     }
 
     pub(crate) fn recipient_harness(&self) -> &'static str {
         match self {
             ResolvedTarget::Claude(_, _) | ResolvedTarget::Parked { .. } => "claude",
+            ResolvedTarget::SubagentInTurn { session: s, .. } => match s.harness.as_str() {
+                "claude" => "claude",
+                "agy" => "agy",
+                "svc" => "svc",
+                h => crate::plugin::harness(h).unwrap_or("pi"),
+            },
+            ResolvedTarget::SubagentFallback { parent, .. } => parent.recipient_harness(),
             ResolvedTarget::Agy(_) => "agy",
             ResolvedTarget::Pi(s) => crate::plugin::harness(&s.harness).unwrap_or("pi"),
             ResolvedTarget::Svc(_) => "svc",
@@ -193,6 +218,10 @@ impl ResolvedTarget {
 /// Local resolution of a send's target (A11, A7, D-4), one order for every surface. Kind
 /// prefixes and pids are not refs: a ref is an instance ID (optionally `~n`) or a name.
 ///
+/// 0. A sub-address `<parent>/<child>` where `<parent>` is an instance reference
+///    (`is_instance_ref`, A11, HA9-A §2.1, E3, D1): `<parent>` resolves as a local instance
+///    address and `<child>` resolves in that parent's `subagents` table. It never falls
+///    through to label lookup.
 /// 1. An instance ID, which is UUID-shaped (A11): a Claude `X~n` or bare `X`, then an agy
 ///    or pi ID. Any other ref is a name and skips this step.
 ///    A bare X with only `X~n` forks live is `ambiguous` (D-4).
@@ -225,6 +254,84 @@ pub(crate) async fn resolve_target(
     let proc_root = &agy_config.proc_root;
     let now = storage::now_epoch_secs();
     let query = registry::SessionsQuery::default();
+
+    // 0. HA9-A §2.1, E3, D1: `<parent>/<child>` when `<parent>` is an instance reference.
+    if let Some((parent_ref, child_ref)) = crate::claim::split_subaddress(ref_str) {
+        if child_ref.is_empty() || child_ref.contains('/') {
+            return Err(AppError::NotFound(format!(
+                "{ref_str} (parent '{parent_ref}')"
+            )));
+        }
+        let ttl_secs = reply_ttl.as_secs() as i64;
+        let parent_target = match Box::pin(resolve_target(
+            sessions_dirs,
+            agy_config,
+            agy_store,
+            pi_store,
+            svc_store,
+            db,
+            node_name,
+            parent_ref,
+            reply_ttl,
+        ))
+        .await
+        {
+            Ok(t) => t,
+            Err(e @ AppError::Ambiguous(_)) => return Err(e),
+            Err(_) => {
+                return Err(AppError::NotFound(format!(
+                    "{ref_str} (parent '{parent_ref}' not found)"
+                )))
+            }
+        };
+        let parent_session = parent_target.session().clone();
+        let parent_addr = parent_session.session_id.clone();
+        let binding = {
+            let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+            storage::resolve_subagent_in(&conn, &parent_addr, child_ref)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .ok_or_else(|| {
+                    AppError::NotFound(format!("{ref_str} (parent '{parent_addr}')"))
+                })?
+        };
+        let sub_id = format!("{}/{}", binding.parent, binding.agent_id);
+        let sub_session = registry::Session {
+            session_id: sub_id,
+            name: binding.display_label().map(str::to_string),
+            pid: binding.turn_pid.unwrap_or(0),
+            cwd: parent_session.cwd,
+            status: parent_session.status,
+            kind: "subagent".to_string(),
+            entrypoint: None,
+            version: None,
+            started_at: binding.bound_at as u64,
+            updated_at: binding.bound_at as u64,
+            harness: parent_session.harness,
+            registered: parent_session.registered,
+        };
+        // OQ2 isolation: in-turn (or parked Claude parent) queues into `<P>/<agent_id>`;
+        // out-of-turn falls back to P with `to=<P>/<child> agent_id=<id>` (D2).
+        if crate::claim::is_subagent_in_turn(proc_root, &binding)
+            || matches!(parent_target, ResolvedTarget::Parked { .. })
+        {
+            return Ok(ResolvedTarget::SubagentInTurn {
+                session: sub_session,
+                expires_at: now + ttl_secs,
+            });
+        }
+        let child_part = binding.name.as_deref().unwrap_or(&binding.agent_id);
+        let subagent_header = format!(
+            "to={}/{} agent_id={}",
+            binding.parent, child_part, binding.agent_id
+        );
+        return Ok(ResolvedTarget::SubagentFallback {
+            session: sub_session,
+            parent: Box::new(parent_target),
+            subagent_header,
+            expires_at: now + ttl_secs,
+        });
+    }
+
     let is = |id: &str| id == ref_str;
     // A11: only a UUID-shaped reference (optionally `~n`) is an instance ID; any other is a
     // name, even where an instance presents it as its ID.

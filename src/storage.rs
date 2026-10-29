@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -350,6 +350,19 @@ const SCHEMA_N: &str = r#"
         );
         CREATE INDEX IF NOT EXISTS idx_instance_claims_id ON instance_claims(id);
         CREATE INDEX IF NOT EXISTS idx_instance_claims_proc ON instance_claims(pid, proc_start);
+
+        CREATE TABLE IF NOT EXISTS subagents (
+            parent      TEXT NOT NULL,
+            agent_id    TEXT NOT NULL,
+            name        TEXT,
+            agent_type  TEXT,
+            tool_use_id TEXT,
+            bound_at    INTEGER NOT NULL,
+            turn_pid    INTEGER,
+            turn_start  TEXT,
+            PRIMARY KEY (parent, agent_id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_subagents_name ON subagents(parent, name) WHERE name IS NOT NULL;
 
         CREATE TABLE IF NOT EXISTS instance_queue (
             id TEXT PRIMARY KEY,
@@ -1964,15 +1977,215 @@ pub fn parked_instances(
 }
 
 /// Prunes `instance_seen` rows whose `last_live` is older than `ttl_secs` (the longest
-/// `within` window accepted) and which hold no unexpired queued messages.
+/// `within` window accepted) and which hold no unexpired queued messages. When a parent's
+/// `instance_seen` row is purged, its `subagents` rows (and any subagent queue rows) go
+/// with it in the same batch (HA9-A §2.5, E7 O10).
 pub fn purge_instance_seen(conn: &Connection, now: i64, ttl_secs: i64) -> Result<usize> {
-    conn.execute(
-        "DELETE FROM instance_seen WHERE last_live + ?2 <= ?1 \
+    let mut stmt = conn.prepare(
+        "SELECT id FROM instance_seen WHERE last_live + ?2 <= ?1 \
          AND NOT EXISTS (SELECT 1 FROM instance_queue q WHERE q.instance_id = instance_seen.id AND q.delivered_at IS NULL AND q.expires_at > ?1) \
          AND NOT EXISTS (SELECT 1 FROM agy_pending_messages a WHERE a.session_id = instance_seen.id AND a.delivered_at IS NULL AND a.created_at >= ?1 - ?2) \
          AND NOT EXISTS (SELECT 1 FROM pi_pending_messages p WHERE p.session_id = instance_seen.id AND p.delivered_at IS NULL AND p.created_at >= ?1 - ?2)",
-        params![now, ttl_secs],
+    )?;
+    let purged_ids: Vec<String> = stmt
+        .query_map(params![now, ttl_secs], |r| r.get(0))?
+        .collect::<Result<Vec<_>>>()?;
+    for id in &purged_ids {
+        conn.execute("DELETE FROM instance_seen WHERE id = ?1", params![id])?;
+        conn.execute(
+            "DELETE FROM subagents WHERE parent = ?1 OR parent LIKE ?1 || '~%'",
+            params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM instance_queue WHERE instance_id LIKE ?1 || '/%' OR instance_id LIKE ?1 || '~%/%'",
+            params![id],
+        )?;
+    }
+    Ok(purged_ids.len())
+}
+
+// -----------------------------------------------------------------------------
+// HA9-A: Delegated sub-addresses for in-process Claude subagents
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentBinding {
+    pub parent: String,
+    pub agent_id: String,
+    pub name: Option<String>,
+    pub agent_type: Option<String>,
+    pub tool_use_id: Option<String>,
+    pub bound_at: i64,
+    pub turn_pid: Option<u32>,
+    pub turn_start: Option<String>,
+}
+
+impl SubagentBinding {
+    /// Display label per D5: `name ?? agent_type`.
+    pub fn display_label(&self) -> Option<&str> {
+        self.name.as_deref().or(self.agent_type.as_deref())
+    }
+}
+
+fn map_subagent_row(row: &rusqlite::Row<'_>) -> Result<SubagentBinding> {
+    Ok(SubagentBinding {
+        parent: row.get(0)?,
+        agent_id: row.get(1)?,
+        name: row.get(2)?,
+        agent_type: row.get(3)?,
+        tool_use_id: row.get(4)?,
+        bound_at: row.get(5)?,
+        turn_pid: row.get(6)?,
+        turn_start: row.get(7)?,
+    })
+}
+
+pub fn get_subagent(
+    conn: &Connection,
+    parent: &str,
+    agent_id: &str,
+) -> Result<Option<SubagentBinding>> {
+    conn.query_row(
+        "SELECT parent, agent_id, name, agent_type, tool_use_id, bound_at, turn_pid, turn_start FROM subagents WHERE parent = ?1 AND agent_id = ?2",
+        params![parent, agent_id],
+        map_subagent_row,
     )
+    .optional()
+}
+
+pub fn resolve_subagent_in(
+    conn: &Connection,
+    parent: &str,
+    child_ref: &str,
+) -> Result<Option<SubagentBinding>> {
+    conn.query_row(
+        "SELECT parent, agent_id, name, agent_type, tool_use_id, bound_at, turn_pid, turn_start FROM subagents WHERE parent = ?1 AND (name = ?2 OR agent_id = ?2) LIMIT 1",
+        params![parent, child_ref],
+        map_subagent_row,
+    )
+    .optional()
+}
+
+pub fn list_subagents_for_parent(conn: &Connection, parent: &str) -> Result<Vec<SubagentBinding>> {
+    let mut stmt = conn.prepare(
+        "SELECT parent, agent_id, name, agent_type, tool_use_id, bound_at, turn_pid, turn_start FROM subagents WHERE parent = ?1 ORDER BY bound_at ASC, agent_id ASC",
+    )?;
+    let rows = stmt
+        .query_map(params![parent], map_subagent_row)?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn list_all_subagents(conn: &Connection) -> Result<Vec<SubagentBinding>> {
+    let mut stmt = conn.prepare(
+        "SELECT parent, agent_id, name, agent_type, tool_use_id, bound_at, turn_pid, turn_start FROM subagents ORDER BY parent ASC, bound_at ASC, agent_id ASC",
+    )?;
+    let rows = stmt
+        .query_map([], map_subagent_row)?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Upserts `(parent, agent_id)` at `SubagentStart`, setting `turn_pid` and `turn_start` to
+/// the parent process. On a resume with `meta_name`, binds the name only when no other row
+/// under `parent` holds it (HA9-A §2.2, E5). `agent_type` is stored when supplied (D5).
+#[allow(clippy::too_many_arguments)]
+pub fn subagent_start_turn(
+    conn: &Connection,
+    parent: &str,
+    agent_id: &str,
+    turn_pid: u32,
+    turn_start: &str,
+    meta_name: Option<&str>,
+    agent_type: Option<&str>,
+    tool_use_id: Option<&str>,
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO subagents (parent, agent_id, name, agent_type, tool_use_id, bound_at, turn_pid, turn_start) \
+         VALUES (?1, ?2, NULL, ?7, ?5, ?6, ?3, ?4) \
+         ON CONFLICT(parent, agent_id) DO UPDATE SET \
+             agent_type = COALESCE(?7, subagents.agent_type), \
+             tool_use_id = COALESCE(?5, subagents.tool_use_id), \
+             turn_pid = ?3, \
+             turn_start = ?4",
+        params![parent, agent_id, turn_pid, turn_start, tool_use_id, now, agent_type],
+    )?;
+    if let Some(n) = meta_name {
+        conn.execute(
+            "UPDATE subagents SET name = ?3, bound_at = ?4 \
+             WHERE parent = ?1 AND agent_id = ?2 \
+               AND NOT EXISTS (SELECT 1 FROM subagents s2 WHERE s2.parent = ?1 AND s2.name = ?3 AND s2.agent_id != ?2)",
+            params![parent, agent_id, n, now],
+        )?;
+    }
+    Ok(())
+}
+
+/// Binds `(parent, agent_id)` from a spawn event (`PostToolUse(Agent)` or `teammate_spawned`).
+/// By OQ1 (recommended arm) and E5, a spawn bind takes over a held name: any earlier holder's
+/// `name` becomes `NULL`, and that child stays reachable by `<parent>/<agent_id>`.
+pub fn subagent_bind_spawn(
+    conn: &Connection,
+    parent: &str,
+    agent_id: &str,
+    name: Option<&str>,
+    tool_use_id: Option<&str>,
+    now: i64,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    if let Some(n) = name {
+        tx.execute(
+            "UPDATE subagents SET name = NULL WHERE parent = ?1 AND name = ?2 AND agent_id != ?3",
+            params![parent, n, agent_id],
+        )?;
+    }
+    tx.execute(
+        "INSERT INTO subagents (parent, agent_id, name, tool_use_id, bound_at, turn_pid, turn_start) \
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL) \
+         ON CONFLICT(parent, agent_id) DO UPDATE SET \
+             name = COALESCE(?3, subagents.name), \
+             tool_use_id = COALESCE(?4, subagents.tool_use_id), \
+             bound_at = CASE WHEN ?3 IS NOT NULL THEN ?5 ELSE subagents.bound_at END",
+        params![parent, agent_id, name, tool_use_id, now],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Re-asserts `(parent, resumed_agent_id)` from `PostToolUse(SendMessage)`. When `name` is
+/// supplied (`tool_input.to` was not id-shaped), binds it without displacing another holder (E5).
+pub fn subagent_reassert_resume(
+    conn: &Connection,
+    parent: &str,
+    agent_id: &str,
+    name: Option<&str>,
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO subagents (parent, agent_id, name, tool_use_id, bound_at, turn_pid, turn_start) \
+         VALUES (?1, ?2, NULL, NULL, ?3, NULL, NULL) \
+         ON CONFLICT(parent, agent_id) DO NOTHING",
+        params![parent, agent_id, now],
+    )?;
+    if let Some(n) = name {
+        conn.execute(
+            "UPDATE subagents SET name = ?3, bound_at = ?4 \
+             WHERE parent = ?1 AND agent_id = ?2 \
+               AND NOT EXISTS (SELECT 1 FROM subagents s2 WHERE s2.parent = ?1 AND s2.name = ?3 AND s2.agent_id != ?2)",
+            params![parent, agent_id, n, now],
+        )?;
+    }
+    Ok(())
+}
+
+/// Clears `turn_pid` and `turn_start` on `SubagentStop` (§2.2).
+pub fn subagent_stop_turn(conn: &Connection, parent: &str, agent_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE subagents SET turn_pid = NULL, turn_start = NULL WHERE parent = ?1 AND agent_id = ?2",
+        params![parent, agent_id],
+    )?;
+    Ok(())
 }
 
 /// An inactive instance in `instance_seen` within `within_secs` of `now` (XL1, HA8): its ID,
