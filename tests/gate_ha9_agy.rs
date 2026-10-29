@@ -714,18 +714,93 @@ async fn g2_admission_from_descriptor_and_refusals() {
         assert!(storage::get_subagent(&db, P_UUID, Z_UUID).unwrap().is_none());
     }
 
-    // 5. `as_agent = "../<Q>/x"` on `send` -> `not_recipient` (`denied`), no traversal.
-    let traversal = format!("../{Q_UUID}/{X_UUID}");
-    let send_trav = h
+    // 5. G2c (E4 UUID-shape guard): non-UUID `as_agent` / `agent_id` values (`"../aaaa"`,
+    // `"kid/../x"`, and `"not-a-uuid"`) with readable, content-matching sentinel files placed
+    // at the target paths (`brain/<P>/.system_generated/aaaa.json`,
+    // `brain/<P>/.system_generated/subagents/x.json` with `subagents/kid/` present, and
+    // `brain/<P>/.system_generated/subagents/not-a-uuid.json`) must be refused before any
+    // non-UUID descriptor path is opened.
+    let sentinel_outside = h
+        .brain_dir
+        .join(P_UUID)
+        .join(".system_generated")
+        .join("aaaa.json");
+    fs::write(
+        &sentinel_outside,
+        serde_json::to_string(&json!({
+            "conversationId": "../aaaa",
+            "role": "trav-outside",
+            "typeName": "self",
+            "stepIndex": 6,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let subagents_dir = h
+        .brain_dir
+        .join(P_UUID)
+        .join(".system_generated")
+        .join("subagents");
+    fs::create_dir_all(subagents_dir.join("kid")).unwrap();
+    fs::write(
+        subagents_dir.join("x.json"),
+        serde_json::to_string(&json!({
+            "conversationId": "kid/../x",
+            "role": "trav-sub",
+            "typeName": "self",
+            "stepIndex": 7,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        subagents_dir.join("not-a-uuid.json"),
+        serde_json::to_string(&json!({
+            "conversationId": "not-a-uuid",
+            "role": "non-uuid",
+            "typeName": "self",
+            "stepIndex": 8,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    for bad_id in ["../aaaa", "kid/../x", "not-a-uuid"] {
+        let send_trav = h
+            .agent_frame(json!({
+                "action": "send",
+                "to": P_UUID,
+                "text": "traversal",
+                "as_agent": bad_id,
+            }))
+            .await;
+        assert_eq!(
+            send_trav["status"], "error",
+            "non-UUID as_agent '{bad_id}' must be refused on send: {send_trav}"
+        );
+        assert_eq!(send_trav["error"], "denied", "{send_trav}");
+        {
+            let db = h.state.db.lock().unwrap();
+            assert!(
+                storage::get_subagent(&db, P_UUID, bad_id).unwrap().is_none(),
+                "admit_agy must never admit non-UUID '{bad_id}'"
+            );
+        }
+    }
+
+    let start_non_uuid = h
         .agent_frame(json!({
-            "action": "send",
-            "to": P_UUID,
-            "text": "traversal",
-            "as_agent": traversal,
+            "action": "subagent",
+            "event": "start",
+            "agent_id": "not-a-uuid",
         }))
         .await;
-    assert_eq!(send_trav["status"], "error", "{send_trav}");
-    assert_eq!(send_trav["error"], "denied", "{send_trav}");
+    assert_eq!(
+        start_non_uuid["status"], "error",
+        "non-UUID agent_id must be refused on start: {start_non_uuid}"
+    );
+    assert_eq!(start_non_uuid["error"], "denied", "{start_non_uuid}");
 }
 
 // ===========================================================================
