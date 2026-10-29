@@ -440,7 +440,7 @@ fn tool_err(text: String) -> Value {
     })
 }
 
-fn call_agent_sock(sock_path: &std::path::Path, payload: &Value) -> Result<Value, String> {
+pub fn call_agent_sock(sock_path: &std::path::Path, payload: &Value) -> Result<Value, String> {
     call_agent_sock_within(sock_path, payload, Duration::from_secs(5))
 }
 
@@ -506,30 +506,36 @@ pub const REPLY_ONLY_TOOLS: &[&str] = &["reply", "replies"];
 /// A13's four tools. MCP carries no `idempotency_key`: agents don't retry a send by
 /// accident, and programs that retry use HTTP or `agent.sock`.
 pub fn tool_definitions() -> Vec<Value> {
+    let as_agent_prop = json!({
+        "type": "string",
+        "description": "Set by the harness hook. Any value you write is replaced."
+    });
     vec![
         json!({
             "name": "list",
-            "description": "List the recipients you can message, on this node and every node it can reach. By default (`status` omitted or \"live\"), shows only live recipients, each carrying `registered_at` (epoch seconds when it registered on its node). With `status: \"inactive\"`, shows parked and closed instances seen within `within` seconds (default 86400 = 24h, capped at the reply TTL), each carrying `last_seen` (a peer older than XL1 lists no inactive entries). Each entry gives its address (`id@node` for an instance, `name@node` for a service), kind (`service` or `instance`), harness (`claude`, `agy`, `pi`, `opencode`, `hermes` or `svc`; omitted when a pre-XL1 peer did not report it), label, status (`live`, `parked` or `closed`), user, and `registered_at` or `last_seen`; `nodes` gives each node asked as `ok`, `unreachable` or `timeout` (a node that withholds list is `unreachable`, detail `withholds list`). Filter by `name`, `node` or `kind`; `node` asks only that node.",
+            "description": "List the recipients you can message, on this node and every node it can reach. By default (`status` omitted or \"live\"), shows only live recipients, each carrying `registered_at` (epoch seconds when it registered on its node). With `status: \"inactive\"`, shows parked and closed instances seen within `within` seconds (default 86400 = 24h, capped at the reply TTL), each carrying `last_seen` (a peer older than XL1 lists no inactive entries). Each entry gives its address (`id@node` for an instance, `name@node` for a service, `<parent>/<child>@node` for a subagent), kind (`service`, `instance` or `subagent`), harness (`claude`, `agy`, `pi`, `opencode`, `hermes` or `svc`; omitted when a pre-XL1 peer did not report it), label, status (`live`, `parked` or `closed`), user, and `registered_at` or `last_seen`; `nodes` gives each node asked as `ok`, `unreachable` or `timeout` (a node that withholds list is `unreachable`, detail `withholds list`). Filter by `name`, `node` or `kind`; `node` asks only that node.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "Only recipients with this label or service name" },
                     "node": { "type": "string", "description": "Ask only this node (this one or a federated peer)" },
-                    "kind": { "type": "string", "enum": ["service", "instance"], "description": "Only services or only instances" },
+                    "kind": { "type": "string", "enum": ["service", "instance", "subagent"], "description": "Only services, only instances, or only subagents" },
                     "status": { "type": "string", "enum": ["live", "inactive"], "description": "Whether to list live recipients (default) or inactive (parked and closed) instances" },
-                    "within": { "type": "integer", "minimum": 0, "description": "For status='inactive', include entries seen within this many seconds (default 86400 = 24h, capped at reply TTL)" }
+                    "within": { "type": "integer", "minimum": 0, "description": "For status='inactive', include entries seen within this many seconds (default 86400 = 24h, capped at reply TTL)" },
+                    "as_agent": as_agent_prop
                 },
                 "additionalProperties": false
             }
         }),
         json!({
             "name": "send",
-            "description": "Send a message. `to` is an instance ID (a UUID, optionally ~n), a service name or an instance label, optionally followed by @node to reach another node (one @ at most). A name resolves among services first and only when exactly one live recipient carries it; otherwise the error lists the candidates. Returns the message ID, the resolved address (use it for follow-ups) and the outcome. Your identity is derived from your session; replies are pushed to you.",
+            "description": "Send a message. `to` is an instance ID (a UUID, optionally ~n), a sub-address (<parent>/<child>), a service name or an instance label, optionally followed by @node to reach another node (one @ at most). A name resolves among services first and only when exactly one live recipient carries it; otherwise the error lists the candidates. Returns the message ID, the resolved address (use it for follow-ups) and the outcome. Your identity is derived from your session; replies are pushed to you.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "to": { "type": "string", "description": "<id or name>[@<node>]" },
-                    "text": { "type": "string", "description": "Message content" }
+                    "text": { "type": "string", "description": "Message content" },
+                    "as_agent": as_agent_prop
                 },
                 "required": ["to", "text"],
                 "additionalProperties": false
@@ -542,7 +548,8 @@ pub fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "message_id": { "type": "string", "description": "ID of the message being replied to" },
-                    "text": { "type": "string", "description": "Reply text" }
+                    "text": { "type": "string", "description": "Reply text" },
+                    "as_agent": as_agent_prop
                 },
                 "required": ["message_id", "text"],
                 "additionalProperties": false
@@ -555,9 +562,22 @@ pub fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "message_id": { "type": "string", "description": "ID of the message you sent" },
-                    "wait": { "type": "integer", "minimum": 0, "description": "Seconds to wait for a first reply (capped at 60)" }
+                    "wait": { "type": "integer", "minimum": 0, "description": "Seconds to wait for a first reply (capped at 60)" },
+                    "as_agent": as_agent_prop
                 },
                 "required": ["message_id"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "inbox",
+            "description": "Read messages sent to your subagent address (<parent>/<child>@<node>) while your turn is running, waiting up to `wait` seconds (at most 60) for the first. Only subagents may call this tool; a parent session receives messages on its channel.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wait": { "type": "integer", "minimum": 0, "description": "Seconds to wait for a first message (capped at 60)" },
+                    "as_agent": as_agent_prop
+                },
                 "additionalProperties": false
             }
         }),
@@ -686,12 +706,15 @@ pub fn execute_tool(
             let (Some(to), Some(text)) = (str_arg("to"), str_arg("text")) else {
                 return tool_err("missing required string arguments 'to' and 'text'".to_string());
             };
-            let payload = json!({
+            let mut payload = json!({
                 "action": "send",
                 "schema_version": crate::surface::MCP_SCHEMA_VERSION,
                 "to": to,
                 "text": text,
             });
+            if let Some(as_agent) = str_arg("as_agent") {
+                payload["as_agent"] = Value::String(as_agent.to_string());
+            }
             agent_tool(config, &payload, None, Duration::from_secs(20))
         }
         "reply" => {
@@ -700,12 +723,15 @@ pub fn execute_tool(
                     "missing required string arguments 'message_id' and 'text'".to_string(),
                 );
             };
-            let payload = json!({
+            let mut payload = json!({
                 "action": "reply",
                 "schema_version": crate::surface::MCP_SCHEMA_VERSION,
                 "message_id": message_id,
                 "text": text,
             });
+            if let Some(as_agent) = str_arg("as_agent") {
+                payload["as_agent"] = Value::String(as_agent.to_string());
+            }
             // NOTE (XU1 Gate 4 / Amendment 6): MCP tool result is reshaped to
             // {bytes, messageId, inReplyTo, outcome} to save model context and unify
             // messageId meaning ("the id of what I just sent"). The agent-socket and
@@ -762,6 +788,27 @@ pub fn execute_tool(
                 config,
                 &payload,
                 Some("replies"),
+                Duration::from_secs(wait + 5),
+            )
+        }
+        "inbox" => {
+            let wait = args
+                .get("wait")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .min(crate::surface::MAX_WAIT_SECS);
+            let mut payload = json!({
+                "action": "inbox",
+                "schema_version": crate::surface::MCP_SCHEMA_VERSION,
+                "wait": wait,
+            });
+            if let Some(as_agent) = str_arg("as_agent") {
+                payload["as_agent"] = Value::String(as_agent.to_string());
+            }
+            agent_tool(
+                config,
+                &payload,
+                None,
                 Duration::from_secs(wait + 5),
             )
         }

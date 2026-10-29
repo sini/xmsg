@@ -45,6 +45,9 @@ pub enum AgentFrame {
         status: Option<String>,
         #[serde(default)]
         within: Option<u64>,
+        #[serde(default)]
+        #[allow(dead_code)]
+        as_agent: Option<String>,
     },
     Send {
         #[serde(default)]
@@ -53,6 +56,8 @@ pub enum AgentFrame {
         text: String,
         #[serde(default)]
         idempotency_key: Option<String>,
+        #[serde(default)]
+        as_agent: Option<String>,
     },
     Reply {
         #[serde(default)]
@@ -61,6 +66,8 @@ pub enum AgentFrame {
         text: String,
         #[serde(default)]
         idempotency_key: Option<String>,
+        #[serde(default)]
+        as_agent: Option<String>,
     },
     Replies {
         #[serde(default)]
@@ -70,6 +77,35 @@ pub enum AgentFrame {
         wait: Option<u64>,
         #[serde(default)]
         after: Option<i64>,
+        #[serde(default)]
+        #[allow(dead_code)]
+        as_agent: Option<String>,
+    },
+    Inbox {
+        #[serde(default)]
+        schema_version: Option<u32>,
+        #[serde(default)]
+        wait: Option<u64>,
+        #[serde(default)]
+        as_agent: Option<String>,
+    },
+    Subagent {
+        #[serde(default)]
+        schema_version: Option<u32>,
+        event: String,
+        agent_id: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        agent_type: Option<String>,
+        #[serde(default)]
+        tool_use_id: Option<String>,
+        #[serde(default)]
+        transcript_path: Option<String>,
+        #[serde(default)]
+        to: Option<String>,
+        #[serde(default)]
+        pin_name: Option<String>,
     },
 }
 
@@ -614,7 +650,13 @@ pub async fn run_agent_server_with_listener(
                     }
                 };
 
-                let caller_needed = matches!(frame, AgentFrame::Send { .. } | AgentFrame::Reply { .. });
+                let caller_needed = matches!(
+                    frame,
+                    AgentFrame::Send { .. }
+                        | AgentFrame::Reply { .. }
+                        | AgentFrame::Inbox { .. }
+                        | AgentFrame::Subagent { .. }
+                );
                 let caller = if caller_needed {
                     match surface::trace_caller_peer(&state_clone, &peer).await {
                         Ok(c) => Some(c),
@@ -879,29 +921,115 @@ pub async fn run_agent_server_with_listener(
                             .await
                             .map(|r| serde_json::json!({ "status": "ok", "recipients": r.recipients, "nodes": r.nodes }))
                     }
-                    AgentFrame::Send { to, text, idempotency_key, .. } => {
-                        let sender = surface::Sender::Session(caller.expect("caller resolved"));
-                        surface::send(&state_clone, &sender, &to, &text, idempotency_key.as_deref())
-                            .await
-                            .map(|r| {
-                                serde_json::json!({
-                                    "status": "ok",
-                                    "message_id": r.message_id,
-                                    "address": r.address,
-                                    "outcome": r.outcome,
+                    AgentFrame::Send {
+                        to,
+                        text,
+                        idempotency_key,
+                        as_agent,
+                        ..
+                    } => {
+                        let parent = caller.expect("caller resolved");
+                        match resolve_as_agent(&state_clone, parent, as_agent.as_deref(), false) {
+                            Ok(effective_caller) => {
+                                let sender = surface::Sender::Session(effective_caller);
+                                surface::send(
+                                    &state_clone,
+                                    &sender,
+                                    &to,
+                                    &text,
+                                    idempotency_key.as_deref(),
+                                )
+                                .await
+                                .map(|r| {
+                                    serde_json::json!({
+                                        "status": "ok",
+                                        "message_id": r.message_id,
+                                        "address": r.address,
+                                        "outcome": r.outcome,
+                                    })
                                 })
-                            })
+                            }
+                            Err(e) => Err(e),
+                        }
                     }
-                    AgentFrame::Reply { message_id, text, idempotency_key, .. } => {
-                        let caller = caller.expect("caller resolved");
-                        surface::reply(&state_clone, &caller, &message_id, &text, idempotency_key.as_deref())
+                    AgentFrame::Reply {
+                        message_id,
+                        text,
+                        idempotency_key,
+                        as_agent,
+                        ..
+                    } => {
+                        let parent = caller.expect("caller resolved");
+                        match resolve_as_agent(&state_clone, parent, as_agent.as_deref(), false) {
+                            Ok(effective_caller) => surface::reply(
+                                &state_clone,
+                                &effective_caller,
+                                &message_id,
+                                &text,
+                                idempotency_key.as_deref(),
+                            )
                             .await
-                            .map(|r| serde_json::json!({ "status": "ok", "reply": r }))
+                            .map(|r| serde_json::json!({ "status": "ok", "reply": r })),
+                            Err(e) => Err(e),
+                        }
                     }
-                    AgentFrame::Replies { message_id, wait, after, .. } => {
-                        surface::replies(&state_clone, &message_id, after.unwrap_or(0), wait.unwrap_or(0))
-                            .await
-                            .map(|r| serde_json::json!({ "status": "ok", "replies": r }))
+                    AgentFrame::Replies {
+                        message_id,
+                        wait,
+                        after,
+                        ..
+                    } => {
+                        surface::replies(
+                            &state_clone,
+                            &message_id,
+                            after.unwrap_or(0),
+                            wait.unwrap_or(0),
+                        )
+                        .await
+                        .map(|r| serde_json::json!({ "status": "ok", "replies": r }))
+                    }
+                    AgentFrame::Inbox { wait, as_agent, .. } => {
+                        let parent = caller.expect("caller resolved");
+                        match resolve_as_agent(&state_clone, parent, as_agent.as_deref(), true) {
+                            Ok(effective_caller) => {
+                                surface::inbox(&state_clone, &effective_caller, wait.unwrap_or(0))
+                                    .await
+                                    .map(|r| {
+                                        serde_json::json!({
+                                            "status": "ok",
+                                            "address": r.address,
+                                            "messages": r.messages,
+                                        })
+                                    })
+                            }
+                            Err(e) => Err(e),
+                        }
+                    }
+                    AgentFrame::Subagent {
+                        event,
+                        agent_id,
+                        name,
+                        agent_type,
+                        tool_use_id,
+                        transcript_path,
+                        to,
+                        pin_name,
+                        ..
+                    } => {
+                        let parent = caller.expect("caller resolved");
+                        handle_subagent_frame(
+                            &state_clone,
+                            &parent,
+                            &event,
+                            &agent_id,
+                            name.as_deref(),
+                            agent_type.as_deref(),
+                            tool_use_id.as_deref(),
+                            transcript_path.as_deref(),
+                            to.as_deref(),
+                            pin_name.as_deref(),
+                        )
+                        .await
                     }
                 };
                 let line = match resp {
@@ -911,5 +1039,410 @@ pub async fn run_agent_server_with_listener(
                 let _ = writer.write_all(format!("{line}\n").as_bytes()).await;
             }
         });
+    }
+}
+
+/// Resolves `as_agent` against `parent` in `subagents` (HA9-A §2.3 step 3, E1, E2, D1, D5).
+/// When `as_agent` is absent or empty, acts as `parent` unless `require_subagent` is true
+/// (`inbox` requires a non-empty bound `as_agent`).
+pub fn resolve_as_agent(
+    state: &AppState,
+    parent: Session,
+    as_agent: Option<&str>,
+    require_subagent: bool,
+) -> Result<Session, AppError> {
+    let agent_id = as_agent.map(str::trim).unwrap_or("");
+    if agent_id.is_empty() {
+        if require_subagent {
+            return Err(AppError::NotRecipient(format!(
+                "'{}' is a parent session and receives messages on its channel; 'inbox' is only for subagents",
+                parent.session_id
+            )));
+        }
+        return Ok(parent);
+    }
+    let db = state
+        .db
+        .lock()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let binding = crate::storage::get_subagent(&db, &parent.session_id, agent_id)
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| {
+            AppError::NotRecipient(format!(
+                "subagent '{agent_id}' is not bound under '{}'",
+                parent.session_id
+            ))
+        })?;
+    Ok(Session {
+        session_id: format!("{}/{}", binding.parent, binding.agent_id),
+        name: binding.display_label().map(str::to_string),
+        pid: binding.turn_pid.unwrap_or(parent.pid),
+        cwd: parent.cwd,
+        status: parent.status,
+        kind: "subagent".to_string(),
+        entrypoint: parent.entrypoint,
+        version: parent.version,
+        started_at: binding.bound_at as u64,
+        updated_at: binding.bound_at as u64,
+        harness: parent.harness,
+        registered: parent.registered,
+    })
+}
+
+/// Reads optional `("name", "agentType")` from the subagent `meta.json` beside `transcript_path`
+/// (HA9-A §2.5, O12).
+fn read_meta_json_fields(transcript_path: &str, agent_id: &str) -> (Option<String>, Option<String>) {
+    let mut candidates = Vec::new();
+    let stem = transcript_path
+        .strip_suffix(".jsonl")
+        .unwrap_or(transcript_path);
+    candidates.push(
+        PathBuf::from(stem)
+            .join("subagents")
+            .join(format!("agent-{agent_id}.meta.json")),
+    );
+    candidates.push(PathBuf::from(format!("{stem}.meta.json")));
+    if let Some(parent_dir) = Path::new(transcript_path).parent() {
+        candidates.push(
+            parent_dir
+                .join("subagents")
+                .join(format!("agent-{agent_id}.meta.json")),
+        );
+        candidates.push(parent_dir.join(format!("agent-{agent_id}.meta.json")));
+        candidates.push(parent_dir.join("meta.json"));
+    }
+    for path in candidates {
+        if let Ok(raw) = fs::read_to_string(&path) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                let name = val
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                let agent_type = val
+                    .get("agentType")
+                    .or_else(|| val.get("agent_type"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                return (name, agent_type);
+            }
+        }
+    }
+    (None, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_subagent_frame(
+    state: &AppState,
+    parent: &Session,
+    event: &str,
+    agent_id: &str,
+    name: Option<&str>,
+    agent_type: Option<&str>,
+    tool_use_id: Option<&str>,
+    transcript_path: Option<&str>,
+    to: Option<&str>,
+    pin_name: Option<&str>,
+) -> Result<serde_json::Value, AppError> {
+    if parent.harness != "claude" {
+        return Err(AppError::BadRequest(
+            "subagent frame on agent.sock is only valid for Claude sessions".to_string(),
+        ));
+    }
+    let agent_id = agent_id.trim();
+    if agent_id.is_empty() || agent_id.contains('/') {
+        return Err(AppError::BadRequest(
+            "agent_id must be non-empty and must not contain '/'".to_string(),
+        ));
+    }
+    let now = crate::storage::now_epoch_secs();
+    match event {
+        "start" | "SubagentStart" | "subagent_start" => {
+            let turn_start =
+                process::starttime(&state.agy_config.proc_root, parent.pid).map_err(|e| {
+                    AppError::Internal(format!(
+                        "failed to read starttime for parent PID {}: {e}",
+                        parent.pid
+                    ))
+                })?;
+            let (meta_name, meta_type) = match transcript_path {
+                Some(tp) if !tp.is_empty() => read_meta_json_fields(tp, agent_id),
+                _ => (None, None),
+            };
+            let candidate_name = name.or(meta_name.as_deref());
+            let valid_name = candidate_name.filter(|n| crate::claim::validate_subagent_name(n).is_ok());
+            let effective_type = agent_type
+                .filter(|s| !s.is_empty())
+                .or(meta_type.as_deref().filter(|s| !s.is_empty()));
+            {
+                let db = state
+                    .db
+                    .lock()
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                crate::storage::subagent_start_turn(
+                    &db,
+                    &parent.session_id,
+                    agent_id,
+                    parent.pid,
+                    &turn_start,
+                    valid_name,
+                    effective_type,
+                    tool_use_id,
+                    now,
+                )
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            }
+            Ok(serde_json::json!({ "status": "ok" }))
+        }
+        "bind_spawn" | "post_agent" | "spawn" => {
+            let valid_name = name.filter(|n| crate::claim::validate_subagent_name(n).is_ok());
+            {
+                let db = state
+                    .db
+                    .lock()
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                crate::storage::subagent_bind_spawn(
+                    &db,
+                    &parent.session_id,
+                    agent_id,
+                    valid_name,
+                    tool_use_id,
+                    now,
+                )
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            }
+            Ok(serde_json::json!({ "status": "ok" }))
+        }
+        "reassert_resume" | "post_send_message" | "resume" => {
+            let candidate_name = if let Some(t) = to.filter(|t| !t.is_empty()) {
+                if !crate::claim::is_subagent_id_shaped(t) {
+                    Some(t)
+                } else {
+                    pin_name.filter(|p| {
+                        !p.is_empty()
+                            && *p != agent_id
+                            && !crate::claim::is_subagent_id_shaped(p)
+                    })
+                }
+            } else if let Some(p) = pin_name.filter(|p| !p.is_empty()) {
+                if p != agent_id && !crate::claim::is_subagent_id_shaped(p) {
+                    Some(p)
+                } else {
+                    None
+                }
+            } else {
+                name.filter(|n| {
+                    !n.is_empty()
+                        && *n != agent_id
+                        && !crate::claim::is_subagent_id_shaped(n)
+                })
+            };
+            let valid_name =
+                candidate_name.filter(|n| crate::claim::validate_subagent_name(n).is_ok());
+            {
+                let db = state
+                    .db
+                    .lock()
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                crate::storage::subagent_reassert_resume(
+                    &db,
+                    &parent.session_id,
+                    agent_id,
+                    valid_name,
+                    now,
+                )
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            }
+            Ok(serde_json::json!({ "status": "ok" }))
+        }
+        "stop" | "SubagentStop" | "subagent_stop" => {
+            {
+                let db = state
+                    .db
+                    .lock()
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                crate::storage::subagent_stop_turn(&db, &parent.session_id, agent_id)
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+            }
+            // Sweep any messages queued during the turn back to P's socket (HA9-A §2.4, O5).
+            let _ = crate::claim::sync_claims(
+                &state.db,
+                &state.agy_config.proc_root,
+                &state.sessions_dirs,
+                &state.node_name,
+            )
+            .await;
+            Ok(serde_json::json!({ "status": "ok" }))
+        }
+        other => Err(AppError::BadRequest(format!(
+            "unknown subagent event '{other}'"
+        ))),
+    }
+}
+
+/// Runs `xmsg register claude --hook`: processes a Claude Code hook JSON payload from
+/// `input` (`PreToolUse`, `SubagentStart`, `PostToolUse`, `SubagentStop`).
+/// Returns `Ok(stdout_json)` on success, or `Err(reason)` on any failure (caller exits 2 per E6).
+pub fn run_claude_hook(input: &str, agent_sock: Option<&Path>) -> Result<String, String> {
+    use serde_json::Value;
+    let val: Value =
+        serde_json::from_str(input).map_err(|e| format!("malformed hook JSON on stdin: {e}"))?;
+    let obj = val
+        .as_object()
+        .ok_or_else(|| "hook stdin JSON must be an object".to_string())?;
+    let event_name = obj
+        .get("hook_event_name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing string 'hook_event_name' in hook JSON".to_string())?;
+
+    let resolve_sock = || -> Result<PathBuf, String> {
+        match agent_sock {
+            Some(p) => Ok(p.to_path_buf()),
+            None => default_agent_sock_path().map_err(|e| e.to_string()),
+        }
+    };
+
+    match event_name {
+        "PreToolUse" => {
+            // E6: PreToolUse does no socket I/O; it only reads stdin and writes stdout.
+            let tool_input = obj
+                .get("tool_input")
+                .and_then(Value::as_object)
+                .ok_or_else(|| "PreToolUse hook input missing 'tool_input' object".to_string())?;
+            let agent_id = match obj.get("agent_id") {
+                None | Some(Value::Null) => "",
+                Some(Value::String(s)) => s.as_str(),
+                Some(_) => return Err("'agent_id' in PreToolUse hook input must be a string".to_string()),
+            };
+            let mut updated_input = tool_input.clone();
+            updated_input.insert("as_agent".to_string(), Value::String(agent_id.to_string()));
+            let out = serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "updatedInput": updated_input,
+                }
+            });
+            Ok(out.to_string())
+        }
+        "SubagentStart" => {
+            let agent_id = obj
+                .get("agent_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| "SubagentStart hook input missing non-empty 'agent_id'".to_string())?;
+            let mut frame = serde_json::json!({
+                "action": "subagent",
+                "schema_version": surface::MCP_SCHEMA_VERSION,
+                "event": "start",
+                "agent_id": agent_id,
+            });
+            if let Some(at) = obj.get("agent_type").and_then(Value::as_str) {
+                frame["agent_type"] = Value::String(at.to_string());
+            }
+            if let Some(tp) = obj
+                .get("transcript_path")
+                .or_else(|| obj.get("agent_transcript_path"))
+                .and_then(Value::as_str)
+            {
+                frame["transcript_path"] = Value::String(tp.to_string());
+            }
+            let sock = resolve_sock()?;
+            crate::mcp::call_agent_sock(&sock, &frame)?;
+            Ok("{}".to_string())
+        }
+        "PostToolUse" => {
+            let tool_name = obj
+                .get("tool_name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "PostToolUse hook input missing 'tool_name'".to_string())?;
+            match tool_name {
+                "Agent" => {
+                    let tool_resp = obj
+                        .get("tool_response")
+                        .and_then(Value::as_object)
+                        .ok_or_else(|| "PostToolUse(Agent) missing 'tool_response' object".to_string())?;
+                    let agent_id = tool_resp
+                        .get("agentId")
+                        .or_else(|| tool_resp.get("teammate_id"))
+                        .or_else(|| tool_resp.get("agent_id"))
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.trim().is_empty());
+                    if let Some(agent_id) = agent_id {
+                        let name = obj
+                            .get("tool_input")
+                            .and_then(|ti| ti.get("name"))
+                            .and_then(Value::as_str)
+                            .or_else(|| tool_resp.get("name").and_then(Value::as_str));
+                        let tool_use_id = obj.get("tool_use_id").and_then(Value::as_str);
+                        let mut frame = serde_json::json!({
+                            "action": "subagent",
+                            "schema_version": surface::MCP_SCHEMA_VERSION,
+                            "event": "bind_spawn",
+                            "agent_id": agent_id,
+                        });
+                        if let Some(n) = name {
+                            frame["name"] = Value::String(n.to_string());
+                        }
+                        if let Some(tu) = tool_use_id {
+                            frame["tool_use_id"] = Value::String(tu.to_string());
+                        }
+                        let sock = resolve_sock()?;
+                        crate::mcp::call_agent_sock(&sock, &frame)?;
+                    }
+                    Ok("{}".to_string())
+                }
+                "SendMessage" => {
+                    if let Some(tool_resp) = obj.get("tool_response").and_then(Value::as_object) {
+                        if let Some(resumed_id) = tool_resp
+                            .get("resumedAgentId")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.trim().is_empty())
+                        {
+                            let to = obj
+                                .get("tool_input")
+                                .and_then(|ti| ti.get("to"))
+                                .and_then(Value::as_str);
+                            let pin_name = tool_resp
+                                .get("pin")
+                                .and_then(|p| p.get("name"))
+                                .and_then(Value::as_str);
+                            let mut frame = serde_json::json!({
+                                "action": "subagent",
+                                "schema_version": surface::MCP_SCHEMA_VERSION,
+                                "event": "reassert_resume",
+                                "agent_id": resumed_id,
+                            });
+                            if let Some(t) = to {
+                                frame["to"] = Value::String(t.to_string());
+                            }
+                            if let Some(pn) = pin_name {
+                                frame["pin_name"] = Value::String(pn.to_string());
+                            }
+                            let sock = resolve_sock()?;
+                            crate::mcp::call_agent_sock(&sock, &frame)?;
+                        }
+                    }
+                    Ok("{}".to_string())
+                }
+                _ => Ok("{}".to_string()),
+            }
+        }
+        "SubagentStop" => {
+            let agent_id = obj
+                .get("agent_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| "SubagentStop hook input missing non-empty 'agent_id'".to_string())?;
+            let frame = serde_json::json!({
+                "action": "subagent",
+                "schema_version": surface::MCP_SCHEMA_VERSION,
+                "event": "stop",
+                "agent_id": agent_id,
+            });
+            let sock = resolve_sock()?;
+            crate::mcp::call_agent_sock(&sock, &frame)?;
+            Ok("{}".to_string())
+        }
+        other => Err(format!("unsupported hook_event_name '{other}'")),
     }
 }

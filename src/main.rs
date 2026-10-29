@@ -60,6 +60,20 @@ pub struct RegisterArgs {
 pub enum RegisterHarness {
     /// Register Antigravity session credentials
     Agy(RegisterAgyArgs),
+
+    /// Claude Code subagent hook handler (PreToolUse, SubagentStart, PostToolUse, SubagentStop)
+    Claude(RegisterClaudeArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct RegisterClaudeArgs {
+    /// Hook mode for Claude Code hooks
+    #[arg(long)]
+    pub hook: bool,
+
+    /// Agent socket path (defaults to $XDG_RUNTIME_DIR/xmsg/agent.sock)
+    #[arg(long, env = "XMSG_AGENT_SOCK")]
+    pub sock: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -244,6 +258,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             RegisterHarness::Agy(agy_args) => {
                 run_register_agy(agy_args)?;
             }
+            RegisterHarness::Claude(claude_args) => {
+                run_register_claude(claude_args);
+            }
         },
         Commands::CheckPeers(args) => {
             let own = match &args.fed_cert {
@@ -288,6 +305,28 @@ fn own_node_from_der(leaf: &[u8]) -> Result<xmsg::fed::OwnNode, Box<dyn std::err
         name,
         pin: Some(pin),
     })
+}
+
+fn run_register_claude(args: RegisterClaudeArgs) {
+    use std::io::Read;
+    if !args.hook {
+        eprintln!("xmsg register claude error: --hook is required");
+        std::process::exit(2);
+    }
+    let mut input = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut input) {
+        eprintln!("xmsg register claude error: failed to read stdin: {e}");
+        std::process::exit(2);
+    }
+    match xmsg::agent::run_claude_hook(&input, args.sock.as_deref()) {
+        Ok(out) => {
+            println!("{out}");
+        }
+        Err(e) => {
+            eprintln!("xmsg register claude error: {e}");
+            std::process::exit(2);
+        }
+    }
 }
 
 fn run_register_agy(args: RegisterAgyArgs) -> Result<(), Box<dyn std::error::Error>> {
