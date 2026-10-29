@@ -805,12 +805,7 @@ pub fn execute_tool(
             if let Some(as_agent) = str_arg("as_agent") {
                 payload["as_agent"] = Value::String(as_agent.to_string());
             }
-            agent_tool(
-                config,
-                &payload,
-                None,
-                Duration::from_secs(wait + 5),
-            )
+            agent_tool(config, &payload, None, Duration::from_secs(wait + 5))
         }
         _ => tool_err(format!("unknown tool: {name}")),
     }

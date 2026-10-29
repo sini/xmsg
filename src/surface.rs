@@ -703,8 +703,9 @@ pub(crate) async fn listing(
 ) -> Result<Vec<FedListEntry>, AppError> {
     let mut out = listing_live(local, reply_ttl, user).await?;
     let db = local.db.lock().map_err(db_err)?;
-    let parked = storage::parked_instances(&db, storage::now_epoch_secs(), reply_ttl.as_secs() as i64)
-        .map_err(db_err)?;
+    let parked =
+        storage::parked_instances(&db, storage::now_epoch_secs(), reply_ttl.as_secs() as i64)
+            .map_err(db_err)?;
     for (id, harness, last_live) in parked {
         if !out.iter().any(|e| e.id == id) {
             out.push(inactive_entry(&id, &harness, "parked", user, last_live));
@@ -2329,11 +2330,7 @@ pub struct InboxResult {
 /// Drains unexpired messages queued for `caller` (`<P>/<agent_id>`) in `instance_queue`,
 /// waiting up to `wait` seconds (capped at `MAX_WAIT_SECS`) for the first message if none
 /// are waiting. Marks drained messages `delivered` in `messages`.
-pub async fn inbox(
-    state: &AppState,
-    caller: &Session,
-    wait: u64,
-) -> Result<InboxResult, AppError> {
+pub async fn inbox(state: &AppState, caller: &Session, wait: u64) -> Result<InboxResult, AppError> {
     let wait_secs = wait.min(MAX_WAIT_SECS);
     let _permit = if wait_secs > 0 {
         match state.long_poll_semaphore.clone().try_acquire_owned() {

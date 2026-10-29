@@ -290,9 +290,7 @@ pub(crate) async fn resolve_target(
             let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
             storage::resolve_subagent_in(&conn, &parent_addr, child_ref)
                 .map_err(|e| AppError::Internal(e.to_string()))?
-                .ok_or_else(|| {
-                    AppError::NotFound(format!("{ref_str} (parent '{parent_addr}')"))
-                })?
+                .ok_or_else(|| AppError::NotFound(format!("{ref_str} (parent '{parent_addr}')")))?
         };
         let sub_id = format!("{}/{}", binding.parent, binding.agent_id);
         let sub_session = registry::Session {
