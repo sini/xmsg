@@ -2105,7 +2105,7 @@ pub fn subagent_start_turn(
         "INSERT INTO subagents (parent, agent_id, name, agent_type, tool_use_id, bound_at, turn_pid, turn_start) \
          VALUES (?1, ?2, NULL, ?7, ?5, ?6, ?3, ?4) \
          ON CONFLICT(parent, agent_id) DO UPDATE SET \
-             agent_type = COALESCE(?7, subagents.agent_type), \
+             agent_type = COALESCE(subagents.agent_type, ?7), \
              tool_use_id = COALESCE(?5, subagents.tool_use_id), \
              turn_pid = ?3, \
              turn_start = ?4",
@@ -2184,6 +2184,36 @@ pub fn subagent_stop_turn(conn: &Connection, parent: &str, agent_id: &str) -> Re
     conn.execute(
         "UPDATE subagents SET turn_pid = NULL, turn_start = NULL WHERE parent = ?1 AND agent_id = ?2",
         params![parent, agent_id],
+    )?;
+    Ok(())
+}
+
+/// Clears `turn_pid` and `turn_start` for every subagent row under `parent` (HA9-A.oc §2.2, C7:
+/// `Frame::Register` of `parent` clears stale turn columns in the same batch).
+pub fn subagent_clear_turns_for_parent(conn: &Connection, parent: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE subagents SET turn_pid = NULL, turn_start = NULL WHERE parent = ?1",
+        params![parent],
+    )?;
+    Ok(())
+}
+
+/// Deletes `(parent, agent_id)` from `subagents` (HA9-A.oc §2.2 `end`, C9).
+pub fn subagent_delete_row(conn: &Connection, parent: &str, agent_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM subagents WHERE parent = ?1 AND agent_id = ?2",
+        params![parent, agent_id],
+    )?;
+    Ok(())
+}
+
+/// Deletes every `subagents` row and subagent queue entry under `parent` (HA9-A.oc §2.5:
+/// `release` of `parent`).
+pub fn subagent_delete_for_parent(conn: &Connection, parent: &str) -> Result<()> {
+    conn.execute("DELETE FROM subagents WHERE parent = ?1", params![parent])?;
+    conn.execute(
+        "DELETE FROM instance_queue WHERE instance_id LIKE ?1 || '/%'",
+        params![parent],
     )?;
     Ok(())
 }

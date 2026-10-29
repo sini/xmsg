@@ -108,6 +108,8 @@ enum Frame {
         request_id: String,
         session: String,
         #[serde(default)]
+        as_agent: Option<String>,
+        #[serde(default)]
         name: Option<String>,
         #[serde(default)]
         node: Option<String>,
@@ -121,6 +123,8 @@ enum Frame {
     Send {
         request_id: String,
         session: String,
+        #[serde(default)]
+        as_agent: Option<String>,
         to: String,
         text: String,
         #[serde(default)]
@@ -129,6 +133,8 @@ enum Frame {
     Reply {
         request_id: String,
         session: String,
+        #[serde(default)]
+        as_agent: Option<String>,
         message_id: String,
         text: String,
         #[serde(default)]
@@ -137,11 +143,30 @@ enum Frame {
     Replies {
         request_id: String,
         session: String,
+        #[serde(default)]
+        as_agent: Option<String>,
         message_id: String,
         #[serde(default)]
         wait: Option<u64>,
         #[serde(default)]
         after: Option<i64>,
+    },
+    Inbox {
+        request_id: String,
+        session: String,
+        #[serde(default)]
+        as_agent: Option<String>,
+        #[serde(default)]
+        wait: Option<u64>,
+    },
+    Subagent {
+        request_id: String,
+        event: String,
+        #[serde(default)]
+        session: Option<String>,
+        agent_id: String,
+        #[serde(default)]
+        agent_type: Option<String>,
     },
 }
 
@@ -199,6 +224,15 @@ fn held(conn: &Connection, conn_id: &str, label: &str) -> rusqlite::Result<Optio
     .optional()
 }
 
+/// All session addresses held on connection `conn_id`.
+fn held_addresses(conn: &Connection, conn_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT address FROM plugin_sessions WHERE conn = ?1 ORDER BY registered_at, rowid",
+    )?;
+    let rows = stmt.query_map(params![conn_id], |r| r.get(0))?;
+    rows.collect()
+}
+
 /// Whether `pid` (started at `starttime`) holds a plugin connection.
 pub fn is_plugin_process(conn: &Connection, pid: u32, starttime: &str) -> rusqlite::Result<bool> {
     conn.query_row(
@@ -220,9 +254,11 @@ fn detach(conn: &Connection, address: &str, harness: &str) -> rusqlite::Result<(
 }
 
 /// Permanently releases `address`: clears `reclaim_hash` so it answers `gone` from now on
-/// and shows as `closed` in inactive `list` (HA8 §3.1).
+/// and shows as `closed` in inactive `list` (HA8 §3.1), and deletes its `subagents` rows
+/// in the same batch (HA9-A.oc §2.5).
 fn release(conn: &Connection, address: &str, harness: &str) -> rusqlite::Result<()> {
     detach(conn, address, harness)?;
+    storage::subagent_delete_for_parent(conn, address)?;
     storage::clear_reclaim_hash(conn, address, now_epoch_secs())
 }
 
@@ -496,6 +532,11 @@ where
                         params![address, conn_id, harness, session, now, peer_pid],
                     )
                     .map_err(db_err)?;
+                    // HA9-A.oc §2.2, C7: a register of P (fresh or reclaimed) clears the turn
+                    // columns of every subagent row under P in the same batch.
+                    storage::subagent_clear_turns_for_parent(&c, &address).map_err(db_err)?;
+                    let _ = crate::claim::take_queued_for(&c, &state.agy_config.proc_root, &[]);
+                    let _ = state.pi_notify_tx.send(address.clone());
                     Ok(json!({
                         "status": "ok",
                         "address": address_of(&address),
@@ -601,12 +642,14 @@ where
             Frame::List {
                 request_id,
                 session,
+                as_agent,
                 name,
                 node,
                 kind,
                 status,
                 within,
             } => {
+                let _ = as_agent;
                 let caller =
                     held(&*db.lock().map_err(db_err)?, &conn_id, &session).map_err(db_err)?;
                 let Some(_) = caller else {
@@ -632,6 +675,7 @@ where
             Frame::Send {
                 request_id,
                 session,
+                as_agent,
                 to,
                 text,
                 idempotency_key,
@@ -641,6 +685,18 @@ where
                 let Some(caller) = caller else {
                     let _ = tx.send(answer(Err(not_held(&session)), &request_id));
                     continue;
+                };
+                let caller = match crate::agent::resolve_as_agent(
+                    &state,
+                    caller,
+                    as_agent.as_deref(),
+                    false,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tx.send(answer(Err(e), &request_id));
+                        continue;
+                    }
                 };
                 let (state, tx) = (state.clone(), tx.clone());
                 tasks.spawn(async move {
@@ -662,6 +718,7 @@ where
             Frame::Reply {
                 request_id,
                 session,
+                as_agent,
                 message_id,
                 text,
                 idempotency_key,
@@ -671,6 +728,18 @@ where
                 let Some(caller) = caller else {
                     let _ = tx.send(answer(Err(not_held(&session)), &request_id));
                     continue;
+                };
+                let caller = match crate::agent::resolve_as_agent(
+                    &state,
+                    caller,
+                    as_agent.as_deref(),
+                    false,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tx.send(answer(Err(e), &request_id));
+                        continue;
+                    }
                 };
                 let (state, tx) = (state.clone(), tx.clone());
                 tasks.spawn(async move {
@@ -689,10 +758,12 @@ where
             Frame::Replies {
                 request_id,
                 session,
+                as_agent,
                 message_id,
                 wait,
                 after,
             } => {
+                let _ = as_agent;
                 let caller =
                     held(&*db.lock().map_err(db_err)?, &conn_id, &session).map_err(db_err)?;
                 let Some(_) = caller else {
@@ -711,6 +782,141 @@ where
                     .map(|r| json!({ "status": "ok", "replies": r }));
                     let _ = tx.send(answer(res, &request_id));
                 });
+            }
+            Frame::Inbox {
+                request_id,
+                session,
+                as_agent,
+                wait,
+            } => {
+                let caller =
+                    held(&*db.lock().map_err(db_err)?, &conn_id, &session).map_err(db_err)?;
+                let Some(caller) = caller else {
+                    let _ = tx.send(answer(Err(not_held(&session)), &request_id));
+                    continue;
+                };
+                let caller =
+                    match crate::agent::resolve_as_agent(&state, caller, as_agent.as_deref(), true)
+                    {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let _ = tx.send(answer(Err(e), &request_id));
+                            continue;
+                        }
+                    };
+                let (state, tx) = (state.clone(), tx.clone());
+                tasks.spawn(async move {
+                    let res = surface::inbox(&state, &caller, wait.unwrap_or(0))
+                        .await
+                        .map(|r| {
+                            json!({
+                                "status": "ok",
+                                "address": r.address,
+                                "messages": r.messages,
+                            })
+                        });
+                    let _ = tx.send(answer(res, &request_id));
+                });
+            }
+            Frame::Subagent {
+                request_id,
+                event,
+                session,
+                agent_id,
+                agent_type,
+            } => {
+                let res = (|| {
+                    if harness != "opencode" {
+                        return Err(AppError::BadRequest(
+                            "subagent frame on register.sock is only valid for opencode".into(),
+                        ));
+                    }
+                    let agent_id = agent_id.trim();
+                    if agent_id.is_empty()
+                        || agent_id.contains('/')
+                        || agent_id.contains('@')
+                        || agent_id.contains(char::is_whitespace)
+                    {
+                        return Err(AppError::BadRequest(
+                            "agent_id must be non-empty and must not contain '/', '@' or whitespace"
+                                .into(),
+                        ));
+                    }
+                    let c = db.lock().map_err(db_err)?;
+                    match event.as_str() {
+                        "start" => {
+                            let session = session.as_deref().ok_or_else(|| {
+                                AppError::BadRequest("subagent start requires 'session'".into())
+                            })?;
+                            let parent = held(&c, &conn_id, session)
+                                .map_err(db_err)?
+                                .ok_or_else(|| not_held(session))?;
+                            let now = now_epoch_secs();
+                            let effective_type = agent_type
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty());
+                            storage::subagent_start_turn(
+                                &c,
+                                &parent.session_id,
+                                agent_id,
+                                peer_pid,
+                                &starttime,
+                                None,
+                                effective_type,
+                                None,
+                                now,
+                            )
+                            .map_err(db_err)?;
+                            Ok(json!({ "status": "ok" }))
+                        }
+                        "stop" => {
+                            let parents = match session.as_deref() {
+                                Some(s) => vec![
+                                    held(&c, &conn_id, s)
+                                        .map_err(db_err)?
+                                        .ok_or_else(|| not_held(s))?
+                                        .session_id,
+                                ],
+                                None => held_addresses(&c, &conn_id).map_err(db_err)?,
+                            };
+                            for p in &parents {
+                                storage::subagent_stop_turn(&c, p, agent_id).map_err(db_err)?;
+                            }
+                            let _ =
+                                crate::claim::take_queued_for(&c, &state.agy_config.proc_root, &[]);
+                            for p in &parents {
+                                let _ = state.pi_notify_tx.send(p.clone());
+                            }
+                            Ok(json!({ "status": "ok" }))
+                        }
+                        "end" => {
+                            let parents = match session.as_deref() {
+                                Some(s) => vec![
+                                    held(&c, &conn_id, s)
+                                        .map_err(db_err)?
+                                        .ok_or_else(|| not_held(s))?
+                                        .session_id,
+                                ],
+                                None => held_addresses(&c, &conn_id).map_err(db_err)?,
+                            };
+                            for p in &parents {
+                                storage::subagent_stop_turn(&c, p, agent_id).map_err(db_err)?;
+                            }
+                            let _ =
+                                crate::claim::take_queued_for(&c, &state.agy_config.proc_root, &[]);
+                            for p in &parents {
+                                storage::subagent_delete_row(&c, p, agent_id).map_err(db_err)?;
+                                let _ = state.pi_notify_tx.send(p.clone());
+                            }
+                            Ok(json!({ "status": "ok" }))
+                        }
+                        other => Err(AppError::BadRequest(format!(
+                            "unknown subagent event '{other}'"
+                        ))),
+                    }
+                })();
+                let _ = tx.send(answer(res, &request_id));
             }
         }
     }

@@ -235,12 +235,15 @@ that directory's sessions:
   hook), so a session started in this process, or resumed with `-s`, gets an address once it is used, and the many
   stored sessions an opencode server can reach do not. Registration finishes before the turn's first tool call is
   answered.
-- **Tools.** `xmsg_list`, `xmsg_send`, `xmsg_reply` and `xmsg_replies`, sent as frames under the calling session
-  (`ToolContext.sessionID`). On 2.x they are kept out of Code Mode, so the model calls them by name. The arguments
-  are required, except `xmsg_list`'s filters (`name`, `node`, `kind`, `status`, `within`): `xmsg_replies` takes
-  `wait` (0 for none).
-- **Child sessions** (a `task` subagent) act as their root conversation: the plugin walks `parentID` to the root
-  and calls under the root's session. A child is never registered (HA7).
+- **Tools.** `xmsg_list`, `xmsg_send`, `xmsg_reply`, `xmsg_replies` and `xmsg_inbox`, sent as frames under the
+  calling session (`ToolContext.sessionID`). On 2.x they are kept out of Code Mode, so the model calls them by
+  name. The arguments are required, except `xmsg_list`'s filters (`name`, `node`, `kind`, `status`, `within`) and
+  `xmsg_inbox`'s `wait`: `xmsg_replies` takes `wait` (0 for none).
+- **Child sessions** (a `task` or `subagent` child) bind a delegated sub-address `<P>/<child_ses>@<node>` under
+  their root conversation `P` (found by walking `parentID`) via `subagent` (`start`/`stop`/`end`) and send
+  `as_agent: <child_ses>` on `xmsg_send`, `xmsg_reply` and `xmsg_inbox`. While a child is in a turn, messages to
+  `<P>/<child_ses>` queue for its `xmsg_inbox`; otherwise they fall back to `P` with a `to=<P>/<child_ses> agent_id=<child_ses>` header. Registration, reclaim, push delivery (`pi_pending_messages`), `xmsg_list`,
+  `xmsg_replies` and root release stay rooted (HA7 narrowed by HA9-A.oc).
 - **Push.** A delivered message goes into its session as a user prompt (1.x `promptAsync`, 2.x `session.prompt`),
   which starts the session if it is idle; in a running turn, opencode takes it as it takes any mid-turn prompt. The
   plugin acks only after opencode accepted the prompt.

@@ -4,11 +4,13 @@
 // One `register.sock` connection per opencode process on 1.x, per project directory the
 // server serves on 2.x, many sessions on it. A root
 // session registers at its first user prompt and gets its own server-minted address;
-// a child session (a task subagent) acts as its root, found by walking `parentID`, and is
-// never registered. The tools `xmsg_list`, `xmsg_send`, `xmsg_reply` and `xmsg_replies`
-// send their frames on that connection under the root's session, so the server attributes
-// them to its address. A pushed message is prompted into its session and acked once
-// opencode accepts it. A deleted session releases its address.
+// a child session (a task/subagent session) binds a delegated sub-address `<P>/<child>`
+// under its root `P` (found by walking `parentID`) and is never registered as an instance
+// (HA7 narrowed by HA9-A.oc). The tools `xmsg_list`, `xmsg_send`, `xmsg_reply`,
+// `xmsg_replies` and `xmsg_inbox` send their frames on that connection under the root's
+// session, adding `as_agent` for a child so the server attributes `send`, `reply` and
+// `inbox` to `<P>/<child>`. Registration, reclaim, push delivery (`pi_pending_messages`),
+// `list`, `replies` and root release stay rooted.
 //
 // The default export serves both plugin APIs: opencode 1.x calls `server`, opencode 2.x
 // calls `setup`. Each adapts its API to `Xmsg`, which holds the behaviour.
@@ -75,6 +77,9 @@ class Connection {
   // Root sessions and their registrations on the current connection.
   private registered = new Map<string, Promise<Answer>>();
   private roots = new Set<string>();
+  // Child sessions currently in a turn (child -> { root, agent? }), and per-connection bound cache.
+  private inTurn = new Map<string, { root: string; agent?: string }>();
+  private bound = new Map<string, Promise<Answer>>();
   private ready?: Promise<void>;
   private closed = false;
   private storePath = reclaimStorePath();
@@ -102,7 +107,19 @@ class Connection {
           this.socket = s;
           resolve();
           void this.pollLoop(s);
-          for (const root of this.roots) void this.register(root);
+          void (async () => {
+            for (const root of this.roots) await this.register(root).catch(() => {});
+            for (const [child, info] of this.inTurn) {
+              await this.register(info.root).catch(() => {});
+              await this.call({
+                action: "subagent",
+                event: "start",
+                session: info.root,
+                agent_id: child,
+                ...(info.agent ? { agent_type: info.agent } : {}),
+              }).catch(() => {});
+            }
+          })();
           return;
         }
         this.waiting.get(a.request_id)?.(a);
@@ -113,6 +130,7 @@ class Connection {
         if (this.socket === s) this.socket = undefined;
         this.ready = undefined;
         this.registered.clear();
+        this.bound.clear();
         for (const [, resolve] of this.waiting) resolve({ status: "error", error: "closed", detail: "xmsg connection closed" });
         this.waiting.clear();
         if (this.roots.size && !this.closed) setTimeout(() => void this.connect().catch(() => {}), 1500);
@@ -167,14 +185,75 @@ class Connection {
     return r;
   }
 
+  async startTurn(root: string, child: string, agent?: string): Promise<Answer> {
+    const prev = this.inTurn.get(child);
+    const effectiveAgent = agent || prev?.agent;
+    this.inTurn.set(child, { root, ...(effectiveAgent ? { agent: effectiveAgent } : {}) });
+    await this.register(root);
+    return this.call({
+      action: "subagent",
+      event: "start",
+      session: root,
+      agent_id: child,
+      ...(effectiveAgent ? { agent_type: effectiveAgent } : {}),
+    });
+  }
+
+  ensureBound(child: string, root: string, agent?: string): Promise<Answer> {
+    const prev = this.inTurn.get(child);
+    if (prev && agent && !prev.agent) prev.agent = agent;
+    let b = this.bound.get(child);
+    if (!b) {
+      b = (async () => {
+        await this.register(root);
+        const a = await this.call({
+          action: "subagent",
+          event: "start",
+          session: root,
+          agent_id: child,
+          ...(agent ? { agent_type: agent } : {}),
+        });
+        if (a.status !== "ok") this.bound.delete(child);
+        return a;
+      })();
+      this.bound.set(child, b);
+      b.catch(() => this.bound.delete(child));
+    }
+    return b;
+  }
+
+  async stopTurn(session: string) {
+    const info = this.inTurn.get(session);
+    this.inTurn.delete(session);
+    this.bound.delete(session);
+    if (!info && this.roots.has(session)) return;
+    await this.call({
+      action: "subagent",
+      event: "stop",
+      ...(info ? { session: info.root } : {}),
+      agent_id: session,
+    }).catch(() => {});
+  }
+
   async release(session: string) {
     const latest = loadReclaimStore(this.storePath);
     if (session in latest) {
       delete latest[session];
       saveReclaimStore(this.storePath, latest);
     }
-    if (!this.roots.delete(session)) return;
+    if (!this.roots.delete(session)) {
+      this.inTurn.delete(session);
+      this.bound.delete(session);
+      await this.call({ action: "subagent", event: "end", agent_id: session });
+      return;
+    }
     this.registered.delete(session);
+    for (const [child, info] of this.inTurn) {
+      if (info.root === session) {
+        this.inTurn.delete(child);
+        this.bound.delete(child);
+      }
+    }
     await this.call({ action: "release", session });
   }
 
@@ -188,6 +267,8 @@ class Connection {
   close() {
     this.closed = true;
     this.roots.clear();
+    this.inTurn.clear();
+    this.bound.clear();
     this.socket?.destroy();
   }
 
@@ -231,22 +312,35 @@ class Xmsg {
     return id;
   }
 
-  async prompted(session: string) {
+  async prompted(session: string, agent?: string) {
     try {
-      if (!(await this.host.parentOf(session))) await this.conn.register(session);
+      const root = await this.rootOf(session);
+      await this.conn.register(root);
+      if (session !== root) await this.conn.startTurn(root, session, agent);
     } catch (e) {
       console.warn(`[xmsg] registering ${session}: ${e}`);
     }
+  }
+
+  async stopped(session: string) {
+    if (!session) return;
+    await this.conn.stopTurn(session);
   }
 
   async deleted(session: string) {
     await this.conn.release(session).catch(() => {});
   }
 
-  async run(frame: Answer, sessionID: string): Promise<string> {
-    const session = await this.rootOf(sessionID);
-    await this.conn.settled(session);
-    return JSON.stringify(await this.conn.call({ ...frame, session }));
+  private async bound(child: string, root: string, agent?: string) {
+    await this.conn.ensureBound(child, root, agent);
+  }
+
+  async run(frame: Answer, sessionID: string, agent?: string): Promise<string> {
+    const root = await this.rootOf(sessionID);
+    const child = sessionID !== root ? sessionID : undefined;
+    await this.conn.settled(root);
+    if (child) await this.bound(child, root, agent);
+    return JSON.stringify(await this.conn.call({ ...frame, session: root, ...(child ? { as_agent: child } : {}) }));
   }
 
   close() {
@@ -296,6 +390,16 @@ const TOOLS: { name: string; description: string; args: Answer; required?: strin
     args: { message_id: str("the message_id you sent"), wait: { type: "number", description: "seconds to wait" } },
     frame: (a) => ({ action: "replies", message_id: a.message_id, wait: a.wait }),
   },
+  {
+    name: "xmsg_inbox",
+    description: "Read messages queued for this subagent during its turn, waiting up to `wait` seconds (0 to 60) for the first.",
+    args: { wait: { type: "number", description: "seconds to wait (default 0)" } },
+    required: [],
+    frame: (a) => ({
+      action: "inbox",
+      ...(a?.wait != null ? { wait: a.wait } : {}),
+    }),
+  },
 ];
 
 const noSock = () => console.warn("[xmsg] XDG_RUNTIME_DIR is not set; the xmsg plugin is off");
@@ -321,14 +425,18 @@ const server = async ({ client }: any) => {
   });
 
   return {
-    "chat.message": (input: { sessionID: string }) => xmsg.prompted(input.sessionID),
+    "chat.message": (input: { sessionID: string; agent?: string }) => xmsg.prompted(input.sessionID, input.agent),
     event: async ({ event }: any) => {
       if (event.type === "session.deleted") await xmsg.deleted(event.properties.info.id);
+      else if (event.type === "session.idle") await xmsg.stopped(event.properties.sessionID);
+      else if (event.type === "session.status" && event.properties?.status?.type === "idle") {
+        await xmsg.stopped(event.properties.sessionID);
+      }
     },
     tool: Object.fromEntries(
       TOOLS.map((t) => [
         t.name,
-        { description: t.description, args: t.args, execute: (a: Answer, ctx: any) => xmsg.run(t.frame(a), ctx.sessionID) },
+        { description: t.description, args: t.args, execute: (a: Answer, ctx: any) => xmsg.run(t.frame(a), ctx.sessionID, ctx.agent) },
       ]),
     ),
   };
@@ -349,7 +457,10 @@ const setup = async (ctx: any) => {
       ),
   });
 
-  const hook = await ctx.session.hook("prompt", (input: { sessionID: string }) => xmsg.prompted(input.sessionID));
+  const hook = await ctx.session.hook("prompt", async (input: { sessionID: string }) => {
+    const s = await ctx.session.get({ sessionID: input.sessionID }).catch(() => undefined);
+    await xmsg.prompted(input.sessionID, s?.agent);
+  });
   // Out of Code Mode, so the model calls the tools by name, as it does on 1.x.
   const tools = await ctx.tool.transform((editor: any) => {
     for (const t of TOOLS) {
@@ -358,7 +469,7 @@ const setup = async (ctx: any) => {
         description: t.description,
         options: { codemode: false },
         input: { type: "object", properties: t.args, required: t.required ?? Object.keys(t.args), additionalProperties: false },
-        execute: async (a: Answer, tc: { sessionID: string }) => ({ content: await xmsg.run(t.frame(a), tc.sessionID) }),
+        execute: async (a: Answer, tc: { sessionID: string; agent?: string }) => ({ content: await xmsg.run(t.frame(a), tc.sessionID, tc.agent) }),
       });
     }
   });
@@ -367,6 +478,9 @@ const setup = async (ctx: any) => {
     try {
       for await (const event of ctx.event.subscribe({ signal: abort.signal })) {
         if (event.type === "session.deleted") await xmsg.deleted(event.data.sessionID);
+        else if (event.type.startsWith("session.execution.") && event.type !== "session.execution.started") {
+          await xmsg.stopped(event.data.sessionID);
+        }
       }
     } catch (e) {
       if (!abort.signal.aborted) console.warn(`[xmsg] event subscription: ${e}`);

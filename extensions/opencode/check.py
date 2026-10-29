@@ -8,7 +8,7 @@ opencode 1.x or 2.x, by the major version `opencode --version` reports: the plug
 
 usage: check.py <xmsg> <opencode> <plugin.ts>
 Exits non-zero naming the first oracle that fails."""
-import base64, http.server, json, os, re, socket, subprocess, sys, threading, time, urllib.request, uuid
+import base64, http.server, json, os, re, socket, sqlite3, subprocess, sys, threading, time, urllib.request, uuid
 
 XMSG, OPENCODE, PLUGIN = sys.argv[1:4]
 TMP = os.environ.get("TMPDIR", "/tmp")
@@ -66,6 +66,10 @@ def text_of(m):
     return c or ""
 
 
+tool_results = []
+inbox_call_started = threading.Event()
+
+
 class Mock(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -82,12 +86,18 @@ class Mock(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
         msgs = body.get("messages", [])
         last = msgs[-1] if msgs else {}
+        if last.get("role") == "tool":
+            tool_results.append(text_of(last).strip())
         txt = text_of(last).strip() if last.get("role") == "user" else ""
+        lines = [l.strip() for l in txt.splitlines() if l.strip()]
+        cmd = lines[-1] if lines else ""
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
         self.end_headers()
-        if txt.startswith("CALL ") and body.get("tools") is not None:
-            _, tool, args = txt.split(" ", 2)
+        if cmd.startswith("CALL ") and body.get("tools") is not None:
+            _, tool, args = cmd.split(" ", 2)
+            if tool == "xmsg_inbox":
+                inbox_call_started.set()
             out = chunk({"role": "assistant", "tool_calls": [{"index": 0, "id": "call_1", "type": "function",
                                                               "function": {"name": tool, "arguments": args}}]})
             out += chunk({}, "tool_calls")
@@ -211,7 +221,11 @@ def call_tool(session, tool, args):
 
 
 def entry(label):
-    return next((e for e in recipients() if e.get("label") == label), None)
+    return next((e for e in recipients() if e.get("label") == label and e.get("kind") == "instance"), None)
+
+
+def sub_entry(addr_prefix):
+    return next((e for e in recipients() if e.get("kind") == "subagent" and e.get("address", "").startswith(addr_prefix + "@")), None)
 
 
 def user_texts(session):
@@ -309,15 +323,101 @@ for text, e, s in (("from s1", e1, s1), ("from s2", e2, s2)):
         fail(f"9: '{text}' is attributed to {by_text.get(text)!r}, not {s} · {e['address']}")
 ok("9: each session's send is attributed to its own address")
 
-# 10. A child session acts as its root.
+# 10 (HA9-A.oc C3, C1, C4, C5, C8): Delegated sub-addresses for child sessions.
+p_bare = e1["address"].split("@")[0]
 child = new_session(parent=s1)
+child_sub_prefix = f"{p_bare}/{child}"
+child_sub_addr = f"{child_sub_prefix}@{e1['node']}"
+
+# C3: After a child turn that makes no xmsg tool call (the mock answers "ok"), `list` shows
+# `kind:"subagent"`, `address` `<P>/<child>@<node>`, `harness:"opencode"`, with the parent's
+# status. No `kind:"instance"` entry is labelled with the child.
+say(child, "hello child")
+ec = wait_until(lambda: sub_entry(child_sub_prefix), 20, f"subagent {child_sub_prefix} listed")
+if (ec.get("kind") != "subagent" or ec.get("address") != child_sub_addr
+        or ec.get("harness") != "opencode" or ec.get("status") != e1.get("status")):
+    fail(f"C3: subagent entry mismatch: {ec} vs expected {child_sub_addr}")
+if any(e.get("kind") == "instance" and e.get("label") == child for e in recipients()):
+    fail(f"C3: child {child} registered as kind=instance: {recipients()}")
+ok(f"C3: child {child} bound at prompt as subagent {child_sub_addr} before any xmsg tool call")
+
+# C1: A `POST /session {parentID: s1}` child calls `xmsg_send`. The receiver's `from_name`
+# ends `<P>/<child_ses>@<node>`, where P is s1's address. s1's own send in the same run is
+# `s1 · <P>@<node>`.
 call_tool(child, "xmsg_send", {"to": recv.address, "text": "from the child"})
 (d,) = recv.deliveries(1)
-if d["from_name"] != f"{s1} · {e1['address']}":
-    fail(f"10: the child's send is attributed to {d['from_name']!r}, not its root {s1}")
-if entry(child):
-    fail(f"10: the child {child} is registered")
-ok(f"10: the child's send is attributed to its root {s1}")
+if not d["from_name"].endswith(child_sub_addr):
+    fail(f"C1: the child's send is attributed to {d['from_name']!r}, expected suffix {child_sub_addr!r}")
+if any(e.get("kind") == "instance" and e.get("label") == child for e in recipients()):
+    fail(f"C1: the child {child} is registered as an instance")
+reclaim_path = os.path.join(TMP, "state", "opencode", "xmsg-reclaim.json")
+reclaim_store = json.loads(open(reclaim_path).read()) if os.path.exists(reclaim_path) else {}
+if child in reclaim_store or s1 not in reclaim_store:
+    fail(f"C8: reclaim store has child key or lacks root key: {reclaim_store}")
+ok(f"C1/C8: the child's send is attributed to {d['from_name']} and xmsg-reclaim.json holds no child key")
+
+# C4: Delivery in a turn. The child's turn calls `xmsg_inbox {"wait":20}`. During the wait,
+# `POST /v1/messages` to `<P>/<child>` returns `queued`. The inbox result holds that message
+# and the child's own address. The message's outcome becomes `delivered`.
+inbox_call_started.clear()
+prev_results_len = len(tool_results)
+inbox_thread = threading.Thread(target=lambda: call_tool(child, "xmsg_inbox", {"wait": 20}))
+inbox_thread.start()
+if not inbox_call_started.wait(20):
+    fail("C4: timed out waiting for child xmsg_inbox tool call to start")
+time.sleep(0.3)
+body_c4 = f"in-turn {uuid.uuid4().hex}"
+st_c4, sent_c4 = xmsg_http("POST", "/v1/messages", {"to": child_sub_prefix, "from": "ci", "text": body_c4})
+if st_c4 != 202 or sent_c4.get("outcome") != "queued":
+    fail(f"C4: POST /v1/messages to {child_sub_prefix} during turn returned {st_c4} {sent_c4}")
+inbox_thread.join(timeout=30)
+if inbox_thread.is_alive():
+    fail("C4: child xmsg_inbox turn did not finish")
+wait_until(lambda: len(tool_results) > prev_results_len, 10, "C4 tool result")
+inbox_payload = json.loads(tool_results[-1])
+if inbox_payload.get("address") != child_sub_addr:
+    fail(f"C4: inbox address {inbox_payload.get('address')!r} != {child_sub_addr!r}")
+if not any(body_c4 in m.get("body", "") for m in inbox_payload.get("messages", [])):
+    fail(f"C4: inbox messages did not contain {body_c4!r}: {inbox_payload}")
+db_conn = sqlite3.connect(os.path.join(TMP, "xmsg.db"))
+row_c4 = db_conn.execute("SELECT outcome FROM messages WHERE id = ?", (sent_c4["message_id"],)).fetchone()
+db_conn.close()
+if not row_c4 or row_c4[0] != "delivered":
+    fail(f"C4: message {sent_c4['message_id']} outcome in db is {row_c4}, expected 'delivered'")
+ok(f"C4: in-turn message {sent_c4['message_id']} delivered via xmsg_inbox to {child_sub_addr}")
+
+# C5: Turn end, then fallback. After the child's turn ends, a send to `<P>/<child>` appears
+# as a user prompt in s1 containing `to=<P>/<child> agent_id=<child>`, within 30 s.
+def child_turn_cleared():
+    c = sqlite3.connect(os.path.join(TMP, "xmsg.db"))
+    r = c.execute("SELECT turn_pid FROM subagents WHERE parent = ? AND agent_id = ?", (p_bare, child)).fetchone()
+    c.close()
+    return r is not None and r[0] is None
+
+wait_until(child_turn_cleared, 10, f"C5: {child} turn_pid cleared after turn end")
+body_c5 = f"fallback {uuid.uuid4().hex}"
+st_c5, sent_c5 = xmsg_http("POST", "/v1/messages", {"to": child_sub_prefix, "from": "ci", "text": body_c5})
+if st_c5 != 202:
+    fail(f"C5: POST /v1/messages to {child_sub_prefix} after turn end returned {st_c5} {sent_c5}")
+expected_hdr = f"to={child_sub_prefix} agent_id={child}"
+wait_until(lambda: any(body_c5 in t and expected_hdr in t for t in user_texts(s1)), 30,
+           f"C5: fallback message in root {s1} with header {expected_hdr!r}")
+ok(f"C5: post-turn message {sent_c5['message_id']} fell back to {s1} with '{expected_hdr}'")
+
+# OQ1 / E12: on 2.x, a child spawned via the built-in `subagent` tool (`agent: "general"`)
+# carries `parentID`, fires the `prompt` hook, attributes its `xmsg_send` to
+# `general · <P>/<spawned_ses>@<node>`, and clears its turn on `session.execution.succeeded`.
+if V2:
+    sub_text = f"from-2x-subagent-{uuid.uuid4().hex}"
+    call_tool(s1, "subagent", {
+        "agent": "general",
+        "description": "oq1 spawned child",
+        "prompt": f'CALL xmsg_send {json.dumps({"to": recv.address, "text": sub_text})}',
+    })
+    (d_sub,) = recv.deliveries(1)
+    if not (d_sub["from_name"].startswith(f"general · {p_bare}/ses_") and d_sub["from_name"].endswith("@" + e1["node"])):
+        fail(f"OQ1/E12: 2.x subagent-spawned send attributed to {d_sub['from_name']!r}")
+    ok(f"OQ1/E12: 2.x subagent tool child attributed to {d_sub['from_name']}")
 
 # 11. Push: a message to an idle session appears in it through promptAsync, acked once.
 s3 = new_session()
@@ -357,6 +457,26 @@ if status != 202:
     fail(f"restart: {s1}'s reclaimed address {e1['address']} answers {status} {body}, not 202")
 wait_until(lambda: any(body_reclaimed in t for t in user_texts(s1)), 30, f"the message to reclaimed {s1}")
 ok(f"restart (HA8): {s1} reclaims {e1b['address']} and receives messages")
+
+# C6: After `xmsg serve` restarts and s1 reclaims P, `list` still shows `<P>/<child>`,
+# and a send to it falls back to s1.
+wait_until(lambda: sub_entry(child_sub_prefix), 20, f"C6: {child_sub_prefix} listed after restart")
+body_c6 = f"restart-sub {uuid.uuid4().hex}"
+st_c6, sent_c6 = xmsg_http("POST", "/v1/messages", {"to": child_sub_prefix, "from": "ci", "text": body_c6})
+if st_c6 != 202:
+    fail(f"C6: POST /v1/messages to {child_sub_prefix} after restart returned {st_c6} {sent_c6}")
+wait_until(lambda: any(body_c6 in t and expected_hdr in t for t in user_texts(s1)), 30,
+           f"C6: fallback message to {child_sub_prefix} in {s1} after restart")
+ok(f"C6: after restart, {child_sub_addr} stays listed and falls back to {s1}")
+
+# C9: Delete ends the binding. `DELETE /session/<child>`, then a send to `<P>/<child>`
+# returns 404 and `list` omits it.
+oc("DELETE", f"/session/{child}")
+wait_until(lambda: sub_entry(child_sub_prefix) is None, 20, f"C9: {child_sub_prefix} omitted from list after DELETE")
+st_c9, body_c9 = xmsg_http("POST", "/v1/messages", {"to": child_sub_prefix, "from": "ci", "text": "after-delete"})
+if st_c9 != 404:
+    fail(f"C9: POST /v1/messages to deleted {child_sub_prefix} returned {st_c9} {body_c9}, expected 404")
+ok(f"C9: deleting child {child} removes {child_sub_addr} from list and answers 404")
 
 for p in procs:
     p.kill()
