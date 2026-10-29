@@ -1042,9 +1042,9 @@ pub async fn run_agent_server_with_listener(
     }
 }
 
-/// Resolves `as_agent` against `parent` in `subagents` (HA9-A §2.3 step 3, E1, E2, D1, D5).
-/// When `as_agent` is absent or empty, acts as `parent` unless `require_subagent` is true
-/// (`inbox` requires a non-empty bound `as_agent`).
+/// Resolves `as_agent` against `parent` in `subagents` (HA9-A §2.3 step 3, E1, E2, D1, D5, D6).
+/// When `as_agent` is absent, empty, or equal to `parent.session_id` (D6), acts as `parent`
+/// unless `require_subagent` is true (`inbox` requires a non-empty bound child `as_agent`).
 pub fn resolve_as_agent(
     state: &AppState,
     parent: Session,
@@ -1052,7 +1052,7 @@ pub fn resolve_as_agent(
     require_subagent: bool,
 ) -> Result<Session, AppError> {
     let agent_id = as_agent.map(str::trim).unwrap_or("");
-    if agent_id.is_empty() {
+    if agent_id.is_empty() || agent_id == parent.session_id {
         if require_subagent {
             return Err(AppError::NotRecipient(format!(
                 "'{}' is a parent session and receives messages on its channel; 'inbox' is only for subagents",
@@ -1091,7 +1091,10 @@ pub fn resolve_as_agent(
 
 /// Reads optional `("name", "agentType")` from the subagent `meta.json` beside `transcript_path`
 /// (HA9-A §2.5, O12).
-fn read_meta_json_fields(transcript_path: &str, agent_id: &str) -> (Option<String>, Option<String>) {
+fn read_meta_json_fields(
+    transcript_path: &str,
+    agent_id: &str,
+) -> (Option<String>, Option<String>) {
     let mut candidates = Vec::new();
     let stem = transcript_path
         .strip_suffix(".jsonl")
@@ -1169,7 +1172,8 @@ async fn handle_subagent_frame(
                 _ => (None, None),
             };
             let candidate_name = name.or(meta_name.as_deref());
-            let valid_name = candidate_name.filter(|n| crate::claim::validate_subagent_name(n).is_ok());
+            let valid_name =
+                candidate_name.filter(|n| crate::claim::validate_subagent_name(n).is_ok());
             let effective_type = agent_type
                 .filter(|s| !s.is_empty())
                 .or(meta_type.as_deref().filter(|s| !s.is_empty()));
@@ -1218,9 +1222,7 @@ async fn handle_subagent_frame(
                     Some(t)
                 } else {
                     pin_name.filter(|p| {
-                        !p.is_empty()
-                            && *p != agent_id
-                            && !crate::claim::is_subagent_id_shaped(p)
+                        !p.is_empty() && *p != agent_id && !crate::claim::is_subagent_id_shaped(p)
                     })
                 }
             } else if let Some(p) = pin_name.filter(|p| !p.is_empty()) {
@@ -1231,9 +1233,7 @@ async fn handle_subagent_frame(
                 }
             } else {
                 name.filter(|n| {
-                    !n.is_empty()
-                        && *n != agent_id
-                        && !crate::claim::is_subagent_id_shaped(n)
+                    !n.is_empty() && *n != agent_id && !crate::claim::is_subagent_id_shaped(n)
                 })
             };
             let valid_name =
@@ -1311,7 +1311,9 @@ pub fn run_claude_hook(input: &str, agent_sock: Option<&Path>) -> Result<String,
             let agent_id = match obj.get("agent_id") {
                 None | Some(Value::Null) => "",
                 Some(Value::String(s)) => s.as_str(),
-                Some(_) => return Err("'agent_id' in PreToolUse hook input must be a string".to_string()),
+                Some(_) => {
+                    return Err("'agent_id' in PreToolUse hook input must be a string".to_string())
+                }
             };
             let mut updated_input = tool_input.clone();
             updated_input.insert("as_agent".to_string(), Value::String(agent_id.to_string()));
@@ -1329,7 +1331,9 @@ pub fn run_claude_hook(input: &str, agent_sock: Option<&Path>) -> Result<String,
                 .get("agent_id")
                 .and_then(Value::as_str)
                 .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| "SubagentStart hook input missing non-empty 'agent_id'".to_string())?;
+                .ok_or_else(|| {
+                    "SubagentStart hook input missing non-empty 'agent_id'".to_string()
+                })?;
             let mut frame = serde_json::json!({
                 "action": "subagent",
                 "schema_version": surface::MCP_SCHEMA_VERSION,
@@ -1360,7 +1364,9 @@ pub fn run_claude_hook(input: &str, agent_sock: Option<&Path>) -> Result<String,
                     let tool_resp = obj
                         .get("tool_response")
                         .and_then(Value::as_object)
-                        .ok_or_else(|| "PostToolUse(Agent) missing 'tool_response' object".to_string())?;
+                        .ok_or_else(|| {
+                            "PostToolUse(Agent) missing 'tool_response' object".to_string()
+                        })?;
                     let agent_id = tool_resp
                         .get("agentId")
                         .or_else(|| tool_resp.get("teammate_id"))
@@ -1432,7 +1438,9 @@ pub fn run_claude_hook(input: &str, agent_sock: Option<&Path>) -> Result<String,
                 .get("agent_id")
                 .and_then(Value::as_str)
                 .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| "SubagentStop hook input missing non-empty 'agent_id'".to_string())?;
+                .ok_or_else(|| {
+                    "SubagentStop hook input missing non-empty 'agent_id'".to_string()
+                })?;
             let frame = serde_json::json!({
                 "action": "subagent",
                 "schema_version": surface::MCP_SCHEMA_VERSION,
