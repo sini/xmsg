@@ -21,7 +21,7 @@ Every recipient has an address:
 
 ## Listing recipients: `list`
 
-Call **`list`**, optionally with `name`, `node`, `kind` (`service` or `instance`), `status` (`live` or `inactive`) and `within`.
+Call **`list`**, optionally with `name`, `node`, `kind` (`service`, `instance` or `subagent`), `status` (`live` or `inactive`) and `within`.
 
 By default (`status` omitted or `live`), `list` shows only **live** recipients, and each entry carries `registered_at` (epoch seconds when it registered on its node).
 
@@ -29,8 +29,8 @@ To see inactive instances (`parked` and `closed`), call `list` with `status: "in
 
 Each entry gives:
 
-- `address`: `id@node` or `name@node`;
-- `kind`: `service` or `instance`;
+- `address`: `id@node`, `id/child@node` or `name@node`;
+- `kind`: `service`, `instance` or `subagent`;
 - `harness`: `claude`, `agy`, `pi`, `opencode`, `hermes`, or `svc` (omitted when a pre-XL1 peer did not report it);
 - `label`: an instance's own description (a service has none);
 - `status`: `live`, `parked` (an instance that is not running now and would be queued for), or `closed`;
@@ -93,13 +93,21 @@ first reply (at most 60). Use it after a restart or a missed push, or to send an
 
 ## Subagent mailbox: `inbox`
 
-If you are running as a subagent, call **`inbox`** (optionally with `wait`, up to 60 seconds) to drain messages sent to your `<parent>/<child>@<node>` address while your turn is active. Once your turn ends, messages to your sub-address fall back to your parent session with a `to=<parent>/<child> agent_id=<id>` header.
+A subagent bound under a parent session `<P>` has a delegated sub-address `<P>/<child>@<node>` (`id/child@node`), where `<child>` is its bound name (when given) or its harness `agent_id` / child session ID; both `<P>/<name>` and `<P>/<agent_id>` resolve to the same bound child.
+
+- **Active turn (`inbox`):** While your subagent turn is active, messages and replies sent to `<P>/<child>@<node>` queue in your turn mailbox (`outcome: "queued"`). Call **`inbox`** (optionally with `wait`, up to 60 seconds) to drain queued messages; it returns `{address, messages: [{id, from, body, created_at}]}` and marks drained messages `delivered`.
+- **Parent fallback:** When your turn is not active (after your turn ends or between turns), messages and replies to `<P>/<child>@<node>` fall back to your parent session `<P>` with a `to=<P>/<child> agent_id=<id>` header prepended to the body. If `<P>` is parked, the message queues and drains into your next `inbox` call or `<P>`'s next turn.
+- **Per-harness support:**
+  - **Claude Code (`claude`):** Subagents spawned via `Agent` bind `<P>/<name>@<node>` (when named) and `<P>/<agent_id>@<node>` through `xmsg register claude --hook` (`SubagentStart`, `PostToolUse` on `Agent`/`SendMessage`, `SubagentStop`), and `PreToolUse` stamps `as_agent` on MCP calls so `send`, `reply` and `inbox` act as `<P>/<child>@<node>`.
+  - **opencode 1.x and 2.x (`opencode`):** Child sessions (`task` or `subagent` children with a `parentID`) bind `<P>/<child_ses>@<node>` under their root conversation `<P>` on the plugin's `register.sock` connection and pass `as_agent` on `xmsg_send`, `xmsg_reply` and `xmsg_inbox`.
+  - **Antigravity (`agy`):** Subagents spawned via `invoke_subagent` (admitted from the parent's `transcript.jsonl`) bind `<P>/<child_uuid>@<node>` through `xmsg register agy --hook` (`PreInvocation`, `PreToolUse`, `Stop`), stamping `as_agent` on MCP calls while the parent session is registered.
+  - **Hermes (`hermes`) and Pi (`pi`):** Hermes `delegate_task` children act as their root conversation and do not bind a separate sub-address; Pi has no subagent sub-addresses.
 
 ## Reading the sender
 
 A sender is shown as follows:
 
-- `label · id@node` (or `label · id~n@node`): an agent session. xmsg attests the `id@node` part. The label is the
+- `label · id@node` (or `label · id~n@node`, `label · id/child@node`): an agent session or bound subagent. xmsg attests the `id@node` (or `id/child@node`) part. The label is the
   sender's own description and is not verified.
 - `name@node`: a service, all of it attested.
 - `label · anon@node`: an anonymous caller, such as a script. Only the node is attested.

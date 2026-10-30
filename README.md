@@ -105,14 +105,16 @@ Serves the HTTP API directly over a local Unix domain socket. Peer credentials (
 
 Used by agent sessions, MCP tool instances and registered services. One JSON frame per line; each mirrors an MCP tool field for field, with `idempotency_key` added on `send` and `reply` (AM-4; Section 4, Idempotency). **Every frame refuses a field it does not know** with `bad_request` naming every unknown field (an old client's `{"action":"send","ref":…,"push_replies":…}` is refused naming `ref` and `push_replies`).
 
-| frame                                                       | answer                                             |
-| ----------------------------------------------------------- | -------------------------------------------------- |
-| `{"action":"list","name"?,"node"?,"kind"?}`                 | `{"status":"ok","recipients":[…]}` (§4)            |
-| `{"action":"send","to","text","idempotency_key"?}`          | `{"status":"ok","message_id","address","outcome"}` |
-| `{"action":"reply","message_id","text","idempotency_key"?}` | `{"status":"ok","reply":{…}}`                      |
-| `{"action":"replies","message_id","wait"?,"after"?}`        | `{"status":"ok","replies":[…]}`                    |
+| frame                                                                   | answer                                                                         |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `{"action":"list","name"?,"node"?,"kind"?,"status"?,"within"?}`         | `{"status":"ok","recipients":[…],"nodes":[…]}` (§4)                            |
+| `{"action":"send","to","text","idempotency_key"?,"as_agent"?}`          | `{"status":"ok","message_id","address","outcome"}`                             |
+| `{"action":"reply","message_id","text","idempotency_key"?,"as_agent"?}` | `{"status":"ok","reply":{…}}`                                                  |
+| `{"action":"replies","message_id","wait"?,"after"?}`                    | `{"status":"ok","replies":[…]}`                                                |
+| `{"action":"inbox","wait"?,"as_agent"?}`                                | `{"status":"ok","address":"<P>/<child>@<node>","messages":[…]}`                |
+| `{"action":"subagent","event","agent_id",…}`                            | `{"status":"ok",…}` (subagent lifecycle and name binding for Claude and `agy`) |
 
-`send` and `reply` are attributed to the caller by its process ancestry (`SO_PEERCRED`): a Claude, agy or pi session, or a registered service (a service sends over `agent.sock`, attributed by its pid; plan §6 D15). The sender's label is A12's one render, `label · id@node` for an instance and `name@node` for a service; callers cannot supply a sender or a return address. Errors are `{"status":"error","error","detail"}` with the codes of §4.
+`send`, `reply` and `inbox` are attributed to the caller by its process ancestry (`SO_PEERCRED`): a Claude, agy or pi session, or a registered service (a service sends over `agent.sock`, attributed by its pid). When `as_agent` is set on `send`, `reply` or `inbox` (stamped by the harness's `PreToolUse` hook), the call acts as the bound subagent `<P>/<child>@<node>` under the caller's parent session `P` (or as `P` itself when `as_agent` equals `P`'s own session ID). The sender's label is `label · id@node` (or `label · id/child@node` for a subagent) for an instance and `name@node` for a service; callers cannot supply a sender or a return address. Errors are `{"status":"error","error","detail"}` with the codes of §4.
 
 ### 2.3 `register.sock`
 
@@ -126,7 +128,7 @@ Used by non-Claude harnesses for registration and polling, and by services:
 #### 2.3.1 Plugin registration: many sessions on one connection
 
 A plugin harness (opencode, hermes) runs many sessions in one process, so its plugin holds **one** `register.sock`
-connection and registers each session on it; each gets its own server-minted address (A18, HA4). The plugin's
+connection and registers each session on it; each gets its own server-minted address. The plugin's
 tools travel on the same connection, as frames naming the session they act as, so a call is attributed to that
 session's address and to no other.
 
@@ -135,25 +137,25 @@ carries a `request_id` of the plugin's choosing, and its answer carries it back:
 delivery that ends a pending `poll` arrive on one connection, in whatever order they are ready, and **a tool frame
 is answered while a `poll` is pending**. Every frame refuses unknown fields (`bad_request`, naming them).
 
-| frame                                                         | answer                                                                                                                                                                                                  |
-| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `{"action":"register","session":S}`                           | `{"status":"ok","address":"<id>@<node>"}`, a fresh address; `conflict` if S is already registered on this connection                                                                                    |
-| `{"action":"release","session":S}`                            | `{"status":"ok"}`; S's address answers `gone` from then on                                                                                                                                              |
-| `{"action":"continues","from":S1,"to":S2}`                    | `{"status":"ok","address":…}`: S1's address now belongs to S2 (A19); `conflict` if S2 is registered on this connection                                                                                  |
-| `{"action":"list"\|"send"\|"reply"\|"replies","session":S,…}` | `agent.sock`'s frames and answers (2.2) field for field, acting as S                                                                                                                                    |
-| `{"action":"poll","wait":N}`                                  | `{"action":"deliver","session":S,"address":"<id>@<node>","message_id":…,"from_name":…,"text":…,"envelope":…}` for any session on the connection, or `{"action":"timeout"}` after N seconds (at most 60) |
-| `{"action":"ack","session":S,"message_id":M}`                 | `{"status":"ok"}` once the harness accepted M, which then reads `delivered`; an unacked message is offered again                                                                                        |
+| frame                                                                                            | answer                                                                                                                                                                                                  |
+| ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{"action":"register","session":S,"reclaim"?:{…}}`                                               | `{"status":"ok","address":"<id>@<node>","reclaim":{…}}`, a fresh or reclaimed address; `conflict` if S is already registered on this connection                                                         |
+| `{"action":"release","session":S}`                                                               | `{"status":"ok"}`; S's address answers `gone` from then on                                                                                                                                              |
+| `{"action":"continues","from":S1,"to":S2}`                                                       | `{"status":"ok","address":…}`: S1's address now belongs to S2; `conflict` if S2 is registered on this connection                                                                                        |
+| `{"action":"subagent","event":"start"\|"stop"\|"end","session"?:S,"agent_id":C,"agent_type"?:…}` | `{"status":"ok",…}`: binds child session C under root S (`<P>/<C>@<node>`), marks its turn active (`start`) or inactive (`stop`), or unbinds it (`end`)                                                 |
+| `{"action":"list"\|"send"\|"reply"\|"replies"\|"inbox","session":S,"as_agent"?:C,…}`             | `agent.sock`'s frames and answers (2.2) field for field, acting as S (or `<P>/<C>@<node>` when `as_agent` is set on `send`, `reply` or `inbox`)                                                         |
+| `{"action":"poll","wait":N}`                                                                     | `{"action":"deliver","session":S,"address":"<id>@<node>","message_id":…,"from_name":…,"text":…,"envelope":…}` for any session on the connection, or `{"action":"timeout"}` after N seconds (at most 60) |
+| `{"action":"ack","session":S,"message_id":M}`                                                    | `{"status":"ok"}` once the harness accepted M, which then reads `delivered`; an unacked message is offered again                                                                                        |
 
 One `poll` is pending per connection at a time, and a second is refused `conflict`, so a message is never handed
 to two polls. The sessions on a connection take turns: a session's unacked head is offered again only after the
 other sessions' heads, so one refused message does not hold back the rest.
 
-A frame naming a session this connection does not hold, `continues` included, is refused `denied`: only the
-connection that registered a session can speak for it or move its address. A released session's address, and
-every address of a connection that closes (whether or not the process lives on), answers `gone` and is never
-queued for (AM-9); a plugin that reconnects registers again and gets new addresses. A plugin process maps to no
+A frame naming a session this connection does not hold, `continues` and `subagent` included, is refused `denied`: only the
+connection that registered a session can speak for it, bind or stop its subagents, or move its address. A released session's address
+answers `gone` permanently; a connection that closes without `release` detaches its addresses so the plugin can reclaim them within the reply TTL. A plugin process maps to no
 address, so any other caller in it or under it (a shell tool's `curl` to `http.sock`, an `xmsg mcp` child) is
-anonymous (A15, HA2).
+anonymous.
 
 ### 2.4 Replies: stored always, pushed by sender kind (A10)
 
@@ -186,12 +188,13 @@ anonymous (A15, HA2).
 }
 ```
 
-Exposes four tools (A13; all execute autonomously without user interaction prompts):
+Exposes five tools (all execute autonomously without user interaction prompts):
 
-- **`list(name?, node?, kind?)`:** the recipients the caller may see: each entry's address (`id@node` for an instance, `name@node` for a service), kind (`service` or `instance`), label and status. `node` lists a federated peer. (Passing `host` is refused with a migration hint to use `node`).
-- **`send(to, text)`:** `to` is an instance ID (a UUID, optionally `~n`), a service name or an instance label, optionally followed by `@node` (one `@` at most). Returns the message ID, the resolved address and the outcome; follow-ups to the address cannot drift to another instance. The caller's identity is derived; passing `ref` or `from` is refused with a migration hint (`use 'to' instead`). Passing a label containing `' · '` in `to` is refused with a hint to use the header's `ref=` address. MCP carries no `idempotency_key` on `send` or `reply`: agents do not retry by accident, and programs that retry use HTTP, `agent.sock` or `register.sock`.
-- **`reply(message_id, text)`:** answers the exchange's other party symmetrically (if received, answers the sender; if sent, follow-up to the recipient). Reshaped for MCP callers to return `{bytes, messageId, inReplyTo, outcome}`, where `messageId` is the new reply's ID and `inReplyTo` is the answered ID.
+- **`list(name?, node?, kind?, status?, within?)`:** the recipients the caller may see: each entry's address (`id@node` for an instance, `id/child@node` for a subagent, `name@node` for a service), kind (`service`, `instance` or `subagent`), label and status (`live`, `parked` or `closed`). `node` lists a federated peer. (Passing `host` is refused with a migration hint to use `node`).
+- **`send(to, text, as_agent?)`:** `to` is an instance ID (a UUID, optionally `~n`), a sub-address (`<P>/<child>`), a service name or an instance label, optionally followed by `@node` (one `@` at most). Returns the message ID, the resolved address and the outcome; follow-ups to the address cannot drift to another instance. The caller's identity is derived (or attested as `<P>/<child>` when `as_agent` is stamped by the harness hook); passing `ref` or `from` is refused with a migration hint (`use 'to' instead`). Passing a label containing `' · '` in `to` is refused with a hint to use the header's `ref=` address. MCP carries no `idempotency_key` on `send` or `reply`: agents do not retry by accident, and programs that retry use HTTP, `agent.sock` or `register.sock`.
+- **`reply(message_id, text, as_agent?)`:** answers the exchange's other party symmetrically (if received, answers the sender; if sent, follow-up to the recipient). Reshaped for MCP callers to return `{bytes, messageId, inReplyTo, outcome}`, where `messageId` is the new reply's ID and `inReplyTo` is the answered ID.
 - **`replies(message_id, wait?)`:** the stored replies to a message the caller sent, waiting up to `wait` seconds (at most 60) for the first.
+- **`inbox(wait?, as_agent?)`:** drains unexpired messages queued for a bound subagent's `<P>/<child>@<node>` turn mailbox while its turn is active, waiting up to `wait` seconds (at most 60) for the first message, and marks drained messages `delivered`. Returns `{address, messages: [{id, from, body, created_at}]}`.
 
 #### Reply-Only Mode (`--reply-only`)
 
@@ -208,7 +211,21 @@ For restricted subagent or responder-only sessions where the model should only b
 }
 ```
 
-In reply-only mode, `tools/list` returns `[reply, replies]`. The `list` and `send` tools are omitted from the catalog and any direct JSON-RPC calls to them fail closed with an error.
+In reply-only mode, `tools/list` returns `[reply, replies]`. The `list`, `send` and `inbox` tools are omitted from the catalog and any direct JSON-RPC calls to them fail closed with an error.
+
+### 3.1.1 Delegated Sub-Addresses (`<P>/<child>@<node>`), `inbox`, and Parent Fallback
+
+In harnesses that spawn in-process or child subagents under a parent conversation `P`, each bound child gets a delegated sub-address so external sessions and services can message or reply to the subagent directly and see its sends attributed to it:
+
+- **Address form (`<P>/<child>@<node>`):** `<P>` is the parent instance's ID (a UUID, or `X~n` fork) and `<child>` is either the subagent's bound name (when one is given) or its harness `agent_id` / child session ID. Both `<P>/<name>` and `<P>/<agent_id>` resolve to the same bound subagent, and `list` includes live bound subagents with `kind: "subagent"` and `address: "<P>/<child>@<node>"`. When the subagent sends or replies, its sender label is `label · <P>/<child>@<node>`.
+- **Turn mailbox (`inbox`):** While a subagent's turn is active (`turn_pid` live with matching start time), messages and replies sent to `<P>/<child>@<node>` queue in its turn mailbox (`outcome: "queued"`). The subagent drains them during its turn by calling **`inbox`** (optionally with `wait` up to 60 seconds), which returns `{address, messages: [{id, from, body, created_at}]}` and marks each drained message `delivered`.
+- **Parent fallback (`to=<P>/<child> agent_id=<id>`):** When the subagent's turn is not active (between turns or after `SubagentStop` / `Stop`), messages and replies addressed to `<P>/<child>@<node>` fall back to the parent session `P` with a `to=<P>/<child> agent_id=<agent_id>` header prepended to the message body. If `P` is currently parked, the message stays queued on `<P>/<agent_id>` and is either drained by the subagent on its next `inbox` call or delivered to `P` with the fallback header when `P` returns.
+- **Per-harness sub-address support:**
+  - **Claude Code (`claude`):** Full delegated sub-addresses (`<P>/<name>@<node>` and `<P>/<agent_id>@<node>`), `inbox`, and parent fallback via `xmsg register claude --hook` on `SubagentStart`, `PostToolUse` (`Agent` and `SendMessage`), `SubagentStop`, and `PreToolUse` on `mcp__xmsg__*` / `mcp__plugin_hm_xmsg__*` (which stamps `as_agent` into the tool input).
+  - **opencode 1.x and 2.x (`opencode`):** Full delegated sub-addresses (`<P>/<child_ses>@<node>`), `xmsg_inbox`, and parent fallback on both 1.x and 2.x plugin APIs. Child sessions (`task` or `subagent` children with a `parentID`) walk `parentID` to their root conversation `P`, bind via `subagent` (`start`/`stop`/`end`) on `register.sock`, and pass `as_agent: <child_ses>` on `xmsg_send`, `xmsg_reply` and `xmsg_inbox`.
+  - **Antigravity (`agy`):** Full delegated sub-addresses (`<P>/<child_uuid>@<node>`), `inbox`, and parent fallback while parent `P` is registered. Children spawned via `invoke_subagent` are admitted from `P`'s `brain/<P>/.system_generated/logs/transcript.jsonl` and tracked across turns by `xmsg register agy --hook` (`--event pre-invocation`, `--event pre-tool-use` stamping `as_agent`, and `--event stop`).
+  - **Hermes (`hermes`):** `delegate_task` subagents act as their root conversation `P` and do not bind separate `<P>/<child>` sub-addresses.
+  - **Pi (`pi`):** Single-session process; no subagent sub-addresses.
 
 ### 3.2 Pi Coding Agent Extension: `extensions/pi/`
 
@@ -217,7 +234,7 @@ TypeScript extension for Pi (`@earendil-works/pi-coding-agent`):
 - Connects to `register.sock`, receives server-derived session ID, and long-polls for inbound messages.
 - Defaults session display name to the directory basename of the working directory.
 - Delivers incoming messages into Pi with `expandPromptTemplates: false` to prevent remote command or prompt template injection.
-- Registers three tools:
+- Registers three tools (`list`, `send`, `reply`); Pi has no subagent sub-addresses or `inbox` tool:
   - **`list`:** Queries active sessions over `$XDG_RUNTIME_DIR/xmsg/http.sock` via Unix domain socket (or `XMSG_URL` when explicitly configured as an override).
   - **`send`:** Sends messages over `agent.sock` to ensure kernel attestation of peer PID and return address.
   - **`reply`:** Sends replies over `agent.sock`.
@@ -243,7 +260,7 @@ that directory's sessions:
   their root conversation `P` (found by walking `parentID`) via `subagent` (`start`/`stop`/`end`) and send
   `as_agent: <child_ses>` on `xmsg_send`, `xmsg_reply` and `xmsg_inbox`. While a child is in a turn, messages to
   `<P>/<child_ses>` queue for its `xmsg_inbox`; otherwise they fall back to `P` with a `to=<P>/<child_ses> agent_id=<child_ses>` header. Registration, reclaim, push delivery (`pi_pending_messages`), `xmsg_list`,
-  `xmsg_replies` and root release stay rooted (HA7 narrowed by HA9-A.oc).
+  `xmsg_replies` and root release stay rooted.
 - **Push.** A delivered message goes into its session as a user prompt (1.x `promptAsync`, 2.x `session.prompt`),
   which starts the session if it is idle; in a running turn, opencode takes it as it takes any mid-turn prompt. The
   plugin acks only after opencode accepted the prompt.
@@ -252,7 +269,7 @@ that directory's sessions:
   it registered, and a message delivered to it starts a turn in the service, which runs and can answer with no TUI
   attached; the turn shows when the session is opened again. Only deleting the session releases it. Stopping the
   service, or reloading the plugin (opencode watches the file), closes the connection, which detaches every address
-  on it (HA8): each session reclaims its own address at its next prompt.
+  on it: each session reclaims its own address at its next prompt.
 
 There is no MCP entry for opencode: the plugin's tools are the attested path.
 
@@ -264,7 +281,7 @@ hermes process (2.3.1):
 
 - **Registration.** A session registers at the first `pre_llm_call` hook or xmsg tool call that carries its
   `session_id`. A delegate (a `delegate_task` subagent, whose `pre_llm_call` names its parent) acts as its root
-  conversation and is never registered (HA7).
+  conversation and is never registered.
 - **Tools.** `xmsg_list`, `xmsg_send`, `xmsg_reply` and `xmsg_replies`, in the toolset `xmsg`, sent as frames under
   the calling session (the tool's `session_id`). hermes defers plugin tools behind its Tool Search bridge by default
   (`tools.tool_search`), so the model reaches them through `tool_search` and `tool_call`.
@@ -277,7 +294,7 @@ hermes process (2.3.1):
   switch at the next hook, tool call or push, by the CLI's `session_id`, releases the old address then, and never
   injects one session's message into another.
 - **Compression.** With `compression.in_place: false`, a compression continues the conversation under a new
-  session id; the plugin then moves the address with `continues` (A19). It reads hermes's session store for this
+  session id; the plugin then moves the address with `continues`. It reads hermes's session store for this
   (`SessionDB(read_only=True).get_compression_chain`), which is internal hermes API: a change there breaks
   continuation, and CI's `hermes-plugin` check pins it. hermes's default, in-place compaction keeps the session id,
   and the address with it.
@@ -319,8 +336,8 @@ On Darwin and in sandboxes without accessible `/proc`, `xmsg` falls back to the 
 1. **Identity at MCP Start:**
    When `xmsg mcp` starts as an `agy` child, the server attests the ancestor process chain (verifying a trusted `agy` executable and an open presence lock held via Linux `FLOCK` in `presence_dir`). The session immediately becomes addressable as `agy:<pid>:<starttime>` without credentials (`status: "idle"`, `registered: false`). Messages sent to it are queued in its inbox (`outcome: "queued"`).
 
-2. **PreInvocation Hook (`xmsg register agy --hook`):**
-   Configured in `hooks.json` under `PreInvocation`:
+2. **Hooks (`xmsg register agy --hook`):**
+   Configured in `hooks.json` under `PreInvocation`, `PreToolUse` and `Stop`:
 
    ```json
    {
@@ -328,23 +345,41 @@ On Darwin and in sandboxes without accessible `/proc`, `xmsg` falls back to the 
        "PreInvocation": [
          {
            "type": "command",
-           "command": "/path/to/xmsg register agy --hook"
+           "command": "/path/to/xmsg register agy --hook --event pre-invocation"
+         }
+       ],
+       "PreToolUse": [
+         {
+           "matcher": "call_mcp_tool|mcp_xmsg_.*",
+           "hooks": [
+             {
+               "type": "command",
+               "command": "/path/to/xmsg register agy --hook --event pre-tool-use",
+               "timeout": 5
+             }
+           ]
+         }
+       ],
+       "Stop": [
+         {
+           "type": "command",
+           "command": "/path/to/xmsg register agy --hook --event stop",
+           "timeout": 5
          }
        ]
      }
    }
    ```
 
-   On each turn, `agy` passes hook JSON on stdin containing `conversationId`.
-
-   - If that session already has push credentials registered, `xmsg` prints `{}`.
-   - If push credentials are not yet registered:
-     - When Arm A is watching and this is the first turn since becoming unregistered, `xmsg` prints `{}` (stand-down).
-     - If still unregistered on subsequent turns, or when Arm A is not watching (Darwin/sandboxes), `xmsg` emits an `ephemeralMessage` instructing the model to run `xmsg register agy` before anything else.
-   - On any error (malformed stdin, missing fields, or connection failure), `xmsg` logs a notice to stderr, prints `{}`, and exits 0 to ensure model execution is never blocked.
+   - **`PreInvocation` (`--event pre-invocation`, default):** On each turn, `agy` passes hook JSON on stdin containing `conversationId`. First, the hook sends a `subagent` `start` frame on `agent.sock`: if the caller is a subagent spawned via `invoke_subagent` under a registered parent `P` (admitted from `P`'s `brain/<P>/.system_generated/logs/transcript.jsonl`), the server binds `<P>/<conversationId>@<node>`, records the subagent's active turn against `P`'s process and start time, answers `{"status":"ok","role":"subagent"}`, and the hook prints `{}` so the child never gets a registration prompt. For a parent session:
+     - If push credentials are already registered, `xmsg` prints `{}`.
+     - If push credentials are not yet registered: when Arm A is watching and this is the first turn since becoming unregistered, `xmsg` prints `{}` (stand-down); on subsequent turns, or when Arm A is not watching (Darwin/sandboxes), `xmsg` emits an `ephemeralMessage` instructing the model to run `xmsg register agy` before anything else.
+     - On any error (malformed stdin, missing fields, or connection failure), `xmsg` logs a notice to stderr, prints `{}`, and exits 0.
+   - **`PreToolUse` (`--event pre-tool-use`):** Matches `call_mcp_tool` and `mcp_xmsg_*` calls and returns `{"decision":"allow","overwrite":{…}}` stamping `as_agent: <conversationId>` into the tool arguments (for non-`xmsg` `call_mcp_tool` invocations it returns `{"decision":"ask"}` without modifying arguments; if `conversationId` or the tool payload cannot be parsed it fails closed with `{"decision":"deny"}`). When the caller is a bound subagent, `send`, `reply` and `inbox` act as `<P>/<conversationId>@<node>`; when the caller is the parent (`as_agent == P`), they act as `P`.
+   - **`Stop` (`--event stop`):** Sends a `subagent` `stop` frame on `agent.sock` for `conversationId`, clearing the subagent's active turn and sweeping any remaining messages queued in its turn mailbox to the parent `P` with a `to=<P>/<conversationId> agent_id=<conversationId>` header.
 
 3. **Credential Registration & FIFO Queue Flush:**
-   Credentials can register either automatically via Arm A's proc watcher or via the model running `<exe_path> register agy`. In both paths, credentials are authenticated through `verify_registration`. As soon as credentials register, all queued messages are flushed to the session in FIFO order (`outcome: "delivered"`). Subsequent turns find credentials active and emit `{}`.
+   Credentials can register either automatically via Arm A's proc watcher or via the model running `<exe_path> register agy`. In both paths, credentials are authenticated through `verify_registration`, `xmsg` rescans the parent's `transcript.jsonl` to admit its subagents, and all queued parent and subagent fallback messages are flushed to the session in FIFO order (`outcome: "delivered"`). Subsequent turns find credentials active and emit `{}`.
 
 4. **Error Reporting Invariance:**
    Sending to a live PID that has no attested agent session returns `unregistered` (`process <pid> has no attested agent session`). The outdated text `"process exited"` appears nowhere for live processes.
@@ -385,7 +420,18 @@ In multi-tenant setups where multiple Claude configurations exist on the same ho
 - **Default:** `~/.claude/sessions`.
 - **Instance Claims & Multi-Instance Resolution:** Discovery, liveness verification, listing, and delivery inspect all configured directories. When the same conversation ID appears across multiple directories or in multiple concurrent processes, `xmsg` assigns instance claims deterministically via the persistent `instance_claims` table. The first observed live process retains plain `X`, and subsequent instances receive monotonic fork addresses `X~2`, `X~3`, etc., accompanied by fork notices.
   - **Address Lifespan:** An Antigravity session address lasts across restarts that resume with `--conversation=<id>` (the conversation UUID is preserved). A Claude session address lasts across a resumed session when the harness keeps it (a resumed session may retain its sessionId across process restarts, but a new session ID will mint a new claim).
-  - **Cost (P-4):** across session directories (tenants sharing one xmsg, §1.3), the plain ID goes to whichever directory's process registers X next (first observed), where previously the duplicate ID was excluded entirely.
+  - **Cost:** across session directories (tenants sharing one xmsg, §1.3), the plain ID goes to whichever directory's process registers X next (first observed), where previously the duplicate ID was excluded entirely.
+
+#### Claude Code Subagent Hooks (`xmsg register claude --hook`)
+
+Claude Code subagents spawned in-process via the `Agent` tool share the parent's `session_id` and MCP server process, while Claude Code's hook stdin supplies `agent_id` and `agent_type` on subagent events. `xmsg register claude --hook` wires four Claude Code hook events to `agent.sock`:
+
+- **`SubagentStart`:** Sends `{"action":"subagent","event":"start","agent_id":…,"agent_type":…}` on `agent.sock`, binding `<P>/<agent_id>@<node>` under the parent session `P` and recording the parent's PID and start time as the subagent's active turn.
+- **`PostToolUse` (matcher `^(Agent|SendMessage)$`):**
+  - On `Agent`, reads `tool_input.name` and `tool_response.agentId` (or `subagents/agent-<id>.meta.json` next to `transcript_path`) and sends a `subagent` `bind` frame so the subagent is addressable by both `<P>/<name>@<node>` and `<P>/<agent_id>@<node>`.
+  - On `SendMessage`, when `tool_input.to` targets a bound subagent whose in-memory teammate channel is unreachable after a restart, sends a `subagent` `send` frame so the message queues in the subagent's `xmsg` mailbox.
+- **`PreToolUse` (matcher `^mcp__(plugin_hm_)?xmsg__(send|reply|inbox|list|replies)$`):** Returns `hookSpecificOutput.updatedInput` with `as_agent` set to the hook payload's `agent_id` (when called by a subagent) or `session_id` (when called by the parent), overwriting any model-supplied value. `send`, `reply` and `inbox` then act as `<P>/<child>@<node>` for a subagent or as `P` for the parent.
+- **`SubagentStop`:** Sends `{"action":"subagent","event":"stop","agent_id":…}` on `agent.sock`, clearing the subagent's active turn so subsequent messages to `<P>/<child>@<node>` fall back to the parent session `P` with a `to=<P>/<child> agent_id=<agent_id>` header.
 
 ### 3.5 Daemon Harness Integration: Long-Poll & Attestation
 
@@ -510,14 +556,14 @@ curl --unix-socket "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/xmsg/http.sock" http:
 
 ### Addresses and how a `to` resolves
 
-An address is `<id or name>[@<node>]`, with at most one `@` (A9). A UUID, optionally followed by `~n`, is an instance; anything else is a name (A11). There are no kind prefixes (`svc:`, `claude:`, …) and no pid refs. A `to` with more than one `@` is refused `bad_request`: the route is the server's, and the explicit hop `x@dest@hub` is not in the grammar (A3, B4). `@node` names this node or a peer.
+An address is `<id or name>[@<node>]`, with at most one `@`. A UUID, optionally followed by `~n`, is an instance; `<P>/<child>` (where `<P>` is an instance ID and `<child>` is a bound subagent name or `agent_id`) is a delegated sub-address; anything else is a name. There are no kind prefixes (`svc:`, `claude:`, …) and no pid refs. A `to` with more than one `@` is refused `bad_request`: the route is the server's, and the explicit hop `x@dest@hub` is not in the grammar. `@node` names this node or a peer.
 
 One order, for every surface that takes a target (`POST /v1/messages`, the `agent.sock` `send` frame, the MCP `send` tool, and a federated send arriving at this node):
 
-1. **An instance ID.** A Claude conversation's `X~n` or bare `X`, then an agy or pi session's ID. A bare `X` while the plain ID is free and only `X~n` forks are live is `ambiguous`, listing each fork as `X~n@<node>`; it is never taken as not running.
+1. **An instance ID or delegated sub-address (`<P>/<child>`).** A Claude conversation's `X~n` or bare `X`, then an agy, plugin or pi session's ID; or a sub-address `<P>/<child>` bound under `P` (where `<child>` matches either the subagent's bound `name` or its `agent_id`). When a subagent is in an active turn, the message queues in its turn mailbox (`outcome: "queued"`) for `inbox`; when its turn is not active, the message falls back to parent `P` with a `to=<P>/<child> agent_id=<agent_id>` header prepended. A bare `X` while the plain ID is free and only `X~n` forks are live is `ambiguous`, listing each fork as `X~n@<node>`; it is never taken as not running.
 2. **A name, among services first.** If a registered service has the name, the send goes to it, whatever any instance is labelled. A session labelled `genie-guard` can never shadow or block the service `genie-guard`; it is reachable only by its ID.
 3. **Instance labels, only when unique.** Only when no service has the name are instance labels (a Claude or pi session's name) considered, and the send resolves only when exactly one live instance carries the label. Two or more give `409 ambiguous`, whose detail lists each candidate as `id@<node>`. Nothing is guessed.
-4. **An instance observed here before and not running now** (see the queue, below): a Claude or agy conversation is `queued`; a pi ID is `410 gone`, never queued (its ID is bound to its process, AM-9, AM-10). An `X~n` whose process exited is `410 gone` (step 1; D-4).
+4. **An instance observed here before and not running now** (see the queue, below): a Claude or agy conversation is `queued`; a pi ID is `410 gone`, never queued (its ID is bound to its process). An `X~n` whose process exited is `410 gone`.
 5. Otherwise `404 not_found`, which is also the answer for an ID no process here ever presented.
 
 A federated send arriving at this node takes the same steps, the queue included, except that a send routed by a cached location (below) is never queued: for an instance that is parked here it is refused `not_live`.
@@ -973,11 +1019,14 @@ Each switch installs that harness's pieces, through the harness's own home-manag
 option, so it composes with the rest of your configuration:
 
 - `programs.xmsg.harnesses.claude.enable`: the `xmsg mcp` server in `programs.claude-code.mcpServers`, the `xmsg`
-  skill in `programs.claude-code.skills`, and `mcp__xmsg__list`, `mcp__xmsg__send`, `mcp__xmsg__reply` and
-  `mcp__xmsg__replies` in `programs.claude-code.settings.permissions.allow`. Needs `programs.claude-code.enable`.
+  skill in `programs.claude-code.skills`, `list`, `send`, `reply`, `replies` and `inbox` under both
+  `mcp__plugin_hm_xmsg__` and `mcp__xmsg__` prefixes (`programs.xmsg.harnesses.claude.permissionPrefixes`) in
+  `programs.claude-code.settings.permissions.allow`, and the `xmsg register claude --hook` hooks (`PreToolUse`,
+  `PostToolUse`, `SubagentStart`, `SubagentStop`) in `programs.claude-code.settings.hooks`. Needs
+  `programs.claude-code.enable`.
 
 - `programs.xmsg.harnesses.agy.enable`: the server in `programs.antigravity-cli.mcpServers`, the skill in
-  `programs.antigravity-cli.skills`, and the PreInvocation hook `xmsg register agy --hook` (Section 3.3).
+  `programs.antigravity-cli.skills`, and the `PreInvocation`, `PreToolUse` and `Stop` hooks (`xmsg register agy --hook --event pre-invocation|pre-tool-use|stop`, Section 3.3).
   Needs `programs.antigravity-cli.enable`. **Cost:** `programs.antigravity-cli` has no hook option, so the module
   writes the whole `~/.gemini/config/hooks.json`; any other definition of that file fails evaluation. CI runs
   the hook command the module renders: a fake agy (a process holding a conversation's presence lock, as agy does)
@@ -1013,9 +1062,9 @@ option, so it composes with the rest of your configuration:
 A Claude, agy or hermes switch whose harness module is off fails evaluation, naming the option it needs, rather
 than installing nothing. The pi and opencode switches write files and need no harness module.
 
-The skill (`nix/modules/skills/xmsg/SKILL.md`, the same file for every harness) teaches the four tools (`list`,
-`send`, `reply`, `replies`), addresses and sender labels (`label · id[~n]@node`, `name@node`,
-`<from> · anon@node`), the send outcomes and the error vocabulary, and the `http.sock` API with its limits: an
+The skill (`nix/modules/skills/xmsg/SKILL.md`, the same file for every harness) teaches the five tools (`list`,
+`send`, `reply`, `replies`, `inbox`), addresses and sender labels (`label · id[~n]@node`, `label · id/child@node`, `name@node`,
+`<from> · anon@node`), delegated sub-addresses (`<P>/<child>@<node>`), `inbox` and parent fallback, per-harness support, the send outcomes and the error vocabulary, and the `http.sock` API with its limits: an
 untraced caller is anonymous and cannot `reply`, and a call from an opencode or hermes process is anonymous.
 
 ### 8.3 Federation and peers
