@@ -43,7 +43,7 @@ All local IPC in `xmsg` relies on Unix domain sockets located in `$XDG_RUNTIME_D
   ```
   `id@node` is attested by `xmsg`: `id` is the sender's instance address, a fork's `~n` included (so the `X~2` fork of a conversation sends as `X~2`, never as plain `X`), and `node` is the node's own name (Section 7.0), or the reader's nickname for a peer it has one for. The label is the sender's own description (a Claude session's name, a pi session's name) and is shown apart from it. The harness is not shown. A label containing `@` or `·` is dropped whole, so it can never imitate the attested part; the session stays listed and addressable by its ID, with no label. Only the label is bounded (64 characters); the attested part is always emitted whole, however long the node's name is.
 - **Ancestor Process Walk:** For calls to `agent.sock` (such as MCP tools spawned in child shells) and to `http.sock` (A15), `xmsg` traverses parent PIDs upwards through `/proc/<pid>/stat` (`proc_pidinfo` on macOS) to identify the originating session or service, reading the claim table, so a fork acts as `X~n`. A caller on `http.sock` that traces to none is anonymous. A caller on the TCP `--listen` listener carries no peer credentials and is anonymous, except in leaf mode, where it is the leaf principal (AM-2).
-- **Symmetric Reply Authorization (XU1 Gate 3):** `reply(message_id=m)` answers $m$'s other party. If the caller is $m$'s recipient, the reply goes to $m$'s sender; if the caller is $m$'s sender, it goes to $m$'s recipient as a follow-up in the same exchange (`in_reply_to = m`). A caller who is neither party is refused with `not_recipient` (`denied`). Every envelope footer carries `[xmsg] ref=<id>@<node> message_id=... — reply with the xmsg reply tool (tools: send, reply, list, replies)`.
+- **Symmetric Reply Authorization:** `reply(message_id=m)` answers $m$'s other party. If the caller is $m$'s recipient, the reply goes to $m$'s sender; if the caller is $m$'s sender, it goes to $m$'s recipient as a follow-up in the same exchange (`in_reply_to = m`). A caller who is neither party is refused with `not_recipient` (`denied`). Every envelope footer carries `[xmsg] ref=<id>@<node> message_id=... — reply with the xmsg reply tool (tools: send, reply, list, replies)`.
 - **Principal-Scoped Idempotency:** Idempotency keys are partitioned by sender principal: an attested caller's instance address (a fork's `~n` included) or service name, and an anonymous HTTP caller's `anon:<from>`, from the caller-declared `from` field. Anonymous callers choosing the same `from` share that key namespace.
 
 ### 1.4 Envelope Sanitization & Breakout Protection
@@ -393,7 +393,7 @@ See [docs/probes/agy-hook-injection.md](docs/probes/agy-hook-injection.md) for f
 
 When `xmsg serve` restarts while an `agy` session remains active, in-memory registration state is discarded, but the running `xmsg mcp` child process automatically re-establishes stage-1 registration. By holding a persistent connection to `agent.sock` and reconnecting with backoff whenever connection to the server is lost and restored, `xmsg mcp` kernel-attests itself to the restarted server within a bounded time. The session is restored to the session catalog as addressable with `registered: false` (queuing inbound messages and replies without dropping them). On the session's next turn, the `PreInvocation` hook detects that push credentials are not yet registered and triggers `xmsg register agy`, promoting the session back to `registered: true` and flushing all queued messages in FIFO order. A restarted server does not list sessions whose `xmsg mcp` child has exited, preventing ghost sessions.
 
-#### Unregistered Session Message Queuing (Unit X20)
+#### Unregistered Session Message Queuing
 
 When an Antigravity session is live (its presence lock is held by a running process) but unregistered (e.g. before initial credential registration or immediately following an `xmsg` restart prior to the session's next turn):
 
@@ -530,7 +530,7 @@ Communication over the registration socket uses a JSON-lines streaming protocol:
 
    A reply is `{ "action": "reply", "messageId": "01M4FG...", "text": "...", "idempotencyKey": "..." }` (the key optional, Section 4, Idempotency); the server responds `{"status": "ok", "messageId": <the pushed reply's ID, or null>}`.
 
-3. **At-Least-Once Delivery & Per-Connection In-Flight Tracking (XF6):**
+3. **At-Least-Once Delivery & Per-Connection In-Flight Tracking:**
    A message's queue row is stamped `delivered` **only** upon receiving an explicit `ack` frame. On a live `register.sock` connection, `xmsg` tracks the message IDs already handed out on that connection (`in_flight`), so a subsequent `poll` while an earlier delivery is still unacked hands out the next pending message in FIFO order rather than redelivering the unacked head. If the daemon crashes, disconnects, or terminates before sending an `ack`, the connection's `in_flight` set is dropped and every unacknowledged message remains in the queue to be redelivered in FIFO order when the daemon reconnects and polls again. A serial `poll` → `ack` → `poll` consumer receives one message at a time in order, unchanged.
 
 ---
@@ -568,7 +568,7 @@ One order, for every surface that takes a target (`POST /v1/messages`, the `agen
 
 A federated send arriving at this node takes the same steps, the queue included, except that a send routed by a cached location (below) is never queued: for an instance that is parked here it is refused `not_live`.
 
-#### A bare reference resolves over the view (XA6)
+#### A bare reference resolves over the view
 
 A `to` with `@node` is resolved by that node alone (`@` this node: the steps above, here). A bare `to` on a node with peers resolves over the send's **view**: this node and every node in its peers file, direct peers and dial-out clients alike. Each is asked for its `list` at once, within the 5 s list timeout (Section 7.3), and the answers decide:
 
@@ -590,13 +590,13 @@ A `to` with `@node` is resolved by that node alone (`@` this node: the steps abo
 
 ### Delivery and the queue (A14)
 
-- **Outcomes.** A send returns `delivered` (it reached a live recipient) or `queued` (it is held for an instance that is not running, or for a live pi or plugin session (opencode, hermes) or a registered service until its harness or the service acks it, HA3). A held message's record (`GET /v1/messages/{id}`, and a keyed send's replay) reads `delivered` once it is delivered or acked. Across nodes, the receiving node's record follows the ack; the sending node's stays at the answer it got, since no `/fed/v2` exchange reports a later delivery.
+- **Outcomes.** A send returns `delivered` (it reached a live recipient) or `queued` (it is held for an instance that is not running, or for a live pi or plugin session (opencode, hermes) or a registered service until its harness or the service acks it). A held message's record (`GET /v1/messages/{id}`, and a keyed send's replay) reads `delivered` once it is delivered or acked. Across nodes, the receiving node's record follows the ack; the sending node's stays at the answer it got, since no `/fed/v2` exchange reports a later delivery.
 - **What queues.** A send to an instance ID this node has observed, while it is not running: a closed Claude conversation, or an agy conversation between turns. "Observed" is the claim table (a Claude process presenting the ID) plus agy registrations. A pi ID, a released or closed plugin session's address (opencode, hermes) and an exited `X~n` are `gone`, never queue and are never listed `parked`.
 - **How long.** A message is held for the reply TTL (`--reply-ttl`, 7 days by default) and dropped unread after it. The ID stays parked, so sends to it queue, for the reply TTL after the conversation was last live, or as long as its queue holds a message, whichever is longer; after that it is `not_found` (D-1's lifetime). Discovery is on demand, so for Claude "last live" is the scan that found the conversation gone, and for agy its last registration.
 - **Delivery.** The queue drains when the conversation is next observed: a new Claude process presenting the ID (the next scan of the session files, which every `list`, `send` and MCP start runs), or an agy registration. Each message is delivered once, in the order sent, and shows when it was sent: `[xmsg] message_id=<id> sent=<RFC 3339 UTC time>`. Its outcome then reads `delivered`.
-- **Across nodes.** A send from another node to a conversation parked here queues here, as a local one does (XA6's resolution picks the node). The queue then follows the conversation across the user's machines, below.
+- **Across nodes.** A send from another node to a conversation parked here queues here, as a local one does (view resolution picks the node). The queue then follows the conversation across the user's machines, below.
 
-#### The queue across a user's machines (XA7)
+#### The queue across a user's machines
 
 A user's nodes are one principal (A16), so a Claude conversation that moves between them (`~/.claude` synced between two machines) keeps its bare ID, and its queue follows it.
 
@@ -772,7 +772,7 @@ Nodes talk over `/fed/v2`, and every envelope carries `"v": 2`. The `/fed/v1` ro
 | `/fed/v2/messages/{id}/replies`           | GET       | the replies stored for a message the asker sent (an undialable sender's pull) |
 | `/fed/v2/sessions`                        | GET       | this node's `list` for the asker (Section 7.3)                                |
 | `/fed/v2/inbox`, `/fed/v2/inbox/{id}/ack` | GET, POST | a dial-out client's mailbox (Sections 7.5, 7.6)                               |
-| `/fed/v2/handoff`, `/fed/v2/handoff/ack`  | POST      | a parked queue handed to the user's node that gained the conversation (XA7)   |
+| `/fed/v2/handoff`, `/fed/v2/handoff/ack`  | POST      | a parked queue handed to the user's node that gained the conversation         |
 | `/fed/v2/list/{query}`                    | POST      | a dial-out client's answer to a `list` query from its mailbox                 |
 
 **Replies return to the origin (A-2).** A reply always travels back to the node the message came from, and that node decides how it reaches the sender, by the sender's kind: pushed to a session or a service, which have inboxes, and stored for an anonymous HTTP caller, who reads it there with `replies`. The receiving node never decides it. The outbound reply poller of a node that dials out is armed the same way, by the sender's kind.
