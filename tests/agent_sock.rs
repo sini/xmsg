@@ -599,3 +599,277 @@ async fn test_agent_sock_reply_and_send_flow() {
     };
     assert_eq!(sent.from_name, "sender-session · sess-caller-123@test-host");
 }
+
+/// XS2 (HB1 self-review C4a): `SvcStore` in `resolve_caller_session_peer` admits only hop 0
+/// (`curr_pid == peer_pid`). A service daemon is attested by its own `--svc-exe` binary at
+/// `peer_pid` (GI-9); a child or descendant process spawned by that service (such as a
+/// tier-1 `pi --mode rpc` worker or `bash` subprocess under `genie-root`) must NOT inherit
+/// the service's identity on `agent.sock`, while the service process itself (hop 0) still
+/// resolves as `svc:<name>` and Claude/agy/pi ancestry walks remain unchanged.
+#[tokio::test]
+async fn test_xs2_svc_store_admits_only_hop0_while_refusing_child_of_svc() {
+    if let Ok(sock) = std::env::var("XS2_CHILD_AGENT_SOCK") {
+        let stream = UnixStream::connect(&sock).await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let req = serde_json::json!({
+            "action": "send",
+            "schema_version": 2,
+            "to": "genie",
+            "text": "bypass from child"
+        });
+        writer
+            .write_all(format!("{req}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        print!("XS2_CHILD_JSON:{line}");
+        return;
+    }
+
+    let tmp = tempdir().unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+
+    let sock_dir = tmp.path().join("xmsg");
+    fs::create_dir_all(&sock_dir).unwrap();
+    fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let agent_sock_path = sock_dir.join("agent.sock");
+    let proc_root = std::path::PathBuf::from(xmsg::process::LIVE_PROC_ROOT);
+    let sessions_dir = tmp.path().join("sessions");
+    let presence_dir = tmp.path().join("presence");
+    let proc_locks_path = tmp.path().join("locks");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    fs::create_dir_all(&presence_dir).unwrap();
+
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    xmsg::storage::init_db(&conn).unwrap();
+    let db = Arc::new(Mutex::new(conn));
+    let my_uid = current_uid();
+    let self_pid = std::process::id();
+    let self_start = get_self_proc_start();
+
+    let svc_store = xmsg::svc::new_svc_store();
+    {
+        let mut lock = svc_store.write().unwrap();
+        lock.insert(
+            "genie".to_string(),
+            xmsg::svc::SvcSessionInfo {
+                session_id: "genie".to_string(),
+                name: "genie".to_string(),
+                pid: self_pid,
+                starttime: self_start.clone(),
+                cwd: "/".to_string(),
+                registered_at: 1000,
+            },
+        );
+    }
+
+    let agy_config = AgyConfig {
+        presence_dir,
+        proc_locks_path,
+        proc_root: proc_root.clone(),
+        agy_bin: "agy".to_string(),
+        trusted_agy_exes: Vec::new(),
+        brain_dir: std::path::PathBuf::new(),
+    };
+
+    // 1. Unit check over synthetic proc_root: hop 0 resolves to `svc:genie`, hop 1 and hop 2
+    //    descending from `svc:genie` are refused (`NotRecipient`), while a Pi ancestor at hop 1
+    //    still resolves via ancestry.
+    {
+        let synth_proc = tmp.path().join("synth_proc");
+        let write_stat = |pid: u32, ppid: u32, start: &str| {
+            let d = synth_proc.join(pid.to_string());
+            fs::create_dir_all(&d).unwrap();
+            fs::write(
+                d.join("stat"),
+                format!("{pid} (p) S {ppid} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {start} 0 0\n"),
+            )
+            .unwrap();
+        };
+        write_stat(5000, 1, "100");
+        write_stat(5001, 5000, "200");
+        write_stat(5002, 5001, "300");
+
+        let synth_svc = xmsg::svc::new_svc_store();
+        synth_svc.write().unwrap().insert(
+            "genie".to_string(),
+            xmsg::svc::SvcSessionInfo {
+                session_id: "genie".to_string(),
+                name: "genie".to_string(),
+                pid: 5000,
+                starttime: "100".to_string(),
+                cwd: "/".to_string(),
+                registered_at: 1000,
+            },
+        );
+
+        // Hop 0 (PID 5000 itself) resolves as svc:genie
+        let hop0 = resolve_caller_session(
+            &synth_proc,
+            &sessions_dir,
+            &agy_config,
+            &new_agy_store(),
+            &new_pi_store(),
+            &synth_svc,
+            None,
+            5000,
+        )
+        .expect("hop 0 svc process must resolve");
+        assert_eq!(hop0.session_id, "genie");
+        assert_eq!(hop0.harness, "svc");
+
+        // Hop 1 (child PID 5001 of svc 5000) MUST NOT resolve as svc:genie
+        let hop1 = resolve_caller_session(
+            &synth_proc,
+            &sessions_dir,
+            &agy_config,
+            &new_agy_store(),
+            &new_pi_store(),
+            &synth_svc,
+            None,
+            5001,
+        );
+        assert!(
+            matches!(hop1, Err(AppError::NotRecipient(_))),
+            "child of svc (hop 1) must be refused NotRecipient, got: {hop1:?}"
+        );
+
+        // Hop 2 (grandchild PID 5002 of svc 5000) MUST NOT resolve as svc:genie
+        let hop2 = resolve_caller_session(
+            &synth_proc,
+            &sessions_dir,
+            &agy_config,
+            &new_agy_store(),
+            &new_pi_store(),
+            &synth_svc,
+            None,
+            5002,
+        );
+        assert!(
+            matches!(hop2, Err(AppError::NotRecipient(_))),
+            "grandchild of svc (hop 2) must be refused NotRecipient, got: {hop2:?}"
+        );
+
+        // Positive control: a Pi session at PID 5000 still resolves for child PID 5001 (hop 1)
+        let synth_pi = new_pi_store();
+        synth_pi.write().unwrap().insert(
+            "pi-parent-id".to_string(),
+            xmsg::pi::PiSessionInfo {
+                session_id: "pi-parent-id".to_string(),
+                name: Some("pi-parent".to_string()),
+                pid: 5000,
+                starttime: "100".to_string(),
+                cwd: "/".to_string(),
+                registered_at: 1000,
+            },
+        );
+        let pi_hop1 = resolve_caller_session(
+            &synth_proc,
+            &sessions_dir,
+            &agy_config,
+            &new_agy_store(),
+            &synth_pi,
+            &synth_svc,
+            None,
+            5001,
+        )
+        .expect("child of pi session must still resolve via ancestry");
+        assert_eq!(pi_hop1.session_id, "pi-parent-id");
+        assert_eq!(pi_hop1.harness, "pi");
+    }
+
+    // 2. Live agent.sock check: this process (registered as svc:genie at self_pid) can send
+    //    over agent.sock as genie@test-host, while a real child OS process spawned by self_pid
+    //    is refused on agent.sock (`denied` / not a recipient).
+    let (notify_tx, _) = tokio::sync::broadcast::channel(16);
+    let (pi_notify_tx, _) = tokio::sync::broadcast::channel(16);
+    let app_state = Arc::new(AppState {
+        sessions_dirs: vec![sessions_dir],
+        agy_config,
+        agy_store: new_agy_store(),
+        pi_store: new_pi_store(),
+        pi_notify_tx,
+        svc_store,
+        svc_notify_tx: tokio::sync::broadcast::channel(16).0,
+        node_name: "test-host".to_string(),
+        max_body: 65536,
+        request_counter: AtomicU64::new(1),
+        db: db.clone(),
+        notify_tx,
+        reply_ttl: Duration::from_secs(3600),
+        idempotency_ttl: Duration::from_secs(86400),
+        long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
+        fed_state: None,
+    });
+
+    let s_path = agent_sock_path.clone();
+    let s_state = app_state.clone();
+    tokio::spawn(async move {
+        let _ = run_agent_server(s_path, s_state, my_uid).await;
+    });
+    for _ in 0..500 {
+        if agent_sock_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Hop 0 (self_pid) sends to genie over agent.sock -> succeeds as genie@test-host
+    {
+        let stream = UnixStream::connect(&agent_sock_path).await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let send_req = serde_json::json!({
+            "action": "send",
+            "schema_version": 2,
+            "to": "genie",
+            "text": "from genie hop 0"
+        });
+        writer
+            .write_all(format!("{send_req}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let resp: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(resp["status"], "ok", "hop 0 svc send must succeed: {resp}");
+        assert_eq!(resp["address"], "genie@test-host");
+    }
+
+    // Hop 1 (real OS child process of self_pid) attempts to send over agent.sock -> refused!
+    let child_out = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("test_xs2_svc_store_admits_only_hop0_while_refusing_child_of_svc")
+        .arg("--nocapture")
+        .env("XS2_CHILD_AGENT_SOCK", &agent_sock_path)
+        .output()
+        .await
+        .expect("spawn child test binary");
+    assert!(
+        child_out.status.success(),
+        "child exited non-zero: {:?}",
+        String::from_utf8_lossy(&child_out.stderr)
+    );
+    let stdout_str = String::from_utf8_lossy(&child_out.stdout);
+    let json_line = stdout_str
+        .lines()
+        .find_map(|l| l.strip_prefix("XS2_CHILD_JSON:"))
+        .unwrap_or_else(|| panic!("missing XS2_CHILD_JSON in stdout: {stdout_str}"));
+    let child_resp: serde_json::Value =
+        serde_json::from_str(json_line).expect("valid json from agent.sock");
+    assert_eq!(
+        child_resp["status"], "error",
+        "child of svc must be refused on agent.sock, got: {child_resp}"
+    );
+    assert_eq!(child_resp["error"], "denied", "{child_resp}");
+    assert!(
+        child_resp["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("does not descend from an active agent session"),
+        "unexpected error detail: {child_resp}"
+    );
+}

@@ -387,8 +387,10 @@ pub fn resolve_caller_session_peer(
             }
         }
 
-        // 4. Check Svc sessions
-        {
+        // 4. Check Svc sessions (hop 0 only: a service daemon is attested by its own
+        //    --svc-exe binary at peer_pid (GI-9); child processes spawned by a service
+        //    must not inherit the service's identity on agent.sock).
+        if curr_pid == peer_pid {
             let svc_lock = svc_store.read().unwrap();
             for info in svc_lock.values() {
                 if info.pid == curr_pid && info.starttime == st {
