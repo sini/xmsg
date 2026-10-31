@@ -275,6 +275,7 @@ import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.PLUGIN_TS).href);
 const plugin = mod.default;
 const tools = {};
+let promptHook = null;
 let getCalledWithEmpty = false;
 const ctx = {
   session: {
@@ -283,7 +284,10 @@ const ctx = {
       return undefined;
     },
     prompt: async () => {},
-    hook: async () => ({ dispose: async () => {} }),
+    hook: async (_name, fn) => {
+      promptHook = fn;
+      return { dispose: async () => {} };
+    },
   },
   tool: {
     transform: async (cb) => {
@@ -314,6 +318,7 @@ try {
 
   // 2. When ctx.session.get({ sessionID }) returns undefined on 2.x, parentOf uses ?.parentID
   // and does not throw TypeError: Cannot read properties of undefined (reading 'parentID')
+  await promptHook({ sessionID: "ses_ephemeral_2x" });
   const res = await tools.xmsg_list.execute({}, { sessionID: "ses_ephemeral_2x" });
   const parsed = JSON.parse(res.content);
   assert.equal(parsed.status, "ok", `XH1-D4: expected status ok from xmsg_list, got: ${res.content}`);
