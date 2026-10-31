@@ -15,9 +15,11 @@
 #   real `xmsg serve` and a mock model on loopback (extensions/hermes/check.py).
 # - `pi-extension`, `pi-paths`: the pi extension's own node tests (extensions/pi). The
 #   extension's darwin `getconf DARWIN_USER_TEMP_DIR` fallback is not covered by CI.
-# - `pre-xl1-compat` (XF3.1): runs `gate_xf3_list_compat_and_agy_label` with `XMSG_PRE_XL1_BIN`
-#   pointing at the pre-XL1 (`9096199`) binary (`doCheck = false`) and asserts that the live
-#   two-binary subprocess oracle actually ran (no skip line).
+# - `pre-xl1-compat` (XF3.1, XC1): runs `gate_xf3_list_compat_and_agy_label` with
+#   `XMSG_PRE_XL1_BIN` pointing at the pre-XL1 (`9096199`) binary and `XMSG_PRE_DEPLOY_BIN`
+#   pointing at the pre-XR3/XH1 deployed (`9d1f5fa`) binary (`doCheck = false`), asserting
+#   both federated wire compat and hook-to-sidecar version skew across `claude` and `agy`
+#   (root and subagent) with no skip lines.
 { inputs, ... }:
 {
   perSystem =
@@ -46,6 +48,20 @@
         version = "0.1.0";
         src = xmsgPreXl1Src;
         cargoLock.lockFile = "${xmsgPreXl1Src}/Cargo.lock";
+        doCheck = false;
+        meta.mainProgram = "xmsg";
+      };
+      xmsgPreDeploySrc = pkgs.fetchFromGitHub {
+        owner = "sini";
+        repo = "xmsg";
+        rev = "9d1f5fa38356a8f9208594db951c8e6502fe8e5d";
+        hash = "sha256-NcY8mUx9lfZopi+Ti3vOLumH8m9yWlPhTpDCQLr3ckU=";
+      };
+      xmsgPreDeploy = pkgs.rustPlatform.buildRustPackage {
+        pname = "xmsg-pre-deploy";
+        version = "0.1.0";
+        src = xmsgPreDeploySrc;
+        cargoLock.lockFile = "${xmsgPreDeploySrc}/Cargo.lock";
         doCheck = false;
         meta.mainProgram = "xmsg";
       };
@@ -316,6 +332,7 @@
           pname = "xmsg-pre-xl1-compat";
           dontBuild = true;
           XMSG_PRE_XL1_BIN = lib.getExe xmsgPreXl1;
+          XMSG_PRE_DEPLOY_BIN = lib.getExe xmsgPreDeploy;
           checkPhase = ''
             runHook preCheck
             set -o pipefail
@@ -324,10 +341,15 @@
               echo "pre-xl1-compat: live two-binary pre-XL1 check was skipped" >&2
               exit 1
             fi
+            cargoWithProfile test --locked --test gate_xf3_list_compat_and_agy_label -- test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew --exact --nocapture 2>&1 | tee -a test.log
+            if grep -Fq "XMSG_PRE_DEPLOY_BIN or XMSG_PRE_XL1_BIN unset; skipping live old-sidecar subprocess check" test.log; then
+              echo "pre-xl1-compat: live hook-to-sidecar version-skew check was skipped" >&2
+              exit 1
+            fi
             runHook postCheck
           '';
           installPhase = ''
-            echo "${xmsgPreXl1}" > $out
+            printf '%s\n%s\n' "${xmsgPreXl1}" "${xmsgPreDeploy}" > $out
           '';
         };
       };

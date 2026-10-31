@@ -1411,3 +1411,693 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
         "hook injectSteps ephemeralMessage must include '--label work' when label != 'agy', got: {msg}"
     );
 }
+
+// =============================================================================
+// Oracle 4 (XC1): Hook-to-Sidecar Version Skew Oracle
+// Drives the previously deployed `xmsg mcp` sidecar (`9d1f5fa`, `XMSG_PRE_DEPLOY_BIN`)
+// and the pre-HA9-A `xmsg mcp` sidecar (`9096199`, `XMSG_PRE_XL1_BIN`) with the
+// CURRENT hook output (`BIN`) for every hook kind:
+// - `claude` root (clean + model-spoofed `as_agent`)
+// - `claude` subagent (`SubagentStart` + `PreToolUse` with `agent_id`)
+// - `agy` root (clean + model-spoofed `as_agent`, both `call_mcp_tool` and `mcp_xmsg_*`)
+// - `agy` subagent (`PreToolUse` with child `conversationId` and descriptor on disk)
+// Asserts that each tool call (`list`, `send`, `reply`, `replies`, and `inbox` for
+// subagents) succeeds (`isError == false`) and that root calls emit no `as_agent` onto
+// `agent.sock`.
+// Mutants:
+// - Revert XR3 (stamp `as_agent = conv_id` on `agy` root) -> RED
+// - Revert D1 (stamp `as_agent = ""` on `claude` root or forward `""` in `mcp.rs`) -> RED
+// =============================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
+    let ca = Ca::new();
+    let creds_a = ca.issue("spiffe://xf3.test/host/nodea/user/sini");
+    let my_exe = std::env::current_exe().unwrap();
+    let bin_exe = PathBuf::from(BIN);
+
+    let extra_args = vec![
+        "--agy-exe".to_string(),
+        my_exe.display().to_string(),
+        "--agy-exe".to_string(),
+        bin_exe.display().to_string(),
+    ];
+    let (node, _) =
+        start_node_with_bin(BIN, &ca.pem, &creds_a, json!({}), &extra_args, false).await;
+    let run_dir = node.tmp.path().join("run");
+
+    // Tee proxy in front of `node.agent_sock` to record every frame sent by `xmsg mcp`
+    let proxy_agent_sock = run_dir.join("proxy_agent.sock");
+    let proxy_listener = UnixListener::bind(&proxy_agent_sock).unwrap();
+    fs::set_permissions(&proxy_agent_sock, fs::Permissions::from_mode(0o600)).unwrap();
+    let recorded_frames: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let frames_clone = recorded_frames.clone();
+    let real_agent_sock = node.agent_sock.clone();
+    tokio::spawn(async move {
+        while let Ok((client_stream, _)) = proxy_listener.accept().await {
+            let Ok(server_stream) = UnixStream::connect(&real_agent_sock).await else {
+                continue;
+            };
+            let frames_inner = frames_clone.clone();
+            tokio::spawn(async move {
+                let (c_r, mut c_w) = client_stream.into_split();
+                let (s_r, mut s_w) = server_stream.into_split();
+                let c2s = async move {
+                    let mut lines = BufReader::new(c_r).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                            frames_inner.lock().unwrap().push(v);
+                        }
+                        if s_w.write_all(format!("{line}\n").as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                };
+                let s2c = async move {
+                    let mut lines = BufReader::new(s_r).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        if c_w.write_all(format!("{line}\n").as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                };
+                tokio::join!(c2s, s2c);
+            });
+        }
+    });
+
+    // Register a sibling target session `peer-target` as message recipient
+    let s_target = Sleeper::new();
+    let in_target = inbox();
+    let id_target = "99990000-0000-4000-8000-000000000000";
+    write_claude_session(
+        &node.sessions_dir,
+        s_target.pid(),
+        id_target,
+        "peer-target",
+        &in_target.sock,
+    );
+
+    let claude_pre_tool_use =
+        |session_id: &str, agent_id: Option<&str>, tool_name: &str, tool_input: Value| -> Value {
+            let mut hook_in = json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": session_id,
+                "tool_name": format!("mcp__xmsg__{tool_name}"),
+                "tool_input": tool_input,
+            });
+            if let Some(aid) = agent_id {
+                hook_in["agent_id"] = Value::String(aid.to_string());
+            }
+            let mut child = Command::new(BIN)
+                .args([
+                    "register",
+                    "claude",
+                    "--hook",
+                    "--sock",
+                    proxy_agent_sock.to_str().unwrap(),
+                ])
+                .env("HOME", &run_dir)
+                .env("XDG_RUNTIME_DIR", &run_dir)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            {
+                use std::io::Write;
+                child
+                    .stdin
+                    .as_mut()
+                    .unwrap()
+                    .write_all(hook_in.to_string().as_bytes())
+                    .unwrap();
+            }
+            let out = child.wait_with_output().unwrap();
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "claude PreToolUse hook failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let parsed: Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(
+                parsed["hookSpecificOutput"]["permissionDecision"], "allow",
+                "claude PreToolUse must allow: {parsed}"
+            );
+            if let Some(updated) = parsed["hookSpecificOutput"].get("updatedInput") {
+                updated.clone()
+            } else {
+                tool_input
+            }
+        };
+
+    let agy_pre_tool_use_call_mcp =
+        |conv_id: &str, tool_name: &str, arguments: Value| -> Value {
+            let hook_in = json!({
+                "conversationId": conv_id,
+                "toolCall": {
+                    "name": "call_mcp_tool",
+                    "args": {
+                        "ServerName": "xmsg",
+                        "ToolName": tool_name,
+                        "Arguments": arguments,
+                    }
+                }
+            });
+            let mut child = Command::new(BIN)
+                .args([
+                    "register",
+                    "agy",
+                    "--hook",
+                    "--event",
+                    "pre-tool-use",
+                    "--agent-sock",
+                    proxy_agent_sock.to_str().unwrap(),
+                ])
+                .env("HOME", &run_dir)
+                .env("XDG_RUNTIME_DIR", &run_dir)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            {
+                use std::io::Write;
+                child
+                    .stdin
+                    .as_mut()
+                    .unwrap()
+                    .write_all(hook_in.to_string().as_bytes())
+                    .unwrap();
+            }
+            let out = child.wait_with_output().unwrap();
+            assert_eq!(out.status.code(), Some(0));
+            let parsed: Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(
+                parsed["decision"], "allow",
+                "agy PreToolUse call_mcp_tool must allow: {parsed}"
+            );
+            if let Some(updated) = parsed.get("overwrite").and_then(|o| o.get("Arguments")) {
+                updated.clone()
+            } else {
+                arguments
+            }
+        };
+
+    let agy_pre_tool_use_eager = |conv_id: &str, tool_name: &str, args: Value| -> Value {
+        let hook_in = json!({
+            "conversationId": conv_id,
+            "toolCall": {
+                "name": format!("mcp_xmsg_{tool_name}"),
+                "args": args,
+            }
+        });
+        let mut child = Command::new(BIN)
+            .args([
+                "register",
+                "agy",
+                "--hook",
+                "--event",
+                "pre-tool-use",
+                "--agent-sock",
+                proxy_agent_sock.to_str().unwrap(),
+            ])
+            .env("HOME", &run_dir)
+            .env("XDG_RUNTIME_DIR", &run_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(hook_in.to_string().as_bytes())
+                .unwrap();
+        }
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        let parsed: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            parsed["decision"], "allow",
+            "agy PreToolUse eager must allow: {parsed}"
+        );
+        let mut merged = args;
+        if let (Some(dst), Some(src)) = (
+            merged.as_object_mut(),
+            parsed.get("overwrite").and_then(Value::as_object),
+        ) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
+        }
+        merged
+    };
+
+    let call_mcp_sidecar = |mcp_bin: &str, tool_name: &str, arguments: Value| -> Value {
+        let mut child = Command::new(mcp_bin)
+            .args([
+                "mcp",
+                "--sessions-dir",
+                node.sessions_dir.to_str().unwrap(),
+                "--xmsg-url",
+                &format!("http://127.0.0.1:{}", node.http_port),
+                "--http-sock",
+                node.http_sock.to_str().unwrap(),
+                "--agent-sock",
+                proxy_agent_sock.to_str().unwrap(),
+            ])
+            .env("HOME", &run_dir)
+            .env("XDG_RUNTIME_DIR", &run_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("failed to spawn {mcp_bin} mcp: {e}"));
+        {
+            use std::io::Write;
+            let stdin = child.stdin.as_mut().unwrap();
+            let init = json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "xc1-oracle", "version": "1.0" }
+                }
+            });
+            let call = json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": tool_name,
+                    "arguments": arguments,
+                }
+            });
+            writeln!(stdin, "{init}").unwrap();
+            writeln!(stdin, "{call}").unwrap();
+        }
+        let out = child.wait_with_output().unwrap();
+        let stdout_str = String::from_utf8_lossy(&out.stdout);
+        let resp_line = stdout_str
+            .lines()
+            .find_map(|l| {
+                let v: Value = serde_json::from_str(l).ok()?;
+                (v.get("id") == Some(&json!(2))).then_some(v)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing id=2 response from {mcp_bin} mcp on tool {tool_name}; stdout={stdout_str}, stderr={}",
+                    String::from_utf8_lossy(&out.stderr)
+                )
+            });
+        let result = &resp_line["result"];
+        assert_eq!(
+            result["isError"],
+            json!(false),
+            "XC1: {mcp_bin} mcp failed on tool '{tool_name}' with args {arguments}: {resp_line}"
+        );
+        result.clone()
+    };
+
+    let pre_deploy_bin = std::env::var("XMSG_PRE_DEPLOY_BIN")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let pre_xl1_bin = std::env::var("XMSG_PRE_XL1_BIN")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let has_both_old_bins = pre_deploy_bin.is_some() && pre_xl1_bin.is_some();
+    if !has_both_old_bins {
+        eprintln!(
+            "XMSG_PRE_DEPLOY_BIN or XMSG_PRE_XL1_BIN unset; skipping live old-sidecar subprocess check"
+        );
+    }
+    let deploy_sidecar = pre_deploy_bin.as_deref().unwrap_or(BIN);
+    let pre_ha9_sidecar = pre_xl1_bin.as_deref().unwrap_or(BIN);
+
+    // =========================================================================
+    // Phase 1: Claude root & Claude subagent
+    // =========================================================================
+    let my_pid = std::process::id();
+    let in_claude = inbox();
+    let id_claude = "aaaa1111-1111-4111-8111-111111111111";
+    write_claude_session(
+        &node.sessions_dir,
+        my_pid,
+        id_claude,
+        "claude-root",
+        &in_claude.sock,
+    );
+
+    // 1A. Claude root (clean + spoofed `as_agent`) -> drives `9d1f5fa` (`deploy_sidecar`)
+    //     and `9096199` (`pre_ha9_sidecar`).
+    for (label, extra) in [
+        ("clean", None),
+        ("spoofed", Some(("as_agent", json!("forged-sub")))),
+    ] {
+        let mut list_in = json!({});
+        let mut send_in = json!({ "to": "peer-target", "text": format!("claude root {label}") });
+        if let Some((k, v)) = &extra {
+            list_in[*k] = v.clone();
+            send_in[*k] = v.clone();
+        }
+
+        let list_args = claude_pre_tool_use(id_claude, None, "list", list_in);
+        let send_args = claude_pre_tool_use(id_claude, None, "send", send_in);
+
+        for sidecar in [pre_ha9_sidecar, deploy_sidecar] {
+            recorded_frames.lock().unwrap().clear();
+            call_mcp_sidecar(sidecar, "list", list_args.clone());
+            let send_res = call_mcp_sidecar(sidecar, "send", send_args.clone());
+            let send_payload: Value =
+                serde_json::from_str(send_res["content"][0]["text"].as_str().unwrap()).unwrap();
+            let sent_msg_id = send_payload["messageId"]
+                .as_str()
+                .or_else(|| send_payload["message_id"].as_str())
+                .unwrap()
+                .to_string();
+
+            let mut reply_in = json!({ "message_id": sent_msg_id, "text": format!("reply {label}") });
+            let mut replies_in = json!({ "message_id": sent_msg_id, "wait": 0 });
+            if let Some((k, v)) = &extra {
+                reply_in[*k] = v.clone();
+                replies_in[*k] = v.clone();
+            }
+            let reply_args = claude_pre_tool_use(id_claude, None, "reply", reply_in);
+            let replies_args = claude_pre_tool_use(id_claude, None, "replies", replies_in);
+
+            call_mcp_sidecar(sidecar, "reply", reply_args);
+            call_mcp_sidecar(sidecar, "replies", replies_args);
+
+            let frames = recorded_frames.lock().unwrap().clone();
+            for f in &frames {
+                let action = f["action"].as_str().unwrap_or("");
+                if action == "send" || action == "reply" {
+                    assert!(
+                        f.get("as_agent").is_none(),
+                        "XC1 (D1): claude root ({label}) via {sidecar} must not emit as_agent onto agent.sock, got: {f}"
+                    );
+                }
+            }
+        }
+    }
+
+    // Also verify D1's `src/mcp.rs` defence directly on current `BIN mcp`: if an empty
+    // `as_agent: ""` reaches `BIN mcp`, `BIN mcp` strips it before `agent.sock`.
+    recorded_frames.lock().unwrap().clear();
+    call_mcp_sidecar(
+        BIN,
+        "send",
+        json!({ "to": "peer-target", "text": "empty as_agent check", "as_agent": "   " }),
+    );
+    for f in recorded_frames.lock().unwrap().iter() {
+        if f["action"] == "send" {
+            assert!(
+                f.get("as_agent").is_none(),
+                "XC1 (D1 mcp.rs): current mcp sidecar must strip empty/whitespace as_agent, got: {f}"
+            );
+        }
+    }
+
+    // 1B. Claude subagent (`SubagentStart` + `PreToolUse` with `agent_id`) -> drives `9d1f5fa` (`deploy_sidecar`)
+    let child_claude = "sub-claude-xc1";
+    {
+        let start_in = json!({
+            "hook_event_name": "SubagentStart",
+            "session_id": id_claude,
+            "agent_id": child_claude,
+            "agent_type": "research",
+        });
+        let mut c = Command::new(BIN)
+            .args([
+                "register",
+                "claude",
+                "--hook",
+                "--sock",
+                proxy_agent_sock.to_str().unwrap(),
+            ])
+            .env("HOME", &run_dir)
+            .env("XDG_RUNTIME_DIR", &run_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        c.stdin
+            .as_mut()
+            .unwrap()
+            .write_all(start_in.to_string().as_bytes())
+            .unwrap();
+        assert_eq!(c.wait().unwrap().code(), Some(0));
+    }
+
+    let (st_sub_msg, msg_to_claude_sub) = node
+        .http_send(
+            &format!("{id_claude}/{child_claude}@sini.nodea"),
+            "ping claude subagent",
+        )
+        .await;
+    assert_eq!(st_sub_msg, 202, "{msg_to_claude_sub}");
+
+    let sub_list_args =
+        claude_pre_tool_use(id_claude, Some(child_claude), "list", json!({}));
+    let sub_send_args = claude_pre_tool_use(
+        id_claude,
+        Some(child_claude),
+        "send",
+        json!({ "to": "peer-target", "text": "from claude sub", "as_agent": "spoofed-other" }),
+    );
+    let sub_inbox_args = claude_pre_tool_use(
+        id_claude,
+        Some(child_claude),
+        "inbox",
+        json!({ "wait": 0 }),
+    );
+
+    recorded_frames.lock().unwrap().clear();
+    call_mcp_sidecar(deploy_sidecar, "list", sub_list_args);
+    let sub_send_res = call_mcp_sidecar(deploy_sidecar, "send", sub_send_args);
+    let sub_send_payload: Value =
+        serde_json::from_str(sub_send_res["content"][0]["text"].as_str().unwrap()).unwrap();
+    let msg_id_for_claude_sub = sub_send_payload["messageId"]
+        .as_str()
+        .or_else(|| sub_send_payload["message_id"].as_str())
+        .unwrap()
+        .to_string();
+    let sub_reply_args = claude_pre_tool_use(
+        id_claude,
+        Some(child_claude),
+        "reply",
+        json!({ "message_id": msg_id_for_claude_sub, "text": "reply from claude sub" }),
+    );
+    let sub_replies_args = claude_pre_tool_use(
+        id_claude,
+        Some(child_claude),
+        "replies",
+        json!({ "message_id": msg_id_for_claude_sub, "wait": 0 }),
+    );
+    call_mcp_sidecar(deploy_sidecar, "reply", sub_reply_args);
+    call_mcp_sidecar(deploy_sidecar, "replies", sub_replies_args);
+    call_mcp_sidecar(deploy_sidecar, "inbox", sub_inbox_args);
+
+    for f in recorded_frames.lock().unwrap().iter() {
+        let action = f["action"].as_str().unwrap_or("");
+        if action == "send" || action == "reply" || action == "inbox" {
+            assert_eq!(
+                f["as_agent"], child_claude,
+                "XC1: claude subagent frame via {deploy_sidecar} must carry as_agent={child_claude}, got: {f}"
+            );
+        }
+    }
+
+    // Remove Claude session from `my_pid` before Phase 2 (`agy`)
+    remove_claude_session(&node.sessions_dir, my_pid, id_claude);
+
+    // =========================================================================
+    // Phase 2: Antigravity root & Antigravity subagent
+    // =========================================================================
+    let conv_agy = "cccc3333-3333-4333-8333-333333333333";
+    let lock_agy = node.presence_dir.join(format!("{conv_agy}.lock"));
+    fs::write(&lock_agy, "lock").unwrap();
+    let open_lock_agy = fs::File::open(&lock_agy).unwrap();
+    unsafe {
+        use std::os::unix::io::AsRawFd;
+        libc::flock(open_lock_agy.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB);
+    }
+
+    let reg_agy = Command::new(BIN)
+        .args([
+            "register",
+            "agy",
+            "--sock",
+            node.register_sock.to_str().unwrap(),
+        ])
+        .env("ANTIGRAVITY_CONVERSATION_ID", conv_agy)
+        .env("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:39999")
+        .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-xc1")
+        .output()
+        .unwrap();
+    assert_eq!(reg_agy.status.code(), Some(0));
+
+    // 2A. Antigravity root (`call_mcp_tool`, clean + spoofed `as_agent`) -> drives
+    //     `9d1f5fa` (`deploy_sidecar`) and `9096199` (`pre_ha9_sidecar`).
+    for (label, extra) in [
+        ("clean", None),
+        ("spoofed", Some(("as_agent", json!("forged-agy-sub")))),
+    ] {
+        let mut list_in = json!({});
+        let mut send_in = json!({ "to": "peer-target", "text": format!("agy root {label}") });
+        if let Some((k, v)) = &extra {
+            list_in[*k] = v.clone();
+            send_in[*k] = v.clone();
+        }
+
+        let list_args = agy_pre_tool_use_call_mcp(conv_agy, "list", list_in);
+        let send_args = agy_pre_tool_use_call_mcp(conv_agy, "send", send_in);
+
+        for sidecar in [pre_ha9_sidecar, deploy_sidecar] {
+            recorded_frames.lock().unwrap().clear();
+            call_mcp_sidecar(sidecar, "list", list_args.clone());
+            let send_res = call_mcp_sidecar(sidecar, "send", send_args.clone());
+            let send_payload: Value =
+                serde_json::from_str(send_res["content"][0]["text"].as_str().unwrap()).unwrap();
+            let sent_msg_id = send_payload["messageId"]
+                .as_str()
+                .or_else(|| send_payload["message_id"].as_str())
+                .unwrap()
+                .to_string();
+
+            let mut reply_in =
+                json!({ "message_id": sent_msg_id, "text": format!("agy reply {label}") });
+            let mut replies_in = json!({ "message_id": sent_msg_id, "wait": 0 });
+            if let Some((k, v)) = &extra {
+                reply_in[*k] = v.clone();
+                replies_in[*k] = v.clone();
+            }
+            let reply_args = agy_pre_tool_use_call_mcp(conv_agy, "reply", reply_in);
+            let replies_args = agy_pre_tool_use_call_mcp(conv_agy, "replies", replies_in);
+
+            call_mcp_sidecar(sidecar, "reply", reply_args);
+            call_mcp_sidecar(sidecar, "replies", replies_args);
+
+            let frames = recorded_frames.lock().unwrap().clone();
+            for f in &frames {
+                let action = f["action"].as_str().unwrap_or("");
+                if action == "send" || action == "reply" {
+                    assert!(
+                        f.get("as_agent").is_none(),
+                        "XC1 (XR3): agy root ({label}) via {sidecar} must not emit as_agent onto agent.sock, got: {f}"
+                    );
+                }
+            }
+        }
+    }
+
+    // Also test Antigravity root eager `mcp_xmsg_send` (clean on old sidecars, spoofed on `BIN`)
+    let eager_clean_send = agy_pre_tool_use_eager(
+        conv_agy,
+        "send",
+        json!({ "to": "peer-target", "text": "agy root eager clean" }),
+    );
+    for sidecar in [pre_ha9_sidecar, deploy_sidecar] {
+        recorded_frames.lock().unwrap().clear();
+        call_mcp_sidecar(sidecar, "send", eager_clean_send.clone());
+        for f in recorded_frames.lock().unwrap().iter() {
+            if f["action"] == "send" {
+                assert!(
+                    f.get("as_agent").is_none(),
+                    "XC1 (XR3): agy root eager clean via {sidecar} must not emit as_agent, got: {f}"
+                );
+            }
+        }
+    }
+    let eager_spoof_send = agy_pre_tool_use_eager(
+        conv_agy,
+        "send",
+        json!({ "to": "peer-target", "text": "agy root eager spoof", "as_agent": "forged" }),
+    );
+    recorded_frames.lock().unwrap().clear();
+    call_mcp_sidecar(BIN, "send", eager_spoof_send);
+    for f in recorded_frames.lock().unwrap().iter() {
+        if f["action"] == "send" {
+            assert!(
+                f.get("as_agent").is_none(),
+                "XC1 (XR3+D1): agy root eager spoof via BIN must strip empty overwrite as_agent, got: {f}"
+            );
+        }
+    }
+
+    // 2B. Antigravity subagent (`child_agy` with descriptor on disk) -> drives `9d1f5fa` (`deploy_sidecar`)
+    let child_agy = "dddd4444-4444-4444-8444-444444444444";
+    let subagents_dir = run_dir
+        .join(".gemini/antigravity-cli/brain")
+        .join(conv_agy)
+        .join(".system_generated/subagents");
+    fs::create_dir_all(&subagents_dir).unwrap();
+    fs::write(
+        subagents_dir.join(format!("{child_agy}.json")),
+        json!({
+            "conversationId": child_agy,
+            "subagentDescriptor": { "role": "xc1-kid", "typeName": "self" },
+            "spawnStepIndex": 1
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let agy_sub_list = agy_pre_tool_use_call_mcp(child_agy, "list", json!({}));
+    let agy_sub_send = agy_pre_tool_use_call_mcp(
+        child_agy,
+        "send",
+        json!({ "to": "peer-target", "text": "from agy sub", "as_agent": "forged-other" }),
+    );
+    let agy_sub_inbox = agy_pre_tool_use_call_mcp(child_agy, "inbox", json!({ "wait": 0 }));
+
+    recorded_frames.lock().unwrap().clear();
+    call_mcp_sidecar(deploy_sidecar, "list", agy_sub_list);
+    let agy_sub_send_res = call_mcp_sidecar(deploy_sidecar, "send", agy_sub_send);
+    let agy_sub_send_payload: Value =
+        serde_json::from_str(agy_sub_send_res["content"][0]["text"].as_str().unwrap()).unwrap();
+    let msg_id_for_agy_sub = agy_sub_send_payload["messageId"]
+        .as_str()
+        .or_else(|| agy_sub_send_payload["message_id"].as_str())
+        .unwrap()
+        .to_string();
+
+    let (st_agy_sub, msg_to_agy_sub) = node
+        .http_send(
+            &format!("{conv_agy}/{child_agy}@sini.nodea"),
+            "ping agy subagent",
+        )
+        .await;
+    assert_eq!(st_agy_sub, 202, "{msg_to_agy_sub}");
+
+    let agy_sub_reply = agy_pre_tool_use_eager(
+        child_agy,
+        "reply",
+        json!({ "message_id": msg_id_for_agy_sub, "text": "reply from agy sub" }),
+    );
+    let agy_sub_replies = agy_pre_tool_use_call_mcp(
+        child_agy,
+        "replies",
+        json!({ "message_id": msg_id_for_agy_sub, "wait": 0 }),
+    );
+    call_mcp_sidecar(deploy_sidecar, "reply", agy_sub_reply);
+    call_mcp_sidecar(deploy_sidecar, "replies", agy_sub_replies);
+    call_mcp_sidecar(deploy_sidecar, "inbox", agy_sub_inbox);
+
+    for f in recorded_frames.lock().unwrap().iter() {
+        let action = f["action"].as_str().unwrap_or("");
+        if action == "send" || action == "reply" || action == "inbox" {
+            assert_eq!(
+                f["as_agent"], child_agy,
+                "XC1: agy subagent frame via {deploy_sidecar} must carry as_agent={child_agy}, got: {f}"
+            );
+        }
+    }
+}
