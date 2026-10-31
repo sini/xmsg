@@ -1513,3 +1513,187 @@ async fn test_oracle_9_service_name_validation_refusals() {
         );
     }
 }
+
+/// XS3 (HB1 self-review C3a): `sync_claims_entries` (and `resolve_caller_session_peer` /
+/// `claude_absence_in`) refuses any `~/.claude/sessions/<pid>.json` entry whose `session_id`
+/// is recorded in `instance_seen` with `harness != "claude"` (e.g. `"pi"`, `"agy"`,
+/// `"opencode"`, `"hermes"`), while still admitting genuine Claude UUIDs.
+#[tokio::test]
+async fn test_xs3_sync_claims_refuses_claude_session_file_claiming_non_claude_uuid() {
+    let tmp = tempdir().unwrap();
+    let proc_root = tmp.path().join("proc");
+    let sessions_dir = tmp.path().join("sessions");
+    fs::create_dir_all(&proc_root).unwrap();
+    fs::create_dir_all(&sessions_dir).unwrap();
+
+    let attacker_listener = start_socket_listener("attacker").await;
+    let genuine_listener = start_socket_listener("genuine").await;
+
+    setup_mock_proc(&proc_root, 7001, "100");
+    setup_mock_proc(&proc_root, 7002, "200");
+    setup_mock_proc(&proc_root, 7003, "300");
+
+    let pi_id = "11111111-1111-4111-8111-111111111111";
+    let agy_id = "33333333-3333-4333-8333-333333333333";
+    let claude_id = "44444444-4444-4444-8444-444444444444";
+
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    init_db(&conn).unwrap();
+    let now = xmsg::storage::now_epoch_secs();
+
+    // Record `pi_id` as a reclaimable pi instance (with a bound subagent `<pi_id>/reviewer`)
+    // and `agy_id` as an agy instance in `instance_seen`.
+    let _pi_secret = xmsg::storage::mint_reclaimable_instance(&conn, pi_id, "pi", now).unwrap();
+    xmsg::storage::subagent_bind_spawn(
+        &conn,
+        pi_id,
+        "22222222-2222-4222-8222-222222222222",
+        Some("reviewer"),
+        None,
+        now,
+    )
+    .unwrap();
+    xmsg::storage::mark_live(&conn, agy_id, "agy", now).unwrap();
+
+    // Attacker processes 7001 and 7002 write `~/.claude/sessions/<pid>.json` claiming `pi_id`
+    // and `agy_id`; genuine Claude process 7003 claims `claude_id`.
+    write_claude_session_file(
+        &sessions_dir,
+        7001,
+        pi_id,
+        "hijack-pi",
+        "100",
+        &attacker_listener.sock_path,
+    );
+    write_claude_session_file(
+        &sessions_dir,
+        7002,
+        agy_id,
+        "hijack-agy",
+        "200",
+        &attacker_listener.sock_path,
+    );
+    write_claude_session_file(
+        &sessions_dir,
+        7003,
+        claude_id,
+        "real-claude",
+        "300",
+        &genuine_listener.sock_path,
+    );
+
+    let dirs = vec![sessions_dir.clone()];
+    let (active_pairs, _notices) =
+        sync_claims_db(&conn, &proc_root, &dirs, "test-node").expect("sync_claims_db");
+
+    // Only `claude_id` may be claimed; `pi_id` and `agy_id` must be refused.
+    let claimed_ids: Vec<&str> = active_pairs.iter().map(|(c, _)| c.id.as_str()).collect();
+    assert_eq!(
+        claimed_ids,
+        vec![claude_id],
+        "sync_claims_entries must refuse non-Claude UUIDs from instance_seen, got: {claimed_ids:?}"
+    );
+    assert!(
+        get_all_claims_for_id(&conn, pi_id).unwrap().is_empty(),
+        "pi_id must have zero rows in instance_claims"
+    );
+    assert!(
+        get_all_claims_for_id(&conn, agy_id).unwrap().is_empty(),
+        "agy_id must have zero rows in instance_claims"
+    );
+
+    // Even after 7001's fake session file is removed and sync_claims_db runs again,
+    // `pi_id`'s harness in `instance_seen` stays `"pi"` and `reclaimable` stays `true`.
+    remove_claude_session_file(&sessions_dir, 7001, pi_id);
+    let _ = sync_claims_db(&conn, &proc_root, &dirs, "test-node").expect("resync");
+    let seen_pi = xmsg::storage::seen_instance(&conn, pi_id, now, 3600)
+        .unwrap()
+        .expect("pi_id still in instance_seen");
+    assert_eq!(seen_pi.harness, "pi");
+    assert!(seen_pi.reclaimable);
+
+    // Re-plant 7001's fake session file and verify:
+    // 1. Sending to `<pi_id>/reviewer` (out-of-turn fallback) queues into `pi_pending_messages`
+    //    for `pi_id` and NEVER delivers to `attacker_listener`.
+    // 2. `resolve_caller_session` with `Some(&conn)` refuses PID 7001 while admitting PID 7003.
+    write_claude_session_file(
+        &sessions_dir,
+        7001,
+        pi_id,
+        "hijack-pi",
+        "100",
+        &attacker_listener.sock_path,
+    );
+
+    let agy_config = AgyConfig {
+        proc_root: proc_root.clone(),
+        ..Default::default()
+    };
+    let caller_7001 = xmsg::agent::resolve_caller_session(
+        &proc_root,
+        &sessions_dir,
+        &agy_config,
+        &new_agy_store(),
+        &new_pi_store(),
+        &xmsg::svc::new_svc_store(),
+        Some(&conn),
+        7001,
+    );
+    assert!(
+        caller_7001.is_err(),
+        "PID 7001 claiming non-Claude UUID via ~/.claude/sessions must be refused, got: {caller_7001:?}"
+    );
+    let caller_7003 = xmsg::agent::resolve_caller_session(
+        &proc_root,
+        &sessions_dir,
+        &agy_config,
+        &new_agy_store(),
+        &new_pi_store(),
+        &xmsg::svc::new_svc_store(),
+        Some(&conn),
+        7003,
+    )
+    .expect("genuine Claude PID 7003 must resolve");
+    assert_eq!(caller_7003.session_id, claude_id);
+
+    let db = Arc::new(std::sync::Mutex::new(conn));
+    let state = Arc::new(AppState {
+        sessions_dirs: dirs,
+        agy_config,
+        agy_store: new_agy_store(),
+        pi_store: new_pi_store(),
+        pi_notify_tx: tokio::sync::broadcast::channel(16).0,
+        svc_store: xmsg::svc::new_svc_store(),
+        svc_notify_tx: tokio::sync::broadcast::channel(16).0,
+        node_name: "test-node".to_string(),
+        max_body: 65536,
+        request_counter: AtomicU64::new(1),
+        db: db.clone(),
+        notify_tx: tokio::sync::broadcast::channel(16).0,
+        reply_ttl: Duration::from_secs(3600),
+        idempotency_ttl: Duration::from_secs(3600),
+        long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
+        fed_state: None,
+    });
+
+    let send_res = xmsg::surface::send(
+        &state,
+        &xmsg::surface::Sender::Anonymous("probe".to_string()),
+        &format!("{pi_id}/reviewer"),
+        "fallback must stay in pi queue",
+        None,
+    )
+    .await
+    .expect("send to parked pi parent subaddress");
+    assert_eq!(send_res.outcome, "queued");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        attacker_listener.received_lines.lock().await.is_empty(),
+        "attacker socket must receive 0 messages"
+    );
+    let pi_queued = xmsg::storage::count_pending_pi_messages(&db.lock().unwrap(), pi_id).unwrap();
+    assert_eq!(
+        pi_queued, 1,
+        "fallback message must be queued in pi_pending_messages for pi_id"
+    );
+}

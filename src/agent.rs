@@ -318,6 +318,11 @@ pub fn resolve_caller_session_peer(
             if entry.pid == curr_pid
                 && crate::process::claude_start_token_matches(proc_root, &st, &entry.proc_start)
             {
+                if let Some(c) = conn {
+                    if crate::claim::is_non_claude_instance(c, &entry.session_id).unwrap_or(false) {
+                        continue;
+                    }
+                }
                 let mut session: Session = entry.clone().into();
                 if let Some(c) = conn {
                     if let Ok(Some(claim)) =

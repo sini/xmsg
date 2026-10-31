@@ -259,6 +259,19 @@ pub fn is_claude_proc_live(proc_root: &Path, pid: u32, expected: &str) -> bool {
     process::claude_proc_start_matches(proc_root, pid, expected)
 }
 
+/// XS3: whether `id` is recorded in `instance_seen` (or active `plugin_sessions`) as a
+/// non-Claude instance (`harness != "claude"`), in which case a `~/.claude/sessions/<pid>.json`
+/// file must not claim or overwrite it.
+pub fn is_non_claude_instance(conn: &Connection, id: &str) -> Result<bool> {
+    let seen_non_claude: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM instance_seen WHERE id = ?1 AND harness != 'claude') \
+         OR EXISTS(SELECT 1 FROM plugin_sessions WHERE address = ?1)",
+        params![id],
+        |r| r.get(0),
+    )?;
+    Ok(seen_non_claude)
+}
+
 #[allow(clippy::type_complexity)]
 pub fn sync_claims_db(
     conn: &Connection,
@@ -299,11 +312,20 @@ pub fn sync_claims_entries(
         .unchecked_transaction()
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    // Filter to live entries where process is still alive and proc_start matches
-    let live_entries: Vec<SessionFileEntry> = raw_entries
-        .into_iter()
-        .filter(|e| is_claude_proc_live(proc_root, e.pid, &e.proc_start))
-        .collect();
+    // Filter to live entries where process is still alive, proc_start matches, and the
+    // presented session_id is not already recorded for a non-Claude harness (XS3).
+    let mut live_entries = Vec::new();
+    for e in raw_entries {
+        if !is_claude_proc_live(proc_root, e.pid, &e.proc_start) {
+            continue;
+        }
+        if is_non_claude_instance(conn, &e.session_id)
+            .map_err(|err| AppError::Internal(err.to_string()))?
+        {
+            continue;
+        }
+        live_entries.push(e);
+    }
 
     let now = now_epoch_secs();
 
@@ -338,8 +360,12 @@ pub fn sync_claims_entries(
             .map_err(|e| AppError::Internal(e.to_string()))?;
             // Discovery is on demand, so the release is the latest moment X is known to
             // have been live: its parked lifetime runs from here (A14, D-1).
-            storage::mark_live(conn, &claim.id, "claude", now)
-                .map_err(|e| AppError::Internal(e.to_string()))?;
+            if !is_non_claude_instance(conn, &claim.id)
+                .map_err(|err| AppError::Internal(err.to_string()))?
+            {
+                storage::mark_live(conn, &claim.id, "claude", now)
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+            }
         }
     }
     storage::purge_instance_seen(conn, now, 604_800)
@@ -866,11 +892,11 @@ pub fn claude_absence_in(
         Err(rusqlite::Error::QueryReturnedNoRows) => {}
         Err(e) => return AppError::Internal(e.to_string()),
     }
-    // A bare ID no process here was ever observed presenting is `not_found` (A14), even
-    // when a session file still names it.
+    // A bare ID no Claude process here was ever observed presenting is `not_found` (A14, XS3),
+    // even when a session file still names it.
     match storage::seen_instance(conn, ref_str, 0, 0) {
-        Ok(None) => return AppError::NotFound(ref_str.to_string()),
-        Ok(Some(_)) => {}
+        Ok(Some(seen)) if seen.harness == "claude" => {}
+        Ok(_) => return AppError::NotFound(ref_str.to_string()),
         Err(e) => return AppError::Internal(e.to_string()),
     }
 
