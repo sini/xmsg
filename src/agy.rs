@@ -1161,6 +1161,44 @@ fn read_agy_descriptor_file(path: &Path, expected_id: &str) -> Option<AgySubagen
     })
 }
 
+/// Looks up `brain/<P>/.system_generated/subagents/<conv_id>.json` across the default `brain_dir`
+/// (`AgyConfig::default().effective_brain_dir()`), returning `Some(descriptor)` when `conv_id`
+/// is a subagent with a valid descriptor under some parent `<P>`, or `None` when `conv_id` is
+/// a root session (or not UUID-shaped).
+pub fn find_agy_subagent_descriptor(conv_id: &str) -> Option<AgySubagentDescriptor> {
+    let config = AgyConfig::default();
+    find_agy_subagent_descriptor_in(&config.effective_brain_dir(), conv_id)
+}
+
+/// Like [`find_agy_subagent_descriptor`], reading under `brain_dir`.
+pub fn find_agy_subagent_descriptor_in(
+    brain_dir: &Path,
+    conv_id: &str,
+) -> Option<AgySubagentDescriptor> {
+    if !crate::claim::is_uuid_shaped(conv_id) {
+        return None;
+    }
+    let entries = fs::read_dir(brain_dir).ok()?;
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(parent_id) = file_name.to_str() else {
+            continue;
+        };
+        if !crate::claim::is_uuid_shaped(parent_id) || parent_id == conv_id {
+            continue;
+        }
+        let desc_path = entry
+            .path()
+            .join(".system_generated")
+            .join("subagents")
+            .join(format!("{conv_id}.json"));
+        if let Some(desc) = read_agy_descriptor_file(&desc_path, conv_id) {
+            return Some(desc);
+        }
+    }
+    None
+}
+
 fn read_agy_descriptors_for_parent(brain_dir: &Path, parent_id: &str) -> Vec<AgySubagentDescriptor> {
     if !crate::claim::is_uuid_shaped(parent_id) {
         return Vec::new();

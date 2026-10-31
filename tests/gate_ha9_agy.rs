@@ -428,10 +428,11 @@ impl AgyTestHarness {
     }
 }
 
-fn run_hook_bin(event: &str, stdin_str: &str) -> (i32, Value) {
+fn run_hook_bin_with_home(home: &Path, event: &str, stdin_str: &str) -> (i32, Value) {
     let bin = env!("CARGO_BIN_EXE_xmsg");
     let mut child = Command::new(bin)
         .args(["register", "agy", "--hook", "--event", event])
+        .env("HOME", home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -452,13 +453,60 @@ fn run_hook_bin(event: &str, stdin_str: &str) -> (i32, Value) {
 }
 
 // ===========================================================================
-// G1: Stamp (hook binary, `--event pre-tool-use`)
+// G1: Stamp (hook binary, `--event pre-tool-use`) + XR3 root vs subagent
 // ===========================================================================
 #[test]
 fn g1_pre_tool_use_stamp_and_foreign_and_malformed() {
-    // 1. `call_mcp_tool` with `ServerName: "xmsg"` and `Arguments` as object whose `as_agent` is
-    //    a sibling id -> `decision: "allow"`, `overwrite.Arguments.as_agent = conversationId`,
-    //    other keys byte-equal.
+    let tmp_home = tempdir().expect("tempdir for hook HOME");
+    let brain_dir = tmp_home.path().join(".gemini/antigravity-cli/brain");
+    // Write a valid subagent descriptor for X_UUID under parent P_UUID so X_UUID is a subagent
+    // while P_UUID has no subagent descriptor (root session).
+    write_descriptor(
+        &brain_dir,
+        P_UUID,
+        X_UUID,
+        X_UUID,
+        Some("kid"),
+        Some("self"),
+        4,
+        false,
+    );
+    let run_hook_bin =
+        |event: &str, stdin_str: &str| run_hook_bin_with_home(tmp_home.path(), event, stdin_str);
+
+    // 1. Subagent (`X_UUID`): `call_mcp_tool` with `ServerName: "xmsg"` and `Arguments` as object
+    //    (both without `as_agent` and with a sibling `as_agent: Y_UUID`) -> `decision: "allow"`,
+    //    `overwrite.Arguments.as_agent = X_UUID`, other keys byte-equal.
+    let (code, out_sub_no_as_agent) = run_hook_bin(
+        "pre-tool-use",
+        &json!({
+            "conversationId": X_UUID,
+            "toolCall": {
+                "name": "call_mcp_tool",
+                "args": {
+                    "ServerName": "xmsg",
+                    "ToolName": "send",
+                    "Arguments": {
+                        "to": "recip",
+                        "text": "hello from child",
+                    }
+                }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(code, 0);
+    assert_eq!(out_sub_no_as_agent["decision"], "allow", "{out_sub_no_as_agent}");
+    assert_eq!(
+        out_sub_no_as_agent["overwrite"]["Arguments"]["as_agent"], X_UUID,
+        "XR3: subagent call without as_agent must still get as_agent injected: {out_sub_no_as_agent}"
+    );
+    assert_eq!(out_sub_no_as_agent["overwrite"]["Arguments"]["to"], "recip");
+    assert_eq!(
+        out_sub_no_as_agent["overwrite"]["Arguments"]["text"],
+        "hello from child"
+    );
+
     let (code, out) = run_hook_bin(
         "pre-tool-use",
         &json!({
@@ -517,7 +565,7 @@ fn g1_pre_tool_use_stamp_and_foreign_and_malformed() {
     assert_eq!(parsed_overwritten["to"], "recip");
     assert_eq!(parsed_overwritten["text"], "string-encoded");
 
-    // 3. Eager form `mcp_xmsg_send` -> `decision: "allow"`, `overwrite.as_agent = conversationId`.
+    // 3. Eager form `mcp_xmsg_send` on subagent `X_UUID` -> `decision: "allow"`, `overwrite.as_agent = X_UUID`.
     let (code, out) = run_hook_bin(
         "pre-tool-use",
         &json!({
@@ -536,6 +584,151 @@ fn g1_pre_tool_use_stamp_and_foreign_and_malformed() {
     assert_eq!(code, 0);
     assert_eq!(out["decision"], "allow", "{out}");
     assert_eq!(out["overwrite"]["as_agent"], X_UUID, "{out}");
+
+    // 3b (XR3): Root agy call (`P_UUID`, no subagent descriptor) WITHOUT `as_agent` yields no
+    //     `as_agent` (no `overwrite`) across object `Arguments`, string `Arguments`, and eager `mcp_xmsg_*`.
+    let (code, out_root_obj) = run_hook_bin(
+        "pre-tool-use",
+        &json!({
+            "conversationId": P_UUID,
+            "toolCall": {
+                "name": "call_mcp_tool",
+                "args": {
+                    "ServerName": "xmsg",
+                    "ToolName": "send",
+                    "Arguments": {
+                        "to": "recip",
+                        "text": "root call",
+                    }
+                }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(code, 0);
+    assert_eq!(out_root_obj["decision"], "allow", "{out_root_obj}");
+    assert!(
+        out_root_obj.get("overwrite").is_none(),
+        "XR3: root agy call without as_agent must yield no overwrite / no as_agent: {out_root_obj}"
+    );
+
+    let root_args_str = serde_json::to_string(&json!({
+        "to": "recip",
+        "text": "root string call",
+    }))
+    .unwrap();
+    let (code, out_root_str) = run_hook_bin(
+        "pre-tool-use",
+        &json!({
+            "conversationId": P_UUID,
+            "toolCall": {
+                "name": "call_mcp_tool",
+                "args": {
+                    "ServerName": "xmsg",
+                    "ToolName": "send",
+                    "Arguments": root_args_str,
+                }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(code, 0);
+    assert_eq!(out_root_str["decision"], "allow", "{out_root_str}");
+    assert!(
+        out_root_str.get("overwrite").is_none(),
+        "XR3: root agy string-Arguments call without as_agent must yield no overwrite: {out_root_str}"
+    );
+
+    let (code, out_root_eager) = run_hook_bin(
+        "pre-tool-use",
+        &json!({
+            "conversationId": P_UUID,
+            "toolCall": {
+                "name": "mcp_xmsg_send",
+                "args": {
+                    "to": "recip",
+                    "text": "root eager",
+                }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(code, 0);
+    assert_eq!(out_root_eager["decision"], "allow", "{out_root_eager}");
+    assert!(
+        out_root_eager.get("overwrite").is_none(),
+        "XR3: root agy eager call without as_agent must yield no overwrite: {out_root_eager}"
+    );
+
+    // 3c (XR3): Model-written `as_agent` on a root agy call (`P_UUID`) gets stripped from
+    //     `Arguments` (both object and string forms) so the root session cannot impersonate a child.
+    let (code, out_root_spoof_obj) = run_hook_bin(
+        "pre-tool-use",
+        &json!({
+            "conversationId": P_UUID,
+            "toolCall": {
+                "name": "call_mcp_tool",
+                "args": {
+                    "ServerName": "xmsg",
+                    "ToolName": "send",
+                    "Arguments": {
+                        "to": "recip",
+                        "text": "spoof attempt",
+                        "as_agent": X_UUID,
+                    }
+                }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(code, 0);
+    assert_eq!(out_root_spoof_obj["decision"], "allow", "{out_root_spoof_obj}");
+    let stripped_obj = out_root_spoof_obj["overwrite"]["Arguments"]
+        .as_object()
+        .expect("XR3: root spoofed object Arguments must be overwritten");
+    assert!(
+        !stripped_obj.contains_key("as_agent"),
+        "XR3: model-written as_agent on root call must be stripped: {out_root_spoof_obj}"
+    );
+    assert_eq!(stripped_obj.get("to").and_then(Value::as_str), Some("recip"));
+    assert_eq!(
+        stripped_obj.get("text").and_then(Value::as_str),
+        Some("spoof attempt")
+    );
+
+    let root_spoof_str = serde_json::to_string(&json!({
+        "to": "recip",
+        "text": "spoof string attempt",
+        "as_agent": X_UUID,
+    }))
+    .unwrap();
+    let (code, out_root_spoof_str) = run_hook_bin(
+        "pre-tool-use",
+        &json!({
+            "conversationId": P_UUID,
+            "toolCall": {
+                "name": "call_mcp_tool",
+                "args": {
+                    "ServerName": "xmsg",
+                    "ToolName": "send",
+                    "Arguments": root_spoof_str,
+                }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(code, 0);
+    assert_eq!(out_root_spoof_str["decision"], "allow", "{out_root_spoof_str}");
+    let stripped_str = out_root_spoof_str["overwrite"]["Arguments"]
+        .as_str()
+        .expect("XR3: root spoofed string Arguments must remain a string");
+    let stripped_parsed: Value = serde_json::from_str(stripped_str).unwrap();
+    assert!(
+        stripped_parsed.get("as_agent").is_none(),
+        "XR3: model-written as_agent in string Arguments on root call must be stripped: {stripped_parsed}"
+    );
+    assert_eq!(stripped_parsed["to"], "recip");
+    assert_eq!(stripped_parsed["text"], "spoof string attempt");
 
     // 4. Non-xmsg `ServerName` -> no `overwrite` and no `"allow"` (`decision: "ask"` per OQ3).
     let (code, out) = run_hook_bin(
@@ -939,6 +1132,27 @@ async fn g4_attested_send_lazy_admission_and_d6_and_inbox_refusal() {
     assert!(
         raw_p.contains(&expected_from_p) && raw_p.contains(&expected_ref_p),
         "expected {expected_from_p:?} and {expected_ref_p:?} in {raw_p:?}"
+    );
+
+    // 2b (XR3): `xmsg mcp` `send` WITHOUT `as_agent` on root agy session P -> resolves P's
+    //     identity from the session alone (`agy-parent · <P>@<node>`).
+    let mcp_p_no_as_agent = h
+        .mcp_tool_call(
+            "send",
+            json!({
+                "to": recip_id,
+                "text": "from parent P without as_agent",
+            }),
+        )
+        .await;
+    assert_eq!(
+        mcp_p_no_as_agent["result"]["isError"], false,
+        "{mcp_p_no_as_agent}"
+    );
+    let raw_p_no_as_agent = accept_one_claude_msg(&recip_listener).await;
+    assert!(
+        raw_p_no_as_agent.contains(&expected_from_p) && raw_p_no_as_agent.contains(&expected_ref_p),
+        "XR3: root agy send without as_agent must resolve to {expected_from_p:?} and {expected_ref_p:?} in {raw_p_no_as_agent:?}"
     );
 
     // 3. `as_agent = Y` (no descriptor) -> refused `denied` (`not_recipient`).

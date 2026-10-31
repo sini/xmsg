@@ -573,22 +573,36 @@ fn run_hook_agy_pre_tool_use(input: &str) -> serde_json::Value {
         let Some(raw_arguments) = args.get("Arguments") else {
             return deny();
         };
+        let is_subagent = xmsg::agy::find_agy_subagent_descriptor(conv_id).is_some();
         match raw_arguments {
             serde_json::Value::Object(obj) => {
-                if obj.get("as_agent").and_then(|v| v.as_str()) == Some(conv_id) {
-                    return serde_json::json!({ "decision": "allow" });
-                }
-                let mut updated = obj.clone();
-                updated.insert(
-                    "as_agent".to_string(),
-                    serde_json::Value::String(conv_id.to_string()),
-                );
-                serde_json::json!({
-                    "decision": "allow",
-                    "overwrite": {
-                        "Arguments": serde_json::Value::Object(updated),
+                if is_subagent {
+                    if obj.get("as_agent").and_then(|v| v.as_str()) == Some(conv_id) {
+                        return serde_json::json!({ "decision": "allow" });
                     }
-                })
+                    let mut updated = obj.clone();
+                    updated.insert(
+                        "as_agent".to_string(),
+                        serde_json::Value::String(conv_id.to_string()),
+                    );
+                    serde_json::json!({
+                        "decision": "allow",
+                        "overwrite": {
+                            "Arguments": serde_json::Value::Object(updated),
+                        }
+                    })
+                } else if obj.contains_key("as_agent") {
+                    let mut updated = obj.clone();
+                    updated.remove("as_agent");
+                    serde_json::json!({
+                        "decision": "allow",
+                        "overwrite": {
+                            "Arguments": serde_json::Value::Object(updated),
+                        }
+                    })
+                } else {
+                    serde_json::json!({ "decision": "allow" })
+                }
             }
             serde_json::Value::String(s) => {
                 let parsed: serde_json::Value = match serde_json::from_str(s) {
@@ -598,36 +612,64 @@ fn run_hook_agy_pre_tool_use(input: &str) -> serde_json::Value {
                 let Some(obj) = parsed.as_object() else {
                     return deny();
                 };
-                if obj.get("as_agent").and_then(|v| v.as_str()) == Some(conv_id) {
-                    return serde_json::json!({ "decision": "allow" });
-                }
-                let mut updated = obj.clone();
-                updated.insert(
-                    "as_agent".to_string(),
-                    serde_json::Value::String(conv_id.to_string()),
-                );
-                let Ok(re_serialized) = serde_json::to_string(&updated) else {
-                    return deny();
-                };
-                serde_json::json!({
-                    "decision": "allow",
-                    "overwrite": {
-                        "Arguments": serde_json::Value::String(re_serialized),
+                if is_subagent {
+                    if obj.get("as_agent").and_then(|v| v.as_str()) == Some(conv_id) {
+                        return serde_json::json!({ "decision": "allow" });
                     }
-                })
+                    let mut updated = obj.clone();
+                    updated.insert(
+                        "as_agent".to_string(),
+                        serde_json::Value::String(conv_id.to_string()),
+                    );
+                    let Ok(re_serialized) = serde_json::to_string(&updated) else {
+                        return deny();
+                    };
+                    serde_json::json!({
+                        "decision": "allow",
+                        "overwrite": {
+                            "Arguments": serde_json::Value::String(re_serialized),
+                        }
+                    })
+                } else if obj.contains_key("as_agent") {
+                    let mut updated = obj.clone();
+                    updated.remove("as_agent");
+                    let Ok(re_serialized) = serde_json::to_string(&updated) else {
+                        return deny();
+                    };
+                    serde_json::json!({
+                        "decision": "allow",
+                        "overwrite": {
+                            "Arguments": serde_json::Value::String(re_serialized),
+                        }
+                    })
+                } else {
+                    serde_json::json!({ "decision": "allow" })
+                }
             }
             _ => deny(),
         }
     } else if tool_name.starts_with("mcp_xmsg_") {
-        if args.get("as_agent").and_then(|v| v.as_str()) == Some(conv_id) {
-            serde_json::json!({ "decision": "allow" })
-        } else {
+        let is_subagent = xmsg::agy::find_agy_subagent_descriptor(conv_id).is_some();
+        if is_subagent {
+            if args.get("as_agent").and_then(|v| v.as_str()) == Some(conv_id) {
+                serde_json::json!({ "decision": "allow" })
+            } else {
+                serde_json::json!({
+                    "decision": "allow",
+                    "overwrite": {
+                        "as_agent": conv_id,
+                    }
+                })
+            }
+        } else if args.contains_key("as_agent") {
             serde_json::json!({
                 "decision": "allow",
                 "overwrite": {
-                    "as_agent": conv_id,
+                    "as_agent": "",
                 }
             })
+        } else {
+            serde_json::json!({ "decision": "allow" })
         }
     } else {
         serde_json::json!({ "decision": "ask" })
