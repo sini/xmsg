@@ -624,6 +624,7 @@ async fn test_xs2_svc_store_admits_only_hop0_while_refusing_child_of_svc() {
             .unwrap();
         let mut line = String::new();
         reader.read_line(&mut line).await.unwrap();
+        println!("XS2_CHILD_PID:{}", std::process::id());
         print!("XS2_CHILD_JSON:{line}");
         return;
     }
@@ -854,6 +855,11 @@ async fn test_xs2_svc_store_admits_only_hop0_while_refusing_child_of_svc() {
         String::from_utf8_lossy(&child_out.stderr)
     );
     let stdout_str = String::from_utf8_lossy(&child_out.stdout);
+    let child_pid: u32 = stdout_str
+        .lines()
+        .find_map(|l| l.strip_prefix("XS2_CHILD_PID:"))
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or_else(|| panic!("missing XS2_CHILD_PID in stdout: {stdout_str}"));
     let json_line = stdout_str
         .lines()
         .find_map(|l| l.strip_prefix("XS2_CHILD_JSON:"))
@@ -865,11 +871,39 @@ async fn test_xs2_svc_store_admits_only_hop0_while_refusing_child_of_svc() {
         "child of svc must be refused on agent.sock, got: {child_resp}"
     );
     assert_eq!(child_resp["error"], "denied", "{child_resp}");
+    let detail = child_resp["detail"].as_str().unwrap_or("");
     assert!(
-        child_resp["detail"]
-            .as_str()
-            .unwrap_or("")
-            .contains("does not descend from an active agent session"),
-        "unexpected error detail: {child_resp}"
+        detail.starts_with(&format!("peer PID {child_pid}")),
+        "error detail must identify the child peer PID {child_pid}: {child_resp}"
     );
+    #[cfg(target_os = "linux")]
+    assert!(
+        detail.contains("does not descend from an active agent session"),
+        "unexpected error detail on linux: {child_resp}"
+    );
+    // On macOS, `proc_pidinfo(PROC_PIDTBSDINFO)` only reads processes owned by the same UID
+    // without root (`src/process.rs:684`). The walk reads hop-0 `child_pid` and hop-1
+    // `self_pid` (both owned by `my_uid`), refuses `svc_store` at hop 1 because
+    // `curr_pid != peer_pid`, and continues up the same-UID test/cargo chain until it hits
+    // the root-owned ancestor above the runner/nix-daemon user switch (`EPERM` ->
+    // `WalkEnd::Unreadable(root_ancestor_pid)`), or PID 1 (`WalkEnd::Root`) if no UID
+    // boundary sits above `self_pid`. Requiring `!detail.contains(child_pid)` and
+    // `!detail.contains(self_pid)` on the `cannot be read` arm proves the walk stepped past
+    // both `child_pid` (hop 0) and `self_pid` (hop 1) and rejected `svc_store` at hop 1.
+    #[cfg(target_os = "macos")]
+    assert!(
+        detail.contains("does not descend from an active agent session")
+            || (detail.contains("cannot be read, so its ancestry is unproven")
+                && !detail.contains(&format!("start time of {child_pid} "))
+                && !detail.contains(&format!("start time of {self_pid} "))),
+        "unexpected error detail on macos: {child_resp}"
+    );
+    let _ = self_pid;
+    // Also verify no second message was recorded in the DB (only the hop-0 send).
+    let msg_count: i64 = db
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(msg_count, 1, "only hop-0 svc send may be recorded");
 }
