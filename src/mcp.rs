@@ -712,7 +712,7 @@ pub fn execute_tool(
                 "to": to,
                 "text": text,
             });
-            if let Some(as_agent) = str_arg("as_agent") {
+            if let Some(as_agent) = str_arg("as_agent").map(str::trim).filter(|s| !s.is_empty()) {
                 payload["as_agent"] = Value::String(as_agent.to_string());
             }
             agent_tool(config, &payload, None, Duration::from_secs(20))
@@ -729,7 +729,7 @@ pub fn execute_tool(
                 "message_id": message_id,
                 "text": text,
             });
-            if let Some(as_agent) = str_arg("as_agent") {
+            if let Some(as_agent) = str_arg("as_agent").map(str::trim).filter(|s| !s.is_empty()) {
                 payload["as_agent"] = Value::String(as_agent.to_string());
             }
             // NOTE (XU1 Gate 4 / Amendment 6): MCP tool result is reshaped to
@@ -802,7 +802,7 @@ pub fn execute_tool(
                 "schema_version": crate::surface::MCP_SCHEMA_VERSION,
                 "wait": wait,
             });
-            if let Some(as_agent) = str_arg("as_agent") {
+            if let Some(as_agent) = str_arg("as_agent").map(str::trim).filter(|s| !s.is_empty()) {
                 payload["as_agent"] = Value::String(as_agent.to_string());
             }
             agent_tool(config, &payload, None, Duration::from_secs(wait + 5))

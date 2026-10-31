@@ -336,6 +336,7 @@ class Xmsg {
   }
 
   async run(frame: Answer, sessionID: string, agent?: string): Promise<string> {
+    if (!sessionID) throw new Error("xmsg: tool call has no sessionID");
     const root = await this.rootOf(sessionID);
     const child = sessionID !== root ? sessionID : undefined;
     await this.conn.settled(root);
@@ -449,7 +450,7 @@ const setup = async (ctx: any) => {
   if (!sock) return noSock();
 
   const xmsg = new Xmsg(sock, {
-    parentOf: async (sessionID) => (await ctx.session.get({ sessionID })).parentID,
+    parentOf: async (sessionID) => (await ctx.session.get({ sessionID }))?.parentID,
     prompt: (sessionID, text) =>
       ctx.session.prompt({ sessionID, text }).then(
         () => true,

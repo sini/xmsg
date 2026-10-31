@@ -1250,10 +1250,7 @@ async fn handle_subagent_frame(
                     b
                 };
                 let child_part = binding.name.as_deref().unwrap_or(&binding.agent_id);
-                let addr = format!(
-                    "{}/{child_part}@{}",
-                    binding.parent, state.node_name
-                );
+                let addr = format!("{}/{child_part}@{}", binding.parent, state.node_name);
                 Ok(serde_json::json!({
                     "status": "ok",
                     "role": "subagent",
@@ -1280,16 +1277,11 @@ async fn handle_subagent_frame(
                         &state.agy_store,
                     );
                 }
-                let has_creds = state
-                    .agy_store
-                    .read()
-                    .unwrap()
-                    .values()
-                    .any(|info| {
-                        (info.session_key == parent.session_id
-                            || info.conversation_id == parent.session_id)
-                            && info.credentials.as_ref().is_some_and(|c| !c.is_stale)
-                    });
+                let has_creds = state.agy_store.read().unwrap().values().any(|info| {
+                    (info.session_key == parent.session_id
+                        || info.conversation_id == parent.session_id)
+                        && info.credentials.as_ref().is_some_and(|c| !c.is_stale)
+                });
                 if has_creds {
                     crate::agy::flush_agy_queue(
                         &state.agy_config,
@@ -1467,6 +1459,12 @@ pub fn run_claude_hook(input: &str, agent_sock: Option<&Path>) -> Result<String,
         }
     };
 
+    let send_lifecycle_frame = |frame: &Value| {
+        if let Err(e) = resolve_sock().and_then(|sock| crate::mcp::call_agent_sock(&sock, frame)) {
+            eprintln!("xmsg: {e}");
+        }
+    };
+
     match event_name {
         "PreToolUse" => {
             // E6: PreToolUse does no socket I/O; it only reads stdin and writes stdout.
@@ -1476,21 +1474,42 @@ pub fn run_claude_hook(input: &str, agent_sock: Option<&Path>) -> Result<String,
                 .ok_or_else(|| "PreToolUse hook input missing 'tool_input' object".to_string())?;
             let agent_id = match obj.get("agent_id") {
                 None | Some(Value::Null) => "",
-                Some(Value::String(s)) => s.as_str(),
+                Some(Value::String(s)) => s.trim(),
                 Some(_) => {
                     return Err("'agent_id' in PreToolUse hook input must be a string".to_string())
                 }
             };
-            let mut updated_input = tool_input.clone();
-            updated_input.insert("as_agent".to_string(), Value::String(agent_id.to_string()));
-            let out = serde_json::json!({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                    "updatedInput": updated_input,
-                }
-            });
-            Ok(out.to_string())
+            if !agent_id.is_empty() {
+                let mut updated_input = tool_input.clone();
+                updated_input.insert("as_agent".to_string(), Value::String(agent_id.to_string()));
+                let out = serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "allow",
+                        "updatedInput": updated_input,
+                    }
+                });
+                Ok(out.to_string())
+            } else if tool_input.contains_key("as_agent") {
+                let mut updated_input = tool_input.clone();
+                updated_input.remove("as_agent");
+                let out = serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "allow",
+                        "updatedInput": updated_input,
+                    }
+                });
+                Ok(out.to_string())
+            } else {
+                let out = serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "allow",
+                    }
+                });
+                Ok(out.to_string())
+            }
         }
         "SubagentStart" => {
             let agent_id = obj
@@ -1516,8 +1535,7 @@ pub fn run_claude_hook(input: &str, agent_sock: Option<&Path>) -> Result<String,
             {
                 frame["transcript_path"] = Value::String(tp.to_string());
             }
-            let sock = resolve_sock()?;
-            crate::mcp::call_agent_sock(&sock, &frame)?;
+            send_lifecycle_frame(&frame);
             Ok("{}".to_string())
         }
         "PostToolUse" => {
@@ -1558,8 +1576,7 @@ pub fn run_claude_hook(input: &str, agent_sock: Option<&Path>) -> Result<String,
                         if let Some(tu) = tool_use_id {
                             frame["tool_use_id"] = Value::String(tu.to_string());
                         }
-                        let sock = resolve_sock()?;
-                        crate::mcp::call_agent_sock(&sock, &frame)?;
+                        send_lifecycle_frame(&frame);
                     }
                     Ok("{}".to_string())
                 }
@@ -1590,8 +1607,7 @@ pub fn run_claude_hook(input: &str, agent_sock: Option<&Path>) -> Result<String,
                             if let Some(pn) = pin_name {
                                 frame["pin_name"] = Value::String(pn.to_string());
                             }
-                            let sock = resolve_sock()?;
-                            crate::mcp::call_agent_sock(&sock, &frame)?;
+                            send_lifecycle_frame(&frame);
                         }
                     }
                     Ok("{}".to_string())
@@ -1613,8 +1629,7 @@ pub fn run_claude_hook(input: &str, agent_sock: Option<&Path>) -> Result<String,
                 "event": "stop",
                 "agent_id": agent_id,
             });
-            let sock = resolve_sock()?;
-            crate::mcp::call_agent_sock(&sock, &frame)?;
+            send_lifecycle_frame(&frame);
             Ok("{}".to_string())
         }
         other => Err(format!("unsupported hook_event_name '{other}'")),

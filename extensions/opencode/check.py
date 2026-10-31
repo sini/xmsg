@@ -265,6 +265,72 @@ def serve():
 
 server = serve()
 
+# XH1-D4: Direct unit check on xmsg.ts (`setup` 2.x with undefined `ctx.session.get` response,
+# and `run` with empty `sessionID` refused before `session.get` or socket send).
+plugin_ts_copy = os.path.join(home, ".config", "opencode", "plugin", "xmsg.ts")
+d4_node_script = """
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN_TS).href);
+const plugin = mod.default;
+const tools = {};
+let getCalledWithEmpty = false;
+const ctx = {
+  session: {
+    get: async ({ sessionID }) => {
+      if (!sessionID) getCalledWithEmpty = true;
+      return undefined;
+    },
+    prompt: async () => {},
+    hook: async () => ({ dispose: async () => {} }),
+  },
+  tool: {
+    transform: async (cb) => {
+      cb({
+        add: (def) => {
+          tools[def.name] = def;
+        },
+      });
+      return { dispose: async () => {} };
+    },
+  },
+  event: {
+    subscribe: async function* ({ signal }) {
+      await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+    },
+  },
+};
+
+const cleanup = await plugin.setup(ctx);
+try {
+  // 1. Empty sessionID is refused with 'xmsg: tool call has no sessionID' without calling session.get
+  await assert.rejects(
+    () => tools.xmsg_list.execute({}, { sessionID: "" }),
+    /xmsg: tool call has no sessionID/,
+    "XH1-D4: empty sessionID must throw 'xmsg: tool call has no sessionID'"
+  );
+  assert.equal(getCalledWithEmpty, false, "XH1-D4: session.get must not be called when sessionID is empty");
+
+  // 2. When ctx.session.get({ sessionID }) returns undefined on 2.x, parentOf uses ?.parentID
+  // and does not throw TypeError: Cannot read properties of undefined (reading 'parentID')
+  const res = await tools.xmsg_list.execute({}, { sessionID: "ses_ephemeral_2x" });
+  const parsed = JSON.parse(res.content);
+  assert.equal(parsed.status, "ok", `XH1-D4: expected status ok from xmsg_list, got: ${res.content}`);
+} finally {
+  await cleanup();
+}
+"""
+d4_res = subprocess.run(
+    ["node", "--experimental-transform-types", "--input-type=module", "-e", d4_node_script],
+    env=dict(env, PLUGIN_TS=plugin_ts_copy),
+    capture_output=True,
+    text=True,
+)
+if d4_res.returncode != 0:
+    fail(f"XH1-D4 node unit check failed (rc={d4_res.returncode}):\nstdout: {d4_res.stdout}\nstderr: {d4_res.stderr}")
+ok("XH1-D4: 2.x parentOf handles undefined session.get and run() rejects empty sessionID")
+
 mock_port = free_port()
 mock = http.server.ThreadingHTTPServer(("127.0.0.1", mock_port), Mock)
 threading.Thread(target=mock.serve_forever, daemon=True).start()

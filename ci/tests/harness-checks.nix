@@ -177,10 +177,17 @@
 
       opencodeCheck =
         name: opencode:
-        pkgs.runCommand "xmsg-${name}" { nativeBuildInputs = [ pkgs.python3 ]; } ''
-          python3 ${../../extensions/opencode/check.py} ${lib.getExe xmsgPkg} ${lib.getExe opencode} ${opencodePlugin}
-          touch $out
-        '';
+        pkgs.runCommand "xmsg-${name}"
+          {
+            nativeBuildInputs = [
+              pkgs.python3
+              pkgs.nodejs
+            ];
+          }
+          ''
+            python3 ${../../extensions/opencode/check.py} ${lib.getExe xmsgPkg} ${lib.getExe opencode} ${opencodePlugin}
+            touch $out
+          '';
 
       nodeCheck =
         name: script:

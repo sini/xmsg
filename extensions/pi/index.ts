@@ -557,6 +557,7 @@ export class XmsgPiBridge {
       execute: async (_toolCallId, params: any) => {
         const req = {
           action: "send",
+          schema_version: 2,
           to: params.to,
           text: params.text,
         };
@@ -589,6 +590,7 @@ export class XmsgPiBridge {
       execute: async (_toolCallId, params: any) => {
         const req = {
           action: "reply",
+          schema_version: 2,
           message_id: params.message_id,
           text: params.text,
         };
@@ -624,7 +626,7 @@ export class XmsgPiBridge {
       }),
       execute: async (_toolCallId, params: any) => {
         const wait = Math.min(params.wait ?? 0, 60);
-        const req = { action: "replies", message_id: params.message_id, wait };
+        const req = { action: "replies", schema_version: 2, message_id: params.message_id, wait };
         const resp = await this.callAgentSock(req);
         if (resp.status === "ok") {
           return {

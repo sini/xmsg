@@ -213,8 +213,8 @@ impl Ha9Harness {
                 proc_root: proc_root.clone(),
                 agy_bin: "agy".to_string(),
                 trusted_agy_exes: Vec::new(),
-                    brain_dir: std::path::PathBuf::new(),
-    },
+                brain_dir: std::path::PathBuf::new(),
+            },
             agy_store: xmsg::agy::new_agy_store(),
             pi_store: xmsg::pi::new_pi_store(),
             pi_notify_tx,
@@ -533,7 +533,7 @@ async fn test_ha9_o1_hook_stamp_and_fail_closed() {
     );
     assert_eq!(v1["hookSpecificOutput"]["updatedInput"]["to"], "recip");
 
-    // 2. PreToolUse WITHOUT `agent_id`, whose `tool_input.as_agent` names a child -> overwrites with `""`.
+    // 2a. PreToolUse WITHOUT `agent_id`, whose `tool_input.as_agent` names a child -> removes `as_agent` from `updatedInput`.
     let (rc2, out2, err2) = run_hook_stdin(
         &json!({
             "hook_event_name": "PreToolUse",
@@ -548,10 +548,43 @@ async fn test_ha9_o1_hook_stamp_and_fail_closed() {
     );
     assert_eq!(rc2, 0, "stderr: {err2}");
     let v2: Value = serde_json::from_str(out2.trim()).expect("valid hook JSON output");
+    assert!(
+        v2["hookSpecificOutput"]["updatedInput"].is_object(),
+        "O1/XH1-D1: PreToolUse without agent_id must emit updatedInput when stripping spoofed as_agent: {v2}"
+    );
+    assert!(
+        v2["hookSpecificOutput"]["updatedInput"]
+            .get("as_agent")
+            .is_none(),
+        "O1/XH1-D1: PreToolUse without agent_id must remove spoofed tool_input.as_agent: {v2}"
+    );
+    assert_eq!(v2["hookSpecificOutput"]["updatedInput"]["to"], "recip");
+
+    // 2b. PreToolUse WITHOUT `agent_id` and WITHOUT `tool_input.as_agent` -> emits no `updatedInput` and no `as_agent`.
+    let (rc2b, out2b, err2b) = run_hook_stdin(
+        &json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "mcp__plugin_hm_xmsg__send",
+            "tool_input": {
+                "to": "recip",
+                "text": "hello"
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(rc2b, 0, "stderr: {err2b}");
+    assert!(
+        !out2b.contains("as_agent"),
+        "XH1-D1: root PreToolUse without spoofed as_agent must not emit as_agent: {out2b}"
+    );
+    let v2b: Value = serde_json::from_str(out2b.trim()).expect("valid hook JSON output");
     assert_eq!(
-        v2["hookSpecificOutput"]["updatedInput"]["as_agent"],
-        "",
-        "O1: PreToolUse without agent_id must overwrite tool_input.as_agent with empty string: {v2}"
+        v2b["hookSpecificOutput"]["permissionDecision"], "allow",
+        "{v2b}"
+    );
+    assert!(
+        v2b["hookSpecificOutput"].get("updatedInput").is_none(),
+        "XH1-D1: root PreToolUse without spoofed as_agent must omit updatedInput: {v2b}"
     );
 
     // 3. Malformed stdin -> exit 2 and no `updatedInput`.
@@ -1920,4 +1953,220 @@ async fn test_ha9_d6_as_agent_equals_parent_session_id() {
         inbox_resp["error"], "denied",
         "D6: inbox with as_agent == own session_id must be refused 'denied': {inbox_resp}"
     );
+}
+
+// =============================================================================
+// XH1 (D1 & D2):
+// - D1: `xmsg::mcp::execute_tool` never forwards an empty/whitespace `as_agent`
+//   onto `agent.sock` for `send`, `reply`, or `inbox`.
+// - D2: `SubagentStart`, `PostToolUse`, and `SubagentStop` fail open (`exit 0`,
+//   `"{}"`) when `agent.sock` is unreachable, and a child whose `SubagentStart`
+//   never reached the daemon is stamped with `as_agent = <child_id>` by
+//   `PreToolUse` and refused `denied` (`NotRecipient`) by `agent.sock` — never
+//   resolving as the parent.
+// =============================================================================
+#[tokio::test]
+async fn test_xh1_d1_d2_mcp_strips_empty_as_agent_and_unregistered_child_never_acts_as_parent() {
+    // --- D1: `execute_tool` never forwards empty/whitespace `as_agent` on `agent.sock` ---
+    let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let sock_path = dir.path().join("agent.sock");
+    let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+    let server_task = tokio::spawn(async move {
+        let mut received = Vec::new();
+        for _ in 0..3 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, mut w) = stream.into_split();
+            let mut reader = BufReader::new(r);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let val: Value = serde_json::from_str(line.trim()).unwrap();
+            let action = val["action"].as_str().unwrap_or("").to_string();
+            received.push(val);
+            let resp = if action == "reply" {
+                json!({
+                    "status": "ok",
+                    "reply": {
+                        "pushedMessageId": "01REP",
+                        "pushOutcome": "pushed"
+                    }
+                })
+            } else {
+                json!({
+                    "status": "ok",
+                    "message_id": "01MSG",
+                    "address": "recip@node",
+                    "outcome": "delivered",
+                    "messages": []
+                })
+            };
+            w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+        }
+        received
+    });
+
+    let sock_clone = sock_path.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut cfg = xmsg::mcp::McpConfig::new(Vec::new(), "http://127.0.0.1:1".to_string());
+        cfg.http_sock = None;
+        cfg.agent_sock = sock_clone;
+        let client = reqwest::blocking::Client::new();
+        let r1 = xmsg::mcp::execute_tool(
+            &cfg,
+            &client,
+            "send",
+            &json!({ "to": "recip", "text": "hi", "as_agent": "" }),
+        );
+        assert_ne!(r1["isError"], Value::Bool(true), "send failed: {r1}");
+        let r2 = xmsg::mcp::execute_tool(
+            &cfg,
+            &client,
+            "reply",
+            &json!({ "message_id": "01M", "text": "yo", "as_agent": "   " }),
+        );
+        assert_ne!(r2["isError"], Value::Bool(true), "reply failed: {r2}");
+        let r3 = xmsg::mcp::execute_tool(
+            &cfg,
+            &client,
+            "inbox",
+            &json!({ "wait": 0, "as_agent": "" }),
+        );
+        assert_ne!(r3["isError"], Value::Bool(true), "inbox failed: {r3}");
+    })
+    .await
+    .unwrap();
+
+    let frames = server_task.await.unwrap();
+    assert_eq!(frames.len(), 3);
+    for f in &frames {
+        assert!(
+            f.get("as_agent").is_none(),
+            "XH1-D1: mcp.rs must not forward empty/whitespace as_agent onto agent.sock: {f}"
+        );
+    }
+
+    // --- D2: Lifecycle hooks fail open when `agent.sock` is unreachable ---
+    for lifecycle_payload in [
+        json!({
+            "hook_event_name": "SubagentStart",
+            "agent_id": "unregistered_child_1",
+            "agent_type": "Explore"
+        }),
+        json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Agent",
+            "tool_input": { "name": "helper" },
+            "tool_response": { "agentId": "unregistered_child_1" }
+        }),
+        json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "SendMessage",
+            "tool_input": { "to": "helper" },
+            "tool_response": { "resumedAgentId": "unregistered_child_1" }
+        }),
+        json!({
+            "hook_event_name": "SubagentStop",
+            "agent_id": "unregistered_child_1"
+        }),
+    ] {
+        let (rc, out, _err) = run_hook_stdin(&lifecycle_payload.to_string());
+        assert_eq!(
+            rc, 0,
+            "XH1-D2: lifecycle hook must fail-open (exit 0) when agent.sock is unreachable: {lifecycle_payload}"
+        );
+        assert_eq!(
+            out.trim(),
+            "{}",
+            "XH1-D2: lifecycle hook stdout must be '{{}}'"
+        );
+    }
+
+    // --- D2 Security Proof: When `SubagentStart` failed to reach the daemon, the
+    // unregistered child's `PreToolUse` stamps `as_agent = <child_id>` and `agent.sock`
+    // refuses `send`, `reply`, and `inbox` as `denied` (`NotRecipient`) — never acting as parent. ---
+    let h = Ha9Harness::start(3600).await;
+    let p_sock = SocketListener::start("p_inbox_d2").await;
+    let r_sock = SocketListener::start("r_inbox_d2").await;
+
+    let p_id = h
+        .register_claude(4000, "claude-p", "parent-p", &p_sock.sock_path)
+        .await;
+    let r_id = h
+        .register_claude(5000, "claude-r", "recip-r", &r_sock.sock_path)
+        .await;
+
+    // Seed a message to `p_id` so we have a valid `message_id` that `parent-p` is recipient of.
+    h.set_caller_parent(5000);
+    let seed = h
+        .agent_frame(json!({
+            "action": "send",
+            "to": p_id,
+            "text": "for parent only",
+        }))
+        .await;
+    assert_eq!(seed["status"], "ok", "{seed}");
+    let seed_msg_id = seed["message_id"].as_str().unwrap().to_string();
+    let _ = p_sock.wait_for_lines(1).await;
+
+    // Switch caller to parent 4000's process tree, and run `PreToolUse` for `unregistered_child_1`.
+    h.set_caller_parent(4000);
+    let (rc_pre, out_pre, err_pre) = run_hook_stdin(
+        &json!({
+            "hook_event_name": "PreToolUse",
+            "agent_id": "unregistered_child_1",
+            "tool_name": "mcp__plugin_hm_xmsg__send",
+            "tool_input": {
+                "to": r_id,
+                "text": "attempt from unregistered child"
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(rc_pre, 0, "stderr: {err_pre}");
+    let pre_val: Value = serde_json::from_str(out_pre.trim()).unwrap();
+    let stamped_as_agent = pre_val["hookSpecificOutput"]["updatedInput"]["as_agent"]
+        .as_str()
+        .unwrap();
+    assert_eq!(stamped_as_agent, "unregistered_child_1");
+
+    for frame in [
+        json!({
+            "action": "send",
+            "to": r_id,
+            "text": "attempt from unregistered child",
+            "as_agent": stamped_as_agent,
+        }),
+        json!({
+            "action": "reply",
+            "message_id": seed_msg_id,
+            "text": "reply from unregistered child",
+            "as_agent": stamped_as_agent,
+        }),
+        json!({
+            "action": "inbox",
+            "wait": 0,
+            "as_agent": stamped_as_agent,
+        }),
+    ] {
+        let resp = h.agent_frame(frame.clone()).await;
+        assert_eq!(
+            resp["status"], "error",
+            "XH1-D2 security: unregistered child call must be refused, not act as parent: {resp}"
+        );
+        assert_eq!(
+            resp["error"], "denied",
+            "XH1-D2 security: unregistered child call must be refused 'denied': {resp}"
+        );
+        assert!(
+            resp["detail"]
+                .as_str()
+                .unwrap_or("")
+                .contains("subagent 'unregistered_child_1' is not bound under"),
+            "XH1-D2 security: expected unbound subagent error detail, got: {resp}"
+        );
+    }
 }

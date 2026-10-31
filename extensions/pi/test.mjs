@@ -204,6 +204,13 @@ async function runTest3() {
               outcome: "delivered",
             }) + "\n"
           );
+        } else if (receivedReq.action === "replies") {
+          socket.write(
+            JSON.stringify({
+              status: "ok",
+              replies: [{ seq: 1, text: "stored reply" }],
+            }) + "\n"
+          );
         } else if (receivedReq.message_id === "msg-valid") {
           socket.write(
             JSON.stringify({
@@ -261,6 +268,7 @@ async function runTest3() {
   );
 
   assert.equal(receivedReq.action, "reply");
+  assert.equal(receivedReq.schema_version, 2, "XH1-D3: reply frame must stamp schema_version: 2");
   assert.equal(receivedReq.message_id, "msg-valid");
   assert.equal(receivedReq.messageId, undefined);
   assert.equal(receivedReq.text, "Hello from Pi!");
@@ -293,11 +301,32 @@ async function runTest3() {
   );
 
   assert.equal(receivedReq.action, "send");
+  assert.equal(receivedReq.schema_version, 2, "XH1-D3: send frame must stamp schema_version: 2");
   assert.equal(receivedReq.to, "victim-session");
   assert.equal(receivedReq.text, "Hello from Pi via agent.sock");
-  assert.deepEqual(Object.keys(receivedReq).sort(), ["action", "text", "to"]);
+  assert.deepEqual(Object.keys(receivedReq).sort(), ["action", "schema_version", "text", "to"]);
   assert.equal(result3.details.address, "victim-session@node");
   assert.equal(result3.details.message_id, "msg-sent-1");
+
+  // 4. Successful replies over agent.sock with schema_version: 2
+  bridge.registerRepliesTool();
+  const repliesTool = mockPi.tools.find((t) => t.name === "replies");
+  assert.ok(repliesTool);
+
+  const result4 = await repliesTool.execute(
+    "call-4",
+    { message_id: "msg-sent-1", wait: 3 },
+    undefined,
+    undefined,
+    { sessionManager: { getSessionId: () => "pi-sess-replier" } },
+  );
+
+  assert.equal(receivedReq.action, "replies");
+  assert.equal(receivedReq.schema_version, 2, "XH1-D3: replies frame must stamp schema_version: 2");
+  assert.equal(receivedReq.message_id, "msg-sent-1");
+  assert.equal(receivedReq.wait, 3);
+  assert.deepEqual(Object.keys(receivedReq).sort(), ["action", "message_id", "schema_version", "wait"]);
+  assert.equal(result4.details.length, 1);
 
   await new Promise((r) => server.close(r));
   fs.rmSync(tmpDir, { recursive: true, force: true });
