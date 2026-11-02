@@ -134,8 +134,7 @@ static PEERPIDFD_FALLBACK_WARNED: std::sync::atomic::AtomicBool =
 static FORCE_PEERPIDFD_ERRNO: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 #[cfg(target_os = "linux")]
-static FORCE_PIDFD_PID: std::sync::atomic::AtomicI64 =
-    std::sync::atomic::AtomicI64::new(i64::MIN);
+static FORCE_PIDFD_PID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(i64::MIN);
 
 /// Test seam: forces `getsockopt(SO_PEERPIDFD)` to fail with `errno` (or `0` to use the kernel).
 pub fn set_force_peerpidfd_errno_for_test(errno: i32) {

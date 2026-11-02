@@ -185,6 +185,7 @@ pub fn assemble_envelope(from_name: &str, sanitized_body: &str) -> String {
 /// Serializes typed `InboxLine` into JSON with serde_json, appending a single `\n`.
 /// Never uses format! or string concatenation for the JSON structure.
 pub fn encode_transport_line(from_name: &str, raw_body: &str) -> Result<String, AppError> {
+    crate::fed::validate_no_control_chars("from_name", from_name)?;
     let sanitized_body = sanitize_body(raw_body);
     let envelope = assemble_envelope(from_name, &sanitized_body);
 
@@ -204,6 +205,9 @@ pub fn encode_transport_line(from_name: &str, raw_body: &str) -> Result<String, 
 
 /// Delivers a single newline-delimited JSON line to the target Unix domain socket.
 pub async fn deliver_to_socket(socket_path: &Path, line: &str) -> Result<(), AppError> {
+    crate::registry::validate_messaging_socket_path(socket_path)
+        .map_err(|e| AppError::InboxUnavailable(format!("invalid messaging socket path: {e}")))?;
+
     let connect_fut = UnixStream::connect(socket_path);
     let mut stream = match timeout(SOCKET_TIMEOUT, connect_fut).await {
         Ok(Ok(s)) => s,

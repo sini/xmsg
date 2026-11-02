@@ -57,7 +57,7 @@ fn cell_1_accept_trusted_exe_and_lock_open() {
     let proc_locks = tmp.path().join("locks");
     let presence_dir = tmp.path().join("presence");
     fs::create_dir_all(&presence_dir).unwrap();
-    let lock_file = presence_dir.join("conv-1.lock");
+    let lock_file = presence_dir.join("0199cecf-0001-7000-8000-000000000001.lock");
     fs::write(&lock_file, "lock").unwrap();
     let meta = fs::metadata(&lock_file).unwrap();
     let dev = meta.dev();
@@ -89,7 +89,7 @@ fn cell_1_accept_trusted_exe_and_lock_open() {
     setup_mock_process(&proc_root, 3000, 2000, None, None, "2000", None);
 
     let req = AgyRegisterRequest {
-        conversation_id: "conv-1".to_string(),
+        conversation_id: "0199cecf-0001-7000-8000-000000000001".to_string(),
         ls_address: "127.0.0.1:4000".to_string(),
         csrf_token: "secret".to_string(),
     };
@@ -108,7 +108,7 @@ fn cell_1_accept_trusted_exe_and_lock_open() {
 
     assert_eq!(reg.pid, 2000);
     assert_eq!(reg.starttime, "1000");
-    assert_eq!(reg.session_key, "conv-1");
+    assert_eq!(reg.session_key, "0199cecf-0001-7000-8000-000000000001");
 }
 
 /// Cell 2: Refuse - ancestor has file open but untrusted exe (argv claims agy, exe differs).
@@ -121,7 +121,7 @@ fn cell_2_refuse_untrusted_exe() {
     fs::create_dir_all(&presence_dir).unwrap();
     fs::write(&proc_locks, "").unwrap();
 
-    let lock_file = presence_dir.join("conv-2.lock");
+    let lock_file = presence_dir.join("0199cecf-0002-7000-8000-000000000002.lock");
     fs::write(&lock_file, "lock").unwrap();
 
     let trusted_agy = tmp.path().join("trusted_agy");
@@ -144,7 +144,7 @@ fn cell_2_refuse_untrusted_exe() {
     setup_mock_process(&proc_root, 3000, 2000, None, None, "2000", None);
 
     let req = AgyRegisterRequest {
-        conversation_id: "conv-2".to_string(),
+        conversation_id: "0199cecf-0002-7000-8000-000000000002".to_string(),
         ls_address: "127.0.0.1:4000".to_string(),
         csrf_token: "secret".to_string(),
     };
@@ -178,7 +178,7 @@ fn cell_3_refuse_lock_not_open() {
     fs::create_dir_all(&presence_dir).unwrap();
     fs::write(&proc_locks, "").unwrap();
 
-    let lock_file = presence_dir.join("conv-3.lock");
+    let lock_file = presence_dir.join("0199cecf-0003-7000-8000-000000000003.lock");
     fs::write(&lock_file, "lock").unwrap();
 
     let dummy_agy = tmp.path().join("trusted_agy");
@@ -190,7 +190,7 @@ fn cell_3_refuse_lock_not_open() {
     setup_mock_process(&proc_root, 3000, 2000, None, None, "2000", None);
 
     let req = AgyRegisterRequest {
-        conversation_id: "conv-3".to_string(),
+        conversation_id: "0199cecf-0003-7000-8000-000000000003".to_string(),
         ls_address: "127.0.0.1:4000".to_string(),
         csrf_token: "secret".to_string(),
     };
@@ -224,7 +224,7 @@ fn cell_4_refuse_non_ancestor_holder() {
     fs::create_dir_all(&presence_dir).unwrap();
     fs::write(&proc_locks, "").unwrap();
 
-    let lock_file = presence_dir.join("conv-4.lock");
+    let lock_file = presence_dir.join("0199cecf-0004-7000-8000-000000000004.lock");
     fs::write(&lock_file, "lock").unwrap();
 
     let dummy_agy = tmp.path().join("trusted_agy");
@@ -246,7 +246,7 @@ fn cell_4_refuse_non_ancestor_holder() {
     setup_mock_process(&proc_root, 3000, 2000, None, None, "2000", None);
 
     let req = AgyRegisterRequest {
-        conversation_id: "conv-4".to_string(),
+        conversation_id: "0199cecf-0004-7000-8000-000000000004".to_string(),
         ls_address: "127.0.0.1:4000".to_string(),
         csrf_token: "secret".to_string(),
     };
@@ -274,11 +274,11 @@ fn cell_5_refuse_no_trusted_exe_configured() {
     let presence_dir = tmp.path().join("presence");
     fs::create_dir_all(&presence_dir).unwrap();
 
-    let lock_file = presence_dir.join("conv-5.lock");
+    let lock_file = presence_dir.join("0199cecf-0005-7000-8000-000000000005.lock");
     fs::write(&lock_file, "lock").unwrap();
 
     let req = AgyRegisterRequest {
-        conversation_id: "conv-5".to_string(),
+        conversation_id: "0199cecf-0005-7000-8000-000000000005".to_string(),
         ls_address: "127.0.0.1:4000".to_string(),
         csrf_token: "secret".to_string(),
     };
@@ -312,7 +312,7 @@ fn cell_6_refuse_symlinked_presence_path_inode_mismatch() {
     fs::create_dir_all(&presence_dir).unwrap();
     fs::write(&proc_locks, "").unwrap();
 
-    let real_presence_file = presence_dir.join("conv-6.lock");
+    let real_presence_file = presence_dir.join("0199cecf-0006-7000-8000-000000000006.lock");
     fs::write(&real_presence_file, "lock").unwrap();
 
     let different_file = tmp.path().join("unrelated_file.txt");
@@ -335,7 +335,7 @@ fn cell_6_refuse_symlinked_presence_path_inode_mismatch() {
     setup_mock_process(&proc_root, 3000, 2000, None, None, "2000", None);
 
     let req = AgyRegisterRequest {
-        conversation_id: "conv-6".to_string(),
+        conversation_id: "0199cecf-0006-7000-8000-000000000006".to_string(),
         ls_address: "127.0.0.1:4000".to_string(),
         csrf_token: "secret".to_string(),
     };
@@ -366,7 +366,7 @@ fn cell_7_refuse_linux_flock_mismatch() {
     let presence_dir = tmp.path().join("presence");
     fs::create_dir_all(&presence_dir).unwrap();
 
-    let lock_file = presence_dir.join("conv-7.lock");
+    let lock_file = presence_dir.join("0199cecf-0007-7000-8000-000000000007.lock");
     fs::write(&lock_file, "lock").unwrap();
     let meta = fs::metadata(&lock_file).unwrap();
     let dev = meta.dev();
@@ -397,7 +397,7 @@ fn cell_7_refuse_linux_flock_mismatch() {
     setup_mock_process(&proc_root, 3000, 2000, None, None, "2000", None);
 
     let req = AgyRegisterRequest {
-        conversation_id: "conv-7".to_string(),
+        conversation_id: "0199cecf-0007-7000-8000-000000000007".to_string(),
         ls_address: "127.0.0.1:4000".to_string(),
         csrf_token: "secret".to_string(),
     };
@@ -525,7 +525,7 @@ fn cell_parent_younger_than_child_or_unreadable_start_is_refused() {
     let proc_locks = tmp.path().join("locks");
     let presence_dir = tmp.path().join("presence");
     fs::create_dir_all(&presence_dir).unwrap();
-    let lock_file = presence_dir.join("conv-order.lock");
+    let lock_file = presence_dir.join("0199cecf-0009-7000-8000-000000000009.lock");
     fs::write(&lock_file, "lock").unwrap();
     let meta = fs::metadata(&lock_file).unwrap();
     fs::write(
@@ -542,7 +542,7 @@ fn cell_parent_younger_than_child_or_unreadable_start_is_refused() {
     fs::write(&dummy_agy, "binary").unwrap();
     let trusted_exes = vec![dummy_agy.clone()];
     let req = AgyRegisterRequest {
-        conversation_id: "conv-order".to_string(),
+        conversation_id: "0199cecf-0009-7000-8000-000000000009".to_string(),
         ls_address: "127.0.0.1:4000".to_string(),
         csrf_token: "secret".to_string(),
     };

@@ -70,9 +70,23 @@ fn create_claude_session_fixture(
     );
     fs::write(pid_dir.join("stat"), stat_content).unwrap();
 
+    let session_uuid = if xmsg::claim::is_uuid_shaped(session_id) {
+        session_id.to_string()
+    } else {
+        use sha2::{Digest, Sha256};
+        let h = hex::encode(Sha256::digest(session_id.as_bytes()));
+        format!(
+            "{}-{}-4{}-a{}-{}",
+            &h[0..8],
+            &h[8..12],
+            &h[13..16],
+            &h[17..20],
+            &h[20..32]
+        )
+    };
     let session_json = serde_json::json!({
         "pid": my_pid,
-        "sessionId": session_id,
+        "sessionId": session_uuid,
         "name": name,
         "cwd": "/workspace",
         "status": "idle",
@@ -158,7 +172,7 @@ async fn create_hub_test_node(
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
 
     let agy_store = new_agy_store();
@@ -313,7 +327,7 @@ async fn create_leaf_test_node(
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
 
     let agy_store = new_agy_store();
@@ -1192,8 +1206,12 @@ async fn test_oracle_6_delivered_frame_carries_principal_badge() {
     )
     .await;
 
-    let (_sock, _rx) =
-        create_claude_session_fixture(&hub.proc_root, &hub.sessions_dir, "sess-alice", "alice");
+    let (_sock, _rx) = create_claude_session_fixture(
+        &hub.proc_root,
+        &hub.sessions_dir,
+        "0199cecf-a11c-7000-8000-0000000a11ce",
+        "alice",
+    );
 
     // Send from hub via agent.sock
     let resp =
@@ -1222,7 +1240,10 @@ async fn test_oracle_6_delivered_frame_carries_principal_badge() {
     // Invariant: the one origin shape (A12): the sender's instance ID, the node that
     // attests it (the hub, where alice sent from) and her own label
     let origin = &deliver_resp["origin"];
-    assert_eq!(origin["id"], "sess-alice", "{origin}");
+    assert_eq!(
+        origin["id"], "0199cecf-a11c-7000-8000-0000000a11ce",
+        "{origin}"
+    );
     assert_eq!(origin["node"], "hub", "{origin}");
     assert_eq!(
         origin["label"], "alice",

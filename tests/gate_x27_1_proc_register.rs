@@ -119,8 +119,8 @@ impl Tree {
             proc_root: self.proc_root.clone(),
             agy_bin: "agy".to_string(),
             trusted_agy_exes: vec![self.trusted_exe.clone()],
-                brain_dir: std::path::PathBuf::new(),
-    }
+            brain_dir: std::path::PathBuf::new(),
+        }
     }
 }
 
@@ -316,20 +316,25 @@ async fn wait_registered(store: &AgyStore, conv: &str, within: Duration) -> Opti
 #[tokio::test(flavor = "multi_thread")]
 async fn oracle_1_attested_child_environ_registers() {
     let t = Tree::new();
-    t.agy("conv-1", 1000, &t.trusted_exe);
-    t.hold("conv-1", 1000);
+    t.agy("0199cecf-0001-7000-8000-000000000001", 1000, &t.trusted_exe);
+    t.hold("0199cecf-0001-7000-8000-000000000001", 1000);
     t.children(1000, 1000, &[]);
     t.children(1000, 1007, &[1001]);
     t.process(1001, 1000, None, None, "200");
     fs::write(t.environ(1001), agy_env("token-oracle-1")).unwrap();
 
     let store = new_agy_store();
-    let still = scan(&t, &store, &["conv-1"]).await.unwrap();
+    let still = scan(&t, &store, &["0199cecf-0001-7000-8000-000000000001"])
+        .await
+        .unwrap();
     assert!(
         still.is_empty(),
         "a registered conversation stops being watched"
     );
-    assert_eq!(csrf_of(&store, "conv-1").as_deref(), Some("token-oracle-1"));
+    assert_eq!(
+        csrf_of(&store, "0199cecf-0001-7000-8000-000000000001").as_deref(),
+        Some("token-oracle-1")
+    );
     let info = store.read().unwrap().values().next().cloned().unwrap();
     let creds = info.credentials.unwrap();
     assert_eq!(creds.ls_address, "127.0.0.1:44555");
@@ -347,17 +352,17 @@ async fn oracle_1_attested_child_environ_registers() {
 #[tokio::test(flavor = "multi_thread")]
 async fn oracle_1c_verification_runs_on_the_supplying_process() {
     let t = Tree::new();
-    t.agy("conv-1c", 5900, &t.trusted_exe);
-    t.hold("conv-1c", 5900);
+    t.agy("0199cecf-001c-7000-8000-00000000001c", 5900, &t.trusted_exe);
+    t.hold("0199cecf-001c-7000-8000-00000000001c", 5900);
     t.children(5900, 5900, &[5901]);
-    let lock = t.lock_file("conv-1c");
+    let lock = t.lock_file("0199cecf-001c-7000-8000-00000000001c");
     t.process(5901, 5900, Some(&t.trusted_exe), Some(&lock), "200");
     t.children(5901, 5901, &[5902]);
     t.process(5902, 5901, None, None, "300");
     fs::write(t.environ(5902), agy_env("token-1c")).unwrap();
 
     let req = xmsg::agy::AgyRegisterRequest {
-        conversation_id: "conv-1c".to_string(),
+        conversation_id: "0199cecf-001c-7000-8000-00000000001c".to_string(),
         ls_address: "127.0.0.1:44555".to_string(),
         csrf_token: "token-1c".to_string(),
     };
@@ -379,9 +384,11 @@ async fn oracle_1c_verification_runs_on_the_supplying_process() {
     );
 
     let store = new_agy_store();
-    assert!(scan(&t, &store, &["conv-1c"]).await.is_ok());
+    assert!(scan(&t, &store, &["0199cecf-001c-7000-8000-00000000001c"])
+        .await
+        .is_ok());
     assert_eq!(
-        csrf_of(&store, "conv-1c"),
+        csrf_of(&store, "0199cecf-001c-7000-8000-00000000001c"),
         None,
         "the scan must refuse what `register agy` from the supplying process refuses"
     );
@@ -399,13 +406,13 @@ async fn oracle_1c_verification_runs_on_the_supplying_process() {
 #[tokio::test(flavor = "multi_thread")]
 async fn oracle_1b_serve_watcher_registers_without_hook() {
     let t = Tree::new();
-    t.agy("conv-1b-a", 6000, &t.trusted_exe);
-    t.hold("conv-1b-a", 6000);
+    t.agy("0199cecf-01ba-7000-8000-0000000001ba", 6000, &t.trusted_exe);
+    t.hold("0199cecf-01ba-7000-8000-0000000001ba", 6000);
     t.children(6000, 6000, &[6001]);
     t.process(6001, 6000, None, None, "200");
     fs::write(t.environ(6001), agy_env("token-1b-a")).unwrap();
 
-    t.agy("conv-1b-b", 6100, &t.trusted_exe);
+    t.agy("0199cecf-01bb-7000-8000-0000000001bb", 6100, &t.trusted_exe);
     t.children(6100, 6100, &[6101]);
     t.process(6101, 6100, None, None, "200");
     fs::write(t.environ(6101), agy_env("token-1b-b")).unwrap();
@@ -415,39 +422,57 @@ async fn oracle_1b_serve_watcher_registers_without_hook() {
 
     // (a) no request of any kind: the watcher alone registers conv-1b-a.
     assert_eq!(
-        wait_registered(&store, "conv-1b-a", Duration::from_secs(5))
-            .await
-            .as_deref(),
+        wait_registered(
+            &store,
+            "0199cecf-01ba-7000-8000-0000000001ba",
+            Duration::from_secs(5)
+        )
+        .await
+        .as_deref(),
         Some("token-1b-a"),
         "the serve watcher must register an eligible conversation with no hook call"
     );
-    assert_eq!(check(&sock, "conv-1b-a")["hasCredentials"], true);
+    assert_eq!(
+        check(&sock, "0199cecf-01ba-7000-8000-0000000001ba")["hasCredentials"],
+        true
+    );
 
     // conv-1b-b's lock is not held yet: not eligible, not registered.
     tokio::time::sleep(Duration::from_millis(400)).await;
-    assert_eq!(csrf_of(&store, "conv-1b-b"), None);
+    assert_eq!(
+        csrf_of(&store, "0199cecf-01bb-7000-8000-0000000001bb"),
+        None
+    );
 
     // Held now, but nothing has armed it: the idle watcher reads nothing.
-    t.hold("conv-1b-b", 6100);
+    t.hold("0199cecf-01bb-7000-8000-0000000001bb", 6100);
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(
-        csrf_of(&store, "conv-1b-b"),
+        csrf_of(&store, "0199cecf-01bb-7000-8000-0000000001bb"),
         None,
         "with nothing armed the watcher must stay idle"
     );
 
     // (b) the hook's check arms it; the watcher registers it.
-    assert_eq!(check(&sock, "conv-1b-b")["watching"], true);
+    assert_eq!(
+        check(&sock, "0199cecf-01bb-7000-8000-0000000001bb")["watching"],
+        true
+    );
     let deadline = Instant::now() + Duration::from_secs(5);
-    while check(&sock, "conv-1b-b")["hasCredentials"] != true && Instant::now() < deadline {
+    while check(&sock, "0199cecf-01bb-7000-8000-0000000001bb")["hasCredentials"] != true
+        && Instant::now() < deadline
+    {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(
-        check(&sock, "conv-1b-b")["hasCredentials"],
+        check(&sock, "0199cecf-01bb-7000-8000-0000000001bb")["hasCredentials"],
         true,
         "check must arm the watcher for a conversation that became eligible"
     );
-    assert_eq!(csrf_of(&store, "conv-1b-b").as_deref(), Some("token-1b-b"));
+    assert_eq!(
+        csrf_of(&store, "0199cecf-01bb-7000-8000-0000000001bb").as_deref(),
+        Some("token-1b-b")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -463,8 +488,8 @@ async fn oracle_1b_serve_watcher_registers_without_hook() {
 // ---------------------------------------------------------------------------
 async fn oracle_2_outside(non_attested: bool, children: bool) {
     let t = Tree::new();
-    t.agy("conv-2a", 2000, &t.trusted_exe);
-    t.hold("conv-2a", 2000);
+    t.agy("0199cecf-002a-7000-8000-00000000002a", 2000, &t.trusted_exe);
+    t.hold("0199cecf-002a-7000-8000-00000000002a", 2000);
     // An in-subtree child without the variables, so the scan has a subtree to walk.
     t.process(2002, 2000, None, None, "200");
     if children {
@@ -475,8 +500,8 @@ async fn oracle_2_outside(non_attested: bool, children: bool) {
     let outsider = if non_attested {
         let other_exe = other_dir.path().join(t.trusted_exe.file_name().unwrap());
         fs::write(&other_exe, "").unwrap();
-        t.agy("conv-2b", 2100, &other_exe);
-        t.hold("conv-2b", 2100);
+        t.agy("0199cecf-002b-7000-8000-00000000002b", 2100, &other_exe);
+        t.hold("0199cecf-002b-7000-8000-00000000002b", 2100);
         t.process(2101, 2100, None, None, "200");
         if children {
             t.children(2100, 2100, &[2101]);
@@ -498,14 +523,26 @@ async fn oracle_2_outside(non_attested: bool, children: bool) {
     );
 
     let store = new_agy_store();
-    let res = scan(&t, &store, &["conv-2a", "conv-2b"]).await;
+    let res = scan(
+        &t,
+        &store,
+        &[
+            "0199cecf-002a-7000-8000-00000000002a",
+            "0199cecf-002b-7000-8000-00000000002b",
+        ],
+    )
+    .await;
     let mut checked = None;
     if !children {
         // The production server: its start-up sweep arms conv-2a, and the hook's check runs.
         let (_dir, sock) = start_server(t.config(), store.clone()).await;
         tokio::time::sleep(Duration::from_millis(400)).await;
-        let watching = check(&sock, "conv-2a")["watching"].clone();
-        let (code, out) = run_hook(env!("CARGO_BIN_EXE_xmsg"), &sock, "conv-2a");
+        let watching = check(&sock, "0199cecf-002a-7000-8000-00000000002a")["watching"].clone();
+        let (code, out) = run_hook(
+            env!("CARGO_BIN_EXE_xmsg"),
+            &sock,
+            "0199cecf-002a-7000-8000-00000000002a",
+        );
         checked = Some((watching, code, out));
     }
     stop.store(true, Ordering::SeqCst);
@@ -561,8 +598,8 @@ async fn oracle_2b_child_of_non_attested_agy_no_children() {
 #[tokio::test(flavor = "multi_thread")]
 async fn oracle_3_recycled_child_pid_starttime_mismatch_ignored() {
     let t = Tree::new();
-    t.agy("conv-3", 3000, &t.trusted_exe);
-    t.hold("conv-3", 3000);
+    t.agy("0199cecf-0003-7000-8000-000000000003", 3000, &t.trusted_exe);
+    t.hold("0199cecf-0003-7000-8000-000000000003", 3000);
     t.children(3000, 3000, &[3001]);
     t.process(3001, 3000, None, None, "200");
 
@@ -575,7 +612,7 @@ async fn oracle_3_recycled_child_pid_starttime_mismatch_ignored() {
     });
 
     let store = new_agy_store();
-    let res = scan(&t, &store, &["conv-3"]).await;
+    let res = scan(&t, &store, &["0199cecf-0003-7000-8000-000000000003"]).await;
     stop.store(true, Ordering::SeqCst);
     let opens = opens.join().unwrap();
 
@@ -601,8 +638,8 @@ async fn oracle_3_recycled_child_pid_starttime_mismatch_ignored() {
 #[tokio::test(flavor = "multi_thread")]
 async fn oracle_3b_pid_recycled_before_ancestry_check_never_read() {
     let t = Tree::new();
-    t.agy("conv-3b", 3100, &t.trusted_exe);
-    t.hold("conv-3b", 3100);
+    t.agy("0199cecf-003b-7000-8000-00000000003b", 3100, &t.trusted_exe);
+    t.hold("0199cecf-003b-7000-8000-00000000003b", 3100);
     t.children(3100, 3100, &[3101]);
     t.process(3101, 3100, None, None, "200");
 
@@ -619,7 +656,7 @@ async fn oracle_3b_pid_recycled_before_ancestry_check_never_read() {
     });
 
     let store = new_agy_store();
-    let res = scan(&t, &store, &["conv-3b"]).await;
+    let res = scan(&t, &store, &["0199cecf-003b-7000-8000-00000000003b"]).await;
     stop.store(true, Ordering::SeqCst);
     let stat_reads = stat_reads.join().unwrap();
     let environ_opens = environ_opens.join().unwrap();
@@ -643,8 +680,8 @@ async fn oracle_3b_pid_recycled_before_ancestry_check_never_read() {
 #[tokio::test(flavor = "multi_thread")]
 async fn oracle_3c_holder_recycled_before_listing_children_never_read() {
     let t = Tree::new();
-    t.agy("conv-3c", 3200, &t.trusted_exe);
-    t.hold("conv-3c", 3200);
+    t.agy("0199cecf-003c-7000-8000-00000000003c", 3200, &t.trusted_exe);
+    t.hold("0199cecf-003c-7000-8000-00000000003c", 3200);
     t.children(3200, 3200, &[3201]);
     t.process(3201, 3200, None, None, "200");
 
@@ -660,7 +697,7 @@ async fn oracle_3c_holder_recycled_before_listing_children_never_read() {
     });
 
     let store = new_agy_store();
-    let res = scan(&t, &store, &["conv-3c"]).await;
+    let res = scan(&t, &store, &["0199cecf-003c-7000-8000-00000000003c"]).await;
     stop.store(true, Ordering::SeqCst);
     let holder_reads = holder_reads.join().unwrap();
     let child_stat_reads = child_stat_reads.join().unwrap();
@@ -687,18 +724,18 @@ async fn oracle_3c_holder_recycled_before_listing_children_never_read() {
 #[tokio::test(flavor = "multi_thread")]
 async fn oracle_4_unreadable_environ_leaves_registration_to_the_hook() {
     let t = Tree::new();
-    t.agy("conv-4", 4000, &t.trusted_exe);
-    t.hold("conv-4", 4000);
+    t.agy("0199cecf-0004-7000-8000-000000000004", 4000, &t.trusted_exe);
+    t.hold("0199cecf-0004-7000-8000-000000000004", 4000);
     t.children(4000, 4000, &[4001]);
     t.process(4001, 4000, None, None, "200");
     fs::write(t.environ(4001), b"secret").unwrap();
     fs::set_permissions(t.environ(4001), fs::Permissions::from_mode(0o000)).unwrap();
 
     let store = new_agy_store();
-    let res = scan(&t, &store, &["conv-4"]).await;
+    let res = scan(&t, &store, &["0199cecf-0004-7000-8000-000000000004"]).await;
     assert_eq!(
         res,
-        Ok(vec!["conv-4".to_string()]),
+        Ok(vec!["0199cecf-0004-7000-8000-000000000004".to_string()]),
         "unreadable environ: no fatal error, conversation stays watched"
     );
     assert!(store.read().unwrap().is_empty(), "store must remain empty");
@@ -706,10 +743,10 @@ async fn oracle_4_unreadable_environ_leaves_registration_to_the_hook() {
     let (_dir, sock) = start_server(t.config(), store.clone()).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     let bin = env!("CARGO_BIN_EXE_xmsg");
-    let (code1, out1) = run_hook(bin, &sock, "conv-4");
+    let (code1, out1) = run_hook(bin, &sock, "0199cecf-0004-7000-8000-000000000004");
     assert_eq!(code1, 0);
     assert_eq!(out1, serde_json::json!({}), "turn 1: stand-down");
-    let (code2, out2) = run_hook(bin, &sock, "conv-4");
+    let (code2, out2) = run_hook(bin, &sock, "0199cecf-0004-7000-8000-000000000004");
     assert_eq!(code2, 0);
     assert_hook_injects(&out2, "turn 2 with environ unreadable");
     assert!(store.read().unwrap().is_empty());
@@ -726,13 +763,13 @@ async fn oracle_4_unreadable_environ_leaves_registration_to_the_hook() {
 async fn oracle_5_hook_stand_down_mechanics() {
     let bin = env!("CARGO_BIN_EXE_xmsg");
     let t = Tree::new();
-    t.agy("conv-watched-standdown", 5000, &t.trusted_exe);
-    t.hold("conv-watched-standdown", 5000);
+    t.agy("0199cecf-0005-7000-8000-000000000005", 5000, &t.trusted_exe);
+    t.hold("0199cecf-0005-7000-8000-000000000005", 5000);
     t.children(5000, 5000, &[]);
 
     let (_dir, sock) = start_server(t.config(), new_agy_store()).await;
 
-    let (code1, out1) = run_hook(bin, &sock, "conv-watched-standdown");
+    let (code1, out1) = run_hook(bin, &sock, "0199cecf-0005-7000-8000-000000000005");
     assert_eq!(code1, 0);
     assert_eq!(
         out1,
@@ -740,12 +777,12 @@ async fn oracle_5_hook_stand_down_mechanics() {
         "turn 1 while watched must stand down and output {{}}"
     );
 
-    let (code2, out2) = run_hook(bin, &sock, "conv-watched-standdown");
+    let (code2, out2) = run_hook(bin, &sock, "0199cecf-0005-7000-8000-000000000005");
     assert_eq!(code2, 0);
     assert_hook_injects(&out2, "turn 2 still unregistered");
 
     // No presence lock held => A is not watching => inject on the first turn.
-    let (code_unw, out_unw) = run_hook(bin, &sock, "conv-unwatched-immediate");
+    let (code_unw, out_unw) = run_hook(bin, &sock, "0199cecf-0006-7000-8000-000000000006");
     assert_eq!(code_unw, 0);
     assert_hook_injects(&out_unw, "turn 1 unwatched");
 }

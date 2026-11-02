@@ -326,8 +326,18 @@ fn claude_session(sessions_dir: &Path, session_id: &str, name: &str) -> Arc<Mute
     let pid = std::process::id();
     let proc_start =
         xmsg::process::starttime(Path::new(xmsg::process::LIVE_PROC_ROOT), pid).unwrap();
+    let sess_uuid = if xmsg::claim::is_uuid_shaped(session_id) {
+        session_id.to_string()
+    } else {
+        use sha2::{Digest, Sha256};
+        let h = Sha256::digest(session_id.as_bytes());
+        format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-4{:01x}{:02x}-8{:01x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            h[0], h[1], h[2], h[3], h[4], h[5], h[6] & 0x0f, h[7], h[8] & 0x0f, h[9], h[10], h[11], h[12], h[13], h[14], h[15]
+        )
+    };
     let session = json!({
-        "pid": pid, "sessionId": session_id, "name": name, "cwd": "/workspace",
+        "pid": pid, "sessionId": sess_uuid, "name": name, "cwd": "/workspace",
         "status": "idle", "kind": "interactive", "startedAt": 1000, "updatedAt": 2000,
         "procStart": proc_start, "messagingSocketPath": sock_path.display().to_string(),
     });
@@ -1031,14 +1041,23 @@ async fn test_oracle_7_filters_match_names_and_ids() {
         let r = start(r_spec, None).await;
 
         let (mut sr, mut sw) = register_svc(&r, "genie-guard").await;
-        let impostor = claude_session(&r.sessions_dir, "sess-impostor", "genie-guard");
+        let impostor = claude_session(
+            &r.sessions_dir,
+            "0199cecf-0007-7000-8000-000000000007",
+            "genie-guard",
+        );
 
         let (status, body) = http_send(&s, "genie-guard@r", "to the service").await;
         assert_eq!(status, 202, "the service is admitted: {body}");
         let d = svc_poll(&mut sr, &mut sw).await;
         assert_eq!(d["text"], "to the service", "{d}");
 
-        let (status, body) = http_send(&s, "sess-impostor@r", "to the labelled instance").await;
+        let (status, body) = http_send(
+            &s,
+            "0199cecf-0007-7000-8000-000000000007@r",
+            "to the labelled instance",
+        )
+        .await;
         assert_eq!(
             status, 403,
             "an instance labelled genie-guard is not the service genie-guard: {body}"

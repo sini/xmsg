@@ -116,7 +116,7 @@ async fn create_fed_test_node(
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
 
     let agy_store = new_agy_store();
@@ -374,7 +374,11 @@ async fn test_oracle_1_peer_with_list_allowed() {
     .await;
 
     // Create a Claude session and a Svc daemon on Node A
-    let (_sock, _rx) = create_claude_session_fixture(&node_a.sessions_dir, "sess-a", "agent-a");
+    let (_sock, _rx) = create_claude_session_fixture(
+        &node_a.sessions_dir,
+        "0199cecf-000a-7000-8000-00000000000a",
+        "agent-a",
+    );
 
     let (mut daemon_reader, mut daemon_writer) = connect_svc(&node_a.reg_sock).await;
     let reg_frame = serde_json::json!({
@@ -410,8 +414,8 @@ async fn test_oracle_1_peer_with_list_allowed() {
 
     let claude_sess = sessions
         .iter()
-        .find(|s| s["address"] == "sess-a@host-a")
-        .expect("sess-a found, addressable as sess-a@host-a");
+        .find(|s| s["address"] == "0199cecf-000a-7000-8000-00000000000a@host-a")
+        .expect("0199cecf-000a-7000-8000-00000000000a found, addressable as 0199cecf-000a-7000-8000-00000000000a@host-a");
     assert_eq!(claude_sess["kind"], "instance");
     assert_eq!(claude_sess["node"], "host-a");
 
@@ -483,7 +487,11 @@ async fn test_oracle_2_peer_without_list_allowed_403() {
     .await;
 
     // Create session on Node A
-    let (_sock, _rx) = create_claude_session_fixture(&node_a.sessions_dir, "sess-a", "agent-a");
+    let (_sock, _rx) = create_claude_session_fixture(
+        &node_a.sessions_dir,
+        "0199cecf-000a-7000-8000-00000000000a",
+        "agent-a",
+    );
 
     // Node B queries /v1/recipients?node=host-a. XA5: a node that withholds `list` is
     // reported in the per-node status, not as an error of the whole list.
@@ -568,7 +576,11 @@ async fn test_oracle_3_peer_with_targets() {
     .await;
 
     // Create Claude session AND svc daemon on Node A
-    let (_sock, _rx) = create_claude_session_fixture(&node_a.sessions_dir, "sess-a", "agent-a");
+    let (_sock, _rx) = create_claude_session_fixture(
+        &node_a.sessions_dir,
+        "0199cecf-000a-7000-8000-00000000000a",
+        "agent-a",
+    );
 
     let (mut daemon_reader, mut daemon_writer) = connect_svc(&node_a.reg_sock).await;
     let reg_frame = serde_json::json!({
@@ -670,7 +682,11 @@ async fn test_oracle_4_no_cwd_or_pid() {
     .await;
 
     // Create session on Node A
-    let (_sock, _rx) = create_claude_session_fixture(&node_a.sessions_dir, "sess-a", "agent-a");
+    let (_sock, _rx) = create_claude_session_fixture(
+        &node_a.sessions_dir,
+        "0199cecf-000a-7000-8000-00000000000a",
+        "agent-a",
+    );
 
     // Check direct /fed/v2/sessions output first
     let (wire_entries, wire_status) = list_peer(&node_b.fed_state, "host-a").await;
@@ -805,10 +821,18 @@ async fn test_oracle_5_mcp_list_host() {
     )
     .await;
 
-    // Node A has sess-a
-    let (_sock_a, _rx_a) = create_claude_session_fixture(&node_a.sessions_dir, "sess-a", "agent-a");
-    // Node B has sess-b
-    let (_sock_b, _rx_b) = create_claude_session_fixture(&node_b.sessions_dir, "sess-b", "agent-b");
+    // Node A has 0199cecf-000a-7000-8000-00000000000a
+    let (_sock_a, _rx_a) = create_claude_session_fixture(
+        &node_a.sessions_dir,
+        "0199cecf-000a-7000-8000-00000000000a",
+        "agent-a",
+    );
+    // Node B has 0199cecf-000b-7000-8000-00000000000b
+    let (_sock_b, _rx_b) = create_claude_session_fixture(
+        &node_b.sessions_dir,
+        "0199cecf-000b-7000-8000-00000000000b",
+        "agent-b",
+    );
 
     let mcp_cfg = McpConfig {
         sessions_dirs: vec![node_b.sessions_dir.clone()],
@@ -836,16 +860,16 @@ async fn test_oracle_5_mcp_list_host() {
     .await
     .unwrap();
 
-    // 1. MCP list with host set to "host-a": must return remote entries (sess-a@host-a)
+    // 1. MCP list with host set to "host-a": must return remote entries (0199cecf-000a-7000-8000-00000000000a@host-a)
     assert_eq!(remote_call["isError"], false);
     let remote_text = remote_call["content"][0]["text"].as_str().unwrap();
     assert!(
-        remote_text.contains("sess-a@host-a"),
-        "MCP list with host=host-a must contain sess-a@host-a: {remote_text}"
+        remote_text.contains("0199cecf-000a-7000-8000-00000000000a@host-a"),
+        "MCP list with host=host-a must contain 0199cecf-000a-7000-8000-00000000000a@host-a: {remote_text}"
     );
     assert!(
-        !remote_text.contains("sess-b"),
-        "MCP list with host=host-a must NOT contain local session sess-b: {remote_text}"
+        !remote_text.contains("0199cecf-000b-7000-8000-00000000000b"),
+        "MCP list with host=host-a must NOT contain local session 0199cecf-000b-7000-8000-00000000000b: {remote_text}"
     );
 
     // 2. MCP list without host: must return local entries byte-for-byte identical to local /v1/sessions
@@ -927,7 +951,11 @@ async fn test_oracle_6_source_outside_from_cidr_refused() {
     .await;
 
     // Create session on Node A
-    let (_sock, _rx) = create_claude_session_fixture(&node_a.sessions_dir, "sess-a", "agent-a");
+    let (_sock, _rx) = create_claude_session_fixture(
+        &node_a.sessions_dir,
+        "0199cecf-000a-7000-8000-00000000000a",
+        "agent-a",
+    );
 
     // Node B connects from 127.0.0.1 to Node A
     let (entries, status) = list_peer(&node_b.fed_state, "host-a").await;

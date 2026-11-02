@@ -75,7 +75,7 @@ async fn start_harness(max_body: usize) -> TestHarness {
     let live_json = format!(
         r#"{{
             "pid": {my_pid},
-            "sessionId": "live-session-1234",
+            "sessionId": "0199cecf-1234-7000-8000-000000001234",
             "name": "my-worker",
             "cwd": "/workspace/project-a",
             "status": "idle",
@@ -92,7 +92,7 @@ async fn start_harness(max_body: usize) -> TestHarness {
     // 2. Dead session (PID not running)
     let dead_json = r#"{
         "pid": 4194302,
-        "sessionId": "dead-session-9999",
+        "sessionId": "0199cecf-9999-7000-8000-000000009999",
         "name": "dead-worker",
         "cwd": "/workspace/project-b",
         "status": "busy",
@@ -108,7 +108,7 @@ async fn start_harness(max_body: usize) -> TestHarness {
     let dead_sock_json = format!(
         r#"{{
             "pid": {my_pid},
-            "sessionId": "dead-sock-session",
+            "sessionId": "0199cecf-d000-7000-8000-00000000d000",
             "name": "dead-sock-worker",
             "cwd": "/workspace/project-c",
             "status": "busy",
@@ -125,7 +125,7 @@ async fn start_harness(max_body: usize) -> TestHarness {
     let twin1_json = format!(
         r#"{{
             "pid": {my_pid},
-            "sessionId": "twin-1111",
+            "sessionId": "0199cecf-1111-7000-8000-000000001111",
             "name": "twin-worker",
             "cwd": "/workspace/twin1",
             "status": "idle",
@@ -142,7 +142,7 @@ async fn start_harness(max_body: usize) -> TestHarness {
     let twin2_json = format!(
         r#"{{
             "pid": {my_pid},
-            "sessionId": "twin-2222",
+            "sessionId": "0199cecf-2222-7000-8000-000000002222",
             "name": "twin-worker",
             "cwd": "/workspace/twin2",
             "status": "idle",
@@ -169,8 +169,8 @@ async fn start_harness(max_body: usize) -> TestHarness {
             proc_root: PathBuf::from("/proc"),
             agy_bin: "agy".to_string(),
             trusted_agy_exes: Vec::new(),
-                brain_dir: std::path::PathBuf::new(),
-    },
+            brain_dir: std::path::PathBuf::new(),
+        },
         agy_store: xmsg::agy::new_agy_store(),
         pi_store: xmsg::pi::new_pi_store(),
         pi_notify_tx,
@@ -257,7 +257,10 @@ async fn test_e2e_recipients_list_and_query_200() {
     )
     .unwrap();
     assert_eq!(filtered.len(), 1);
-    assert_eq!(filtered[0]["address"], "live-session-1234@test-host");
+    assert_eq!(
+        filtered[0]["address"],
+        "0199cecf-1234-7000-8000-000000001234@test-host"
+    );
     assert_eq!(filtered[0]["label"], "my-worker");
 
     // Filter by kind
@@ -302,7 +305,10 @@ async fn test_e2e_recipient_by_name_200() {
         serde_json::from_value(res.json::<serde_json::Value>().await.unwrap()["recipients"].take())
             .unwrap();
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0]["address"], "live-session-1234@test-host");
+    assert_eq!(
+        entries[0]["address"],
+        "0199cecf-1234-7000-8000-000000001234@test-host"
+    );
     assert!(entries[0].get("messagingSocketPath").is_none());
 }
 
@@ -324,7 +330,10 @@ async fn test_e2e_post_message_accepted_202() {
         .unwrap();
     assert_eq!(res.status(), reqwest::StatusCode::ACCEPTED);
     let deliv: serde_json::Value = res.json().await.unwrap();
-    assert_eq!(deliv["address"], "live-session-1234@test-host");
+    assert_eq!(
+        deliv["address"],
+        "0199cecf-1234-7000-8000-000000001234@test-host"
+    );
     assert_eq!(deliv["outcome"], "delivered");
 
     tokio::time::sleep(Duration::from_millis(100)).await;

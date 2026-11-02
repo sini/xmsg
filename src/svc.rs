@@ -517,6 +517,72 @@ pub async fn handle_svc_connection_peer<
     Ok(())
 }
 
+pub const REGISTER_INITIAL_MAX_BYTES: usize = 65536;
+pub const REGISTER_INITIAL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Reads the initial newline-delimited registration frame with a byte cap and a timeout,
+/// shared by `run_register_server` and `run_leaf_register_server` (XB2 F6).
+pub async fn read_initial_register_line<R, W>(
+    buf_reader: &mut tokio::io::BufReader<R>,
+    writer: &mut W,
+    max_frame: usize,
+    timeout_dur: Duration,
+) -> Option<String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut byte_buf = Vec::new();
+    let read_res = tokio::time::timeout(
+        timeout_dur,
+        buf_reader
+            .take((max_frame + 1) as u64)
+            .read_until(b'\n', &mut byte_buf),
+    )
+    .await;
+
+    let n = match read_res {
+        Ok(Ok(n)) => n,
+        Ok(Err(e)) => {
+            tracing::warn!("register.sock read error: {e}");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!("register.sock connection timed out waiting for initial frame");
+            return None;
+        }
+    };
+
+    if n == 0 {
+        return None;
+    }
+
+    if byte_buf.len() > max_frame || (n >= max_frame && !byte_buf.ends_with(b"\n")) {
+        let err = serde_json::json!({
+            "status": "error",
+            "detail": "frame exceeds maximum allowed size"
+        });
+        let _ = writer.write_all(format!("{err}\n").as_bytes()).await;
+        return None;
+    }
+
+    if !byte_buf.ends_with(b"\n") {
+        return None;
+    }
+
+    match std::str::from_utf8(&byte_buf) {
+        Ok(s) => Some(s.to_string()),
+        Err(_) => {
+            let err = serde_json::json!({
+                "status": "error",
+                "detail": "invalid utf-8"
+            });
+            let _ = writer.write_all(format!("{err}\n").as_bytes()).await;
+            None
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_leaf_register_server(
     sock_path: PathBuf,
@@ -558,20 +624,24 @@ pub async fn run_leaf_register_server(
         let leaf_principal_clone = leaf_principal.clone();
 
         tokio::spawn(async move {
-            let (reader, writer) = stream.into_split();
+            let (reader, mut writer) = stream.into_split();
             let mut buf_reader = tokio::io::BufReader::new(reader);
-            let mut line = String::new();
-            if let Err(e) = buf_reader.read_line(&mut line).await {
-                tracing::warn!("failed to read registration frame: {e}");
+            let Some(line) = read_initial_register_line(
+                &mut buf_reader,
+                &mut writer,
+                REGISTER_INITIAL_MAX_BYTES,
+                REGISTER_INITIAL_TIMEOUT,
+            )
+            .await
+            else {
                 return;
-            }
+            };
 
             let val: serde_json::Value = match serde_json::from_str(&line) {
                 Ok(v) => v,
                 Err(e) => {
-                    let mut w = writer;
                     let err = serde_json::json!({ "status": "error", "detail": format!("invalid json: {e}") });
-                    let _ = w.write_all(format!("{err}\n").as_bytes()).await;
+                    let _ = writer.write_all(format!("{err}\n").as_bytes()).await;
                     return;
                 }
             };
@@ -579,9 +649,8 @@ pub async fn run_leaf_register_server(
             let req: SvcRegisterRequest = match serde_json::from_value(val) {
                 Ok(r) => r,
                 Err(e) => {
-                    let mut w = writer;
                     let err = serde_json::json!({ "status": "error", "detail": format!("invalid svc registration: {e}") });
-                    let _ = w.write_all(format!("{err}\n").as_bytes()).await;
+                    let _ = writer.write_all(format!("{err}\n").as_bytes()).await;
                     return;
                 }
             };
@@ -626,6 +695,23 @@ pub async fn run_leaf_inbox_task(
             }
             Ok(Some(crate::fed::FedInboxItem::Message(msg))) => {
                 backoff_millis = 100;
+
+                if let Err(e) = crate::fed::validate_pulled_message(&msg) {
+                    tracing::warn!(
+                        peer = %peer_name,
+                        "rejecting malformed message pulled from hub on leaf: {e}"
+                    );
+                    if !msg.id.is_empty()
+                        && msg.id.len() <= 128
+                        && !msg.id.contains('/')
+                        && !msg.id.contains(char::is_control)
+                        && !msg.id.contains(char::is_whitespace)
+                    {
+                        let _ =
+                            crate::fed::ack_federated_inbox(&fed_state, &peer_name, &msg.id).await;
+                    }
+                    continue;
+                }
 
                 let leaf_name = crate::surface::leaf_service_name(&leaf_principal);
                 let target_session_id = msg.to.clone().unwrap_or_else(|| leaf_name.to_string());

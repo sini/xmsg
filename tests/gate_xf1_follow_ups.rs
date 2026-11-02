@@ -60,8 +60,7 @@ fn xf1_socket_client_helper() {
 
     let sock = std::env::var("XF1_SOCK").expect("XF1_SOCK");
     let payload = std::env::var("XF1_PAYLOAD").unwrap_or_default();
-    let wait_before_connect =
-        std::env::var("XF1_WAIT_BEFORE_CONNECT").unwrap_or_default() == "1";
+    let wait_before_connect = std::env::var("XF1_WAIT_BEFORE_CONNECT").unwrap_or_default() == "1";
     let read_resp = std::env::var("XF1_READ_RESP").unwrap_or_default() == "1";
 
     if wait_before_connect {
@@ -150,7 +149,7 @@ async fn test_xf1_peerpidfd_rejects_reaped_recycled_root_pid_and_fallback() {
     let _victim_listener = UnixListener::bind(&victim_inbox_sock).unwrap();
     let victim_json = json!({
         "pid": victim_pid,
-        "sessionId": "sess-victim",
+        "sessionId": "0199cecf-0500-7000-8000-000000000500",
         "name": "Victim",
         "cwd": "/workspace",
         "status": "idle",
@@ -161,7 +160,9 @@ async fn test_xf1_peerpidfd_rejects_reaped_recycled_root_pid_and_fallback() {
         "messagingSocketPath": victim_inbox_sock.display().to_string()
     });
     fs::write(
-        sessions_dir.join(format!("{victim_pid}-sess-victim.json")),
+        sessions_dir.join(format!(
+            "{victim_pid}-0199cecf-0500-7000-8000-000000000500.json"
+        )),
         victim_json.to_string(),
     )
     .unwrap();
@@ -184,7 +185,7 @@ async fn test_xf1_peerpidfd_rejects_reaped_recycled_root_pid_and_fallback() {
     });
     let target_json = json!({
         "pid": target_pid,
-        "sessionId": "sess-target",
+        "sessionId": "0199cecf-0600-7000-8000-000000000600",
         "name": "Target",
         "cwd": "/workspace",
         "status": "idle",
@@ -195,7 +196,9 @@ async fn test_xf1_peerpidfd_rejects_reaped_recycled_root_pid_and_fallback() {
         "messagingSocketPath": target_inbox_sock.display().to_string()
     });
     fs::write(
-        sessions_dir.join(format!("{target_pid}-sess-target.json")),
+        sessions_dir.join(format!(
+            "{target_pid}-0199cecf-0600-7000-8000-000000000600.json"
+        )),
         target_json.to_string(),
     )
     .unwrap();
@@ -208,7 +211,7 @@ async fn test_xf1_peerpidfd_rejects_reaped_recycled_root_pid_and_fallback() {
         proc_root: proc_root.clone(),
         agy_bin: "false".to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
 
     let db_conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -238,7 +241,7 @@ async fn test_xf1_peerpidfd_rejects_reaped_recycled_root_pid_and_fallback() {
         svc_store: new_svc_store(),
     });
 
-    // Pre-sync claims so sess-victim and sess-target are in the claim table.
+    // Pre-sync claims so 0199cecf-0500-7000-8000-000000000500 and 0199cecf-0600-7000-8000-000000000600 are in the claim table.
     xmsg::claim::sync_claims(&db, &proc_root, &state.sessions_dirs[..], "node-test")
         .await
         .unwrap();
@@ -261,7 +264,7 @@ async fn test_xf1_peerpidfd_rejects_reaped_recycled_root_pid_and_fallback() {
     let status_a = child_a.wait().await.unwrap();
     assert!(status_a.success());
 
-    // Plant a recycled proc_root/<pid_a>/stat entry whose ppid points to sess-victim (500)!
+    // Plant a recycled proc_root/<pid_a>/stat entry whose ppid points to 0199cecf-0500-7000-8000-000000000500 (500)!
     write_fake_stat(&proc_root, pid_a, victim_pid, "9999");
 
     // Walk Ancestry::from_peer: because peer_a's pidfd refers to the reaped child_a,
@@ -324,7 +327,7 @@ async fn test_xf1_peerpidfd_rejects_reaped_recycled_root_pid_and_fallback() {
     }
 
     // Also test `http.sock` under the same race window: short-lived child sends HTTP POST /v1/messages
-    // without a `from` field (so only an attested caller would be attributed to `sess-victim`; an
+    // without a `from` field (so only an attested caller would be attributed to `0199cecf-0500-7000-8000-000000000500`; an
     // unattested caller is anonymous and rejected with 400 `'from' is required`).
     {
         let body = "{\"to\":\"Target\",\"text\":\"forged-via-http-sock\"}";
@@ -360,13 +363,13 @@ async fn test_xf1_peerpidfd_rejects_reaped_recycled_root_pid_and_fallback() {
         let msgs = target_received.lock().unwrap();
         assert!(
             msgs.is_empty(),
-            "neither agent.sock nor http.sock may attribute a reaped caller with recycled proc entry to sess-victim; got deliveries: {msgs:?}"
+            "neither agent.sock nor http.sock may attribute a reaped caller with recycled proc entry to 0199cecf-0500-7000-8000-000000000500; got deliveries: {msgs:?}"
         );
     }
 
     // -------------------------------------------------------------------------
     // Part C: Positive control — a live child C2 whose proc_root entry descends
-    // from sess-victim stays alive until the server responds, and succeeds!
+    // from 0199cecf-0500-7000-8000-000000000500 stays alive until the server responds, and succeeds!
     // -------------------------------------------------------------------------
     let mut live_child = spawn_std_socket_helper(
         &agent_sock,
@@ -396,11 +399,11 @@ async fn test_xf1_peerpidfd_rejects_reaped_recycled_root_pid_and_fallback() {
         serde_json::from_str(resp_line.trim()).expect("live child response json");
     assert_eq!(
         resp_json["status"], "ok",
-        "live child under sess-victim must be attested and succeed: {resp_json}"
+        "live child under 0199cecf-0500-7000-8000-000000000500 must be attested and succeed: {resp_json}"
     );
     let _ = live_child.wait().await;
 
-    // Target must have received the legitimate message attributed to Victim (sess-victim)!
+    // Target must have received the legitimate message attributed to Victim (0199cecf-0500-7000-8000-000000000500)!
     tokio::time::sleep(Duration::from_millis(50)).await;
     {
         let msgs = target_received.lock().unwrap();
@@ -410,8 +413,8 @@ async fn test_xf1_peerpidfd_rejects_reaped_recycled_root_pid_and_fallback() {
             "Target should have exactly 1 legitimate message"
         );
         assert!(
-            msgs[0].contains("legit-from-live-child") && msgs[0].contains("sess-victim@node-test"),
-            "Legitimate message must be attributed to sess-victim, got: {}",
+            msgs[0].contains("legit-from-live-child") && msgs[0].contains("0199cecf-0500-7000-8000-000000000500@node-test"),
+            "Legitimate message must be attributed to 0199cecf-0500-7000-8000-000000000500, got: {}",
             msgs[0]
         );
     }
@@ -445,7 +448,10 @@ async fn test_xf1_peerpidfd_rejects_reaped_recycled_root_pid_and_fallback() {
     )
     .expect("fallback PeerCred must still resolve live caller via proc_root");
     drop(db_guard);
-    assert_eq!(fallback_session.session_id, "sess-victim");
+    assert_eq!(
+        fallback_session.session_id,
+        "0199cecf-0500-7000-8000-000000000500"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -465,7 +471,7 @@ async fn test_xf1_live_peer_cred_attests_caller() {
     let _victim_listener = UnixListener::bind(&victim_inbox_sock).unwrap();
     let victim_json = json!({
         "pid": victim_pid,
-        "sessionId": "sess-victim",
+        "sessionId": "0199cecf-0500-7000-8000-000000000500",
         "name": "Victim",
         "cwd": "/workspace",
         "status": "idle",
@@ -476,7 +482,9 @@ async fn test_xf1_live_peer_cred_attests_caller() {
         "messagingSocketPath": victim_inbox_sock.display().to_string()
     });
     fs::write(
-        sessions_dir.join(format!("{victim_pid}-sess-victim.json")),
+        sessions_dir.join(format!(
+            "{victim_pid}-0199cecf-0500-7000-8000-000000000500.json"
+        )),
         victim_json.to_string(),
     )
     .unwrap();
@@ -498,7 +506,7 @@ async fn test_xf1_live_peer_cred_attests_caller() {
     });
     let target_json = json!({
         "pid": target_pid,
-        "sessionId": "sess-target",
+        "sessionId": "0199cecf-0600-7000-8000-000000000600",
         "name": "Target",
         "cwd": "/workspace",
         "status": "idle",
@@ -509,7 +517,9 @@ async fn test_xf1_live_peer_cred_attests_caller() {
         "messagingSocketPath": target_inbox_sock.display().to_string()
     });
     fs::write(
-        sessions_dir.join(format!("{target_pid}-sess-target.json")),
+        sessions_dir.join(format!(
+            "{target_pid}-0199cecf-0600-7000-8000-000000000600.json"
+        )),
         target_json.to_string(),
     )
     .unwrap();
@@ -522,7 +532,7 @@ async fn test_xf1_live_peer_cred_attests_caller() {
         proc_root: proc_root.clone(),
         agy_bin: "false".to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
 
     let db_conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -577,7 +587,10 @@ async fn test_xf1_live_peer_cred_attests_caller() {
     let steps: Vec<(u32, String)> = walk.by_ref().collect();
     assert_eq!(
         steps,
-        vec![(pid_raw, "3333".to_string()), (victim_pid, "1000".to_string())]
+        vec![
+            (pid_raw, "3333".to_string()),
+            (victim_pid, "1000".to_string())
+        ]
     );
     assert_eq!(walk.end(), Some(WalkEnd::Root));
 
@@ -592,9 +605,9 @@ async fn test_xf1_live_peer_cred_attests_caller() {
         Some(&*db_guard),
         &peer_raw,
     )
-    .expect("live peer must resolve to sess-victim");
+    .expect("live peer must resolve to 0199cecf-0500-7000-8000-000000000500");
     drop(db_guard);
-    assert_eq!(resolved.session_id, "sess-victim");
+    assert_eq!(resolved.session_id, "0199cecf-0500-7000-8000-000000000500");
 
     accepted_raw.write_all(b"pong\n").await.unwrap();
     drop(accepted_raw);
@@ -672,9 +685,19 @@ async fn test_xf1_live_peer_cred_attests_caller() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     let msgs = target_received.lock().unwrap();
-    assert_eq!(msgs.len(), 2, "Target should receive both messages: {msgs:?}");
-    assert!(msgs[0].contains("legit-via-agent-sock") && msgs[0].contains("sess-victim@node-test"));
-    assert!(msgs[1].contains("legit-via-http-sock") && msgs[1].contains("sess-victim@node-test"));
+    assert_eq!(
+        msgs.len(),
+        2,
+        "Target should receive both messages: {msgs:?}"
+    );
+    assert!(
+        msgs[0].contains("legit-via-agent-sock")
+            && msgs[0].contains("0199cecf-0500-7000-8000-000000000500@node-test")
+    );
+    assert!(
+        msgs[1].contains("legit-via-http-sock")
+            && msgs[1].contains("0199cecf-0500-7000-8000-000000000500@node-test")
+    );
 }
 
 // =============================================================================
@@ -855,9 +878,19 @@ fn create_claude_session_fixture(
     let live_proc = PathBuf::from(xmsg::process::LIVE_PROC_ROOT);
     let my_proc_start =
         xmsg::process::starttime(&live_proc, my_pid).unwrap_or_else(|_| "1000".to_string());
+    let sess_uuid = if xmsg::claim::is_uuid_shaped(session_id) {
+        session_id.to_string()
+    } else {
+        use sha2::{Digest, Sha256};
+        let h = Sha256::digest(session_id.as_bytes());
+        format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-4{:01x}{:02x}-8{:01x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            h[0], h[1], h[2], h[3], h[4], h[5], h[6] & 0x0f, h[7], h[8] & 0x0f, h[9], h[10], h[11], h[12], h[13], h[14], h[15]
+        )
+    };
     let session_json = json!({
         "pid": my_pid,
-        "sessionId": session_id,
+        "sessionId": sess_uuid,
         "name": name,
         "cwd": "/workspace",
         "status": "idle",
@@ -1008,8 +1041,7 @@ async fn test_xf1_dial_out_pulled_reply_answerable_end_to_end() {
     // -------------------------------------------------------------------------
     // Turn 2: Bob@node-b replies R1 to M (stored on B, pulled by A's poller)
     // -------------------------------------------------------------------------
-    let reply_r1 =
-        reply_via_agent_sock(&node_b.agent_sock, &m_id, "Turn 2: Bob -> Alice R1").await;
+    let reply_r1 = reply_via_agent_sock(&node_b.agent_sock, &m_id, "Turn 2: Bob -> Alice R1").await;
     assert_eq!(reply_r1["status"], "ok", "Turn 2 reply failed: {reply_r1}");
     assert_eq!(reply_r1["reply"]["pushOutcome"], "stored");
     let r1_id_on_b = reply_r1["reply"]["pushedMessageId"]
@@ -1087,8 +1119,7 @@ async fn test_xf1_dial_out_pulled_reply_answerable_end_to_end() {
     assert!(a_m2.contains("Rev 1: Bob -> Alice M2"));
     let m2_id = extract_message_id(&a_m2).expect("extract M2 id");
 
-    let reply_r4 =
-        reply_via_agent_sock(&node_a.agent_sock, &m2_id, "Rev 2: Alice -> Bob R4").await;
+    let reply_r4 = reply_via_agent_sock(&node_a.agent_sock, &m2_id, "Rev 2: Alice -> Bob R4").await;
     assert_eq!(reply_r4["status"], "ok", "Rev 2 reply failed: {reply_r4}");
     assert_eq!(reply_r4["reply"]["pushOutcome"], "pushed");
     let r4_id = reply_r4["reply"]["pushedMessageId"]
@@ -1264,8 +1295,7 @@ async fn test_xf1_dial_out_anonymous_stored_reply_and_poller_refuses_unid_reply(
         .await
         .expect("Alice must receive the valid reply (seq 2)");
     assert!(
-        a_valid.contains("valid-reply-after-unid")
-            && !a_valid.contains("reply-without-pushed-id"),
+        a_valid.contains("valid-reply-after-unid") && !a_valid.contains("reply-without-pushed-id"),
         "Alice must receive only the valid reply, not the un-ID'd reply: {a_valid}"
     );
 

@@ -127,7 +127,7 @@ async fn start_mcp_harness() -> McpHarness {
     write_session_file(
         sess_dir.path(),
         target_pid,
-        "sess-target-5000",
+        "0199cecf-5000-7000-8000-000000005000",
         "target-agent",
         target_proc_start,
         &sock_path,
@@ -146,8 +146,8 @@ async fn start_mcp_harness() -> McpHarness {
             proc_root: proc_dir.path().to_path_buf(),
             agy_bin: "agy".to_string(),
             trusted_agy_exes: Vec::new(),
-                brain_dir: std::path::PathBuf::new(),
-    },
+            brain_dir: std::path::PathBuf::new(),
+        },
         agy_store: xmsg::agy::new_agy_store(),
         pi_store: xmsg::pi::new_pi_store(),
         pi_notify_tx,
@@ -311,7 +311,10 @@ async fn test_mcp_initialize_and_tools_list() {
     );
 
     let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(tool_names, vec!["list", "send", "reply", "replies", "inbox"]);
+    assert_eq!(
+        tool_names,
+        vec!["list", "send", "reply", "replies", "inbox"]
+    );
 
     // Invariant: None of the tools may have requiresUserInteraction set
     for t in tools {
@@ -386,7 +389,7 @@ async fn test_mcp_send_and_reply_with_derived_caller() {
     write_session_file(
         &harness.sessions_dir,
         caller_pid,
-        "sess-caller-6000",
+        "0199cecf-6000-7000-8000-000000006000",
         "calling-orchestrator",
         "100",
         &dummy_sock,
@@ -417,7 +420,10 @@ async fn test_mcp_send_and_reply_with_derived_caller() {
     let resp_text = result["content"][0]["text"].as_str().unwrap();
     let delivery_json: serde_json::Value = serde_json::from_str(resp_text).unwrap();
     let message_id = delivery_json["message_id"].as_str().unwrap();
-    assert_eq!(delivery_json["address"], "sess-target-5000@test-host");
+    assert_eq!(
+        delivery_json["address"],
+        "0199cecf-5000-7000-8000-000000005000@test-host"
+    );
     assert_eq!(delivery_json["outcome"], "delivered");
 
     // Check socket delivery to target-agent
@@ -425,22 +431,21 @@ async fn test_mcp_send_and_reply_with_derived_caller() {
     let lines = harness.received_lines.lock().await;
     assert_eq!(lines.len(), 1);
     let inbox_line: InboxLine = serde_json::from_str(lines[0].trim()).unwrap();
-    assert!(inbox_line
-        .message
-        .content
-        .contains("from-name=\"calling-orchestrator · sess-caller-6000@test-host\""));
+    assert!(inbox_line.message.content.contains(
+        "from-name=\"calling-orchestrator · 0199cecf-6000-7000-8000-000000006000@test-host\""
+    ));
     assert!(inbox_line
         .message
         .content
         .contains("Please report status on milestone 2"));
     let expected_footer = format!(
-        "[xmsg] ref=sess-caller-6000@test-host message_id={message_id} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
+        "[xmsg] ref=0199cecf-6000-7000-8000-000000006000@test-host message_id={message_id} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
     );
     assert!(inbox_line.message.content.contains(&expected_footer));
     drop(lines);
 
     // 2. reply to the message via MCP
-    // Reconfigure ancestor for target-agent (session_id = sess-target-5000, pid = 5000)
+    // Reconfigure ancestor for target-agent (session_id = 0199cecf-5000-7000-8000-000000005000, pid = 5000)
     write_proc_stat(&harness.proc_root, my_pid, 5000, "200");
 
     let reply_req = serde_json::json!({
@@ -501,7 +506,10 @@ async fn test_mcp_list_sessions() {
     )
     .unwrap();
     assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0]["address"], "sess-target-5000@test-host");
+    assert_eq!(
+        sessions[0]["address"],
+        "0199cecf-5000-7000-8000-000000005000@test-host"
+    );
     assert_eq!(sessions[0]["label"], "target-agent");
 }
 

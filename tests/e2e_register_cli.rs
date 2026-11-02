@@ -74,8 +74,8 @@ async fn test_shipped_binary_register_cli_with_server() {
     let my_pid = std::process::id();
     let my_uid = current_uid();
 
-    // Create presence lock for conv-cli-test
-    let conv_id = "conv-cli-test";
+    // Create presence lock for 0199cecf-c110-7000-8000-00000000c110
+    let conv_id = "0199cecf-c110-7000-8000-00000000c110";
     let lock_file = presence_dir.join(format!("{conv_id}.lock"));
     fs::write(&lock_file, "lock").unwrap();
     let meta = fs::metadata(&lock_file).unwrap();
@@ -99,7 +99,7 @@ async fn test_shipped_binary_register_cli_with_server() {
         proc_root,
         agy_bin: "agy".to_string(),
         trusted_agy_exes: vec![my_exe],
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
     let store = new_agy_store();
 
@@ -189,7 +189,10 @@ async fn test_shipped_binary_register_cli_with_server() {
     // `xmsg register agy` exits non-zero and prints the server's error text to stderr.
     let refused_out = Command::new(bin)
         .args(["register", "agy", "--sock", sock_path.to_str().unwrap()])
-        .env("ANTIGRAVITY_CONVERSATION_ID", "conv-refused-no-lock")
+        .env(
+            "ANTIGRAVITY_CONVERSATION_ID",
+            "0199cecf-c111-7000-8000-00000000c111",
+        )
         .env("ANTIGRAVITY_LS_ADDRESS", "localhost:33399")
         .env("ANTIGRAVITY_CSRF_TOKEN", "token-secret-cli-99")
         .output()
@@ -202,7 +205,7 @@ async fn test_shipped_binary_register_cli_with_server() {
     let refused_stderr = String::from_utf8_lossy(&refused_out.stderr);
     assert!(
         refused_stderr.contains(
-            "registration rejected by server: session conv-refused-no-lock process 0 exited"
+            "registration rejected by server: session 0199cecf-c111-7000-8000-00000000c111 process 0 exited"
         ),
         "XR1: stderr must contain the server's refusal error text, got: {refused_stderr}"
     );
@@ -246,7 +249,7 @@ async fn test_shipped_binary_register_cli_with_server() {
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(b"{\"conversationId\":\"conv-hook-refusal\"}")
+        .write_all(b"{\"conversationId\":\"0199cecf-c112-7000-8000-00000000c112\"}")
         .unwrap();
     let hook_out = hook_child.wait_with_output().unwrap();
     assert_eq!(

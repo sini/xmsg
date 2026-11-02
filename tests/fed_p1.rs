@@ -161,8 +161,8 @@ async fn create_test_node_full_inner(
             proc_root: proc_root.clone(),
             agy_bin: agy_bin_opt.unwrap_or_else(|| "agy".to_string()),
             trusted_agy_exes: Vec::new(),
-                brain_dir: std::path::PathBuf::new(),
-    },
+            brain_dir: std::path::PathBuf::new(),
+        },
         agy_store: new_agy_store(),
         pi_store: new_pi_store(),
         pi_notify_tx: pi_notify_tx.clone(),
@@ -260,7 +260,7 @@ async fn test_oracle_1_attested_cross_host_send() {
 
     let node_a = create_test_node_full(
         "host-a",
-        "sess-a",
+        "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
             name: "host-b".to_string(),
             address: fed_addr_b.to_string(),
@@ -281,7 +281,7 @@ async fn test_oracle_1_attested_cross_host_send() {
 
     let node_b = create_test_node_full(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: node_a.fed_addr.to_string(),
@@ -300,14 +300,14 @@ async fn test_oracle_1_attested_cross_host_send() {
     )
     .await;
 
-    // Send via agent.sock from host-a to sess-b@host-b
+    // Send via agent.sock from host-a to 0199cecf-000b-7000-8000-00000000000b@host-b
     let stream = UnixStream::connect(&node_a.agent_sock_path).await.unwrap();
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
     let send_req = serde_json::json!({
         "action": "send",
-        "to": format!("sess-b@{}", node_b.name),
+        "to": format!("0199cecf-000b-7000-8000-00000000000b@{}", node_b.name),
         "text": "Hello federated world from A",
     });
     writer
@@ -321,13 +321,13 @@ async fn test_oracle_1_attested_cross_host_send() {
     assert_eq!(resp["status"], "ok");
     assert_eq!(resp["outcome"], "delivered");
 
-    // Wait for delivery to sess-b's inbox
+    // Wait for delivery to 0199cecf-000b-7000-8000-00000000000b's inbox
     tokio::time::sleep(Duration::from_millis(100)).await;
     let inboxes = node_b.inbox_rx.lock().unwrap().clone();
     assert_eq!(inboxes.len(), 1);
     // A12: `id@node`; a label equal to the id is not repeated.
     assert!(
-        inboxes[0].contains(r#"from-name=\"sess-a@host-a\""#),
+        inboxes[0].contains(r#"from-name=\"0199cecf-000a-7000-8000-00000000000a@host-a\""#),
         "{}",
         inboxes[0]
     );
@@ -350,7 +350,7 @@ async fn test_oracle_2_reply_pushed_back_and_recorded() {
 
     let node_a = create_test_node_full(
         "host-a",
-        "sess-a",
+        "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
             name: "host-b".to_string(),
             address: fed_addr_b.to_string(),
@@ -371,7 +371,7 @@ async fn test_oracle_2_reply_pushed_back_and_recorded() {
 
     let node_b = create_test_node_full(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: fed_addr_a.to_string(),
@@ -397,7 +397,7 @@ async fn test_oracle_2_reply_pushed_back_and_recorded() {
 
     let send_req = serde_json::json!({
         "action": "send",
-        "to": format!("sess-b@{}", node_b.name),
+        "to": format!("0199cecf-000b-7000-8000-00000000000b@{}", node_b.name),
         "text": "Question from A",
     });
     writer_a
@@ -434,11 +434,11 @@ async fn test_oracle_2_reply_pushed_back_and_recorded() {
 
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    // Assert reply arrived at sess-a's inbox
+    // Assert reply arrived at 0199cecf-000a-7000-8000-00000000000a's inbox
     let inboxes_a = node_a.inbox_rx.lock().unwrap().clone();
     assert!(
         !inboxes_a.is_empty(),
-        "Reply should be pushed to sess-a's inbox"
+        "Reply should be pushed to 0199cecf-000a-7000-8000-00000000000a's inbox"
     );
     assert!(inboxes_a[0].contains("Answer from B"));
 
@@ -459,7 +459,8 @@ async fn test_oracle_2_reply_pushed_back_and_recorded() {
 // =============================================================================
 #[tokio::test]
 async fn test_oracle_3_unpinned_cert_refused_at_handshake() {
-    let node_b = create_test_node("host-b", "sess-b", Vec::new()).await;
+    let node_b =
+        create_test_node("host-b", "0199cecf-000b-7000-8000-00000000000b", Vec::new()).await;
 
     // Generate untrusted cert/key
     let (bad_cert, bad_key, _) = generate_self_signed_ed25519("attacker").unwrap();
@@ -495,7 +496,7 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
     // 1. Inside CIDR (127.0.0.1/32) -> Accepted (202) and delivered
     let node_b_allow = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -516,13 +517,13 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         origin: xmsg::storage::Origin {
-            id: Some("sess-a".to_string()),
+            id: Some("0199cecf-000a-7000-8000-00000000000a".to_string()),
             service: None,
             node: "origin-claim".into(),
             label: Some("agent-a".to_string()),
         },
         to: FedTarget {
-            r#ref: "sess-b".to_string(),
+            r#ref: "0199cecf-000b-7000-8000-00000000000b".to_string(),
         },
         body: "Payload inside CIDR".to_string(),
         thread_id: "t1".to_string(),
@@ -585,7 +586,7 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
     // 2. Outside CIDR (10.0.0.0/8) -> 403 PeerRejected and 0 bytes in inbox
     let node_b_deny = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -606,13 +607,13 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         origin: xmsg::storage::Origin {
-            id: Some("sess-a".to_string()),
+            id: Some("0199cecf-000a-7000-8000-00000000000a".to_string()),
             service: None,
             node: "origin-claim".into(),
             label: Some("agent-a".to_string()),
         },
         to: FedTarget {
-            r#ref: "sess-b".to_string(),
+            r#ref: "0199cecf-000b-7000-8000-00000000000b".to_string(),
         },
         body: "Payload outside CIDR".to_string(),
         thread_id: "t2".to_string(),
@@ -689,7 +690,7 @@ async fn test_oracle_2_from_absent_pin_only_accepted() {
 
     let node_b = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -710,13 +711,13 @@ async fn test_oracle_2_from_absent_pin_only_accepted() {
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         origin: xmsg::storage::Origin {
-            id: Some("sess-a".to_string()),
+            id: Some("0199cecf-000a-7000-8000-00000000000a".to_string()),
             service: None,
             node: "origin-claim".into(),
             label: Some("agent-a".to_string()),
         },
         to: FedTarget {
-            r#ref: "sess-b".to_string(),
+            r#ref: "0199cecf-000b-7000-8000-00000000000b".to_string(),
         },
         body: "Pin-only authenticated message".to_string(),
         thread_id: "t1".to_string(),
@@ -817,7 +818,7 @@ async fn test_oracle_4_reply_route_source_check() {
     // Node A only allows replies from host-b if source is in 10.0.0.0/8 (outside 127.0.0.1)
     let node_a = create_test_node(
         "host-a",
-        "sess-a",
+        "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
             name: "host-b".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -838,19 +839,27 @@ async fn test_oracle_4_reply_route_source_check() {
     let orig_msg_id = ulid::Ulid::new().to_string();
     {
         let db = node_a.db.lock().unwrap();
-        storage::insert_outbound(&db, &orig_msg_id, "host-b", "sess-b", "accepted", 1000).unwrap();
+        storage::insert_outbound(
+            &db,
+            &orig_msg_id,
+            "host-b",
+            "0199cecf-000b-7000-8000-00000000000b",
+            "accepted",
+            1000,
+        )
+        .unwrap();
         storage::insert_message(
             &db,
             &storage::MessageRecord {
                 id: orig_msg_id.clone(),
                 created_at: 1000,
-                session_id: "sess-a".to_string(),
-                from_name: "xmsg@host-a · claude:sess-a".to_string(),
+                session_id: "0199cecf-000a-7000-8000-00000000000a".to_string(),
+                from_name: "xmsg@host-a · claude:0199cecf-000a-7000-8000-00000000000a".to_string(),
                 bytes: 4,
                 outcome: "accepted".to_string(),
                 recipient_harness: "claude".to_string(),
                 return_harness: Some("claude".to_string()),
-                return_session_id: Some("sess-a".to_string()),
+                return_session_id: Some("0199cecf-000a-7000-8000-00000000000a".to_string()),
                 return_host: None,
                 thread_id: "th1".to_string(),
             },
@@ -907,7 +916,7 @@ async fn test_oracle_4_reply_route_source_check() {
         id: ulid::Ulid::new().to_string(),
         in_reply_to: orig_msg_id,
         replier: xmsg::storage::Origin {
-            id: Some("sess-b".to_string()),
+            id: Some("0199cecf-000b-7000-8000-00000000000b".to_string()),
             service: None,
             node: "origin-claim".into(),
             label: Some("agent-b".to_string()),
@@ -969,7 +978,7 @@ async fn test_oracle_5_host_field_in_body_rejected() {
 
     let node_b = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -1008,7 +1017,7 @@ async fn test_oracle_5_host_field_in_body_rejected() {
             "node": "host-a",
             "label": "a1"
         },
-        "to": { "ref": "sess-b" },
+        "to": { "ref": "0199cecf-000b-7000-8000-00000000000b" },
         "body": "test",
         "thread_id": "t1",
         "created_at": 1000
@@ -1039,7 +1048,7 @@ async fn test_oracle_6_anonymous_from_with_colon_gives_400() {
 
     let node_b = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -1066,7 +1075,7 @@ async fn test_oracle_6_anonymous_from_with_colon_gives_400() {
             label: Some("bad:sender".to_string()),
         },
         to: FedTarget {
-            r#ref: "sess-b".to_string(),
+            r#ref: "0199cecf-000b-7000-8000-00000000000b".to_string(),
         },
         body: "test body".to_string(),
         thread_id: "t1".to_string(),
@@ -1137,7 +1146,7 @@ async fn test_oracle_7_root_harness_rejected_and_badge_spoof_sanitized() {
 
     let node_b = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -1210,7 +1219,7 @@ async fn test_oracle_7_root_harness_rejected_and_badge_spoof_sanitized() {
             label: Some("admin".to_string()),
         },
         to: FedTarget {
-            r#ref: "sess-b".to_string(),
+            r#ref: "0199cecf-000b-7000-8000-00000000000b".to_string(),
         },
         body: "test".to_string(),
         thread_id: "t1".to_string(),
@@ -1234,7 +1243,7 @@ async fn test_oracle_7_root_harness_rejected_and_badge_spoof_sanitized() {
             label: Some("x · claude:y".to_string()),
         },
         to: FedTarget {
-            r#ref: "sess-b".to_string(),
+            r#ref: "0199cecf-000b-7000-8000-00000000000b".to_string(),
         },
         body: "spoof attempt".to_string(),
         thread_id: "t2".to_string(),
@@ -1261,7 +1270,7 @@ async fn test_n4_attested_name_ascii_only_u0387() {
 
     let node_b = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -1332,7 +1341,7 @@ async fn test_n4_attested_name_ascii_only_u0387() {
             label: Some("x \u{0387} claude:y".to_string()),
         },
         to: FedTarget {
-            r#ref: "sess-b".to_string(),
+            r#ref: "0199cecf-000b-7000-8000-00000000000b".to_string(),
         },
         body: "homoglyph spoof attempt".to_string(),
         thread_id: "t-u0387".to_string(),
@@ -1356,7 +1365,7 @@ async fn test_oracle_8_no_forward_rejected() {
 
     let node_b = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -1451,7 +1460,7 @@ async fn test_oracle_9_forged_reply_id_gives_403() {
 
     let node_a = create_test_node(
         "host-a",
-        "sess-a",
+        "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
             name: "host-b".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -1517,7 +1526,7 @@ async fn test_oracle_9_forged_reply_id_gives_403() {
         id: ulid::Ulid::new().to_string(),
         in_reply_to: "01H000000000000000000FORGED".to_string(),
         replier: xmsg::storage::Origin {
-            id: Some("sess-b".to_string()),
+            id: Some("0199cecf-000b-7000-8000-00000000000b".to_string()),
             service: None,
             node: "origin-claim".into(),
             label: Some("agent-b".to_string()),
@@ -1542,13 +1551,13 @@ async fn test_oracle_9_forged_reply_id_gives_403() {
             &storage::MessageRecord {
                 id: msg_c_id.clone(),
                 created_at: 1000,
-                session_id: "sess-a".to_string(),
-                from_name: "xmsg@host-a · claude:sess-a".to_string(),
+                session_id: "0199cecf-000a-7000-8000-00000000000a".to_string(),
+                from_name: "xmsg@host-a · claude:0199cecf-000a-7000-8000-00000000000a".to_string(),
                 bytes: 4,
                 outcome: "accepted".to_string(),
                 recipient_harness: "claude".to_string(),
                 return_harness: Some("claude".to_string()),
-                return_session_id: Some("sess-a".to_string()),
+                return_session_id: Some("0199cecf-000a-7000-8000-00000000000a".to_string()),
                 thread_id: msg_c_id.clone(),
                 return_host: Some("host-a".to_string()),
             },
@@ -1561,7 +1570,7 @@ async fn test_oracle_9_forged_reply_id_gives_403() {
         id: ulid::Ulid::new().to_string(),
         in_reply_to: msg_c_id,
         replier: xmsg::storage::Origin {
-            id: Some("sess-b".to_string()),
+            id: Some("0199cecf-000b-7000-8000-00000000000b".to_string()),
             service: None,
             node: "origin-claim".into(),
             label: Some("agent-b".to_string()),
@@ -1593,7 +1602,7 @@ async fn test_oracle_10_duplicate_id_delivered_once() {
 
     let node_b = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -1665,7 +1674,7 @@ async fn test_oracle_10_duplicate_id_delivered_once() {
             label: Some("agent-a".to_string()),
         },
         to: FedTarget {
-            r#ref: "sess-b".to_string(),
+            r#ref: "0199cecf-000b-7000-8000-00000000000b".to_string(),
         },
         body: "deliver once only".to_string(),
         thread_id: dup_id.clone(),
@@ -1705,7 +1714,7 @@ async fn test_oracle_11_rate_limit_429() {
 
     let node_b = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -1778,7 +1787,7 @@ async fn test_oracle_11_rate_limit_429() {
                 label: Some("flooder".to_string()),
             },
             to: FedTarget {
-                r#ref: "sess-b".to_string(),
+                r#ref: "0199cecf-000b-7000-8000-00000000000b".to_string(),
             },
             body: "flood".to_string(),
             thread_id: "t".to_string(),
@@ -1801,7 +1810,7 @@ async fn test_oracle_11_rate_limit_429() {
             label: Some("flooder".to_string()),
         },
         to: FedTarget {
-            r#ref: "sess-b".to_string(),
+            r#ref: "0199cecf-000b-7000-8000-00000000000b".to_string(),
         },
         body: "flood 21".to_string(),
         thread_id: "t".to_string(),
@@ -1824,7 +1833,7 @@ async fn test_oracle_12_router_isolation() {
 
     let node_b = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -1890,7 +1899,7 @@ async fn test_amendment_a_peer_without_send_gets_403_op_denied() {
 
     let node_b = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -1961,7 +1970,7 @@ async fn test_amendment_a_peer_without_send_gets_403_op_denied() {
             label: Some("agent-a".to_string()),
         },
         to: FedTarget {
-            r#ref: "sess-b".to_string(),
+            r#ref: "0199cecf-000b-7000-8000-00000000000b".to_string(),
         },
         body: "unauthorized send".to_string(),
         thread_id: "t1".to_string(),
@@ -1988,7 +1997,8 @@ async fn test_amendment_a_peer_without_send_gets_403_op_denied() {
 // =============================================================================
 #[tokio::test]
 async fn test_amendment_b_unlinked_well_formed_cert_refused() {
-    let node_b = create_test_node("host-b", "sess-b", Vec::new()).await;
+    let node_b =
+        create_test_node("host-b", "0199cecf-000b-7000-8000-00000000000b", Vec::new()).await;
 
     // Well-formed ed25519 cert from unlinked node "host-c"
     let (cert_c, key_c, _) = generate_self_signed_ed25519("host-c").unwrap();
@@ -2034,7 +2044,8 @@ async fn test_amendment_c_unknown_peer_opens_no_socket() {
         }
     });
 
-    let node_a = create_test_node("host-a", "sess-a", Vec::new()).await;
+    let node_a =
+        create_test_node("host-a", "0199cecf-000a-7000-8000-00000000000a", Vec::new()).await;
 
     // Send to unknown peer using the stand-in listener address as the host
     let unknown_ref = format!("sess-unknown@{stand_in_addr}");
@@ -2106,7 +2117,7 @@ exit 0
 
     let node_b = create_test_node_full_inner(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:0".to_string(),
@@ -2145,7 +2156,7 @@ exit 0
 
     let node_a = create_test_node_full(
         "host-a",
-        "sess-a",
+        "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
             name: "host-b".to_string(),
             address: node_b.fed_addr.to_string(),
@@ -2319,7 +2330,7 @@ async fn test_f2_anon_origin_reply_stored() {
 
     let node_a = create_test_node(
         "host-a",
-        "sess-a",
+        "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
             name: "host-b".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -2340,13 +2351,21 @@ async fn test_f2_anon_origin_reply_stored() {
     let anon_msg_id = ulid::Ulid::new().to_string();
     {
         let db = node_a.db.lock().unwrap();
-        storage::insert_outbound(&db, &anon_msg_id, "host-b", "sess-b", "accepted", 1000).unwrap();
+        storage::insert_outbound(
+            &db,
+            &anon_msg_id,
+            "host-b",
+            "0199cecf-000b-7000-8000-00000000000b",
+            "accepted",
+            1000,
+        )
+        .unwrap();
         storage::insert_message(
             &db,
             &storage::MessageRecord {
                 id: anon_msg_id.clone(),
                 created_at: 1000,
-                session_id: "sess-b".to_string(),
+                session_id: "0199cecf-000b-7000-8000-00000000000b".to_string(),
                 from_name: "xmsg@host-a · script".to_string(),
                 bytes: 10,
                 outcome: "accepted".to_string(),
@@ -2377,7 +2396,7 @@ async fn test_f2_anon_origin_reply_stored() {
         id: ulid::Ulid::new().to_string(),
         in_reply_to: anon_msg_id,
         replier: xmsg::storage::Origin {
-            id: Some("sess-b".to_string()),
+            id: Some("0199cecf-000b-7000-8000-00000000000b".to_string()),
             service: None,
             node: "origin-claim".into(),
             label: Some("agent-b".to_string()),
@@ -2405,7 +2424,7 @@ async fn test_f2_session_sender_always_pushed() {
 
     let node_a = create_test_node(
         "host-a",
-        "sess-a",
+        "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
             name: "host-b".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -2425,19 +2444,27 @@ async fn test_f2_session_sender_always_pushed() {
     let msg_id = ulid::Ulid::new().to_string();
     {
         let db = node_a.db.lock().unwrap();
-        storage::insert_outbound(&db, &msg_id, "host-b", "sess-b", "accepted", 1000).unwrap();
+        storage::insert_outbound(
+            &db,
+            &msg_id,
+            "host-b",
+            "0199cecf-000b-7000-8000-00000000000b",
+            "accepted",
+            1000,
+        )
+        .unwrap();
         storage::insert_message(
             &db,
             &storage::MessageRecord {
                 id: msg_id.clone(),
                 created_at: 1000,
-                session_id: "sess-a".to_string(),
-                from_name: "xmsg@host-a · claude:sess-a".to_string(),
+                session_id: "0199cecf-000a-7000-8000-00000000000a".to_string(),
+                from_name: "xmsg@host-a · claude:0199cecf-000a-7000-8000-00000000000a".to_string(),
                 bytes: 10,
                 outcome: "accepted".to_string(),
                 recipient_harness: "claude".to_string(),
                 return_harness: Some("claude".to_string()),
-                return_session_id: Some("sess-a".to_string()),
+                return_session_id: Some("0199cecf-000a-7000-8000-00000000000a".to_string()),
                 thread_id: msg_id.clone(),
                 return_host: Some("host-a".to_string()),
             },
@@ -2462,7 +2489,7 @@ async fn test_f2_session_sender_always_pushed() {
         id: ulid::Ulid::new().to_string(),
         in_reply_to: msg_id,
         replier: xmsg::storage::Origin {
-            id: Some("sess-b".to_string()),
+            id: Some("0199cecf-000b-7000-8000-00000000000b".to_string()),
             service: None,
             node: "origin-claim".into(),
             label: Some("agent-b".to_string()),
@@ -2491,7 +2518,7 @@ async fn test_f2_unknown_harness_reply_stored() {
 
     let node_a = create_test_node(
         "host-a",
-        "sess-a",
+        "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
             name: "host-b".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -2511,19 +2538,27 @@ async fn test_f2_unknown_harness_reply_stored() {
     let msg_id = ulid::Ulid::new().to_string();
     {
         let db = node_a.db.lock().unwrap();
-        storage::insert_outbound(&db, &msg_id, "host-b", "sess-b", "accepted", 1000).unwrap();
+        storage::insert_outbound(
+            &db,
+            &msg_id,
+            "host-b",
+            "0199cecf-000b-7000-8000-00000000000b",
+            "accepted",
+            1000,
+        )
+        .unwrap();
         storage::insert_message(
             &db,
             &storage::MessageRecord {
                 id: msg_id.clone(),
                 created_at: 1000,
-                session_id: "sess-a".to_string(),
-                from_name: "xmsg@host-a · claude:sess-a".to_string(),
+                session_id: "0199cecf-000a-7000-8000-00000000000a".to_string(),
+                from_name: "xmsg@host-a · claude:0199cecf-000a-7000-8000-00000000000a".to_string(),
                 bytes: 10,
                 outcome: "accepted".to_string(),
                 recipient_harness: "claude".to_string(),
                 return_harness: Some("matrix_bridge".to_string()),
-                return_session_id: Some("sess-a".to_string()),
+                return_session_id: Some("0199cecf-000a-7000-8000-00000000000a".to_string()),
                 thread_id: msg_id.clone(),
                 return_host: Some("host-a".to_string()),
             },
@@ -2548,7 +2583,7 @@ async fn test_f2_unknown_harness_reply_stored() {
         id: ulid::Ulid::new().to_string(),
         in_reply_to: msg_id,
         replier: xmsg::storage::Origin {
-            id: Some("sess-b".to_string()),
+            id: Some("0199cecf-000b-7000-8000-00000000000b".to_string()),
             service: None,
             node: "origin-claim".into(),
             label: Some("agent-b".to_string()),
@@ -2580,7 +2615,7 @@ async fn test_f3_http_origin_federated_send() {
 
     let node_b = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -2599,7 +2634,7 @@ async fn test_f3_http_origin_federated_send() {
 
     let node_a = create_test_node_full(
         "host-a",
-        "sess-a",
+        "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
             name: "host-b".to_string(),
             address: node_b.fed_addr.to_string(),
@@ -2621,10 +2656,12 @@ async fn test_f3_http_origin_federated_send() {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://{}/v1/messages", node_a.http_addr))
-        .json(&serde_json::json!({"to": "sess-b@host-b",
-            "from": "script",
-            "text": "anonymous hello"
-        }))
+        .json(
+            &serde_json::json!({"to": "0199cecf-000b-7000-8000-00000000000b@host-b",
+                "from": "script",
+                "text": "anonymous hello"
+            }),
+        )
         .send()
         .await
         .unwrap();
@@ -2646,7 +2683,7 @@ async fn test_f4_empty_allow_pin_refused_at_handshake() {
     let (cert_a, key_a, pin_a) = generate_self_signed_ed25519("host-a").unwrap();
     let node_b = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -2693,7 +2730,7 @@ async fn test_f4_one_way_link() {
 
     let node_b = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -2712,7 +2749,7 @@ async fn test_f4_one_way_link() {
 
     let node_a = create_test_node_full(
         "host-a",
-        "sess-a",
+        "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
             name: "host-b".to_string(),
             address: node_b.fed_addr.to_string(),
@@ -2741,7 +2778,7 @@ async fn test_f4_one_way_link() {
             label: Some("agent-a".to_string()),
         },
         to: FedTarget {
-            r#ref: "sess-b".to_string(),
+            r#ref: "0199cecf-000b-7000-8000-00000000000b".to_string(),
         },
         body: "one-way message".to_string(),
         thread_id: "t1".to_string(),
@@ -2764,7 +2801,8 @@ async fn test_f4_one_way_link() {
 
 #[tokio::test]
 async fn test_f5_listener_handshake_timeout() {
-    let node_b = create_test_node("host-b", "sess-b", Vec::new()).await;
+    let node_b =
+        create_test_node("host-b", "0199cecf-000b-7000-8000-00000000000b", Vec::new()).await;
     let mut idle_stream = tokio::net::TcpStream::connect(&node_b.fed_addr)
         .await
         .unwrap();
@@ -2797,7 +2835,8 @@ async fn test_f7_outbound_timeout_on_silent_peer() {
     });
 
     let (cert_a, key_a, _) = generate_self_signed_ed25519("host-a").unwrap();
-    let node_a = create_test_node("host-a", "sess-a", Vec::new()).await;
+    let node_a =
+        create_test_node("host-a", "0199cecf-000a-7000-8000-00000000000a", Vec::new()).await;
 
     let fed_state = make_client_fed_state(
         "host-a",
@@ -2821,7 +2860,7 @@ async fn test_f7_outbound_timeout_on_silent_peer() {
             label: Some("agent-a".to_string()),
         },
         to: FedTarget {
-            r#ref: "sess-b".to_string(),
+            r#ref: "0199cecf-000b-7000-8000-00000000000b".to_string(),
         },
         body: "test timeout".to_string(),
         thread_id: "t1".to_string(),
@@ -2853,7 +2892,7 @@ async fn test_f8_verbatim_remote_outcome_relay_and_dedup() {
 
     let node_b = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -2923,7 +2962,7 @@ async fn test_f9_kind_qualified_principal_filter() {
 
     let node_b = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -2966,7 +3005,7 @@ async fn test_f9_kind_qualified_principal_filter() {
                 label: Some("other".into()),
             },
             to: FedTarget {
-                r#ref: "sess-b".into(),
+                r#ref: "0199cecf-000b-7000-8000-00000000000b".into(),
             },
             body: "ctl".into(),
             thread_id: "t1".into(),
@@ -2991,7 +3030,7 @@ async fn test_f9_kind_qualified_principal_filter() {
                 label: Some("genie".into()),
             },
             to: FedTarget {
-                r#ref: "sess-b".into(),
+                r#ref: "0199cecf-000b-7000-8000-00000000000b".into(),
             },
             body: "anon genie".into(),
             thread_id: "t2".into(),
@@ -3020,7 +3059,7 @@ async fn test_f9_kind_qualified_principal_filter() {
                 label: Some("matrix".into()),
             },
             to: FedTarget {
-                r#ref: "sess-b".into(),
+                r#ref: "0199cecf-000b-7000-8000-00000000000b".into(),
             },
             body: "spoofing service matrix".into(),
             thread_id: "t3".into(),
@@ -3045,7 +3084,7 @@ async fn test_f9_kind_qualified_principal_filter() {
                 label: None,
             },
             to: FedTarget {
-                r#ref: "sess-b".into(),
+                r#ref: "0199cecf-000b-7000-8000-00000000000b".into(),
             },
             body: "real service matrix".into(),
             thread_id: "t4".into(),
@@ -3070,7 +3109,7 @@ async fn test_f10_reply_deduplication_and_rate_limit() {
 
     let node_a = create_test_node(
         "host-a",
-        "sess-a",
+        "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
             name: "host-b".to_string(),
             address: "127.0.0.1:9999".to_string(),
@@ -3090,19 +3129,27 @@ async fn test_f10_reply_deduplication_and_rate_limit() {
     let msg_id = ulid::Ulid::new().to_string();
     {
         let db = node_a.db.lock().unwrap();
-        storage::insert_outbound(&db, &msg_id, "host-b", "sess-b", "accepted", 1000).unwrap();
+        storage::insert_outbound(
+            &db,
+            &msg_id,
+            "host-b",
+            "0199cecf-000b-7000-8000-00000000000b",
+            "accepted",
+            1000,
+        )
+        .unwrap();
         storage::insert_message(
             &db,
             &storage::MessageRecord {
                 id: msg_id.clone(),
                 created_at: 1000,
-                session_id: "sess-a".to_string(),
-                from_name: "xmsg@host-a · claude:sess-a".to_string(),
+                session_id: "0199cecf-000a-7000-8000-00000000000a".to_string(),
+                from_name: "xmsg@host-a · claude:0199cecf-000a-7000-8000-00000000000a".to_string(),
                 bytes: 4,
                 outcome: "accepted".to_string(),
                 recipient_harness: "claude".to_string(),
                 return_harness: Some("claude".to_string()),
-                return_session_id: Some("sess-a".to_string()),
+                return_session_id: Some("0199cecf-000a-7000-8000-00000000000a".to_string()),
                 thread_id: msg_id.clone(),
                 return_host: Some("host-a".to_string()),
             },
@@ -3128,7 +3175,7 @@ async fn test_f10_reply_deduplication_and_rate_limit() {
         id: reply_id.clone(),
         in_reply_to: msg_id.clone(),
         replier: xmsg::storage::Origin {
-            id: Some("sess-b".to_string()),
+            id: Some("0199cecf-000b-7000-8000-00000000000b".to_string()),
             service: None,
             node: "origin-claim".into(),
             label: Some("agent-b".to_string()),
@@ -3161,7 +3208,7 @@ async fn test_f10_reply_deduplication_and_rate_limit() {
             id: ulid::Ulid::new().to_string(),
             in_reply_to: msg_id.clone(),
             replier: xmsg::storage::Origin {
-                id: Some("sess-b".to_string()),
+                id: Some("0199cecf-000b-7000-8000-00000000000b".to_string()),
                 service: None,
                 node: "origin-claim".into(),
                 label: Some("agent-b".to_string()),
@@ -3188,7 +3235,7 @@ async fn test_oracle_server_pin_verified() {
     let (cert_a, key_a, pin_a) = generate_self_signed_ed25519("host-a").unwrap();
     let b = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9".into(),
@@ -3239,7 +3286,7 @@ async fn test_oracle_server_pin_verified() {
             label: Some("a".to_string()),
         },
         to: FedTarget {
-            r#ref: "sess-b".to_string(),
+            r#ref: "0199cecf-000b-7000-8000-00000000000b".to_string(),
         },
         body: "test".to_string(),
         thread_id: "t1".to_string(),
@@ -3264,7 +3311,7 @@ async fn test_oracle_reply_allow_check() {
 
     let node_a = create_test_node_full(
         "host-a",
-        "sess-a",
+        "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
             name: "host-b".to_string(),
             address: "127.0.0.1:9".into(),
@@ -3286,19 +3333,27 @@ async fn test_oracle_reply_allow_check() {
     let msg_id = ulid::Ulid::new().to_string();
     {
         let db = node_a.db.lock().unwrap();
-        storage::insert_outbound(&db, &msg_id, "host-b", "sess-b", "accepted", 1000).unwrap();
+        storage::insert_outbound(
+            &db,
+            &msg_id,
+            "host-b",
+            "0199cecf-000b-7000-8000-00000000000b",
+            "accepted",
+            1000,
+        )
+        .unwrap();
         storage::insert_message(
             &db,
             &storage::MessageRecord {
                 id: msg_id.clone(),
                 created_at: 1000,
-                session_id: "sess-a".to_string(),
-                from_name: "xmsg@host-a · claude:sess-a".to_string(),
+                session_id: "0199cecf-000a-7000-8000-00000000000a".to_string(),
+                from_name: "xmsg@host-a · claude:0199cecf-000a-7000-8000-00000000000a".to_string(),
                 bytes: 4,
                 outcome: "accepted".to_string(),
                 recipient_harness: "claude".to_string(),
                 return_harness: Some("claude".to_string()),
-                return_session_id: Some("sess-a".to_string()),
+                return_session_id: Some("0199cecf-000a-7000-8000-00000000000a".to_string()),
                 thread_id: msg_id.clone(),
                 return_host: Some("host-a".to_string()),
             },
@@ -3323,7 +3378,7 @@ async fn test_oracle_reply_allow_check() {
         id: ulid::Ulid::new().to_string(),
         in_reply_to: msg_id,
         replier: xmsg::storage::Origin {
-            id: Some("sess-b".to_string()),
+            id: Some("0199cecf-000b-7000-8000-00000000000b".to_string()),
             service: None,
             node: "origin-claim".into(),
             label: Some("agent-b".to_string()),
@@ -3344,19 +3399,27 @@ async fn test_oracle_reply_allow_check() {
 fn seed_origin(node: &TestNode, peer_name: &str) -> String {
     let id = ulid::Ulid::new().to_string();
     let db = node.db.lock().unwrap();
-    storage::insert_outbound(&db, &id, peer_name, "sess-b", "accepted", 1000).unwrap();
+    storage::insert_outbound(
+        &db,
+        &id,
+        peer_name,
+        "0199cecf-000b-7000-8000-00000000000b",
+        "accepted",
+        1000,
+    )
+    .unwrap();
     storage::insert_message(
         &db,
         &storage::MessageRecord {
             id: id.clone(),
             created_at: 1000,
-            session_id: "sess-a".to_string(),
-            from_name: "xmsg@host-a · claude:sess-a".to_string(),
+            session_id: "0199cecf-000a-7000-8000-00000000000a".to_string(),
+            from_name: "xmsg@host-a · claude:0199cecf-000a-7000-8000-00000000000a".to_string(),
             bytes: 4,
             outcome: "accepted".to_string(),
             recipient_harness: "claude".to_string(),
             return_harness: Some("claude".to_string()),
-            return_session_id: Some("sess-a".to_string()),
+            return_session_id: Some("0199cecf-000a-7000-8000-00000000000a".to_string()),
             thread_id: "th".to_string(),
             return_host: None,
         },
@@ -3374,7 +3437,7 @@ async fn test_n1_offsource_replay_known_reply_id_rejected() {
     let (cert_b, key_b, pin_b) = generate_self_signed_ed25519("host-b").unwrap();
     let node_a = create_test_node(
         "host-a",
-        "sess-a",
+        "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
             name: "host-b".to_string(),
             address: "127.0.0.1:9".to_string(),
@@ -3397,7 +3460,7 @@ async fn test_n1_offsource_replay_known_reply_id_rejected() {
         storage::insert_reply(
             &db,
             &orig,
-            "sess-a",
+            "0199cecf-000a-7000-8000-00000000000a",
             "earlier",
             Some("pushed"),
             Some(&known),
@@ -3444,7 +3507,7 @@ async fn test_n1_offsource_flood_leaves_legit_bucket_intact() {
     let (cert_a, key_a, pin_a) = generate_self_signed_ed25519("host-a").unwrap();
     let off = create_test_node(
         "host-r",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9".to_string(),
@@ -3566,7 +3629,7 @@ async fn test_n1_offsource_flood_leaves_legit_bucket_intact() {
             id: ulid::Ulid::new().to_string(),
             in_reply_to: orig,
             replier: xmsg::storage::Origin {
-                id: Some("sess-b".to_string()),
+                id: Some("0199cecf-000b-7000-8000-00000000000b".to_string()),
                 service: None,
                 node: "origin-claim".into(),
                 label: Some("agent-a".to_string()),
@@ -3587,7 +3650,7 @@ async fn test_n2_idle_authenticated_connection_closed_within_timeout() {
     let (cert_a, key_a, pin_a) = generate_self_signed_ed25519("host-a").unwrap();
     let node_b = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9".to_string(),
@@ -3631,7 +3694,7 @@ async fn test_n3_unauthenticated_socket_bound_leaves_slot_for_peer() {
     let (cert_a, key_a, pin_a) = generate_self_signed_ed25519("host-a").unwrap();
     let node_b = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9".to_string(),
@@ -3679,7 +3742,7 @@ async fn test_n3_unauthenticated_socket_bound_leaves_slot_for_peer() {
             label: Some("agent-a".to_string()),
         },
         to: FedTarget {
-            r#ref: "sess-b".to_string(),
+            r#ref: "0199cecf-000b-7000-8000-00000000000b".to_string(),
         },
         body: "hello".to_string(),
         thread_id: "t1".to_string(),
@@ -3775,7 +3838,7 @@ async fn test_n7_mf6_tcp_peer_address_source() {
     let (cert_a, key_a, pin_a) = generate_self_signed_ed25519("host-a").unwrap();
     let node_b = create_test_node(
         "host-b",
-        "sess-b",
+        "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
             name: "host-a".to_string(),
             address: "127.0.0.1:9".to_string(),
@@ -3818,7 +3881,7 @@ async fn test_n7_mf6_tcp_peer_address_source() {
             label: Some("a".to_string()),
         },
         to: FedTarget {
-            r#ref: "sess-b".to_string(),
+            r#ref: "0199cecf-000b-7000-8000-00000000000b".to_string(),
         },
         body: "from-127-0-0-2".to_string(),
         thread_id: "t1".to_string(),
@@ -3848,7 +3911,8 @@ async fn test_n7_mf6_tcp_peer_address_source() {
     ignore = "needs 127.0.0.2-17 on lo0 (macOS lo0 only has 127.0.0.1); add with `sudo ifconfig lo0 alias 127.0.0.N up`"
 )]
 async fn test_n7_f5b_semaphore_bound() {
-    let node_b = create_test_node("host-b", "sess-b", Vec::new()).await;
+    let node_b =
+        create_test_node("host-b", "0199cecf-000b-7000-8000-00000000000b", Vec::new()).await;
 
     let mut held_sockets = Vec::new();
     for i in 1..=16 {

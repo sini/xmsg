@@ -333,8 +333,18 @@ fn claude_session(sessions_dir: &Path, session_id: &str, name: &str) -> Arc<Mute
     let pid = std::process::id();
     let proc_start =
         xmsg::process::starttime(Path::new(xmsg::process::LIVE_PROC_ROOT), pid).unwrap();
+    let sess_uuid = if xmsg::claim::is_uuid_shaped(session_id) {
+        session_id.to_string()
+    } else {
+        use sha2::{Digest, Sha256};
+        let h = Sha256::digest(session_id.as_bytes());
+        format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-4{:01x}{:02x}-8{:01x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            h[0], h[1], h[2], h[3], h[4], h[5], h[6] & 0x0f, h[7], h[8] & 0x0f, h[9], h[10], h[11], h[12], h[13], h[14], h[15]
+        )
+    };
     let session = json!({
-        "pid": pid, "sessionId": session_id, "name": name, "cwd": "/workspace",
+        "pid": pid, "sessionId": sess_uuid, "name": name, "cwd": "/workspace",
         "status": "idle", "kind": "interactive", "startedAt": 1000, "updatedAt": 2000,
         "procStart": proc_start, "messagingSocketPath": sock_path.display().to_string(),
     });
@@ -818,7 +828,11 @@ async fn test_oracle_5_reply_returns_to_the_origin() {
             json!({ "sini.a": ca_entry(pa.fed_port, &pb.ca_file(), URI_A, &["send", "reply"]) });
         let mut b = start(pb, &ca_b, peers_b, None, Some("answerer")).await;
         let a = start(pa, &ca_a, peers_a, None, None).await;
-        let alice = claude_session(&a.sessions_dir, "alice", "Alice");
+        let alice = claude_session(
+            &a.sessions_dir,
+            "135aa23d-60a6-5595-a42a-c0296722252e",
+            "Alice",
+        );
         let (mut r, mut w) = register_svc(&b.register_sock, "answerer").await;
 
         // The Claude fake's send: the reply is pushed into its session.
@@ -1352,8 +1366,18 @@ fn late_session(sessions_dir: &Path, session_id: &str, name: &str) -> PathBuf {
     let pid = std::process::id();
     let proc_start =
         xmsg::process::starttime(Path::new(xmsg::process::LIVE_PROC_ROOT), pid).unwrap();
+    let sess_uuid = if xmsg::claim::is_uuid_shaped(session_id) {
+        session_id.to_string()
+    } else {
+        use sha2::{Digest, Sha256};
+        let h = Sha256::digest(session_id.as_bytes());
+        format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-4{:01x}{:02x}-8{:01x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            h[0], h[1], h[2], h[3], h[4], h[5], h[6] & 0x0f, h[7], h[8] & 0x0f, h[9], h[10], h[11], h[12], h[13], h[14], h[15]
+        )
+    };
     let session = json!({
-        "pid": pid, "sessionId": session_id, "name": name, "cwd": "/workspace",
+        "pid": pid, "sessionId": sess_uuid, "name": name, "cwd": "/workspace",
         "status": "idle", "kind": "interactive", "startedAt": 1000, "updatedAt": 2000,
         "procStart": proc_start, "messagingSocketPath": sock_path.display().to_string(),
     });
@@ -1485,7 +1509,11 @@ async fn replied_pair() -> Pair {
         json!({ "sini.a": ca_entry(pa.fed_port, &pb.ca_file(), URI_A, &["send", "reply"]) });
     let b = start(pb, &ca_b, peers_b, None, Some("answerer")).await;
     let a = start(pa, &ca_a, peers_a, None, None).await;
-    let alice = claude_session(&a.sessions_dir, "alice", "Alice");
+    let alice = claude_session(
+        &a.sessions_dir,
+        "135aa23d-60a6-5595-a42a-c0296722252e",
+        "Alice",
+    );
     let (mut r, mut w) = register_svc(&b.register_sock, "answerer").await;
 
     let sent = agent_send(&a, "answerer@eve.b", "x from alice").await;
@@ -1556,7 +1584,10 @@ async fn test_oracle_12_a_federated_reply_is_answerable() {
         assert_eq!(got["action"], "deliver", "{got}");
         assert_eq!(got["text"], "a2 to answerer", "{got}");
         assert_eq!(got["inReplyTo"], reply.as_str(), "{got}");
-        assert_eq!(got["origin"]["id"], "alice", "attributed to Alice: {got}");
+        assert_eq!(
+            got["origin"]["id"], "135aa23d-60a6-5595-a42a-c0296722252e",
+            "attributed to Alice: {got}"
+        );
         assert_eq!(got["origin"]["node"], "sini.a", "attested to A: {got}");
 
         // `answerer` answers Alice's reply: it reaches Alice on A.

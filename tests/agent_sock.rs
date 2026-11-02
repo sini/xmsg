@@ -177,7 +177,7 @@ fn test_resolve_caller_session_ancestor_walk() {
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
     let agy_store = new_agy_store();
     let pi_store = new_pi_store();
@@ -209,7 +209,7 @@ fn test_resolve_caller_session_ancestor_walk() {
 
     let session_json = serde_json::json!({
         "pid": 1000,
-        "sessionId": "claude-sess-alpha",
+        "sessionId": "0199cecf-a1fa-7000-8000-00000000a1fa",
         "name": "alpha-agent",
         "cwd": "/workspace",
         "status": "idle",
@@ -223,7 +223,7 @@ fn test_resolve_caller_session_ancestor_walk() {
 
     let svc_store = xmsg::svc::new_svc_store();
 
-    // 1. Caller PID 3000 should resolve upwards to session claude-sess-alpha
+    // 1. Caller PID 3000 should resolve upwards to session 0199cecf-a1fa-7000-8000-00000000a1fa
     let resolved = resolve_caller_session(
         &proc_root,
         &sessions_dir,
@@ -235,7 +235,7 @@ fn test_resolve_caller_session_ancestor_walk() {
         3000,
     )
     .unwrap();
-    assert_eq!(resolved.session_id, "claude-sess-alpha");
+    assert_eq!(resolved.session_id, "0199cecf-a1fa-7000-8000-00000000a1fa");
     assert_eq!(resolved.name.as_deref(), Some("alpha-agent"));
 
     // 2. Caller PID 9999 (not descending from any session) should fail
@@ -295,7 +295,7 @@ fn resolve_with_middle_link(
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
     let stat = |pid: u32, ppid: u32, start: &str| {
         let dir = proc_root.join(pid.to_string());
@@ -310,7 +310,7 @@ fn resolve_with_middle_link(
     middle(&proc_root);
     stat(3000, 2000, "300");
     let session = serde_json::json!({
-        "pid": 1000, "sessionId": "sess-a", "cwd": "/", "status": "idle",
+        "pid": 1000, "sessionId": "0199cecf-000a-7000-8000-00000000000a", "cwd": "/", "status": "idle",
         "kind": "interactive", "startedAt": 1, "updatedAt": 1, "procStart": "100",
         "messagingSocketPath": "/tmp/dummy.sock",
     });
@@ -334,7 +334,7 @@ fn test_resolve_caller_session_rejects_parent_younger_than_child() {
     // Control: 2000 started before its child 3000, so the chain is the session's.
     assert_eq!(
         resolve_through_middle_link("200").unwrap().session_id,
-        "sess-a"
+        "0199cecf-000a-7000-8000-00000000000a"
     );
     // 2000 "started" after its child 3000: a reused PID, so the caller is anonymous.
     match resolve_through_middle_link("400") {
@@ -428,7 +428,7 @@ async fn test_agent_sock_reply_and_send_flow() {
     // Register current test process as session-sender
     let session_json = serde_json::json!({
         "pid": my_pid,
-        "sessionId": "sess-caller-123",
+        "sessionId": "0199cecf-0123-7000-8000-000000000123",
         "name": "sender-session",
         "cwd": "/workspace",
         "status": "idle",
@@ -457,7 +457,7 @@ async fn test_agent_sock_reply_and_send_flow() {
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
 
     let app_state = Arc::new(AppState {
@@ -501,11 +501,11 @@ async fn test_agent_sock_reply_and_send_flow() {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
-    // 1. Insert a message into DB addressed to sess-caller-123
+    // 1. Insert a message into DB addressed to 0199cecf-0123-7000-8000-000000000123
     let msg_record = xmsg::storage::MessageRecord {
         id: "msg-001".to_string(),
         created_at: xmsg::storage::now_epoch_secs(),
-        session_id: "sess-caller-123".to_string(),
+        session_id: "0199cecf-0123-7000-8000-000000000123".to_string(),
         from_name: "orchestrator".to_string(),
         bytes: 20,
         outcome: "delivered".to_string(),
@@ -520,7 +520,7 @@ async fn test_agent_sock_reply_and_send_flow() {
         xmsg::storage::insert_message(&db_lock, &msg_record).unwrap();
     }
 
-    // 2. Reply to msg-001 from sess-caller-123
+    // 2. Reply to msg-001 from 0199cecf-0123-7000-8000-000000000123
     let reply_req = serde_json::json!({
         "action": "reply",
         "message_id": "msg-001",
@@ -537,7 +537,10 @@ async fn test_agent_sock_reply_and_send_flow() {
     assert_eq!(resp["status"], "ok");
     assert_eq!(resp["reply"]["messageId"], "msg-001");
     assert_eq!(resp["reply"]["text"], "Attested reply over agent.sock");
-    assert_eq!(resp["reply"]["replierSessionId"], "sess-caller-123");
+    assert_eq!(
+        resp["reply"]["replierSessionId"],
+        "0199cecf-0123-7000-8000-000000000123"
+    );
 
     // 3. Insert a message addressed to a different session (sess-other-999)
     let other_msg_record = xmsg::storage::MessageRecord {
@@ -575,7 +578,7 @@ async fn test_agent_sock_reply_and_send_flow() {
     assert_eq!(err_resp["status"], "error");
     assert_eq!(err_resp["error"], "denied");
 
-    // 5. Send message over agent.sock (targeting sess-caller-123)
+    // 5. Send message over agent.sock (targeting 0199cecf-0123-7000-8000-000000000123)
     let send_req = serde_json::json!({
         "action": "send",
         "to": "sender-session",
@@ -590,14 +593,20 @@ async fn test_agent_sock_reply_and_send_flow() {
     reader.read_line(&mut line).await.unwrap();
     let send_resp: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(send_resp["status"], "ok");
-    assert_eq!(send_resp["address"], "sess-caller-123@test-host");
+    assert_eq!(
+        send_resp["address"],
+        "0199cecf-0123-7000-8000-000000000123@test-host"
+    );
     let sent = {
         let db_lock = db.lock().unwrap();
         xmsg::storage::get_message(&db_lock, send_resp["message_id"].as_str().unwrap())
             .unwrap()
             .unwrap()
     };
-    assert_eq!(sent.from_name, "sender-session · sess-caller-123@test-host");
+    assert_eq!(
+        sent.from_name,
+        "sender-session · 0199cecf-0123-7000-8000-000000000123@test-host"
+    );
 }
 
 /// XS2 (HB1 self-review C4a): `SvcStore` in `resolve_caller_session_peer` admits only hop 0

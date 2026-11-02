@@ -99,10 +99,7 @@ impl Node {
             Some(&body),
         )
         .await;
-        assert!(
-            status == 200 || status == 202,
-            "send: {status} {resp_text}"
-        );
+        assert!(status == 200 || status == 202, "send: {status} {resp_text}");
         let val: Value = serde_json::from_str(&resp_text).unwrap();
         val["message_id"].as_str().unwrap().to_string()
     }

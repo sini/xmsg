@@ -118,9 +118,23 @@ fn create_claude_session_fixture(
     let live_proc = PathBuf::from(xmsg::process::LIVE_PROC_ROOT);
     let my_proc_start =
         xmsg::process::starttime(&live_proc, my_pid).unwrap_or_else(|_| "1000".to_string());
+    let session_uuid = if xmsg::claim::is_uuid_shaped(session_id) {
+        session_id.to_string()
+    } else {
+        use sha2::{Digest, Sha256};
+        let h = hex::encode(Sha256::digest(session_id.as_bytes()));
+        format!(
+            "{}-{}-4{}-a{}-{}",
+            &h[0..8],
+            &h[8..12],
+            &h[13..16],
+            &h[17..20],
+            &h[20..32]
+        )
+    };
     let session_json = serde_json::json!({
         "pid": my_pid,
-        "sessionId": session_id,
+        "sessionId": session_uuid,
         "name": name,
         "cwd": "/workspace",
         "status": "idle",

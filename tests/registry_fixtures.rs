@@ -22,7 +22,7 @@ fn test_registry_fixtures() {
     let live_json = format!(
         r#"{{
             "pid": {my_pid},
-            "sessionId": "live-session-1111",
+            "sessionId": "0199cecf-1111-7000-8000-000000001111",
             "name": "live-agent",
             "cwd": "/workspace/live",
             "status": "idle",
@@ -95,7 +95,10 @@ fn test_registry_fixtures() {
     // Test list_sessions
     let live_list = list_sessions(dir_path, &SessionsQuery::default());
     assert_eq!(live_list.len(), 1, "Only live session should be listed");
-    assert_eq!(live_list[0].session_id, "live-session-1111");
+    assert_eq!(
+        live_list[0].session_id,
+        "0199cecf-1111-7000-8000-000000001111"
+    );
     assert_eq!(live_list[0].pid, my_pid);
     assert_eq!(live_list[0].name.as_deref(), Some("live-agent"));
     assert!(!live_list

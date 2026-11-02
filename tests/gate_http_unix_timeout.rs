@@ -40,9 +40,14 @@ fn unix_request_timeout_is_timed_out_with_path_and_bound() {
     // on its own side of the bound, so a loaded runner's scheduling delay decides neither.
     let early = dir.path().join("early.sock");
     slow_server(&early, Duration::ZERO);
-    let (status, body) =
-        xmsg::http::http_request_unix_within(&early, "GET", "/v1/recipients", None, Duration::from_secs(10))
-            .expect("a server answering inside the bound must succeed");
+    let (status, body) = xmsg::http::http_request_unix_within(
+        &early,
+        "GET",
+        "/v1/recipients",
+        None,
+        Duration::from_secs(10),
+    )
+    .expect("a server answering inside the bound must succeed");
     assert_eq!(status.as_u16(), 200);
     assert_eq!(body, "ok");
 }

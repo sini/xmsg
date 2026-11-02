@@ -118,9 +118,23 @@ fn create_claude_session_fixture(
     let live_proc = PathBuf::from(xmsg::process::LIVE_PROC_ROOT);
     let my_proc_start =
         xmsg::process::starttime(&live_proc, my_pid).unwrap_or_else(|_| "1000".to_string());
+    let session_uuid = if xmsg::claim::is_uuid_shaped(session_id) {
+        session_id.to_string()
+    } else {
+        use sha2::{Digest, Sha256};
+        let h = hex::encode(Sha256::digest(session_id.as_bytes()));
+        format!(
+            "{}-{}-4{}-a{}-{}",
+            &h[0..8],
+            &h[8..12],
+            &h[13..16],
+            &h[17..20],
+            &h[20..32]
+        )
+    };
     let session_json = json!({
         "pid": my_pid,
-        "sessionId": session_id,
+        "sessionId": session_uuid,
         "name": name,
         "cwd": "/workspace",
         "status": "idle",
@@ -347,81 +361,88 @@ where
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_1_direct_link_wins_over_default_route() {
-    run_test_with_port_retry("test_oracle_1_direct_link_wins_over_default_route", || async move {
-        let (cert_a, key_a, pin_a) = generate_self_signed_ed25519_pem("node-a").unwrap();
-        let (cert_h, key_h, pin_h) = generate_self_signed_ed25519_pem("hub").unwrap();
-        let (cert_b, key_b, pin_b) = generate_self_signed_ed25519_pem("node-b").unwrap();
+    run_test_with_port_retry(
+        "test_oracle_1_direct_link_wins_over_default_route",
+        || async move {
+            let (cert_a, key_a, pin_a) = generate_self_signed_ed25519_pem("node-a").unwrap();
+            let (cert_h, key_h, pin_h) = generate_self_signed_ed25519_pem("hub").unwrap();
+            let (cert_b, key_b, pin_b) = generate_self_signed_ed25519_pem("node-b").unwrap();
 
-        let port_a = get_free_port();
-        let http_a = get_free_port();
-        let port_h = get_free_port();
-        let http_h = get_free_port();
-        let port_b = get_free_port();
-        let http_b = get_free_port();
+            let port_a = get_free_port();
+            let http_a = get_free_port();
+            let port_h = get_free_port();
+            let http_h = get_free_port();
+            let port_b = get_free_port();
+            let http_b = get_free_port();
 
-        // Node A has both:
-        // 1. Hub with default_route: true
-        // 2. Direct link to node-b
-        let peers_a = json!({
-            "peers": {
-                "hub": {
-                    "address": format!("127.0.0.1:{port_h}"),
-                    "pin": normalize_pin(&pin_h),
-                    "allow": ["send", "reply"],
-                    "default_route": true
-                },
-                "node-b": {
-                    "address": format!("127.0.0.1:{port_b}"),
-                    "pin": normalize_pin(&pin_b),
-                    "allow": ["send", "reply"]
+            // Node A has both:
+            // 1. Hub with default_route: true
+            // 2. Direct link to node-b
+            let peers_a = json!({
+                "peers": {
+                    "hub": {
+                        "address": format!("127.0.0.1:{port_h}"),
+                        "pin": normalize_pin(&pin_h),
+                        "allow": ["send", "reply"],
+                        "default_route": true
+                    },
+                    "node-b": {
+                        "address": format!("127.0.0.1:{port_b}"),
+                        "pin": normalize_pin(&pin_b),
+                        "allow": ["send", "reply"]
+                    }
                 }
-            }
-        });
+            });
 
-        // Hub only knows node-a (hub does NOT know node-b)
-        // If Node A erroneously routes via hub, hub will refuse forwarding to node-b
-        let peers_h = json!({
-            "peers": {
-                "node-a": {
-                    "address": format!("127.0.0.1:{port_a}"),
-                    "pin": normalize_pin(&pin_a),
-                    "allow": ["send", "reply", "forward"]
+            // Hub only knows node-a (hub does NOT know node-b)
+            // If Node A erroneously routes via hub, hub will refuse forwarding to node-b
+            let peers_h = json!({
+                "peers": {
+                    "node-a": {
+                        "address": format!("127.0.0.1:{port_a}"),
+                        "pin": normalize_pin(&pin_a),
+                        "allow": ["send", "reply", "forward"]
+                    }
                 }
-            }
-        });
+            });
 
-        // Node B knows node-a directly
-        let peers_b = json!({
-            "peers": {
-                "node-a": {
-                    "address": format!("127.0.0.1:{port_a}"),
-                    "pin": normalize_pin(&pin_a),
-                    "allow": ["send", "reply"]
+            // Node B knows node-a directly
+            let peers_b = json!({
+                "peers": {
+                    "node-a": {
+                        "address": format!("127.0.0.1:{port_a}"),
+                        "pin": normalize_pin(&pin_a),
+                        "allow": ["send", "reply"]
+                    }
                 }
-            }
-        });
+            });
 
-        let _hub = spawn_test_node("hub", port_h, http_h, &cert_h, &key_h, peers_h).await;
-        let node_b = spawn_test_node("node-b", port_b, http_b, &cert_b, &key_b, peers_b).await;
-        let node_a = spawn_test_node("node-a", port_a, http_a, &cert_a, &key_a, peers_a).await;
+            let _hub = spawn_test_node("hub", port_h, http_h, &cert_h, &key_h, peers_h).await;
+            let node_b = spawn_test_node("node-b", port_b, http_b, &cert_b, &key_b, peers_b).await;
+            let node_a = spawn_test_node("node-a", port_a, http_a, &cert_a, &key_a, peers_a).await;
 
-        let (_sock_a, _rx_a) = create_claude_session_fixture(&node_a.sessions_dir, "alice", "Alice");
-        let (_sock_b, rx_b) = create_claude_session_fixture(&node_b.sessions_dir, "bob", "Bob");
+            let (_sock_a, _rx_a) =
+                create_claude_session_fixture(&node_a.sessions_dir, "alice", "Alice");
+            let (_sock_b, rx_b) = create_claude_session_fixture(&node_b.sessions_dir, "bob", "Bob");
 
-        let send_resp = send_via_agent_sock(
-            &node_a.agent_sock,
-            "Bob@node-b",
-            "Direct link wins over default route",
-        )
-        .await;
+            let send_resp = send_via_agent_sock(
+                &node_a.agent_sock,
+                "Bob@node-b",
+                "Direct link wins over default route",
+            )
+            .await;
 
-        assert_eq!(send_resp["status"], "ok", "direct send must succeed: {send_resp}");
+            assert_eq!(
+                send_resp["status"], "ok",
+                "direct send must succeed: {send_resp}"
+            );
 
-        let b_msg = wait_for_inbox_message(&rx_b, Duration::from_secs(5))
-            .await
-            .expect("Bob on B must receive direct message");
-        assert!(b_msg.contains("Direct link wins over default route"));
-    })
+            let b_msg = wait_for_inbox_message(&rx_b, Duration::from_secs(5))
+                .await
+                .expect("Bob on B must receive direct message");
+            assert!(b_msg.contains("Direct link wins over default route"));
+        },
+    )
     .await;
 }
 
@@ -487,7 +508,11 @@ async fn test_oracle_2_default_route_via_hub() {
         let _hub = spawn_test_node("hub", port_h, http_h, &cert_h, &key_h, peers_h).await;
         let node_a = spawn_test_node("node-a", port_a, http_a, &cert_a, &key_a, peers_a).await;
 
-        let (_sock_a, _rx_a) = create_claude_session_fixture(&node_a.sessions_dir, "alice", "Alice");
+        let (_sock_a, _rx_a) = create_claude_session_fixture(
+            &node_a.sessions_dir,
+            "0199cecf-a11c-7000-8000-0000000a11ce",
+            "Alice",
+        );
         let (_sock_b, rx_b) = create_claude_session_fixture(&node_b.sessions_dir, "bob", "Bob");
 
         let send_resp = send_via_agent_sock(
@@ -497,14 +522,19 @@ async fn test_oracle_2_default_route_via_hub() {
         )
         .await;
 
-        assert_eq!(send_resp["status"], "ok", "default route send must succeed: {send_resp}");
+        assert_eq!(
+            send_resp["status"], "ok",
+            "default route send must succeed: {send_resp}"
+        );
 
         let b_msg = wait_for_inbox_message(&rx_b, Duration::from_secs(5))
             .await
             .expect("Bob on B must receive relayed message");
         assert!(b_msg.contains("Routing via default route hub"));
         let node_a_name = xmsg::node::node_name_from_pin(&pin_a).unwrap();
-        assert!(b_msg.contains(&format!("Alice · alice@{node_a_name}")));
+        assert!(b_msg.contains(&format!(
+            "Alice · 0199cecf-a11c-7000-8000-0000000a11ce@{node_a_name}"
+        )));
     })
     .await;
 }
@@ -515,39 +545,46 @@ async fn test_oracle_2_default_route_via_hub() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_3_unknown_peer_refusal_when_no_default_route() {
-    run_test_with_port_retry("test_oracle_3_unknown_peer_refusal_when_no_default_route", || async move {
-        let (cert_a, key_a, _pin_a) = generate_self_signed_ed25519_pem("node-a").unwrap();
-        let port_a = get_free_port();
-        let http_a = get_free_port();
+    run_test_with_port_retry(
+        "test_oracle_3_unknown_peer_refusal_when_no_default_route",
+        || async move {
+            let (cert_a, key_a, _pin_a) = generate_self_signed_ed25519_pem("node-a").unwrap();
+            let port_a = get_free_port();
+            let http_a = get_free_port();
 
-        // Node A has no default route
-        let peers_a = json!({
-            "peers": {
-                "known-peer": {
-                    "address": "127.0.0.1:9999",
-                    "pin": DUMMY_PIN,
-                    "allow": ["send", "reply"]
+            // Node A has no default route
+            let peers_a = json!({
+                "peers": {
+                    "known-peer": {
+                        "address": "127.0.0.1:9999",
+                        "pin": DUMMY_PIN,
+                        "allow": ["send", "reply"]
+                    }
                 }
-            }
-        });
+            });
 
-        let node_a = spawn_test_node("node-a", port_a, http_a, &cert_a, &key_a, peers_a).await;
-        let (_sock_a, _rx_a) = create_claude_session_fixture(&node_a.sessions_dir, "alice", "Alice");
+            let node_a = spawn_test_node("node-a", port_a, http_a, &cert_a, &key_a, peers_a).await;
+            let (_sock_a, _rx_a) =
+                create_claude_session_fixture(&node_a.sessions_dir, "alice", "Alice");
 
-        let send_resp = send_via_agent_sock(
-            &node_a.agent_sock,
-            "Bob@unreachable-peer",
-            "This should fail",
-        )
-        .await;
+            let send_resp = send_via_agent_sock(
+                &node_a.agent_sock,
+                "Bob@unreachable-peer",
+                "This should fail",
+            )
+            .await;
 
-        assert_eq!(send_resp["status"], "error", "must fail for unknown peer when no default route");
-        let detail = send_resp["detail"].as_str().unwrap_or("");
-        assert!(
-            detail.contains("unknown peer") || detail.contains("unreachable-peer"),
-            "error should indicate unknown peer, got: {send_resp}"
-        );
-    })
+            assert_eq!(
+                send_resp["status"], "error",
+                "must fail for unknown peer when no default route"
+            );
+            let detail = send_resp["detail"].as_str().unwrap_or("");
+            assert!(
+                detail.contains("unknown peer") || detail.contains("unreachable-peer"),
+                "error should indicate unknown peer, got: {send_resp}"
+            );
+        },
+    )
     .await;
 }
 
@@ -609,7 +646,10 @@ async fn test_oracle_4_two_hop_refusal_at_hub() {
 
         let (status, res) = send_envelope(&origin, &pin_h, port_h, fwd_env).await;
 
-        assert_eq!(status, 403, "Hub must refuse already-forwarded envelope with 403: {res}");
+        assert_eq!(
+            status, 403,
+            "Hub must refuse already-forwarded envelope with 403: {res}"
+        );
         assert_eq!(res["error"], "denied");
         assert_eq!(
             res["detail"],
@@ -629,92 +669,99 @@ async fn test_oracle_4_two_hop_refusal_at_hub() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_5_hub_relayed_reply_answerable() {
-    run_test_with_port_retry("test_oracle_5_hub_relayed_reply_answerable", || async move {
-        let (cert_a, key_a, pin_a) = generate_self_signed_ed25519_pem("node-a").unwrap();
-        let (cert_h, key_h, pin_h) = generate_self_signed_ed25519_pem("hub").unwrap();
-        let (cert_b, key_b, pin_b) = generate_self_signed_ed25519_pem("node-b").unwrap();
+    run_test_with_port_retry(
+        "test_oracle_5_hub_relayed_reply_answerable",
+        || async move {
+            let (cert_a, key_a, pin_a) = generate_self_signed_ed25519_pem("node-a").unwrap();
+            let (cert_h, key_h, pin_h) = generate_self_signed_ed25519_pem("hub").unwrap();
+            let (cert_b, key_b, pin_b) = generate_self_signed_ed25519_pem("node-b").unwrap();
 
-        let port_a = get_free_port();
-        let http_a = get_free_port();
-        let port_h = get_free_port();
-        let http_h = get_free_port();
-        let port_b = get_free_port();
-        let http_b = get_free_port();
+            let port_a = get_free_port();
+            let http_a = get_free_port();
+            let port_h = get_free_port();
+            let http_h = get_free_port();
+            let port_b = get_free_port();
+            let http_b = get_free_port();
 
-        let peers_a = json!({
-            "peers": {
-                "hub": {
-                    "address": format!("127.0.0.1:{port_h}"),
-                    "pin": normalize_pin(&pin_h),
-                    "allow": ["send", "reply"],
-                    "default_route": true
+            let peers_a = json!({
+                "peers": {
+                    "hub": {
+                        "address": format!("127.0.0.1:{port_h}"),
+                        "pin": normalize_pin(&pin_h),
+                        "allow": ["send", "reply"],
+                        "default_route": true
+                    }
                 }
-            }
-        });
+            });
 
-        let peers_h = json!({
-            "peers": {
-                "node-a": {
-                    "address": format!("127.0.0.1:{port_a}"),
-                    "pin": normalize_pin(&pin_a),
-                    "allow": ["send", "reply", "forward"]
-                },
-                "node-b": {
-                    "address": format!("127.0.0.1:{port_b}"),
-                    "pin": normalize_pin(&pin_b),
-                    "allow": ["send", "reply"]
+            let peers_h = json!({
+                "peers": {
+                    "node-a": {
+                        "address": format!("127.0.0.1:{port_a}"),
+                        "pin": normalize_pin(&pin_a),
+                        "allow": ["send", "reply", "forward"]
+                    },
+                    "node-b": {
+                        "address": format!("127.0.0.1:{port_b}"),
+                        "pin": normalize_pin(&pin_b),
+                        "allow": ["send", "reply"]
+                    }
                 }
-            }
-        });
+            });
 
-        let peers_b = json!({
-            "peers": {
-                "hub": {
-                    "address": format!("127.0.0.1:{port_h}"),
-                    "pin": normalize_pin(&pin_h),
-                    "allow": ["send", "reply", "relayed"]
+            let peers_b = json!({
+                "peers": {
+                    "hub": {
+                        "address": format!("127.0.0.1:{port_h}"),
+                        "pin": normalize_pin(&pin_h),
+                        "allow": ["send", "reply", "relayed"]
+                    }
                 }
-            }
-        });
+            });
 
-        let node_b = spawn_test_node("node-b", port_b, http_b, &cert_b, &key_b, peers_b).await;
-        let _hub = spawn_test_node("hub", port_h, http_h, &cert_h, &key_h, peers_h).await;
-        let node_a = spawn_test_node("node-a", port_a, http_a, &cert_a, &key_a, peers_a).await;
+            let node_b = spawn_test_node("node-b", port_b, http_b, &cert_b, &key_b, peers_b).await;
+            let _hub = spawn_test_node("hub", port_h, http_h, &cert_h, &key_h, peers_h).await;
+            let node_a = spawn_test_node("node-a", port_a, http_a, &cert_a, &key_a, peers_a).await;
 
-        let (_sock_a, rx_a) = create_claude_session_fixture(&node_a.sessions_dir, "alice", "Alice");
-        let (_sock_b, rx_b) = create_claude_session_fixture(&node_b.sessions_dir, "bob", "Bob");
+            let (_sock_a, rx_a) =
+                create_claude_session_fixture(&node_a.sessions_dir, "alice", "Alice");
+            let (_sock_b, rx_b) = create_claude_session_fixture(&node_b.sessions_dir, "bob", "Bob");
 
-        // Turn 1: Alice sends to Bob via Hub
-        let send_resp = send_via_agent_sock(&node_a.agent_sock, "Bob@node-b", "Turn 1: Hello Bob").await;
-        assert_eq!(send_resp["status"], "ok");
+            // Turn 1: Alice sends to Bob via Hub
+            let send_resp =
+                send_via_agent_sock(&node_a.agent_sock, "Bob@node-b", "Turn 1: Hello Bob").await;
+            assert_eq!(send_resp["status"], "ok");
 
-        let b_msg1 = wait_for_inbox_message(&rx_b, Duration::from_secs(5))
-            .await
-            .expect("Bob receives Turn 1");
-        assert!(b_msg1.contains("Turn 1: Hello Bob"));
-        let id1 = extract_message_id(&b_msg1).expect("extract id1");
+            let b_msg1 = wait_for_inbox_message(&rx_b, Duration::from_secs(5))
+                .await
+                .expect("Bob receives Turn 1");
+            assert!(b_msg1.contains("Turn 1: Hello Bob"));
+            let id1 = extract_message_id(&b_msg1).expect("extract id1");
 
-        // Turn 2: Bob replies to Turn 1
-        rx_b.lock().unwrap().clear();
-        let reply_resp1 = reply_via_agent_sock(&node_b.agent_sock, &id1, "Turn 2: Hello Alice").await;
-        assert_eq!(reply_resp1["status"], "ok");
+            // Turn 2: Bob replies to Turn 1
+            rx_b.lock().unwrap().clear();
+            let reply_resp1 =
+                reply_via_agent_sock(&node_b.agent_sock, &id1, "Turn 2: Hello Alice").await;
+            assert_eq!(reply_resp1["status"], "ok");
 
-        let a_reply1 = wait_for_inbox_message(&rx_a, Duration::from_secs(5))
-            .await
-            .expect("Alice receives Turn 2 reply");
-        assert!(a_reply1.contains("Turn 2: Hello Alice"));
-        let id2 = extract_reply_id(&a_reply1).expect("extract id2");
+            let a_reply1 = wait_for_inbox_message(&rx_a, Duration::from_secs(5))
+                .await
+                .expect("Alice receives Turn 2 reply");
+            assert!(a_reply1.contains("Turn 2: Hello Alice"));
+            let id2 = extract_reply_id(&a_reply1).expect("extract id2");
 
-        // Turn 3: Alice replies to Bob's reply
-        rx_a.lock().unwrap().clear();
-        let reply_resp2 = reply_via_agent_sock(&node_a.agent_sock, &id2, "Turn 3: Glad you got it").await;
-        assert_eq!(reply_resp2["status"], "ok");
+            // Turn 3: Alice replies to Bob's reply
+            rx_a.lock().unwrap().clear();
+            let reply_resp2 =
+                reply_via_agent_sock(&node_a.agent_sock, &id2, "Turn 3: Glad you got it").await;
+            assert_eq!(reply_resp2["status"], "ok");
 
-        let b_msg2 = wait_for_inbox_message(&rx_b, Duration::from_secs(5))
-            .await
-            .expect("Bob receives Turn 3 reply");
-        assert!(b_msg2.contains("Turn 3: Glad you got it"));
-    })
+            let b_msg2 = wait_for_inbox_message(&rx_b, Duration::from_secs(5))
+                .await
+                .expect("Bob receives Turn 3 reply");
+            assert!(b_msg2.contains("Turn 3: Glad you got it"));
+        },
+    )
     .await;
 }
 
@@ -893,7 +940,7 @@ async fn test_oracle_7_removed_pull_loop_exits_on_reload() {
         proc_root: PathBuf::from(xmsg::process::LIVE_PROC_ROOT),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
 
     let fs = Arc::new(FedState {
@@ -922,7 +969,10 @@ async fn test_oracle_7_removed_pull_loop_exits_on_reload() {
     });
 
     let active_pull_loops = Arc::new(Mutex::new(HashSet::new()));
-    active_pull_loops.lock().unwrap().insert("peer-b".to_string());
+    active_pull_loops
+        .lock()
+        .unwrap()
+        .insert("peer-b".to_string());
 
     let reloader = Arc::new(
         CredentialReloader::new_full(
@@ -960,7 +1010,10 @@ async fn test_oracle_7_removed_pull_loop_exits_on_reload() {
     // Pull loop should detect peer-b is gone from current_peers() and exit promptly!
     // Mutant M3 (loop never checks map): handle never completes, timeout expires => RED!
     let res = tokio::time::timeout(Duration::from_millis(600), handle).await;
-    assert!(res.is_ok(), "pull loop must exit promptly when peer is removed");
+    assert!(
+        res.is_ok(),
+        "pull loop must exit promptly when peer is removed"
+    );
 }
 
 // =============================================================================
@@ -1012,7 +1065,7 @@ async fn test_oracle_8_reload_adds_pull_loop() {
         proc_root: PathBuf::from(xmsg::process::LIVE_PROC_ROOT),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
 
     let fs = Arc::new(FedState {
@@ -1368,7 +1421,9 @@ fn test_oracle_12_default_route_parsing_and_invariants() {
     });
     let pm = PeersMap::load_from_json_for(&wrapped.to_string(), None)
         .expect("wrapped fixture with default_route must parse");
-    let dr = pm.default_route_link().expect("default_route_link must be Some");
+    let dr = pm
+        .default_route_link()
+        .expect("default_route_link must be Some");
     assert_eq!(dr.name, "hub");
     assert_eq!(pm.get("cee").unwrap().address, "");
     assert!(pm.get("cee").unwrap().leaf);
@@ -1740,18 +1795,19 @@ async fn test_oracle_15_nickname_address_routes_direct() {
             let node_b = spawn_test_node("node-b", port_b, http_b, &cert_b, &key_b, peers_b).await;
             let node_a = spawn_test_node("node-a", port_a, http_a, &cert_a, &key_a, peers_a).await;
 
-            let (_sock_a, _rx_a) = create_claude_session_fixture(&node_a.sessions_dir, "alice", "Alice");
+            let (_sock_a, _rx_a) =
+                create_claude_session_fixture(&node_a.sessions_dir, "alice", "Alice");
             let (_sock_b, rx_b) = create_claude_session_fixture(&node_b.sessions_dir, "bob", "Bob");
-            let (_sock_h, rx_h) = create_claude_session_fixture(&hub.sessions_dir, "hub-sess", "HubSess");
+            let (_sock_h, rx_h) =
+                create_claude_session_fixture(&hub.sessions_dir, "hub-sess", "HubSess");
 
-            let send_resp = send_via_agent_sock(
-                &node_a.agent_sock,
-                "Bob@laptop",
-                "hello laptop direct",
-            )
-            .await;
+            let send_resp =
+                send_via_agent_sock(&node_a.agent_sock, "Bob@laptop", "hello laptop direct").await;
 
-            assert_eq!(send_resp["status"], "ok", "direct send to nickname must succeed: {send_resp}");
+            assert_eq!(
+                send_resp["status"], "ok",
+                "direct send to nickname must succeed: {send_resp}"
+            );
 
             let b_msg = wait_for_inbox_message(&rx_b, Duration::from_secs(5))
                 .await

@@ -2136,14 +2136,35 @@ fn attested_origin(
         Some(_) => envelope_origin.node.clone(),
         None => sender_node.to_string(),
     };
-    check_origin(envelope_origin)?;
-    Ok(storage::Origin {
+    let origin = storage::Origin {
         node,
         ..envelope_origin.clone()
-    })
+    };
+    check_origin(&origin)?;
+    Ok(origin)
 }
 
-fn check_origin(origin: &storage::Origin) -> Result<(), AppError> {
+pub fn validate_no_control_chars(field: &str, val: &str) -> Result<(), AppError> {
+    if val.contains(char::is_control) {
+        return Err(AppError::BadRequest(format!(
+            "invalid {field}: contains control characters"
+        )));
+    }
+    Ok(())
+}
+
+pub fn check_origin(origin: &storage::Origin) -> Result<(), AppError> {
+    if !origin.node.is_empty()
+        && (origin.node.contains('@')
+            || origin.node.contains('·')
+            || origin.node.contains(char::is_control)
+            || origin.node.contains(char::is_whitespace))
+    {
+        return Err(AppError::BadRequest(format!(
+            "invalid origin node '{}'",
+            origin.node
+        )));
+    }
     let name_re = regex::Regex::new(r"^[A-Za-z0-9._-]{1,32}$").expect("valid regex");
     match (&origin.service, &origin.id) {
         (Some(_), Some(_)) => Err(AppError::BadRequest(
@@ -2165,6 +2186,119 @@ fn check_origin(origin: &storage::Origin) -> Result<(), AppError> {
         }
         _ => Ok(()),
     }
+}
+
+/// Parses a rendered `from_name` (`<label> · <id>@<node>`, `<from> · anon@<node>`, or
+/// `<id>@<node>`) back into an `Origin` and validates it with `check_origin` and
+/// control-character validation (XB2 F5).
+pub fn check_rendered_from_name(from_name: &str) -> Result<(), AppError> {
+    validate_no_control_chars("from_name", from_name)?;
+    if from_name.is_empty()
+        || from_name.contains('"')
+        || from_name.contains('<')
+        || from_name.contains('>')
+    {
+        return Err(AppError::BadRequest(format!(
+            "invalid from_name '{from_name}'"
+        )));
+    }
+    let origin = if let Some((label, right)) = from_name.split_once(" · ") {
+        if label.is_empty() || label.contains('@') || label.contains('·') {
+            return Err(AppError::BadRequest(format!(
+                "invalid label in from_name '{from_name}'"
+            )));
+        }
+        let Some((key, node)) = right.split_once('@') else {
+            return Err(AppError::BadRequest(format!(
+                "missing '@node' in from_name '{from_name}'"
+            )));
+        };
+        if node.is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "empty node in from_name '{from_name}'"
+            )));
+        }
+        if key == "anon" {
+            storage::Origin::anonymous(label, node)
+        } else {
+            storage::Origin::instance(key, node, Some(label))
+        }
+    } else {
+        let Some((key, node)) = from_name.split_once('@') else {
+            return Err(AppError::BadRequest(format!(
+                "missing '@node' in from_name '{from_name}'"
+            )));
+        };
+        if node.is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "empty node in from_name '{from_name}'"
+            )));
+        }
+        storage::Origin::instance(key, node, None)
+    };
+    check_origin(&origin)
+}
+
+/// Validates a pulled `FedInboxMessage` on the hub pull path using `check_origin` and
+/// control-character validation (XB2 F5).
+pub fn validate_pulled_message(msg: &FedInboxMessage) -> Result<(), AppError> {
+    if msg.id.is_empty() || msg.id.len() > 128 || msg.id.contains(char::is_whitespace) {
+        return Err(AppError::BadRequest(format!(
+            "invalid pulled message id '{}'",
+            msg.id
+        )));
+    }
+    validate_no_control_chars("id", &msg.id)?;
+    if msg.origin.node.is_empty() {
+        return Err(AppError::BadRequest(
+            "pulled message origin node is empty".to_string(),
+        ));
+    }
+    check_origin(&msg.origin)?;
+    if let Some(ref to) = msg.to {
+        validate_no_control_chars("to", to)?;
+    }
+    Ok(())
+}
+
+/// Validates a `Transfer` received in `handoff::step` using `check_origin` and
+/// control-character validation (XB2 F5).
+pub fn validate_handoff_transfer(
+    transfer: &crate::handoff::Transfer,
+    holder_node: &str,
+) -> Result<(), AppError> {
+    for m in &transfer.messages {
+        if m.id.is_empty() || m.id.len() > 128 || m.id.contains(char::is_whitespace) {
+            return Err(AppError::BadRequest(format!(
+                "invalid handoff message id '{}'",
+                m.id
+            )));
+        }
+        validate_no_control_chars("id", &m.id)?;
+        validate_no_control_chars("instance_id", &m.instance_id)?;
+        check_rendered_from_name(&m.from_name)?;
+    }
+    for r in &transfer.records {
+        if r.id.is_empty() || r.id.len() > 128 || r.id.contains(char::is_whitespace) {
+            return Err(AppError::BadRequest(format!(
+                "invalid handoff record id '{}'",
+                r.id
+            )));
+        }
+        validate_no_control_chars("id", &r.id)?;
+        validate_no_control_chars("session_id", &r.session_id)?;
+        validate_no_control_chars("thread_id", &r.thread_id)?;
+        check_rendered_from_name(&r.from_name)?;
+        if let Some(ref ret_id) = r.return_session_id {
+            let origin = if r.return_harness.as_deref() == Some("svc") {
+                storage::Origin::service(ret_id, holder_node)
+            } else {
+                storage::Origin::instance(ret_id, holder_node, None)
+            };
+            check_origin(&origin)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -4517,6 +4651,22 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
             }
             Ok(Some(FedInboxItem::Message(msg))) => {
                 backoff_millis = 100;
+
+                if let Err(e) = validate_pulled_message(&msg) {
+                    tracing::warn!(
+                        peer = %peer_name,
+                        "rejecting malformed message pulled from hub: {e}"
+                    );
+                    if !msg.id.is_empty()
+                        && msg.id.len() <= 128
+                        && !msg.id.contains('/')
+                        && !msg.id.contains(char::is_control)
+                        && !msg.id.contains(char::is_whitespace)
+                    {
+                        let _ = ack_federated_inbox(&fed_state, &peer_name, &msg.id).await;
+                    }
+                    continue;
+                }
 
                 // Idempotency (X1): a message already delivered or queued here is acked
                 // and skipped; one recorded as a failure is delivered again.

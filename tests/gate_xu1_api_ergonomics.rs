@@ -156,7 +156,7 @@ async fn create_node(
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
     let agy_store = new_agy_store();
     let pi_store = new_pi_store();
@@ -342,20 +342,28 @@ async fn test_gate1_parameter_validation() {
     assert_eq!(http_send_resp.status(), reqwest::StatusCode::BAD_REQUEST);
     let body: Value = http_send_resp.json().await.unwrap();
     assert!(
-        body["detail"].as_str().unwrap().contains("unknown field 'ref'; use 'to' instead"),
+        body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("unknown field 'ref'; use 'to' instead"),
         "expected HTTP send refusal for ref, got: {body:?}"
     );
 
     // 5. HTTP Parity: GET /v1/recipients?host=cortex is rejected with 400 Bad Request
     let http_list_resp = client
-        .get(format!("http://127.0.0.1:{}/v1/recipients?host=cortex", node.http_port))
+        .get(format!(
+            "http://127.0.0.1:{}/v1/recipients?host=cortex",
+            node.http_port
+        ))
         .send()
         .await
         .unwrap();
     assert_eq!(http_list_resp.status(), reqwest::StatusCode::BAD_REQUEST);
     let list_body: Value = http_list_resp.json().await.unwrap();
     assert!(
-        list_body["detail"].as_str().unwrap().contains("unknown parameter 'host'; use 'node' instead (or omit it to list all nodes)"),
+        list_body["detail"].as_str().unwrap().contains(
+            "unknown parameter 'host'; use 'node' instead (or omit it to list all nodes)"
+        ),
         "expected HTTP list refusal for host, got: {list_body:?}"
     );
 }
@@ -540,9 +548,30 @@ async fn test_gate3_symmetric_reply_local_and_third_party() {
         }
     });
 
-    write_session_file(&node.sessions_dir, alice_pid, SESS_ALICE, "alice", "100", &alice_sock);
-    write_session_file(&node.sessions_dir, bob_pid, SESS_BOB, "bob", "100", &bob_sock);
-    write_session_file(&node.sessions_dir, charlie_pid, SESS_CHARLIE, "charlie", "100", &charlie_sock);
+    write_session_file(
+        &node.sessions_dir,
+        alice_pid,
+        SESS_ALICE,
+        "alice",
+        "100",
+        &alice_sock,
+    );
+    write_session_file(
+        &node.sessions_dir,
+        bob_pid,
+        SESS_BOB,
+        "bob",
+        "100",
+        &bob_sock,
+    );
+    write_session_file(
+        &node.sessions_dir,
+        charlie_pid,
+        SESS_CHARLIE,
+        "charlie",
+        "100",
+        &charlie_sock,
+    );
 
     // 1. Alice sends message M1 to Bob
     let send_res = call_agent_sock(
@@ -576,7 +605,11 @@ async fn test_gate3_symmetric_reply_local_and_third_party() {
     // Verify Bob receives Alice's follow-up reply in his socket
     tokio::time::sleep(Duration::from_millis(50)).await;
     let received = bob_rx.lock().unwrap().clone();
-    assert_eq!(received.len(), 2, "Bob should have received M1 and Alice's reply");
+    assert_eq!(
+        received.len(),
+        2,
+        "Bob should have received M1 and Alice's reply"
+    );
     assert!(received[1].contains("Alice immediate follow-up on M1"));
     assert!(received[1].contains(&format!("reply to message_id={m1_id}")));
 
@@ -658,7 +691,14 @@ async fn test_gate3_symmetric_reply_federated() {
     write_proc_stat(&node_a.proc_root, my_pid, alice_pid, "200");
     write_proc_stat(&node_a.proc_root, alice_pid, 1, "100");
     let alice_sock = node_a.proc_root.join("alice.sock");
-    write_session_file(&node_a.sessions_dir, alice_pid, SESS_ALICE, "alice", "100", &alice_sock);
+    write_session_file(
+        &node_a.sessions_dir,
+        alice_pid,
+        SESS_ALICE,
+        "alice",
+        "100",
+        &alice_sock,
+    );
 
     write_proc_stat(&node_b.proc_root, bob_pid, 1, "100");
     let bob_sock = node_b.proc_root.join("bob.sock");
@@ -676,7 +716,14 @@ async fn test_gate3_symmetric_reply_federated() {
             }
         }
     });
-    write_session_file(&node_b.sessions_dir, bob_pid, SESS_BOB, "bob", "100", &bob_sock);
+    write_session_file(
+        &node_b.sessions_dir,
+        bob_pid,
+        SESS_BOB,
+        "bob",
+        "100",
+        &bob_sock,
+    );
 
     // 1. Alice sends federated message to Bob on node_b
     let fed_send_res = call_agent_sock(
@@ -707,7 +754,11 @@ async fn test_gate3_symmetric_reply_federated() {
     // 3. Bob receives Alice's follow-up across federation
     tokio::time::sleep(Duration::from_millis(100)).await;
     let received = bob_rx.lock().unwrap().clone();
-    assert_eq!(received.len(), 2, "Bob on node_b should receive M_fed and Alice's federated follow-up");
+    assert_eq!(
+        received.len(),
+        2,
+        "Bob on node_b should receive M_fed and Alice's federated follow-up"
+    );
     assert!(received[1].contains("Alice federated follow-up to Bob"));
     assert!(received[1].contains(&format!("reply to message_id={m_fed_id}")));
 }
@@ -732,8 +783,22 @@ async fn test_gate4_mcp_reply_reshape_and_socket_parity() {
     let replier_sock = node.proc_root.join("replier.sock");
     let _replier_listener = UnixListener::bind(&replier_sock).unwrap();
 
-    write_session_file(&node.sessions_dir, caller_pid, SESS_ALICE, "caller", "100", &caller_sock);
-    write_session_file(&node.sessions_dir, replier_pid, SESS_BOB, "replier", "100", &replier_sock);
+    write_session_file(
+        &node.sessions_dir,
+        caller_pid,
+        SESS_ALICE,
+        "caller",
+        "100",
+        &caller_sock,
+    );
+    write_session_file(
+        &node.sessions_dir,
+        replier_pid,
+        SESS_BOB,
+        "replier",
+        "100",
+        &replier_sock,
+    );
 
     // 1. Caller sends a message to Replier
     let send_req = serde_json::json!({
@@ -750,7 +815,8 @@ async fn test_gate4_mcp_reply_reshape_and_socket_parity() {
     });
     let send_resp = call_mcp(&node.mcp_config, send_req).await;
     assert_eq!(send_resp["result"]["isError"], false);
-    let send_delivery: Value = serde_json::from_str(send_resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let send_delivery: Value =
+        serde_json::from_str(send_resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     let orig_msg_id = send_delivery["message_id"].as_str().unwrap();
 
     // 2. Switch caller to replier
@@ -774,7 +840,9 @@ async fn test_gate4_mcp_reply_reshape_and_socket_parity() {
     assert_eq!(mcp_reply_resp["id"], 11);
     assert_eq!(mcp_reply_resp["result"]["isError"], false);
 
-    let mcp_reply_raw = mcp_reply_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let mcp_reply_raw = mcp_reply_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     let mcp_reply: Value = serde_json::from_str(mcp_reply_raw).unwrap();
 
     // Reshape Assertions (MCP tool result):
@@ -791,9 +859,15 @@ async fn test_gate4_mcp_reply_reshape_and_socket_parity() {
     // 4. outcome is pushed
     assert_eq!(mcp_reply["outcome"], "pushed");
     // 5. Does NOT contain echoed text
-    assert!(mcp_reply.get("text").is_none(), "MCP reply must not echo text");
+    assert!(
+        mcp_reply.get("text").is_none(),
+        "MCP reply must not echo text"
+    );
     // 6. Does NOT contain pushedMessageId
-    assert!(mcp_reply.get("pushedMessageId").is_none(), "MCP reply must not contain pushedMessageId");
+    assert!(
+        mcp_reply.get("pushedMessageId").is_none(),
+        "MCP reply must not contain pushedMessageId"
+    );
 
     // Socket Parity Assertion (Amendment 6):
     // Agent-socket frame must retain ReplyRecord with pushedMessageId and text
@@ -813,8 +887,7 @@ async fn test_gate4_mcp_reply_reshape_and_socket_parity() {
         "socket frame must retain pushedMessageId for matrix-xmsg compatibility"
     );
     assert_eq!(
-        socket_reply["text"],
-        "Second reply via socket",
+        socket_reply["text"], "Second reply via socket",
         "socket frame must retain text field"
     );
 
@@ -880,7 +953,9 @@ async fn test_gate4_mcp_reply_reshape_and_socket_parity() {
         missing_id_resp["result"]["isError"], true,
         "socket answer without pushedMessageId must yield a tool error, not fall back silently"
     );
-    let err_text = missing_id_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let err_text = missing_id_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(
         err_text.contains("missing 'pushedMessageId' in socket response"),
         "tool error must name the missing field, got: {err_text}"
@@ -918,8 +993,22 @@ async fn test_gate5_header_names_all_four_tools() {
         }
     });
 
-    write_session_file(&node.sessions_dir, alice_pid, SESS_ALICE, "alice", "100", &alice_sock);
-    write_session_file(&node.sessions_dir, bob_pid, SESS_BOB, "bob", "100", &bob_sock);
+    write_session_file(
+        &node.sessions_dir,
+        alice_pid,
+        SESS_ALICE,
+        "alice",
+        "100",
+        &alice_sock,
+    );
+    write_session_file(
+        &node.sessions_dir,
+        bob_pid,
+        SESS_BOB,
+        "bob",
+        "100",
+        &bob_sock,
+    );
 
     // Send message to Bob
     let send_res = call_agent_sock(
@@ -969,8 +1058,22 @@ async fn test_xh1_1_stale_mcp_client_refusal() {
     let bob_sock = node.proc_root.join("bob.sock");
     let _bob_listener = UnixListener::bind(&bob_sock).unwrap();
 
-    write_session_file(&node.sessions_dir, alice_pid, SESS_ALICE, "alice", "100", &alice_sock);
-    write_session_file(&node.sessions_dir, bob_pid, SESS_BOB, "bob", "100", &bob_sock);
+    write_session_file(
+        &node.sessions_dir,
+        alice_pid,
+        SESS_ALICE,
+        "alice",
+        "100",
+        &alice_sock,
+    );
+    write_session_file(
+        &node.sessions_dir,
+        bob_pid,
+        SESS_BOB,
+        "bob",
+        "100",
+        &bob_sock,
+    );
 
     // 1. Stale v1 send frame over agent.sock (`ref` and `push_replies`, no schema_version)
     let stale_send = call_agent_sock(

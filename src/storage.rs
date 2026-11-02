@@ -1556,6 +1556,13 @@ pub fn insert_queued(conn: &Connection, msg: &QueuedMessage) -> Result<()> {
 /// already holds, delivered or not, is left as it is: a transfer repeated after a lost
 /// acknowledgement delivers nothing twice (X1). Returns whether it was new.
 pub fn insert_handed_over(conn: &Connection, msg: &QueuedMessage) -> Result<bool> {
+    if crate::fed::validate_no_control_chars("id", &msg.id).is_err()
+        || crate::fed::check_rendered_from_name(&msg.from_name).is_err()
+    {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "invalid handed-over message".to_string(),
+        ));
+    }
     let n = conn.execute(
         "INSERT OR IGNORE INTO instance_queue (id, instance_id, created_at, expires_at, from_name, body) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![msg.id, msg.instance_id, msg.created_at, msg.expires_at, msg.from_name, msg.body],

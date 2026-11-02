@@ -124,7 +124,7 @@ async fn start_replies_harness(reply_ttl: Duration) -> RepliesHarness {
     let recipient_json = format!(
         r#"{{
             "pid": {my_pid},
-            "sessionId": "sess-recipient-1111",
+            "sessionId": "0199cecf-1111-7000-8000-000000001111",
             "name": "recipient-worker",
             "cwd": "/workspace/recipient",
             "status": "idle",
@@ -156,8 +156,8 @@ async fn start_replies_harness(reply_ttl: Duration) -> RepliesHarness {
             proc_root: PathBuf::from("/proc"),
             agy_bin: "agy".to_string(),
             trusted_agy_exes: Vec::new(),
-                brain_dir: std::path::PathBuf::new(),
-    },
+            brain_dir: std::path::PathBuf::new(),
+        },
         agy_store: xmsg::agy::new_agy_store(),
         pi_store: xmsg::pi::new_pi_store(),
         pi_notify_tx,
@@ -232,7 +232,10 @@ async fn test_reply_roundtrip_and_envelope_footer() {
 
     assert_eq!(res.status(), reqwest::StatusCode::ACCEPTED);
     let delivery: DeliveryResponse = res.json().await.unwrap();
-    assert_eq!(delivery.address, "sess-recipient-1111@test-host");
+    assert_eq!(
+        delivery.address,
+        "0199cecf-1111-7000-8000-000000001111@test-host"
+    );
     assert!(!delivery.message_id.is_empty());
     let message_id = delivery.message_id;
 
@@ -273,7 +276,7 @@ async fn test_reply_roundtrip_and_envelope_footer() {
             harness.base_url, message_id
         ))
         .json(&serde_json::json!({
-            "sessionRef": "sess-recipient-1111",
+            "sessionRef": "0199cecf-1111-7000-8000-000000001111",
             "text": "PR #42 reviewed and accepted."
         }))
         .send()
@@ -294,7 +297,10 @@ async fn test_reply_roundtrip_and_envelope_footer() {
 
     assert_eq!(reply.seq, 1);
     assert_eq!(reply.message_id, message_id);
-    assert_eq!(reply.replier_session_id, "sess-recipient-1111");
+    assert_eq!(
+        reply.replier_session_id,
+        "0199cecf-1111-7000-8000-000000001111"
+    );
     assert_eq!(reply.text, "PR #42 reviewed and accepted.");
 
     // 4. GET /v1/messages/{id}/replies
@@ -322,7 +328,7 @@ async fn test_reply_roundtrip_and_envelope_footer() {
     assert_eq!(res.status(), reqwest::StatusCode::OK);
     let detail: MessageDetailResponse = res.json().await.unwrap();
     assert_eq!(detail.id, message_id);
-    assert_eq!(detail.session_id, "sess-recipient-1111");
+    assert_eq!(detail.session_id, "0199cecf-1111-7000-8000-000000001111");
     assert_eq!(detail.from_name, "orchestrator · anon@test-host");
     assert_eq!(detail.outcome, "delivered");
     assert_eq!(detail.replies.len(), 1);
@@ -334,7 +340,7 @@ async fn test_reply_not_recipient_403() {
     let harness = start_replies_harness(Duration::from_secs(3600)).await;
     let client = reqwest::Client::new();
 
-    // Deliver message to recipient (sess-recipient-1111)
+    // Deliver message to recipient (0199cecf-1111-7000-8000-000000001111)
     let post_msg_payload = serde_json::json!({
         "to": "recipient-worker",
         "from": "orchestrator",
@@ -349,13 +355,13 @@ async fn test_reply_not_recipient_403() {
     assert_eq!(res.status(), reqwest::StatusCode::ACCEPTED);
     let delivery: DeliveryResponse = res.json().await.unwrap();
 
-    // Change current PID session identity to other-worker (sess-other-2222)
+    // Change current PID session identity to other-worker (0199cecf-2222-7000-8000-000000002222)
     let my_pid = std::process::id();
     let my_proc_start = get_self_proc_start();
     let other_json = format!(
         r#"{{
             "pid": {my_pid},
-            "sessionId": "sess-other-2222",
+            "sessionId": "0199cecf-2222-7000-8000-000000002222",
             "name": "other-worker",
             "cwd": "/workspace/other",
             "status": "idle",
@@ -372,7 +378,7 @@ async fn test_reply_not_recipient_403() {
     )
     .unwrap();
 
-    // Attempt reply from other-worker (sess-other-2222) over agent.sock
+    // Attempt reply from other-worker (0199cecf-2222-7000-8000-000000002222) over agent.sock
     let err = post_agent_sock_reply(
         &harness.agent_sock_path,
         &delivery.message_id,
@@ -554,7 +560,7 @@ async fn test_ttl_purge_on_reply() {
         let expired_created_at = xmsg::storage::now_epoch_secs() - 100; // 100s old, TTL is 5s
         db.execute(
             "INSERT INTO replies (message_id, created_at, replier_session_id, text) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![message_id, expired_created_at, "sess-recipient-1111", "old expired reply"],
+            rusqlite::params![message_id, expired_created_at, "0199cecf-1111-7000-8000-000000001111", "old expired reply"],
         )
         .unwrap();
     }

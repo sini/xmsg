@@ -130,7 +130,7 @@ async fn setup_gate_harness() -> GateHarness {
 
     let target_session_json = serde_json::json!({
         "pid": victim_pid,
-        "sessionId": "victim-claude",
+        "sessionId": "0199cecf-b200-7000-8000-0000000000b2",
         "name": "victim-claude",
         "cwd": "/workspace",
         "status": "idle",
@@ -159,7 +159,7 @@ async fn setup_gate_harness() -> GateHarness {
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
     let agy_store = new_agy_store();
     let pi_store = new_pi_store();

@@ -76,7 +76,7 @@ fn setup_session_file(sess_path: &Path, sock_path: &Path) {
     let live_json = format!(
         r#"{{
             "pid": {my_pid},
-            "sessionId": "live-session-1234",
+            "sessionId": "0199cecf-1234-7000-8000-000000001234",
             "name": "target-worker",
             "cwd": "/workspace/project-a",
             "status": "idle",
@@ -153,8 +153,8 @@ async fn start_server(
             proc_root: PathBuf::from(xmsg::process::LIVE_PROC_ROOT),
             agy_bin: "agy".to_string(),
             trusted_agy_exes: Vec::new(),
-                brain_dir: std::path::PathBuf::new(),
-    },
+            brain_dir: std::path::PathBuf::new(),
+        },
         agy_store: xmsg::agy::new_agy_store(),
         pi_store: xmsg::pi::new_pi_store(),
         pi_notify_tx,
@@ -482,7 +482,7 @@ async fn test_oracle_5_attested_agent_and_anonymous_http_principal_isolation() {
     let client = reqwest::Client::new();
     let http_url = format!("{}/v1/messages", harness.base_url);
     let http_req = serde_json::json!({"to": "target-worker",
-        "from": "live-session-1234",
+        "from": "0199cecf-1234-7000-8000-000000001234",
         "text": "anonymous http message body",
         "idempotency_key": "cross-protocol-shared-key"
     });
@@ -553,7 +553,7 @@ async fn test_oracle_5_attested_agent_and_anonymous_http_principal_isolation() {
     // 5. Conflicting HTTP body returns 409 Conflict without affecting agent record
     let http_conflict_req = serde_json::json!({
         "to": "target-worker",
-        "from": "live-session-1234",
+        "from": "0199cecf-1234-7000-8000-000000001234",
         "text": "tampered conflicting http body",
         "idempotency_key": "cross-protocol-shared-key"
     });
@@ -572,7 +572,7 @@ async fn test_oracle_5_attested_agent_and_anonymous_http_principal_isolation() {
         // caller (A15).
         let agent_rec = xmsg::storage::get_idempotency_record(
             &db,
-            "live-session-1234",
+            "0199cecf-1234-7000-8000-000000001234",
             "cross-protocol-shared-key",
             86400,
         )
@@ -582,7 +582,7 @@ async fn test_oracle_5_attested_agent_and_anonymous_http_principal_isolation() {
 
         let http_rec = xmsg::storage::get_idempotency_record(
             &db,
-            "anon:live-session-1234",
+            "anon:0199cecf-1234-7000-8000-000000001234",
             "cross-protocol-shared-key",
             86400,
         )

@@ -45,7 +45,7 @@ fn listed_with(proc_start: &str) -> bool {
     let pid = std::process::id();
     let json = serde_json::json!({
         "pid": pid,
-        "sessionId": "lstart-session",
+        "sessionId": "0199cecf-0000-7000-8000-00000000157a",
         "name": "lstart",
         "cwd": "/workspace/lstart",
         "status": "idle",
@@ -58,7 +58,7 @@ fn listed_with(proc_start: &str) -> bool {
     fs::write(dir.path().join(format!("{pid}.json")), json.to_string()).unwrap();
     list_sessions(dir.path(), &SessionsQuery::default())
         .iter()
-        .any(|s| s.session_id == "lstart-session" && s.pid == pid)
+        .any(|s| s.session_id == "0199cecf-0000-7000-8000-00000000157a" && s.pid == pid)
 }
 
 #[test]

@@ -779,6 +779,9 @@ pub(crate) async fn deliver(
     body: &str,
     origin: Origin,
 ) -> Result<(String, &'static str, &'static str), AppError> {
+    crate::fed::check_origin(&origin)?;
+    crate::fed::validate_no_control_chars("from_name", from_name)?;
+    crate::fed::validate_no_control_chars("message_id", message_id)?;
     let ref_part = match origin.machine_ref() {
         Some(r) => format!(" ref={r}"),
         None => String::new(),

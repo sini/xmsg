@@ -51,7 +51,7 @@ fn test_verify_registration_uid_mismatch() {
     let trusted_exes = vec![dummy_exe];
 
     let req = AgyRegisterRequest {
-        conversation_id: "test-conv-1".to_string(),
+        conversation_id: "0199cecf-0001-7000-8000-000000000001".to_string(),
         ls_address: "127.0.0.1:1234".to_string(),
         csrf_token: "secret".to_string(),
     };
@@ -84,7 +84,7 @@ fn test_verify_registration_missing_or_dead_lock() {
     let trusted_exes = vec![dummy_exe];
 
     let req = AgyRegisterRequest {
-        conversation_id: "test-conv-missing".to_string(),
+        conversation_id: "0199cecf-0002-7000-8000-000000000002".to_string(),
         ls_address: "127.0.0.1:1234".to_string(),
         csrf_token: "secret".to_string(),
     };
@@ -103,13 +103,13 @@ fn test_verify_registration_missing_or_dead_lock() {
     assert!(matches!(res1, Err(AppError::Gone { .. })));
 
     // 2. Lock file exists, but no ancestor holds it open -> Err(NotRecipient)
-    let lock_file = presence_dir.join("test-conv-dead.lock");
+    let lock_file = presence_dir.join("0199cecf-0003-7000-8000-000000000003.lock");
     fs::write(&lock_file, "").unwrap();
 
     setup_mock_proc(&proc_root, 5000, 1, None, None);
 
     let req_dead = AgyRegisterRequest {
-        conversation_id: "test-conv-dead".to_string(),
+        conversation_id: "0199cecf-0003-7000-8000-000000000003".to_string(),
         ls_address: "127.0.0.1:1234".to_string(),
         csrf_token: "secret".to_string(),
     };
@@ -135,7 +135,7 @@ fn test_verify_registration_ancestor_walk() {
     fs::create_dir_all(&presence_dir).unwrap();
 
     // Create presence lock file
-    let lock_file = presence_dir.join("conv-active.lock");
+    let lock_file = presence_dir.join("0199cecf-0004-7000-8000-000000000004.lock");
     fs::write(&lock_file, "lock").unwrap();
     let meta = fs::metadata(&lock_file).unwrap();
     let dev = meta.dev();
@@ -164,7 +164,7 @@ fn test_verify_registration_ancestor_walk() {
     setup_mock_proc(&proc_root, 9000, 1, None, None);
 
     let req = AgyRegisterRequest {
-        conversation_id: "conv-active".to_string(),
+        conversation_id: "0199cecf-0004-7000-8000-000000000004".to_string(),
         ls_address: "127.0.0.1:1234".to_string(),
         csrf_token: "token1".to_string(),
     };
@@ -223,8 +223,8 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
     let my_pid = std::process::id();
     let my_uid = current_uid();
 
-    // Create presence lock for conv-123
-    let lock_file = presence_dir.join("conv-123.lock");
+    // Create presence lock for 0199cecf-0123-7000-8000-000000000123
+    let lock_file = presence_dir.join("0199cecf-0123-7000-8000-000000000123.lock");
     fs::write(&lock_file, "lock").unwrap();
     let meta = fs::metadata(&lock_file).unwrap();
     let dev = meta.dev();
@@ -250,7 +250,7 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: vec![dummy_exe],
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
     let store = new_agy_store();
 
@@ -306,7 +306,7 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
     // 1. Connect and send initial registration
     let mut stream = UnixStream::connect(&sock_path).await.unwrap();
     let req1 = serde_json::json!({
-        "conversation_id": "conv-123",
+        "conversation_id": "0199cecf-0123-7000-8000-000000000123",
         "ls_address": "127.0.0.1:4000",
         "csrf_token": "token-initial"
     });
@@ -320,7 +320,7 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
     reader.read_line(&mut resp).await.unwrap();
     let val: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
     assert_eq!(val["status"], "ok");
-    assert_eq!(val["sessionId"], "conv-123");
+    assert_eq!(val["sessionId"], "0199cecf-0123-7000-8000-000000000123");
 
     let sid1 = val["sessionId"].as_str().unwrap();
 
@@ -332,13 +332,13 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
         assert_eq!(creds.ls_address, "127.0.0.1:4000");
         assert_eq!(creds.csrf_token, "token-initial");
         assert!(!creds.is_stale);
-        assert_eq!(sid1, "conv-123");
+        assert_eq!(sid1, "0199cecf-0123-7000-8000-000000000123");
     }
 
     // 2. Atomic replacement with new credentials
     let mut stream2 = UnixStream::connect(&sock_path).await.unwrap();
     let req2 = serde_json::json!({
-        "conversation_id": "conv-123",
+        "conversation_id": "0199cecf-0123-7000-8000-000000000123",
         "ls_address": "127.0.0.1:5000",
         "csrf_token": "token-replaced"
     });

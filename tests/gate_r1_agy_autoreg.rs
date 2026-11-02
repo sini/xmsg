@@ -75,17 +75,21 @@ async fn oracle_1_hook_credential_less_and_credentialed_and_malformed() {
     let (pi_notify_tx, _) = broadcast::channel(1024);
     let my_uid = xmsg::agent::current_uid();
 
-    // Insert conv-credless: no credentials
-    let credless_info =
-        AgySessionInfo::new("conv-credless".to_string(), 1111, "100".to_string(), None);
+    // Insert 0199cecf-1111-7000-8000-000000001111: no credentials
+    let credless_info = AgySessionInfo::new(
+        "0199cecf-1111-7000-8000-000000001111".to_string(),
+        1111,
+        "100".to_string(),
+        None,
+    );
     agy_store
         .write()
         .unwrap()
         .insert("agy:1111:100".to_string(), credless_info);
 
-    // Insert conv-creds: has credentials
+    // Insert 0199cecf-2222-7000-8000-000000002222: has credentials
     let creds_info = AgySessionInfo::new(
-        "conv-creds".to_string(),
+        "0199cecf-2222-7000-8000-000000002222".to_string(),
         2222,
         "200".to_string(),
         Some(AgyCredentials {
@@ -157,7 +161,7 @@ async fn oracle_1_hook_credential_less_and_credentialed_and_malformed() {
             .unwrap();
 
         let stdin_payload = serde_json::json!({
-            "conversationId": "conv-credless"
+            "conversationId": "0199cecf-1111-7000-8000-000000001111"
         });
         child
             .stdin
@@ -221,7 +225,7 @@ async fn oracle_1_hook_credential_less_and_credentialed_and_malformed() {
             .unwrap();
 
         let stdin_payload = serde_json::json!({
-            "conversationId": "conv-creds"
+            "conversationId": "0199cecf-2222-7000-8000-000000002222"
         });
         child
             .stdin

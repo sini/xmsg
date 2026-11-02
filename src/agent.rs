@@ -1127,12 +1127,46 @@ pub fn resolve_as_agent(
     })
 }
 
+/// Maximum byte size of a subagent `meta.json` file read from disk (XB2 F2).
+const MAX_META_JSON_BYTES: u64 = 65_536;
+
 /// Reads optional `("name", "agentType")` from the subagent `meta.json` beside `transcript_path`
-/// (HA9-A §2.5, O12).
-fn read_meta_json_fields(
+/// (HA9-A §2.5, O12; XB2 F2).
+///
+/// Confines `transcript_path` and `agent_id` to the expected session directory (absolute path,
+/// no `..`, not in `/dev`/`/proc`/`/sys`/`/etc`, valid `agent_id`), and reads only a regular
+/// file via `symlink_metadata` with a size cap (`MAX_META_JSON_BYTES`).
+pub fn read_meta_json_fields(
     transcript_path: &str,
     agent_id: &str,
 ) -> (Option<String>, Option<String>) {
+    use std::path::Component;
+    let Ok(agent_id) = crate::claim::validate_subagent_id(agent_id) else {
+        return (None, None);
+    };
+    if agent_id.contains("..") {
+        return (None, None);
+    }
+    let tp_path = Path::new(transcript_path);
+    if !tp_path.is_absolute()
+        || tp_path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+    {
+        return (None, None);
+    }
+    let Some(expected_session_dir) = tp_path.parent() else {
+        return (None, None);
+    };
+    if expected_session_dir == Path::new("/") {
+        return (None, None);
+    }
+    for blocked in ["/dev", "/proc", "/sys", "/etc"] {
+        if tp_path.starts_with(blocked) {
+            return (None, None);
+        }
+    }
+
     let mut candidates = Vec::new();
     let stem = transcript_path
         .strip_suffix(".jsonl")
@@ -1143,36 +1177,58 @@ fn read_meta_json_fields(
             .join(format!("agent-{agent_id}.meta.json")),
     );
     candidates.push(PathBuf::from(format!("{stem}.meta.json")));
-    if let Some(parent_dir) = Path::new(transcript_path).parent() {
-        candidates.push(
-            parent_dir
-                .join("subagents")
-                .join(format!("agent-{agent_id}.meta.json")),
-        );
-        candidates.push(parent_dir.join(format!("agent-{agent_id}.meta.json")));
-        candidates.push(parent_dir.join("meta.json"));
-    }
+    candidates.push(
+        expected_session_dir
+            .join("subagents")
+            .join(format!("agent-{agent_id}.meta.json")),
+    );
+    candidates.push(expected_session_dir.join(format!("agent-{agent_id}.meta.json")));
+    candidates.push(expected_session_dir.join("meta.json"));
+
     for path in candidates {
-        if let Ok(raw) = fs::read_to_string(&path) {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
-                let name = val
-                    .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string);
-                let agent_type = val
-                    .get("agentType")
-                    .or_else(|| val.get("agent_type"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string);
-                return (name, agent_type);
-            }
+        if !path.starts_with(expected_session_dir)
+            || path.components().any(|c| matches!(c, Component::ParentDir))
+        {
+            continue;
+        }
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let ft = meta.file_type();
+        if ft.is_symlink() || !ft.is_file() || meta.len() > MAX_META_JSON_BYTES {
+            continue;
+        }
+        let Ok(file) = fs::File::open(&path) else {
+            continue;
+        };
+        let mut raw = String::new();
+        use std::io::Read;
+        if file
+            .take(MAX_META_JSON_BYTES + 1)
+            .read_to_string(&mut raw)
+            .is_err()
+            || raw.len() as u64 > MAX_META_JSON_BYTES
+        {
+            continue;
+        }
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+            let name = val
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let agent_type = val
+                .get("agentType")
+                .or_else(|| val.get("agent_type"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            return (name, agent_type);
         }
     }
     (None, None)
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_subagent_frame(
+pub async fn handle_subagent_frame(
     state: &AppState,
     parent: &Session,
     event: &str,
@@ -1189,12 +1245,7 @@ async fn handle_subagent_frame(
             "subagent frame on agent.sock is only valid for Claude or agy sessions".to_string(),
         ));
     }
-    let agent_id = agent_id.trim();
-    if agent_id.is_empty() || agent_id.contains('/') {
-        return Err(AppError::BadRequest(
-            "agent_id must be non-empty and must not contain '/'".to_string(),
-        ));
-    }
+    let agent_id = crate::claim::validate_subagent_id(agent_id)?;
     let now = crate::storage::now_epoch_secs();
     if parent.harness == "agy" {
         return match event {

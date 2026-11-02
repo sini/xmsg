@@ -110,7 +110,7 @@ async fn setup(max_body: usize) -> Env {
         sessions.join("target.json"),
         serde_json::json!({
             "pid": target_pid(),
-            "sessionId": "target-claude",
+            "sessionId": "0199cecf-0001-7000-8000-000000000001",
             "name": "target",
             "cwd": "/",
             "status": "idle",
@@ -142,9 +142,9 @@ async fn setup(max_body: usize) -> Env {
         presence_dir: presence.clone(),
         proc_locks_path: locks.clone(),
         proc_root: proc_root.clone(),
-        agy_bin: "/nonexistent-agy".into(),
+        agy_bin: "/tmp/nonexistent.sock-agy".into(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     xmsg::storage::init_db(&conn).unwrap();
@@ -370,7 +370,7 @@ async fn gate2_identity() {
         e.sessions.join("me.json"),
         serde_json::json!({
             "pid": me,
-            "sessionId": "real-boss",
+            "sessionId": "0199cecf-b055-7000-8000-00000000b055",
             "name": "boss",
             "cwd": "/",
             "status": "idle",
@@ -378,7 +378,7 @@ async fn gate2_identity() {
             "startedAt": 0,
             "updatedAt": 0,
             "procStart": "555",
-            "messagingSocketPath": "/nonexistent"
+            "messagingSocketPath": "/tmp/nonexistent.sock"
         })
         .to_string(),
     )
@@ -412,7 +412,7 @@ async fn gate2_identity() {
         .and_then(|r| r.strip_suffix("@h"))
         .expect("pi label is `boss · <id>@h`");
     assert!(xmsg::claim::is_uuid_shaped(pi_id), "{pi_from}");
-    assert_eq!(cl_from, "boss · real-boss@h");
+    assert_eq!(cl_from, "boss · 0199cecf-b055-7000-8000-00000000b055@h");
     assert_ne!(
         pi_from, cl_from,
         "labels must be disambiguated by the attested id"

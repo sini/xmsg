@@ -1551,58 +1551,57 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
             }
         };
 
-    let agy_pre_tool_use_call_mcp =
-        |conv_id: &str, tool_name: &str, arguments: Value| -> Value {
-            let hook_in = json!({
-                "conversationId": conv_id,
-                "toolCall": {
-                    "name": "call_mcp_tool",
-                    "args": {
-                        "ServerName": "xmsg",
-                        "ToolName": tool_name,
-                        "Arguments": arguments,
-                    }
+    let agy_pre_tool_use_call_mcp = |conv_id: &str, tool_name: &str, arguments: Value| -> Value {
+        let hook_in = json!({
+            "conversationId": conv_id,
+            "toolCall": {
+                "name": "call_mcp_tool",
+                "args": {
+                    "ServerName": "xmsg",
+                    "ToolName": tool_name,
+                    "Arguments": arguments,
                 }
-            });
-            let mut child = Command::new(BIN)
-                .args([
-                    "register",
-                    "agy",
-                    "--hook",
-                    "--event",
-                    "pre-tool-use",
-                    "--agent-sock",
-                    proxy_agent_sock.to_str().unwrap(),
-                ])
-                .env("HOME", &run_dir)
-                .env("XDG_RUNTIME_DIR", &run_dir)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
+            }
+        });
+        let mut child = Command::new(BIN)
+            .args([
+                "register",
+                "agy",
+                "--hook",
+                "--event",
+                "pre-tool-use",
+                "--agent-sock",
+                proxy_agent_sock.to_str().unwrap(),
+            ])
+            .env("HOME", &run_dir)
+            .env("XDG_RUNTIME_DIR", &run_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(hook_in.to_string().as_bytes())
                 .unwrap();
-            {
-                use std::io::Write;
-                child
-                    .stdin
-                    .as_mut()
-                    .unwrap()
-                    .write_all(hook_in.to_string().as_bytes())
-                    .unwrap();
-            }
-            let out = child.wait_with_output().unwrap();
-            assert_eq!(out.status.code(), Some(0));
-            let parsed: Value = serde_json::from_slice(&out.stdout).unwrap();
-            assert_eq!(
-                parsed["decision"], "allow",
-                "agy PreToolUse call_mcp_tool must allow: {parsed}"
-            );
-            if let Some(updated) = parsed.get("overwrite").and_then(|o| o.get("Arguments")) {
-                updated.clone()
-            } else {
-                arguments
-            }
-        };
+        }
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        let parsed: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            parsed["decision"], "allow",
+            "agy PreToolUse call_mcp_tool must allow: {parsed}"
+        );
+        if let Some(updated) = parsed.get("overwrite").and_then(|o| o.get("Arguments")) {
+            updated.clone()
+        } else {
+            arguments
+        }
+    };
 
     let agy_pre_tool_use_eager = |conv_id: &str, tool_name: &str, args: Value| -> Value {
         let hook_in = json!({
@@ -1782,7 +1781,8 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
                 .unwrap()
                 .to_string();
 
-            let mut reply_in = json!({ "message_id": sent_msg_id, "text": format!("reply {label}") });
+            let mut reply_in =
+                json!({ "message_id": sent_msg_id, "text": format!("reply {label}") });
             let mut replies_in = json!({ "message_id": sent_msg_id, "wait": 0 });
             if let Some((k, v)) = &extra {
                 reply_in[*k] = v.clone();
@@ -1864,20 +1864,15 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
         .await;
     assert_eq!(st_sub_msg, 202, "{msg_to_claude_sub}");
 
-    let sub_list_args =
-        claude_pre_tool_use(id_claude, Some(child_claude), "list", json!({}));
+    let sub_list_args = claude_pre_tool_use(id_claude, Some(child_claude), "list", json!({}));
     let sub_send_args = claude_pre_tool_use(
         id_claude,
         Some(child_claude),
         "send",
         json!({ "to": "peer-target", "text": "from claude sub", "as_agent": "spoofed-other" }),
     );
-    let sub_inbox_args = claude_pre_tool_use(
-        id_claude,
-        Some(child_claude),
-        "inbox",
-        json!({ "wait": 0 }),
-    );
+    let sub_inbox_args =
+        claude_pre_tool_use(id_claude, Some(child_claude), "inbox", json!({ "wait": 0 }));
 
     recorded_frames.lock().unwrap().clear();
     call_mcp_sidecar(deploy_sidecar, "list", sub_list_args);

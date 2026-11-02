@@ -92,10 +92,7 @@ fn inbox() -> Inbox {
             let _ = stream.read_to_string(&mut buf).await;
         }
     });
-    Inbox {
-        _dir: dir,
-        sock,
-    }
+    Inbox { _dir: dir, sock }
 }
 
 fn write_claude_session(sessions_dir: &Path, pid: u32, session_id: &str, name: &str, sock: &Path) {

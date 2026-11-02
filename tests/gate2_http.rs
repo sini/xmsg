@@ -72,7 +72,7 @@ async fn start_harness(max_body: usize) -> TestHarness {
     let live_json = format!(
         r#"{{
             "pid": {my_pid},
-            "sessionId": "live-session-1234",
+            "sessionId": "0199cecf-1234-7000-8000-000000001234",
             "name": "my-worker",
             "cwd": "/workspace/project-a",
             "status": "idle",
@@ -99,8 +99,8 @@ async fn start_harness(max_body: usize) -> TestHarness {
             proc_root: PathBuf::from("/proc"),
             agy_bin: "agy".to_string(),
             trusted_agy_exes: Vec::new(),
-                brain_dir: std::path::PathBuf::new(),
-    },
+            brain_dir: std::path::PathBuf::new(),
+        },
         agy_store: xmsg::agy::new_agy_store(),
         pi_store: xmsg::pi::new_pi_store(),
         pi_notify_tx,
@@ -153,7 +153,10 @@ async fn gate2_http_prefix() {
     // 1. Control arm: legitimate ASCII sender
     let (st, v) = post_from(&h.base_url, "claude").await;
     assert_eq!(st, reqwest::StatusCode::ACCEPTED);
-    assert_eq!(v["address"], "live-session-1234@test-host");
+    assert_eq!(
+        v["address"],
+        "0199cecf-1234-7000-8000-000000001234@test-host"
+    );
     tokio::time::sleep(Duration::from_millis(100)).await;
     let lines = h._received_lines.lock().await.clone();
     assert!(

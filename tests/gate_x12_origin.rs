@@ -84,7 +84,7 @@ async fn test_oracle_1_local_attested_session_origin() {
     let my_uid = current_uid();
     setup_mock_proc(&proc_root, my_pid, &trusted_bin, "100000");
 
-    let session_id = "claude-local-test-session";
+    let session_id = "0199cecf-0012-7000-8000-000000000012";
     let session_json = serde_json::json!({
         "pid": my_pid,
         "sessionId": session_id,
@@ -117,7 +117,7 @@ async fn test_oracle_1_local_attested_session_origin() {
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
     let agy_store = new_agy_store();
     let pi_store = new_pi_store();
@@ -320,9 +320,21 @@ async fn create_fed_test_node(
     let my_uid = current_uid();
     setup_mock_proc(&proc_root, my_pid, &trusted_bin, "100000");
 
+    let sess_uuid = match name {
+        "host-a" => "0199cecf-000a-7000-8000-00000000000a".to_string(),
+        "host-b" => "0199cecf-000b-7000-8000-00000000000b".to_string(),
+        _ => {
+            use sha2::{Digest, Sha256};
+            let h = Sha256::digest(name.as_bytes());
+            format!(
+                "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-4{:01x}{:02x}-8{:01x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                h[0], h[1], h[2], h[3], h[4], h[5], h[6] & 0x0f, h[7], h[8] & 0x0f, h[9], h[10], h[11], h[12], h[13], h[14], h[15]
+            )
+        }
+    };
     let session_json = serde_json::json!({
         "pid": my_pid,
-        "sessionId": format!("sess-{name}"),
+        "sessionId": sess_uuid,
         "name": format!("agent-{name}"),
         "cwd": "/workspace",
         "status": "idle",
@@ -358,7 +370,7 @@ async fn create_fed_test_node(
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
     let agy_store = new_agy_store();
     let pi_store = new_pi_store();
@@ -599,7 +611,7 @@ async fn test_oracle_2_federated_message_origin() {
 
     assert_eq!(
         origin.get("id").and_then(|k| k.as_str()),
-        Some("sess-host-a"),
+        Some("0199cecf-000a-7000-8000-00000000000a"),
         "origin id must be the federated sender's instance ID"
     );
     // XA2: the origin is the sender's canonical node name; host-a is a pinned peer, so it
@@ -747,7 +759,7 @@ async fn test_oracle_3_text_containing_fake_origin_still_reads_fed() {
     );
     assert_eq!(
         origin.get("id").and_then(|h| h.as_str()),
-        Some("sess-host-a"),
+        Some("0199cecf-000a-7000-8000-00000000000a"),
         "origin id is the attested sender, never the text's"
     );
 }

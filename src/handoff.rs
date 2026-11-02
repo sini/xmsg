@@ -145,7 +145,8 @@ async fn pull(state: Arc<AppState>, id: String) {
 }
 
 /// What one step of a hand-off left to do.
-enum Step {
+#[derive(Debug, PartialEq, Eq)]
+pub enum Step {
     /// Settled: refused, or nothing left at the holder.
     Done,
     /// The holder still holds messages for X: ask again now.
@@ -216,7 +217,7 @@ async fn settle(state: Arc<AppState>, fs: Arc<FedState>, key: String, id: String
 }
 
 /// One step: the owed acknowledgement if there is one, else an ask and its acknowledgement.
-async fn step(state: &AppState, fs: &FedState, key: &str, id: &str) -> Result<Step, AppError> {
+pub async fn step(state: &AppState, fs: &FedState, key: &str, id: &str) -> Result<Step, AppError> {
     let db_err = |e: &dyn std::fmt::Display| AppError::Internal(e.to_string());
     let owed = {
         let db = state.db.lock().map_err(|e| db_err(&e))?;
@@ -247,6 +248,7 @@ async fn step(state: &AppState, fs: &FedState, key: &str, id: &str) -> Result<St
             return Ok(Step::Retry);
         }
     };
+    crate::fed::validate_handoff_transfer(&transfer, key)?;
     let ids: Vec<String> = transfer.messages.iter().map(|m| m.id.clone()).collect();
     let until = transfer
         .messages

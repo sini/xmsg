@@ -191,7 +191,7 @@ exit 0
         proc_root: proc_root.clone(),
         agy_bin: fake_agy_bin.to_string_lossy().to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
 
     let state = Arc::new(AppState {
@@ -1064,7 +1064,7 @@ async fn test_u8_mcp_start_claude_walk_refuses_parent_younger_than_child() {
         &env.sessions_dir,
         &env.proc_root,
         env._tmp.path(),
-        "sess-claude-a",
+        "0199cecf-0a00-7000-8000-00000000000a",
         "alice",
     );
     let mcp_start = serde_json::json!({ "action": "mcp_start" });

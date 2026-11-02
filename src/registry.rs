@@ -203,6 +203,83 @@ pub fn is_pid_live_in(proc_root: &Path, pid: u32, expected_proc_start: &str) -> 
     process::claude_proc_start_matches(proc_root, pid, expected_proc_start)
 }
 
+/// Validates a `messaging_socket_path` from a `SessionFileEntry` (XB2 F3):
+/// - must be an absolute path (`is_absolute()`),
+/// - must contain no `..` (`Component::ParentDir`),
+/// - must not name `xmsg`'s own sockets (`agent.sock`, `register.sock`, `http.sock`,
+///   `leaf-register.sock`) or reside directly inside `.../xmsg/<file>`,
+/// - must have a parent directory that is not `/`, not `/dev`/`/proc`/`/sys`/`/etc`, and
+///   when the path exists on disk, `symlink_metadata` must not be a symlink, regular file,
+///   directory, FIFO, block, or char device (only a Unix socket or not-yet-bound path).
+pub fn validate_messaging_socket_path(sock: &Path) -> Result<(), AppError> {
+    use std::path::Component;
+    if !sock.is_absolute() {
+        return Err(AppError::BadRequest(format!(
+            "messaging_socket_path '{}' must be an absolute path",
+            sock.display()
+        )));
+    }
+    if sock.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(AppError::BadRequest(format!(
+            "messaging_socket_path '{}' must not contain '..'",
+            sock.display()
+        )));
+    }
+    let Some(file_name) = sock.file_name().and_then(|s| s.to_str()) else {
+        return Err(AppError::BadRequest(format!(
+            "messaging_socket_path '{}' has no file name",
+            sock.display()
+        )));
+    };
+    if matches!(
+        file_name,
+        "agent.sock" | "register.sock" | "http.sock" | "leaf-register.sock"
+    ) {
+        return Err(AppError::BadRequest(format!(
+            "messaging_socket_path '{}' must not name an xmsg daemon socket",
+            sock.display()
+        )));
+    }
+    let Some(parent) = sock.parent() else {
+        return Err(AppError::BadRequest(format!(
+            "messaging_socket_path '{}' has no parent directory",
+            sock.display()
+        )));
+    };
+    if parent == Path::new("/") {
+        return Err(AppError::BadRequest(format!(
+            "messaging_socket_path '{}' must not reside directly in '/'",
+            sock.display()
+        )));
+    }
+    for blocked in ["/dev", "/proc", "/sys", "/etc"] {
+        if sock.starts_with(blocked) {
+            return Err(AppError::BadRequest(format!(
+                "messaging_socket_path '{}' is not in an allowed socket directory",
+                sock.display()
+            )));
+        }
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(sock) {
+        use std::os::unix::fs::FileTypeExt;
+        let ft = meta.file_type();
+        if ft.is_symlink() || !ft.is_socket() {
+            return Err(AppError::BadRequest(format!(
+                "messaging_socket_path '{}' is not a Unix domain socket",
+                sock.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validates a `SessionFileEntry` at ingestion and use sites (XB2 F3):
+/// requires a UUID-shaped `session_id` and a valid `messaging_socket_path`.
+pub fn validate_session_file_entry(entry: &SessionFileEntry) -> bool {
+    crate::claim::is_uuid_shaped(&entry.session_id)
+        && validate_messaging_socket_path(Path::new(&entry.messaging_socket_path)).is_ok()
+}
+
 /// Reads all session files across `sessions_dirs`, ignoring `.key` files and invalid entries.
 /// If the same sessionId appears in multiple directories, an error is logged once
 /// and the duplicate session is excluded from the returned entries (fail closed).
@@ -240,6 +317,13 @@ pub fn read_session_entries(sessions_dirs: &(impl SessionDirs + ?Sized)) -> Vec<
 
             match serde_json::from_str::<SessionFileEntry>(&content) {
                 Ok(session_entry) => {
+                    if !validate_session_file_entry(&session_entry) {
+                        warn!(
+                            "Ignoring session file {} with invalid session_id or messaging_socket_path",
+                            path.display()
+                        );
+                        continue;
+                    }
                     entries.push(session_entry);
                 }
                 Err(e) => {
@@ -303,7 +387,12 @@ pub fn find_ancestor_session_in_dirs(
             if session_file.exists() {
                 if let Ok(content) = std::fs::read_to_string(&session_file) {
                     if let Ok(entry) = serde_json::from_str::<SessionFileEntry>(&content) {
-                        if process::claude_start_token_matches(proc_root, &start, &entry.proc_start)
+                        if validate_session_file_entry(&entry)
+                            && process::claude_start_token_matches(
+                                proc_root,
+                                &start,
+                                &entry.proc_start,
+                            )
                         {
                             return Ok(entry.into());
                         }

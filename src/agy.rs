@@ -405,8 +405,7 @@ pub fn attested_lock_holder(
                 if (meta.dev(), meta.ino()) != (dev, ino) {
                     continue;
                 }
-                let Ok(info) =
-                    fs::read_to_string(proc_dir.join("fdinfo").join(entry.file_name()))
+                let Ok(info) = fs::read_to_string(proc_dir.join("fdinfo").join(entry.file_name()))
                 else {
                     continue;
                 };
@@ -768,6 +767,14 @@ pub fn verify_registration_peer(
     if peer_uid != my_uid {
         return Err(AppError::NotRecipient(format!(
             "peer UID {peer_uid} does not match server UID {my_uid}"
+        )));
+    }
+
+    // XB2 F1: conversation_id must be UUID-shaped before any path join or store insert.
+    if !crate::claim::is_uuid_shaped(&req.conversation_id) {
+        return Err(AppError::BadRequest(format!(
+            "invalid conversation_id '{}': must be a UUID",
+            req.conversation_id
         )));
     }
 
@@ -1199,7 +1206,10 @@ pub fn find_agy_subagent_descriptor_in(
     None
 }
 
-fn read_agy_descriptors_for_parent(brain_dir: &Path, parent_id: &str) -> Vec<AgySubagentDescriptor> {
+fn read_agy_descriptors_for_parent(
+    brain_dir: &Path,
+    parent_id: &str,
+) -> Vec<AgySubagentDescriptor> {
     if !crate::claim::is_uuid_shaped(parent_id) {
         return Vec::new();
     }
@@ -1318,9 +1328,7 @@ pub fn admit_agy(
         }
     }
 
-    let eff_name = effective_names
-        .get(child_id)
-        .and_then(|n| n.as_deref());
+    let eff_name = effective_names.get(child_id).and_then(|n| n.as_deref());
     crate::storage::subagent_upsert_agy(
         conn,
         parent_id,
@@ -1377,8 +1385,8 @@ pub fn sweep_agy_subagent_queues(
     store: &AgyStore,
 ) -> Result<(), AppError> {
     let now = crate::storage::now_epoch_secs();
-    let all_subagents = crate::storage::list_all_subagents(conn)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let all_subagents =
+        crate::storage::list_all_subagents(conn).map_err(|e| AppError::Internal(e.to_string()))?;
     if all_subagents.is_empty() {
         return Ok(());
     }
@@ -1441,6 +1449,9 @@ pub async fn flush_agy_queue(
     conv_id: &str,
     reply_ttl: Duration,
 ) {
+    if !crate::claim::is_uuid_shaped(conv_id) {
+        return;
+    }
     let pending_msgs = {
         let db_lock = match db.lock() {
             Ok(guard) => guard,
@@ -1704,6 +1715,9 @@ pub const AGY_PROC_WATCH_INTERVAL: Duration = Duration::from_millis(100);
 /// held by an attested agy process, and that process's `task/*/children` readable). Without the
 /// `children` file the watcher reads nothing, so B′'s hook fires from the first turn.
 pub fn is_conversation_proc_watched(config: &AgyConfig, conv_id: &str) -> bool {
+    if !crate::claim::is_uuid_shaped(conv_id) {
+        return false;
+    }
     if !locks_supported(&config.proc_locks_path) {
         return false;
     }
@@ -1781,6 +1795,9 @@ fn eligible_holder(
     store: &AgyStore,
     conv_id: &str,
 ) -> Option<(u32, String)> {
+    if !crate::claim::is_uuid_shaped(conv_id) {
+        return None;
+    }
     let already_registered = store.read().unwrap().values().any(|info| {
         (info.conversation_id == conv_id || info.session_key == conv_id)
             && info.credentials.as_ref().is_some_and(|c| !c.is_stale)
@@ -2207,59 +2224,18 @@ pub async fn run_register_server(
         let arm_tx_clone = arm_tx.clone();
 
         tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+            use tokio::io::{AsyncWriteExt, BufReader};
             let (reader, mut writer) = stream.into_split();
             let mut buf_reader = BufReader::new(reader);
-            let mut byte_buf = Vec::new();
-            let max_frame = 65536;
-
-            let read_res = tokio::time::timeout(
-                Duration::from_secs(30),
-                (&mut buf_reader)
-                    .take((max_frame + 1) as u64)
-                    .read_until(b'\n', &mut byte_buf),
+            let Some(line) = crate::svc::read_initial_register_line(
+                &mut buf_reader,
+                &mut writer,
+                crate::svc::REGISTER_INITIAL_MAX_BYTES,
+                crate::svc::REGISTER_INITIAL_TIMEOUT,
             )
-            .await;
-
-            let n = match read_res {
-                Ok(Ok(n)) => n,
-                Ok(Err(e)) => {
-                    tracing::warn!("register.sock read error: {e}");
-                    return;
-                }
-                Err(_) => {
-                    tracing::warn!("register.sock connection timed out waiting for initial frame");
-                    return;
-                }
-            };
-
-            if n == 0 {
+            .await
+            else {
                 return;
-            }
-
-            if byte_buf.len() > max_frame || (n >= max_frame && !byte_buf.ends_with(b"\n")) {
-                let err = serde_json::json!({
-                    "status": "error",
-                    "detail": "frame exceeds maximum allowed size"
-                });
-                let _ = writer.write_all(format!("{err}\n").as_bytes()).await;
-                return;
-            }
-
-            if !byte_buf.ends_with(b"\n") {
-                return;
-            }
-
-            let line = match std::str::from_utf8(&byte_buf) {
-                Ok(s) => s,
-                Err(_) => {
-                    let err = serde_json::json!({
-                        "status": "error",
-                        "detail": "invalid utf-8"
-                    });
-                    let _ = writer.write_all(format!("{err}\n").as_bytes()).await;
-                    return;
-                }
             };
 
             if !line.trim().is_empty() {
@@ -2275,6 +2251,15 @@ pub async fn run_register_server(
                             .or_else(|| v.get("conversationId"))
                             .and_then(|c| c.as_str())
                             .unwrap_or("");
+                        if !crate::claim::is_uuid_shaped(conv_id) {
+                            let err_resp = serde_json::json!({
+                                "status": "error",
+                                "error": "bad_request",
+                                "detail": format!("invalid conversation_id '{conv_id}': must be a UUID")
+                            });
+                            let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+                            return;
+                        }
                         let raw_label = v.get("label").and_then(|l| l.as_str()).map(str::to_string);
                         if let Some(ref raw) = raw_label {
                             {
@@ -2420,6 +2405,16 @@ pub async fn run_register_server(
                         let raw_label = v.get("label").and_then(|l| l.as_str()).map(str::to_string);
                         match serde_json::from_value::<AgyRegisterRequest>(v) {
                             Ok(req) => {
+                                if !crate::claim::is_uuid_shaped(&req.conversation_id) {
+                                    let err_resp = serde_json::json!({
+                                        "status": "error",
+                                        "error": "bad_request",
+                                        "detail": format!("invalid conversation_id '{}': must be a UUID", req.conversation_id)
+                                    });
+                                    let _ =
+                                        writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+                                    return;
+                                }
                                 match verify_registration_peer(
                                     &config_clone.proc_root,
                                     &config_clone.proc_locks_path,
@@ -2546,7 +2541,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let presence_dir = dir.path().join("presence");
         fs::create_dir_all(&presence_dir).unwrap();
-        let conv_id = "xr2-missing-line-conv";
+        let conv_id = "0199cecf-0099-7000-8000-000000000001";
         let lock_path = presence_dir.join(format!("{conv_id}.lock"));
         let f = fs::File::create(&lock_path).unwrap();
         let meta = f.metadata().unwrap();
@@ -2702,7 +2697,7 @@ mod tests {
     #[test]
     fn registration_without_trusted_exes_is_rejected() {
         let req = AgyRegisterRequest {
-            conversation_id: "c".to_string(),
+            conversation_id: "0199cecf-0099-7000-8000-000000000002".to_string(),
             ls_address: "127.0.0.1:1".to_string(),
             csrf_token: "t".to_string(),
         };

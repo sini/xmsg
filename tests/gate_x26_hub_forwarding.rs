@@ -108,9 +108,23 @@ fn create_claude_session_fixture(
     let live_proc = PathBuf::from(xmsg::process::LIVE_PROC_ROOT);
     let my_proc_start =
         xmsg::process::starttime(&live_proc, my_pid).unwrap_or_else(|_| "1000".to_string());
+    let session_uuid = if xmsg::claim::is_uuid_shaped(session_id) {
+        session_id.to_string()
+    } else {
+        use sha2::{Digest, Sha256};
+        let h = hex::encode(Sha256::digest(session_id.as_bytes()));
+        format!(
+            "{}-{}-4{}-a{}-{}",
+            &h[0..8],
+            &h[8..12],
+            &h[13..16],
+            &h[17..20],
+            &h[20..32]
+        )
+    };
     let session_json = serde_json::json!({
         "pid": my_pid,
-        "sessionId": session_id,
+        "sessionId": session_uuid,
         "name": name,
         "cwd": "/workspace",
         "status": "idle",
@@ -386,8 +400,16 @@ async fn test_oracle_1_relay_and_reply() {
         let node_a = spawn_test_node("node-a", port_a, http_a, &cert_a, &key_a, peers_a).await;
 
         // Create session on A (Alice) and session on B (Bob)
-        let (_sock_a, rx_a) = create_claude_session_fixture(&node_a.sessions_dir, "alice", "Alice");
-        let (_sock_b, rx_b) = create_claude_session_fixture(&node_b.sessions_dir, "bob", "Bob");
+        let (_sock_a, rx_a) = create_claude_session_fixture(
+            &node_a.sessions_dir,
+            "0199cecf-a11c-7000-8000-0000000a11ce",
+            "Alice",
+        );
+        let (_sock_b, rx_b) = create_claude_session_fixture(
+            &node_b.sessions_dir,
+            "0199cecf-b0b0-7000-8000-00000000b0b0",
+            "Bob",
+        );
 
         // Alice on A sends to Bob@node-b
         let send_resp = send_via_agent_sock(
@@ -416,7 +438,9 @@ async fn test_oracle_1_relay_and_reply() {
         // name, which is what the hub put on the wire.
         let node_a_name = xmsg::node::node_name_from_pin(&pin_a).unwrap();
         assert!(
-            b_msg.contains(&format!("Alice · alice@{node_a_name}")),
+            b_msg.contains(&format!(
+                "Alice · 0199cecf-a11c-7000-8000-0000000a11ce@{node_a_name}"
+            )),
             "Bob should see origin showing node-a's canonical name {node_a_name}: {b_msg}"
         );
 
@@ -446,7 +470,7 @@ async fn test_oracle_1_relay_and_reply() {
             "Alice should see reply text: {a_reply}"
         );
         assert!(
-            a_reply.contains("Bob · bob@"),
+            a_reply.contains("Bob · 0199cecf-b0b0-7000-8000-00000000b0b0@"),
             "Alice should see origin of reply from Bob: {a_reply}"
         );
     })

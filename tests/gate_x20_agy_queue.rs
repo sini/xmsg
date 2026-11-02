@@ -131,7 +131,7 @@ async fn start_test_http_server(
         proc_root,
         agy_bin: fake_agy_bin.to_string_lossy().to_string(),
         trusted_agy_exes: vec![fake_agy_bin],
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
     let agy_store = new_agy_store();
     let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -610,9 +610,17 @@ async fn create_fed_test_node(
         &my_proc_start,
     );
 
+    let sess_uuid = {
+        use sha2::{Digest, Sha256};
+        let h = Sha256::digest(name.as_bytes());
+        format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-4{:01x}{:02x}-8{:01x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            h[0], h[1], h[2], h[3], h[4], h[5], h[6] & 0x0f, h[7], h[8] & 0x0f, h[9], h[10], h[11], h[12], h[13], h[14], h[15]
+        )
+    };
     let session_json = serde_json::json!({
         "pid": my_pid,
-        "sessionId": format!("sess-{name}"),
+        "sessionId": sess_uuid,
         "name": format!("agent-{name}"),
         "cwd": "/workspace",
         "status": "idle",
@@ -638,8 +646,8 @@ async fn create_fed_test_node(
                 proc_root: proc_root.clone(),
                 agy_bin: "agy".to_string(),
                 trusted_agy_exes: Vec::new(),
-                    brain_dir: std::path::PathBuf::new(),
-    },
+                brain_dir: std::path::PathBuf::new(),
+            },
             new_agy_store(),
         )
     };
@@ -834,8 +842,8 @@ async fn test_oracle_4_federated_send_queues_unregistered_and_checks_starttime()
                         proc_root: proc_root.to_path_buf(),
                         agy_bin: fake_agy_bin.to_string_lossy().to_string(),
                         trusted_agy_exes: vec![fake_agy_bin],
-                            brain_dir: std::path::PathBuf::new(),
-    },
+                        brain_dir: std::path::PathBuf::new(),
+                    },
                     new_agy_store(),
                 )
             },
@@ -960,7 +968,7 @@ struct AgyBetweenTurns {
     server: TestHttpServer,
 }
 
-const XA4_CONV: &str = "conv-xa4-between-turns";
+const XA4_CONV: &str = "0199cecf-00a4-7000-8000-0000000000a4";
 const XA4_PID: u32 = 7031;
 
 impl AgyBetweenTurns {

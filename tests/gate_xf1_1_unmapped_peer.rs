@@ -93,7 +93,7 @@ fn connect_from_reaped_child(sock_path: &Path, payload: &[u8]) -> UnixStream {
     let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
     assert_eq!(waited, pid);
     assert!(
-         libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+        libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
         "child connect/write failed with status {status}"
     );
 
@@ -209,8 +209,8 @@ fn xf1_1_pidns_server_helper() {
             proc_root: proc_root.clone(),
             agy_bin: "false".to_string(),
             trusted_agy_exes: Vec::new(),
-                brain_dir: std::path::PathBuf::new(),
-    };
+            brain_dir: std::path::PathBuf::new(),
+        };
         let db_conn = rusqlite::Connection::open(base_dir.join("xmsg.db")).unwrap();
         storage::init_db(&db_conn).unwrap();
         let db = Arc::new(Mutex::new(db_conn));
@@ -442,7 +442,10 @@ async fn test_xf1_1_unmapped_peer_pid_namespace_and_ancestry_oracles() {
     loop {
         ready_line.clear();
         let n = helper_stdout.read_line(&mut ready_line).await.unwrap();
-        assert!(n > 0, "EOF from xf1_1_pidns_server_helper before ready line");
+        assert!(
+            n > 0,
+            "EOF from xf1_1_pidns_server_helper before ready line"
+        );
         let trimmed = ready_line.trim();
         if trimmed == "PIDNS_SERVER_READY" || trimmed.starts_with("UNSHARE_UNAVAILABLE") {
             break;
@@ -572,9 +575,16 @@ async fn test_xf1_1_unmapped_peer_pid_namespace_and_ancestry_oracles() {
             let mut line = String::new();
             BufReader::new(&mut s).read_line(&mut line).await.unwrap();
             let v: Value = serde_json::from_str(line.trim()).unwrap();
-            assert_eq!(v["pid"], Value::Null, "unmapped peer must have pid: None: {v}");
+            assert_eq!(
+                v["pid"],
+                Value::Null,
+                "unmapped peer must have pid: None: {v}"
+            );
             assert_eq!(v["is_pinned"], true, "unmapped peer must be pinned: {v}");
-            assert_eq!(v["is_unmapped"], true, "unmapped peer must be marked unmapped: {v}");
+            assert_eq!(
+                v["is_unmapped"], true,
+                "unmapped peer must be marked unmapped: {v}"
+            );
             assert_eq!(
                 v["is_pin_alive"], true,
                 "Oracle 1 / Mutant 1: alive-unmapped peer must have is_pin_alive() == true: {v}"
@@ -605,7 +615,7 @@ async fn test_xf1_1_unmapped_peer_pid_namespace_and_ancestry_oracles() {
         proc_root: proc_root.clone(),
         agy_bin: "false".to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
     let db_conn = rusqlite::Connection::open_in_memory().unwrap();
     storage::init_db(&db_conn).unwrap();

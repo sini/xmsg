@@ -831,17 +831,7 @@ where
                             "subagent frame on register.sock is only valid for opencode".into(),
                         ));
                     }
-                    let agent_id = agent_id.trim();
-                    if agent_id.is_empty()
-                        || agent_id.contains('/')
-                        || agent_id.contains('@')
-                        || agent_id.contains(char::is_whitespace)
-                    {
-                        return Err(AppError::BadRequest(
-                            "agent_id must be non-empty and must not contain '/', '@' or whitespace"
-                                .into(),
-                        ));
-                    }
+                    let agent_id = crate::claim::validate_subagent_id(&agent_id)?;
                     let c = db.lock().map_err(db_err)?;
                     match event.as_str() {
                         "start" => {

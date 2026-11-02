@@ -63,7 +63,7 @@ fn cell_g1_linux_refuses_when_no_flock_holder() {
     // Empty locks file: no process holds a FLOCK on the lock file
     fs::write(&proc_locks, "").unwrap();
 
-    let lock_file = presence_dir.join("victim-conv.lock");
+    let lock_file = presence_dir.join("0199cecf-0001-7000-8000-000000000001.lock");
     fs::write(&lock_file, "").unwrap();
 
     let trusted_bin = tmp.path().join("agy");
@@ -83,7 +83,7 @@ fn cell_g1_linux_refuses_when_no_flock_holder() {
     );
 
     let req = AgyRegisterRequest {
-        conversation_id: "victim-conv".to_string(),
+        conversation_id: "0199cecf-0001-7000-8000-000000000001".to_string(),
         ls_address: "127.0.0.1:9999".to_string(),
         csrf_token: "token123".to_string(),
     };
@@ -147,7 +147,7 @@ fn cell_g2_agent_sock_refuses_unregistered_lock_holder() {
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
     let agy_store = new_agy_store(); // Empty: NOT registered
     let pi_store = new_pi_store();
@@ -185,7 +185,7 @@ fn delta_minor_1_starttime_changes_between_reads() {
     let tmp = tempdir().unwrap();
     let presence = tmp.path().join("presence");
     fs::create_dir_all(&presence).unwrap();
-    let lock = presence.join("c.lock");
+    let lock = presence.join("0199cecf-000c-7000-8000-00000000000c.lock");
     fs::write(&lock, "x").unwrap();
     let m = fs::metadata(&lock).unwrap();
     let locks = tmp.path().join("locks");
@@ -225,7 +225,7 @@ fn delta_minor_1_starttime_changes_between_reads() {
         }
     });
     let req = AgyRegisterRequest {
-        conversation_id: "c".into(),
+        conversation_id: "0199cecf-000c-7000-8000-00000000000c".into(),
         ls_address: "127.0.0.1:1".into(),
         csrf_token: "t".into(),
     };

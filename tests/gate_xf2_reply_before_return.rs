@@ -52,7 +52,7 @@ fn build_test_state(node_name: &str) -> (TempDir, Arc<AppState>) {
         proc_root,
         agy_bin: "false".to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
 
     let db_conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -389,7 +389,10 @@ async fn test_xf2_reply_recipient_replies_before_deliver_reply_returns() {
     drop(release_tx);
     let r1 = reply_task.await.unwrap().expect("first reply succeeds");
     assert_eq!(r1.push_outcome.as_deref(), Some("pushed"));
-    assert_eq!(r1.pushed_message_id.as_deref(), Some(pushed_reply_id.as_str()));
+    assert_eq!(
+        r1.pushed_message_id.as_deref(),
+        Some(pushed_reply_id.as_str())
+    );
 }
 
 // Oracle 4 (failure path): if `deliver` or `push_reply` fails after pre-recording the
@@ -406,8 +409,7 @@ async fn test_xf2_failed_delivery_or_push_refuses_later_reply() {
     {
         let _listener = UnixListener::bind(&dead_sock).unwrap();
     } // socket path exists on disk, but listener is closed -> ECONNREFUSED
-    let dead_claude =
-        register_fake_claude(&state, 801, dead_id, "dead-claude", &dead_sock).await;
+    let dead_claude = register_fake_claude(&state, 801, dead_id, "dead-claude", &dead_sock).await;
 
     let err = surface::send(
         &state,
@@ -441,15 +443,17 @@ async fn test_xf2_failed_delivery_or_push_refuses_later_reply() {
     let reply_err = surface::reply(&state, &dead_claude, &failed_msg_id, "nope", None)
         .await
         .expect_err("reply to failed send must be refused");
-    assert!(matches!(reply_err, AppError::NotFound(_)), "got: {reply_err:?}");
+    assert!(
+        matches!(reply_err, AppError::NotFound(_)),
+        "got: {reply_err:?}"
+    );
 
     // 4b. `deliver_reply` fails during `push_reply` (`sender_gone` after pre-recording the
     // pushed reply row in `messages`).
     let gone_id = "33333333-4444-5555-6666-777777777777";
     let gone_sock = short_sock::sock_path(tmp.path(), "gone-inbox");
     let gone_listener = UnixListener::bind(&gone_sock).unwrap();
-    let gone_sender =
-        register_fake_claude(&state, 802, gone_id, "gone-sender", &gone_sock).await;
+    let gone_sender = register_fake_claude(&state, 802, gone_id, "gone-sender", &gone_sock).await;
     let svc_replier = register_fake_svc(&state, 803, "svc-target");
 
     let m = surface::send(
@@ -498,12 +502,21 @@ async fn test_xf2_failed_delivery_or_push_refuses_later_reply() {
     let reply_err = surface::reply(&state, &gone_sender, &unpushed_reply_id, "nope", None)
         .await
         .expect_err("reply to unpushed reply_id must be refused");
-    assert!(matches!(reply_err, AppError::NotFound(_)), "got: {reply_err:?}");
+    assert!(
+        matches!(reply_err, AppError::NotFound(_)),
+        "got: {reply_err:?}"
+    );
 
     // 4c. A row in `messages` recorded first and then marked with a failure outcome
     // (`delivery_failed`, `failed`, `not_found`, `gone`, `ambiguous`) is also refused by
     // `reply` with `NotFound`.
-    for failed_outcome in ["delivery_failed", "failed", "not_found", "gone", "ambiguous"] {
+    for failed_outcome in [
+        "delivery_failed",
+        "failed",
+        "not_found",
+        "gone",
+        "ambiguous",
+    ] {
         let id = format!("msg-{failed_outcome}");
         {
             let db = state.db.lock().unwrap();

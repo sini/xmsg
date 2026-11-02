@@ -138,7 +138,10 @@ fn write_descriptor(
         if let Some(t) = type_name {
             obj.insert("typeName".into(), Value::String(t.into()));
         }
-        obj.insert("spawnStepIndex".into(), Value::Number(spawn_step_index.into()));
+        obj.insert(
+            "spawnStepIndex".into(),
+            Value::Number(spawn_step_index.into()),
+        );
         Value::Object(obj)
     } else {
         let mut desc = serde_json::Map::new();
@@ -496,7 +499,10 @@ fn g1_pre_tool_use_stamp_and_foreign_and_malformed() {
         .to_string(),
     );
     assert_eq!(code, 0);
-    assert_eq!(out_sub_no_as_agent["decision"], "allow", "{out_sub_no_as_agent}");
+    assert_eq!(
+        out_sub_no_as_agent["decision"], "allow",
+        "{out_sub_no_as_agent}"
+    );
     assert_eq!(
         out_sub_no_as_agent["overwrite"]["Arguments"]["as_agent"], X_UUID,
         "XR3: subagent call without as_agent must still get as_agent injected: {out_sub_no_as_agent}"
@@ -530,7 +536,10 @@ fn g1_pre_tool_use_stamp_and_foreign_and_malformed() {
     assert_eq!(out["decision"], "allow", "{out}");
     assert_eq!(out["overwrite"]["Arguments"]["as_agent"], X_UUID, "{out}");
     assert_eq!(out["overwrite"]["Arguments"]["to"], "recip", "{out}");
-    assert_eq!(out["overwrite"]["Arguments"]["text"], "hello world", "{out}");
+    assert_eq!(
+        out["overwrite"]["Arguments"]["text"], "hello world",
+        "{out}"
+    );
 
     // 2. Same with `Arguments` as a JSON string -> `overwrite.Arguments` is a JSON string with
     //    `as_agent` replaced and other keys preserved.
@@ -682,7 +691,10 @@ fn g1_pre_tool_use_stamp_and_foreign_and_malformed() {
         .to_string(),
     );
     assert_eq!(code, 0);
-    assert_eq!(out_root_spoof_obj["decision"], "allow", "{out_root_spoof_obj}");
+    assert_eq!(
+        out_root_spoof_obj["decision"], "allow",
+        "{out_root_spoof_obj}"
+    );
     let stripped_obj = out_root_spoof_obj["overwrite"]["Arguments"]
         .as_object()
         .expect("XR3: root spoofed object Arguments must be overwritten");
@@ -690,7 +702,10 @@ fn g1_pre_tool_use_stamp_and_foreign_and_malformed() {
         !stripped_obj.contains_key("as_agent"),
         "XR3: model-written as_agent on root call must be stripped: {out_root_spoof_obj}"
     );
-    assert_eq!(stripped_obj.get("to").and_then(Value::as_str), Some("recip"));
+    assert_eq!(
+        stripped_obj.get("to").and_then(Value::as_str),
+        Some("recip")
+    );
     assert_eq!(
         stripped_obj.get("text").and_then(Value::as_str),
         Some("spoof attempt")
@@ -718,7 +733,10 @@ fn g1_pre_tool_use_stamp_and_foreign_and_malformed() {
         .to_string(),
     );
     assert_eq!(code, 0);
-    assert_eq!(out_root_spoof_str["decision"], "allow", "{out_root_spoof_str}");
+    assert_eq!(
+        out_root_spoof_str["decision"], "allow",
+        "{out_root_spoof_str}"
+    );
     let stripped_str = out_root_spoof_str["overwrite"]["Arguments"]
         .as_str()
         .expect("XR3: root spoofed string Arguments must remain a string");
@@ -747,8 +765,14 @@ fn g1_pre_tool_use_stamp_and_foreign_and_malformed() {
         .to_string(),
     );
     assert_eq!(code, 0);
-    assert!(out.get("overwrite").is_none(), "foreign server must get no overwrite: {out}");
-    assert_ne!(out["decision"], "allow", "foreign server must never get allow: {out}");
+    assert!(
+        out.get("overwrite").is_none(),
+        "foreign server must get no overwrite: {out}"
+    );
+    assert_ne!(
+        out["decision"], "allow",
+        "foreign server must never get allow: {out}"
+    );
     assert_eq!(out["decision"], "ask", "{out}");
 
     // 5. Malformed stdin -> `decision: "deny"`.
@@ -864,7 +888,9 @@ async fn g2_admission_from_descriptor_and_refusals() {
     assert_eq!(resp_y["error"], "denied", "{resp_y}");
     {
         let db = h.state.db.lock().unwrap();
-        assert!(storage::get_subagent(&db, P_UUID, Y_UUID).unwrap().is_none());
+        assert!(storage::get_subagent(&db, P_UUID, Y_UUID)
+            .unwrap()
+            .is_none());
     }
 
     // 3. `start` for P -> `role: "parent"`, no row for P under P.
@@ -879,7 +905,9 @@ async fn g2_admission_from_descriptor_and_refusals() {
     assert_eq!(resp_p["role"], "parent", "{resp_p}");
     {
         let db = h.state.db.lock().unwrap();
-        assert!(storage::get_subagent(&db, P_UUID, P_UUID).unwrap().is_none());
+        assert!(storage::get_subagent(&db, P_UUID, P_UUID)
+            .unwrap()
+            .is_none());
     }
 
     // 4. Descriptor `Z.json` whose `conversationId` inside the JSON is `W` -> `not_recipient`, no row.
@@ -904,7 +932,9 @@ async fn g2_admission_from_descriptor_and_refusals() {
     assert_eq!(resp_z["error"], "denied", "{resp_z}");
     {
         let db = h.state.db.lock().unwrap();
-        assert!(storage::get_subagent(&db, P_UUID, Z_UUID).unwrap().is_none());
+        assert!(storage::get_subagent(&db, P_UUID, Z_UUID)
+            .unwrap()
+            .is_none());
     }
 
     // 5. G2c (E4 UUID-shape guard): non-UUID `as_agent` / `agent_id` values (`"../aaaa"`,
@@ -976,7 +1006,9 @@ async fn g2_admission_from_descriptor_and_refusals() {
         {
             let db = h.state.db.lock().unwrap();
             assert!(
-                storage::get_subagent(&db, P_UUID, bad_id).unwrap().is_none(),
+                storage::get_subagent(&db, P_UUID, bad_id)
+                    .unwrap()
+                    .is_none(),
                 "admit_agy must never admit non-UUID '{bad_id}'"
             );
         }
@@ -1168,7 +1200,10 @@ async fn g4_attested_send_lazy_admission_and_d6_and_inbox_refusal() {
         .await;
     assert_eq!(mcp_y["result"]["isError"], true, "{mcp_y}");
     let err_y = mcp_y["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(err_y.contains("denied"), "expected denied for Y, got: {err_y}");
+    assert!(
+        err_y.contains("denied"),
+        "expected denied for Y, got: {err_y}"
+    );
 
     // 4. `as_agent = Z` (descriptor under Q, not P) -> refused `denied` (`not_recipient`).
     let mcp_z = h
@@ -1183,7 +1218,10 @@ async fn g4_attested_send_lazy_admission_and_d6_and_inbox_refusal() {
         .await;
     assert_eq!(mcp_z["result"]["isError"], true, "{mcp_z}");
     let err_z = mcp_z["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(err_z.contains("denied"), "expected denied for Z, got: {err_z}");
+    assert!(
+        err_z.contains("denied"),
+        "expected denied for Z, got: {err_z}"
+    );
 
     // 5. `inbox` with `as_agent = P` -> refused just as for `""` (E3).
     let inbox_p = h
@@ -1399,10 +1437,9 @@ async fn g6_reset_on_mcp_start_and_crash_preserves_queue_until_reregister() {
     // Trigger eviction + purge via `http_list`.
     let recs = h.http_list("").await;
     assert!(
-        !recs.iter().any(|r| r["address"]
-            .as_str()
-            .unwrap_or("")
-            .starts_with(P_UUID)),
+        !recs
+            .iter()
+            .any(|r| r["address"].as_str().unwrap_or("").starts_with(P_UUID)),
         "dead P and its subagents must be evicted from live list: {recs:?}"
     );
 
@@ -1410,7 +1447,10 @@ async fn g6_reset_on_mcp_start_and_crash_preserves_queue_until_reregister() {
         let db = h.state.db.lock().unwrap();
         // `subagents` rows under P were purged by D9 eviction...
         let subs = storage::list_subagents_for_parent(&db, P_UUID).unwrap();
-        assert!(subs.is_empty(), "expected subagents rows purged on eviction, got {subs:?}");
+        assert!(
+            subs.is_empty(),
+            "expected subagents rows purged on eviction, got {subs:?}"
+        );
         // ...while `instance_queue` still holds the 1 undelivered row keyed `<P>/<X>`.
         let sub_queue_key = format!("{P_UUID}/{X_UUID}");
         let q_count: i64 = db
@@ -1533,7 +1573,9 @@ async fn g7_rebind_on_registration_and_role_collisions_and_list() {
     );
 
     // 2. `<P>/<X>` resolves to X.
-    let (st_x, send_x) = h.http_send(&format!("{P_UUID}/{X_UUID}"), "to X by id").await;
+    let (st_x, send_x) = h
+        .http_send(&format!("{P_UUID}/{X_UUID}"), "to X by id")
+        .await;
     assert_eq!(st_x, 202, "{send_x}");
     assert_eq!(
         send_x["address"],

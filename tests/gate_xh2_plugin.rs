@@ -616,7 +616,7 @@ async fn p3_walk_stops_at_the_plugin_process() {
     let me = std::process::id();
     let start = xmsg::process::starttime(std::path::Path::new(xmsg::process::LIVE_PROC_ROOT), me)
         .expect("live start time");
-    let claude_id = "walk-claude-ancestor";
+    let claude_id = "0199cecf-0000-7000-8000-00000000c1a0";
     let sessions = node
         .http_sock
         .parent()

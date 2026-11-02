@@ -118,7 +118,7 @@ async fn create_test_node(
         proc_root,
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
     let agy_store = new_agy_store();
     let pi_store = new_pi_store();
@@ -191,9 +191,23 @@ fn create_claude_session_fixture(
     let live_proc = PathBuf::from(xmsg::process::LIVE_PROC_ROOT);
     let my_proc_start =
         xmsg::process::starttime(&live_proc, my_pid).unwrap_or_else(|_| "1000".to_string());
+    let session_uuid = if xmsg::claim::is_uuid_shaped(session_id) {
+        session_id.to_string()
+    } else {
+        use sha2::{Digest, Sha256};
+        let h = hex::encode(Sha256::digest(session_id.as_bytes()));
+        format!(
+            "{}-{}-4{}-a{}-{}",
+            &h[0..8],
+            &h[8..12],
+            &h[13..16],
+            &h[17..20],
+            &h[20..32]
+        )
+    };
     let session_json = serde_json::json!({
         "pid": my_pid,
-        "sessionId": session_id,
+        "sessionId": session_uuid,
         "name": name,
         "cwd": "/workspace",
         "status": "idle",
@@ -1308,7 +1322,7 @@ async fn test_oracle_9_ca_peer_policy_targets_enforced() {
                 from: None,
                 leaf: false,
                 principals: Vec::new(),
-                targets: Some(vec!["allowed-target".to_string()]),
+                targets: Some(vec!["0199cecf-a110-7000-8000-0000000a1100".to_string()]),
                 dial: None,
             },
             anchors.clone(),
@@ -1316,8 +1330,11 @@ async fn test_oracle_9_ca_peer_policy_targets_enforced() {
         .unwrap();
 
     let node_b = create_test_node("server-b", b_peers, cert_b, Vec::new(), key_b).await;
-    let (_sock1, rx1) =
-        create_claude_session_fixture(&node_b.sessions_dir, "allowed-target", "allowed-target");
+    let (_sock1, rx1) = create_claude_session_fixture(
+        &node_b.sessions_dir,
+        "0199cecf-a110-7000-8000-0000000a1100",
+        "allowed-target",
+    );
     let (_sock2, rx2) =
         create_claude_session_fixture(&node_b.sessions_dir, "denied-target", "denied-target");
 

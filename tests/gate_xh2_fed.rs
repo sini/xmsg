@@ -157,9 +157,23 @@ async fn create_full_test_node(
         }
     });
 
+    let session_uuid = if xmsg::claim::is_uuid_shaped(target_session_name) {
+        target_session_name.to_string()
+    } else {
+        use sha2::{Digest, Sha256};
+        let h = hex::encode(Sha256::digest(target_session_name.as_bytes()));
+        format!(
+            "{}-{}-4{}-a{}-{}",
+            &h[0..8],
+            &h[8..12],
+            &h[13..16],
+            &h[17..20],
+            &h[20..32]
+        )
+    };
     let session_json = serde_json::json!({
         "pid": my_pid,
-        "sessionId": target_session_name,
+        "sessionId": session_uuid,
         "name": target_session_name,
         "cwd": "/workspace",
         "status": "idle",
@@ -200,7 +214,7 @@ async fn create_full_test_node(
         proc_root: proc_root.clone(),
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
-            brain_dir: std::path::PathBuf::new(),
+        brain_dir: std::path::PathBuf::new(),
     };
     let agy_store = new_agy_store();
     let pi_store = new_pi_store();

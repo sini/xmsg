@@ -164,6 +164,25 @@ pub fn validate_subagent_name(name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Validates a subagent `agent_id` across both `agent.sock` (`handle_subagent_frame`,
+/// `read_meta_json_fields`) and `register.sock` (`plugin.rs` `Frame::Subagent`):
+/// trimmed, non-empty, `<= 128` bytes, no `'/'`, `'@'`, whitespace, or control chars (XB2 F4).
+pub fn validate_subagent_id(agent_id: &str) -> Result<&str, AppError> {
+    let agent_id = agent_id.trim();
+    if agent_id.is_empty()
+        || agent_id.len() > 128
+        || agent_id.contains('/')
+        || agent_id.contains('@')
+        || agent_id.contains(char::is_whitespace)
+        || agent_id.contains(char::is_control)
+    {
+        return Err(AppError::BadRequest(
+            "agent_id must be non-empty (<= 128 bytes) and must not contain '/', '@', whitespace or control characters".to_string(),
+        ));
+    }
+    Ok(agent_id)
+}
+
 /// HA9-A §2.4: whether a bound subagent is currently in an active turn (`turn_pid` and
 /// `turn_start` match a live parent process in `proc_root`).
 pub fn is_subagent_in_turn(proc_root: &Path, row: &storage::SubagentBinding) -> bool {
@@ -312,10 +331,14 @@ pub fn sync_claims_entries(
         .unchecked_transaction()
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    // Filter to live entries where process is still alive, proc_start matches, and the
-    // presented session_id is not already recorded for a non-Claude harness (XS3).
+    // Filter to live entries where process is still alive, proc_start matches, the entry passes
+    // SessionFileEntry validation (XB2 F3), and the presented session_id is not already recorded
+    // for a non-Claude harness (XS3).
     let mut live_entries = Vec::new();
     for e in raw_entries {
+        if !registry::validate_session_file_entry(&e) {
+            continue;
+        }
         if !is_claude_proc_live(proc_root, e.pid, &e.proc_start) {
             continue;
         }
