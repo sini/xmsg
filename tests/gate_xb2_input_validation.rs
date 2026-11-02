@@ -44,9 +44,16 @@ fn make_test_state(tmp: &std::path::Path) -> Arc<AppState> {
     let my_pid = std::process::id();
     let pid_dir = proc_root.join(my_pid.to_string());
     fs::create_dir_all(&pid_dir).unwrap();
-    if let Ok(real_stat) = fs::read_to_string(format!("/proc/{my_pid}/stat")) {
-        fs::write(pid_dir.join("stat"), real_stat).unwrap();
-    }
+    // Populate a synthetic Linux-style `<proc_root>/<pid>/stat` on every platform
+    // (`src/process.rs:3-4`: synthetic `proc_root != LIVE_PROC_ROOT` is always read as a
+    // Linux-style procfs tree, including on macOS where `/proc` does not exist).
+    let my_proc_start =
+        xmsg::process::starttime(std::path::Path::new(xmsg::process::LIVE_PROC_ROOT), my_pid)
+            .unwrap_or_else(|_| "100".to_string());
+    let stat_content = format!(
+        "{my_pid} (xmsg) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {my_proc_start} 0 0\n"
+    );
+    fs::write(pid_dir.join("stat"), stat_content).unwrap();
     fs::create_dir_all(&presence_dir).unwrap();
     fs::create_dir_all(&brain_dir).unwrap();
 
@@ -237,6 +244,30 @@ fn f2_read_meta_json_confines_path_symlink_and_size() {
         "symlink .meta.json must be refused by symlink_metadata"
     );
 
+    // Valid 2: `transcript_path` accessed through a symlinked parent directory (such as macOS
+    // `/var/folders/...` -> `/private/var/folders/...`) passes when both `expected_session_dir`
+    // and the candidate `meta.json` resolve under the same canonical session directory.
+    let symlink_root = tmp.path().join("var-folders-link");
+    std::os::unix::fs::symlink(tmp.path().join("project"), &symlink_root).unwrap();
+    let symlinked_transcript = symlink_root.join(format!("{VALID_UUID_1}.jsonl"));
+    let (name, atype) =
+        xmsg::agent::read_meta_json_fields(symlinked_transcript.to_str().unwrap(), "good");
+    assert_eq!(name.as_deref(), Some("bounded-worker"));
+    assert_eq!(atype.as_deref(), Some("research"));
+
+    // Malformed 3b: intermediate `subagents` directory replaced by a symlink pointing outside
+    // `expected_session_dir` is refused by canonical prefix check.
+    let escape_session_dir = tmp.path().join("project").join(VALID_UUID_2);
+    fs::create_dir_all(&escape_session_dir).unwrap();
+    std::os::unix::fs::symlink(tmp.path(), escape_session_dir.join("subagents")).unwrap();
+    let escape_transcript = escape_session_dir.with_extension("jsonl");
+    let (name, atype) =
+        xmsg::agent::read_meta_json_fields(escape_transcript.to_str().unwrap(), "outside");
+    assert!(
+        name.is_none() && atype.is_none(),
+        "intermediate symlinked subagents/ directory pointing outside session dir must be refused"
+    );
+
     // Malformed 4: oversized `.meta.json` (> 65536 bytes) refused by size cap.
     let huge_meta = subagents_dir.join("agent-huge.meta.json");
     let huge_payload = format!(r#"{{"name":"{}","agentType":"huge"}}"#, "x".repeat(70_000));
@@ -331,6 +362,7 @@ async fn f3_session_file_entry_requires_uuid_and_safe_socket_path() {
     // Malformed 3: socket path outside expected directory or containing `..` refused.
     for bad_path in [
         "/etc/claude.sock",
+        "/private/etc/claude.sock",
         "/tmp/../etc/claude.sock",
         "relative.sock",
     ] {
@@ -343,6 +375,17 @@ async fn f3_session_file_entry_requires_uuid_and_safe_socket_path() {
             "unsafe socket path {bad_path} must be refused"
         );
     }
+    // Symlinked parent directory pointing to `/etc` refused via canonical parent check.
+    let etc_link = tmp.path().join("etc-link");
+    std::os::unix::fs::symlink("/etc", &etc_link).unwrap();
+    let etc_link_sock = SessionFileEntry {
+        messaging_socket_path: etc_link.join("claude.sock").to_string_lossy().to_string(),
+        ..valid_entry.clone()
+    };
+    assert!(
+        !xmsg::registry::validate_session_file_entry(&etc_link_sock),
+        "socket path under symlink to /etc must be refused"
+    );
 }
 
 /// F4: `handle_subagent_frame` uses the same `agent_id` validation as `plugin.rs`, through
@@ -905,13 +948,6 @@ async fn f6_run_leaf_register_server_enforces_byte_cap_and_timeout() {
     fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let sock_path = tmp.path().join("leaf-register.sock");
     let state = make_test_state(tmp.path());
-
-    // Write `/proc/<pid>/stat` so our test process has a valid starttime pin.
-    let my_pid = std::process::id();
-    let pid_dir = state.agy_config.proc_root.join(my_pid.to_string());
-    fs::create_dir_all(&pid_dir).unwrap();
-    let real_stat = fs::read_to_string(format!("/proc/{my_pid}/stat")).unwrap();
-    fs::write(pid_dir.join("stat"), real_stat).unwrap();
 
     let my_uid = unsafe { libc::geteuid() };
     let srv_sock = sock_path.clone();

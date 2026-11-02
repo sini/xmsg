@@ -1161,9 +1161,20 @@ pub fn read_meta_json_fields(
     if expected_session_dir == Path::new("/") {
         return (None, None);
     }
-    for blocked in ["/dev", "/proc", "/sys", "/etc"] {
+    for blocked in ["/dev", "/proc", "/sys", "/etc", "/private/etc"] {
         if tp_path.starts_with(blocked) {
             return (None, None);
+        }
+    }
+    let canon_session_dir = fs::canonicalize(expected_session_dir).ok();
+    if let Some(ref canon_dir) = canon_session_dir {
+        if canon_dir == Path::new("/") {
+            return (None, None);
+        }
+        for blocked in ["/dev", "/proc", "/sys", "/etc", "/private/etc"] {
+            if canon_dir.starts_with(blocked) {
+                return (None, None);
+            }
         }
     }
 
@@ -1197,6 +1208,14 @@ pub fn read_meta_json_fields(
         let ft = meta.file_type();
         if ft.is_symlink() || !ft.is_file() || meta.len() > MAX_META_JSON_BYTES {
             continue;
+        }
+        if let Some(ref canon_dir) = canon_session_dir {
+            let Ok(canon_path) = fs::canonicalize(&path) else {
+                continue;
+            };
+            if !canon_path.starts_with(canon_dir) {
+                continue;
+            }
         }
         let Ok(file) = fs::File::open(&path) else {
             continue;

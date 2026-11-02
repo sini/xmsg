@@ -252,12 +252,28 @@ pub fn validate_messaging_socket_path(sock: &Path) -> Result<(), AppError> {
             sock.display()
         )));
     }
-    for blocked in ["/dev", "/proc", "/sys", "/etc"] {
+    for blocked in ["/dev", "/proc", "/sys", "/etc", "/private/etc"] {
         if sock.starts_with(blocked) {
             return Err(AppError::BadRequest(format!(
                 "messaging_socket_path '{}' is not in an allowed socket directory",
                 sock.display()
             )));
+        }
+    }
+    if let Ok(canon_parent) = std::fs::canonicalize(parent) {
+        if canon_parent == Path::new("/") {
+            return Err(AppError::BadRequest(format!(
+                "messaging_socket_path '{}' must not reside directly in '/'",
+                sock.display()
+            )));
+        }
+        for blocked in ["/dev", "/proc", "/sys", "/etc", "/private/etc"] {
+            if canon_parent.starts_with(blocked) {
+                return Err(AppError::BadRequest(format!(
+                    "messaging_socket_path '{}' is not in an allowed socket directory",
+                    sock.display()
+                )));
+            }
         }
     }
     if let Ok(meta) = std::fs::symlink_metadata(sock) {
