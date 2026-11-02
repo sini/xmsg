@@ -771,7 +771,7 @@ fn agy_has_creds(store: &crate::agy::AgyStore, session: &Session) -> bool {
 
 /// Delivers a message to a resolved local target. Returns the target's ID, its harness
 /// and the outcome.
-pub(crate) async fn deliver(
+pub async fn deliver(
     local: &Local<'_>,
     target: &ResolvedTarget,
     from_name: &str,

@@ -13,16 +13,19 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use tempfile::tempdir;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::broadcast;
 
 use xmsg::agy::{AgyConfig, AgyCredentials, AgySessionInfo};
-use xmsg::fed::FedInboxMessage;
+use xmsg::fed::{
+    generate_self_signed_ed25519, normalize_pin, run_fed_listener, run_outbound_peer_pull_loop,
+    FedInboxMessage, FedState, PeersMap, RateLimiter,
+};
 use xmsg::handoff::Transfer;
-use xmsg::http::AppState;
+use xmsg::http::{AppState, ResolvedTarget};
 use xmsg::registry::{Session, SessionFileEntry};
-use xmsg::storage::{self, MessageRecord, Origin, QueuedMessage};
+use xmsg::storage::{self, MessageRecord, Origin, PeerMailboxMessage, QueuedMessage};
 
 const VALID_UUID_1: &str = "0199cecf-0001-7000-8000-000000000001";
 const VALID_UUID_2: &str = "0199cecf-0002-7000-8000-000000000002";
@@ -282,9 +285,32 @@ async fn f3_session_file_entry_requires_uuid_and_safe_socket_path() {
         "non-UUID session_id must be refused"
     );
 
-    // Malformed 2: xmsg's own `agent.sock` and `register.sock` refused.
+    // Malformed 2: xmsg's own `agent.sock`, `register.sock` and `http.sock` refused.
+    // Bind a real `UnixListener` at each reserved path so that without the use-site check in
+    // `inbox::deliver_to_socket`, `UnixStream::connect` + write would succeed (`Ok(())`).
+    let valid_sock_listener = UnixListener::bind(&valid_sock).unwrap();
+    tokio::spawn(async move {
+        if let Ok((mut stream, _)) = valid_sock_listener.accept().await {
+            let mut buf = Vec::new();
+            let _ = stream.read_to_end(&mut buf).await;
+        }
+    });
+    assert!(
+        xmsg::inbox::deliver_to_socket(&valid_sock, "{}\n")
+            .await
+            .is_ok(),
+        "valid session socket must pass deliver_to_socket use site"
+    );
+
     for reserved in ["agent.sock", "register.sock", "http.sock"] {
         let reserved_sock = tmp.path().join(reserved);
+        let reserved_listener = UnixListener::bind(&reserved_sock).unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = reserved_listener.accept().await {
+                let mut buf = Vec::new();
+                let _ = stream.read_to_end(&mut buf).await;
+            }
+        });
         let bad_sock_entry = SessionFileEntry {
             messaging_socket_path: reserved_sock.to_string_lossy().to_string(),
             ..valid_entry.clone()
@@ -293,11 +319,12 @@ async fn f3_session_file_entry_requires_uuid_and_safe_socket_path() {
             !xmsg::registry::validate_session_file_entry(&bad_sock_entry),
             "reserved xmsg socket {reserved} must be refused at entry"
         );
+        let err = xmsg::inbox::deliver_to_socket(&reserved_sock, "{}\n")
+            .await
+            .expect_err("reserved xmsg socket must be refused at deliver_to_socket use site");
         assert!(
-            xmsg::inbox::deliver_to_socket(&reserved_sock, "{}\n")
-                .await
-                .is_err(),
-            "reserved xmsg socket {reserved} must be refused at deliver_to_socket use site"
+            err.to_string().contains("invalid messaging socket path"),
+            "deliver_to_socket error must come from socket path validation, got: {err}"
         );
     }
 
@@ -390,9 +417,11 @@ async fn f4_subagent_frame_shares_agent_id_validation() {
 }
 
 /// F5: `check_origin` and the control-character validation apply on the hub pull path
-/// (`run_outbound_peer_pull_loop`) and in `handoff::step`, the same as on the direct path.
-#[test]
-fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
+/// (`run_outbound_peer_pull_loop`) and in `handoff::step`, the same as on the direct path,
+/// and the use-site re-checks (`surface::deliver`, `inbox::encode_transport_line`,
+/// `storage::insert_handed_over`) refuse malformed inputs even when called directly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
     // 1. Valid pulled message passes `validate_pulled_message`.
     let valid_pulled = FedInboxMessage {
         id: "01M6DNYSJF6YTHXYEAGY6GNX06".to_string(),
@@ -405,9 +434,19 @@ fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
         "valid pulled message must pass"
     );
 
-    // Malformed pulled messages (bad origin id with '@' or control char, bad service name,
-    // origin node with control char, or message id with control char) are refused.
+    // Malformed pulled messages (both service and id set, bad origin id with '@' or control
+    // char, bad service name, origin node with control char, or message id with control char)
+    // are refused.
     let bad_pulled_cases = vec![
+        FedInboxMessage {
+            origin: Origin {
+                service: Some("svc".to_string()),
+                id: Some(VALID_UUID_1.to_string()),
+                label: None,
+                node: "sini.hub".to_string(),
+            },
+            ..valid_pulled.clone()
+        },
         FedInboxMessage {
             origin: Origin::instance("bad@id", "sini.hub", None),
             ..valid_pulled.clone()
@@ -435,6 +474,240 @@ fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
             "malformed pulled message must be refused: {bad:?}"
         );
     }
+
+    // 1b. Drive `run_outbound_peer_pull_loop` end-to-end against a real mTLS hub listener:
+    // - A pulled `FedInboxMessage` with an invalid `origin` (both `service` and `id` set) is
+    //   refused at `src/fed.rs:4655`, acked from the hub mailbox, and NEVER stored in
+    //   `messages` (`storage::get_message` returns `None`) or delivered to the target socket.
+    // - A pulled `FedInboxMessage` with a valid `origin` in the same pull loop passes, is
+    //   stored in `messages` (`outcome == "delivered"`), and is delivered to the target socket.
+    let tmp = tempdir().unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let (hub_cert_der, hub_key_der, hub_pin) = generate_self_signed_ed25519("hub").unwrap();
+    let (leaf_cert_der, leaf_key_der, leaf_pin) = generate_self_signed_ed25519("leaf").unwrap();
+
+    let hub_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hub_port = hub_listener.local_addr().unwrap().port();
+
+    let hub_peers_path = tmp.path().join("hub-peers.json");
+    fs::write(
+        &hub_peers_path,
+        serde_json::json!({
+            "leaf": {
+                "address": "127.0.0.1:0",
+                "pin": normalize_pin(&leaf_pin),
+                "leaf": true,
+                "allow": ["send", "reply", "inbox"]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let hub_peers = Arc::new(PeersMap::load_from_file_for(&hub_peers_path, None).unwrap());
+
+    let hub_state = make_test_state(&tmp.path().join("hub"));
+    let bad_pull_id = "01M6DNYSJF6YTHXYEAGY6GNX01";
+    let good_pull_id = "01M6DNYSJF6YTHXYEAGY6GNX02";
+    {
+        let hub_db = hub_state.db.lock().unwrap();
+        // Invalid origin: both `service` and `id` set.
+        storage::insert_peer_mailbox(
+            &hub_db,
+            &PeerMailboxMessage {
+                id: bad_pull_id.to_string(),
+                peer: "leaf".to_string(),
+                target_ref: VALID_UUID_2.to_string(),
+                created_at: 10,
+                from_name: "spoof".to_string(),
+                bytes: 16,
+                body: "poisoned message".to_string(),
+                envelope: "{}".to_string(),
+                origin: Origin {
+                    service: Some("svc".to_string()),
+                    id: Some(VALID_UUID_1.to_string()),
+                    label: None,
+                    node: "sini.hub".to_string(),
+                },
+            },
+        )
+        .unwrap();
+        // Valid origin: instance on `sini.hub`.
+        storage::insert_peer_mailbox(
+            &hub_db,
+            &PeerMailboxMessage {
+                id: good_pull_id.to_string(),
+                peer: "leaf".to_string(),
+                target_ref: VALID_UUID_2.to_string(),
+                created_at: 20,
+                from_name: format!("worker · {VALID_UUID_1}@sini.hub"),
+                bytes: 13,
+                body: "clean message".to_string(),
+                envelope: "{}".to_string(),
+                origin: Origin::instance(VALID_UUID_1, "sini.hub", Some("worker")),
+            },
+        )
+        .unwrap();
+    }
+
+    let hub_fed_state = Arc::new(FedState {
+        node_name: "sini.hub".to_string(),
+        peers: hub_peers,
+        cert_der: hub_cert_der.clone(),
+        cert_chain_der: vec![hub_cert_der],
+        key_der: hub_key_der,
+        rate_limiter: Arc::new(RateLimiter::new(60, 100)),
+        db: hub_state.db.clone(),
+        sessions_dirs: hub_state.sessions_dirs.clone(),
+        agy_config: hub_state.agy_config.clone(),
+        agy_store: hub_state.agy_store.clone(),
+        pi_store: hub_state.pi_store.clone(),
+        pi_notify_tx: hub_state.pi_notify_tx.clone(),
+        svc_store: hub_state.svc_store.clone(),
+        svc_notify_tx: hub_state.svc_notify_tx.clone(),
+        notify_tx: hub_state.notify_tx.clone(),
+        max_body: 65_536,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
+        reply_ttl: Duration::from_secs(3600),
+        list_queries: Default::default(),
+    });
+    let hub_srv = tokio::spawn(run_fed_listener(hub_listener, hub_fed_state.clone()));
+
+    let leaf_dir = tmp.path().join("leaf");
+    let leaf_state = make_test_state(&leaf_dir);
+    let leaf_sessions_dir = &leaf_state.sessions_dirs[0];
+    fs::create_dir_all(leaf_sessions_dir).unwrap();
+    fs::set_permissions(leaf_sessions_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    // Register a live local Claude session `VALID_UUID_2` on the leaf so pulled messages
+    // targeting `VALID_UUID_2` resolve locally.
+    let target_sock = leaf_dir.join("claude-target.sock");
+    let target_listener = UnixListener::bind(&target_sock).unwrap();
+    let delivered_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let delivered_clone = delivered_lines.clone();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = target_listener.accept().await {
+            let mut buf = Vec::new();
+            let _ = stream.read_to_end(&mut buf).await;
+            if let Ok(s) = String::from_utf8(buf) {
+                delivered_clone.lock().unwrap().push(s);
+            }
+        }
+    });
+
+    let my_pid = std::process::id();
+    let my_proc_start = xmsg::process::starttime(&leaf_state.agy_config.proc_root, my_pid)
+        .unwrap_or_else(|_| "1000".to_string());
+    let session_json = serde_json::json!({
+        "pid": my_pid,
+        "sessionId": VALID_UUID_2,
+        "name": "target",
+        "cwd": "/tmp",
+        "status": "idle",
+        "kind": "interactive",
+        "startedAt": 1000,
+        "updatedAt": 2000,
+        "procStart": my_proc_start,
+        "messagingSocketPath": target_sock.to_string_lossy()
+    });
+    fs::write(
+        leaf_sessions_dir.join(format!("{my_pid}-{VALID_UUID_2}.json")),
+        session_json.to_string(),
+    )
+    .unwrap();
+
+    let leaf_peers_path = tmp.path().join("leaf-peers.json");
+    fs::write(
+        &leaf_peers_path,
+        serde_json::json!({
+            "hub": {
+                "address": format!("127.0.0.1:{hub_port}"),
+                "pin": normalize_pin(&hub_pin),
+                "dial": "outbound",
+                "allow": ["send", "reply", "inbox"]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let leaf_peers = Arc::new(PeersMap::load_from_file_for(&leaf_peers_path, None).unwrap());
+
+    let leaf_fed_state = Arc::new(FedState {
+        node_name: "sini.leaf".to_string(),
+        peers: leaf_peers,
+        cert_der: leaf_cert_der.clone(),
+        cert_chain_der: vec![leaf_cert_der],
+        key_der: leaf_key_der,
+        rate_limiter: Arc::new(RateLimiter::new(60, 100)),
+        db: leaf_state.db.clone(),
+        sessions_dirs: leaf_state.sessions_dirs.clone(),
+        agy_config: leaf_state.agy_config.clone(),
+        agy_store: leaf_state.agy_store.clone(),
+        pi_store: leaf_state.pi_store.clone(),
+        pi_notify_tx: leaf_state.pi_notify_tx.clone(),
+        svc_store: leaf_state.svc_store.clone(),
+        svc_notify_tx: leaf_state.svc_notify_tx.clone(),
+        notify_tx: leaf_state.notify_tx.clone(),
+        max_body: 65_536,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Default::default(),
+        reply_ttl: Duration::from_secs(3600),
+        list_queries: Default::default(),
+    });
+
+    let pull_handle = tokio::spawn(run_outbound_peer_pull_loop(
+        leaf_fed_state.clone(),
+        "hub".to_string(),
+    ));
+
+    // Wait for both mailbox items to be pulled and acked from the hub.
+    let mut mailbox_drained = false;
+    for _ in 0..100 {
+        let remaining = {
+            let hub_db = hub_state.db.lock().unwrap();
+            storage::count_peer_mailbox_messages(&hub_db, "leaf").unwrap()
+        };
+        if remaining == 0 {
+            mailbox_drained = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    pull_handle.abort();
+    hub_srv.abort();
+    assert!(
+        mailbox_drained,
+        "run_outbound_peer_pull_loop must drain and ack both hub mailbox items"
+    );
+
+    {
+        let leaf_db = leaf_state.db.lock().unwrap();
+        assert!(
+            storage::get_message(&leaf_db, bad_pull_id)
+                .unwrap()
+                .is_none(),
+            "invalid-origin pulled message must be refused at entry and NEVER stored in messages"
+        );
+        let good_rec = storage::get_message(&leaf_db, good_pull_id)
+            .unwrap()
+            .expect("valid pulled message must be stored in messages");
+        assert_eq!(good_rec.outcome, "delivered");
+    }
+    let lines = delivered_lines.lock().unwrap().clone();
+    assert_eq!(
+        lines.len(),
+        1,
+        "only the valid pulled message may be delivered to the target socket, got: {lines:?}"
+    );
+    assert!(
+        lines[0].contains("clean message") && !lines[0].contains("poisoned message"),
+        "target socket must receive only the valid pulled message, got: {}",
+        lines[0]
+    );
 
     // 2. Valid handoff Transfer passes `validate_handoff_transfer` and `insert_handed_over`.
     let valid_qmsg = QueuedMessage {
@@ -517,11 +790,111 @@ fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
             &conn,
             &QueuedMessage {
                 from_name: "evil\nline · id@sini.hub".to_string(),
-                ..valid_qmsg
+                ..valid_qmsg.clone()
             }
         )
         .is_err(),
         "insert_handed_over use site must refuse control chars in from_name"
+    );
+    assert!(
+        storage::insert_handed_over(
+            &conn,
+            &QueuedMessage {
+                from_name: "spoof@extra · id@sini.hub".to_string(),
+                ..valid_qmsg
+            }
+        )
+        .is_err(),
+        "insert_handed_over use site must refuse unparseable/spoofed origin in from_name"
+    );
+
+    // 3. Direct use-site check on `inbox::encode_transport_line` (without entry check):
+    assert!(
+        xmsg::inbox::encode_transport_line(&format!("worker · {VALID_UUID_1}@sini.hub"), "hello")
+            .is_ok(),
+        "valid from_name must pass encode_transport_line"
+    );
+    assert!(
+        xmsg::inbox::encode_transport_line("evil\nfrom · id@sini.hub", "hello").is_err(),
+        "encode_transport_line use site must refuse control chars in from_name"
+    );
+
+    // 4. Direct use-site check on `surface::deliver` (without entry check):
+    let parked_target = ResolvedTarget::Parked {
+        session: Session {
+            session_id: VALID_UUID_2.to_string(),
+            name: Some("target".to_string()),
+            pid: my_pid,
+            cwd: "/tmp".to_string(),
+            status: "parked".to_string(),
+            kind: "interactive".to_string(),
+            entrypoint: None,
+            version: None,
+            started_at: 1,
+            updated_at: 1,
+            harness: "claude".to_string(),
+            registered: Some(true),
+        },
+        expires_at: 9_999_999_999,
+    };
+    let valid_origin = Origin::instance(VALID_UUID_1, "sini.hub", Some("worker"));
+    let invalid_origin = Origin {
+        service: Some("svc".to_string()),
+        id: Some(VALID_UUID_1.to_string()),
+        label: None,
+        node: "sini.hub".to_string(),
+    };
+    assert!(
+        xmsg::surface::deliver(
+            &leaf_state.local(),
+            &parked_target,
+            &format!("worker · {VALID_UUID_1}@sini.hub"),
+            "01M6DNYSJF6YTHXYEAGY6GNX90",
+            "hello",
+            invalid_origin,
+        )
+        .await
+        .is_err(),
+        "surface::deliver use site must refuse invalid Origin"
+    );
+    assert!(
+        xmsg::surface::deliver(
+            &leaf_state.local(),
+            &parked_target,
+            "evil\nfrom · id@sini.hub",
+            "01M6DNYSJF6YTHXYEAGY6GNX91",
+            "hello",
+            valid_origin.clone(),
+        )
+        .await
+        .is_err(),
+        "surface::deliver use site must refuse control chars in from_name"
+    );
+    assert!(
+        xmsg::surface::deliver(
+            &leaf_state.local(),
+            &parked_target,
+            &format!("worker · {VALID_UUID_1}@sini.hub"),
+            "bad\nid",
+            "hello",
+            valid_origin.clone(),
+        )
+        .await
+        .is_err(),
+        "surface::deliver use site must refuse control chars in message_id"
+    );
+    assert!(
+        xmsg::surface::deliver(
+            &leaf_state.local(),
+            &parked_target,
+            &format!("worker · {VALID_UUID_1}@sini.hub"),
+            "01M6DNYSJF6YTHXYEAGY6GNX92",
+            "hello",
+            valid_origin,
+        )
+        .await
+        .is_ok(),
+        "surface::deliver use site must accept valid Origin, from_name, and message_id"
     );
 }
 

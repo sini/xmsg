@@ -145,7 +145,7 @@ async fn healthz_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
     )
 }
 
-pub(crate) enum ResolvedTarget {
+pub enum ResolvedTarget {
     Claude(registry::Session, PathBuf),
     Agy(registry::Session),
     /// A session served from a `register.sock` poll queue: a pi, or a plugin session
