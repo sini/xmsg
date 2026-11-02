@@ -358,12 +358,22 @@ settings.update({
 with open(os.path.join(HH, "config.yaml"), "w") as f:
     json.dump(settings, f)  # JSON is YAML
 
+def can_connect_unix(path):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
 env = dict(os.environ, HOME=HOME, HERMES_HOME=HH, XDG_RUNTIME_DIR=RUN, TERM="xterm-256color",
            COLUMNS="160", LINES="50")
 procs.append(subprocess.Popen([XMSG, "serve", "--db-path", os.path.join(TMP, "xmsg.db")], env=env,
                               stdout=open(os.path.join(TMP, "serve.log"), "a"), stderr=subprocess.STDOUT))
-wait_until(lambda: os.path.exists(os.path.join(SOCKS, "http.sock"))
-           and os.path.exists(os.path.join(SOCKS, "register.sock")), 30, "xmsg serve")
+wait_until(lambda: can_connect_unix(os.path.join(SOCKS, "http.sock"))
+           and can_connect_unix(os.path.join(SOCKS, "register.sock")), 30, "xmsg serve")
 recv = Receiver()
 
 

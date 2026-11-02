@@ -138,7 +138,7 @@ async fn test_oracle_1_leaf_binds_no_harness_sockets_or_fed_listener() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(
-        register_sock.exists(),
+        std::os::unix::net::UnixStream::connect(&register_sock).is_ok(),
         "X19: leaf mode additionally serves register.sock (expected: {})",
         register_sock.display()
     );
@@ -531,13 +531,13 @@ async fn test_oracle_3_leaf_pull_replies_node_zero_outbound_connections() {
         let _ = run_agent_server(s_path, s_state, my_uid).await;
     });
     for _ in 0..1500 {
-        if node_b_agent_sock.exists() {
+        if std::os::unix::net::UnixStream::connect(&node_b_agent_sock).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(
-        node_b_agent_sock.exists(),
+        std::os::unix::net::UnixStream::connect(&node_b_agent_sock).is_ok(),
         "the in-process server never bound its socket in 30s"
     );
 

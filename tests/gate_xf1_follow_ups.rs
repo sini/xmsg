@@ -404,7 +404,12 @@ async fn test_xf1_peerpidfd_rejects_reaped_recycled_root_pid_and_fallback() {
     let _ = live_child.wait().await;
 
     // Target must have received the legitimate message attributed to Victim (0199cecf-0500-7000-8000-000000000500)!
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if target_received.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     {
         let msgs = target_received.lock().unwrap();
         assert_eq!(
@@ -683,7 +688,12 @@ async fn test_xf1_live_peer_cred_attests_caller() {
     );
     let _ = live_http.wait().await;
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if target_received.lock().unwrap().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let msgs = target_received.lock().unwrap();
     assert_eq!(
         msgs.len(),
@@ -803,7 +813,7 @@ where
                 exited = Some(status);
                 break;
             }
-            if agent_sock.exists()
+            if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
                 && tokio::net::TcpStream::connect(("127.0.0.1", fed_port))
                     .await
                     .is_ok()

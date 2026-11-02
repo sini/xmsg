@@ -226,13 +226,13 @@ async fn setup_gate_harness() -> GateHarness {
     let _app = build_router(app_state);
 
     for _ in 0..1500 {
-        if register_sock_path.exists() && agent_sock_path.exists() {
+        if std::os::unix::net::UnixStream::connect(&register_sock_path).is_ok() && std::os::unix::net::UnixStream::connect(&agent_sock_path).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(
-        register_sock_path.exists() && agent_sock_path.exists(),
+        std::os::unix::net::UnixStream::connect(&register_sock_path).is_ok() && std::os::unix::net::UnixStream::connect(&agent_sock_path).is_ok(),
         "the in-process server never bound its socket in 30s"
     );
 
@@ -408,7 +408,12 @@ async fn test_gate_probe_b3_attested_name_sanitization_and_envelope_integrity() 
     );
 
     // Inspect delivered line on target socket
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if harness.target_received.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let received = harness.target_received.lock().unwrap();
     assert_eq!(received.len(), 1);
     let wire_line = &received[0];

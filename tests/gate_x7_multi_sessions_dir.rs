@@ -235,7 +235,12 @@ async fn test_oracle_1_multi_dir_listed_and_deliverable() {
         "Message to 8f0ddc09-f6b5-5a11-9ffa-bf3e69848223 accepted"
     );
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if listener_a.received_lines.lock().await.len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let lines_a = listener_a.received_lines.lock().await;
     assert_eq!(lines_a.len(), 1, "Session A must receive message");
     let inbox_a: InboxLine = serde_json::from_str(lines_a[0].trim()).unwrap();
@@ -260,7 +265,12 @@ async fn test_oracle_1_multi_dir_listed_and_deliverable() {
         "Message to eaa01066-ba31-55ae-9603-610ab0258fe5 accepted"
     );
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if listener_b.received_lines.lock().await.len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let lines_b = listener_b.received_lines.lock().await;
     assert_eq!(lines_b.len(), 1, "Session B must receive message");
     let inbox_b: InboxLine = serde_json::from_str(lines_b[0].trim()).unwrap();
@@ -467,7 +477,14 @@ async fn test_oracle_3_duplicate_session_across_dirs_assigned_suffixes_and_route
     );
 
     // 5. Verify sockets received their expected messages
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    for _ in 0..250 {
+        if listener.received_lines.lock().await.len() >= 2
+            && listener_b.received_lines.lock().await.len() >= 1
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     {
         let lines_plain = listener.received_lines.lock().await;
         assert!(

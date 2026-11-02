@@ -99,7 +99,7 @@ impl Node {
         }
         let mut child = cmd.spawn().expect("spawn xmsg serve");
         for _ in 0..1200 {
-            if self.http_sock.exists() && self.agent_sock.exists() && self.register_sock.exists() {
+            if std::os::unix::net::UnixStream::connect(&self.http_sock).is_ok() && std::os::unix::net::UnixStream::connect(&self.agent_sock).is_ok() && std::os::unix::net::UnixStream::connect(&self.register_sock).is_ok() {
                 self.child = Some(child);
                 return;
             }

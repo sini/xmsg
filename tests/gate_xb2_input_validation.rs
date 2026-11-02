@@ -135,7 +135,7 @@ async fn f1_register_sock_conversation_id_requires_uuid() {
     });
 
     for _ in 0..50 {
-        if sock_path.exists() {
+        if std::os::unix::net::UnixStream::connect(&sock_path).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -963,7 +963,7 @@ async fn f6_run_leaf_register_server_enforces_byte_cap_and_timeout() {
     });
 
     for _ in 0..50 {
-        if sock_path.exists() {
+        if std::os::unix::net::UnixStream::connect(&sock_path).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;

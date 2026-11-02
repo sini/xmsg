@@ -190,13 +190,13 @@ async fn start_replies_harness(reply_ttl: Duration) -> RepliesHarness {
     });
 
     for _ in 0..1500 {
-        if agent_sock_path.exists() {
+        if std::os::unix::net::UnixStream::connect(&agent_sock_path).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(
-        agent_sock_path.exists(),
+        std::os::unix::net::UnixStream::connect(&agent_sock_path).is_ok(),
         "the in-process server never bound its socket in 30s"
     );
 
@@ -240,7 +240,12 @@ async fn test_reply_roundtrip_and_envelope_footer() {
     let message_id = delivery.message_id;
 
     // 2. Check stand-in socket received message with footer (§8.2)
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if harness.received_lines.lock().await.len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let lines = harness.received_lines.lock().await;
     assert_eq!(lines.len(), 1, "Stand-in socket received exactly 1 line");
     let raw_line = &lines[0];

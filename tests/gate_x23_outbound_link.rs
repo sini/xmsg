@@ -249,7 +249,7 @@ async fn spawn_hub_node(
                 exited = Some(status);
                 break;
             }
-            if agent_sock.exists()
+            if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
                 && tokio::net::TcpStream::connect(("127.0.0.1", fed_port))
                     .await
                     .is_ok()
@@ -386,7 +386,7 @@ async fn spawn_client_node(
                 status, stderr
             );
         }
-        if agent_sock.exists() && register_sock.exists() {
+        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() && std::os::unix::net::UnixStream::connect(&register_sock).is_ok() {
             ready = true;
             break;
         }
@@ -772,7 +772,7 @@ async fn test_oracle_4_off_by_default_no_pull_loop() {
                 status, stderr
             );
         }
-        if agent_sock.exists() && register_sock.exists() {
+        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() && std::os::unix::net::UnixStream::connect(&register_sock).is_ok() {
             ready = true;
             break;
         }

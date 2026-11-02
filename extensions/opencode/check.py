@@ -254,12 +254,26 @@ env = dict(os.environ, HOME=home, XDG_RUNTIME_DIR=RUN, XDG_CONFIG_HOME=os.path.j
            XDG_STATE_HOME=os.path.join(TMP, "state"), OPENCODE_DISABLE_AUTOUPDATE="1",
            OPENCODE_DISABLE_MODELS_FETCH="1")
 
+def can_connect_unix(path):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
 def serve():
+    for s_name in ("http.sock", "agent.sock", "register.sock"):
+        s_path = os.path.join(SOCKS, s_name)
+        if os.path.exists(s_path):
+            os.unlink(s_path)
     p = subprocess.Popen([XMSG, "serve", "--db-path", os.path.join(TMP, "xmsg.db")], env=env,
                          stdout=open(os.path.join(TMP, "serve.log"), "a"), stderr=subprocess.STDOUT)
     procs.append(p)
-    wait_until(lambda: os.path.exists(os.path.join(SOCKS, "http.sock"))
-               and os.path.exists(os.path.join(SOCKS, "register.sock")), 20, "xmsg serve")
+    wait_until(lambda: can_connect_unix(os.path.join(SOCKS, "http.sock"))
+               and can_connect_unix(os.path.join(SOCKS, "register.sock")), 20, "xmsg serve")
     return p
 
 
@@ -430,13 +444,19 @@ ok(f"C1/C8: the child's send is attributed to {d['from_name']} and xmsg-reclaim.
 # C4: Delivery in a turn. The child's turn calls `xmsg_inbox {"wait":20}`. During the wait,
 # `POST /v1/messages` to `<P>/<child>` returns `queued`. The inbox result holds that message
 # and the child's own address. The message's outcome becomes `delivered`.
+def child_in_turn():
+    c = sqlite3.connect(os.path.join(TMP, "xmsg.db"))
+    r = c.execute("SELECT turn_pid FROM subagents WHERE parent = ? AND agent_id = ?", (p_bare, child)).fetchone()
+    c.close()
+    return r is not None and r[0] is not None
+
 inbox_call_started.clear()
 prev_results_len = len(tool_results)
 inbox_thread = threading.Thread(target=lambda: call_tool(child, "xmsg_inbox", {"wait": 20}))
 inbox_thread.start()
 if not inbox_call_started.wait(20):
     fail("C4: timed out waiting for child xmsg_inbox tool call to start")
-time.sleep(0.3)
+wait_until(child_in_turn, 10, f"C4: {child} turn_pid active in xmsg.db")
 body_c4 = f"in-turn {uuid.uuid4().hex}"
 st_c4, sent_c4 = xmsg_http("POST", "/v1/messages", {"to": child_sub_prefix, "from": "ci", "text": body_c4})
 if st_c4 != 202 or sent_c4.get("outcome") != "queued":

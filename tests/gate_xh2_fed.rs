@@ -288,7 +288,7 @@ async fn create_full_test_node(
     });
 
     for _ in 0..1500 {
-        if agent_sock.exists() && register_sock.exists() {
+        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() && std::os::unix::net::UnixStream::connect(&register_sock).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -432,7 +432,7 @@ async fn start_pair() -> Pair {
                 exited = Some(status);
                 break;
             }
-            if register_sock_b.exists()
+            if std::os::unix::net::UnixStream::connect(&register_sock_b).is_ok()
                 && tokio::net::TcpStream::connect(("127.0.0.1", port_b))
                     .await
                     .is_ok()

@@ -231,7 +231,7 @@ async fn create_node(
     });
 
     for _ in 0..1500 {
-        if agent_sock.exists() {
+        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -445,7 +445,12 @@ async fn test_gate2_addressable_header_and_reject_dot() {
     assert_eq!(send_res["status"], "ok");
 
     // 2. Bob inspects incoming envelope: ref= MUST be attested address "SESS_ALICE@node-alpha"
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if bob_rx.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let received = bob_rx.lock().unwrap().clone();
     assert_eq!(received.len(), 1);
     let inbox_line: InboxLine = serde_json::from_str(received[0].trim()).unwrap();
@@ -474,7 +479,12 @@ async fn test_gate2_addressable_header_and_reject_dot() {
     )
     .await;
     assert_eq!(reply_send["status"], "ok");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if alice_rx.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(alice_rx.lock().unwrap().len(), 1);
 
     // 4. Passing a display label containing ' · ' in 'to' is refused with migration hint
@@ -603,7 +613,12 @@ async fn test_gate3_symmetric_reply_local_and_third_party() {
     assert_ne!(pushed_id, m1_id);
 
     // Verify Bob receives Alice's follow-up reply in his socket
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if bob_rx.lock().unwrap().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let received = bob_rx.lock().unwrap().clone();
     assert_eq!(
         received.len(),
@@ -752,7 +767,12 @@ async fn test_gate3_symmetric_reply_federated() {
     assert_eq!(fed_reply_res["reply"]["pushOutcome"], "pushed");
 
     // 3. Bob receives Alice's follow-up across federation
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    for _ in 0..250 {
+        if bob_rx.lock().unwrap().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let received = bob_rx.lock().unwrap().clone();
     assert_eq!(
         received.len(),
@@ -986,6 +1006,8 @@ async fn test_gate5_header_names_all_four_tools() {
             if let Ok((mut stream, _)) = bob_listener.accept().await {
                 let mut buf = Vec::new();
                 let _ = stream.read_to_end(&mut buf).await;
+                // XR4 bad-timing proof: delay pushing to bob_rx by 150ms (exceeding the old 50ms fixed sleep)
+                tokio::time::sleep(Duration::from_millis(150)).await;
                 if let Ok(s) = String::from_utf8(buf) {
                     rx_clone.lock().unwrap().push(s);
                 }
@@ -1022,7 +1044,12 @@ async fn test_gate5_header_names_all_four_tools() {
     .await;
     assert_eq!(send_res["status"], "ok");
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if bob_rx.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let received = bob_rx.lock().unwrap().clone();
     assert_eq!(received.len(), 1);
     let inbox_line: InboxLine = serde_json::from_str(received[0].trim()).unwrap();

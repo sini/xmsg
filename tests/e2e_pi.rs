@@ -137,14 +137,17 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
     });
 
     for _ in 0..1500 {
-        if sock_path.exists() && agent_sock_path.exists() {
+        if UnixStream::connect(&sock_path).await.is_ok()
+            && UnixStream::connect(&agent_sock_path).await.is_ok()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(
-        sock_path.exists() && agent_sock_path.exists(),
-        "the in-process server never bound its socket in 30s"
+        UnixStream::connect(&sock_path).await.is_ok()
+            && UnixStream::connect(&agent_sock_path).await.is_ok(),
+        "the in-process server never accepted on its sockets in 30s"
     );
 
     // 3. Mock Pi connects over Unix domain socket and registers
@@ -230,7 +233,16 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
         let _ = keepalive_rx.await;
     });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..200 {
+        if pi_notify_tx.receiver_count() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        pi_notify_tx.receiver_count() >= 1,
+        "Pi long-poll should have subscribed to pi_notify_tx"
+    );
 
     // 6. Post message to Pi session via HTTP (using session name worker-one)
     let send_resp = client

@@ -287,12 +287,15 @@ async fn start_server(config: AgyConfig, store: AgyStore) -> (TempDir, PathBuf) 
         .await;
     });
     for _ in 0..3000 {
-        if sock.exists() {
+        if UnixStream::connect(&sock).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(sock.exists(), "register server must create its socket");
+    assert!(
+        UnixStream::connect(&sock).is_ok(),
+        "register server must accept connections on its socket"
+    );
     (sock_dir, sock)
 }
 
@@ -740,8 +743,24 @@ async fn oracle_4_unreadable_environ_leaves_registration_to_the_hook() {
     );
     assert!(store.read().unwrap().is_empty(), "store must remain empty");
 
+    let stop = Arc::new(AtomicBool::new(false));
+    let scanned_once = Arc::new(AtomicBool::new(false));
+    let scanned_flag = scanned_once.clone();
+    let _stat_fifo = serve_fifo(t.proc_root.join("4001").join("stat"), stop.clone(), move |_| {
+        scanned_flag.store(true, Ordering::SeqCst);
+        stat_line(4001, 4000, "200").into_bytes()
+    });
     let (_dir, sock) = start_server(t.config(), store.clone()).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    for _ in 0..200 {
+        if scanned_once.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        scanned_once.load(Ordering::SeqCst),
+        "watcher must have scanned 4001 at least once"
+    );
     let bin = env!("CARGO_BIN_EXE_xmsg");
     let (code1, out1) = run_hook(bin, &sock, "0199cecf-0004-7000-8000-000000000004");
     assert_eq!(code1, 0);
@@ -750,6 +769,7 @@ async fn oracle_4_unreadable_environ_leaves_registration_to_the_hook() {
     assert_eq!(code2, 0);
     assert_hook_injects(&out2, "turn 2 with environ unreadable");
     assert!(store.read().unwrap().is_empty());
+    stop.store(true, Ordering::SeqCst);
 }
 
 // ---------------------------------------------------------------------------

@@ -80,6 +80,66 @@ impl RunningServer {
     }
 }
 
+fn find_reregister_tid(pid: u32) -> Option<u32> {
+    let entries = fs::read_dir(format!("/proc/{pid}/task")).ok()?;
+    for entry in entries.flatten() {
+        let tid_str = entry.file_name().to_string_lossy().to_string();
+        if let Ok(tid) = tid_str.parse::<u32>() {
+            if let Ok(comm) = fs::read_to_string(entry.path().join("comm")) {
+                if comm.trim().starts_with("xmsg-mcp-reregi") {
+                    return Some(tid);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn read_tid_voluntary_csw(pid: u32, tid: u32) -> Option<u64> {
+    let status = fs::read_to_string(format!("/proc/{pid}/task/{tid}/status")).ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("voluntary_ctxt_switches:") {
+            return rest.trim().parse::<u64>().ok();
+        }
+    }
+    None
+}
+
+fn read_mcp_reregister_csw(pid: u32) -> Option<u64> {
+    let tid = find_reregister_tid(pid)?;
+    read_tid_voluntary_csw(pid, tid)
+}
+
+async fn wait_for_mcp_reregister_ready(pid: u32) -> Option<u64> {
+    for _ in 0..400 {
+        if let Some(csw) = read_mcp_reregister_csw(pid) {
+            if csw >= 2 {
+                return Some(csw);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    read_mcp_reregister_csw(pid)
+}
+
+async fn wait_for_mcp_socket_read(pid: u32, csw_before: Option<u64>) {
+    if let Some(before) = csw_before {
+        for _ in 0..600 {
+            if let Some(now) = read_mcp_reregister_csw(pid) {
+                if now >= before + 2 {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!(
+            "timed out waiting for xmsg mcp (pid {pid}) xmsg-mcp-reregister thread to process escrow event"
+        );
+    } else {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
 async fn start_test_server(
     agent_sock: PathBuf,
     sessions_dir: PathBuf,
@@ -89,6 +149,7 @@ async fn start_test_server(
     trusted_agy: PathBuf,
     agy_bin: String,
 ) -> RunningServer {
+    let _ = fs::remove_file(&agent_sock);
     let my_uid = xmsg::agent::current_uid();
     let agy_config = AgyConfig {
         presence_dir,
@@ -141,7 +202,7 @@ async fn start_test_server(
     });
 
     for _ in 0..3000 {
-        if agent_sock.exists() {
+        if UnixStream::connect(&agent_sock).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -259,7 +320,7 @@ async fn c1_bus_restart_preserves_stage2_credentials_and_delivers_immediately() 
     let child_pid = child.id();
     setup_mock_process(&proc_root, child_pid, parent_pid, None, None, "200");
 
-    // Wait for stage-1 registration on Server 1
+    // Wait for stage-1 registration on Server 1 and for xmsg-mcp-reregister thread to enter hold_connection
     let mut stage1_ok = false;
     for _ in 0..60 {
         if server1
@@ -273,6 +334,7 @@ async fn c1_bus_restart_preserves_stage2_credentials_and_delivers_immediately() 
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(stage1_ok, "stage-1 registration must succeed on Server 1");
+    let csw_before = wait_for_mcp_reregister_ready(child_pid).await;
 
     // 3. Register stage-2 credentials on Server 1
     {
@@ -295,12 +357,11 @@ async fn c1_bus_restart_preserves_stage2_credentials_and_delivers_immediately() 
     }
     notify_agy_escrow();
 
-    // Give xmsg mcp's held connection a moment to receive the agy_escrow event
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Wait until xmsg mcp's held connection reads the agy_escrow event from agent.sock
+    wait_for_mcp_socket_read(child_pid, csw_before).await;
 
     // 4. Stop Server 1 and start Server 2 on the same agent_sock (bus restart while agy is idle)
     server1.stop().await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let server2 = start_test_server(
         agent_sock.clone(),
@@ -432,6 +493,7 @@ async fn c2_custom_label_and_registered_at_survive_bus_restart() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    let csw_before = wait_for_mcp_reregister_ready(child_pid).await;
 
     let custom_reg_at: i64 = 1_700_001_234;
     {
@@ -455,10 +517,9 @@ async fn c2_custom_label_and_registered_at_survive_bus_restart() {
             .insert(conv_id.to_string(), info);
     }
     notify_agy_escrow();
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    wait_for_mcp_socket_read(child_pid, csw_before).await;
 
     server1.stop().await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let server2 = start_test_server(
         agent_sock.clone(),
@@ -745,6 +806,7 @@ async fn c4_stale_credentials_clear_escrow_on_both_ends() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    let csw_before_escrow = wait_for_mcp_reregister_ready(child_pid).await;
 
     // 1. Register stage-2 credentials and let xmsg mcp cache them
     server1.state.agy_store.write().unwrap().insert(
@@ -761,9 +823,10 @@ async fn c4_stale_credentials_clear_escrow_on_both_ends() {
         ),
     );
     notify_agy_escrow();
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    wait_for_mcp_socket_read(child_pid, csw_before_escrow).await;
 
     // 2. Trigger auth failure on delivery so deliver_agy_envelope marks is_stale = true
+    let csw_before_clear = read_mcp_reregister_csw(child_pid);
     fs::write(&fail_file, "fail").unwrap();
     let client = reqwest::Client::new();
     let fail_resp = client
@@ -782,12 +845,11 @@ async fn c4_stale_credentials_clear_escrow_on_both_ends() {
         "delivery with failing agy must return 503"
     );
 
-    // Wait briefly for xmsg mcp to receive agy_escrow_clear
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Wait until xmsg mcp reads agy_escrow_clear from agent.sock
+    wait_for_mcp_socket_read(child_pid, csw_before_clear).await;
 
     // 3. Restart server: xmsg mcp must NOT re-supply the cleared stale credentials
     server1.stop().await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let server2 = start_test_server(
         agent_sock.clone(),

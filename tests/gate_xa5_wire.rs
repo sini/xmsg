@@ -235,10 +235,10 @@ async fn start(
             .await
             .is_ok();
         let up = match leaf {
-            Some(_) => register_sock.exists() && http_up,
+            Some(_) => std::os::unix::net::UnixStream::connect(&register_sock).is_ok() && http_up,
             None => {
-                agent_sock.exists()
-                    && register_sock.exists()
+                std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+                    && std::os::unix::net::UnixStream::connect(&register_sock).is_ok()
                     && http_up
                     && tokio::net::TcpStream::connect(("127.0.0.1", fed_port))
                         .await

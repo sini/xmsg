@@ -314,7 +314,12 @@ async fn test_oracle_1_ca_peer_accepted_and_delivered() {
     let res = send_federated_message(&node_a.fed_state, "server-b", &envelope).await;
     assert!(res.is_ok(), "Expected send to succeed, got: {res:?}");
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if received.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let msgs = received.lock().unwrap();
     assert_eq!(msgs.len(), 1, "Expected 1 message delivered to target");
     assert!(msgs[0].contains("hello ca federation"));
@@ -666,7 +671,12 @@ async fn test_oracle_4_expired_and_not_yet_valid_refused() {
         res_valid.is_ok(),
         "Expected valid cert to succeed: {res_valid:?}"
     );
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if received.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let msgs = received.lock().unwrap();
     assert_eq!(msgs.len(), 1, "Expected 1 message delivered by valid cert");
 }
@@ -996,7 +1006,12 @@ async fn test_oracle_6_prefix_wildcard_matching() {
         other => panic!("Unexpected error variant: {other:?}"),
     }
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if received.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let msgs = received.lock().unwrap();
     assert_eq!(msgs.len(), 1, "Only matching URI should deliver a message");
 }
@@ -1367,6 +1382,12 @@ async fn test_oracle_9_ca_peer_policy_targets_enforced() {
         res_allowed.is_ok(),
         "Expected send to allowed target to succeed: {res_allowed:?}"
     );
+    for _ in 0..250 {
+        if rx1.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     // 2. Send to denied target -> rejected by policy
     let env_denied = make_envelope("denied-target", "msg to denied");

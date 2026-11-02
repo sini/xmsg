@@ -328,7 +328,12 @@ async fn test_oracle_1_h0_hub_off_by_default() {
         "Expected static CA client to succeed: {res_a:?}"
     );
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if received.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(received.lock().unwrap().len(), 1);
 
     // Unlisted client signed by same CA tries to connect: rejected (fail closed, H0)
@@ -454,7 +459,12 @@ async fn test_oracle_2_pattern_admission_and_xa2_naming() {
     let res1 = send_federated_message(&client1_node.fed_state, "hub.hub", &env1).await;
     assert!(res1.is_ok(), "Client 1 send failed: {res1:?}");
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if received.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     {
         let msgs = received.lock().unwrap();
         assert_eq!(msgs.len(), 1);
@@ -486,7 +496,12 @@ async fn test_oracle_2_pattern_admission_and_xa2_naming() {
     let res2 = send_federated_message(&client2_node.fed_state, "hub.hub", &env2).await;
     assert!(res2.is_ok(), "Client 2 send failed: {res2:?}");
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if received.lock().unwrap().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     {
         let msgs = received.lock().unwrap();
         assert_eq!(msgs.len(), 2);
@@ -1272,7 +1287,12 @@ async fn test_oracle_6_collision_refusal_no_last_writer_wins() {
     let res1 = send_federated_message(&client1_node.fed_state, "hub.hub", &env1).await;
     assert!(res1.is_ok(), "Client 1 send should succeed: {res1:?}");
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if received.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(received.lock().unwrap().len(), 1);
 
     // Verify client 1 is registered

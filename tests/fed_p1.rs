@@ -221,13 +221,13 @@ async fn create_test_node_full_inner(
     });
 
     for _ in 0..1500 {
-        if agent_sock_path.exists() {
+        if std::os::unix::net::UnixStream::connect(&agent_sock_path).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(
-        agent_sock_path.exists(),
+        std::os::unix::net::UnixStream::connect(&agent_sock_path).is_ok(),
         "the in-process server never bound its socket in 30s"
     );
 
@@ -322,7 +322,12 @@ async fn test_oracle_1_attested_cross_host_send() {
     assert_eq!(resp["outcome"], "delivered");
 
     // Wait for delivery to 0199cecf-000b-7000-8000-00000000000b's inbox
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    for _ in 0..250 {
+        if node_b.inbox_rx.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let inboxes = node_b.inbox_rx.lock().unwrap().clone();
     assert_eq!(inboxes.len(), 1);
     // A12: `id@node`; a label equal to the id is not repeated.
@@ -410,7 +415,12 @@ async fn test_oracle_2_reply_pushed_back_and_recorded() {
     let resp: serde_json::Value = serde_json::from_str(&line).unwrap();
     let message_id = resp["message_id"].as_str().unwrap().to_string();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    for _ in 0..250 {
+        if node_b.inbox_rx.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     // Reply from B to A via agent_sock on B
     let stream_b = UnixStream::connect(&node_b.agent_sock_path).await.unwrap();
@@ -432,7 +442,12 @@ async fn test_oracle_2_reply_pushed_back_and_recorded() {
     let r_resp: serde_json::Value = serde_json::from_str(&r_line).unwrap();
     assert_eq!(r_resp["status"], "ok");
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    for _ in 0..250 {
+        if !node_a.inbox_rx.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     // Assert reply arrived at 0199cecf-000a-7000-8000-00000000000a's inbox
     let inboxes_a = node_a.inbox_rx.lock().unwrap().clone();
@@ -580,7 +595,12 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
         res1.is_ok(),
         "Expected success for source within from CIDR: {res1:?}"
     );
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if node_b_allow.inbox_rx.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(node_b_allow.inbox_rx.lock().unwrap().len(), 1);
 
     // 2. Outside CIDR (10.0.0.0/8) -> 403 PeerRejected and 0 bytes in inbox
@@ -772,7 +792,12 @@ async fn test_oracle_2_from_absent_pin_only_accepted() {
     let res = send_federated_message(&fed_state_a, "host-b", &envelope).await;
     assert!(res.is_ok(), "Pin-only message should be accepted: {res:?}");
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if node_b.inbox_rx.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let inboxes = node_b.inbox_rx.lock().unwrap().clone();
     assert_eq!(inboxes.len(), 1);
     assert!(inboxes[0].contains("Pin-only authenticated message"));
@@ -1253,7 +1278,12 @@ async fn test_oracle_7_root_harness_rejected_and_badge_spoof_sanitized() {
     let res_spoof = send_federated_message(&fed_state_a, "host-b", &env_spoof).await;
     assert!(res_spoof.is_ok());
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    for _ in 0..250 {
+        if node_b.inbox_rx.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let inboxes = node_b.inbox_rx.lock().unwrap().clone();
     assert_eq!(
         res_spoof.unwrap().from_name,
@@ -1688,7 +1718,12 @@ async fn test_oracle_10_duplicate_id_delivered_once() {
         .unwrap();
     assert_eq!(r1.message_id, dup_id);
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if node_b.inbox_rx.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(node_b.inbox_rx.lock().unwrap().len(), 1);
 
     // Second send (duplicate)
@@ -2504,7 +2539,12 @@ async fn test_f2_session_sender_always_pushed() {
     let in_reply_to = reply.in_reply_to.clone();
     let res = send_federated_reply(&fed_state_b, "host-a", &reply).await;
     assert!(res.is_ok(), "{res:?}");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if node_a.inbox_rx.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     // The flag is gone (A10): a sender with an inbox is always pushed, and stored too.
     assert_eq!(node_a.inbox_rx.lock().unwrap().len(), 1);
     let stored = storage::get_all_replies(&node_a.db.lock().unwrap(), &in_reply_to).unwrap();
@@ -2667,7 +2707,12 @@ async fn test_f3_http_origin_federated_send() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if node_b.inbox_rx.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     let inboxes = node_b.inbox_rx.lock().unwrap().clone();
     assert_eq!(inboxes.len(), 1);
@@ -2791,7 +2836,12 @@ async fn test_f4_one_way_link() {
         res.is_ok(),
         "A must be able to send to B on a one-way link: {res:?}"
     );
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if node_b.inbox_rx.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(node_b.inbox_rx.lock().unwrap().len(), 1);
 }
 
@@ -3187,6 +3237,18 @@ async fn test_f10_reply_deduplication_and_rate_limit() {
     // First reply delivery
     let r1 = send_federated_reply(&fed_state_b, "host-a", &reply).await;
     assert!(r1.is_ok(), "First reply should succeed: {r1:?}");
+    for _ in 0..250 {
+        if node_a
+            .inbox_rx
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains(&reply_id))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     // Duplicate reply with same reply.id
     let r2 = send_federated_reply(&fed_state_b, "host-a", &reply).await;

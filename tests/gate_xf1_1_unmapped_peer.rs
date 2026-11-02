@@ -283,7 +283,7 @@ fn xf1_1_pidns_server_helper() {
         });
 
         for _ in 0..200 {
-            if reg_sock.exists() && agent_sock.exists() && probe_sock.exists() {
+            if std::os::unix::net::UnixStream::connect(&reg_sock).is_ok() && std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() && std::os::unix::net::UnixStream::connect(&probe_sock).is_ok() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -670,7 +670,7 @@ async fn test_xf1_1_unmapped_peer_pid_namespace_and_ancestry_oracles() {
     });
 
     for _ in 0..100 {
-        if reg_sock_seam.exists() {
+        if std::os::unix::net::UnixStream::connect(&reg_sock_seam).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;

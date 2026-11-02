@@ -248,7 +248,7 @@ async fn create_fed_test_node(
     });
 
     for _ in 0..1500 {
-        if reg_sock.exists() && agent_sock.exists() && http_sock.exists() {
+        if std::os::unix::net::UnixStream::connect(&reg_sock).is_ok() && std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() && std::os::unix::net::UnixStream::connect(&http_sock).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

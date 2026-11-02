@@ -336,7 +336,12 @@ async fn test_e2e_post_message_accepted_202() {
     );
     assert_eq!(deliv["outcome"], "delivered");
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    for _ in 0..250 {
+        if harness.received_lines.lock().await.len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let lines = harness.received_lines.lock().await;
     assert_eq!(lines.len(), 1);
     let line = &lines[0];

@@ -224,8 +224,8 @@ async fn start(p: Prepared, creds: &Creds, peers: Value, svc: Option<&str>) -> N
             }
             panic!("node exited at start (failed to bind?): {err}");
         }
-        let up = agent_sock.exists()
-            && register_sock.exists()
+        let up = std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+            && std::os::unix::net::UnixStream::connect(&register_sock).is_ok()
             && tokio::net::TcpStream::connect(("127.0.0.1", http_port))
                 .await
                 .is_ok()

@@ -231,7 +231,7 @@ async fn spawn_hub_node(
                 exited = Some(status);
                 break;
             }
-            if agent_sock.exists()
+            if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
                 && tokio::net::TcpStream::connect(("127.0.0.1", fed_port))
                     .await
                     .is_ok()
@@ -369,7 +369,7 @@ async fn spawn_leaf_node(
                 exited = Some(status);
                 break;
             }
-            if reg_sock.exists() {
+            if std::os::unix::net::UnixStream::connect(&reg_sock).is_ok() {
                 ready = true;
                 break;
             }

@@ -180,13 +180,13 @@ async fn start_mcp_harness() -> McpHarness {
     });
 
     for _ in 0..1500 {
-        if agent_sock_path.exists() {
+        if std::os::unix::net::UnixStream::connect(&agent_sock_path).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(
-        agent_sock_path.exists(),
+        std::os::unix::net::UnixStream::connect(&agent_sock_path).is_ok(),
         "the in-process server never bound its socket in 30s"
     );
 
@@ -427,7 +427,12 @@ async fn test_mcp_send_and_reply_with_derived_caller() {
     assert_eq!(delivery_json["outcome"], "delivered");
 
     // Check socket delivery to target-agent
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if harness.received_lines.lock().await.len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let lines = harness.received_lines.lock().await;
     assert_eq!(lines.len(), 1);
     let inbox_line: InboxLine = serde_json::from_str(lines[0].trim()).unwrap();

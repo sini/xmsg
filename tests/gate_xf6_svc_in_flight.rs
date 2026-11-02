@@ -72,7 +72,7 @@ impl Node {
             .spawn()
             .expect("spawn xmsg serve");
         for _ in 0..1200 {
-            if http_sock.exists() && register_sock.exists() {
+            if std::os::unix::net::UnixStream::connect(&http_sock).is_ok() && std::os::unix::net::UnixStream::connect(&register_sock).is_ok() {
                 return Node {
                     http_sock,
                     register_sock,
@@ -133,17 +133,22 @@ struct Service {
 
 impl Service {
     async fn register(node: &Node) -> Service {
-        let (r, w) = UnixStream::connect(&node.register_sock)
-            .await
-            .unwrap()
-            .into_split();
-        let mut s = Service {
-            r: BufReader::new(r),
-            w,
-        };
-        let reg = s.call(json!({ "harness": "svc", "name": SVC })).await;
-        assert_eq!(reg["status"], "ok", "{reg}");
-        s
+        for _ in 0..250 {
+            let (r, w) = UnixStream::connect(&node.register_sock)
+                .await
+                .unwrap()
+                .into_split();
+            let mut s = Service {
+                r: BufReader::new(r),
+                w,
+            };
+            let reg = s.call(json!({ "harness": "svc", "name": SVC })).await;
+            if reg["status"] == "ok" {
+                return s;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("Service::register failed to register within 5s");
     }
 
     async fn call(&mut self, frame: Value) -> Value {
@@ -252,9 +257,6 @@ async fn test_oracle_b_drop_without_ack_redelivers_on_reconnect() {
     // Ack msg_2 (e.g., verdict routed and acked), but drop connection before msg_1 finishes.
     svc1.ack(&msg_2).await;
     drop(svc1);
-
-    // Wait briefly for server to observe EOF on first connection and clear registration.
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let mut svc2 = Service::register(&node).await;
     let redelivered = svc2.poll(5).await;

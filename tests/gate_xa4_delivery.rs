@@ -162,8 +162,8 @@ impl Node {
             let up = if spec.leaf {
                 std::net::TcpStream::connect(tcp.as_deref().unwrap()).is_ok()
             } else {
-                http_sock.exists()
-                    && register_sock.exists()
+                std::os::unix::net::UnixStream::connect(&http_sock).is_ok()
+                    && std::os::unix::net::UnixStream::connect(&register_sock).is_ok()
                     && tcp
                         .as_deref()
                         .is_none_or(|a| std::net::TcpStream::connect(a).is_ok())

@@ -264,7 +264,7 @@ async fn create_hub_test_node(
     });
 
     for _ in 0..1500 {
-        if http_sock.exists() && agent_sock.exists() {
+        if std::os::unix::net::UnixStream::connect(&http_sock).is_ok() && std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -417,7 +417,7 @@ async fn create_leaf_test_node(
     }
 
     for _ in 0..1500 {
-        if reg_sock.exists() {
+        if std::os::unix::net::UnixStream::connect(&reg_sock).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

@@ -267,7 +267,7 @@ async fn test_oracle_2_no_flag_no_tcp_bound() {
 
     let mut started = false;
     for _ in 0..600 {
-        if http_sock.exists() {
+        if std::os::unix::net::UnixStream::connect(&http_sock).is_ok() {
             started = true;
             break;
         }

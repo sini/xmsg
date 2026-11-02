@@ -363,7 +363,12 @@ async fn test_oracle_1_outbound_presents_reloaded_cert() {
         res2
     );
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if b_received.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let msgs = b_received.lock().unwrap();
     assert_eq!(msgs.len(), 1);
     assert!(msgs[0].contains("hello v2"));
@@ -442,7 +447,12 @@ async fn test_oracle_2_peer_ca_bundle_reload_refuses_old_ca() {
         res1
     );
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if a_received.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(a_received.lock().unwrap().len(), 1);
 
     // 2. Replace Node B's CA bundle on Node A's disk with CA 2
@@ -535,6 +545,12 @@ async fn test_oracle_3_garbage_cert_preserves_old_config() {
     let envelope1 = make_envelope("recipient-b", "msg 1");
     let res1 = send_federated_message(&node_a.fed_state, "node-b", &envelope1).await;
     assert!(res1.is_ok(), "Initial send must succeed: {:?}", res1);
+    for _ in 0..250 {
+        if b_received.lock().unwrap().len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     // 2. Overwrite Node A's cert with invalid garbage
     fs::write(
@@ -559,7 +575,12 @@ async fn test_oracle_3_garbage_cert_preserves_old_config() {
         res2
     );
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if b_received.lock().unwrap().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let msgs = b_received.lock().unwrap();
     assert_eq!(msgs.len(), 2);
     assert!(msgs[1].contains("msg 2 with old valid config"));

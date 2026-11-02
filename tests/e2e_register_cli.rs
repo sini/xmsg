@@ -141,7 +141,7 @@ async fn test_shipped_binary_register_cli_with_server() {
     });
 
     for _ in 0..1500 {
-        if sock_path.exists() {
+        if std::os::unix::net::UnixStream::connect(&sock_path).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

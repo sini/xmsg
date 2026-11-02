@@ -157,7 +157,17 @@ async fn gate2_http_prefix() {
         v["address"],
         "0199cecf-1234-7000-8000-000000001234@test-host"
     );
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    for _ in 0..250 {
+        if h._received_lines
+            .lock()
+            .await
+            .iter()
+            .any(|l| l.contains("from-name=\\\"claude · anon@test-host\\\""))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let lines = h._received_lines.lock().await.clone();
     assert!(
         lines

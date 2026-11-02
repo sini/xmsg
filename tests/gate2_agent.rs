@@ -83,6 +83,7 @@ struct Env {
     ag: PathBuf,
     got: Arc<tokio::sync::Mutex<Vec<String>>>,
     db: Arc<Mutex<rusqlite::Connection>>,
+    pi_store: xmsg::pi::PiStore,
 }
 
 async fn setup(max_body: usize) -> Env {
@@ -198,7 +199,7 @@ async fn setup(max_body: usize) -> Env {
         sessions_dirs: vec![sessions.clone()],
         agy_config: cfg,
         agy_store,
-        pi_store,
+        pi_store: pi_store.clone(),
         pi_notify_tx: ptx,
         svc_store: xmsg::svc::new_svc_store(),
         svc_notify_tx: tokio::sync::broadcast::channel(16).0,
@@ -220,14 +221,18 @@ async fn setup(max_body: usize) -> Env {
         });
     }
 
+    let mut ready = false;
     for _ in 0..1500 {
-        if reg.exists() && ag.exists() {
+        if std::os::unix::net::UnixStream::connect(&reg).is_ok()
+            && std::os::unix::net::UnixStream::connect(&ag).is_ok()
+        {
+            ready = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(
-        reg.exists() && ag.exists(),
+        ready,
         "the in-process server never bound its socket in 30s"
     );
     Env {
@@ -240,6 +245,7 @@ async fn setup(max_body: usize) -> Env {
         ag,
         got,
         db,
+        pi_store,
     }
 }
 
@@ -327,6 +333,7 @@ async fn gate2_identity() {
     assert_eq!(reply_cross["error"], "denied");
 
     // ---- B3: send with hostile name (registered pi)
+    let prev_got = e.got.lock().await.len();
     let o = agent_call(
         &e.ag,
         serde_json::json!({"action":"send","to":"target","text":"hello"}),
@@ -334,7 +341,12 @@ async fn gate2_identity() {
     .await;
     let send_resp: serde_json::Value = serde_json::from_str(&o).unwrap();
     assert_eq!(send_resp["status"], "ok");
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    for _ in 0..250 {
+        if e.got.lock().await.len() > prev_got {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let line = e.got.lock().await.last().cloned().unwrap_or_default();
     let v: serde_json::Value = serde_json::from_str(&line).unwrap();
     let c = v["message"]["content"].as_str().unwrap().to_string();
@@ -345,7 +357,12 @@ async fn gate2_identity() {
     );
     assert_eq!(c.matches("&quot;").count(), 0);
     drop(w);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if e.pi_store.read().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     // ---- C3 Badge Disambiguation: pi named "boss" vs Claude session named "boss"
     let s = UnixStream::connect(&e.reg).await.unwrap();
@@ -363,7 +380,12 @@ async fn gate2_identity() {
     )
     .await;
     drop(w);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if e.pi_store.read().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     // Now make this pid a Claude session named "boss"
     fs::write(

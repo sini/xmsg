@@ -240,8 +240,8 @@ impl Node {
                 }
                 panic!("node exited at start (failed to bind?): {err}");
             }
-            let up = agent_sock.exists()
-                && http_sock.exists()
+            let up = std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+                && std::os::unix::net::UnixStream::connect(&http_sock).is_ok()
                 && tokio::net::TcpStream::connect(("127.0.0.1", self.http_port))
                     .await
                     .is_ok()

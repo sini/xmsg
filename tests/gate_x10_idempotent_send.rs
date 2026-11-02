@@ -51,7 +51,7 @@ async fn start_harness(db_path: Option<PathBuf>) -> X10Harness {
         start_server(sess_dir.path(), Some(agent_sock_path.clone()), db_path).await;
 
     for _ in 0..600 {
-        if agent_sock_path.exists() {
+        if std::os::unix::net::UnixStream::connect(&agent_sock_path).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -96,7 +96,7 @@ fn setup_mock_socket(
     received_lines: Arc<Mutex<Vec<String>>>,
     stop_signal: Arc<AtomicBool>,
 ) {
-    if sock_path.exists() {
+    if std::os::unix::net::UnixStream::connect(&sock_path).is_ok() {
         let _ = fs::remove_file(sock_path);
     }
     let listener = UnixListener::bind(sock_path).expect("bind unix socket");
@@ -219,7 +219,12 @@ async fn test_oracle_1_send_twice_one_key_one_delivery() {
         .to_string();
     assert!(!msg_id1.is_empty());
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if harness.received_lines.lock().await.len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(
         harness.received_lines.lock().await.len(),
         1,
@@ -264,7 +269,12 @@ async fn test_oracle_2_same_key_different_body_409() {
     let res1 = client.post(&url).json(&payload1).send().await.unwrap();
     assert_eq!(res1.status(), reqwest::StatusCode::ACCEPTED);
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if harness.received_lines.lock().await.len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(harness.received_lines.lock().await.len(), 1);
 
     // Send 2: same key, different body
@@ -312,7 +322,12 @@ async fn test_oracle_3_different_principals_independent() {
     let json_alice: serde_json::Value = res_alice.json().await.unwrap();
     let msg_id_alice = json_alice["message_id"].as_str().unwrap().to_string();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if harness.received_lines.lock().await.len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(harness.received_lines.lock().await.len(), 1);
 
     // Bob sends with the SAME key but his own identity (and different text)
@@ -337,7 +352,12 @@ async fn test_oracle_3_different_principals_independent() {
         "Different principals must receive distinct messageIds"
     );
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if harness.received_lines.lock().await.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(
         harness.received_lines.lock().await.len(),
         2,
@@ -382,7 +402,12 @@ async fn test_oracle_4_survives_server_restart_persisted() {
         let json1: serde_json::Value = res1.json().await.unwrap();
         let id = json1["message_id"].as_str().unwrap().to_string();
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        for _ in 0..250 {
+            if received_lines.lock().await.len() >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         assert_eq!(received_lines.lock().await.len(), 1);
 
         // Terminate server 1
@@ -471,7 +496,12 @@ async fn test_oracle_5_attested_agent_and_anonymous_http_principal_isolation() {
         .expect("agent messageId")
         .to_string();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if harness.received_lines.lock().await.len() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(
         harness.received_lines.lock().await.len(),
         1,
@@ -500,7 +530,12 @@ async fn test_oracle_5_attested_agent_and_anonymous_http_principal_isolation() {
         "Attested session and anonymous HTTP must receive distinct messageIds despite identical key"
     );
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..250 {
+        if harness.received_lines.lock().await.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(
         harness.received_lines.lock().await.len(),
         2,

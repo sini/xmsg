@@ -164,7 +164,7 @@ async fn setup_harness(service_name: &str) -> SvcTestHarness {
 
     // Wait briefly for register.sock to exist
     for _ in 0..1500 {
-        if sock_path.exists() {
+        if std::os::unix::net::UnixStream::connect(&sock_path).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

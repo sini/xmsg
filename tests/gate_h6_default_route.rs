@@ -258,7 +258,7 @@ async fn spawn_test_node(
             exited = Some(status);
             break;
         }
-        if agent_sock.exists()
+        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
             && tokio::net::TcpStream::connect(("127.0.0.1", fed_port))
                 .await
                 .is_ok()

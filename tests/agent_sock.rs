@@ -486,13 +486,13 @@ async fn test_agent_sock_reply_and_send_flow() {
     });
 
     for _ in 0..1500 {
-        if agent_sock_path.exists() {
+        if std::os::unix::net::UnixStream::connect(&agent_sock_path).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(
-        agent_sock_path.exists(),
+        std::os::unix::net::UnixStream::connect(&agent_sock_path).is_ok(),
         "the in-process server never bound its socket in 30s"
     );
 
@@ -821,7 +821,7 @@ async fn test_xs2_svc_store_admits_only_hop0_while_refusing_child_of_svc() {
         let _ = run_agent_server(s_path, s_state, my_uid).await;
     });
     for _ in 0..500 {
-        if agent_sock_path.exists() {
+        if std::os::unix::net::UnixStream::connect(&agent_sock_path).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;

@@ -211,7 +211,7 @@ async fn start_server_with(
     });
 
     for _ in 0..3000 {
-        if agent_sock.exists() {
+        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -851,7 +851,14 @@ async fn test_oracle_6_fork_notice_exact_text_and_single_delivery() {
     )
     .unwrap();
     xmsg::claim::deliver_fork_notices(&conn, notices).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    for _ in 0..250 {
+        if listener_p1.received_lines.lock().await.len() >= 1
+            && listener_p2.received_lines.lock().await.len() >= 1
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     // Verify exact notice text received by P1
     let lines_p1 = listener_p1.received_lines.lock().await.clone();
@@ -953,7 +960,12 @@ async fn test_oracle_6e_failed_fork_notice_retried_once() {
     xmsg::claim::sync_claims(&db, &f.proc_root, &f.sessions_dir, "test-node")
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    for _ in 0..250 {
+        if notice_count(&f.p1).await >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(notice_count(&f.p1).await, 1);
     assert_eq!(notice_count(&f.p2).await, 0);
 

@@ -138,7 +138,7 @@ async fn start_test_server(
 
     // Wait briefly for agent_sock to exist
     for _ in 0..3000 {
-        if agent_sock.exists() {
+        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;

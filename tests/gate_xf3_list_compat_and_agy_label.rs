@@ -365,9 +365,9 @@ async fn start_node_with_bin(
                 || tokio::net::TcpStream::connect(("127.0.0.1", fed_port))
                     .await
                     .is_ok();
-            let up = agent_sock.exists()
-                && register_sock.exists()
-                && http_sock.exists()
+            let up = std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+                && std::os::unix::net::UnixStream::connect(&register_sock).is_ok()
+                && std::os::unix::net::UnixStream::connect(&http_sock).is_ok()
                 && tokio::net::TcpStream::connect(("127.0.0.1", http_port))
                     .await
                     .is_ok()

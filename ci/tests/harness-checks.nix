@@ -321,13 +321,20 @@
                 done
                 return 1
               }
+              waitfor_sock() {
+                for _ in $(seq 200); do
+                  socat -u OPEN:/dev/null "UNIX-CONNECT:$1" 2>/dev/null && return 0
+                  sleep 0.1
+                done
+                return 1
+              }
 
               # The fake agy's executable is flock: it holds C's presence lock and runs the turn.
               (umask 0077 && exec ${lib.getExe xmsgPkg} serve --agy-exe ${pkgs.util-linux}/bin/flock --db-path "$TMPDIR/xmsg.db") > serve.log 2>&1 &
               serve=$!
               agy=
-              waitfor "$sock/register.sock" || fail "xmsg serve did not open register.sock"
-              waitfor "$sock/http.sock" || fail "xmsg serve did not open http.sock"
+              waitfor_sock "$sock/register.sock" || fail "xmsg serve did not accept on register.sock"
+              waitfor_sock "$sock/http.sock" || fail "xmsg serve did not accept on http.sock"
 
               flock "$lock" ${agyTurn} "$hook" "$pre_tool_hook" "$stop_hook" "$conv" "$child" "$TMPDIR/turn-done" &
               agy=$!

@@ -136,7 +136,7 @@ async fn oracle_1_hook_credential_less_and_credentialed_and_malformed() {
 
     // Wait for register.sock to exist
     for _ in 0..3000 {
-        if reg_sock.exists() {
+        if std::os::unix::net::UnixStream::connect(&reg_sock).is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
