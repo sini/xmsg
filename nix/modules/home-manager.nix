@@ -437,6 +437,19 @@ in
         Service = {
           ExecStart = "${exe} serve ${lib.escapeShellArgs serveArgs}";
           Restart = "on-failure";
+          # Safe hardening subset for systemd --user (no CLONE_NEWUSER / CLONE_NEWNS):
+          NoNewPrivileges = true;
+          LockPersonality = true;
+          RestrictRealtime = true;
+          RestrictSUIDSGID = true;
+          SystemCallArchitectures = "native";
+          RestrictAddressFamilies = [
+            "AF_UNIX"
+            "AF_INET"
+            "AF_INET6"
+            "AF_NETLINK"
+          ];
+          UMask = "0077";
         }
         // lib.optionalAttrs hasCustomSessionsDirs {
           Environment = [ "XMSG_SESSIONS_DIR=${sessionsDirsEnv}" ];

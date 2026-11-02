@@ -182,6 +182,38 @@ in
         failed = [ ];
       };
     };
+    # XH3: safe hardening subset for systemd --user (no CLONE_NEWUSER / CLONE_NEWNS).
+    test-linux-unit-hardening = {
+      expr = {
+        inherit (linux.systemd.user.services.xmsg.Service)
+          NoNewPrivileges
+          LockPersonality
+          RestrictRealtime
+          RestrictSUIDSGID
+          SystemCallArchitectures
+          RestrictAddressFamilies
+          UMask
+          ;
+        hasProtectSystem = linux.systemd.user.services.xmsg.Service ? ProtectSystem;
+        hasPrivateUsers = linux.systemd.user.services.xmsg.Service ? PrivateUsers;
+      };
+      expected = {
+        NoNewPrivileges = true;
+        LockPersonality = true;
+        RestrictRealtime = true;
+        RestrictSUIDSGID = true;
+        SystemCallArchitectures = "native";
+        RestrictAddressFamilies = [
+          "AF_UNIX"
+          "AF_INET"
+          "AF_INET6"
+          "AF_NETLINK"
+        ];
+        UMask = "0077";
+        hasProtectSystem = false;
+        hasPrivateUsers = false;
+      };
+    };
     # XS1: sessionsDirs and extraSessionsDirs render XMSG_SESSIONS_DIR on the serve unit
     # only when the effective list differs from the default.
     test-sessions-dirs =

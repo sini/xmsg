@@ -66,7 +66,7 @@
         meta.mainProgram = "xmsg";
       };
 
-      hooksJson =
+      agyHmCfg =
         (home-manager.lib.homeManagerConfiguration {
           inherit pkgs;
           modules = [
@@ -88,7 +88,9 @@
               };
             }
           ];
-        }).config.home.file.".gemini/config/hooks.json".source;
+        }).config;
+      hooksJson = agyHmCfg.home.file.".gemini/config/hooks.json".source;
+      xmsgUserUnit = agyHmCfg.xdg.configFile."systemd/user/xmsg.service".source;
 
       # One agy turn, run by the fake agy (`flock`, holding C's presence lock): the
       # PreInvocation hook with C on stdin, then the turn's command with agy's language-server
@@ -266,6 +268,30 @@
               printf '{"conversationId":"%s","subagentDescriptor":{"role":"kid","typeName":"self"},"spawnStepIndex":4}\n' "$child" \
                 > "$HOME/.gemini/antigravity-cli/brain/$conv/.system_generated/subagents/$child.json"
 
+              # XH3: assert the rendered systemd/user/xmsg.service INI file carries all 7 safe-subset directives.
+              for expected_line in \
+                "NoNewPrivileges=true" \
+                "LockPersonality=true" \
+                "RestrictRealtime=true" \
+                "RestrictSUIDSGID=true" \
+                "SystemCallArchitectures=native" \
+                "RestrictAddressFamilies=AF_UNIX" \
+                "RestrictAddressFamilies=AF_INET" \
+                "RestrictAddressFamilies=AF_INET6" \
+                "RestrictAddressFamilies=AF_NETLINK" \
+                "UMask=0077"; do
+                grep -Fxq "$expected_line" ${xmsgUserUnit} || {
+                  echo "agy-hook: rendered xmsg.service missing '$expected_line'" >&2
+                  cat ${xmsgUserUnit} >&2
+                  exit 1
+                }
+              done
+              if grep -Eq '^(ProtectSystem|PrivateUsers)=' ${xmsgUserUnit}; then
+                echo "agy-hook: rendered xmsg.service unexpectedly contains userns/mount directive" >&2
+                cat ${xmsgUserUnit} >&2
+                exit 1
+              fi
+
               # G9: assert hooks.json renders the three entries of §2.6 with the right --event.
               jq -e '
                 (."xmsg-register".PreInvocation[0].command | endswith("register agy --hook --event pre-invocation"))
@@ -297,7 +323,7 @@
               }
 
               # The fake agy's executable is flock: it holds C's presence lock and runs the turn.
-              ${lib.getExe xmsgPkg} serve --agy-exe ${pkgs.util-linux}/bin/flock --db-path "$TMPDIR/xmsg.db" > serve.log 2>&1 &
+              (umask 0077 && exec ${lib.getExe xmsgPkg} serve --agy-exe ${pkgs.util-linux}/bin/flock --db-path "$TMPDIR/xmsg.db") > serve.log 2>&1 &
               serve=$!
               agy=
               waitfor "$sock/register.sock" || fail "xmsg serve did not open register.sock"
