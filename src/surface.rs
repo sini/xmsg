@@ -231,17 +231,13 @@ pub async fn trace_caller_peer(
         &state.node_name,
     )
     .await;
-    let db = state.db.lock().ok();
-    crate::agent::resolve_caller_session_peer(
-        &state.agy_config.proc_root,
-        &state.sessions_dirs,
-        &state.agy_config,
-        &state.agy_store,
-        &state.pi_store,
-        &state.svc_store,
-        db.as_deref(),
-        peer,
-    )
+    match crate::agent::trace_caller_or_codex_owner(state, peer)? {
+        crate::agent::CallerTrace::Session(s) => Ok(s),
+        crate::agent::CallerTrace::CodexOwner { .. } => Err(AppError::NotRecipient(
+            "codex MCP call is missing runtime _meta (sessionId/threadId); refresh MCP or restart the codex session"
+                .to_string(),
+        )),
+    }
 }
 
 /// Parses one socket frame. A frame with fields `T` does not know is refused
@@ -657,6 +653,48 @@ pub(crate) async fn listing_live(
             }
         }
     }
+    #[cfg(target_os = "linux")]
+    {
+        let codex_roots = crate::codex::sweep_codex_roots(local.db);
+        for snap in codex_roots {
+            out.push(live_entry(
+                &snap.root_id,
+                false,
+                "codex",
+                Some(snap.label.clone()),
+                user,
+                snap.registered_at,
+            ));
+            let raw_subs = {
+                let db = local.db.lock().map_err(db_err)?;
+                storage::list_subagents_for_parent(&db, &snap.root_id).map_err(db_err)?
+            };
+            for sub in raw_subs {
+                if let Ok((_, _, verified_sub)) = crate::codex::admit_codex_subagent(
+                    local.db,
+                    &snap.root_id,
+                    &sub.agent_id,
+                    sub.agent_type.as_deref(),
+                ) {
+                    let child_part = verified_sub
+                        .name
+                        .as_deref()
+                        .unwrap_or(&verified_sub.agent_id);
+                    let sub_id = format!("{}/{child_part}", verified_sub.parent);
+                    out.push(FedListEntry {
+                        id: sub_id,
+                        kind: "subagent".to_string(),
+                        harness: Some("codex".to_string()),
+                        label: verified_sub.display_label().and_then(inbox::clean_label),
+                        status: "live".to_string(),
+                        user: user.to_string(),
+                        registered_at: Some(verified_sub.bound_at),
+                        last_seen: None,
+                    });
+                }
+            }
+        }
+    }
     for s in crate::svc::list_svc_sessions(proc_root, local.svc_store, &query) {
         out.push(live_entry(
             &s.session_id,
@@ -769,6 +807,106 @@ fn agy_has_creds(store: &crate::agy::AgyStore, session: &Session) -> bool {
         .unwrap_or(false)
 }
 
+/// Attempt to hand off an already-enqueued Codex root message (`message_id`) via the
+/// internal restricted relay (`src/codex_relay.rs`), transitioning its `codex_handoff`
+/// state atomically per §2.4 & §2.5.
+#[cfg(target_os = "linux")]
+pub async fn try_push_codex_queued_message(
+    local: &Local<'_>,
+    root_snap: &crate::codex::CodexRootSnapshot,
+    message_id: &str,
+    raw_envelope: &str,
+) -> Result<&'static str, AppError> {
+    let rt_arc = crate::codex::for_db(local.db);
+    let proc_root = {
+        let mut rt = rt_arc.lock().unwrap();
+        let cfg = rt.config.clone();
+        if rt
+            .store
+            .validate_root_by_id(&cfg, &root_snap.root_id, Some(root_snap.generation))
+            .is_err()
+        {
+            drop(rt);
+            if let Ok(db) = local.db.lock() {
+                let _ = storage::invalidate_codex_root(&db, &root_snap.root_id);
+            }
+            return Err(AppError::Gone {
+                session_id: root_snap.root_id.clone(),
+                pid: root_snap.owner_pid,
+            });
+        }
+        cfg.proc_root.clone()
+    };
+
+    let reserved = {
+        let db = local.db.lock().map_err(db_err)?;
+        storage::reserve_codex_single_for_push(
+            &db,
+            &root_snap.root_id,
+            root_snap.generation,
+            message_id,
+        )
+        .map_err(db_err)?
+    };
+    if !reserved {
+        let state = {
+            let db = local.db.lock().map_err(db_err)?;
+            storage::get_codex_handoff_state(&db, message_id).map_err(db_err)?
+        };
+        return match state.as_ref().map(|(s, _, _)| s.as_str()) {
+            Some("accepted") => Ok("delivered"),
+            Some("unknown") => Ok("delivery_unknown"),
+            _ => Ok("queued"),
+        };
+    }
+
+    let job = crate::codex_relay::CodexDeliveryJob {
+        root_id: root_snap.root_id.clone(),
+        root_generation: root_snap.generation,
+        codex_home: root_snap.codex_home.clone(),
+        owner_pid: root_snap.owner_pid,
+        owner_starttime: root_snap.owner_starttime.clone(),
+        message_id: message_id.to_string(),
+        rendered_envelope: crate::codex::prefix_codex_untrusted_preamble(raw_envelope),
+        proc_root,
+    };
+
+    let root_id_for_reval = root_snap.root_id.clone();
+    let gen_for_reval = root_snap.generation;
+    let relay_outcome = crate::codex_relay::deliver_via_codex_relay(&job, || {
+        let mut rt = rt_arc.lock().unwrap();
+        let cfg = rt.config.clone();
+        rt.store
+            .validate_root_by_id(&cfg, &root_id_for_reval, Some(gen_for_reval))
+            .map(|_| ())
+    })
+    .await;
+    let ids = [message_id.to_string()];
+    let db = local.db.lock().map_err(db_err)?;
+    match relay_outcome {
+        crate::codex_relay::RelayOutcome::Accepted { turn_id: _ } => {
+            storage::complete_codex_handoff_accepted(&db, &root_snap.root_id, &ids)
+                .map_err(db_err)?;
+            Ok("delivered")
+        }
+        crate::codex_relay::RelayOutcome::QueueOnly { reason }
+        | crate::codex_relay::RelayOutcome::Rejected { reason } => {
+            tracing::debug!(
+                root_id = %root_snap.root_id,
+                message_id = %message_id,
+                reason = %reason,
+                "codex relay push fell back to queue"
+            );
+            storage::release_codex_handoff_to_pending(&db, &ids).map_err(db_err)?;
+            Ok("queued")
+        }
+        crate::codex_relay::RelayOutcome::Uncertain { reason: _ } => {
+            storage::mark_codex_handoff_unknown(&db, &ids).map_err(db_err)?;
+            Ok("delivery_unknown")
+        }
+    }
+}
+
 /// Delivers a message to a resolved local target. Returns the target's ID, its harness
 /// and the outcome.
 pub async fn deliver(
@@ -827,6 +965,7 @@ pub async fn deliver(
             let harness = match session.harness.as_str() {
                 "claude" => "claude",
                 "agy" => "agy",
+                "codex" => "codex",
                 "svc" => "svc",
                 h => crate::plugin::harness(h).unwrap_or("pi"),
             };
@@ -882,6 +1021,44 @@ pub async fn deliver(
                             queue_for_retry(local)?;
                             Ok((session.session_id.clone(), "claude", "queued"))
                         }
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                ResolvedTarget::Codex(parent_snap, _) => {
+                    let pi_msg = storage::PiPendingMessage {
+                        id: message_id.to_string(),
+                        session_id: parent_snap.root_id.clone(),
+                        created_at: storage::now_epoch_secs(),
+                        from_name: from_name.to_string(),
+                        bytes: body.len(),
+                        text: body_with_header,
+                        envelope: format!(
+                            "[xmsg] from={from_name}{ref_part} message_id={message_id} — reply with the xmsg reply tool (tools: send, reply, list, replies)\n{subagent_header}\n\n{body}"
+                        ),
+                        delivered_at: None,
+                    };
+                    let inserted = {
+                        let db = local.db.lock().map_err(db_err)?;
+                        storage::enqueue_codex_root_message(
+                            &db,
+                            &parent_snap.root_id,
+                            parent_snap.generation,
+                            &pi_msg,
+                        )
+                        .map_err(db_err)?
+                    };
+                    if inserted {
+                        let outcome = try_push_codex_queued_message(
+                            local,
+                            parent_snap,
+                            message_id,
+                            &pi_msg.envelope,
+                        )
+                        .await?;
+                        Ok((session.session_id.clone(), "codex", outcome))
+                    } else {
+                        queue_for_retry(local)?;
+                        Ok((session.session_id.clone(), "codex", "queued"))
                     }
                 }
                 ResolvedTarget::Pi(parent_session) => {
@@ -951,6 +1128,38 @@ pub async fn deliver(
             let db = local.db.lock().map_err(db_err)?;
             storage::insert_agy_message(&db, &agy_msg).map_err(db_err)?;
             Ok((session.session_id.clone(), "agy", "queued"))
+        }
+        #[cfg(target_os = "linux")]
+        ResolvedTarget::Codex(root_snap, session) => {
+            let pi_msg = storage::PiPendingMessage {
+                id: message_id.to_string(),
+                session_id: session.session_id.clone(),
+                created_at: storage::now_epoch_secs(),
+                from_name: from_name.to_string(),
+                bytes: body.len(),
+                text: body.to_string(),
+                envelope: envelope_text(),
+                delivered_at: None,
+            };
+            {
+                let db = local.db.lock().map_err(db_err)?;
+                if !storage::enqueue_codex_root_message(
+                    &db,
+                    &root_snap.root_id,
+                    root_snap.generation,
+                    &pi_msg,
+                )
+                .map_err(db_err)?
+                {
+                    return Err(AppError::ServiceUnavailable(
+                        "codex session message queue is full".to_string(),
+                    ));
+                }
+            }
+            let outcome =
+                try_push_codex_queued_message(local, root_snap, message_id, &pi_msg.envelope)
+                    .await?;
+            Ok((session.session_id.clone(), "codex", outcome))
         }
         ResolvedTarget::Pi(session) => {
             let pi_msg = storage::PiPendingMessage {
@@ -1028,18 +1237,38 @@ pub async fn push_reply(
     if let Some((parent_ref, child_ref)) = crate::claim::split_subaddress(ret_session_id) {
         let now = storage::now_epoch_secs();
         let ttl_secs = local.reply_ttl.as_secs() as i64;
-        let binding = {
-            let Ok(db) = local.db.lock() else {
-                return "push_failed";
+        let (binding, in_turn) = if ret_harness == "codex" {
+            // INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
+            #[cfg(target_os = "linux")]
+            {
+                let Ok((_snap, child_state, b)) =
+                    crate::codex::admit_codex_subagent(local.db, parent_ref, child_ref, None)
+                else {
+                    return "sender_gone";
+                };
+                let active = !child_state.active_turns.is_empty()
+                    && crate::claim::is_subagent_in_turn(&local.agy_config.proc_root, &b);
+                (b, active)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return "sender_gone";
+            }
+        } else {
+            let b = {
+                let Ok(db) = local.db.lock() else {
+                    return "push_failed";
+                };
+                storage::resolve_subagent_in(&db, parent_ref, child_ref)
+                    .ok()
+                    .flatten()
             };
-            storage::resolve_subagent_in(&db, parent_ref, child_ref)
-                .ok()
-                .flatten()
+            let Some(b) = b else {
+                return "sender_gone";
+            };
+            let active = crate::claim::is_subagent_in_turn(&local.agy_config.proc_root, &b);
+            (b, active)
         };
-        let Some(binding) = binding else {
-            return "sender_gone";
-        };
-        let in_turn = crate::claim::is_subagent_in_turn(&local.agy_config.proc_root, &binding);
         if in_turn {
             let instance_id = format!("{}/{}", binding.parent, binding.agent_id);
             let queued = storage::QueuedMessage {
@@ -1227,6 +1456,43 @@ pub async fn push_reply(
                 }
                 Ok(None) => "sender_gone",
                 Err(_) => "push_failed",
+            }
+        }
+        // INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
+        #[cfg(target_os = "linux")]
+        "codex" => {
+            let Some(root_snap) = crate::codex::resolve_codex_root(local.db, ret_session_id) else {
+                return "sender_gone";
+            };
+            let pi_msg = storage::PiPendingMessage {
+                id: reply_id.to_string(),
+                session_id: root_snap.root_id.clone(),
+                created_at: storage::now_epoch_secs(),
+                from_name: replier_label.to_string(),
+                bytes: text.len(),
+                text: text.to_string(),
+                envelope,
+                delivered_at: None,
+            };
+            let inserted = match local.db.lock() {
+                Ok(db) => storage::enqueue_codex_root_message(
+                    &db,
+                    &root_snap.root_id,
+                    root_snap.generation,
+                    &pi_msg,
+                )
+                .unwrap_or(false),
+                Err(_) => false,
+            };
+            if !inserted {
+                return "push_failed";
+            }
+            match try_push_codex_queued_message(local, &root_snap, reply_id, &pi_msg.envelope).await
+            {
+                Ok("delivered") | Ok("queued") => "pushed",
+                Ok("delivery_unknown") => "push_failed",
+                Err(_) => "sender_gone",
+                _ => "push_failed",
             }
         }
         h if h == "pi" || crate::plugin::harness(h).is_some() => {

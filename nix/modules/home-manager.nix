@@ -38,6 +38,266 @@ let
     args = [ "mcp" ];
   };
 
+  codexMcpServer = mcpEntry // {
+    env_vars = [ "XDG_RUNTIME_DIR" ];
+    default_tools_approval_mode = "approve";
+  };
+
+  codexStableBin = "${config.xdg.dataHome}/xmsg/bin/xmsg";
+  codexHookCmd = event: "${lib.escapeShellArg codexStableBin} register codex --hook --event ${event}";
+
+  codexHooks = {
+    SessionStart = [
+      {
+        hooks = [
+          {
+            type = "command";
+            command = codexHookCmd "SessionStart";
+            timeout = 5;
+          }
+        ];
+      }
+    ];
+    UserPromptSubmit = [
+      {
+        hooks = [
+          {
+            type = "command";
+            command = codexHookCmd "UserPromptSubmit";
+            timeout = 5;
+          }
+        ];
+      }
+    ];
+    PreModelRequest = [
+      {
+        hooks = [
+          {
+            type = "command";
+            command = codexHookCmd "PreModelRequest";
+            timeout = 5;
+          }
+        ];
+      }
+    ];
+    SubagentStart = [
+      {
+        hooks = [
+          {
+            type = "command";
+            command = codexHookCmd "SubagentStart";
+            timeout = 5;
+          }
+        ];
+      }
+    ];
+    SubagentStop = [
+      {
+        hooks = [
+          {
+            type = "command";
+            command = codexHookCmd "SubagentStop";
+            timeout = 5;
+          }
+        ];
+      }
+    ];
+    Stop = [
+      {
+        hooks = [
+          {
+            type = "command";
+            command = codexHookCmd "Stop";
+            timeout = 5;
+          }
+        ];
+      }
+    ];
+    SessionEnd = [
+      {
+        hooks = [
+          {
+            type = "command";
+            command = codexHookCmd "SessionEnd";
+            timeout = 1;
+          }
+        ];
+      }
+    ];
+  };
+
+  codexEventNames = {
+    PreModelRequest = "pre_model_request";
+    PostModelRequest = "post_model_request";
+    PreToolUse = "pre_tool_use";
+    PermissionRequest = "permission_request";
+    PostToolUse = "post_tool_use";
+    PreCompact = "pre_compact";
+    PostCompact = "post_compact";
+    SessionStart = "session_start";
+    SessionEnd = "session_end";
+    UserPromptSubmit = "user_prompt_submit";
+    SubagentStart = "subagent_start";
+    SubagentStop = "subagent_stop";
+    Stop = "stop";
+    Interrupt = "interrupt";
+  };
+
+  codexMatchedEvents = [
+    "PreToolUse"
+    "PermissionRequest"
+    "PostToolUse"
+    "PreCompact"
+    "PostCompact"
+    "SessionStart"
+    "SessionEnd"
+    "SubagentStart"
+    "SubagentStop"
+  ];
+
+  codexAdditionalEvents = [
+    "PreToolUse"
+    "PostToolUse"
+    "SessionStart"
+    "UserPromptSubmit"
+    "SubagentStart"
+  ];
+
+  normalizeCodexHookIdentity =
+    event: group: handler:
+    let
+      _ =
+        if !(codexEventNames ? ${event}) then
+          throw "programs.xmsg.harnesses.codex.trustState: unknown Codex hook event '${event}'"
+        else if (handler.type or null) != "command" then
+          throw "programs.xmsg.harnesses.codex.trustState: only ordinary command hook declarations are supported"
+        else if (handler ? commandWindows) && (handler ? command_windows) then
+          throw "programs.xmsg.harnesses.codex.trustState: duplicate Windows command aliases"
+        else
+          true;
+      rawCommand = handler.command or null;
+      _cmdCheck =
+        if !(builtins.isString rawCommand) || (lib.trim rawCommand) == "" then
+          throw "programs.xmsg.harnesses.codex.trustState: command must be a non-empty string"
+        else
+          true;
+      altWin = handler.commandWindows or (handler.command_windows or null);
+      _winCheck =
+        if altWin != null && !(builtins.isString altWin) then
+          throw "programs.xmsg.harnesses.codex.trustState: commandWindows must be a string"
+        else
+          true;
+      isEnd = event == "SessionEnd" || event == "Interrupt";
+      rawTimeout = handler.timeout or null;
+      _timeoutCheck =
+        if rawTimeout != null && (!(builtins.isInt rawTimeout) || rawTimeout < 0) then
+          throw "programs.xmsg.harnesses.codex.trustState: timeout must be a non-negative integer"
+        else
+          true;
+      baseTimeout = if rawTimeout == null then (if isEnd then 1 else 600) else rawTimeout;
+      minTimeout = lib.max 1 baseTimeout;
+      timeout = if isEnd then lib.min 3 minTimeout else minTimeout;
+      asynchronous = if (handler.async or null) == null then false else handler.async;
+      _asyncCheck =
+        if !(builtins.isBool asynchronous) then
+          throw "programs.xmsg.harnesses.codex.trustState: async must be a boolean"
+        else
+          true;
+      status = handler.statusMessage or null;
+      _statusCheck =
+        if status != null && !(builtins.isString status) then
+          throw "programs.xmsg.harnesses.codex.trustState: statusMessage must be a string"
+        else
+          true;
+      limit = handler.additionalContextLimit or null;
+      _limitCheck =
+        if limit != null && (!(builtins.isInt limit) || limit < 0) then
+          throw "programs.xmsg.harnesses.codex.trustState: additionalContextLimit must be a non-negative integer"
+        else
+          true;
+      matcher = group.matcher or null;
+      _matcherCheck =
+        if matcher != null && !(builtins.isString matcher) then
+          throw "programs.xmsg.harnesses.codex.trustState: matcher must be a string"
+        else
+          true;
+      normalizedHandler = {
+        type = "command";
+        command = rawCommand;
+        inherit timeout;
+        async = asynchronous;
+      }
+      // lib.optionalAttrs (status != null) { statusMessage = status; }
+      // lib.optionalAttrs (limit != null && builtins.elem event codexAdditionalEvents && limit != 2500) {
+        additionalContextLimit = limit;
+      };
+    in
+    builtins.seq _ (
+      builtins.seq _cmdCheck (
+        builtins.seq _winCheck (
+          builtins.seq _timeoutCheck (
+            builtins.seq _asyncCheck (
+              builtins.seq _statusCheck (
+                builtins.seq _limitCheck (
+                  builtins.seq _matcherCheck (
+                    {
+                      event_name = codexEventNames.${event};
+                      hooks = [ normalizedHandler ];
+                    }
+                    // lib.optionalAttrs (matcher != null && builtins.elem event codexMatchedEvents) {
+                      inherit matcher;
+                    }
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    );
+
+  computeCodexTrustedHash =
+    event: group: handler:
+    "sha256:"
+    + builtins.hashString "sha256" (builtins.toJSON (normalizeCodexHookIdentity event group handler));
+
+  codexTrustState =
+    hooksPath: finalHooks:
+    let
+      _pathCheck =
+        if !(builtins.isString hooksPath) || !(lib.hasPrefix "/" hooksPath) then
+          throw "programs.xmsg.harnesses.codex.trustState: hooksPath must be an absolute path string"
+        else
+          true;
+      eventsMap =
+        if
+          finalHooks ? hooks && builtins.isAttrs finalHooks.hooks && !(builtins.isList finalHooks.hooks)
+        then
+          finalHooks.hooks
+        else
+          finalHooks;
+    in
+    builtins.seq _pathCheck {
+      hooks.state = lib.listToAttrs (
+        lib.concatLists (
+          lib.concatLists (
+            lib.mapAttrsToList (
+              event: groups:
+              lib.imap0 (
+                groupIndex: group:
+                lib.imap0 (
+                  handlerIndex: handler:
+                  lib.nameValuePair
+                    "${hooksPath}:${codexEventNames.${event}}:${toString groupIndex}:${toString handlerIndex}"
+                    { trusted_hash = computeCodexTrustedHash event group handler; }
+                ) (group.hooks or [ ])
+              ) groups
+            ) eventsMap
+          )
+        )
+      );
+    };
+
   claudeTools = [
     "list"
     "send"
@@ -197,6 +457,16 @@ let
       "--agy-exe"
       p
     ]) srv.agyExe
+    ++ lib.concatMap (p: [
+      "--codex-exe"
+      (toString p)
+    ]) srv.codexExe
+    ++ lib.optionals (cfg.harnesses.codex.enable || srv.codexExe != [ ]) (
+      lib.concatMap (p: [
+        "--codex-home"
+        (toString p)
+      ]) srv.codexHome
+    )
     ++ lib.concatLists (
       lib.mapAttrsToList (name: p: [
         "--svc-exe"
@@ -279,6 +549,20 @@ in
         defaultText = lib.literalExpression ''[ "''${config.programs.antigravity-cli.package}/bin/agy" ] when harnesses.agy is on'';
         description = "`--agy-exe`: the agy executables whose sessions xmsg attests (the identity anchor).";
       };
+      codexExe = mkOption {
+        type = types.listOf types.str;
+        default = lib.optional (
+          cfg.harnesses.codex.enable && (config.programs.codex.package or null) != null
+        ) "${config.programs.codex.package}/bin/codex";
+        defaultText = lib.literalExpression ''[ "''${config.programs.codex.package}/bin/codex" ] when harnesses.codex is on'';
+        description = "`--codex-exe`: the Codex executables whose sessions xmsg attests (the identity anchor).";
+      };
+      codexHome = mkOption {
+        type = types.listOf (types.either types.path types.str);
+        default = [ "${config.home.homeDirectory}/.codex" ];
+        defaultText = lib.literalExpression ''[ "''${config.home.homeDirectory}/.codex" ]'';
+        description = "`--codex-home`: the Codex home directories `xmsg serve` trusts (`--codex-home`, repeatable).";
+      };
       svcExe = mkOption {
         type = types.attrsOf types.str;
         default = { };
@@ -352,6 +636,30 @@ in
       pi.enable = mkEnableOption "the xmsg pi extension and skill (`~/.pi/agent`)";
       opencode.enable = mkEnableOption "the xmsg opencode plugin and skill (`$XDG_CONFIG_HOME/opencode`); no MCP entry and no `opencode.json`";
       hermes.enable = mkEnableOption "the xmsg hermes plugin and skill (`services.hermes-agent`); the plugin may inject on the TUI and desktop host (`plugins.entries.xmsg.allow_gateway_injection`)";
+      codex = {
+        enable = mkEnableOption "the xmsg MCP server, skill, hook declarations and trust-state helper in Codex (`programs.codex`)";
+        hooks = mkOption {
+          type = types.attrsOf (types.listOf types.attrs);
+          readOnly = true;
+          default = if cfg.enable && cfg.harnesses.codex.enable then codexHooks else { };
+          defaultText = lib.literalExpression "lifecycle and drain hook declarations when harnesses.codex is on, else { }";
+          description = "Read-only Codex hook declarations in Claude hook shape (`{ Event = [ { matcher?; hooks = [ { type = \"command\"; command; timeout?; } ]; } ]; }`).";
+        };
+        trustState = mkOption {
+          type = types.functionTo (types.functionTo types.attrs);
+          readOnly = true;
+          default = codexTrustState;
+          defaultText = lib.literalExpression "hooksPath: finalHooks: { hooks.state.<key>.trusted_hash = \"sha256:...\"; }";
+          description = "Read-only function computing `hooks.state.<key>.trusted_hash` entries for every handler in a final `.codex/hooks.json` object.";
+        };
+        mcpServer = mkOption {
+          type = types.attrs;
+          readOnly = true;
+          default = codexMcpServer;
+          defaultText = lib.literalExpression "{ command = lib.getExe config.programs.xmsg.package; args = [ \"mcp\" ]; env_vars = [ \"XDG_RUNTIME_DIR\" ]; default_tools_approval_mode = \"approve\"; }";
+          description = "Read-only MCP server data assigned to `programs.codex.settings.mcp_servers.xmsg`.";
+        };
+      };
     };
   };
 
@@ -375,6 +683,14 @@ in
             config.services.hermes-agent.enable or false
           )
         )
+        # INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
+        ++ lib.optionals cfg.harnesses.codex.enable [
+          (requireHarness "codex" "programs.codex.enable" (config.programs.codex.enable or false))
+          {
+            assertion = pkgs.stdenv.hostPlatform.isLinux;
+            message = "programs.xmsg.harnesses.codex.enable: codex support on Darwin is pending.";
+          }
+        ]
         ++ lib.concatLists (
           lib.mapAttrsToList (
             name: p:
@@ -583,6 +899,19 @@ in
             (lib.mkAfter { plugins.enabled = lib.unique (hermesEnabledElsewhere ++ [ "xmsg" ]); })
           ];
           hermesHomeFiles."skills/xmsg/SKILL.md" = skill + "/SKILL.md";
+        };
+      }
+    ))
+
+    (mkIf cfg.harnesses.codex.enable {
+      xdg.dataFile."xmsg/bin/xmsg".source = exe;
+    })
+
+    (lib.optionalAttrs (options ? programs.codex) (
+      mkIf cfg.harnesses.codex.enable {
+        programs.codex = {
+          skills.xmsg = skill;
+          settings.mcp_servers.xmsg = codexMcpServer;
         };
       }
     ))

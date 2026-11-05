@@ -39,6 +39,7 @@
                 || base == "ci"
                 || base == ".github"
                 || base == "README.md"
+                || base == "AGENTS.md"
                 || base == "TODO.md"
                 || base == "LICENSE"
                 || nixpkgs.lib.hasSuffix ".nix" base

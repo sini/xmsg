@@ -63,6 +63,30 @@ pub enum RegisterHarness {
 
     /// Claude Code subagent hook handler (PreToolUse, SubagentStart, PostToolUse, SubagentStop)
     Claude(RegisterClaudeArgs),
+
+    /// Codex CLI lifecycle and subagent hook handler (INTERIM HA9-A.codex.darwin: codex support on Darwin is pending)
+    #[cfg(target_os = "linux")]
+    Codex(RegisterCodexArgs),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Parser, Debug)]
+pub struct RegisterCodexArgs {
+    /// Hook mode for Codex hooks
+    #[arg(long)]
+    pub hook: bool,
+
+    /// Hook event when `--hook` is passed
+    #[arg(long)]
+    pub event: String,
+
+    /// Agent socket path (defaults to $XDG_RUNTIME_DIR/xmsg/agent.sock)
+    #[arg(long, env = "XMSG_AGENT_SOCK")]
+    pub sock: Option<PathBuf>,
+
+    /// Optional label override to assign to the registered Codex session
+    #[arg(long, env = "XMSG_CODEX_LABEL")]
+    pub label: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -167,6 +191,16 @@ pub struct ServeArgs {
     /// Trusted Antigravity executable paths (comma-separated or multiple flags)
     #[arg(long = "agy-exe", env = "XMSG_AGY_EXE", value_delimiter = ',')]
     pub agy_exes: Vec<PathBuf>,
+
+    /// Trusted Codex executable paths (comma-separated or multiple flags)
+    #[cfg(target_os = "linux")]
+    #[arg(long = "codex-exe", env = "XMSG_CODEX_EXE", value_delimiter = ',')]
+    pub codex_exes: Vec<PathBuf>,
+
+    /// Trusted Codex home directories (repeatable, or separated by ':' in env XMSG_CODEX_HOME; defaults to $CODEX_HOME or ~/.codex)
+    #[cfg(target_os = "linux")]
+    #[arg(long = "codex-home", env = "XMSG_CODEX_HOME", value_delimiter = ':')]
+    pub codex_homes: Vec<PathBuf>,
 
     /// Trusted Svc daemon executable paths per name (format: NAME=PATH, repeatable or comma-separated)
     #[arg(long = "svc-exe", env = "XMSG_SVC_EXE", value_delimiter = ',')]
@@ -276,6 +310,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             RegisterHarness::Claude(claude_args) => {
                 run_register_claude(claude_args);
             }
+            #[cfg(target_os = "linux")]
+            RegisterHarness::Codex(codex_args) => {
+                run_register_codex(codex_args);
+            }
         },
         Commands::CheckPeers(args) => {
             let own = match &args.fed_cert {
@@ -341,6 +379,31 @@ fn run_register_claude(args: RegisterClaudeArgs) {
             eprintln!("xmsg register claude error: {e}");
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_register_codex(args: RegisterCodexArgs) {
+    use std::io::Read;
+    if !args.hook {
+        eprintln!("xmsg register codex error: --hook is required");
+        std::process::exit(2);
+    }
+    let mut input = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut input) {
+        eprintln!("xmsg register codex error: failed to read stdin: {e}");
+        std::process::exit(2);
+    }
+    let stdout = std::io::stdout();
+    if let Err(e) = xmsg::agent::run_codex_hook(
+        &args.event,
+        args.label.as_deref(),
+        &input,
+        args.sock.as_deref(),
+        stdout.lock(),
+    ) {
+        eprintln!("xmsg register codex error: {e}");
+        std::process::exit(2);
     }
 }
 
@@ -1128,6 +1191,43 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
         fed_state: fed_state.clone(),
     });
+
+    #[cfg(target_os = "linux")]
+    {
+        let codex_homes = if args.codex_homes.is_empty() {
+            if let Ok(env_home) = std::env::var("CODEX_HOME") {
+                if !env_home.trim().is_empty() {
+                    vec![PathBuf::from(env_home)]
+                } else if let Ok(home) = std::env::var("HOME") {
+                    vec![PathBuf::from(home).join(".codex")]
+                } else {
+                    Vec::new()
+                }
+            } else if let Ok(home) = std::env::var("HOME") {
+                vec![PathBuf::from(home).join(".codex")]
+            } else {
+                Vec::new()
+            }
+        } else {
+            args.codex_homes
+                .into_iter()
+                .map(|p| {
+                    if let Ok(stripped) = p.strip_prefix("~/") {
+                        if let Ok(home) = std::env::var("HOME") {
+                            return PathBuf::from(home).join(stripped);
+                        }
+                    }
+                    p
+                })
+                .collect()
+        };
+        let codex_config = xmsg::codex::CodexConfig {
+            trusted_codex_exes: args.codex_exes,
+            codex_homes,
+            proc_root: agy_config.proc_root.clone(),
+        };
+        let _ = xmsg::codex::init_for_state(&state, codex_config);
+    }
 
     if !args.leaf {
         let agent_sock = agent_sock_path.clone();

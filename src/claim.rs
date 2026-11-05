@@ -676,6 +676,25 @@ pub fn take_queued_for(
                     subagent_header: Some(header.clone()),
                 });
             }
+        } else if let Ok(Some(codex_gen)) = conn
+            .query_row(
+                "SELECT generation FROM codex_roots WHERE root_id = ?1 AND revoked = 0",
+                params![sub.parent],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+        {
+            let _ = storage::take_codex_subagent_queue_to_parent(
+                conn,
+                &sub.parent,
+                codex_gen.max(0) as u64,
+                &sub.agent_id,
+                now,
+            );
         } else {
             let is_plugin_or_pi = crate::plugin::session(conn, &sub.parent)
                 .map_err(|e| AppError::Internal(e.to_string()))?

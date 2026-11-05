@@ -148,6 +148,8 @@ async fn healthz_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
 pub enum ResolvedTarget {
     Claude(registry::Session, PathBuf),
     Agy(registry::Session),
+    #[cfg(target_os = "linux")]
+    Codex(crate::codex::CodexRootSnapshot, registry::Session),
     /// A session served from a `register.sock` poll queue: a pi, or a plugin session
     /// (opencode), whose `harness` names which.
     Pi(registry::Session),
@@ -188,6 +190,8 @@ impl ResolvedTarget {
 
     pub(crate) fn session(&self) -> &registry::Session {
         match self {
+            #[cfg(target_os = "linux")]
+            ResolvedTarget::Codex(_, s) => s,
             ResolvedTarget::Claude(s, _)
             | ResolvedTarget::Agy(s)
             | ResolvedTarget::Pi(s)
@@ -204,11 +208,14 @@ impl ResolvedTarget {
             ResolvedTarget::SubagentInTurn { session: s, .. } => match s.harness.as_str() {
                 "claude" => "claude",
                 "agy" => "agy",
+                "codex" => "codex",
                 "svc" => "svc",
                 h => crate::plugin::harness(h).unwrap_or("pi"),
             },
             ResolvedTarget::SubagentFallback { parent, .. } => parent.recipient_harness(),
             ResolvedTarget::Agy(_) => "agy",
+            #[cfg(target_os = "linux")]
+            ResolvedTarget::Codex(_, _) => "codex",
             ResolvedTarget::Pi(s) => crate::plugin::harness(&s.harness).unwrap_or("pi"),
             ResolvedTarget::Svc(_) => "svc",
         }
@@ -286,12 +293,31 @@ pub(crate) async fn resolve_target(
         };
         let parent_session = parent_target.session().clone();
         let parent_addr = parent_session.session_id.clone();
-        let binding = {
+        #[cfg(target_os = "linux")]
+        let (binding, codex_in_turn) = if matches!(parent_target, ResolvedTarget::Codex(_, _)) {
+            let (_snap, child_state, b) =
+                crate::codex::admit_codex_subagent(db, &parent_addr, child_ref, None).map_err(
+                    |_| AppError::NotFound(format!("{ref_str} (parent '{parent_addr}')")),
+                )?;
+            let in_turn = !child_state.active_turns.is_empty()
+                && crate::claim::is_subagent_in_turn(proc_root, &b);
+            (b, Some(in_turn))
+        } else {
             let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
             crate::agy::purge_evicted_agy_subagents(&conn, proc_root, agy_store);
-            storage::resolve_subagent_in(&conn, &parent_addr, child_ref)
+            let b = storage::resolve_subagent_in(&conn, &parent_addr, child_ref)
                 .map_err(|e| AppError::Internal(e.to_string()))?
-                .ok_or_else(|| AppError::NotFound(format!("{ref_str} (parent '{parent_addr}')")))?
+                .ok_or_else(|| AppError::NotFound(format!("{ref_str} (parent '{parent_addr}')")))?;
+            (b, None)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let (binding, codex_in_turn): (storage::SubagentBinding, Option<bool>) = {
+            let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+            crate::agy::purge_evicted_agy_subagents(&conn, proc_root, agy_store);
+            let b = storage::resolve_subagent_in(&conn, &parent_addr, child_ref)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .ok_or_else(|| AppError::NotFound(format!("{ref_str} (parent '{parent_addr}')")))?;
+            (b, None)
         };
         let sub_id = format!("{}/{}", binding.parent, binding.agent_id);
         let sub_session = registry::Session {
@@ -310,9 +336,9 @@ pub(crate) async fn resolve_target(
         };
         // OQ2 isolation: in-turn (or parked Claude parent) queues into `<P>/<agent_id>`;
         // out-of-turn falls back to P with `to=<P>/<child> agent_id=<id>` (D2).
-        if crate::claim::is_subagent_in_turn(proc_root, &binding)
-            || matches!(parent_target, ResolvedTarget::Parked { .. })
-        {
+        let is_in_turn =
+            codex_in_turn.unwrap_or_else(|| crate::claim::is_subagent_in_turn(proc_root, &binding));
+        if is_in_turn || matches!(parent_target, ResolvedTarget::Parked { .. }) {
             return Ok(ResolvedTarget::SubagentInTurn {
                 session: sub_session,
                 expires_at: now + ttl_secs,
@@ -369,6 +395,13 @@ pub(crate) async fn resolve_target(
     if let Some(session) = pi_sessions.iter().find(|s| is_id(&s.session_id)) {
         return Ok(ResolvedTarget::Pi(session.clone()));
     }
+    #[cfg(target_os = "linux")]
+    let codex_roots = crate::codex::sweep_codex_roots(db);
+    #[cfg(target_os = "linux")]
+    if let Some(snap) = codex_roots.iter().find(|r| is_id(&r.root_id)) {
+        let session = crate::codex::codex_root_to_session(snap);
+        return Ok(ResolvedTarget::Codex(snap.clone(), session));
+    }
 
     // 2. A name: services first (A11). A service's name is unique on its node (A2).
     if let Some(session) = crate::svc::list_svc_sessions(proc_root, svc_store, &query)
@@ -395,6 +428,11 @@ pub(crate) async fn resolve_target(
             .filter(|s| s.name.as_deref().is_some_and(is))
             .map(ResolvedTarget::Pi),
     );
+    #[cfg(target_os = "linux")]
+    labelled.extend(codex_roots.into_iter().filter(|r| is(&r.label)).map(|r| {
+        let s = crate::codex::codex_root_to_session(&r);
+        ResolvedTarget::Codex(r, s)
+    }));
     match labelled.len() {
         0 => {}
         1 => return Ok(labelled.remove(0)),
@@ -427,10 +465,10 @@ pub(crate) async fn resolve_target(
         };
         return match seen.harness.as_str() {
             _ if !parked => Err(AppError::NotFound(ref_str.to_string())),
-            // HA8: a detached or exited pi/plugin session with `reclaim_hash` set is parked
-            // and queues into `pi_pending_messages`; an explicitly released or expired one
-            // answers `gone`.
-            h if h == "pi" || crate::plugin::harness(h).is_some() => {
+            // HA8 / HA9-A.codex: a detached or exited pi/plugin session with `reclaim_hash`
+            // set is parked and queues into `pi_pending_messages`; an explicitly released or
+            // expired one, or a revoked/ended Codex root, answers `gone`.
+            h if h == "pi" || h == "codex" || crate::plugin::harness(h).is_some() => {
                 if seen.reclaimable && now < seen.last_live + ttl.as_secs() as i64 {
                     Ok(ResolvedTarget::Pi(parked_session(h)))
                 } else {
@@ -534,8 +572,20 @@ fn parse_query<T>(query: Result<Query<T>, QueryRejection>) -> Result<T, AppError
 
 async fn list_recipients_handler(
     State(state): State<Arc<AppState>>,
+    peer: PeerInfo,
     query: Result<Query<surface::ListQuery>, QueryRejection>,
 ) -> Result<Response, AppError> {
+    if let Some(cred) = peer.as_ref().and_then(|p| (p.0).0.peer.as_ref()) {
+        if matches!(
+            crate::agent::trace_caller_or_codex_owner(&state, cred),
+            Ok(crate::agent::CallerTrace::CodexOwner { .. })
+        ) {
+            return Err(AppError::NotRecipient(
+                "codex MCP call is missing runtime _meta (sessionId/threadId); refresh MCP or restart the codex session"
+                    .to_string(),
+            ));
+        }
+    }
     let query = parse_query(query)?;
     let entries = surface::list(&state, &query).await?;
     Ok((StatusCode::OK, Json(entries)).into_response())

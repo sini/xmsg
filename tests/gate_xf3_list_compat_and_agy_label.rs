@@ -950,7 +950,8 @@ async fn test_oracle_2_harness_on_every_kind_live_and_inactive() {
     let my_exe = std::env::current_exe().unwrap();
     let bin_exe = PathBuf::from(BIN);
 
-    let extra_args = vec![
+    #[allow(unused_mut)]
+    let mut extra_args = vec![
         "--agy-exe".to_string(),
         my_exe.display().to_string(),
         "--agy-exe".to_string(),
@@ -958,6 +959,12 @@ async fn test_oracle_2_harness_on_every_kind_live_and_inactive() {
         "--svc-exe".to_string(),
         format!("my-svc={}", my_exe.display()),
     ];
+    // INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
+    #[cfg(target_os = "linux")]
+    {
+        extra_args.push("--codex-exe".to_string());
+        extra_args.push(my_exe.display().to_string());
+    }
     let (node, _) = start_node_with_bin(BIN, &ca.pem, &creds_a, json!({}), &extra_args, true).await;
 
     // 1. Live `claude` session + a second `claude` session that we'll park
@@ -1107,6 +1114,113 @@ async fn test_oracle_2_harness_on_every_kind_live_and_inactive() {
     let svc_reg: Value = serde_json::from_str(&svc_line).unwrap();
     assert_eq!(svc_reg["status"], "ok", "{svc_reg}");
 
+    // 7. Live `codex` session + a second `codex` session that we'll close via SessionEnd
+    // INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
+    #[cfg(target_os = "linux")]
+    let (id_codex_live, id_codex_closed, _codex_lock_live, _codex_lock_closed) = {
+        let run_dir = node.tmp.path().join("run");
+        let codex_home = run_dir.join(".codex");
+        fs::create_dir_all(codex_home.join("thread-writer-locks")).unwrap();
+        fs::create_dir_all(codex_home.join("sessions/2026/11/04")).unwrap();
+        let id_codex_live = "019a1111-1111-7111-8111-111111111111";
+        let id_codex_closed = "019a2222-2222-7222-8222-222222222222";
+        let codex_lock_live = fs::File::create(
+            codex_home
+                .join("thread-writer-locks")
+                .join(format!("{id_codex_live}.lock")),
+        )
+        .unwrap();
+        let codex_lock_closed = fs::File::create(
+            codex_home
+                .join("thread-writer-locks")
+                .join(format!("{id_codex_closed}.lock")),
+        )
+        .unwrap();
+        for cid in [id_codex_live, id_codex_closed] {
+            fs::write(
+                codex_home
+                    .join("sessions/2026/11/04")
+                    .join(format!("rollout-{cid}.jsonl")),
+                format!(
+                    "{}\n",
+                    json!({
+                        "type": "session_meta",
+                        "payload": { "id": cid, "session_id": cid, "cwd": "/workspace" }
+                    })
+                ),
+            )
+            .unwrap();
+            let mut c = Command::new(BIN)
+                .args([
+                    "register",
+                    "codex",
+                    "--hook",
+                    "--event",
+                    "SessionStart",
+                    "--sock",
+                    node.agent_sock.to_str().unwrap(),
+                ])
+                .env("HOME", &run_dir)
+                .env("XDG_RUNTIME_DIR", &run_dir)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            use std::io::Write;
+            c.stdin
+                .as_mut()
+                .unwrap()
+                .write_all(
+                    json!({
+                        "session_id": cid,
+                        "source": "startup",
+                        "cwd": "/workspace"
+                    })
+                    .to_string()
+                    .as_bytes(),
+                )
+                .unwrap();
+            assert_eq!(c.wait().unwrap().code(), Some(0));
+        }
+
+        // End `id_codex_closed` via SessionEnd so it transitions to inactive (`closed`)
+        {
+            let mut c = Command::new(BIN)
+                .args([
+                    "register",
+                    "codex",
+                    "--hook",
+                    "--event",
+                    "SessionEnd",
+                    "--sock",
+                    node.agent_sock.to_str().unwrap(),
+                ])
+                .env("HOME", &run_dir)
+                .env("XDG_RUNTIME_DIR", &run_dir)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            use std::io::Write;
+            c.stdin
+                .as_mut()
+                .unwrap()
+                .write_all(
+                    json!({ "session_id": id_codex_closed })
+                        .to_string()
+                        .as_bytes(),
+                )
+                .unwrap();
+            assert_eq!(c.wait().unwrap().code(), Some(0));
+        }
+        (
+            id_codex_live,
+            id_codex_closed,
+            codex_lock_live,
+            codex_lock_closed,
+        )
+    };
+
     // Observe live list first so `id_parked` is synced into `instance_seen`
     let (st, live_list) = node.http_get("/v1/recipients").await;
     assert_eq!(st, 200, "{live_list}");
@@ -1133,6 +1247,8 @@ async fn test_oracle_2_harness_on_every_kind_live_and_inactive() {
     assert_eq!(find_by_addr(recs, &addr_oc_live)["harness"], "opencode");
     assert_eq!(find_by_addr(recs, &addr_hm_live)["harness"], "hermes");
     assert_eq!(find_by_addr(recs, "my-svc@")["harness"], "svc");
+    #[cfg(target_os = "linux")]
+    assert_eq!(find_by_addr(recs, id_codex_live)["harness"], "codex");
 
     // Verify inactive (`parked` and `closed`) recipients also carry `harness`
     let (st, inactive_list) = node.http_get("/v1/recipients?status=inactive").await;
@@ -1145,6 +1261,13 @@ async fn test_oracle_2_harness_on_every_kind_live_and_inactive() {
     let closed_rec = find_by_addr(irecs, &addr_oc_closed);
     assert_eq!(closed_rec["status"], "closed");
     assert_eq!(closed_rec["harness"], "opencode");
+
+    #[cfg(target_os = "linux")]
+    {
+        let codex_closed_rec = find_by_addr(irecs, id_codex_closed);
+        assert_eq!(codex_closed_rec["status"], "closed");
+        assert_eq!(codex_closed_rec["harness"], "codex");
+    }
 }
 
 // =============================================================================
@@ -1435,12 +1558,19 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
     let my_exe = std::env::current_exe().unwrap();
     let bin_exe = PathBuf::from(BIN);
 
-    let extra_args = vec![
+    #[allow(unused_mut)]
+    let mut extra_args = vec![
         "--agy-exe".to_string(),
         my_exe.display().to_string(),
         "--agy-exe".to_string(),
         bin_exe.display().to_string(),
     ];
+    // INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
+    #[cfg(target_os = "linux")]
+    {
+        extra_args.push("--codex-exe".to_string());
+        extra_args.push(my_exe.display().to_string());
+    }
     let (node, _) =
         start_node_with_bin(BIN, &ca.pem, &creds_a, json!({}), &extra_args, false).await;
     let run_dir = node.tmp.path().join("run");
@@ -1451,9 +1581,74 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
     fs::set_permissions(&proxy_agent_sock, fs::Permissions::from_mode(0o600)).unwrap();
     let recorded_frames: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let frames_clone = recorded_frames.clone();
+    let use_inproc_agent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let use_inproc_clone = use_inproc_agent.clone();
     let real_agent_sock = node.agent_sock.clone();
+
+    // In-process `agent.sock` listener for Phase 3 (`codex`), so `SO_PEERCRED` sees the real
+    // spawned `xmsg mcp` sidecar PID (`09af11b` / `9d1f5fa` / `BIN`) descending from `my_pid`.
+    // INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
+    #[cfg(target_os = "linux")]
+    let inproc_agent_sock = {
+        let inproc_agent_sock = run_dir.join("inproc_agent.sock");
+        let inproc_listener = UnixListener::bind(&inproc_agent_sock).unwrap();
+        fs::set_permissions(&inproc_agent_sock, fs::Permissions::from_mode(0o600)).unwrap();
+        let inproc_conn = rusqlite::Connection::open_in_memory().unwrap();
+        xmsg::storage::init_db(&inproc_conn).unwrap();
+        let (inproc_notify, _) = tokio::sync::broadcast::channel(64);
+        let (inproc_pi_notify, _) = tokio::sync::broadcast::channel(64);
+        let (inproc_svc_notify, _) = tokio::sync::broadcast::channel(64);
+        let inproc_state = Arc::new(xmsg::http::AppState {
+            db: Arc::new(Mutex::new(inproc_conn)),
+            sessions_dirs: vec![node.sessions_dir.clone()],
+            max_body: 65536,
+            node_name: "sini.nodea".to_string(),
+            request_counter: std::sync::atomic::AtomicU64::new(0),
+            notify_tx: inproc_notify,
+            agy_config: xmsg::agy::AgyConfig {
+                trusted_agy_exes: Vec::new(),
+                presence_dir: node.presence_dir.clone(),
+                brain_dir: run_dir.join("agy-brain"),
+                proc_root: PathBuf::from(xmsg::process::LIVE_PROC_ROOT),
+                proc_locks_path: node.proc_locks.clone(),
+                agy_bin: "agy".to_string(),
+            },
+            agy_store: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            pi_store: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            pi_notify_tx: inproc_pi_notify,
+            svc_store: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            svc_notify_tx: inproc_svc_notify,
+            reply_ttl: Duration::from_secs(3600),
+            idempotency_ttl: Duration::from_secs(3600),
+            long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(64)),
+            fed_state: None,
+        });
+        xmsg::codex::init_for_state(
+            &inproc_state,
+            xmsg::codex::CodexConfig {
+                trusted_codex_exes: vec![my_exe.clone()],
+                codex_homes: vec![run_dir.join(".codex")],
+                proc_root: PathBuf::from(xmsg::process::LIVE_PROC_ROOT),
+            },
+        );
+        let inproc_state_srv = inproc_state.clone();
+        let my_uid = unsafe { libc::geteuid() };
+        tokio::spawn(async move {
+            let _ = xmsg::agent::run_agent_server_with_listener(
+                inproc_listener,
+                inproc_state_srv,
+                my_uid,
+            )
+            .await;
+        });
+        inproc_agent_sock
+    };
+
     tokio::spawn(async move {
         while let Ok((client_stream, _)) = proxy_listener.accept().await {
+            if use_inproc_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                continue;
+            }
             let Ok(server_stream) = UnixStream::connect(&real_agent_sock).await else {
                 continue;
             };
@@ -2092,6 +2287,244 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
             assert_eq!(
                 f["as_agent"], child_agy,
                 "XC1: agy subagent frame via {deploy_sidecar} must carry as_agent={child_agy}, got: {f}"
+            );
+        }
+    }
+
+    // Release `open_lock_agy` before Phase 3 (`codex`), so `my_pid` is no longer attested as `agy`
+    // and the ancestry walk reaches step 5 (`CodexOwner`).
+    drop(open_lock_agy);
+    let _ = fs::remove_file(&lock_agy);
+    let _ = use_inproc_agent;
+
+    // =========================================================================
+    // Phase 3 (HA9-A.codex C10): Codex root & subagent vs pre-HA9-A.codex sidecar (`09af11b` / `9d1f5fa`)
+    // Connected directly to `inproc_agent_sock` so `SO_PEERCRED` sees the real spawned sidecar PID
+    // descending from `my_pid` (`my_exe` in `--codex-exe`).
+    // INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
+    // =========================================================================
+    #[cfg(target_os = "linux")]
+    {
+        let codex_home = run_dir.join(".codex");
+        fs::create_dir_all(codex_home.join("thread-writer-locks")).unwrap();
+        fs::create_dir_all(codex_home.join("sessions/2026/11/04")).unwrap();
+        let root_codex = "019a5555-5555-7555-8555-555555555555";
+        let child_codex = "019a6666-6666-7666-8666-666666666666";
+        let _codex_writer_lock = fs::File::create(
+            codex_home
+                .join("thread-writer-locks")
+                .join(format!("{root_codex}.lock")),
+        )
+        .unwrap();
+        fs::write(
+            codex_home
+                .join("sessions/2026/11/04")
+                .join(format!("rollout-{root_codex}.jsonl")),
+            format!(
+                "{}\n",
+                json!({
+                    "type": "session_meta",
+                    "payload": { "id": root_codex, "session_id": root_codex, "cwd": "/workspace" }
+                })
+            ),
+        )
+        .unwrap();
+        fs::write(
+            codex_home
+                .join("sessions/2026/11/04")
+                .join(format!("rollout-{child_codex}.jsonl")),
+            format!(
+                "{}\n",
+                json!({
+                    "type": "session_meta",
+                    "payload": {
+                        "id": child_codex,
+                        "session_id": root_codex,
+                        "parent_thread_id": root_codex,
+                        "cwd": "/workspace"
+                    }
+                })
+            ),
+        )
+        .unwrap();
+
+        // Register `root_codex` via `SessionStart` and `child_codex` via `SubagentStart` on `inproc_agent_sock`
+        for (ev, payload) in [
+            (
+                "SessionStart",
+                json!({ "session_id": root_codex, "source": "startup", "cwd": "/workspace" }),
+            ),
+            (
+                "SubagentStart",
+                json!({ "session_id": root_codex, "agent_id": child_codex, "agent_type": "worker", "turn_id": "t-c10" }),
+            ),
+        ] {
+            let mut c = Command::new(BIN)
+                .args([
+                    "register",
+                    "codex",
+                    "--hook",
+                    "--event",
+                    ev,
+                    "--sock",
+                    inproc_agent_sock.to_str().unwrap(),
+                ])
+                .env("HOME", &run_dir)
+                .env("XDG_RUNTIME_DIR", &run_dir)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            use std::io::Write;
+            c.stdin
+                .as_mut()
+                .unwrap()
+                .write_all(payload.to_string().as_bytes())
+                .unwrap();
+            assert_eq!(c.wait().unwrap().code(), Some(0));
+        }
+
+        let call_mcp_sidecar_with_meta = |mcp_bin: &str,
+                                          tool_name: &str,
+                                          arguments: Value,
+                                          meta: Value|
+         -> Value {
+            let mut child = Command::new(mcp_bin)
+                .args([
+                    "mcp",
+                    "--sessions-dir",
+                    node.sessions_dir.to_str().unwrap(),
+                    "--xmsg-url",
+                    &format!("http://127.0.0.1:{}", node.http_port),
+                    "--http-sock",
+                    node.http_sock.to_str().unwrap(),
+                    "--agent-sock",
+                    inproc_agent_sock.to_str().unwrap(),
+                ])
+                .env("HOME", &run_dir)
+                .env("XDG_RUNTIME_DIR", &run_dir)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap_or_else(|e| panic!("failed to spawn {mcp_bin} mcp: {e}"));
+            {
+                use std::io::Write;
+                let stdin = child.stdin.as_mut().unwrap();
+                let init = json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": { "name": "c10-oracle", "version": "1.0" }
+                    }
+                });
+                let call = json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": tool_name,
+                        "arguments": arguments,
+                        "_meta": meta,
+                    }
+                });
+                writeln!(stdin, "{init}").unwrap();
+                writeln!(stdin, "{call}").unwrap();
+            }
+            let out = child.wait_with_output().unwrap();
+            let stdout_str = String::from_utf8_lossy(&out.stdout);
+            let resp_line = stdout_str
+                .lines()
+                .find_map(|l| {
+                    let v: Value = serde_json::from_str(l).ok()?;
+                    (v.get("id") == Some(&json!(2))).then_some(v)
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing id=2 response from {mcp_bin} mcp on tool {tool_name}; stdout={stdout_str}, stderr={}",
+                        String::from_utf8_lossy(&out.stderr)
+                    )
+                });
+            resp_line["result"].clone()
+        };
+
+        // 3A. Current `BIN mcp` sidecar succeeds for both Codex root `P` and direct child `P/X`!
+        let root_meta = json!({
+            "sessionId": root_codex,
+            "threadId": root_codex,
+            "x-codex-turn-metadata": { "turn_id": "turn-r1" }
+        });
+        let child_meta = json!({
+            "sessionId": root_codex,
+            "threadId": child_codex,
+            "x-codex-turn-metadata": { "turn_id": "t-c10" }
+        });
+
+        let res_root_send = call_mcp_sidecar_with_meta(
+            BIN,
+            "send",
+            json!({ "to": "peer-target", "text": "from codex root" }),
+            root_meta.clone(),
+        );
+        assert_eq!(
+            res_root_send["isError"],
+            json!(false),
+            "C10: current BIN mcp must succeed for Codex root P: {res_root_send}"
+        );
+        let res_child_send = call_mcp_sidecar_with_meta(
+            BIN,
+            "send",
+            json!({ "to": "peer-target", "text": "from codex child" }),
+            child_meta.clone(),
+        );
+        assert_eq!(
+            res_child_send["isError"],
+            json!(false),
+            "C10: current BIN mcp must succeed for Codex direct child P/X: {res_child_send}"
+        );
+
+        // 3B. Pre-HA9-A.codex sidecar (`XMSG_PRE_CODEX_BIN` = `09af11b`)
+        // drops `params._meta`, emits an `agent.sock` frame without `codex_session`/`codex_thread`,
+        // and is explicitly refused with `not_recipient` naming missing runtime metadata (`_meta`),
+        // never falling back to a sole root, forged `as_agent`, or an outer session!
+        let pre_codex_bin = std::env::var("XMSG_PRE_CODEX_BIN")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        if let Some(ref old_codex_sidecar) = pre_codex_bin {
+            for (label, meta_arg, args_val) in [
+                (
+                    "root",
+                    root_meta.clone(),
+                    json!({ "to": "peer-target", "text": "from stale pre-codex sidecar root", "as_agent": root_codex }),
+                ),
+                (
+                    "child",
+                    child_meta.clone(),
+                    json!({ "to": "peer-target", "text": "from stale pre-codex sidecar child", "as_agent": child_codex }),
+                ),
+            ] {
+                let old_res =
+                    call_mcp_sidecar_with_meta(old_codex_sidecar, "send", args_val, meta_arg);
+                assert_eq!(
+                    old_res["isError"],
+                    json!(true),
+                    "C10: pre-HA9-A.codex sidecar ({old_codex_sidecar}) must be refused on {label} when called under Codex owner: {old_res}"
+                );
+                let err_text = old_res["content"][0]["text"].as_str().unwrap_or("");
+                assert!(
+                    err_text.contains("_meta"),
+                    "C10: {label} refusal must name missing runtime _meta, got: {err_text}"
+                );
+            }
+            eprintln!(
+                "C10: live pre-codex (09af11b) sidecar subprocess check passed (root + child refused with missing _meta)"
+            );
+        } else {
+            eprintln!(
+                "XMSG_PRE_CODEX_BIN unset; skipping live pre-codex sidecar subprocess check"
             );
         }
     }

@@ -19,6 +19,7 @@ env:
     treefmt-tree-root
   PACKAGE_CHECKS: >-
     agy-hook
+    codex-hook
     hermes-plugin
     opencode-plugin
     opencode2-plugin

@@ -31,7 +31,7 @@ Each entry gives:
 
 - `address`: `id@node`, `id/child@node` or `name@node`;
 - `kind`: `service`, `instance` or `subagent`;
-- `harness`: `claude`, `agy`, `pi`, `opencode`, `hermes`, or `svc` (omitted when a pre-XL1 peer did not report it);
+- `harness`: `claude`, `agy`, `codex`, `pi`, `opencode`, `hermes`, or `svc` (omitted when a pre-XL1 peer did not report it);
 - `label`: an instance's own description (a service has none);
 - `status`: `live`, `parked` (an instance that is not running now and would be queued for), or `closed`;
 - `user`: the user the recipient belongs to;
@@ -101,6 +101,7 @@ A subagent bound under a parent session `<P>` has a delegated sub-address `<P>/<
   - **Claude Code (`claude`):** Subagents spawned via `Agent` bind `<P>/<name>@<node>` (when named) and `<P>/<agent_id>@<node>` through `xmsg register claude --hook` (`SubagentStart`, `PostToolUse` on `Agent`/`SendMessage`, `SubagentStop`), and `PreToolUse` stamps `as_agent` on MCP calls so `send`, `reply` and `inbox` act as `<P>/<child>@<node>`.
   - **opencode 1.x and 2.x (`opencode`):** Child sessions (`task` or `subagent` children with a `parentID`) bind `<P>/<child_ses>@<node>` under their root conversation `<P>` on the plugin's `register.sock` connection and pass `as_agent` on `xmsg_send`, `xmsg_reply` and `xmsg_inbox`.
   - **Antigravity (`agy`):** Subagents spawned via `invoke_subagent` (admitted from the parent's `transcript.jsonl`) bind `<P>/<child_uuid>@<node>` through `xmsg register agy --hook` (`PreInvocation`, `PreToolUse`, `Stop`), stamping `as_agent` on MCP calls while the parent session is registered.
+  - **Codex (`codex`):** Direct child threads (`payload.parent_thread_id == P`) bind `<P>/<X>@<node>` and are attributed via Codex's MCP runtime `params._meta` (`sessionId` and `threadId`), with turn state tracked by `SubagentStart`, `PreModelRequest`, and `SubagentStop` hooks (`xmsg register codex --hook`).
   - **Hermes (`hermes`) and Pi (`pi`):** Hermes `delegate_task` children act as their root conversation and do not bind a separate sub-address; Pi has no subagent sub-addresses.
 
 ## Reading the sender

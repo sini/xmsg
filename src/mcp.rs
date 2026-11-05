@@ -408,8 +408,9 @@ pub fn handle_jsonrpc(
                 .and_then(|p| p.get("arguments"))
                 .cloned()
                 .unwrap_or(json!({}));
+            let codex_meta = extract_codex_meta(params);
 
-            let res = execute_tool(config, client, name, &args);
+            let res = execute_tool_with_meta(config, client, name, &args, &codex_meta);
             json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -605,6 +606,71 @@ fn check_args(name: &str, args: &Value) -> Result<(), String> {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodexMcpMeta {
+    pub present: bool,
+    pub codex_session: Option<String>,
+    pub codex_thread: Option<String>,
+    pub codex_turn: Option<String>,
+}
+
+/// Extracts Codex runtime metadata strictly from `params._meta`, never from `arguments`
+/// (HA9-A.codex §2.2, C1, C5).
+pub fn extract_codex_meta(params: Option<&Value>) -> CodexMcpMeta {
+    let Some(meta) = params
+        .and_then(|p| p.get("_meta"))
+        .and_then(Value::as_object)
+    else {
+        return CodexMcpMeta::default();
+    };
+    let codex_session = meta
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let codex_thread = meta
+        .get("threadId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let codex_turn = meta.get("x-codex-turn-metadata").and_then(|v| {
+        v.get("turn_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                v.as_str()
+                    .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                    .and_then(|obj| {
+                        obj.get("turn_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+            })
+    });
+    let present = meta.contains_key("sessionId")
+        || meta.contains_key("threadId")
+        || meta.contains_key("x-codex-turn-metadata")
+        || codex_session.is_some()
+        || codex_thread.is_some()
+        || codex_turn.is_some();
+    CodexMcpMeta {
+        present,
+        codex_session,
+        codex_thread,
+        codex_turn,
+    }
+}
+
+pub fn attach_codex_meta(payload: &mut Value, codex_meta: &CodexMcpMeta) {
+    if let Some(ref s) = codex_meta.codex_session {
+        payload["codex_session"] = Value::String(s.clone());
+    }
+    if let Some(ref t) = codex_meta.codex_thread {
+        payload["codex_thread"] = Value::String(t.clone());
+    }
+    if let Some(ref u) = codex_meta.codex_turn {
+        payload["codex_turn"] = Value::String(u.clone());
+    }
+}
+
 /// Runs one `agent.sock` frame for a tool; the result is the frame's `key` member, or the
 /// whole answer without its `status` when `key` is `None`.
 fn agent_tool(
@@ -634,6 +700,16 @@ pub fn execute_tool(
     name: &str,
     args: &Value,
 ) -> Value {
+    execute_tool_with_meta(config, client, name, args, &CodexMcpMeta::default())
+}
+
+pub fn execute_tool_with_meta(
+    config: &McpConfig,
+    client: &reqwest::blocking::Client,
+    name: &str,
+    args: &Value,
+    codex_meta: &CodexMcpMeta,
+) -> Value {
     if config.reply_only && !REPLY_ONLY_TOOLS.contains(&name) {
         return tool_err(format!("tool '{name}' is not available in reply-only mode"));
     }
@@ -647,23 +723,87 @@ pub fn execute_tool(
 
     match name {
         "list" => {
+            let within = match args.get("within") {
+                Some(within_val) => match within_val.as_u64() {
+                    Some(w) => Some(w),
+                    None => {
+                        return tool_err(
+                            "error: 'within' must be a non-negative integer".to_string(),
+                        );
+                    }
+                },
+                None => None,
+            };
+            let mut agent_payload = json!({
+                "action": "list",
+                "schema_version": crate::surface::MCP_SCHEMA_VERSION,
+            });
+            for k in ["name", "node", "kind", "status"] {
+                if let Some(v) = str_arg(k) {
+                    agent_payload[k] = Value::String(v.to_string());
+                }
+            }
+            if let Some(w) = within {
+                agent_payload["within"] = Value::Number(w.into());
+            }
+            let format_list_resp = |mut resp: Value| -> Value {
+                if let Some(obj) = resp.as_object_mut() {
+                    obj.remove("status");
+                }
+                if let Ok(typed) =
+                    serde_json::from_value::<crate::surface::ListResult>(resp.clone())
+                {
+                    if let Ok(s) = serde_json::to_string(&typed) {
+                        return tool_ok(s);
+                    }
+                }
+                tool_ok(resp.to_string())
+            };
+            if codex_meta.present {
+                attach_codex_meta(&mut agent_payload, codex_meta);
+                return match call_agent_sock_within(
+                    &config.agent_sock,
+                    &agent_payload,
+                    Duration::from_secs(10),
+                ) {
+                    Ok(resp) => format_list_resp(resp),
+                    Err(e) => tool_err(e),
+                };
+            }
+            if let Some(as_agent) = str_arg("as_agent").map(str::trim).filter(|s| !s.is_empty()) {
+                agent_payload["as_agent"] = Value::String(as_agent.to_string());
+            }
+            if config.agent_sock.exists() {
+                match call_agent_sock_within(
+                    &config.agent_sock,
+                    &agent_payload,
+                    Duration::from_secs(10),
+                ) {
+                    Ok(resp) => return format_list_resp(resp),
+                    Err(e)
+                        if e.starts_with("not_recipient:")
+                            || e.starts_with("bad_request:")
+                            || e.starts_with("denied:")
+                            || e.starts_with("ambiguous:") =>
+                    {
+                        return tool_err(e);
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            "agent.sock list request failed ({e}); falling back to http.sock/TCP"
+                        );
+                    }
+                }
+            }
+
             let mut url = reqwest::Url::parse("http://xmsg/v1/recipients").expect("static url");
             for k in ["name", "node", "kind", "status"] {
                 if let Some(v) = str_arg(k) {
                     url.query_pairs_mut().append_pair(k, v);
                 }
             }
-            if let Some(within_val) = args.get("within") {
-                match within_val.as_u64() {
-                    Some(w) => {
-                        url.query_pairs_mut().append_pair("within", &w.to_string());
-                    }
-                    None => {
-                        return tool_err(
-                            "error: 'within' must be a non-negative integer".to_string(),
-                        );
-                    }
-                }
+            if let Some(w) = within {
+                url.query_pairs_mut().append_pair("within", &w.to_string());
             }
             let path = match url.query() {
                 Some(q) => format!("{}?{q}", url.path()),
@@ -712,7 +852,11 @@ pub fn execute_tool(
                 "to": to,
                 "text": text,
             });
-            if let Some(as_agent) = str_arg("as_agent").map(str::trim).filter(|s| !s.is_empty()) {
+            if codex_meta.present {
+                attach_codex_meta(&mut payload, codex_meta);
+            } else if let Some(as_agent) =
+                str_arg("as_agent").map(str::trim).filter(|s| !s.is_empty())
+            {
                 payload["as_agent"] = Value::String(as_agent.to_string());
             }
             agent_tool(config, &payload, None, Duration::from_secs(20))
@@ -729,7 +873,11 @@ pub fn execute_tool(
                 "message_id": message_id,
                 "text": text,
             });
-            if let Some(as_agent) = str_arg("as_agent").map(str::trim).filter(|s| !s.is_empty()) {
+            if codex_meta.present {
+                attach_codex_meta(&mut payload, codex_meta);
+            } else if let Some(as_agent) =
+                str_arg("as_agent").map(str::trim).filter(|s| !s.is_empty())
+            {
                 payload["as_agent"] = Value::String(as_agent.to_string());
             }
             // NOTE (XU1 Gate 4 / Amendment 6): MCP tool result is reshaped to
@@ -778,12 +926,19 @@ pub fn execute_tool(
                 .and_then(Value::as_u64)
                 .unwrap_or(0)
                 .min(crate::surface::MAX_WAIT_SECS);
-            let payload = json!({
+            let mut payload = json!({
                 "action": "replies",
                 "schema_version": crate::surface::MCP_SCHEMA_VERSION,
                 "message_id": message_id,
                 "wait": wait,
             });
+            if codex_meta.present {
+                attach_codex_meta(&mut payload, codex_meta);
+            } else if let Some(as_agent) =
+                str_arg("as_agent").map(str::trim).filter(|s| !s.is_empty())
+            {
+                payload["as_agent"] = Value::String(as_agent.to_string());
+            }
             agent_tool(
                 config,
                 &payload,
@@ -802,7 +957,11 @@ pub fn execute_tool(
                 "schema_version": crate::surface::MCP_SCHEMA_VERSION,
                 "wait": wait,
             });
-            if let Some(as_agent) = str_arg("as_agent").map(str::trim).filter(|s| !s.is_empty()) {
+            if codex_meta.present {
+                attach_codex_meta(&mut payload, codex_meta);
+            } else if let Some(as_agent) =
+                str_arg("as_agent").map(str::trim).filter(|s| !s.is_empty())
+            {
                 payload["as_agent"] = Value::String(as_agent.to_string());
             }
             agent_tool(config, &payload, None, Duration::from_secs(wait + 5))

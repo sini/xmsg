@@ -48,6 +48,12 @@ pub enum AgentFrame {
         #[serde(default)]
         #[allow(dead_code)]
         as_agent: Option<String>,
+        #[serde(default)]
+        codex_session: Option<String>,
+        #[serde(default)]
+        codex_thread: Option<String>,
+        #[serde(default)]
+        codex_turn: Option<String>,
     },
     Send {
         #[serde(default)]
@@ -58,6 +64,12 @@ pub enum AgentFrame {
         idempotency_key: Option<String>,
         #[serde(default)]
         as_agent: Option<String>,
+        #[serde(default)]
+        codex_session: Option<String>,
+        #[serde(default)]
+        codex_thread: Option<String>,
+        #[serde(default)]
+        codex_turn: Option<String>,
     },
     Reply {
         #[serde(default)]
@@ -68,6 +80,12 @@ pub enum AgentFrame {
         idempotency_key: Option<String>,
         #[serde(default)]
         as_agent: Option<String>,
+        #[serde(default)]
+        codex_session: Option<String>,
+        #[serde(default)]
+        codex_thread: Option<String>,
+        #[serde(default)]
+        codex_turn: Option<String>,
     },
     Replies {
         #[serde(default)]
@@ -80,6 +98,12 @@ pub enum AgentFrame {
         #[serde(default)]
         #[allow(dead_code)]
         as_agent: Option<String>,
+        #[serde(default)]
+        codex_session: Option<String>,
+        #[serde(default)]
+        codex_thread: Option<String>,
+        #[serde(default)]
+        codex_turn: Option<String>,
     },
     Inbox {
         #[serde(default)]
@@ -88,6 +112,12 @@ pub enum AgentFrame {
         wait: Option<u64>,
         #[serde(default)]
         as_agent: Option<String>,
+        #[serde(default)]
+        codex_session: Option<String>,
+        #[serde(default)]
+        codex_thread: Option<String>,
+        #[serde(default)]
+        codex_turn: Option<String>,
     },
     Subagent {
         #[serde(default)]
@@ -106,6 +136,14 @@ pub enum AgentFrame {
         to: Option<String>,
         #[serde(default)]
         pin_name: Option<String>,
+    },
+    CodexHook {
+        #[serde(default)]
+        schema_version: Option<u32>,
+        event: String,
+        #[serde(default)]
+        label: Option<String>,
+        payload: serde_json::Value,
     },
 }
 
@@ -284,8 +322,74 @@ pub fn resolve_caller_session(
     )
 }
 
+#[derive(Debug, Clone)]
+pub enum CallerTrace {
+    Session(Session),
+    CodexOwner {
+        owner_pid: u32,
+        owner_starttime: String,
+    },
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_caller_session_peer(
+    proc_root: &Path,
+    sessions_dirs: &(impl crate::registry::SessionDirs + ?Sized),
+    agy_config: &AgyConfig,
+    agy_store: &crate::agy::AgyStore,
+    pi_store: &PiStore,
+    svc_store: &crate::svc::SvcStore,
+    conn: Option<&rusqlite::Connection>,
+    peer: &crate::process::PeerCred,
+) -> Result<Session, AppError> {
+    match resolve_caller_session_peer_inner(
+        proc_root,
+        sessions_dirs,
+        agy_config,
+        agy_store,
+        pi_store,
+        svc_store,
+        conn,
+        None,
+        peer,
+    )? {
+        CallerTrace::Session(s) => Ok(s),
+        CallerTrace::CodexOwner { .. } => Err(AppError::NotRecipient(
+            "codex MCP call is missing runtime _meta (sessionId/threadId); refresh MCP or restart the codex session"
+                .to_string(),
+        )),
+    }
+}
+
+pub fn trace_caller_or_codex_owner(
+    state: &AppState,
+    peer: &crate::process::PeerCred,
+) -> Result<CallerTrace, AppError> {
+    #[cfg(target_os = "linux")]
+    let codex_cfg = {
+        let rt_arc = crate::codex::for_state(state);
+        let mut cfg = rt_arc.lock().unwrap().config.clone();
+        cfg.proc_root = state.agy_config.proc_root.clone();
+        Some(cfg)
+    };
+    #[cfg(not(target_os = "linux"))]
+    let codex_cfg: Option<()> = None;
+    let db = state.db.lock().ok();
+    resolve_caller_session_peer_inner(
+        &state.agy_config.proc_root,
+        &state.sessions_dirs,
+        &state.agy_config,
+        &state.agy_store,
+        &state.pi_store,
+        &state.svc_store,
+        db.as_deref(),
+        codex_cfg.as_ref(),
+        peer,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_caller_session_peer_inner(
     proc_root: &Path,
     sessions_dirs: &(impl crate::registry::SessionDirs + ?Sized),
     _agy_config: &AgyConfig,
@@ -293,8 +397,10 @@ pub fn resolve_caller_session_peer(
     pi_store: &PiStore,
     svc_store: &crate::svc::SvcStore,
     conn: Option<&rusqlite::Connection>,
+    #[cfg(target_os = "linux")] codex_config: Option<&crate::codex::CodexConfig>,
+    #[cfg(not(target_os = "linux"))] _codex_config: Option<&()>,
     peer: &crate::process::PeerCred,
-) -> Result<Session, AppError> {
+) -> Result<CallerTrace, AppError> {
     let peer_pid = peer.pid_or_zero();
     let mut walk = crate::process::Ancestry::from_peer(proc_root, peer);
 
@@ -331,7 +437,7 @@ pub fn resolve_caller_session_peer(
                         session.session_id = claim.address();
                     }
                 }
-                return Ok(session);
+                return Ok(CallerTrace::Session(session));
             }
         }
 
@@ -344,7 +450,7 @@ pub fn resolve_caller_session_peer(
                     && !info.starttime.is_empty()
                     && info.starttime == st
                 {
-                    return Ok(Session {
+                    return Ok(CallerTrace::Session(Session {
                         session_id: info.conversation_id.clone(),
                         name: info
                             .label
@@ -364,7 +470,7 @@ pub fn resolve_caller_session_peer(
                         updated_at: info.registered_at.max(0) as u64,
                         harness: "agy".to_string(),
                         registered: Some(info.has_credentials()),
-                    });
+                    }));
                 }
             }
         }
@@ -374,7 +480,7 @@ pub fn resolve_caller_session_peer(
             let pi_lock = pi_store.read().unwrap();
             for info in pi_lock.values() {
                 if info.pid == curr_pid && info.starttime == st {
-                    return Ok(Session {
+                    return Ok(CallerTrace::Session(Session {
                         session_id: info.session_id.clone(),
                         name: info.name.clone().or_else(|| Some(info.session_id.clone())),
                         pid: info.pid,
@@ -387,7 +493,7 @@ pub fn resolve_caller_session_peer(
                         updated_at: info.registered_at as u64,
                         harness: "pi".to_string(),
                         registered: Some(true),
-                    });
+                    }));
                 }
             }
         }
@@ -399,7 +505,7 @@ pub fn resolve_caller_session_peer(
             let svc_lock = svc_store.read().unwrap();
             for info in svc_lock.values() {
                 if info.pid == curr_pid && info.starttime == st {
-                    return Ok(Session {
+                    return Ok(CallerTrace::Session(Session {
                         session_id: info.session_id.clone(),
                         name: Some(info.name.clone()),
                         pid: info.pid,
@@ -412,8 +518,21 @@ pub fn resolve_caller_session_peer(
                         updated_at: info.registered_at as u64,
                         harness: "svc".to_string(),
                         registered: Some(true),
-                    });
+                    }));
                 }
+            }
+        }
+
+        // 5. Check trusted Codex owner (HA9-A.codex §2.2, C4): stop the ancestry walk at
+        //    the nearest trusted Codex process `O = (curr_pid, st)` so a Codex caller never
+        //    falls through to an outer shell or ancestor harness session.
+        #[cfg(target_os = "linux")]
+        if let Some(cfg) = codex_config {
+            if crate::codex::is_trusted_codex_owner_step(cfg, curr_pid, &st).is_some() {
+                return Ok(CallerTrace::CodexOwner {
+                    owner_pid: curr_pid,
+                    owner_starttime: st,
+                });
             }
         }
     }
@@ -657,27 +776,137 @@ pub async fn run_agent_server_with_listener(
                     }
                 };
 
-                let caller_needed = matches!(
-                    frame,
-                    AgentFrame::Send { .. }
-                        | AgentFrame::Reply { .. }
-                        | AgentFrame::Inbox { .. }
-                        | AgentFrame::Subagent { .. }
-                );
-                let caller = if caller_needed {
-                    match surface::trace_caller_peer(&state_clone, &peer).await {
-                        Ok(c) => Some(c),
+                #[cfg(target_os = "linux")]
+                if let AgentFrame::CodexHook {
+                    event,
+                    label,
+                    payload,
+                    ..
+                } = frame
+                {
+                    match handle_codex_hook_frame(
+                        &state_clone,
+                        &peer,
+                        &event,
+                        label.as_deref(),
+                        &payload,
+                    )
+                    .await
+                    {
+                        Ok(outcome) => {
+                            let has_handoff = !outcome.handoff_ids.is_empty();
+                            let resp_json = serde_json::json!({
+                                "status": "ok",
+                                "stdout": outcome.stdout,
+                                "handoff_ids": outcome.handoff_ids,
+                            });
+                            let write_res = writer
+                                .write_all(format!("{resp_json}\n").as_bytes())
+                                .await;
+                            let flush_res = writer.flush().await;
+                            if has_handoff {
+                                if write_res.is_err() || flush_res.is_err() {
+                                    if let Ok(db) = state_clone.db.lock() {
+                                        let _ = crate::storage::release_codex_handoff_to_pending(
+                                            &db,
+                                            &outcome.handoff_ids,
+                                        );
+                                    }
+                                    break;
+                                }
+                                let mut ack_buf = Vec::new();
+                                let mut limited = (&mut buf_reader).take(4096);
+                                let ack_read = tokio::time::timeout(
+                                    std::time::Duration::from_secs(5),
+                                    limited.read_until(b'\n', &mut ack_buf),
+                                )
+                                .await;
+                                let ack_action = match ack_read {
+                                    Ok(Ok(n)) if n > 0 => std::str::from_utf8(&ack_buf)
+                                        .ok()
+                                        .and_then(|s| {
+                                            serde_json::from_str::<serde_json::Value>(s.trim()).ok()
+                                        })
+                                        .and_then(|v| {
+                                            v.get("ack")
+                                                .and_then(serde_json::Value::as_str)
+                                                .map(str::to_string)
+                                        }),
+                                    _ => None,
+                                };
+                                match ack_action.as_deref() {
+                                    Some("accepted") => {
+                                        if let Ok(db) = state_clone.db.lock() {
+                                            let _ =
+                                                crate::storage::complete_codex_handoff_accepted(
+                                                    &db,
+                                                    &outcome.root_id,
+                                                    &outcome.handoff_ids,
+                                                );
+                                        }
+                                        let ok_line = serde_json::json!({ "status": "ok" });
+                                        let _ = writer
+                                            .write_all(format!("{ok_line}\n").as_bytes())
+                                            .await;
+                                        let _ = writer.flush().await;
+                                    }
+                                    Some("abort") => {
+                                        if let Ok(db) = state_clone.db.lock() {
+                                            let _ =
+                                                crate::storage::release_codex_handoff_to_pending(
+                                                    &db,
+                                                    &outcome.handoff_ids,
+                                                );
+                                        }
+                                        let ok_line = serde_json::json!({ "status": "ok" });
+                                        let _ = writer
+                                            .write_all(format!("{ok_line}\n").as_bytes())
+                                            .await;
+                                        let _ = writer.flush().await;
+                                    }
+                                    _ => {
+                                        if let Ok(db) = state_clone.db.lock() {
+                                            let _ = crate::storage::mark_codex_handoff_unknown(
+                                                &db,
+                                                &outcome.handoff_ids,
+                                            );
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         Err(e) => {
                             let err = e.frame();
                             let _ = writer.write_all(format!("{err}\n").as_bytes()).await;
-                            continue;
+                            let _ = writer.flush().await;
                         }
                     }
-                } else {
-                    None
-                };
+                    continue;
+                }
+                #[cfg(not(target_os = "linux"))]
+                if matches!(frame, AgentFrame::CodexHook { .. }) {
+                    // INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
+                    let err = AppError::BadRequest(
+                        "codex support on Darwin is pending".to_string(),
+                    )
+                    .frame();
+                    let _ = writer.write_all(format!("{err}\n").as_bytes()).await;
+                    let _ = writer.flush().await;
+                    continue;
+                }
+
+                let _ = crate::claim::sync_claims(
+                    &state_clone.db,
+                    &state_clone.agy_config.proc_root,
+                    &state_clone.sessions_dirs,
+                    &state_clone.node_name,
+                )
+                .await;
+                let caller_trace = trace_caller_or_codex_owner(&state_clone, &peer);
 
                 let resp: Result<serde_json::Value, AppError> = match frame {
+                    AgentFrame::CodexHook { .. } => unreachable!(),
                     AgentFrame::McpStart {
                         ls_address,
                         csrf_token,
@@ -881,31 +1110,35 @@ pub async fn run_agent_server_with_listener(
                                         .await;
                                     continue;
                                 }
-                                // Check Claude Code sessions via claim table
-                                let claude_res = crate::claim::sync_claims(
-                                    &state_clone.db,
-                                    &state_clone.agy_config.proc_root,
-                                    &state_clone.sessions_dirs,
-                                    &state_clone.node_name,
-                                )
-                                .await
-                                .ok()
-                                .and_then(|active_pairs| {
-                                    let proc_root = &state_clone.agy_config.proc_root;
-                                    process::Ancestry::from_peer(proc_root, &peer)
-                                        .take(32)
-                                        .find_map(|(pid, st)| {
-                                            active_pairs.iter().find_map(|(c, _)| {
-                                                (c.pid == pid
-                                                    && process::claude_start_token_matches(
-                                                        proc_root,
-                                                        &st,
-                                                        &c.proc_start,
-                                                    ))
-                                                .then(|| c.address())
+                                // Check Claude Code sessions via claim table (stopping if caller is a Codex process)
+                                let claude_res = if matches!(caller_trace, Ok(CallerTrace::CodexOwner { .. })) {
+                                    None
+                                } else {
+                                    crate::claim::sync_claims(
+                                        &state_clone.db,
+                                        &state_clone.agy_config.proc_root,
+                                        &state_clone.sessions_dirs,
+                                        &state_clone.node_name,
+                                    )
+                                    .await
+                                    .ok()
+                                    .and_then(|active_pairs| {
+                                        let proc_root = &state_clone.agy_config.proc_root;
+                                        process::Ancestry::from_peer(proc_root, &peer)
+                                            .take(32)
+                                            .find_map(|(pid, st)| {
+                                                active_pairs.iter().find_map(|(c, _)| {
+                                                    (c.pid == pid
+                                                        && process::claude_start_token_matches(
+                                                            proc_root,
+                                                            &st,
+                                                            &c.proc_start,
+                                                        ))
+                                                    .then(|| c.address())
+                                                })
                                             })
-                                        })
-                                });
+                                    })
+                                };
 
                                 if let Some(address) = claude_res {
                                     let resp = serde_json::json!({
@@ -928,136 +1161,7 @@ pub async fn run_agent_server_with_listener(
                         }
                         continue;
                     }
-                    AgentFrame::List {
-                        name,
-                        node,
-                        kind,
-                        status,
-                        within,
-                        ..
-                    } => {
-                        let query = surface::ListQuery {
-                            name,
-                            node,
-                            kind,
-                            status,
-                            within,
-                            host: None,
-                        };
-                        surface::list(&state_clone, &query)
-                            .await
-                            .map(|r| serde_json::json!({ "status": "ok", "recipients": r.recipients, "nodes": r.nodes }))
-                    }
-                    AgentFrame::Send {
-                        to,
-                        text,
-                        idempotency_key,
-                        as_agent,
-                        ..
-                    } => {
-                        let parent = caller.expect("caller resolved");
-                        match resolve_as_agent(&state_clone, parent, as_agent.as_deref(), false) {
-                            Ok(effective_caller) => {
-                                let sender = surface::Sender::Session(effective_caller);
-                                surface::send(
-                                    &state_clone,
-                                    &sender,
-                                    &to,
-                                    &text,
-                                    idempotency_key.as_deref(),
-                                )
-                                .await
-                                .map(|r| {
-                                    serde_json::json!({
-                                        "status": "ok",
-                                        "message_id": r.message_id,
-                                        "address": r.address,
-                                        "outcome": r.outcome,
-                                    })
-                                })
-                            }
-                            Err(e) => Err(e),
-                        }
-                    }
-                    AgentFrame::Reply {
-                        message_id,
-                        text,
-                        idempotency_key,
-                        as_agent,
-                        ..
-                    } => {
-                        let parent = caller.expect("caller resolved");
-                        match resolve_as_agent(&state_clone, parent, as_agent.as_deref(), false) {
-                            Ok(effective_caller) => surface::reply(
-                                &state_clone,
-                                &effective_caller,
-                                &message_id,
-                                &text,
-                                idempotency_key.as_deref(),
-                            )
-                            .await
-                            .map(|r| serde_json::json!({ "status": "ok", "reply": r })),
-                            Err(e) => Err(e),
-                        }
-                    }
-                    AgentFrame::Replies {
-                        message_id,
-                        wait,
-                        after,
-                        ..
-                    } => {
-                        surface::replies(
-                            &state_clone,
-                            &message_id,
-                            after.unwrap_or(0),
-                            wait.unwrap_or(0),
-                        )
-                        .await
-                        .map(|r| serde_json::json!({ "status": "ok", "replies": r }))
-                    }
-                    AgentFrame::Inbox { wait, as_agent, .. } => {
-                        let parent = caller.expect("caller resolved");
-                        match resolve_as_agent(&state_clone, parent, as_agent.as_deref(), true) {
-                            Ok(effective_caller) => {
-                                surface::inbox(&state_clone, &effective_caller, wait.unwrap_or(0))
-                                    .await
-                                    .map(|r| {
-                                        serde_json::json!({
-                                            "status": "ok",
-                                            "address": r.address,
-                                            "messages": r.messages,
-                                        })
-                                    })
-                            }
-                            Err(e) => Err(e),
-                        }
-                    }
-                    AgentFrame::Subagent {
-                        event,
-                        agent_id,
-                        name,
-                        agent_type,
-                        tool_use_id,
-                        transcript_path,
-                        to,
-                        pin_name,
-                        ..
-                    } => {
-                        let parent = caller.expect("caller resolved");
-                        handle_subagent_frame(
-                            &state_clone,
-                            &parent,
-                            &event,
-                            &agent_id,
-                            name.as_deref(),
-                            agent_type.as_deref(),
-                            tool_use_id.as_deref(),
-                            transcript_path.as_deref(),
-                            to.as_deref(),
-                            pin_name.as_deref(),
-                        )
-                        .await
-                    }
+                    other_frame => handle_agent_frame(&state_clone, &peer, other_frame).await,
                 };
                 let line = match resp {
                     Ok(v) => v,
@@ -1066,6 +1170,291 @@ pub async fn run_agent_server_with_listener(
                 let _ = writer.write_all(format!("{line}\n").as_bytes()).await;
             }
         });
+    }
+}
+
+/// Evaluates a non-`McpStart`/`CodexHook` `AgentFrame` on `agent.sock`.
+pub async fn handle_agent_frame(
+    state: &Arc<AppState>,
+    peer: &crate::process::PeerCred,
+    frame: AgentFrame,
+) -> Result<serde_json::Value, AppError> {
+    let _ = crate::claim::sync_claims(
+        &state.db,
+        &state.agy_config.proc_root,
+        &state.sessions_dirs,
+        &state.node_name,
+    )
+    .await;
+    let caller_trace = trace_caller_or_codex_owner(state, peer);
+    match frame {
+        AgentFrame::McpStart { .. } | AgentFrame::CodexHook { .. } => Err(AppError::BadRequest(
+            "mcp_start and codex_hook are handled at stream level".to_string(),
+        )),
+        AgentFrame::List {
+            name,
+            node,
+            kind,
+            status,
+            within,
+            codex_session,
+            codex_thread,
+            codex_turn,
+            ..
+        } => {
+            let codex_check = match &caller_trace {
+                Ok(CallerTrace::CodexOwner {
+                    owner_pid,
+                    owner_starttime,
+                }) => resolve_codex_mcp_caller(
+                    state,
+                    *owner_pid,
+                    owner_starttime,
+                    codex_session.as_deref(),
+                    codex_thread.as_deref(),
+                    codex_turn.as_deref(),
+                    false,
+                )
+                .map(|_| ()),
+                _ if codex_session.is_some() || codex_thread.is_some() => {
+                    Err(AppError::NotRecipient(
+                        "codex runtime metadata rejected: caller does not descend from a trusted --codex-exe process"
+                            .to_string(),
+                    ))
+                }
+                _ => Ok(()),
+            };
+            match codex_check {
+                Ok(()) => {
+                    let query = surface::ListQuery {
+                        name,
+                        node,
+                        kind,
+                        status,
+                        within,
+                        host: None,
+                    };
+                    surface::list(state, &query).await.map(|r| {
+                        serde_json::json!({ "status": "ok", "recipients": r.recipients, "nodes": r.nodes })
+                    })
+                }
+                Err(e) => Err(e),
+            }
+        }
+        AgentFrame::Send {
+            to,
+            text,
+            idempotency_key,
+            as_agent,
+            codex_session,
+            codex_thread,
+            codex_turn,
+            ..
+        } => {
+            let effective_res = match caller_trace {
+                Ok(CallerTrace::CodexOwner {
+                    owner_pid,
+                    ref owner_starttime,
+                }) => resolve_codex_mcp_caller(
+                    state,
+                    owner_pid,
+                    owner_starttime,
+                    codex_session.as_deref(),
+                    codex_thread.as_deref(),
+                    codex_turn.as_deref(),
+                    false,
+                ),
+                _ if codex_session.is_some() || codex_thread.is_some() => {
+                    Err(AppError::NotRecipient(
+                        "codex runtime metadata rejected: caller does not descend from a trusted --codex-exe process"
+                            .to_string(),
+                    ))
+                }
+                Ok(CallerTrace::Session(parent)) => {
+                    resolve_as_agent(state, parent, as_agent.as_deref(), false)
+                }
+                Err(e) => Err(e),
+            };
+            match effective_res {
+                Ok(effective_caller) => {
+                    let sender = surface::Sender::Session(effective_caller);
+                    surface::send(state, &sender, &to, &text, idempotency_key.as_deref())
+                        .await
+                        .map(|r| {
+                            serde_json::json!({
+                                "status": "ok",
+                                "message_id": r.message_id,
+                                "address": r.address,
+                                "outcome": r.outcome,
+                            })
+                        })
+                }
+                Err(e) => Err(e),
+            }
+        }
+        AgentFrame::Reply {
+            message_id,
+            text,
+            idempotency_key,
+            as_agent,
+            codex_session,
+            codex_thread,
+            codex_turn,
+            ..
+        } => {
+            let effective_res = match caller_trace {
+                Ok(CallerTrace::CodexOwner {
+                    owner_pid,
+                    ref owner_starttime,
+                }) => resolve_codex_mcp_caller(
+                    state,
+                    owner_pid,
+                    owner_starttime,
+                    codex_session.as_deref(),
+                    codex_thread.as_deref(),
+                    codex_turn.as_deref(),
+                    false,
+                ),
+                _ if codex_session.is_some() || codex_thread.is_some() => {
+                    Err(AppError::NotRecipient(
+                        "codex runtime metadata rejected: caller does not descend from a trusted --codex-exe process"
+                            .to_string(),
+                    ))
+                }
+                Ok(CallerTrace::Session(parent)) => {
+                    resolve_as_agent(state, parent, as_agent.as_deref(), false)
+                }
+                Err(e) => Err(e),
+            };
+            match effective_res {
+                Ok(effective_caller) => surface::reply(
+                    state,
+                    &effective_caller,
+                    &message_id,
+                    &text,
+                    idempotency_key.as_deref(),
+                )
+                .await
+                .map(|r| serde_json::json!({ "status": "ok", "reply": r })),
+                Err(e) => Err(e),
+            }
+        }
+        AgentFrame::Replies {
+            message_id,
+            wait,
+            after,
+            codex_session,
+            codex_thread,
+            codex_turn,
+            ..
+        } => {
+            let codex_check = match &caller_trace {
+                Ok(CallerTrace::CodexOwner {
+                    owner_pid,
+                    owner_starttime,
+                }) => resolve_codex_mcp_caller(
+                    state,
+                    *owner_pid,
+                    owner_starttime,
+                    codex_session.as_deref(),
+                    codex_thread.as_deref(),
+                    codex_turn.as_deref(),
+                    false,
+                )
+                .map(|_| ()),
+                _ if codex_session.is_some() || codex_thread.is_some() => {
+                    Err(AppError::NotRecipient(
+                        "codex runtime metadata rejected: caller does not descend from a trusted --codex-exe process"
+                            .to_string(),
+                    ))
+                }
+                _ => Ok(()),
+            };
+            match codex_check {
+                Ok(()) => {
+                    surface::replies(state, &message_id, after.unwrap_or(0), wait.unwrap_or(0))
+                        .await
+                        .map(|r| serde_json::json!({ "status": "ok", "replies": r }))
+                }
+                Err(e) => Err(e),
+            }
+        }
+        AgentFrame::Inbox {
+            wait,
+            as_agent,
+            codex_session,
+            codex_thread,
+            codex_turn,
+            ..
+        } => {
+            let effective_res = match caller_trace {
+                Ok(CallerTrace::CodexOwner {
+                    owner_pid,
+                    ref owner_starttime,
+                }) => resolve_codex_mcp_caller(
+                    state,
+                    owner_pid,
+                    owner_starttime,
+                    codex_session.as_deref(),
+                    codex_thread.as_deref(),
+                    codex_turn.as_deref(),
+                    true,
+                ),
+                _ if codex_session.is_some() || codex_thread.is_some() => {
+                    Err(AppError::NotRecipient(
+                        "codex runtime metadata rejected: caller does not descend from a trusted --codex-exe process"
+                            .to_string(),
+                    ))
+                }
+                Ok(CallerTrace::Session(parent)) => {
+                    resolve_as_agent(state, parent, as_agent.as_deref(), true)
+                }
+                Err(e) => Err(e),
+            };
+            match effective_res {
+                Ok(effective_caller) => surface::inbox(state, &effective_caller, wait.unwrap_or(0))
+                    .await
+                    .map(|r| {
+                        serde_json::json!({
+                            "status": "ok",
+                            "address": r.address,
+                            "messages": r.messages,
+                        })
+                    }),
+                Err(e) => Err(e),
+            }
+        }
+        AgentFrame::Subagent {
+            event,
+            agent_id,
+            name,
+            agent_type,
+            tool_use_id,
+            transcript_path,
+            to,
+            pin_name,
+            ..
+        } => match caller_trace {
+            Ok(CallerTrace::Session(parent)) => {
+                handle_subagent_frame(
+                    state,
+                    &parent,
+                    &event,
+                    &agent_id,
+                    name.as_deref(),
+                    agent_type.as_deref(),
+                    tool_use_id.as_deref(),
+                    transcript_path.as_deref(),
+                    to.as_deref(),
+                    pin_name.as_deref(),
+                )
+                .await
+            }
+            Ok(CallerTrace::CodexOwner { .. }) => Err(AppError::BadRequest(
+                "subagent frame on agent.sock is only valid for Claude or agy sessions".to_string(),
+            )),
+            Err(e) => Err(e),
+        },
     }
 }
 
@@ -1704,4 +2093,873 @@ pub fn run_claude_hook(input: &str, agent_sock: Option<&Path>) -> Result<String,
         }
         other => Err(format!("unsupported hook_event_name '{other}'")),
     }
+}
+
+/// Resolves a Codex MCP caller under trusted owner `(owner_pid, owner_starttime)` using
+/// `params._meta` (`codex_session`, `codex_thread`, `codex_turn`) (HA9-A.codex §2.2).
+#[cfg(target_os = "linux")]
+pub fn resolve_codex_mcp_caller(
+    state: &AppState,
+    owner_pid: u32,
+    owner_starttime: &str,
+    codex_session: Option<&str>,
+    codex_thread: Option<&str>,
+    codex_turn: Option<&str>,
+    require_subagent: bool,
+) -> Result<Session, AppError> {
+    let session_id = codex_session
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && crate::claim::is_uuid_shaped(s))
+        .ok_or_else(|| {
+            AppError::NotRecipient(
+                "codex MCP call is missing runtime _meta (sessionId/threadId); refresh MCP or restart the codex session"
+                    .to_string(),
+            )
+        })?;
+    let thread_id = codex_thread
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && crate::claim::is_uuid_shaped(s))
+        .ok_or_else(|| {
+            AppError::NotRecipient(
+                "codex MCP call is missing runtime _meta (sessionId/threadId); refresh MCP or restart the codex session"
+                    .to_string(),
+            )
+        })?;
+
+    let rt_arc = crate::codex::for_state(state);
+    let (root_res, is_revoked) = {
+        let mut rt = rt_arc.lock().unwrap();
+        let mut cfg = rt.config.clone();
+        cfg.proc_root = state.agy_config.proc_root.clone();
+        let res =
+            rt.store
+                .validate_or_retry_root(&cfg, owner_pid, owner_starttime, session_id, true);
+        let rev = rt.store.is_revoked(session_id) || !rt.store.has_root(session_id);
+        (res, rev)
+    };
+
+    let root_snap = match root_res {
+        Ok(snap) => {
+            if let Ok(db) = state.db.lock() {
+                let _ = crate::storage::upsert_codex_root(&db, &snap);
+            }
+            snap
+        }
+        Err(msg) => {
+            if is_revoked {
+                if let Ok(db) = state.db.lock() {
+                    let _ = crate::storage::invalidate_codex_root(&db, session_id);
+                }
+            }
+            return Err(AppError::NotRecipient(msg));
+        }
+    };
+
+    if thread_id == session_id {
+        if require_subagent {
+            return Err(AppError::NotRecipient(format!(
+                "'{session_id}' is a parent session and receives messages on its channel; 'inbox' is only for subagents"
+            )));
+        }
+        return Ok(crate::codex::codex_root_to_session(&root_snap));
+    }
+
+    let (root_snap, _child_state, binding) =
+        crate::codex::admit_codex_subagent(&state.db, session_id, thread_id, None)?;
+
+    if let Some(turn_id) = codex_turn.map(str::trim).filter(|s| !s.is_empty()) {
+        let repaired = {
+            let mut rt = rt_arc.lock().unwrap();
+            rt.store.repair_child_turn_from_meta(
+                session_id,
+                thread_id,
+                root_snap.generation,
+                turn_id,
+            )
+        };
+        if let Some(repaired_state) = repaired {
+            if let Ok(db) = state.db.lock() {
+                let now = crate::storage::now_epoch_secs();
+                let _ = crate::storage::subagent_start_turn(
+                    &db,
+                    session_id,
+                    thread_id,
+                    root_snap.owner_pid,
+                    &root_snap.owner_starttime,
+                    None,
+                    repaired_state.agent_type.as_deref(),
+                    None,
+                    now,
+                );
+            }
+        }
+    }
+
+    Ok(Session {
+        session_id: format!("{session_id}/{thread_id}"),
+        name: binding.display_label().map(str::to_string),
+        pid: root_snap.owner_pid,
+        cwd: root_snap.cwd.unwrap_or_else(|| "/".to_string()),
+        status: "idle".to_string(),
+        kind: "subagent".to_string(),
+        entrypoint: None,
+        version: None,
+        started_at: binding.bound_at as u64,
+        updated_at: binding.bound_at as u64,
+        harness: "codex".to_string(),
+        registered: Some(true),
+    })
+}
+
+// INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
+#[cfg(not(target_os = "linux"))]
+pub fn resolve_codex_mcp_caller(
+    _state: &AppState,
+    _owner_pid: u32,
+    _owner_starttime: &str,
+    _codex_session: Option<&str>,
+    _codex_thread: Option<&str>,
+    _codex_turn: Option<&str>,
+    _require_subagent: bool,
+) -> Result<Session, AppError> {
+    Err(AppError::NotRecipient(
+        "codex support on Darwin is pending".to_string(),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+pub struct CodexHookOutcome {
+    pub root_id: String,
+    pub stdout: String,
+    pub handoff_ids: Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+fn find_trusted_codex_owner_for_hook(
+    state: &AppState,
+    peer: &crate::process::PeerCred,
+) -> Result<(u32, String), AppError> {
+    let rt_arc = crate::codex::for_state(state);
+    let mut cfg = rt_arc.lock().unwrap().config.clone();
+    cfg.proc_root = state.agy_config.proc_root.clone();
+    let peer_pid = peer.pid_or_zero();
+    let mut walk = crate::process::Ancestry::from_peer(&cfg.proc_root, peer);
+    for (curr_pid, st) in walk.by_ref().take(32) {
+        if crate::codex::is_trusted_codex_owner_step(&cfg, curr_pid, &st).is_some() {
+            return Ok((curr_pid, st));
+        }
+    }
+    Err(AppError::NotRecipient(format!(
+        "peer PID {peer_pid} does not descend from a trusted --codex-exe process"
+    )))
+}
+
+/// Handles `AgentFrame::CodexHook` on `agent.sock` (HA9-A.codex §2.1, §2.3, §2.5, §2.7).
+#[cfg(target_os = "linux")]
+pub async fn handle_codex_hook_frame(
+    state: &AppState,
+    peer: &crate::process::PeerCred,
+    event: &str,
+    label: Option<&str>,
+    raw_payload: &serde_json::Value,
+) -> Result<CodexHookOutcome, AppError> {
+    let (owner_pid, owner_starttime) = find_trusted_codex_owner_for_hook(state, peer)?;
+    let hook_payload: crate::codex::CodexHookPayload = serde_json::from_value(raw_payload.clone())
+        .map_err(|e| AppError::BadRequest(format!("invalid codex hook payload: {e}")))?;
+
+    let session_id = hook_payload
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            AppError::BadRequest("codex hook payload missing 'session_id'".to_string())
+        })?;
+    if !crate::claim::is_uuid_shaped(session_id) {
+        return Err(AppError::NotRecipient(format!(
+            "codex hook session_id '{session_id}' is not UUID-shaped"
+        )));
+    }
+
+    let rt_arc = crate::codex::for_state(state);
+    let mut cfg = rt_arc.lock().unwrap().config.clone();
+    cfg.proc_root = state.agy_config.proc_root.clone();
+
+    match event {
+        "SessionStart" | "session-start" => {
+            let source = hook_payload.source.as_deref().map(str::trim).unwrap_or("");
+            match source {
+                "startup" | "clear" | "fork" => {
+                    let reg_res = {
+                        let mut rt = rt_arc.lock().unwrap();
+                        rt.store.register_fresh_root(
+                            &cfg,
+                            owner_pid,
+                            &owner_starttime,
+                            session_id,
+                            hook_payload.cwd.as_deref(),
+                            label,
+                            true,
+                        )
+                    };
+                    match reg_res {
+                        Ok(Some(root_snap)) => {
+                            let reserved = {
+                                let db = state
+                                    .db
+                                    .lock()
+                                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                                crate::storage::upsert_codex_root(&db, &root_snap)
+                                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                                crate::storage::reserve_codex_hook_batch(
+                                    &db,
+                                    session_id,
+                                    root_snap.generation,
+                                )
+                                .map_err(|e| AppError::Internal(e.to_string()))?
+                            };
+                            match reserved {
+                                Some((handoff_ids, context_text)) => {
+                                    let out = serde_json::json!({
+                                        "hookSpecificOutput": {
+                                            "hookEventName": "SessionStart",
+                                            "additionalContext": context_text,
+                                        }
+                                    });
+                                    Ok(CodexHookOutcome {
+                                        root_id: session_id.to_string(),
+                                        stdout: out.to_string(),
+                                        handoff_ids,
+                                    })
+                                }
+                                None => Ok(CodexHookOutcome {
+                                    root_id: session_id.to_string(),
+                                    stdout: String::new(),
+                                    handoff_ids: Vec::new(),
+                                }),
+                            }
+                        }
+                        Ok(None) => Ok(CodexHookOutcome {
+                            root_id: session_id.to_string(),
+                            stdout: String::new(),
+                            handoff_ids: Vec::new(),
+                        }),
+                        Err(msg) => {
+                            if let Ok(db) = state.db.lock() {
+                                let _ = crate::storage::invalidate_codex_root(&db, session_id);
+                            }
+                            Err(AppError::NotRecipient(msg))
+                        }
+                    }
+                }
+                "compact" => {
+                    let val_res = {
+                        let mut rt = rt_arc.lock().unwrap();
+                        rt.store.validate_or_retry_root(
+                            &cfg,
+                            owner_pid,
+                            &owner_starttime,
+                            session_id,
+                            false,
+                        )
+                    };
+                    match val_res {
+                        Ok(root_snap) => {
+                            if let Ok(db) = state.db.lock() {
+                                let _ = crate::storage::upsert_codex_root(&db, &root_snap);
+                            }
+                            Ok(CodexHookOutcome {
+                                root_id: session_id.to_string(),
+                                stdout: String::new(),
+                                handoff_ids: Vec::new(),
+                            })
+                        }
+                        Err(msg) => {
+                            if let Ok(db) = state.db.lock() {
+                                let _ = crate::storage::invalidate_codex_root(&db, session_id);
+                            }
+                            Err(AppError::NotRecipient(msg))
+                        }
+                    }
+                }
+                "resume" => {
+                    {
+                        let mut rt = rt_arc.lock().unwrap();
+                        let _ = rt.store.revoke_root(session_id);
+                    }
+                    if let Ok(db) = state.db.lock() {
+                        let _ = crate::storage::invalidate_codex_root(&db, session_id);
+                    }
+                    Err(AppError::NotRecipient(format!(
+                        "codex resume is unsupported in xmsg v1 for session '{session_id}'; start a fresh codex thread"
+                    )))
+                }
+                other => {
+                    {
+                        let mut rt = rt_arc.lock().unwrap();
+                        let _ = rt.store.revoke_root(session_id);
+                    }
+                    if let Ok(db) = state.db.lock() {
+                        let _ = crate::storage::invalidate_codex_root(&db, session_id);
+                    }
+                    Err(AppError::NotRecipient(format!(
+                        "unsupported or missing SessionStart source '{other}' for session '{session_id}'"
+                    )))
+                }
+            }
+        }
+        "UserPromptSubmit" | "user-prompt-submit" => {
+            let val_res = {
+                let mut rt = rt_arc.lock().unwrap();
+                rt.store
+                    .validate_or_retry_root(&cfg, owner_pid, &owner_starttime, session_id, true)
+            };
+            match val_res {
+                Ok(root_snap) => {
+                    if let Some(agent_id) = hook_payload
+                        .agent_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty() && *s != session_id)
+                    {
+                        let (root_snap, _, _) = crate::codex::admit_codex_subagent(
+                            &state.db,
+                            session_id,
+                            agent_id,
+                            hook_payload.agent_type.as_deref(),
+                        )?;
+                        let updated_child = {
+                            let mut rt = rt_arc.lock().unwrap();
+                            match hook_payload
+                                .turn_id
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                            {
+                                Some(tid) => rt.store.repair_child_turn_from_meta(
+                                    session_id,
+                                    agent_id,
+                                    root_snap.generation,
+                                    tid,
+                                ),
+                                None => rt.store.mark_child_turn_active(
+                                    session_id,
+                                    agent_id,
+                                    root_snap.generation,
+                                    None,
+                                ),
+                            }
+                        };
+                        let subagent_addr = format!("{session_id}/{agent_id}");
+                        let reserved = {
+                            let db = state
+                                .db
+                                .lock()
+                                .map_err(|e| AppError::Internal(e.to_string()))?;
+                            crate::storage::upsert_codex_root(&db, &root_snap)
+                                .map_err(|e| AppError::Internal(e.to_string()))?;
+                            if let Some(child_state) = updated_child {
+                                let now = crate::storage::now_epoch_secs();
+                                let _ = crate::storage::subagent_start_turn(
+                                    &db,
+                                    session_id,
+                                    agent_id,
+                                    root_snap.owner_pid,
+                                    &root_snap.owner_starttime,
+                                    None,
+                                    child_state.agent_type.as_deref(),
+                                    None,
+                                    now,
+                                );
+                            }
+                            crate::storage::reserve_codex_child_hook_batch(
+                                &db,
+                                &subagent_addr,
+                                root_snap.generation,
+                            )
+                            .map_err(|e| AppError::Internal(e.to_string()))?
+                        };
+                        return match reserved {
+                            Some((handoff_ids, context_text)) => {
+                                let out = serde_json::json!({
+                                    "hookSpecificOutput": {
+                                        "hookEventName": "UserPromptSubmit",
+                                        "additionalContext": context_text,
+                                    }
+                                });
+                                Ok(CodexHookOutcome {
+                                    root_id: subagent_addr,
+                                    stdout: out.to_string(),
+                                    handoff_ids,
+                                })
+                            }
+                            None => Ok(CodexHookOutcome {
+                                root_id: subagent_addr,
+                                stdout: String::new(),
+                                handoff_ids: Vec::new(),
+                            }),
+                        };
+                    }
+
+                    let reserved = {
+                        let db = state
+                            .db
+                            .lock()
+                            .map_err(|e| AppError::Internal(e.to_string()))?;
+                        crate::storage::upsert_codex_root(&db, &root_snap)
+                            .map_err(|e| AppError::Internal(e.to_string()))?;
+                        crate::storage::reserve_codex_hook_batch(
+                            &db,
+                            session_id,
+                            root_snap.generation,
+                        )
+                        .map_err(|e| AppError::Internal(e.to_string()))?
+                    };
+                    match reserved {
+                        Some((handoff_ids, context_text)) => {
+                            let out = serde_json::json!({
+                                "hookSpecificOutput": {
+                                    "hookEventName": "UserPromptSubmit",
+                                    "additionalContext": context_text,
+                                }
+                            });
+                            Ok(CodexHookOutcome {
+                                root_id: session_id.to_string(),
+                                stdout: out.to_string(),
+                                handoff_ids,
+                            })
+                        }
+                        None => Ok(CodexHookOutcome {
+                            root_id: session_id.to_string(),
+                            stdout: String::new(),
+                            handoff_ids: Vec::new(),
+                        }),
+                    }
+                }
+                Err(msg) => {
+                    if let Ok(db) = state.db.lock() {
+                        let _ = crate::storage::invalidate_codex_root(&db, session_id);
+                    }
+                    Err(AppError::NotRecipient(msg))
+                }
+            }
+        }
+        "PreModelRequest" | "pre-model-request" => {
+            let val_res = {
+                let mut rt = rt_arc.lock().unwrap();
+                rt.store
+                    .validate_or_retry_root(&cfg, owner_pid, &owner_starttime, session_id, true)
+            };
+            let _root_snap = match val_res {
+                Ok(snap) => {
+                    if let Ok(db) = state.db.lock() {
+                        let _ = crate::storage::upsert_codex_root(&db, &snap);
+                    }
+                    snap
+                }
+                Err(msg) => {
+                    if let Ok(db) = state.db.lock() {
+                        let _ = crate::storage::invalidate_codex_root(&db, session_id);
+                    }
+                    return Err(AppError::NotRecipient(msg));
+                }
+            };
+            if let Some(agent_id) = hook_payload
+                .agent_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && *s != session_id)
+            {
+                let (root_snap, _, _) = crate::codex::admit_codex_subagent(
+                    &state.db,
+                    session_id,
+                    agent_id,
+                    hook_payload.agent_type.as_deref(),
+                )?;
+                let updated_child = {
+                    let mut rt = rt_arc.lock().unwrap();
+                    rt.store.mark_child_turn_active(
+                        session_id,
+                        agent_id,
+                        root_snap.generation,
+                        hook_payload.turn_id.as_deref(),
+                    )
+                };
+                if let Some(child_state) = updated_child {
+                    if let Ok(db) = state.db.lock() {
+                        let now = crate::storage::now_epoch_secs();
+                        let _ = crate::storage::subagent_start_turn(
+                            &db,
+                            session_id,
+                            agent_id,
+                            root_snap.owner_pid,
+                            &root_snap.owner_starttime,
+                            None,
+                            child_state.agent_type.as_deref(),
+                            None,
+                            now,
+                        );
+                    }
+                }
+            }
+            Ok(CodexHookOutcome {
+                root_id: session_id.to_string(),
+                stdout: String::new(),
+                handoff_ids: Vec::new(),
+            })
+        }
+        "SubagentStart" | "subagent-start" => {
+            let agent_id = hook_payload
+                .agent_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    AppError::BadRequest(
+                        "SubagentStart hook payload missing non-empty 'agent_id'".to_string(),
+                    )
+                })?;
+            let val_res = {
+                let mut rt = rt_arc.lock().unwrap();
+                rt.store
+                    .validate_or_retry_root(&cfg, owner_pid, &owner_starttime, session_id, true)
+            };
+            if let Err(msg) = val_res {
+                if let Ok(db) = state.db.lock() {
+                    let _ = crate::storage::invalidate_codex_root(&db, session_id);
+                }
+                return Err(AppError::NotRecipient(msg));
+            }
+            let (root_snap, _, _) = crate::codex::admit_codex_subagent(
+                &state.db,
+                session_id,
+                agent_id,
+                hook_payload.agent_type.as_deref(),
+            )?;
+            let child_state = {
+                let mut rt = rt_arc.lock().unwrap();
+                rt.store.mark_child_turn_active(
+                    session_id,
+                    agent_id,
+                    root_snap.generation,
+                    hook_payload.turn_id.as_deref(),
+                )
+            };
+            if let Ok(db) = state.db.lock() {
+                let now = crate::storage::now_epoch_secs();
+                let _ = crate::storage::upsert_codex_root(&db, &root_snap);
+                let _ = crate::storage::subagent_start_turn(
+                    &db,
+                    session_id,
+                    agent_id,
+                    root_snap.owner_pid,
+                    &root_snap.owner_starttime,
+                    None,
+                    child_state.and_then(|c| c.agent_type).as_deref(),
+                    None,
+                    now,
+                );
+            }
+            Ok(CodexHookOutcome {
+                root_id: session_id.to_string(),
+                stdout: String::new(),
+                handoff_ids: Vec::new(),
+            })
+        }
+        "SubagentStop" | "subagent-stop" => {
+            let agent_id = hook_payload
+                .agent_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    AppError::BadRequest(
+                        "SubagentStop hook payload missing non-empty 'agent_id'".to_string(),
+                    )
+                })?;
+            let val_res = {
+                let mut rt = rt_arc.lock().unwrap();
+                rt.store.validate_or_retry_root(
+                    &cfg,
+                    owner_pid,
+                    &owner_starttime,
+                    session_id,
+                    false,
+                )
+            };
+            let root_snap = match val_res {
+                Ok(snap) => snap,
+                Err(msg) => {
+                    if let Ok(db) = state.db.lock() {
+                        let _ = crate::storage::invalidate_codex_root(&db, session_id);
+                    }
+                    return Err(AppError::NotRecipient(msg));
+                }
+            };
+            let stop_res = {
+                let mut rt = rt_arc.lock().unwrap();
+                rt.store.stop_child_turn(
+                    session_id,
+                    agent_id,
+                    root_snap.generation,
+                    hook_payload.turn_id.as_deref(),
+                )
+            };
+            let all_stopped = stop_res.map_err(AppError::NotRecipient)?;
+            if all_stopped {
+                let moved = {
+                    let db = state
+                        .db
+                        .lock()
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                    crate::storage::subagent_stop_turn(&db, session_id, agent_id)
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                    let now = crate::storage::now_epoch_secs();
+                    crate::storage::take_codex_subagent_queue_to_parent(
+                        &db,
+                        session_id,
+                        root_snap.generation,
+                        agent_id,
+                        now,
+                    )
+                    .map_err(|e| AppError::Internal(e.to_string()))?
+                };
+                let local = state.local();
+                for msg in moved {
+                    let _ = surface::try_push_codex_queued_message(
+                        &local,
+                        &root_snap,
+                        &msg.id,
+                        &msg.envelope,
+                    )
+                    .await;
+                }
+            }
+            Ok(CodexHookOutcome {
+                root_id: session_id.to_string(),
+                stdout: String::new(),
+                handoff_ids: Vec::new(),
+            })
+        }
+        "Stop" | "stop" => {
+            if hook_payload
+                .agent_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_some()
+            {
+                return Ok(CodexHookOutcome {
+                    root_id: session_id.to_string(),
+                    stdout: String::new(),
+                    handoff_ids: Vec::new(),
+                });
+            }
+            let val_res = {
+                let mut rt = rt_arc.lock().unwrap();
+                rt.store
+                    .validate_or_retry_root(&cfg, owner_pid, &owner_starttime, session_id, true)
+            };
+            match val_res {
+                Ok(root_snap) => {
+                    let reserved = {
+                        let db = state
+                            .db
+                            .lock()
+                            .map_err(|e| AppError::Internal(e.to_string()))?;
+                        crate::storage::upsert_codex_root(&db, &root_snap)
+                            .map_err(|e| AppError::Internal(e.to_string()))?;
+                        crate::storage::reserve_codex_hook_batch(
+                            &db,
+                            session_id,
+                            root_snap.generation,
+                        )
+                        .map_err(|e| AppError::Internal(e.to_string()))?
+                    };
+                    match reserved {
+                        Some((handoff_ids, reason_text)) => {
+                            let out = serde_json::json!({
+                                "decision": "block",
+                                "reason": reason_text,
+                            });
+                            Ok(CodexHookOutcome {
+                                root_id: session_id.to_string(),
+                                stdout: out.to_string(),
+                                handoff_ids,
+                            })
+                        }
+                        None => Ok(CodexHookOutcome {
+                            root_id: session_id.to_string(),
+                            stdout: String::new(),
+                            handoff_ids: Vec::new(),
+                        }),
+                    }
+                }
+                Err(msg) => {
+                    if let Ok(db) = state.db.lock() {
+                        let _ = crate::storage::invalidate_codex_root(&db, session_id);
+                    }
+                    Err(AppError::NotRecipient(msg))
+                }
+            }
+        }
+        "SessionEnd" | "session-end" => {
+            let revoked = {
+                let mut rt = rt_arc.lock().unwrap();
+                let owned = rt
+                    .store
+                    .validate_or_retry_root(&cfg, owner_pid, &owner_starttime, session_id, false)
+                    .is_ok();
+                if owned {
+                    let _ = rt.store.end_root(session_id);
+                    true
+                } else {
+                    rt.store.is_revoked(session_id)
+                }
+            };
+            if revoked {
+                if let Ok(db) = state.db.lock() {
+                    let _ = crate::storage::invalidate_codex_root(&db, session_id);
+                }
+                Ok(CodexHookOutcome {
+                    root_id: session_id.to_string(),
+                    stdout: String::new(),
+                    handoff_ids: Vec::new(),
+                })
+            } else {
+                Err(AppError::NotRecipient(format!(
+                    "codex SessionEnd for '{session_id}' rejected: not owned by caller"
+                )))
+            }
+        }
+        other => Err(AppError::BadRequest(format!(
+            "unsupported codex hook event '{other}'"
+        ))),
+    }
+}
+
+/// Runs `xmsg register codex --hook --event <event>`: sends `AgentFrame::CodexHook` to
+/// `agent.sock`, writes the returned hook JSON (if any) to `stdout_writer` and flushes it,
+/// and completes the two-phase `codex_handoff` acknowledgement on the same socket stream (§2.5, §2.7).
+// INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
+#[cfg(target_os = "linux")]
+pub fn run_codex_hook<W: std::io::Write>(
+    event: &str,
+    label: Option<&str>,
+    input: &str,
+    agent_sock: Option<&Path>,
+    mut stdout_writer: W,
+) -> Result<(), String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let payload_val: serde_json::Value =
+        serde_json::from_str(input).map_err(|e| format!("malformed hook JSON on stdin: {e}"))?;
+    if !payload_val.is_object() {
+        return Err("hook stdin JSON must be an object".to_string());
+    }
+
+    let sock_path = match agent_sock {
+        Some(p) => p.to_path_buf(),
+        None => default_agent_sock_path().map_err(|e| e.to_string())?,
+    };
+    let my_uid = current_uid();
+    if let Some(parent) = sock_path.parent() {
+        ensure_secure_socket_dir(parent, my_uid)
+            .map_err(|e| format!("insecure agent socket directory: {e}"))?;
+    }
+
+    let mut stream = UnixStream::connect(&sock_path).map_err(|e| {
+        format!(
+            "failed to connect to agent socket at {}: {e}",
+            sock_path.display()
+        )
+    })?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| e.to_string())?;
+
+    let mut frame = serde_json::json!({
+        "action": "codex_hook",
+        "schema_version": surface::MCP_SCHEMA_VERSION,
+        "event": event,
+        "payload": payload_val,
+    });
+    if let Some(lbl) = label.filter(|s| !s.trim().is_empty()) {
+        frame["label"] = serde_json::Value::String(lbl.to_string());
+    }
+
+    let line = format!("{frame}\n");
+    stream
+        .write_all(line.as_bytes())
+        .map_err(|e| format!("failed to write to agent socket: {e}"))?;
+    stream
+        .flush()
+        .map_err(|e| format!("failed to flush agent socket: {e}"))?;
+
+    let mut reader = BufReader::new(
+        stream
+            .try_clone()
+            .map_err(|e| format!("failed to clone agent socket stream: {e}"))?,
+    );
+    let mut resp_line = String::new();
+    reader
+        .read_line(&mut resp_line)
+        .map_err(|e| format!("failed to read response from agent socket: {e}"))?;
+
+    let resp_val: serde_json::Value = serde_json::from_str(&resp_line)
+        .map_err(|e| format!("invalid response JSON from agent socket: {e}"))?;
+
+    if resp_val.get("status").and_then(serde_json::Value::as_str) == Some("error") {
+        let err_kind = resp_val
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("error");
+        let detail = resp_val
+            .get("detail")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown error");
+        return Err(format!("{err_kind}: {detail}"));
+    }
+
+    let stdout_str = resp_val
+        .get("stdout")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let has_handoff = resp_val
+        .get("handoff_ids")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|a| !a.is_empty());
+
+    if !stdout_str.is_empty() {
+        let out_bytes = format!("{stdout_str}\n");
+        if let Err(e) = stdout_writer
+            .write_all(out_bytes.as_bytes())
+            .and_then(|()| stdout_writer.flush())
+        {
+            if has_handoff {
+                let _ = stream.write_all(b"{\"ack\":\"abort\"}\n");
+                let _ = stream.flush();
+            }
+            return Err(format!("failed to write hook output to stdout: {e}"));
+        }
+    }
+
+    if has_handoff {
+        stream
+            .write_all(b"{\"ack\":\"accepted\"}\n")
+            .map_err(|e| format!("failed to write handoff ack to agent socket: {e}"))?;
+        stream
+            .flush()
+            .map_err(|e| format!("failed to flush handoff ack to agent socket: {e}"))?;
+        let mut ack_resp = String::new();
+        let _ = reader.read_line(&mut ack_resp);
+    }
+
+    Ok(())
 }

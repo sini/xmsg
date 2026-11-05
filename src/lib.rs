@@ -2,6 +2,11 @@ pub mod adapter;
 pub mod agent;
 pub mod agy;
 pub mod claim;
+// INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
+#[cfg(target_os = "linux")]
+pub mod codex;
+#[cfg(target_os = "linux")]
+pub mod codex_relay;
 pub mod error;
 pub mod fed;
 pub mod handoff;

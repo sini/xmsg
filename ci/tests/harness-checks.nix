@@ -15,11 +15,15 @@
 #   real `xmsg serve` and a mock model on loopback (extensions/hermes/check.py).
 # - `pi-extension`, `pi-paths`: the pi extension's own node tests (extensions/pi). The
 #   extension's darwin `getconf DARWIN_USER_TEMP_DIR` fallback is not covered by CI.
-# - `pre-xl1-compat` (XF3.1, XC1): runs `gate_xf3_list_compat_and_agy_label` with
-#   `XMSG_PRE_XL1_BIN` pointing at the pre-XL1 (`9096199`) binary and `XMSG_PRE_DEPLOY_BIN`
-#   pointing at the pre-XR3/XH1 deployed (`9d1f5fa`) binary (`doCheck = false`), asserting
-#   both federated wire compat and hook-to-sidecar version skew across `claude` and `agy`
+# - `pre-xl1-compat` (XF3.1, XC1, HA9-A.codex C10): runs `gate_xf3_list_compat_and_agy_label` with
+#   `XMSG_PRE_XL1_BIN` pointing at the pre-XL1 (`9096199`) binary, `XMSG_PRE_DEPLOY_BIN`
+#   pointing at the pre-XR3/XH1 deployed (`9d1f5fa`) binary, and `XMSG_PRE_CODEX_BIN`
+#   pointing at the pre-codex (`09af11b`) binary (`doCheck = false`), asserting
+#   federated wire compat and hook-to-sidecar version skew across `claude`, `agy`, and `codex`
 #   (root and subagent) with no skip lines.
+# - `codex-hook` (HA9-A.codex C2, C8, C9, C11, C12, C14): runs the real Codex 0.166.0 binary and
+#   real `xmsg serve` against a deterministic local loopback Responses SSE provider with the
+#   module's rendered hooks, pure-Nix trustState, and MCP declaration (`ci/tests/check-codex.py`).
 { inputs, ... }:
 {
   perSystem =
@@ -37,6 +41,7 @@
         llm-agents
         ;
       xmsgPkg = xmsg.packages.${system}.default;
+      codexPkg = llm-agents.packages.${system}.codex;
       xmsgPreXl1Src = pkgs.fetchFromGitHub {
         owner = "sini";
         repo = "xmsg";
@@ -65,6 +70,161 @@
         doCheck = false;
         meta.mainProgram = "xmsg";
       };
+      xmsgPreCodexSrc = pkgs.fetchFromGitHub {
+        owner = "sini";
+        repo = "xmsg";
+        rev = "09af11ba76a6545aa1b26992550e8e706f965564";
+        hash = "sha256-7OTL8xTXc8Bj9Db/+IIOvFp/8+Dtj0k8zXXN+FLlOyg=";
+      };
+      xmsgPreCodex = pkgs.rustPlatform.buildRustPackage {
+        pname = "xmsg-pre-codex";
+        version = "0.1.0";
+        src = xmsgPreCodexSrc;
+        cargoLock.lockFile = "${xmsgPreCodexSrc}/Cargo.lock";
+        doCheck = false;
+        meta.mainProgram = "xmsg";
+      };
+
+      mkCodexHmCfg =
+        pkgOverride:
+        (home-manager.lib.homeManagerConfiguration {
+          inherit pkgs;
+          modules = [
+            xmsg.homeManagerModules.xmsg
+            {
+              home = {
+                username = "alice";
+                homeDirectory = "/tmp/xmsg-codex-ci-user-home";
+                stateVersion = "25.11";
+                enableNixpkgsReleaseCheck = false;
+              };
+              programs.codex = {
+                enable = true;
+                package = codexPkg;
+              };
+              programs.xmsg = {
+                enable = true;
+                package = pkgOverride;
+                harnesses.codex.enable = true;
+              };
+            }
+          ];
+        }).config;
+      codexHmCfg = mkCodexHmCfg xmsgPkg;
+      codexHmCfgRetargeted = mkCodexHmCfg (
+        pkgs.runCommand "xmsg-retargeted-pkg" { meta.mainProgram = "xmsg"; } ''
+          mkdir -p $out/bin
+          cp ${lib.getExe xmsgPkg} $out/bin/xmsg
+        ''
+      );
+      codexGuardHooks = {
+        PreToolUse = [
+          {
+            matcher = "Bash";
+            hooks = [
+              {
+                type = "command";
+                command = "bash /tmp/xmsg-codex-ci-user-home/.claude/bash-guard.sh";
+              }
+            ];
+          }
+        ];
+      };
+      foldHookLists =
+        list:
+        lib.foldl' (
+          acc: h:
+          lib.zipAttrsWith (_: lists: lib.concatLists lists) [
+            acc
+            h
+          ]
+        ) { } list;
+      codexFinalHooks = foldHookLists [
+        codexGuardHooks
+        codexHmCfg.programs.xmsg.harnesses.codex.hooks
+      ];
+      codexRetargetedFinalHooks = foldHookLists [
+        codexGuardHooks
+        codexHmCfgRetargeted.programs.xmsg.harnesses.codex.hooks
+      ];
+      codexHooksPath = "/tmp/xmsg-codex-ci-home/hooks.json";
+      codexTrustState = codexHmCfg.programs.xmsg.harnesses.codex.trustState codexHooksPath codexFinalHooks;
+      codexRetargetedTrustState = codexHmCfgRetargeted.programs.xmsg.harnesses.codex.trustState codexHooksPath codexRetargetedFinalHooks;
+      codexNormalizationExtras = {
+        PreToolUse = [
+          {
+            matcher = "Bash";
+            hooks = [
+              {
+                type = "command";
+                command = "sh /tmp/xmsg-codex-ci-user-home/.claude/bash-guard.sh";
+                commandWindows = "echo WINDOWS_OVERRIDE";
+                timeout = 0;
+                async = false;
+                additionalContextLimit = 2500;
+              }
+            ];
+          }
+        ];
+        SessionEnd = [
+          {
+            matcher = "other";
+            hooks = [
+              {
+                type = "command";
+                command = "printf '%s\\n' 'café'";
+                timeout = 99;
+                async = true;
+                statusMessage = "finishing café";
+                additionalContextLimit = 123;
+              }
+            ];
+          }
+        ];
+        Stop = [
+          {
+            matcher = "ignored-stop-matcher";
+            hooks = [
+              {
+                type = "command";
+                command = "true";
+                timeout = 10;
+              }
+            ];
+          }
+        ];
+      };
+      codexVectorsHooks = foldHookLists [
+        codexFinalHooks
+        codexNormalizationExtras
+      ];
+      codexVectorsTrustState = codexHmCfg.programs.xmsg.harnesses.codex.trustState codexHooksPath codexVectorsHooks;
+      codexReorderedVectorsHooks = codexVectorsHooks // {
+        PreToolUse = lib.reverseList codexVectorsHooks.PreToolUse;
+        SessionEnd = lib.reverseList codexVectorsHooks.SessionEnd;
+      };
+      codexReorderedVectorsTrustState = codexHmCfg.programs.xmsg.harnesses.codex.trustState codexHooksPath codexReorderedVectorsHooks;
+
+      codexFinalHooksJson = pkgs.writeText "codex-final-hooks.json" (builtins.toJSON codexFinalHooks);
+      codexTrustJson = pkgs.writeText "codex-trust.json" (builtins.toJSON codexTrustState);
+      codexRetargetedTrustJson = pkgs.writeText "codex-retargeted-trust.json" (
+        builtins.toJSON codexRetargetedTrustState
+      );
+      codexVectorsHooksJson = pkgs.writeText "codex-vectors-hooks.json" (
+        builtins.toJSON codexVectorsHooks
+      );
+      codexVectorsTrustJson = pkgs.writeText "codex-vectors-trust.json" (
+        builtins.toJSON codexVectorsTrustState
+      );
+      codexReorderedHooksJson = pkgs.writeText "codex-reordered-hooks.json" (
+        builtins.toJSON codexReorderedVectorsHooks
+      );
+      codexReorderedTrustJson = pkgs.writeText "codex-reordered-trust.json" (
+        builtins.toJSON codexReorderedVectorsTrustState
+      );
+      codexMcpServerJson = pkgs.writeText "codex-mcp-server.json" (
+        builtins.toJSON codexHmCfg.programs.xmsg.harnesses.codex.mcpServer
+      );
 
       agyHmCfg =
         (home-manager.lib.homeManagerConfiguration {
@@ -361,11 +521,35 @@
               touch $out
             '';
 
+        codex-hook =
+          pkgs.runCommand "xmsg-codex-hook"
+            {
+              nativeBuildInputs = [
+                (pkgs.python3.withPackages (ps: [ ps.tomlkit ]))
+                pkgs.procps
+              ];
+            }
+            ''
+              python3 ${./check-codex.py} \
+                ${lib.getExe codexPkg} \
+                ${lib.getExe xmsgPkg} \
+                ${codexFinalHooksJson} \
+                ${codexTrustJson} \
+                ${codexRetargetedTrustJson} \
+                ${codexVectorsHooksJson} \
+                ${codexVectorsTrustJson} \
+                ${codexReorderedHooksJson} \
+                ${codexReorderedTrustJson} \
+                ${codexMcpServerJson}
+              touch $out
+            '';
+
         pre-xl1-compat = xmsgPkg.overrideAttrs {
           pname = "xmsg-pre-xl1-compat";
           dontBuild = true;
           XMSG_PRE_XL1_BIN = lib.getExe xmsgPreXl1;
           XMSG_PRE_DEPLOY_BIN = lib.getExe xmsgPreDeploy;
+          XMSG_PRE_CODEX_BIN = lib.getExe xmsgPreCodex;
           checkPhase = ''
             runHook preCheck
             set -o pipefail
@@ -379,10 +563,18 @@
               echo "pre-xl1-compat: live hook-to-sidecar version-skew check was skipped" >&2
               exit 1
             fi
+            if grep -Fq "XMSG_PRE_CODEX_BIN unset; skipping live pre-codex sidecar subprocess check" test.log; then
+              echo "pre-xl1-compat: live pre-codex sidecar check was skipped" >&2
+              exit 1
+            fi
+            if ! grep -Fq "C10: live pre-codex (09af11b) sidecar subprocess check passed" test.log; then
+              echo "pre-xl1-compat: missing evidence of live pre-codex (09af11b) sidecar subprocess check" >&2
+              exit 1
+            fi
             runHook postCheck
           '';
           installPhase = ''
-            printf '%s\n%s\n' "${xmsgPreXl1}" "${xmsgPreDeploy}" > $out
+            printf '%s\n%s\n%s\n' "${xmsgPreXl1}" "${xmsgPreDeploy}" "${xmsgPreCodex}" > $out
           '';
         };
       };

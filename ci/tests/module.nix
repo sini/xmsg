@@ -47,6 +47,10 @@ let
                 enable = true;
                 package = pkgs.runCommand "antigravity-cli-fixture" { } "mkdir -p $out/bin; touch $out/bin/agy";
               };
+              programs.codex = {
+                enable = true;
+                package = pkgs.runCommand "codex-fixture" { } "mkdir -p $out/bin; touch $out/bin/codex";
+              };
               services.hermes-agent.enable = true;
               programs.xmsg = {
                 enable = true;
@@ -56,6 +60,7 @@ let
                   pi.enable = true;
                   opencode.enable = true;
                   hermes.enable = true;
+                  codex.enable = pkgs.stdenv.hostPlatform.isLinux;
                 };
                 server = {
                   httpSocket = "/run/user/1000/xmsg/http.sock";
@@ -114,6 +119,7 @@ let
   linux = hmEval "x86_64-linux" { };
   exe = lib.getExe xmsg.packages.x86_64-linux.default;
   agyAnchor = "${linux.programs.antigravity-cli.package}/bin/agy";
+  codexAnchor = "${linux.programs.codex.package}/bin/codex";
   file = cfg: name: cfg.home.file.${name};
 
   darwinCells =
@@ -168,7 +174,7 @@ in
       };
       expected = {
         exec = [
-          "${exe} serve --http-sock /run/user/1000/xmsg/http.sock --agy-exe ${agyAnchor} --svc-exe 'my-bot=/opt/my-bot/bin/my-bot' --fed-listen 0.0.0.0:7790 --fed-cert /run/secrets/xmsg.crt --fed-key /run/secrets/xmsg.key --peers-file ${pinLiteralPeers} --fed-reload-interval-secs 60"
+          "${exe} serve --http-sock /run/user/1000/xmsg/http.sock --agy-exe ${agyAnchor} --codex-exe ${codexAnchor} --codex-home /home/alice/.codex --svc-exe 'my-bot=/opt/my-bot/bin/my-bot' --fed-listen 0.0.0.0:7790 --fed-cert /run/secrets/xmsg.crt --fed-key /run/secrets/xmsg.key --peers-file ${pinLiteralPeers} --fed-reload-interval-secs 60"
         ];
         triggers = [
           "${xmsg.packages.x86_64-linux.default}"
@@ -489,6 +495,343 @@ in
       ];
     };
 
+    # HA9-A.codex (C2, C8, C11): the Codex switch configures MCP (with XDG_RUNTIME_DIR and
+    # default_tools_approval_mode), skill, stable xdg.dataFile."xmsg/bin/xmsg", read-only
+    # hooks in Claude shape, and server --codex-exe / --codex-home.
+    test-codex =
+      let
+        stableCmd = ev: "/home/alice/.local/share/xmsg/bin/xmsg register codex --hook --event ${ev}";
+        mkEventGroup = ev: timeout: [
+          {
+            hooks = [
+              {
+                type = "command";
+                command = stableCmd ev;
+                inherit timeout;
+              }
+            ];
+          }
+        ];
+        guardHooks = {
+          SessionStart = [
+            {
+              hooks = [
+                {
+                  type = "command";
+                  command = "/nix/store/guard/bin/codex-guard";
+                  timeout = 5;
+                }
+              ];
+            }
+          ];
+        };
+        foldHooks =
+          a: b:
+          lib.zipAttrsWith (_: lists: lib.concatLists lists) [
+            a
+            b
+          ];
+        foldedEnabled = foldHooks guardHooks linux.programs.xmsg.harnesses.codex.hooks;
+        disabledCfg = hmEval "x86_64-linux" { programs.xmsg.harnesses.codex.enable = lib.mkForce false; };
+        foldedDisabled = foldHooks guardHooks disabledCfg.programs.xmsg.harnesses.codex.hooks;
+        retargetedCfg = hmEval "x86_64-linux" {
+          programs.xmsg.package = nixpkgs.legacyPackages.x86_64-linux.runCommand "xmsg-retargeted" {
+            meta.mainProgram = "xmsg";
+          } "mkdir -p $out/bin; touch $out/bin/xmsg";
+        };
+      in
+      {
+        expr = {
+          mcp = linux.programs.codex.settings.mcp_servers.xmsg;
+          mcpOption = linux.programs.xmsg.harnesses.codex.mcpServer;
+          skill = linux.programs.codex.skills.xmsg;
+          stableBin = linux.xdg.dataFile."xmsg/bin/xmsg".source;
+          hooks = linux.programs.xmsg.harnesses.codex.hooks;
+          hooksWhenDisabled = disabledCfg.programs.xmsg.harnesses.codex.hooks;
+          hooksWhenXmsgDisabled =
+            (hmEval "x86_64-linux" { programs.xmsg.enable = lib.mkForce false; })
+            .programs.xmsg.harnesses.codex.hooks;
+          guardFirstInSessionStart = map (g: (lib.head g.hooks).command) foldedEnabled.SessionStart;
+          foldedWhenDisabled = foldedDisabled;
+          retargetedHooksEqual =
+            retargetedCfg.programs.xmsg.harnesses.codex.hooks == linux.programs.xmsg.harnesses.codex.hooks;
+          hasPreToolUse = linux.programs.xmsg.harnesses.codex.hooks ? PreToolUse;
+          noHooksJsonHomeFile = linux.home.file ? ".codex/hooks.json";
+          configTomlRespectsLensDisable =
+            (hmEval "x86_64-linux" {
+              home.file.".codex/config.toml".enable = lib.mkForce false;
+            }).home.file.".codex/config.toml".enable;
+          noCodexSystemdUnit = linux.systemd.user.services ? codex;
+          darwinRefused = failedAssertions (
+            hmEval "aarch64-darwin" {
+              programs.xmsg.harnesses.codex.enable = lib.mkForce true;
+            }
+          );
+        };
+        expected = {
+          mcp = {
+            command = exe;
+            args = [ "mcp" ];
+            env_vars = [ "XDG_RUNTIME_DIR" ];
+            default_tools_approval_mode = "approve";
+          };
+          mcpOption = {
+            command = exe;
+            args = [ "mcp" ];
+            env_vars = [ "XDG_RUNTIME_DIR" ];
+            default_tools_approval_mode = "approve";
+          };
+          skill = ../../nix/modules/skills/xmsg;
+          stableBin = exe;
+          hooks = {
+            SessionStart = mkEventGroup "SessionStart" 5;
+            UserPromptSubmit = mkEventGroup "UserPromptSubmit" 5;
+            PreModelRequest = mkEventGroup "PreModelRequest" 5;
+            SubagentStart = mkEventGroup "SubagentStart" 5;
+            SubagentStop = mkEventGroup "SubagentStop" 5;
+            Stop = mkEventGroup "Stop" 5;
+            SessionEnd = mkEventGroup "SessionEnd" 1;
+          };
+          hooksWhenDisabled = { };
+          hooksWhenXmsgDisabled = { };
+          guardFirstInSessionStart = [
+            "/nix/store/guard/bin/codex-guard"
+            (stableCmd "SessionStart")
+          ];
+          foldedWhenDisabled = guardHooks;
+          retargetedHooksEqual = true;
+          hasPreToolUse = false;
+          noHooksJsonHomeFile = false;
+          configTomlRespectsLensDisable = false;
+          noCodexSystemdUnit = false;
+          # INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
+          darwinRefused = [
+            "programs.xmsg.harnesses.codex.enable: codex support on Darwin is pending."
+          ];
+        };
+      };
+
+    # HA9-A.codex (C8): pure-Nix trustState parity against R §10 vectors, normalization,
+    # group reordering, package retargeting, and fail-closed validation throws.
+    test-codex-trust-state =
+      let
+        inherit (linux.programs.xmsg.harnesses.codex) trustState;
+        throws = v: !(builtins.tryEval (builtins.deepSeq v true)).success;
+        r10Probe = trustState "/tmp/ha9-trust-ui-home-if3mo0m6/hooks.json" {
+          PreToolUse = [
+            {
+              matcher = "Bash";
+              hooks = [
+                {
+                  type = "command";
+                  command = "sh /tmp/ha9-followup/hash-script-command.sh";
+                  commandWindows = "echo WINDOWS_OVERRIDE";
+                  timeout = 0;
+                  async = false;
+                  additionalContextLimit = 2500;
+                }
+              ];
+            }
+          ];
+        };
+        r10Norm = trustState "/tmp/ha9-trust-ui-home-if3mo0m6/hooks.json" {
+          SessionEnd = [
+            {
+              matcher = "other";
+              hooks = [
+                {
+                  type = "command";
+                  command = "printf '%s\\n' 'café'";
+                  timeout = 99;
+                  async = true;
+                  statusMessage = "finishing café";
+                  additionalContextLimit = 123;
+                }
+              ];
+            }
+          ];
+        };
+        stopMatcherIgnored = trustState "/home/alice/.codex/hooks.json" {
+          Stop = [
+            {
+              matcher = "ignored-on-stop";
+              hooks = [
+                {
+                  type = "command";
+                  command = "/bin/stop";
+                  timeout = 5;
+                }
+              ];
+            }
+            {
+              hooks = [
+                {
+                  type = "command";
+                  command = "/bin/stop";
+                  timeout = 5;
+                }
+              ];
+            }
+          ];
+        };
+        orderA = trustState "/home/alice/.codex/hooks.json" {
+          SessionStart = [
+            {
+              hooks = [
+                {
+                  type = "command";
+                  command = "/bin/guard";
+                  timeout = 5;
+                }
+              ];
+            }
+            {
+              hooks = [
+                {
+                  type = "command";
+                  command = "/bin/xmsg";
+                  timeout = 5;
+                }
+              ];
+            }
+          ];
+        };
+        orderB = trustState "/home/alice/.codex/hooks.json" {
+          SessionStart = [
+            {
+              hooks = [
+                {
+                  type = "command";
+                  command = "/bin/xmsg";
+                  timeout = 5;
+                }
+              ];
+            }
+            {
+              hooks = [
+                {
+                  type = "command";
+                  command = "/bin/guard";
+                  timeout = 5;
+                }
+              ];
+            }
+          ];
+        };
+        endClamp = trustState "/home/alice/.codex/hooks.json" {
+          SessionEnd = [
+            {
+              hooks = [
+                {
+                  type = "command";
+                  command = "/bin/end";
+                  timeout = 10;
+                }
+              ];
+            }
+            {
+              hooks = [
+                {
+                  type = "command";
+                  command = "/bin/end";
+                  timeout = 3;
+                }
+              ];
+            }
+          ];
+        };
+      in
+      {
+        expr = {
+          r10ProbeHash =
+            r10Probe.hooks.state."/tmp/ha9-trust-ui-home-if3mo0m6/hooks.json:pre_tool_use:0:0".trusted_hash;
+          r10NormHash =
+            r10Norm.hooks.state."/tmp/ha9-trust-ui-home-if3mo0m6/hooks.json:session_end:0:0".trusted_hash;
+          stopIgnoresMatcher =
+            stopMatcherIgnored.hooks.state."/home/alice/.codex/hooks.json:stop:0:0".trusted_hash
+            == stopMatcherIgnored.hooks.state."/home/alice/.codex/hooks.json:stop:1:0".trusted_hash;
+          reorderSwapsGroupHashes =
+            orderA.hooks.state."/home/alice/.codex/hooks.json:session_start:0:0".trusted_hash
+            == orderB.hooks.state."/home/alice/.codex/hooks.json:session_start:1:0".trusted_hash
+            &&
+              orderA.hooks.state."/home/alice/.codex/hooks.json:session_start:0:0".trusted_hash
+              != orderB.hooks.state."/home/alice/.codex/hooks.json:session_start:0:0".trusted_hash;
+          sessionEndClampedTo3 =
+            endClamp.hooks.state."/home/alice/.codex/hooks.json:session_end:0:0".trusted_hash
+            == endClamp.hooks.state."/home/alice/.codex/hooks.json:session_end:1:0".trusted_hash;
+          rejectsRelativeHooksPath = throws (
+            trustState "hooks.json" {
+              Stop = [
+                {
+                  hooks = [
+                    {
+                      type = "command";
+                      command = "/bin/true";
+                    }
+                  ];
+                }
+              ];
+            }
+          );
+          rejectsNonCommandHandler = throws (
+            trustState "/home/alice/.codex/hooks.json" {
+              Stop = [
+                {
+                  hooks = [
+                    {
+                      type = "prompt";
+                      prompt = "hi";
+                    }
+                  ];
+                }
+              ];
+            }
+          );
+          rejectsNegativeTimeout = throws (
+            trustState "/home/alice/.codex/hooks.json" {
+              Stop = [
+                {
+                  hooks = [
+                    {
+                      type = "command";
+                      command = "/bin/true";
+                      timeout = -1;
+                    }
+                  ];
+                }
+              ];
+            }
+          );
+          rejectsDuplicateWinKeys = throws (
+            trustState "/home/alice/.codex/hooks.json" {
+              Stop = [
+                {
+                  hooks = [
+                    {
+                      type = "command";
+                      command = "/bin/true";
+                      commandWindows = "cmd";
+                      command_windows = "cmd";
+                    }
+                  ];
+                }
+              ];
+            }
+          );
+        };
+        expected = {
+          r10ProbeHash = "sha256:bfe666789cdad46e7049f1189e3ffc663fdf259b2104651c8c7e0644a7827e90";
+          r10NormHash = "sha256:8993e3888afd211af4b1cc5c57ec4f93a20e92912f4b6727ae8cb107238a1661";
+          stopIgnoresMatcher = true;
+          reorderSwapsGroupHashes = true;
+          sessionEndClampedTo3 = true;
+          rejectsRelativeHooksPath = true;
+          rejectsNonCommandHandler = true;
+          rejectsNegativeTimeout = true;
+          rejectsDuplicateWinKeys = true;
+        };
+      };
+
     # Oracle 7: the installed skill teaches A13's four tools, A12's labels and the error
     # vocabulary, and the http.sock limits (A15, HA2); nothing of the retired surface or of an
     # owner's hosts. `builtins.split` searches without a `.*` regex over the file.
@@ -511,6 +854,7 @@ in
             "<P>/<child>@<node>"
             "to=<P>/<child> agent_id=<id>"
             "Claude Code"
+            "Codex"
             "opencode 1.x and 2.x"
             "Antigravity"
             "`delivered`"
@@ -617,12 +961,14 @@ in
           programs.claude-code.enable = lib.mkForce false;
           programs.antigravity-cli.enable = lib.mkForce false;
           services.hermes-agent.enable = lib.mkForce false;
+          programs.codex.enable = lib.mkForce false;
         }
       );
       expected = [
         "programs.xmsg.harnesses.claude.enable needs programs.claude-code.enable = true."
         "programs.xmsg.harnesses.agy.enable needs programs.antigravity-cli.enable = true."
         "programs.xmsg.harnesses.hermes.enable needs services.hermes-agent.enable = true."
+        "programs.xmsg.harnesses.codex.enable needs programs.codex.enable = true."
       ];
     };
 

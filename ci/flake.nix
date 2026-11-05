@@ -17,8 +17,9 @@
     # (its `hermes-agent` node). Its own lock is kept, so its package is nix-config's.
     hermes-agent.url = "github:NousResearch/hermes-agent/c538ec5f402e8078248becacd474e47a08c6e79a";
     # nixpkgs packages opencode 1.x only; the opencode2-plugin check runs llm-agents.nix's
-    # opencode2 (2.x). Its own lock is kept, so its package is the one llm-agents.nix publishes.
-    llm-agents.url = "github:numtide/llm-agents.nix/493c34b1bed086861b0e968a40d00bd06522f003";
+    # opencode2 (2.x) and the codex-hook check runs llm-agents.nix's codex (0.166.0).
+    # Its own lock is kept, so its packages are the ones llm-agents.nix publishes.
+    llm-agents.url = "github:numtide/llm-agents.nix/a854ddf4456f5fd67474e2d844cb4a29c32702d0";
   };
 
   outputs =
@@ -43,8 +44,8 @@
       testModules = ./tests;
       extraModules = [
         # xmsg is a TOOL, not an ecosystem library: it is absent from the register roster,
-        # so no capability sheet is owed.
-        { gen.ci.agentsMd.sheet = "not-owed"; }
+        # so its AGENTS.md is agent instructions rather than a capability sheet.
+        { gen.ci.agentsMd.sheet = "instructions"; }
         # Nor a root library surface: there is no root default.nix.
         { gen.ci.rootSurface.entry = "not-owed"; }
         # Nor an evaluator matrix: its CI is one upstream-Nix column, not evaluators.yml.
