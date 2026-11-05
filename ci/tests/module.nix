@@ -60,7 +60,7 @@ let
                   pi.enable = true;
                   opencode.enable = true;
                   hermes.enable = true;
-                  codex.enable = pkgs.stdenv.hostPlatform.isLinux;
+                  codex.enable = true;
                 };
                 server = {
                   httpSocket = "/run/user/1000/xmsg/http.sock";
@@ -562,11 +562,19 @@ in
               home.file.".codex/config.toml".enable = lib.mkForce false;
             }).home.file.".codex/config.toml".enable;
           noCodexSystemdUnit = linux.systemd.user.services ? codex;
-          darwinRefused = failedAssertions (
-            hmEval "aarch64-darwin" {
-              programs.xmsg.harnesses.codex.enable = lib.mkForce true;
-            }
-          );
+          darwinAccepted =
+            let
+              d = hmEval "aarch64-darwin" {
+                programs.xmsg.harnesses.codex.enable = lib.mkForce true;
+              };
+              progArgs = d.launchd.agents.xmsg.config.ProgramArguments or [ ];
+              codexAnchorDarwin = "${d.programs.codex.package}/bin/codex";
+            in
+            {
+              failed = failedAssertions d;
+              hasCodexExe = lib.elem "--codex-exe" progArgs && lib.elem codexAnchorDarwin progArgs;
+              hasCodexHome = lib.elem "--codex-home" progArgs && lib.elem "/Users/alice/.codex" progArgs;
+            };
         };
         expected = {
           mcp = {
@@ -604,10 +612,11 @@ in
           noHooksJsonHomeFile = false;
           configTomlRespectsLensDisable = false;
           noCodexSystemdUnit = false;
-          # INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
-          darwinRefused = [
-            "programs.xmsg.harnesses.codex.enable: codex support on Darwin is pending."
-          ];
+          darwinAccepted = {
+            failed = [ ];
+            hasCodexExe = true;
+            hasCodexHome = true;
+          };
         };
       };
 

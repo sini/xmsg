@@ -8,11 +8,8 @@ pub mod agy;
 pub mod claim;
 #[cfg(feature = "client")]
 pub mod client;
-// INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
-#[cfg(target_os = "linux")]
 #[cfg(feature = "daemon")]
 pub mod codex;
-#[cfg(target_os = "linux")]
 #[cfg(feature = "daemon")]
 pub mod codex_relay;
 #[cfg(feature = "daemon")]

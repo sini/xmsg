@@ -626,26 +626,101 @@ pub fn exe_path(proc_root: &Path, pid: u32) -> io::Result<std::path::PathBuf> {
     }
 }
 
-/// Returns the device and inode pairs `(dev, ino)` of all open file descriptors for `pid`.
+/// One open file descriptor vnode entry read for a process (`P3`: shared across `agy` and `codex`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenVnode {
+    pub dev: u64,
+    pub ino: u64,
+    pub path: std::path::PathBuf,
+    pub mode: libc::mode_t,
+    pub uid: u32,
+    pub nlink: u64,
+    pub has_flock: bool,
+}
+
+/// Test seam: forces the post-scan `starttime` check in [`open_file_vnodes`] on macOS to see a
+/// mismatched start token (`M1a`), or `None` to use the live kernel read.
+pub fn set_force_post_scan_starttime_for_test(token: Option<String>) {
+    #[cfg(target_os = "macos")]
+    macos::set_force_post_scan_starttime(token);
+    #[cfg(not(target_os = "macos"))]
+    let _ = token;
+}
+
+/// Test seam: forces `macos::link` on macOS to report `order_override` for `target_pid` (`M4`),
+/// or `None` to use the live kernel `proc_pid_rusage` read.
+pub fn set_force_link_order_for_test(override_pair: Option<(u32, u64)>) {
+    #[cfg(target_os = "macos")]
+    macos::set_force_link_order(override_pair);
+    #[cfg(not(target_os = "macos"))]
+    let _ = override_pair;
+}
+
+/// Returns all open regular/vnode file descriptors for `pid`, including `(dev, ino, path, mode, uid, nlink)`.
 ///
-/// On Linux live systems and synthetic test fixtures, stats each entry in `<proc_root>/<pid>/fd/`.
-/// On macOS live systems, queries `proc_pidinfo(PROC_PIDLISTFDS)` and `proc_pidfdinfo(PROC_PIDFDVNODEPATHINFO)`
-/// for vnode file descriptors.
-pub fn open_file_ids(proc_root: &Path, pid: u32) -> io::Result<Vec<(u64, u64)>> {
+/// On Linux live systems and synthetic test fixtures, reads `<proc_root>/<pid>/fd/` symlinks and `stat`s
+/// each target. On macOS live systems, queries `proc_pidinfo(PROC_PIDLISTFDS)` and
+/// `proc_pidfdinfo(PROC_PIDFDVNODEPATHINFO)` in a single shared loop (`P3`). When `expected_starttime`
+/// is `Some(st)`, verifies `starttime(proc_root, pid) == st` before and after the descriptor scan so a
+/// PID recycled mid-scan returns `Err`.
+pub fn open_file_vnodes(
+    proc_root: &Path,
+    pid: u32,
+    expected_starttime: Option<&str>,
+) -> io::Result<Vec<OpenVnode>> {
+    if let Some(expected) = expected_starttime {
+        if starttime(proc_root, pid).ok().as_deref() != Some(expected) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("process {pid} starttime mismatch before fd scan"),
+            ));
+        }
+    }
     if is_live(proc_root) {
         #[cfg(target_os = "macos")]
-        return macos::open_file_ids(pid);
+        return macos::open_file_vnodes(pid, expected_starttime);
     }
     let fd_dir = proc_root.join(pid.to_string()).join("fd");
     let entries = fs::read_dir(fd_dir)?;
-    let mut ids = Vec::new();
+    let mut vnodes = Vec::new();
     for entry in entries.flatten() {
         use std::os::unix::fs::MetadataExt;
-        if let Ok(meta) = fs::metadata(entry.path()) {
-            ids.push((meta.dev(), meta.ino()));
+        let fd_path = entry.path();
+        let Ok(target) = fs::read_link(&fd_path) else {
+            continue;
+        };
+        let Ok(meta) = fs::metadata(&fd_path) else {
+            continue;
+        };
+        vnodes.push(OpenVnode {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            path: target,
+            mode: meta.mode() as libc::mode_t,
+            uid: meta.uid(),
+            nlink: meta.nlink(),
+            has_flock: true,
+        });
+    }
+    if let Some(expected) = expected_starttime {
+        if starttime(proc_root, pid).ok().as_deref() != Some(expected) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("process {pid} starttime mismatch after fd scan"),
+            ));
         }
     }
-    Ok(ids)
+    Ok(vnodes)
+}
+
+/// Returns the device and inode pairs `(dev, ino)` of all open file descriptors for `pid`.
+///
+/// Delegates to [`open_file_vnodes`] (`P3`).
+pub fn open_file_ids(proc_root: &Path, pid: u32) -> io::Result<Vec<(u64, u64)>> {
+    Ok(open_file_vnodes(proc_root, pid, None)?
+        .into_iter()
+        .map(|v| (v.dev, v.ino))
+        .collect())
 }
 
 /// Returns the per-user runtime directory used when `XDG_RUNTIME_DIR` is unset:
@@ -664,7 +739,21 @@ mod macos {
     use std::io;
     use std::mem::{size_of, MaybeUninit};
     use std::os::unix::ffi::OsStrExt;
+    use std::cell::RefCell;
     use std::path::PathBuf;
+
+    thread_local! {
+        static FORCE_POST_SCAN_STARTTIME: RefCell<Option<String>> = const { RefCell::new(None) };
+        static FORCE_LINK_ORDER: RefCell<Option<(u32, u64)>> = const { RefCell::new(None) };
+    }
+
+    pub fn set_force_post_scan_starttime(token: Option<String>) {
+        FORCE_POST_SCAN_STARTTIME.with(|cell| *cell.borrow_mut() = token);
+    }
+
+    pub fn set_force_link_order(override_pair: Option<(u32, u64)>) {
+        FORCE_LINK_ORDER.with(|cell| *cell.borrow_mut() = override_pair);
+    }
 
     pub fn bsdinfo(pid: u32) -> io::Result<libc::proc_bsdinfo> {
         let mut info = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
@@ -720,7 +809,11 @@ mod macos {
     /// `proc_bsdinfo` reads bracket the `proc_pid_rusage` one, so all of it is one process.
     pub fn link(pid: u32) -> Option<super::Link> {
         let info = bsdinfo(pid).ok()?;
-        let order = start_abstime(pid);
+        let order = FORCE_LINK_ORDER
+            .with(|cell| *cell.borrow())
+            .filter(|(target, _)| *target == pid)
+            .map(|(_, forced)| forced)
+            .or_else(|| start_abstime(pid));
         let start = starttime_token(&info);
         (starttime_token(&bsdinfo(pid).ok()?) == start).then_some(super::Link {
             ppid: info.pbi_ppid,
@@ -908,7 +1001,19 @@ mod macos {
 
     pub const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
 
-    pub fn open_file_ids(pid: u32) -> io::Result<Vec<(u64, u64)>> {
+    pub fn open_file_vnodes(
+        pid: u32,
+        expected_starttime: Option<&str>,
+    ) -> io::Result<Vec<super::OpenVnode>> {
+        if let Some(expected) = expected_starttime {
+            let pre_st = starttime_token(&bsdinfo(pid)?);
+            if pre_st != expected {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("process {pid} starttime mismatch before fd scan"),
+                ));
+            }
+        }
         let size_needed = unsafe {
             libc::proc_pidinfo(
                 pid as libc::c_int,
@@ -924,15 +1029,17 @@ mod macos {
                 format!("cannot list fds for process {pid}"),
             ));
         }
-        let count = size_needed as usize / std::mem::size_of::<libc::proc_fdinfo>();
+        let alloc_bytes = (size_needed as usize).saturating_mul(2).max(size_needed as usize);
+        let count = alloc_bytes / std::mem::size_of::<libc::proc_fdinfo>();
         let mut fd_list: Vec<libc::proc_fdinfo> = Vec::with_capacity(count);
+        let buf_bytes = (count * std::mem::size_of::<libc::proc_fdinfo>()) as libc::c_int;
         let n = unsafe {
             libc::proc_pidinfo(
                 pid as libc::c_int,
                 libc::PROC_PIDLISTFDS,
                 0,
                 fd_list.as_mut_ptr().cast(),
-                size_needed,
+                buf_bytes,
             )
         };
         if n <= 0 {
@@ -941,7 +1048,7 @@ mod macos {
         let num_fds = n as usize / std::mem::size_of::<libc::proc_fdinfo>();
         unsafe { fd_list.set_len(num_fds) };
 
-        let mut ids = Vec::new();
+        let mut vnodes = Vec::new();
         let vnode_size = std::mem::size_of::<vnode_fdinfowithpath>() as libc::c_int;
 
         for fd_info in fd_list {
@@ -960,11 +1067,39 @@ mod macos {
                     let vi = unsafe { vnode_info.assume_init() };
                     let dev = vi.pvip.vip_vi.vi_stat.vst_dev as u64;
                     let ino = vi.pvip.vip_vi.vi_stat.vst_ino;
-                    ids.push((dev, ino));
+                    let mode = vi.pvip.vip_vi.vi_stat.vst_mode as libc::mode_t;
+                    let uid = vi.pvip.vip_vi.vi_stat.vst_uid;
+                    let nlink = u64::from(vi.pvip.vip_vi.vi_stat.vst_nlink);
+                    let c_str = unsafe { CStr::from_ptr(vi.pvip.vip_path.as_ptr().cast()) };
+                    let path = PathBuf::from(OsStr::from_bytes(c_str.to_bytes()));
+                    const DARWIN_FWRITE: u32 = 0x0000_0002;
+                    const DARWIN_FWASLOCKED: u32 = 0x0000_4000;
+                    let has_flock = (vi.pfi.fi_openflags & (DARWIN_FWASLOCKED | DARWIN_FWRITE))
+                        == (DARWIN_FWASLOCKED | DARWIN_FWRITE);
+                    vnodes.push(super::OpenVnode {
+                        dev,
+                        ino,
+                        path,
+                        mode,
+                        uid,
+                        nlink,
+                        has_flock,
+                    });
                 }
             }
         }
-        Ok(ids)
+        if let Some(expected) = expected_starttime {
+            let post_st = FORCE_POST_SCAN_STARTTIME
+                .with(|cell| cell.borrow().clone())
+                .unwrap_or_else(|| bsdinfo(pid).map(|i| starttime_token(&i)).unwrap_or_default());
+            if post_st != expected {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("process {pid} starttime mismatch after fd scan"),
+                ));
+            }
+        }
+        Ok(vnodes)
     }
 
     #[repr(C)]

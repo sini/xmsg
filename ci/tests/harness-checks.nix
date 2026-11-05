@@ -384,7 +384,64 @@
           '';
     in
     {
-      checks = lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+      checks = {
+        codex-hook =
+          pkgs.runCommand "xmsg-codex-hook"
+            {
+              nativeBuildInputs = [
+                (pkgs.python3.withPackages (ps: [ ps.tomlkit ]))
+              ];
+            }
+            ''
+              python3 ${./check-codex.py} \
+                ${lib.getExe codexPkg} \
+                ${lib.getExe xmsgPkg} \
+                ${codexFinalHooksJson} \
+                ${codexTrustJson} \
+                ${codexRetargetedTrustJson} \
+                ${codexVectorsHooksJson} \
+                ${codexVectorsTrustJson} \
+                ${codexReorderedHooksJson} \
+                ${codexReorderedTrustJson} \
+                ${codexMcpServerJson}
+              touch $out
+            '';
+
+        pre-xl1-compat = xmsgPkg.overrideAttrs {
+          pname = "xmsg-pre-xl1-compat";
+          dontBuild = true;
+          XMSG_PRE_XL1_BIN = lib.getExe xmsgPreXl1;
+          XMSG_PRE_DEPLOY_BIN = lib.getExe xmsgPreDeploy;
+          XMSG_PRE_CODEX_BIN = lib.getExe xmsgPreCodex;
+          checkPhase = ''
+            runHook preCheck
+            set -o pipefail
+            cargoWithProfile test --locked --test gate_xf3_list_compat_and_agy_label -- test_oracle_1_pre_xl1_wire_compat_direct_and_dialout --exact --nocapture 2>&1 | tee test.log
+            if grep -Fq "XMSG_PRE_XL1_BIN unset; skipping live two-binary pre-XL1 (9096199) subprocess check" test.log; then
+              echo "pre-xl1-compat: live two-binary pre-XL1 check was skipped" >&2
+              exit 1
+            fi
+            cargoWithProfile test --locked --test gate_xf3_list_compat_and_agy_label -- test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew --exact --nocapture 2>&1 | tee -a test.log
+            if grep -Fq "XMSG_PRE_DEPLOY_BIN or XMSG_PRE_XL1_BIN unset; skipping live old-sidecar subprocess check" test.log; then
+              echo "pre-xl1-compat: live hook-to-sidecar version-skew check was skipped" >&2
+              exit 1
+            fi
+            if grep -Fq "XMSG_PRE_CODEX_BIN unset; skipping live pre-codex sidecar subprocess check" test.log; then
+              echo "pre-xl1-compat: live pre-codex sidecar check was skipped" >&2
+              exit 1
+            fi
+            if ! grep -Fq "C10: live pre-codex (09af11b) sidecar subprocess check passed" test.log; then
+              echo "pre-xl1-compat: missing evidence of live pre-codex (09af11b) sidecar subprocess check" >&2
+              exit 1
+            fi
+            runHook postCheck
+          '';
+          installPhase = ''
+            printf '%s\n%s\n%s\n' "${xmsgPreXl1}" "${xmsgPreDeploy}" "${xmsgPreCodex}" > $out
+          '';
+        };
+      }
+      // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
         pi-extension = nodeCheck "pi-extension" "test.mjs";
         pi-paths = nodeCheck "pi-paths" "test-paths.mjs";
 
@@ -520,63 +577,6 @@
               echo "agy-hook: the rendered hook registered $conv, addressed as $conv"
               touch $out
             '';
-
-        codex-hook =
-          pkgs.runCommand "xmsg-codex-hook"
-            {
-              nativeBuildInputs = [
-                (pkgs.python3.withPackages (ps: [ ps.tomlkit ]))
-                pkgs.procps
-              ];
-            }
-            ''
-              python3 ${./check-codex.py} \
-                ${lib.getExe codexPkg} \
-                ${lib.getExe xmsgPkg} \
-                ${codexFinalHooksJson} \
-                ${codexTrustJson} \
-                ${codexRetargetedTrustJson} \
-                ${codexVectorsHooksJson} \
-                ${codexVectorsTrustJson} \
-                ${codexReorderedHooksJson} \
-                ${codexReorderedTrustJson} \
-                ${codexMcpServerJson}
-              touch $out
-            '';
-
-        pre-xl1-compat = xmsgPkg.overrideAttrs {
-          pname = "xmsg-pre-xl1-compat";
-          dontBuild = true;
-          XMSG_PRE_XL1_BIN = lib.getExe xmsgPreXl1;
-          XMSG_PRE_DEPLOY_BIN = lib.getExe xmsgPreDeploy;
-          XMSG_PRE_CODEX_BIN = lib.getExe xmsgPreCodex;
-          checkPhase = ''
-            runHook preCheck
-            set -o pipefail
-            cargoWithProfile test --locked --test gate_xf3_list_compat_and_agy_label -- test_oracle_1_pre_xl1_wire_compat_direct_and_dialout --exact --nocapture 2>&1 | tee test.log
-            if grep -Fq "XMSG_PRE_XL1_BIN unset; skipping live two-binary pre-XL1 (9096199) subprocess check" test.log; then
-              echo "pre-xl1-compat: live two-binary pre-XL1 check was skipped" >&2
-              exit 1
-            fi
-            cargoWithProfile test --locked --test gate_xf3_list_compat_and_agy_label -- test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew --exact --nocapture 2>&1 | tee -a test.log
-            if grep -Fq "XMSG_PRE_DEPLOY_BIN or XMSG_PRE_XL1_BIN unset; skipping live old-sidecar subprocess check" test.log; then
-              echo "pre-xl1-compat: live hook-to-sidecar version-skew check was skipped" >&2
-              exit 1
-            fi
-            if grep -Fq "XMSG_PRE_CODEX_BIN unset; skipping live pre-codex sidecar subprocess check" test.log; then
-              echo "pre-xl1-compat: live pre-codex sidecar check was skipped" >&2
-              exit 1
-            fi
-            if ! grep -Fq "C10: live pre-codex (09af11b) sidecar subprocess check passed" test.log; then
-              echo "pre-xl1-compat: missing evidence of live pre-codex (09af11b) sidecar subprocess check" >&2
-              exit 1
-            fi
-            runHook postCheck
-          '';
-          installPhase = ''
-            printf '%s\n%s\n%s\n' "${xmsgPreXl1}" "${xmsgPreDeploy}" "${xmsgPreCodex}" > $out
-          '';
-        };
       };
     };
 }

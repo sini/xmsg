@@ -240,15 +240,12 @@ pub fn trace_caller_or_codex_owner(
     state: &AppState,
     peer: &crate::process::PeerCred,
 ) -> Result<CallerTrace, AppError> {
-    #[cfg(target_os = "linux")]
     let codex_cfg = {
         let rt_arc = crate::codex::for_state(state);
         let mut cfg = rt_arc.lock().unwrap().config.clone();
         cfg.proc_root = state.agy_config.proc_root.clone();
         Some(cfg)
     };
-    #[cfg(not(target_os = "linux"))]
-    let codex_cfg: Option<()> = None;
     let db = state.db.lock().ok();
     resolve_caller_session_peer_inner(
         &state.agy_config.proc_root,
@@ -272,8 +269,7 @@ fn resolve_caller_session_peer_inner(
     pi_store: &PiStore,
     svc_store: &crate::svc::SvcStore,
     conn: Option<&rusqlite::Connection>,
-    #[cfg(target_os = "linux")] codex_config: Option<&crate::codex::CodexConfig>,
-    #[cfg(not(target_os = "linux"))] _codex_config: Option<&()>,
+    codex_config: Option<&crate::codex::CodexConfig>,
     peer: &crate::process::PeerCred,
 ) -> Result<CallerTrace, AppError> {
     let peer_pid = peer.pid_or_zero();
@@ -401,7 +397,6 @@ fn resolve_caller_session_peer_inner(
         // 5. Check trusted Codex owner (HA9-A.codex §2.2, C4): stop the ancestry walk at
         //    the nearest trusted Codex process `O = (curr_pid, st)` so a Codex caller never
         //    falls through to an outer shell or ancestor harness session.
-        #[cfg(target_os = "linux")]
         if let Some(cfg) = codex_config {
             if crate::codex::is_trusted_codex_owner_step(cfg, curr_pid, &st).is_some() {
                 return Ok(CallerTrace::CodexOwner {
@@ -651,7 +646,6 @@ pub async fn run_agent_server_with_listener(
                     }
                 };
 
-                #[cfg(target_os = "linux")]
                 if let AgentFrame::CodexHook {
                     event,
                     label,
@@ -781,7 +775,6 @@ pub async fn run_agent_server_with_listener(
                     }
                     continue;
                 }
-                #[cfg(target_os = "linux")]
                 if let AgentFrame::CodexRevoke {
                     session_id,
                     revoked,
@@ -822,17 +815,6 @@ pub async fn run_agent_server_with_listener(
                         "revoked": revoked,
                     });
                     let _ = writer.write_all(format!("{ok_line}\n").as_bytes()).await;
-                    let _ = writer.flush().await;
-                    continue;
-                }
-                #[cfg(not(target_os = "linux"))]
-                if matches!(frame, AgentFrame::CodexHook { .. } | AgentFrame::CodexRevoke { .. }) {
-                    // INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
-                    let err = AppError::BadRequest(
-                        "codex support on Darwin is pending".to_string(),
-                    )
-                    .frame();
-                    let _ = writer.write_all(format!("{err}\n").as_bytes()).await;
                     let _ = writer.flush().await;
                     continue;
                 }
@@ -1401,45 +1383,35 @@ pub async fn handle_agent_frame(
             revoked,
             ..
         } => {
-            #[cfg(target_os = "linux")]
-            {
-                let sid = session_id.trim();
-                if !crate::claim::is_uuid_shaped(sid) {
-                    return Err(AppError::BadRequest(format!(
-                        "invalid codex session_id '{sid}': must be UUID-shaped"
-                    )));
-                }
-                let rt_arc = crate::codex::for_state(state);
-                if revoked {
-                    {
-                        let mut rt = rt_arc.lock().unwrap();
-                        let _ = rt.store.revoke_by_operator(sid);
-                    }
-                    if let Ok(db) = state.db.lock() {
-                        let _ = crate::storage::invalidate_codex_root(&db, sid);
-                    }
-                } else {
-                    {
-                        let mut rt = rt_arc.lock().unwrap();
-                        rt.store.unrevoke_by_operator(sid);
-                    }
-                    if let Ok(db) = state.db.lock() {
-                        let _ = crate::storage::unrevoke_codex_root_by_operator(&db, sid);
-                    }
-                }
-                Ok(serde_json::json!({
-                    "status": "ok",
-                    "session_id": sid,
-                    "revoked": revoked,
-                }))
+            let sid = session_id.trim();
+            if !crate::claim::is_uuid_shaped(sid) {
+                return Err(AppError::BadRequest(format!(
+                    "invalid codex session_id '{sid}': must be UUID-shaped"
+                )));
             }
-            #[cfg(not(target_os = "linux"))]
-            {
-                let _ = (session_id, revoked);
-                Err(AppError::BadRequest(
-                    "codex support on Darwin is pending".to_string(),
-                ))
+            let rt_arc = crate::codex::for_state(state);
+            if revoked {
+                {
+                    let mut rt = rt_arc.lock().unwrap();
+                    let _ = rt.store.revoke_by_operator(sid);
+                }
+                if let Ok(db) = state.db.lock() {
+                    let _ = crate::storage::invalidate_codex_root(&db, sid);
+                }
+            } else {
+                {
+                    let mut rt = rt_arc.lock().unwrap();
+                    rt.store.unrevoke_by_operator(sid);
+                }
+                if let Ok(db) = state.db.lock() {
+                    let _ = crate::storage::unrevoke_codex_root_by_operator(&db, sid);
+                }
             }
+            Ok(serde_json::json!({
+                "status": "ok",
+                "session_id": sid,
+                "revoked": revoked,
+            }))
         }
     }
 }
@@ -2083,7 +2055,6 @@ pub fn run_claude_hook(input: &str, agent_sock: Option<&Path>) -> Result<String,
 
 /// Resolves a Codex MCP caller under trusted owner `(owner_pid, owner_starttime)` using
 /// `params._meta` (`codex_session`, `codex_thread`, `codex_turn`) (HA9-A.codex §2.2).
-#[cfg(target_os = "linux")]
 pub fn resolve_codex_mcp_caller(
     state: &AppState,
     owner_pid: u32,
@@ -2200,23 +2171,6 @@ pub fn resolve_codex_mcp_caller(
     })
 }
 
-// INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
-#[cfg(not(target_os = "linux"))]
-pub fn resolve_codex_mcp_caller(
-    _state: &AppState,
-    _owner_pid: u32,
-    _owner_starttime: &str,
-    _codex_session: Option<&str>,
-    _codex_thread: Option<&str>,
-    _codex_turn: Option<&str>,
-    _require_subagent: bool,
-) -> Result<Session, AppError> {
-    Err(AppError::NotRecipient(
-        "codex support on Darwin is pending".to_string(),
-    ))
-}
-
-#[cfg(target_os = "linux")]
 #[derive(Debug, Clone)]
 pub struct CodexHookOutcome {
     pub root_id: String,
@@ -2224,7 +2178,6 @@ pub struct CodexHookOutcome {
     pub handoff_ids: Vec<String>,
 }
 
-#[cfg(target_os = "linux")]
 fn find_trusted_codex_owner_for_hook(
     state: &AppState,
     peer: &crate::process::PeerCred,
@@ -2245,7 +2198,6 @@ fn find_trusted_codex_owner_for_hook(
 }
 
 /// Handles `AgentFrame::CodexHook` on `agent.sock` (HA9-A.codex §2.1, §2.3, §2.5, §2.7).
-#[cfg(target_os = "linux")]
 pub async fn handle_codex_hook_frame(
     state: &AppState,
     peer: &crate::process::PeerCred,
@@ -2956,7 +2908,6 @@ pub fn codex_unavailable_hook_stdout(event: &str) -> Option<String> {
     )
 }
 
-#[cfg(target_os = "linux")]
 fn codex_client_note_marker_path(sock_path: Option<&Path>, session_id: &str) -> Option<PathBuf> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     let safe_sid: String = session_id
@@ -2984,7 +2935,6 @@ fn codex_client_note_marker_path(sock_path: Option<&Path>, session_id: &str) -> 
     Some(base_dir.join(format!(".codex-unavail-{safe_sid}")))
 }
 
-#[cfg(target_os = "linux")]
 fn take_client_unavailable_note(sock_path: Option<&Path>, session_id: Option<&str>) -> bool {
     use std::os::unix::fs::OpenOptionsExt;
     let Some(sid) = session_id else {
@@ -3001,7 +2951,6 @@ fn take_client_unavailable_note(sock_path: Option<&Path>, session_id: Option<&st
         .is_ok()
 }
 
-#[cfg(target_os = "linux")]
 fn clear_client_unavailable_note(sock_path: Option<&Path>, session_id: Option<&str>) {
     let Some(sid) = session_id else {
         return;
@@ -3018,8 +2967,6 @@ fn clear_client_unavailable_note(sock_path: Option<&Path>, session_id: Option<&s
 /// All Codex lifecycle and drain hooks (`SessionStart`, `UserPromptSubmit`, `PreModelRequest`,
 /// `Stop`, `SubagentStart`, `SubagentStop`, `SessionEnd`) fail open (`Ok(())`) on registration/validation
 /// refusal or an unreachable daemon, emitting a one-shot note on `SessionStart` / `UserPromptSubmit`.
-// INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
-#[cfg(target_os = "linux")]
 pub fn run_codex_hook<W: std::io::Write>(
     event: &str,
     label: Option<&str>,
@@ -3240,7 +3187,6 @@ pub fn run_codex_hook<W: std::io::Write>(
 /// Runs `xmsg register codex --revoke <session_id>` / `--unrevoke <session_id>` or
 /// `xmsg unregister --codex-session <session_id>`, sending `AgentFrame::CodexRevoke`
 /// on `agent.sock` (§6.2.1).
-#[cfg(target_os = "linux")]
 pub fn run_codex_revoke(
     session_id: &str,
     revoked: bool,

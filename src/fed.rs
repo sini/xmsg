@@ -104,8 +104,6 @@ fn target_filter_key(target: &crate::http::ResolvedTarget) -> &str {
             .name
             .as_deref()
             .unwrap_or_else(|| s.session_id.strip_prefix("svc:").unwrap_or(&s.session_id)),
-        // INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
-        #[cfg(target_os = "linux")]
         crate::http::ResolvedTarget::Codex(_, s) => &s.session_id,
         crate::http::ResolvedTarget::Claude(s, _)
         | crate::http::ResolvedTarget::Agy(s)

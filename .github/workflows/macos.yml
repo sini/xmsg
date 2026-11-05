@@ -58,3 +58,13 @@ jobs:
           echo "sandbox = $(nix config show sandbox)"
           sys=$(nix eval --impure --raw --expr builtins.currentSystem)
           nix build "./ci#checks.$sys.package" "./ci#checks.$sys.shared-client" -L --no-link
+
+      - name: checks.codex-hook
+        run: |
+          sys=$(nix eval --impure --raw --expr builtins.currentSystem)
+          nix build "./ci#checks.$sys.codex-hook" -L --no-link
+
+      - name: checks.pre-xl1-compat
+        run: |
+          sys=$(nix eval --impure --raw --expr builtins.currentSystem)
+          nix build "./ci#checks.$sys.pre-xl1-compat" -L --no-link

@@ -148,7 +148,6 @@ async fn healthz_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
 pub enum ResolvedTarget {
     Claude(registry::Session, PathBuf),
     Agy(registry::Session),
-    #[cfg(target_os = "linux")]
     Codex(crate::codex::CodexRootSnapshot, registry::Session),
     /// A session served from a `register.sock` poll queue: a pi, or a plugin session
     /// (opencode), whose `harness` names which.
@@ -190,9 +189,8 @@ impl ResolvedTarget {
 
     pub(crate) fn session(&self) -> &registry::Session {
         match self {
-            #[cfg(target_os = "linux")]
-            ResolvedTarget::Codex(_, s) => s,
-            ResolvedTarget::Claude(s, _)
+            ResolvedTarget::Codex(_, s)
+            | ResolvedTarget::Claude(s, _)
             | ResolvedTarget::Agy(s)
             | ResolvedTarget::Pi(s)
             | ResolvedTarget::Svc(s)
@@ -214,7 +212,6 @@ impl ResolvedTarget {
             },
             ResolvedTarget::SubagentFallback { parent, .. } => parent.recipient_harness(),
             ResolvedTarget::Agy(_) => "agy",
-            #[cfg(target_os = "linux")]
             ResolvedTarget::Codex(_, _) => "codex",
             ResolvedTarget::Pi(s) => crate::plugin::harness(&s.harness).unwrap_or("pi"),
             ResolvedTarget::Svc(_) => "svc",
@@ -293,7 +290,6 @@ pub(crate) async fn resolve_target(
         };
         let parent_session = parent_target.session().clone();
         let parent_addr = parent_session.session_id.clone();
-        #[cfg(target_os = "linux")]
         let (binding, codex_in_turn) = if matches!(parent_target, ResolvedTarget::Codex(_, _)) {
             let (_snap, child_state, b) =
                 crate::codex::admit_codex_subagent(db, &parent_addr, child_ref, None).map_err(
@@ -303,15 +299,6 @@ pub(crate) async fn resolve_target(
                 && crate::claim::is_subagent_in_turn(proc_root, &b);
             (b, Some(in_turn))
         } else {
-            let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
-            crate::agy::purge_evicted_agy_subagents(&conn, proc_root, agy_store);
-            let b = storage::resolve_subagent_in(&conn, &parent_addr, child_ref)
-                .map_err(|e| AppError::Internal(e.to_string()))?
-                .ok_or_else(|| AppError::NotFound(format!("{ref_str} (parent '{parent_addr}')")))?;
-            (b, None)
-        };
-        #[cfg(not(target_os = "linux"))]
-        let (binding, codex_in_turn): (storage::SubagentBinding, Option<bool>) = {
             let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
             crate::agy::purge_evicted_agy_subagents(&conn, proc_root, agy_store);
             let b = storage::resolve_subagent_in(&conn, &parent_addr, child_ref)
@@ -395,9 +382,7 @@ pub(crate) async fn resolve_target(
     if let Some(session) = pi_sessions.iter().find(|s| is_id(&s.session_id)) {
         return Ok(ResolvedTarget::Pi(session.clone()));
     }
-    #[cfg(target_os = "linux")]
     let codex_roots = crate::codex::sweep_codex_roots(db);
-    #[cfg(target_os = "linux")]
     if let Some(snap) = codex_roots.iter().find(|r| is_id(&r.root_id)) {
         let session = crate::codex::codex_root_to_session(snap);
         return Ok(ResolvedTarget::Codex(snap.clone(), session));
@@ -428,7 +413,6 @@ pub(crate) async fn resolve_target(
             .filter(|s| s.name.as_deref().is_some_and(is))
             .map(ResolvedTarget::Pi),
     );
-    #[cfg(target_os = "linux")]
     labelled.extend(codex_roots.into_iter().filter(|r| is(&r.label)).map(|r| {
         let s = crate::codex::codex_root_to_session(&r);
         ResolvedTarget::Codex(r, s)

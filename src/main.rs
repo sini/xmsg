@@ -36,14 +36,12 @@ enum Commands {
     Register(RegisterArgs),
 
     /// Explicitly revoke or unregister a session (e.g. `--codex-session <P>`)
-    #[cfg(target_os = "linux")]
     Unregister(UnregisterArgs),
 
     /// Load a peers file with every rule `serve` applies, and exit 0 or name the failure
     CheckPeers(CheckPeersArgs),
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Parser, Debug)]
 pub struct UnregisterArgs {
     /// Deliberately revoke a Codex root session ID (`RevokedByOperator`, sticky across resume)
@@ -80,12 +78,10 @@ pub enum RegisterHarness {
     /// Claude Code subagent hook handler (PreToolUse, SubagentStart, PostToolUse, SubagentStop)
     Claude(RegisterClaudeArgs),
 
-    /// Codex CLI lifecycle and subagent hook handler (INTERIM HA9-A.codex.darwin: codex support on Darwin is pending)
-    #[cfg(target_os = "linux")]
+    /// Codex CLI lifecycle and subagent hook handler
     Codex(RegisterCodexArgs),
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Parser, Debug)]
 pub struct RegisterCodexArgs {
     /// Hook mode for Codex hooks
@@ -217,12 +213,10 @@ pub struct ServeArgs {
     pub agy_exes: Vec<PathBuf>,
 
     /// Trusted Codex executable paths (comma-separated or multiple flags)
-    #[cfg(target_os = "linux")]
     #[arg(long = "codex-exe", env = "XMSG_CODEX_EXE", value_delimiter = ',')]
     pub codex_exes: Vec<PathBuf>,
 
     /// Trusted Codex home directories (repeatable, or separated by ':' in env XMSG_CODEX_HOME; defaults to $CODEX_HOME or ~/.codex)
-    #[cfg(target_os = "linux")]
     #[arg(long = "codex-home", env = "XMSG_CODEX_HOME", value_delimiter = ':')]
     pub codex_homes: Vec<PathBuf>,
 
@@ -334,12 +328,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             RegisterHarness::Claude(claude_args) => {
                 run_register_claude(claude_args);
             }
-            #[cfg(target_os = "linux")]
             RegisterHarness::Codex(codex_args) => {
                 run_register_codex(codex_args);
             }
         },
-        #[cfg(target_os = "linux")]
         Commands::Unregister(args) => {
             if let Err(e) =
                 xmsg::agent::run_codex_revoke(&args.codex_session, true, args.sock.as_deref())
@@ -415,7 +407,6 @@ fn run_register_claude(args: RegisterClaudeArgs) {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn run_register_codex(args: RegisterCodexArgs) {
     use std::io::Read;
     if let Some(ref sid) = args.revoke {
@@ -1239,7 +1230,6 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         fed_state: fed_state.clone(),
     });
 
-    #[cfg(target_os = "linux")]
     {
         let codex_homes = if args.codex_homes.is_empty() {
             if let Ok(env_home) = std::env::var("CODEX_HOME") {

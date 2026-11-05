@@ -683,13 +683,8 @@ in
             config.services.hermes-agent.enable or false
           )
         )
-        # INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
         ++ lib.optionals cfg.harnesses.codex.enable [
           (requireHarness "codex" "programs.codex.enable" (config.programs.codex.enable or false))
-          {
-            assertion = pkgs.stdenv.hostPlatform.isLinux;
-            message = "programs.xmsg.harnesses.codex.enable: codex support on Darwin is pending.";
-          }
         ]
         ++ lib.concatLists (
           lib.mapAttrsToList (

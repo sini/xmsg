@@ -2448,7 +2448,6 @@ pub fn startup_invalidate_codex(
 }
 
 /// Persist an admitted Codex root generation in `codex_roots` and `instance_seen` (§2.1, §6.2.1).
-#[cfg(target_os = "linux")]
 pub fn upsert_codex_root(conn: &Connection, snap: &crate::codex::CodexRootSnapshot) -> Result<()> {
     let now = now_epoch_secs();
     conn.execute(
@@ -2487,7 +2486,6 @@ pub fn upsert_codex_root(conn: &Connection, snap: &crate::codex::CodexRootSnapsh
 /// migrating any unread `pending` root handoff rows from prior generations to the new
 /// generation and folding any unread child queue messages from prior-generation subagents
 /// back into the root queue with the §2.3 fallback header (§6.2.2 step 6).
-#[cfg(target_os = "linux")]
 pub fn rebind_codex_root(conn: &Connection, snap: &crate::codex::CodexRootSnapshot) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     let now = now_epoch_secs();
@@ -2648,7 +2646,6 @@ pub fn reserve_codex_single_for_push(
 /// Atomically select and reserve up to 8 envelopes / 6,000 UTF-8 bytes (or a single oversized
 /// head envelope) in creation order for a hook drain on `(root_id, root_generation)` (§2.5).
 /// Transitions the selected rows to `state = 'inflight'`, `carrier = 'hook'`.
-#[cfg(target_os = "linux")]
 pub fn reserve_codex_hook_batch(
     conn: &Connection,
     root_id: &str,
@@ -2696,7 +2693,6 @@ pub fn reserve_codex_hook_batch(
 
 /// Atomically select and reserve a hook drain batch (at most 8 envelopes / 6,000 UTF-8 bytes)
 /// for an admitted Codex child `subagent_address = "<P>/<X>"` from `instance_queue` (§2.5).
-#[cfg(target_os = "linux")]
 pub fn reserve_codex_child_hook_batch(
     conn: &Connection,
     subagent_address: &str,

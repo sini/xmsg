@@ -718,10 +718,11 @@ def write_codex_config(
     doc["model_providers"] = providers
 
     projects = tomlkit.table()
-    for p in (str(work_dir), str(codex_home)):
-        pt = tomlkit.table()
-        pt["trust_level"] = "trusted"
-        projects[p] = pt
+    for raw_p in (work_dir, codex_home):
+        for p in sorted({str(raw_p), str(Path(raw_p).resolve())}):
+            pt = tomlkit.table()
+            pt["trust_level"] = "trusted"
+            projects[p] = pt
     doc["projects"] = projects
 
     mcp_servers = tomlkit.table()
@@ -2465,7 +2466,10 @@ def main():
     hm_reordered_trust_state = json.loads(Path(hm_reordered_trust_path).read_text(encoding="utf-8"))
     hm_mcp_server = json.loads(Path(hm_mcp_server_path).read_text(encoding="utf-8"))
 
-    base_tmp = Path(tempfile.mkdtemp(prefix="xmsg-codex-check-"))
+    # Use a short `/tmp/xc-*` base directory so Unix domain socket paths
+    # (`<codex_home>/app-server-control/app-server-control.sock`) stay well
+    # under macOS's 104-byte `SUN_LEN` limit even when `/tmp` -> `/private/tmp`.
+    base_tmp = Path(tempfile.mkdtemp(prefix="xc-", dir="/tmp"))
     xdg_run = base_tmp / "run"
     xdg_run.mkdir(parents=True, exist_ok=True)
     xdg_run.chmod(0o700)
@@ -2476,10 +2480,10 @@ def main():
     work_dir = base_tmp / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    codex_home_1 = base_tmp / "codex-home-1"
-    codex_home_2 = base_tmp / "codex-home-2"
-    codex_home_3 = base_tmp / "codex-home-3"
-    imp_home = base_tmp / "codex-home-imp"
+    codex_home_1 = base_tmp / "h1"
+    codex_home_2 = base_tmp / "h2"
+    codex_home_3 = base_tmp / "h3"
+    imp_home = base_tmp / "himp"
 
     provider = LocalResponsesServer()
     serve_proc = None
@@ -2499,12 +2503,10 @@ def main():
             work_dir,
         )
 
-        # Start real `xmsg serve` trusting codex_bin and our isolated homes
-        # Wait: C11 also uses a dynamic `tui_home` under `/tmp/xmsg-codex-tui-home-*` and C12 uses `emb_home`.
-        # Let's allocate all homes up front and pass `--codex-home` for each to `xmsg serve`!
-        tui_home = base_tmp / "codex-home-tui"
-        emb_home = base_tmp / "codex-home-emb"
-        noenv_home = base_tmp / "codex-home-noenv"
+        # Allocate all homes up front and pass `--codex-home` for each to `xmsg serve`.
+        tui_home = base_tmp / "htui"
+        emb_home = base_tmp / "hemb"
+        noenv_home = base_tmp / "hno"
         for h in (codex_home_1, codex_home_2, codex_home_3, imp_home, tui_home, emb_home, noenv_home):
             if h.exists():
                 shutil.rmtree(h)

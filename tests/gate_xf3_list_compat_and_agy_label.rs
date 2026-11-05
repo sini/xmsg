@@ -958,13 +958,9 @@ async fn test_oracle_2_harness_on_every_kind_live_and_inactive() {
         bin_exe.display().to_string(),
         "--svc-exe".to_string(),
         format!("my-svc={}", my_exe.display()),
+        "--codex-exe".to_string(),
+        my_exe.display().to_string(),
     ];
-    // INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
-    #[cfg(target_os = "linux")]
-    {
-        extra_args.push("--codex-exe".to_string());
-        extra_args.push(my_exe.display().to_string());
-    }
     let (node, _) = start_node_with_bin(BIN, &ca.pem, &creds_a, json!({}), &extra_args, true).await;
 
     // 1. Live `claude` session + a second `claude` session that we'll park
@@ -1115,8 +1111,6 @@ async fn test_oracle_2_harness_on_every_kind_live_and_inactive() {
     assert_eq!(svc_reg["status"], "ok", "{svc_reg}");
 
     // 7. Live `codex` session + a second `codex` session that we'll close via SessionEnd
-    // INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
-    #[cfg(target_os = "linux")]
     let (id_codex_live, id_codex_closed, _codex_lock_live, _codex_lock_closed) = {
         let run_dir = node.tmp.path().join("run");
         let codex_home = run_dir.join(".codex");
@@ -1263,7 +1257,6 @@ async fn test_oracle_2_harness_on_every_kind_live_and_inactive() {
     assert_eq!(find_by_addr(recs, &addr_oc_live)["harness"], "opencode");
     assert_eq!(find_by_addr(recs, &addr_hm_live)["harness"], "hermes");
     assert_eq!(find_by_addr(recs, "my-svc@")["harness"], "svc");
-    #[cfg(target_os = "linux")]
     assert_eq!(find_by_addr(recs, id_codex_live)["harness"], "codex");
 
     // Verify inactive (`parked` and `closed`) recipients also carry `harness`
@@ -1278,12 +1271,9 @@ async fn test_oracle_2_harness_on_every_kind_live_and_inactive() {
     assert_eq!(closed_rec["status"], "closed");
     assert_eq!(closed_rec["harness"], "opencode");
 
-    #[cfg(target_os = "linux")]
-    {
-        let codex_closed_rec = find_by_addr(irecs, id_codex_closed);
-        assert_eq!(codex_closed_rec["status"], "closed");
-        assert_eq!(codex_closed_rec["harness"], "codex");
-    }
+    let codex_closed_rec = find_by_addr(irecs, id_codex_closed);
+    assert_eq!(codex_closed_rec["status"], "closed");
+    assert_eq!(codex_closed_rec["harness"], "codex");
 }
 
 // =============================================================================
@@ -1574,19 +1564,14 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
     let my_exe = std::env::current_exe().unwrap();
     let bin_exe = PathBuf::from(BIN);
 
-    #[allow(unused_mut)]
-    let mut extra_args = vec![
+    let extra_args = vec![
         "--agy-exe".to_string(),
         my_exe.display().to_string(),
         "--agy-exe".to_string(),
         bin_exe.display().to_string(),
+        "--codex-exe".to_string(),
+        my_exe.display().to_string(),
     ];
-    // INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
-    #[cfg(target_os = "linux")]
-    {
-        extra_args.push("--codex-exe".to_string());
-        extra_args.push(my_exe.display().to_string());
-    }
     let (node, _) =
         start_node_with_bin(BIN, &ca.pem, &creds_a, json!({}), &extra_args, false).await;
     let run_dir = node.tmp.path().join("run");
@@ -1601,10 +1586,8 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
     let use_inproc_clone = use_inproc_agent.clone();
     let real_agent_sock = node.agent_sock.clone();
 
-    // In-process `agent.sock` listener for Phase 3 (`codex`), so `SO_PEERCRED` sees the real
+    // In-process `agent.sock` listener for Phase 3 (`codex`), so peer credentials see the real
     // spawned `xmsg mcp` sidecar PID (`09af11b` / `9d1f5fa` / `BIN`) descending from `my_pid`.
-    // INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
-    #[cfg(target_os = "linux")]
     let inproc_agent_sock = {
         let inproc_agent_sock = run_dir.join("inproc_agent.sock");
         let inproc_listener = UnixListener::bind(&inproc_agent_sock).unwrap();
@@ -2322,11 +2305,9 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
 
     // =========================================================================
     // Phase 3 (HA9-A.codex C10): Codex root & subagent vs pre-HA9-A.codex sidecar (`09af11b` / `9d1f5fa`)
-    // Connected directly to `inproc_agent_sock` so `SO_PEERCRED` sees the real spawned sidecar PID
+    // Connected directly to `inproc_agent_sock` so peer credentials see the real spawned sidecar PID
     // descending from `my_pid` (`my_exe` in `--codex-exe`).
-    // INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
     // =========================================================================
-    #[cfg(target_os = "linux")]
     {
         let codex_home = run_dir.join(".codex");
         fs::create_dir_all(codex_home.join("thread-writer-locks")).unwrap();

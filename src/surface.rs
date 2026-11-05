@@ -626,7 +626,6 @@ pub(crate) async fn listing_live(
             }
         }
     }
-    #[cfg(target_os = "linux")]
     {
         let codex_roots = crate::codex::sweep_codex_roots(local.db);
         for snap in codex_roots {
@@ -783,7 +782,6 @@ fn agy_has_creds(store: &crate::agy::AgyStore, session: &Session) -> bool {
 /// Attempt to hand off an already-enqueued Codex root message (`message_id`) via the
 /// internal restricted relay (`src/codex_relay.rs`), transitioning its `codex_handoff`
 /// state atomically per §2.4 & §2.5.
-#[cfg(target_os = "linux")]
 pub async fn try_push_codex_queued_message(
     local: &Local<'_>,
     root_snap: &crate::codex::CodexRootSnapshot,
@@ -1002,7 +1000,6 @@ pub async fn deliver(
                         }
                     }
                 }
-                #[cfg(target_os = "linux")]
                 ResolvedTarget::Codex(parent_snap, _) => {
                     let pi_msg = storage::PiPendingMessage {
                         id: message_id.to_string(),
@@ -1108,7 +1105,6 @@ pub async fn deliver(
             storage::insert_agy_message(&db, &agy_msg).map_err(db_err)?;
             Ok((session.session_id.clone(), "agy", "queued"))
         }
-        #[cfg(target_os = "linux")]
         ResolvedTarget::Codex(root_snap, session) => {
             let pi_msg = storage::PiPendingMessage {
                 id: message_id.to_string(),
@@ -1217,22 +1213,14 @@ pub async fn push_reply(
         let now = storage::now_epoch_secs();
         let ttl_secs = local.reply_ttl.as_secs() as i64;
         let (binding, in_turn) = if ret_harness == "codex" {
-            // INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
-            #[cfg(target_os = "linux")]
-            {
-                let Ok((_snap, child_state, b)) =
-                    crate::codex::admit_codex_subagent(local.db, parent_ref, child_ref, None)
-                else {
-                    return "sender_gone";
-                };
-                let active = !child_state.active_turns.is_empty()
-                    && crate::claim::is_subagent_in_turn(&local.agy_config.proc_root, &b);
-                (b, active)
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
+            let Ok((_snap, child_state, b)) =
+                crate::codex::admit_codex_subagent(local.db, parent_ref, child_ref, None)
+            else {
                 return "sender_gone";
-            }
+            };
+            let active = !child_state.active_turns.is_empty()
+                && crate::claim::is_subagent_in_turn(&local.agy_config.proc_root, &b);
+            (b, active)
         } else {
             let b = {
                 let Ok(db) = local.db.lock() else {
@@ -1437,8 +1425,6 @@ pub async fn push_reply(
                 Err(_) => "push_failed",
             }
         }
-        // INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
-        #[cfg(target_os = "linux")]
         "codex" => {
             let Some(root_snap) = crate::codex::resolve_codex_root(local.db, ret_session_id) else {
                 return "sender_gone";

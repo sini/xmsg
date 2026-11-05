@@ -31,6 +31,54 @@ fn effective_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// Resolve the kernel path of an open file descriptor: via `/proc/self/fd/<fd>` + `canonicalize`
+/// on Linux, and via `fcntl(fd, F_GETPATH, ...)` on macOS (`P4`: never `realpath` a kernel vnode path).
+fn opened_fd_kernel_path(fd: libc::c_int) -> std::result::Result<PathBuf, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let fd_proc_path = format!("/proc/self/fd/{fd}");
+        std::fs::canonicalize(&fd_proc_path)
+            .map_err(|e| format!("cannot canonicalize opened fd {fd}: {e}"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut buf = [0 as libc::c_char; libc::PATH_MAX as usize];
+        let rc = unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) };
+        if rc != 0 {
+            return Err(format!(
+                "fcntl(F_GETPATH) failed on fd {fd}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let c_str = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+        Ok(PathBuf::from(std::ffi::OsStr::from_bytes(c_str.to_bytes())))
+    }
+}
+
+#[cfg(target_os = "macos")]
+thread_local! {
+    static FORCE_OMIT_NOTE_FUNLOCK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_IGNORE_KEVENT_FFLAGS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test seam (`M2b`): when `true` on macOS, omits `NOTE_FUNLOCK` from
+/// the `EVFILT_VNODE` registration mask in [`LockLeaseWatch::install`].
+pub fn set_force_omit_note_funlock_for_test(omit: bool) {
+    #[cfg(target_os = "macos")]
+    FORCE_OMIT_NOTE_FUNLOCK.with(|c| c.set(omit));
+    #[cfg(not(target_os = "macos"))]
+    let _ = omit;
+}
+
+/// Test seam (`M3`): when `true` on macOS, ignores `kevent` `fflags` in [`LockLeaseWatch::drain_events`]
+/// and checks only path/inode existence.
+pub fn set_force_ignore_kevent_fflags_for_test(ignore: bool) {
+    #[cfg(target_os = "macos")]
+    FORCE_IGNORE_KEVENT_FFLAGS.with(|c| c.set(ignore));
+    #[cfg(not(target_os = "macos"))]
+    let _ = ignore;
+}
+
 #[derive(Debug, Clone)]
 pub struct CodexConfig {
     /// Canonicalized paths of trusted Codex binaries (`--codex-exe`).
@@ -105,17 +153,26 @@ impl CodexConfig {
     }
 }
 
-/// Continuous Linux `inotify` + `O_PATH` witness over a root's writer-lock inode (§2.1).
+/// Continuous witness over a root's writer-lock inode (§2.1 on Linux via `inotify` + `O_PATH`;
+/// §5.3 on macOS via `kqueue` `EVFILT_VNODE` + `O_EVTONLY`).
 #[derive(Debug)]
 pub struct LockLeaseWatch {
+    #[cfg(target_os = "linux")]
     pub inotify_fd: OwnedFd,
+    #[cfg(target_os = "linux")]
     pub watch_wd: i32,
+    #[cfg(target_os = "linux")]
     pub lock_opath_fd: OwnedFd,
+    #[cfg(target_os = "macos")]
+    pub kq_fd: OwnedFd,
+    #[cfg(target_os = "macos")]
+    pub lock_evtonly_fd: OwnedFd,
     pub lock_path: PathBuf,
     pub lock_dev: u64,
     pub lock_ino: u64,
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for LockLeaseWatch {
     fn drop(&mut self) {
         unsafe {
@@ -126,8 +183,9 @@ impl Drop for LockLeaseWatch {
 
 impl LockLeaseWatch {
     /// Open `<canon_home>/thread-writer-locks/<root_id>.lock` without following symlinks,
-    /// retain an `O_PATH` handle to prevent inode reuse, and install a non-blocking
-    /// `inotify` watch for close/delete/move/unmount/overflow events.
+    /// retain a kernel vnode handle (`O_PATH` on Linux, `O_EVTONLY` on macOS) to prevent inode
+    /// reuse, and install a non-blocking continuous watch (`inotify` on Linux, `kqueue`
+    /// `EVFILT_VNODE` on macOS).
     pub fn install(canon_home: &Path, root_id: &str) -> std::result::Result<Self, String> {
         if !crate::claim::is_uuid_shaped(root_id) {
             return Err(format!("invalid codex root UUID: {root_id}"));
@@ -163,146 +221,309 @@ impl LockLeaseWatch {
             ));
         }
 
-        let raw_opath = unsafe {
-            libc::openat(
-                locks_dir_fd.as_raw_fd(),
-                lock_c.as_ptr(),
-                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if raw_opath < 0 {
-            return Err(format!(
-                "openat O_PATH writer lock failed for {root_id}: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let lock_opath_fd = unsafe { OwnedFd::from_raw_fd(raw_opath) };
-
-        let empty_c = CString::new("").unwrap();
-        let mut fst: libc::stat = unsafe { std::mem::zeroed() };
-        let rc_f = unsafe {
-            libc::fstatat(
-                lock_opath_fd.as_raw_fd(),
-                empty_c.as_ptr(),
-                &mut fst,
-                libc::AT_EMPTY_PATH,
-            )
-        };
-        if rc_f != 0 {
-            return Err(format!(
-                "fstatat AT_EMPTY_PATH failed on writer lock: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        if (fst.st_mode & libc::S_IFMT) != libc::S_IFREG
-            || fst.st_uid != euid
-            || fst.st_nlink == 0
-            || fst.st_dev != lst.st_dev
-            || fst.st_ino != lst.st_ino
-        {
-            return Err("writer lock inode changed or invalid during open".to_string());
-        }
-
         let lock_path = canon_home.join("thread-writer-locks").join(&lock_filename);
-        let fd_proc_path = format!("/proc/self/fd/{}", lock_opath_fd.as_raw_fd());
-        let canon_opened = std::fs::canonicalize(&fd_proc_path)
-            .map_err(|e| format!("cannot canonicalize opened lock fd: {e}"))?;
-        if canon_opened != lock_path || !canon_opened.starts_with(canon_home) {
-            return Err("opened lock fd escapes canonical codex home".to_string());
-        }
 
-        let raw_inotify = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
-        if raw_inotify < 0 {
-            return Err(format!(
-                "inotify_init1 failed: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let inotify_fd = unsafe { OwnedFd::from_raw_fd(raw_inotify) };
+        #[cfg(target_os = "linux")]
+        let watch = {
+            let raw_opath = unsafe {
+                libc::openat(
+                    locks_dir_fd.as_raw_fd(),
+                    lock_c.as_ptr(),
+                    libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if raw_opath < 0 {
+                return Err(format!(
+                    "openat O_PATH writer lock failed for {root_id}: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let lock_opath_fd = unsafe { OwnedFd::from_raw_fd(raw_opath) };
 
-        let watch_target_c = CString::new(fd_proc_path.as_bytes()).unwrap();
-        let mask = LEASE_FATAL_MASK & !libc::IN_Q_OVERFLOW;
-        let wd = unsafe {
-            libc::inotify_add_watch(inotify_fd.as_raw_fd(), watch_target_c.as_ptr(), mask)
+            let empty_c = CString::new("").unwrap();
+            let mut fst: libc::stat = unsafe { std::mem::zeroed() };
+            let rc_f = unsafe {
+                libc::fstatat(
+                    lock_opath_fd.as_raw_fd(),
+                    empty_c.as_ptr(),
+                    &mut fst,
+                    libc::AT_EMPTY_PATH,
+                )
+            };
+            if rc_f != 0 {
+                return Err(format!(
+                    "fstatat AT_EMPTY_PATH failed on writer lock: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            if (fst.st_mode & libc::S_IFMT) != libc::S_IFREG
+                || fst.st_uid != euid
+                || fst.st_nlink == 0
+                || fst.st_dev != lst.st_dev
+                || fst.st_ino != lst.st_ino
+            {
+                return Err("writer lock inode changed or invalid during open".to_string());
+            }
+
+            let fd_proc_path = format!("/proc/self/fd/{}", lock_opath_fd.as_raw_fd());
+            let canon_opened = opened_fd_kernel_path(lock_opath_fd.as_raw_fd())?;
+            if canon_opened != lock_path || !canon_opened.starts_with(canon_home) {
+                return Err("opened lock fd escapes canonical codex home".to_string());
+            }
+
+            let raw_inotify = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+            if raw_inotify < 0 {
+                return Err(format!(
+                    "inotify_init1 failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let inotify_fd = unsafe { OwnedFd::from_raw_fd(raw_inotify) };
+
+            let watch_target_c = CString::new(fd_proc_path.as_bytes()).unwrap();
+            let mask = LEASE_FATAL_MASK & !libc::IN_Q_OVERFLOW;
+            let wd = unsafe {
+                libc::inotify_add_watch(inotify_fd.as_raw_fd(), watch_target_c.as_ptr(), mask)
+            };
+            if wd < 0 {
+                return Err(format!(
+                    "inotify_add_watch failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            Self {
+                inotify_fd,
+                watch_wd: wd,
+                lock_opath_fd,
+                lock_path,
+                lock_dev: fst.st_dev as u64,
+                lock_ino: fst.st_ino,
+            }
         };
-        if wd < 0 {
-            return Err(format!(
-                "inotify_add_watch failed: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
 
-        let watch = Self {
-            inotify_fd,
-            watch_wd: wd,
-            lock_opath_fd,
-            lock_path,
-            lock_dev: fst.st_dev,
-            lock_ino: fst.st_ino,
+        #[cfg(target_os = "macos")]
+        let watch = {
+            let raw_evtonly = unsafe {
+                libc::openat(
+                    locks_dir_fd.as_raw_fd(),
+                    lock_c.as_ptr(),
+                    libc::O_EVTONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if raw_evtonly < 0 {
+                return Err(format!(
+                    "openat O_EVTONLY writer lock failed for {root_id}: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let lock_evtonly_fd = unsafe { OwnedFd::from_raw_fd(raw_evtonly) };
+
+            let raw_kq = unsafe { libc::kqueue() };
+            if raw_kq < 0 {
+                return Err(format!(
+                    "kqueue() failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let kq_fd = unsafe { OwnedFd::from_raw_fd(raw_kq) };
+            let _ = unsafe { libc::fcntl(kq_fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+
+            let omit_funlock = FORCE_OMIT_NOTE_FUNLOCK.with(|c| c.get());
+            let mut fflags: u32 = libc::NOTE_DELETE
+                | libc::NOTE_RENAME
+                | libc::NOTE_REVOKE
+                | libc::NOTE_LINK
+                | libc::NOTE_EXTEND
+                | libc::NOTE_WRITE
+                | libc::NOTE_ATTRIB;
+            if !omit_funlock {
+                fflags |= libc::NOTE_FUNLOCK;
+            }
+            let kev = libc::kevent {
+                ident: lock_evtonly_fd.as_raw_fd() as libc::uintptr_t,
+                filter: libc::EVFILT_VNODE,
+                flags: libc::EV_ADD | libc::EV_ENABLE | libc::EV_CLEAR,
+                fflags,
+                data: 0,
+                udata: std::ptr::null_mut(),
+            };
+            let rc_k = unsafe {
+                libc::kevent(
+                    kq_fd.as_raw_fd(),
+                    &kev as *const libc::kevent,
+                    1,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null(),
+                )
+            };
+            if rc_k < 0 {
+                return Err(format!(
+                    "kevent EVFILT_VNODE registration failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            let mut fst: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstat(lock_evtonly_fd.as_raw_fd(), &mut fst) } != 0 {
+                return Err(format!(
+                    "fstat failed on O_EVTONLY writer lock: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            if (fst.st_mode & libc::S_IFMT) != libc::S_IFREG
+                || fst.st_uid != euid
+                || fst.st_nlink == 0
+                || fst.st_dev != lst.st_dev
+                || fst.st_ino != lst.st_ino
+            {
+                return Err("writer lock inode changed or invalid during open".to_string());
+            }
+
+            let kernel_path = opened_fd_kernel_path(lock_evtonly_fd.as_raw_fd())?;
+            if kernel_path != lock_path || !kernel_path.starts_with(canon_home) {
+                return Err("opened lock fd escapes canonical codex home".to_string());
+            }
+
+            Self {
+                kq_fd,
+                lock_evtonly_fd,
+                lock_path,
+                lock_dev: fst.st_dev as u64,
+                lock_ino: fst.st_ino,
+            }
         };
+
         watch.drain_events()?;
         Ok(watch)
     }
 
-    /// Drain all pending `inotify` events on the watched lock inode. Any delete-self,
-    /// move-self, unmount, ignored, overflow, or read failure returns `Err`.
+    /// Drain all pending watcher events on the watched lock inode. Any delete,
+    /// move, unmount/revoke, unlock, overflow, or inode/link mismatch returns `Err`.
     pub fn drain_events(&self) -> std::result::Result<(), String> {
-        let mut buf = [0u8; 4096];
-        loop {
-            let n = unsafe {
-                libc::read(
-                    self.inotify_fd.as_raw_fd(),
-                    buf.as_mut_ptr() as *mut libc::c_void,
-                    buf.len(),
+        #[cfg(target_os = "linux")]
+        {
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = unsafe {
+                    libc::read(
+                        self.inotify_fd.as_raw_fd(),
+                        buf.as_mut_ptr() as *mut libc::c_void,
+                        buf.len(),
+                    )
+                };
+                if n < 0 {
+                    let err = std::io::Error::last_os_error();
+                    #[allow(unreachable_patterns)]
+                    match err.raw_os_error() {
+                        Some(libc::EAGAIN) | Some(libc::EWOULDBLOCK) => break,
+                        Some(libc::EINTR) => continue,
+                        _ => return Err(format!("inotify read error: {err}")),
+                    }
+                }
+                if n == 0 {
+                    return Err("inotify unexpected EOF".to_string());
+                }
+                let n_usize = n as usize;
+                let mut offset = 0usize;
+                let hdr_size = std::mem::size_of::<libc::inotify_event>();
+                while offset + hdr_size <= n_usize {
+                    let ev: libc::inotify_event = unsafe {
+                        std::ptr::read_unaligned(
+                            buf[offset..].as_ptr() as *const libc::inotify_event
+                        )
+                    };
+                    if (ev.mask & LEASE_FATAL_MASK) != 0 {
+                        return Err(format!(
+                            "writer-lock lease discontinuity event mask=0x{:x}",
+                            ev.mask
+                        ));
+                    }
+                    offset = offset
+                        .saturating_add(hdr_size)
+                        .saturating_add(ev.len as usize);
+                }
+            }
+
+            let empty_c = CString::new("").unwrap();
+            let mut fst: libc::stat = unsafe { std::mem::zeroed() };
+            let rc_f = unsafe {
+                libc::fstatat(
+                    self.lock_opath_fd.as_raw_fd(),
+                    empty_c.as_ptr(),
+                    &mut fst,
+                    libc::AT_EMPTY_PATH,
                 )
             };
-            if n < 0 {
-                let err = std::io::Error::last_os_error();
-                #[allow(unreachable_patterns)]
-                match err.raw_os_error() {
-                    Some(libc::EAGAIN) | Some(libc::EWOULDBLOCK) => break,
-                    Some(libc::EINTR) => continue,
-                    _ => return Err(format!("inotify read error: {err}")),
-                }
-            }
-            if n == 0 {
-                return Err("inotify unexpected EOF".to_string());
-            }
-            let n_usize = n as usize;
-            let mut offset = 0usize;
-            let hdr_size = std::mem::size_of::<libc::inotify_event>();
-            while offset + hdr_size <= n_usize {
-                let ev: libc::inotify_event = unsafe {
-                    std::ptr::read_unaligned(buf[offset..].as_ptr() as *const libc::inotify_event)
-                };
-                if (ev.mask & LEASE_FATAL_MASK) != 0 {
-                    return Err(format!(
-                        "writer-lock lease discontinuity event mask=0x{:x}",
-                        ev.mask
-                    ));
-                }
-                offset = offset
-                    .saturating_add(hdr_size)
-                    .saturating_add(ev.len as usize);
+            if rc_f != 0
+                || fst.st_nlink == 0
+                || fst.st_dev as u64 != self.lock_dev
+                || fst.st_ino != self.lock_ino
+            {
+                return Err("writer-lock O_PATH inode unlinked or mismatched".to_string());
             }
         }
 
-        let empty_c = CString::new("").unwrap();
-        let mut fst: libc::stat = unsafe { std::mem::zeroed() };
-        let rc_f = unsafe {
-            libc::fstatat(
-                self.lock_opath_fd.as_raw_fd(),
-                empty_c.as_ptr(),
-                &mut fst,
-                libc::AT_EMPTY_PATH,
-            )
-        };
-        if rc_f != 0
-            || fst.st_nlink == 0
-            || fst.st_dev != self.lock_dev
-            || fst.st_ino != self.lock_ino
+        #[cfg(target_os = "macos")]
         {
-            return Err("writer-lock O_PATH inode unlinked or mismatched".to_string());
+            let ignore_fflags = FORCE_IGNORE_KEVENT_FFLAGS.with(|c| c.get());
+            let zero_ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            let mut events: [libc::kevent; 16] = unsafe { std::mem::zeroed() };
+            loop {
+                let n = unsafe {
+                    libc::kevent(
+                        self.kq_fd.as_raw_fd(),
+                        std::ptr::null(),
+                        0,
+                        events.as_mut_ptr(),
+                        events.len() as libc::c_int,
+                        &zero_ts as *const libc::timespec,
+                    )
+                };
+                if n < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                    return Err(format!("kevent poll error: {err}"));
+                }
+                if n == 0 {
+                    break;
+                }
+                let fatal_fflags: u32 = libc::NOTE_DELETE
+                    | libc::NOTE_RENAME
+                    | libc::NOTE_REVOKE
+                    | libc::NOTE_LINK
+                    | libc::NOTE_WRITE
+                    | libc::NOTE_EXTEND
+                    | libc::NOTE_ATTRIB
+                    | libc::NOTE_FUNLOCK;
+                for ev in &events[..(n as usize)] {
+                    if (ev.flags & libc::EV_ERROR) != 0 {
+                        return Err(format!("kevent returned EV_ERROR data={}", ev.data));
+                    }
+                    if !ignore_fflags && (ev.fflags & fatal_fflags) != 0 {
+                        return Err(format!(
+                            "writer-lock lease discontinuity kevent fflags=0x{:x}",
+                            ev.fflags
+                        ));
+                    }
+                }
+            }
+
+            let mut fst: libc::stat = unsafe { std::mem::zeroed() };
+            let rc_f = unsafe { libc::fstat(self.lock_evtonly_fd.as_raw_fd(), &mut fst) };
+            if rc_f != 0
+                || fst.st_nlink == 0
+                || fst.st_dev as u64 != self.lock_dev
+                || fst.st_ino != self.lock_ino
+            {
+                return Err("writer-lock O_EVTONLY inode unlinked or mismatched".to_string());
+            }
         }
 
         let lst = std::fs::symlink_metadata(&self.lock_path)
@@ -349,6 +570,7 @@ impl LockLeaseWatch {
 /// `WriterLockCoordinator::remove_stale_thread_locks`, `WriterLockCoordinator::acquire`,
 /// and `WriterLockCoordinator::try_acquire_for_publication` open sibling `<P>.lock`
 /// files `O_RDWR` and close them on `WouldBlock`.
+#[cfg(target_os = "linux")]
 const LEASE_FATAL_MASK: u32 = libc::IN_DELETE_SELF
     | libc::IN_MOVE_SELF
     | libc::IN_UNMOUNT
@@ -356,8 +578,8 @@ const LEASE_FATAL_MASK: u32 = libc::IN_DELETE_SELF
     | libc::IN_Q_OVERFLOW;
 
 /// Check that `owner_pid` has `owner_starttime` and currently holds an open file descriptor
-/// with an active kernel `flock(LOCK_EX)` write lock (§7.2.1) to `(expected_dev, expected_ino)`
-/// whose symlink in `<proc_root>/<owner_pid>/fd` resolves to `expected_lock_path`.
+/// with an active kernel `flock(LOCK_EX)` write lock (§7.2.1, §7.2.2) to `(expected_dev, expected_ino)`
+/// whose path resolves to `expected_lock_path` via `crate::process::open_file_vnodes` (`P3`, `P4`).
 pub fn owner_holds_lock_inode(
     proc_root: &Path,
     owner_pid: u32,
@@ -366,72 +588,56 @@ pub fn owner_holds_lock_inode(
     expected_dev: u64,
     expected_ino: u64,
 ) -> bool {
-    if crate::process::starttime(proc_root, owner_pid)
-        .ok()
-        .as_deref()
-        != Some(owner_starttime)
-    {
-        return false;
-    }
     let euid = effective_uid();
+    let Ok(vnodes) =
+        crate::process::open_file_vnodes(proc_root, owner_pid, Some(owner_starttime))
+    else {
+        return false;
+    };
     let Ok(lst) = std::fs::symlink_metadata(expected_lock_path) else {
         return false;
     };
     if lst.file_type().is_symlink()
-        || (lst.mode() & libc::S_IFMT) != libc::S_IFREG
+        || !lst.is_file()
         || lst.uid() != euid
         || lst.dev() != expected_dev
         || lst.ino() != expected_ino
-        || lst.nlink() == 0
+        || lst.nlink() < 1
     {
         return false;
     }
-    let fd_dir = proc_root.join(owner_pid.to_string()).join("fd");
-    let Ok(entries) = std::fs::read_dir(&fd_dir) else {
-        return false;
-    };
-    let mut found_fd = false;
-    for entry in entries.flatten() {
-        let fd_path = entry.path();
-        let Ok(target) = std::fs::read_link(&fd_path) else {
-            continue;
-        };
-        if target != expected_lock_path {
-            continue;
-        }
-        let Ok(meta) = std::fs::metadata(&fd_path) else {
-            continue;
-        };
-        if (meta.mode() & libc::S_IFMT) == libc::S_IFREG
-            && meta.uid() == euid
-            && meta.dev() == expected_dev
-            && meta.ino() == expected_ino
-            && meta.nlink() >= 1
-        {
-            found_fd = true;
-            break;
-        }
-    }
+    let found_fd = vnodes.into_iter().any(|v| {
+        (v.mode & libc::S_IFMT) == libc::S_IFREG
+            && v.uid == euid
+            && v.nlink >= 1
+            && v.dev == expected_dev
+            && v.ino == expected_ino
+            && v.path == expected_lock_path
+            && v.has_flock
+    });
     if !found_fd {
         return false;
     }
-    let has_flock = matches!(
-        crate::agy::attested_lock_holder(
-            proc_root,
-            &proc_root.join("locks"),
-            owner_pid,
-            expected_dev,
-            expected_ino,
-        ),
-        Ok(Some(holder)) if holder == owner_pid
-    );
-    if !has_flock {
-        return false;
+    if proc_root != Path::new(crate::process::LIVE_PROC_ROOT) || cfg!(target_os = "linux") {
+        let has_flock = matches!(
+            crate::agy::attested_lock_holder(
+                proc_root,
+                &proc_root.join("locks"),
+                owner_pid,
+                expected_dev,
+                expected_ino,
+            ),
+            Ok(Some(holder)) if holder == owner_pid
+        );
+        if !has_flock {
+            return false;
+        }
+        return crate::process::starttime(proc_root, owner_pid)
+            .ok()
+            .as_deref()
+            == Some(owner_starttime);
     }
-    crate::process::starttime(proc_root, owner_pid)
-        .ok()
-        .as_deref()
-        == Some(owner_starttime)
+    true
 }
 
 /// Open a directory with `O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC` and verify UID.
@@ -810,9 +1016,8 @@ fn walk_sessions_dir_fd(
             )));
         }
 
-        let fd_proc = format!("/proc/self/fd/{}", file_fd.as_raw_fd());
-        let canon_file = std::fs::canonicalize(&fd_proc).map_err(|e| {
-            RolloutLookupError::Invalid(format!("XB2: cannot canonicalize opened rollout: {e}"))
+        let canon_file = opened_fd_kernel_path(file_fd.as_raw_fd()).map_err(|e| {
+            RolloutLookupError::Invalid(format!("XB2: cannot resolve opened rollout path: {e}"))
         })?;
         if !canon_file.starts_with(canon_sessions) {
             return Err(RolloutLookupError::Invalid(format!(
