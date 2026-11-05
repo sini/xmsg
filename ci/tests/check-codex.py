@@ -1442,6 +1442,27 @@ sys.exit(proc.wait())
                 )
                 return ([msg_fn("CHILD_TURN_2_COMPLETE")], None)
 
+        if "SECOND_PROMPT_AFTER_RESUME" in joined_user:
+            scenario_state["root_t4_input"] = json.dumps(inp)
+            return ([msg_fn("SECOND_RESUME_PROMPT_DONE")], None)
+
+        if "TRY_SEND_AFTER_RESUME" in joined_user:
+            scenario_state["root_t3_input"] = json.dumps(inp)
+            idx_t3 = max(
+                i
+                for i, it in enumerate(inp)
+                if it.get("type") == "message" and "TRY_SEND_AFTER_RESUME" in json.dumps(it)
+            )
+            post_outputs = [it for it in inp[idx_t3:] if it.get("type") == "function_call_output"]
+            if len(post_outputs) == 0:
+                return (
+                    [fc_fn("send", {"to": "peer", "text": "SHOULD_REFUSE_AFTER_RESUME"}, "mcp__xmsg")],
+                    None,
+                )
+            else:
+                scenario_state["resume_tool_outputs"] = [fco_str(x) for x in post_outputs]
+                return ([msg_fn("RESUME_SEND_ATTEMPTED")], None)
+
         # Root turn 2: RUN_DAEMON_FOLLOWUP:<child_id>:<root_msg_id>
         if "RUN_DAEMON_FOLLOWUP:" in joined_user:
             scenario_state["root_t2_input"] = json.dumps(inp)
@@ -1565,16 +1586,6 @@ sys.exit(proc.wait())
                 )
             else:
                 return ([msg_fn("EMBEDDED_CHILD_DONE")], None)
-
-        if "TRY_SEND_AFTER_RESUME" in joined_user:
-            if len(fc_outputs) == 0:
-                return (
-                    [fc_fn("send", {"to": "peer", "text": "SHOULD_REFUSE_AFTER_RESUME"}, "mcp__xmsg")],
-                    None,
-                )
-            else:
-                scenario_state["root_tool_outputs"].extend(fco_str(x) for x in fc_outputs)
-                return ([msg_fn("RESUME_SEND_ATTEMPTED")], None)
 
         if "SIBLING_LIVE_SEND" in joined_user:
             if len(fc_outputs) == 0:
@@ -1780,6 +1791,52 @@ sys.exit(proc.wait())
         assert not any(
             "SHOULD_REFUSE_AFTER_RESUME" in m.get("text", "") for m in recv.received
         ), "C9 failed: resumed root was able to send after unload/resume"
+        resume_outs = scenario_state.get("resume_tool_outputs", [])
+        assert len(resume_outs) == 1 and (
+            "revoked or resumed" in resume_outs[0] or "not admitted" in resume_outs[0]
+        ), f"C9/fail-open failed: expected server MCP refusal on resumed root tool call, got: {resume_outs}"
+        note_str = "xmsg unavailable for this thread (resumed); start a fresh thread to use xmsg"
+        t3_in_str = scenario_state.get("root_t3_input", "")
+        assert t3_in_str.count(note_str) == 1, (
+            f"C9/fail-open failed: expected unavailable note once on first resumed turn, got count={t3_in_str.count(note_str)} in {t3_in_str}"
+        )
+
+        # Second prompt on resumed `root_p` must exit 0 and NOT repeat the note!
+        t4 = client.request(
+            "turn/start",
+            {"threadId": root_p, "input": [{"type": "text", "text": "SECOND_PROMPT_AFTER_RESUME"}]},
+        )
+        t4_id = t4["result"]["turn"]["id"]
+        deadline = time.time() + 15.0
+        while time.time() < deadline:
+            if any(
+                n.get("method") == "turn/completed"
+                and n.get("params", {}).get("turn", {}).get("id") == t4_id
+                for n in client.notifications
+            ):
+                break
+            time.sleep(0.05)
+        t4_in_str = scenario_state.get("root_t4_input", "")
+        assert t4_in_str.count(note_str) == 1, (
+            f"C9/fail-open failed: unavailable note repeated on second resumed prompt (count={t4_in_str.count(note_str)})"
+        )
+        # Mutant check: restoring exit 2 (`XMSG_TEST_MUTANT_CODEX_HOOK_EXIT2=1`) exits 2 and turns the cell red.
+        mut_env = os.environ.copy()
+        mut_env["XMSG_TEST_MUTANT_CODEX_HOOK_EXIT2"] = "1"
+        for ev, payload in [
+            ("SessionStart", {"session_id": root_p, "source": "resume", "cwd": str(work_dir)}),
+            ("UserPromptSubmit", {"session_id": root_p}),
+        ]:
+            mut_cp = subprocess.run(
+                [str(xmsg_bin), "register", "codex", "--hook", "--event", ev],
+                input=json.dumps(payload),
+                text=True,
+                capture_output=True,
+                env=mut_env,
+            )
+            assert mut_cp.returncode == 2, (
+                f"Mutant restoring exit 2 did not exit 2 on {ev}: rc={mut_cp.returncode}"
+            )
     finally:
         client.close()
 

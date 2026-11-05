@@ -2421,4 +2421,330 @@ async fn c15_delivery_races_unknown_state_and_batch_limits() {
     );
     assert!(big_text.contains("(+1 more pending xmsg message queued)"));
 }
+
+/// C16: Lifecycle and drain hooks (`SessionStart`, `UserPromptSubmit`, `PreModelRequest`,
+/// `Stop`, `SubagentStart`, `SubagentStop`, `SessionEnd`) fail open (exit 0) on a registration
+/// refusal or an unreachable daemon and emit the one-shot note once without repeating on every
+/// prompt, while `resolve_codex_mcp_caller` on the server still refuses MCP tool calls from the
+/// resumed/revoked root. Includes a mutant restoring exit 2 that turns the cell red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    use xmsg::agent::{CODEX_HOOK_FAIL_CLOSED_MUTANT_ENV, CODEX_HOOK_UNAVAILABLE_NOTE};
+
+    let mut env = CodexTestEnv::new();
+    let real_test_exe = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let real_proc = PathBuf::from(xmsg::process::LIVE_PROC_ROOT);
+    Arc::get_mut(&mut env.state).unwrap().agy_config.proc_root = real_proc.clone();
+    xmsg::codex::init_for_state(
+        &env.state,
+        CodexConfig {
+            trusted_codex_exes: vec![real_test_exe],
+            codex_homes: vec![env.codex_home.clone()],
+            proc_root: real_proc,
+        },
+    );
+
+    let sock_dir = tempdir().unwrap();
+    fs::set_permissions(sock_dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let agent_sock = sock_dir.path().join("agent.sock");
+    let listener = UnixListener::bind(&agent_sock).unwrap();
+    let srv_state = env.state.clone();
+    let my_uid = env.my_uid;
+    let srv_task = tokio::spawn(async move {
+        let _ = run_agent_server_with_listener(listener, srv_state, my_uid).await;
+    });
+
+    let self_pid = std::process::id();
+    let peer = env.peer(self_pid);
+
+    let xmsg_bin = PathBuf::from(env!("CARGO_BIN_EXE_xmsg"));
+    let invoke_hook_cli = |event: &str,
+                           sock: &Path,
+                           stdin_json: &str,
+                           mutant_exit2: bool|
+     -> (i32, String, String) {
+        let mut cmd = Command::new(&xmsg_bin);
+        cmd.args([
+            "register",
+            "codex",
+            "--hook",
+            "--event",
+            event,
+            "--sock",
+            sock.to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+        if mutant_exit2 {
+            cmd.env(CODEX_HOOK_FAIL_CLOSED_MUTANT_ENV, "1");
+        } else {
+            cmd.env_remove(CODEX_HOOK_FAIL_CLOSED_MUTANT_ENV);
+        }
+        let mut child = cmd.spawn().expect("spawn xmsg register codex --hook");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin_json.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        )
+    };
+
+    // Helper cell check that runs against a resumed root and verifies exit 0 + one-shot note + MCP refusal.
+    // Returns Err(reason) if any hook exits non-zero (e.g. exit 2 under mutant) or violates one-shot note / server refusal.
+    let run_resumed_root_cell = |root_resume: &str,
+                                 root_prompt: &str,
+                                 mutant_exit2: bool|
+     -> Result<(), String> {
+        // 1. SessionStart(source="resume") on root_resume -> must exit 0 and emit note once; subsequent prompts emit nothing.
+        let (code_ss, out_ss, err_ss) = invoke_hook_cli(
+            "SessionStart",
+            &agent_sock,
+            &json!({"session_id": root_resume, "source": "resume", "cwd": "/workspace"})
+                .to_string(),
+            mutant_exit2,
+        );
+        if code_ss != 0 {
+            return Err(format!(
+                "SessionStart(resume) exited with code {code_ss} (stderr: {err_ss})"
+            ));
+        }
+        let ss_val: Value =
+            serde_json::from_str(&out_ss).map_err(|e| format!("bad SessionStart JSON: {e}"))?;
+        if ss_val["systemMessage"].as_str() != Some(CODEX_HOOK_UNAVAILABLE_NOTE)
+            || ss_val["hookSpecificOutput"]["hookEventName"].as_str() != Some("SessionStart")
+            || ss_val["hookSpecificOutput"]["additionalContext"].as_str()
+                != Some(CODEX_HOOK_UNAVAILABLE_NOTE)
+        {
+            return Err(format!("unexpected SessionStart note payload: {ss_val}"));
+        }
+
+        // Subsequent UserPromptSubmit on the same root_resume must exit 0 and NOT repeat the note.
+        let (code_ups_after_ss, out_ups_after_ss, _) = invoke_hook_cli(
+            "UserPromptSubmit",
+            &agent_sock,
+            &json!({"session_id": root_resume}).to_string(),
+            mutant_exit2,
+        );
+        if code_ups_after_ss != 0 {
+            return Err(format!(
+                "UserPromptSubmit after SessionStart(resume) exited {code_ups_after_ss}"
+            ));
+        }
+        if !out_ups_after_ss.is_empty() {
+            return Err(format!(
+            "UserPromptSubmit repeated note after SessionStart already emitted it: {out_ups_after_ss}"
+        ));
+        }
+
+        // 2. Resumed/revoked root_prompt hitting UserPromptSubmit directly -> prompt #1 exits 0 and emits note once;
+        // prompt #2 exits 0 and emits nothing!
+        let (code_u1, out_u1, err_u1) = invoke_hook_cli(
+            "UserPromptSubmit",
+            &agent_sock,
+            &json!({"session_id": root_prompt}).to_string(),
+            mutant_exit2,
+        );
+        if code_u1 != 0 {
+            return Err(format!(
+            "UserPromptSubmit #1 on resumed root exited with code {code_u1} (stderr: {err_u1})"
+        ));
+        }
+        let u1_val: Value = serde_json::from_str(&out_u1)
+            .map_err(|e| format!("bad UserPromptSubmit #1 JSON: {e}"))?;
+        if u1_val["systemMessage"].as_str() != Some(CODEX_HOOK_UNAVAILABLE_NOTE)
+            || u1_val["hookSpecificOutput"]["hookEventName"].as_str()
+                != Some("UserPromptSubmit")
+            || u1_val["hookSpecificOutput"]["additionalContext"].as_str()
+                != Some(CODEX_HOOK_UNAVAILABLE_NOTE)
+        {
+            return Err(format!(
+                "unexpected UserPromptSubmit #1 note payload: {u1_val}"
+            ));
+        }
+
+        let (code_u2, out_u2, err_u2) = invoke_hook_cli(
+            "UserPromptSubmit",
+            &agent_sock,
+            &json!({"session_id": root_prompt}).to_string(),
+            mutant_exit2,
+        );
+        if code_u2 != 0 {
+            return Err(format!(
+                "UserPromptSubmit #2 exited with code {code_u2} (stderr: {err_u2})"
+            ));
+        }
+        if !out_u2.is_empty() {
+            return Err(format!("UserPromptSubmit #2 spammed note again: {out_u2}"));
+        }
+
+        // 3. All other lifecycle/drain hooks on the resumed root must exit 0 with empty stdout.
+        for (ev, extra) in [
+            ("PreModelRequest", json!({"session_id": root_prompt})),
+            ("Stop", json!({"session_id": root_prompt})),
+            (
+                "SubagentStart",
+                json!({"session_id": root_prompt, "agent_id": "019a0000-0000-7000-8000-000000000199"}),
+            ),
+            (
+                "SubagentStop",
+                json!({"session_id": root_prompt, "agent_id": "019a0000-0000-7000-8000-000000000199"}),
+            ),
+            ("SessionEnd", json!({"session_id": root_prompt})),
+        ] {
+            let (c, o, e) = invoke_hook_cli(ev, &agent_sock, &extra.to_string(), mutant_exit2);
+            if c != 0 || !o.is_empty() {
+                return Err(format!(
+                    "hook {ev} on resumed root failed open check: code={c} out={o:?} err={e:?}"
+                ));
+            }
+        }
+        Ok(())
+    };
+
+    // Admit root_a and root_b, then resume/revoke them:
+    let root_a = "019a0000-0000-7000-8000-000000000101";
+    let root_b = "019a0000-0000-7000-8000-000000000102";
+    let lock_dir = env.codex_home.join("thread-writer-locks");
+    fs::create_dir_all(&lock_dir).unwrap();
+    let _lock_a = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(lock_dir.join(format!("{root_a}.lock")))
+        .unwrap();
+    let _lock_b = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(lock_dir.join(format!("{root_b}.lock")))
+        .unwrap();
+    env.write_root_rollout(&env.codex_home, root_a, "/workspace");
+    env.write_root_rollout(&env.codex_home, root_b, "/workspace");
+
+    for r in [root_a, root_b] {
+        let (code, out, err) = invoke_hook_cli(
+            "SessionStart",
+            &agent_sock,
+            &json!({"session_id": r, "source": "startup", "cwd": "/workspace"}).to_string(),
+            false,
+        );
+        assert_eq!(code, 0, "fresh SessionStart failed: {err}");
+        assert!(out.is_empty());
+    }
+    // Revoke root_b (simulating bus restart or resumed thread before UserPromptSubmit):
+    {
+        let rt_arc = xmsg::codex::for_state(&env.state);
+        rt_arc.lock().unwrap().store.revoke_root(root_b);
+        let db = env.state.db.lock().unwrap();
+        storage::invalidate_codex_root(&db, root_b).unwrap();
+    }
+
+    // Production behavior: cell MUST PASS!
+    let prod_res = run_resumed_root_cell(root_a, root_b, false);
+    assert!(
+        prod_res.is_ok(),
+        "C16 cell failed under production fail-open: {prod_res:?}"
+    );
+
+    // Server enforcement (`resolve_codex_mcp_caller`) MUST still refuse MCP tool calls from both root_a and root_b!
+    for r in [root_a, root_b] {
+        let mcp_res = handle_agent_frame(
+            &env.state,
+            &peer,
+            AgentFrame::Send {
+                schema_version: None,
+                to: root_a.to_string(),
+                text: "must refuse".to_string(),
+                idempotency_key: None,
+                as_agent: None,
+                codex_session: Some(r.to_string()),
+                codex_thread: Some(r.to_string()),
+                codex_turn: None,
+            },
+        )
+        .await;
+        assert!(
+            mcp_res.is_err(),
+            "MCP tool call from resumed/revoked root {r} must still be refused by server"
+        );
+    }
+
+    // Unreachable daemon check: all 7 hooks exit 0, and note is emitted once per session_id!
+    let dead_dir = tempdir().unwrap();
+    fs::set_permissions(dead_dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let dead_sock = dead_dir.path().join("unreachable-agent.sock");
+    let root_dead = "019a0000-0000-7000-8000-000000000103";
+    let (c_dead1, out_dead1, _) = invoke_hook_cli(
+        "UserPromptSubmit",
+        &dead_sock,
+        &json!({"session_id": root_dead}).to_string(),
+        false,
+    );
+    assert_eq!(
+        c_dead1, 0,
+        "unreachable daemon UserPromptSubmit must exit 0"
+    );
+    assert!(
+        out_dead1.contains(CODEX_HOOK_UNAVAILABLE_NOTE),
+        "unreachable daemon first UserPromptSubmit must emit note: {out_dead1}"
+    );
+    let (c_dead2, out_dead2, _) = invoke_hook_cli(
+        "UserPromptSubmit",
+        &dead_sock,
+        &json!({"session_id": root_dead}).to_string(),
+        false,
+    );
+    assert_eq!(c_dead2, 0);
+    assert!(
+        out_dead2.is_empty(),
+        "unreachable daemon second UserPromptSubmit must not repeat note: {out_dead2}"
+    );
+    for ev in [
+        "SessionStart",
+        "PreModelRequest",
+        "Stop",
+        "SubagentStart",
+        "SubagentStop",
+        "SessionEnd",
+    ] {
+        let (c_ev, out_ev, _) = invoke_hook_cli(
+            ev,
+            &dead_sock,
+            &json!({"session_id": root_dead, "source": "startup", "agent_id": root_dead})
+                .to_string(),
+            false,
+        );
+        assert_eq!(c_ev, 0, "unreachable daemon {ev} must exit 0");
+        assert!(
+        out_ev.is_empty(),
+        "unreachable daemon {ev} after note already emitted must emit empty stdout: {out_ev}"
+    );
+    }
+
+    // Mutant check: restoring exit 2 (`XMSG_TEST_MUTANT_CODEX_HOOK_EXIT2=1`) MUST turn the cell RED!
+    let root_m1 = "019a0000-0000-7000-8000-000000000104";
+    let root_m2 = "019a0000-0000-7000-8000-000000000105";
+    {
+        let rt_arc = xmsg::codex::for_state(&env.state);
+        rt_arc.lock().unwrap().store.revoke_root(root_m2);
+    }
+    let mutant_res = run_resumed_root_cell(root_m1, root_m2, true);
+    assert!(
+        mutant_res.is_err(),
+        "mutant restoring exit 2 must turn the C16 cell RED, but got Ok(())"
+    );
+    assert!(
+        mutant_res.unwrap_err().contains("exited with code 2"),
+        "mutant failure must report exit code 2"
+    );
+
+    srv_task.abort();
+}
 }

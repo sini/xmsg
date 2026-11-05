@@ -877,7 +877,29 @@ pub async fn run_agent_server_with_listener(
                             }
                         }
                         Err(e) => {
-                            let err = e.frame();
+                            let emit_note = if canonical_codex_note_event(&event).is_some() {
+                                if let Some(sid) = payload
+                                    .get("session_id")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                {
+                                    let rt_arc = crate::codex::for_state(&state_clone);
+                                    let mut rt = rt_arc.lock().unwrap();
+                                    rt.store.take_unavailable_note(sid)
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+                            let mut err = e.frame();
+                            if let Some(obj) = err.as_object_mut() {
+                                obj.insert(
+                                    "emit_unavailable_note".to_string(),
+                                    serde_json::Value::Bool(emit_note),
+                                );
+                            }
                             let _ = writer.write_all(format!("{err}\n").as_bytes()).await;
                             let _ = writer.flush().await;
                         }
@@ -2839,9 +2861,112 @@ pub async fn handle_codex_hook_frame(
     }
 }
 
+/// User-visible and model-visible one-shot note emitted when a Codex lifecycle/drain hook
+/// encounters a resumed/revoked/unregistered thread or an unreachable daemon.
+pub const CODEX_HOOK_UNAVAILABLE_NOTE: &str =
+    "xmsg unavailable for this thread (resumed); start a fresh thread to use xmsg";
+
+/// Environment variable that restores fail-closed exit-code-2 behavior on Codex hook refusals
+/// for mutation testing.
+pub const CODEX_HOOK_FAIL_CLOSED_MUTANT_ENV: &str = "XMSG_TEST_MUTANT_CODEX_HOOK_EXIT2";
+
+static CODEX_HOOK_FAIL_CLOSED_MUTANT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_codex_hook_fail_closed_mutant_for_test(enabled: bool) {
+    CODEX_HOOK_FAIL_CLOSED_MUTANT.store(enabled, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn is_codex_hook_fail_closed_mutant_active() -> bool {
+    CODEX_HOOK_FAIL_CLOSED_MUTANT.load(std::sync::atomic::Ordering::SeqCst)
+        || std::env::var_os(CODEX_HOOK_FAIL_CLOSED_MUTANT_ENV)
+            .is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+pub fn canonical_codex_note_event(event: &str) -> Option<&'static str> {
+    match event {
+        "SessionStart" | "session-start" => Some("SessionStart"),
+        "UserPromptSubmit" | "user-prompt-submit" => Some("UserPromptSubmit"),
+        _ => None,
+    }
+}
+
+pub fn codex_unavailable_hook_stdout(event: &str) -> Option<String> {
+    let canonical = canonical_codex_note_event(event)?;
+    Some(
+        serde_json::json!({
+            "systemMessage": CODEX_HOOK_UNAVAILABLE_NOTE,
+            "hookSpecificOutput": {
+                "hookEventName": canonical,
+                "additionalContext": CODEX_HOOK_UNAVAILABLE_NOTE,
+            }
+        })
+        .to_string(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn codex_client_note_marker_path(sock_path: Option<&Path>, session_id: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let safe_sid: String = session_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if safe_sid.is_empty() {
+        return None;
+    }
+    let my_uid = current_uid();
+    let base_dir = sock_path
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("xmsg-codex-unavail-{my_uid}")));
+    if !base_dir.exists() {
+        let _ = std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&base_dir);
+    }
+    let meta = std::fs::symlink_metadata(&base_dir).ok()?;
+    if !meta.is_dir() || meta.uid() != my_uid {
+        return None;
+    }
+    Some(base_dir.join(format!(".codex-unavail-{safe_sid}")))
+}
+
+#[cfg(target_os = "linux")]
+fn take_client_unavailable_note(sock_path: Option<&Path>, session_id: Option<&str>) -> bool {
+    use std::os::unix::fs::OpenOptionsExt;
+    let Some(sid) = session_id else {
+        return false;
+    };
+    let Some(marker) = codex_client_note_marker_path(sock_path, sid) else {
+        return false;
+    };
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(marker)
+        .is_ok()
+}
+
+#[cfg(target_os = "linux")]
+fn clear_client_unavailable_note(sock_path: Option<&Path>, session_id: Option<&str>) {
+    let Some(sid) = session_id else {
+        return;
+    };
+    if let Some(marker) = codex_client_note_marker_path(sock_path, sid) {
+        let _ = std::fs::remove_file(marker);
+    }
+}
+
 /// Runs `xmsg register codex --hook --event <event>`: sends `AgentFrame::CodexHook` to
 /// `agent.sock`, writes the returned hook JSON (if any) to `stdout_writer` and flushes it,
 /// and completes the two-phase `codex_handoff` acknowledgement on the same socket stream (§2.5, §2.7).
+///
+/// All Codex lifecycle and drain hooks (`SessionStart`, `UserPromptSubmit`, `PreModelRequest`,
+/// `Stop`, `SubagentStart`, `SubagentStop`, `SessionEnd`) fail open (`Ok(())`) on registration/validation
+/// refusal or an unreachable daemon, emitting a one-shot note on `SessionStart` / `UserPromptSubmit`.
 // INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
 #[cfg(target_os = "linux")]
 pub fn run_codex_hook<W: std::io::Write>(
@@ -2855,34 +2980,102 @@ pub fn run_codex_hook<W: std::io::Write>(
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
 
-    let payload_val: serde_json::Value =
-        serde_json::from_str(input).map_err(|e| format!("malformed hook JSON on stdin: {e}"))?;
-    if !payload_val.is_object() {
-        return Err("hook stdin JSON must be an object".to_string());
-    }
+    let fail_closed_mutant = is_codex_hook_fail_closed_mutant_active();
+
+    let payload_val: serde_json::Value = match serde_json::from_str::<serde_json::Value>(input) {
+        Ok(v) if v.is_object() => v,
+        Ok(_) => {
+            let msg = "hook stdin JSON must be an object".to_string();
+            if fail_closed_mutant {
+                return Err(msg);
+            }
+            eprintln!("xmsg register codex notice: {msg}");
+            return Ok(());
+        }
+        Err(e) => {
+            let msg = format!("malformed hook JSON on stdin: {e}");
+            if fail_closed_mutant {
+                return Err(msg);
+            }
+            eprintln!("xmsg register codex notice: {msg}");
+            return Ok(());
+        }
+    };
+
+    let session_id = payload_val
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let fail_open_or_err = |reason: String,
+                            sock_opt: Option<&Path>,
+                            server_note_decision: Option<bool>,
+                            writer: &mut W|
+     -> Result<(), String> {
+        if fail_closed_mutant {
+            return Err(reason);
+        }
+        eprintln!("xmsg register codex notice: {reason}");
+        if let Some(note_json) = codex_unavailable_hook_stdout(event) {
+            let should_emit = match server_note_decision {
+                Some(decision) => {
+                    if decision {
+                        let _ = take_client_unavailable_note(sock_opt, session_id);
+                    }
+                    decision
+                }
+                None => take_client_unavailable_note(sock_opt, session_id),
+            };
+            if should_emit {
+                let out_bytes = format!("{note_json}\n");
+                let _ = writer
+                    .write_all(out_bytes.as_bytes())
+                    .and_then(|()| writer.flush());
+            }
+        }
+        Ok(())
+    };
 
     let sock_path = match agent_sock {
         Some(p) => p.to_path_buf(),
-        None => default_agent_sock_path().map_err(|e| e.to_string())?,
+        None => match default_agent_sock_path() {
+            Ok(p) => p,
+            Err(e) => {
+                return fail_open_or_err(e.to_string(), None, None, &mut stdout_writer);
+            }
+        },
     };
     let my_uid = current_uid();
     if let Some(parent) = sock_path.parent() {
-        ensure_secure_socket_dir(parent, my_uid)
-            .map_err(|e| format!("insecure agent socket directory: {e}"))?;
+        if parent.exists() {
+            if let Err(e) = ensure_secure_socket_dir(parent, my_uid) {
+                return fail_open_or_err(
+                    format!("insecure agent socket directory: {e}"),
+                    Some(&sock_path),
+                    None,
+                    &mut stdout_writer,
+                );
+            }
+        }
     }
 
-    let mut stream = UnixStream::connect(&sock_path).map_err(|e| {
-        format!(
-            "failed to connect to agent socket at {}: {e}",
-            sock_path.display()
-        )
-    })?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| e.to_string())?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| e.to_string())?;
+    let mut stream = match UnixStream::connect(&sock_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return fail_open_or_err(
+                format!(
+                    "failed to connect to agent socket at {}: {e}",
+                    sock_path.display()
+                ),
+                Some(&sock_path),
+                None,
+                &mut stdout_writer,
+            );
+        }
+    };
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
 
     let mut frame = serde_json::json!({
         "action": "codex_hook",
@@ -2895,25 +3088,50 @@ pub fn run_codex_hook<W: std::io::Write>(
     }
 
     let line = format!("{frame}\n");
-    stream
+    if let Err(e) = stream
         .write_all(line.as_bytes())
-        .map_err(|e| format!("failed to write to agent socket: {e}"))?;
-    stream
-        .flush()
-        .map_err(|e| format!("failed to flush agent socket: {e}"))?;
+        .and_then(|()| stream.flush())
+    {
+        return fail_open_or_err(
+            format!("failed to write to agent socket: {e}"),
+            Some(&sock_path),
+            None,
+            &mut stdout_writer,
+        );
+    }
 
-    let mut reader = BufReader::new(
-        stream
-            .try_clone()
-            .map_err(|e| format!("failed to clone agent socket stream: {e}"))?,
-    );
+    let mut reader = match stream.try_clone() {
+        Ok(s) => BufReader::new(s),
+        Err(e) => {
+            return fail_open_or_err(
+                format!("failed to clone agent socket stream: {e}"),
+                Some(&sock_path),
+                None,
+                &mut stdout_writer,
+            );
+        }
+    };
     let mut resp_line = String::new();
-    reader
-        .read_line(&mut resp_line)
-        .map_err(|e| format!("failed to read response from agent socket: {e}"))?;
+    if let Err(e) = reader.read_line(&mut resp_line) {
+        return fail_open_or_err(
+            format!("failed to read response from agent socket: {e}"),
+            Some(&sock_path),
+            None,
+            &mut stdout_writer,
+        );
+    }
 
-    let resp_val: serde_json::Value = serde_json::from_str(&resp_line)
-        .map_err(|e| format!("invalid response JSON from agent socket: {e}"))?;
+    let resp_val: serde_json::Value = match serde_json::from_str(&resp_line) {
+        Ok(v) => v,
+        Err(e) => {
+            return fail_open_or_err(
+                format!("invalid response JSON from agent socket: {e}"),
+                Some(&sock_path),
+                None,
+                &mut stdout_writer,
+            );
+        }
+    };
 
     if resp_val.get("status").and_then(serde_json::Value::as_str) == Some("error") {
         let err_kind = resp_val
@@ -2924,7 +3142,19 @@ pub fn run_codex_hook<W: std::io::Write>(
             .get("detail")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("unknown error");
-        return Err(format!("{err_kind}: {detail}"));
+        let server_decision = resp_val
+            .get("emit_unavailable_note")
+            .and_then(serde_json::Value::as_bool);
+        return fail_open_or_err(
+            format!("{err_kind}: {detail}"),
+            Some(&sock_path),
+            server_decision,
+            &mut stdout_writer,
+        );
+    }
+
+    if matches!(event, "SessionStart" | "session-start") {
+        clear_client_unavailable_note(Some(&sock_path), session_id);
     }
 
     let stdout_str = resp_val

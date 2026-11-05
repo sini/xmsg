@@ -1085,6 +1085,7 @@ pub struct CodexStore {
     candidates: HashMap<String, CodexRetryCandidate>,
     children: HashMap<(String, String), CodexChildState>,
     revoked_roots: HashSet<String>,
+    noted_unavailable_roots: HashSet<String>,
 }
 
 impl Default for CodexStore {
@@ -1101,6 +1102,7 @@ impl CodexStore {
             candidates: HashMap::new(),
             children: HashMap::new(),
             revoked_roots: initially_revoked,
+            noted_unavailable_roots: HashSet::new(),
         }
     }
 
@@ -1110,6 +1112,12 @@ impl CodexStore {
 
     pub fn has_root(&self, root_id: &str) -> bool {
         self.roots.contains_key(root_id)
+    }
+
+    /// Record that the one-shot unavailable note has been emitted for `root_id`.
+    /// Returns `true` the first time it is called for `root_id`, and `false` on all subsequent calls.
+    pub fn take_unavailable_note(&mut self, root_id: &str) -> bool {
+        self.noted_unavailable_roots.insert(root_id.to_string())
     }
 
     /// Irrevocably revoke a root `P`, dropping its continuous watch, retry candidate,
