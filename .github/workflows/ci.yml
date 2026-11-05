@@ -40,18 +40,14 @@ jobs:
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           github_access_token: ${{ github.token }}
-      - name: Configure Attic substituter
+      - name: Configure Attic and llm-agents substituters
         env:
           ATTIC_PUBLIC_KEY: ${{ vars.ATTIC_PUBLIC_KEY }}
         run: |
-          if [ -z "${ATTIC_PUBLIC_KEY:-}" ]; then
-            echo "ATTIC_PUBLIC_KEY is not set; skipping Attic substituter configuration"
-            exit 0
-          fi
           sudo mkdir -p /etc/nix
           {
-            echo "extra-substituters = https://attic.json64.dev/ci"
-            echo "extra-trusted-public-keys = ${ATTIC_PUBLIC_KEY}"
+            echo "extra-substituters = https://cache.numtide.com${ATTIC_PUBLIC_KEY:+ https://attic.json64.dev/ci}"
+            echo "extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=${ATTIC_PUBLIC_KEY:+ ${ATTIC_PUBLIC_KEY}}"
           } | sudo tee -a /etc/nix/nix.conf >/dev/null
           if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nix-daemon 2>/dev/null; then
             sudo systemctl restart nix-daemon
@@ -110,18 +106,14 @@ jobs:
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           github_access_token: ${{ github.token }}
-      - name: Configure Attic substituter
+      - name: Configure Attic and llm-agents substituters
         env:
           ATTIC_PUBLIC_KEY: ${{ vars.ATTIC_PUBLIC_KEY }}
         run: |
-          if [ -z "${ATTIC_PUBLIC_KEY:-}" ]; then
-            echo "ATTIC_PUBLIC_KEY is not set; skipping Attic substituter configuration"
-            exit 0
-          fi
           sudo mkdir -p /etc/nix
           {
-            echo "extra-substituters = https://attic.json64.dev/ci"
-            echo "extra-trusted-public-keys = ${ATTIC_PUBLIC_KEY}"
+            echo "extra-substituters = https://cache.numtide.com${ATTIC_PUBLIC_KEY:+ https://attic.json64.dev/ci}"
+            echo "extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=${ATTIC_PUBLIC_KEY:+ ${ATTIC_PUBLIC_KEY}}"
           } | sudo tee -a /etc/nix/nix.conf >/dev/null
           if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nix-daemon 2>/dev/null; then
             sudo systemctl restart nix-daemon

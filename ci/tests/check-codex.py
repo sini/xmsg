@@ -1820,23 +1820,6 @@ sys.exit(proc.wait())
         assert t4_in_str.count(note_str) == 1, (
             f"C9/fail-open failed: unavailable note repeated on second resumed prompt (count={t4_in_str.count(note_str)})"
         )
-        # Mutant check: restoring exit 2 (`XMSG_TEST_MUTANT_CODEX_HOOK_EXIT2=1`) exits 2 and turns the cell red.
-        mut_env = os.environ.copy()
-        mut_env["XMSG_TEST_MUTANT_CODEX_HOOK_EXIT2"] = "1"
-        for ev, payload in [
-            ("SessionStart", {"session_id": root_p, "source": "resume", "cwd": str(work_dir)}),
-            ("UserPromptSubmit", {"session_id": root_p}),
-        ]:
-            mut_cp = subprocess.run(
-                [str(xmsg_bin), "register", "codex", "--hook", "--event", ev],
-                input=json.dumps(payload),
-                text=True,
-                capture_output=True,
-                env=mut_env,
-            )
-            assert mut_cp.returncode == 2, (
-                f"Mutant restoring exit 2 did not exit 2 on {ev}: rc={mut_cp.returncode}"
-            )
     finally:
         client.close()
 

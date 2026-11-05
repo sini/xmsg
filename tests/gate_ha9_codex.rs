@@ -2426,12 +2426,13 @@ async fn c15_delivery_races_unknown_state_and_batch_limits() {
 /// `Stop`, `SubagentStart`, `SubagentStop`, `SessionEnd`) fail open (exit 0) on a registration
 /// refusal or an unreachable daemon and emit the one-shot note once without repeating on every
 /// prompt, while `resolve_codex_mcp_caller` on the server still refuses MCP tool calls from the
-/// resumed/revoked root. Includes a mutant restoring exit 2 that turns the cell red.
+/// resumed/revoked root. A source mutant replacing `Ok(())` at the end of `fail_open` in
+/// `run_codex_hook` with `Err(reason)` (exit 2) turns this cell red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() {
     use std::io::Write;
     use std::process::{Command, Stdio};
-    use xmsg::agent::{CODEX_HOOK_FAIL_CLOSED_MUTANT_ENV, CODEX_HOOK_UNAVAILABLE_NOTE};
+    use xmsg::agent::CODEX_HOOK_UNAVAILABLE_NOTE;
 
     let mut env = CodexTestEnv::new();
     let real_test_exe = std::env::current_exe().unwrap().canonicalize().unwrap();
@@ -2460,11 +2461,7 @@ async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() 
     let peer = env.peer(self_pid);
 
     let xmsg_bin = PathBuf::from(env!("CARGO_BIN_EXE_xmsg"));
-    let invoke_hook_cli = |event: &str,
-                           sock: &Path,
-                           stdin_json: &str,
-                           mutant_exit2: bool|
-     -> (i32, String, String) {
+    let invoke_hook_cli = |event: &str, sock: &Path, stdin_json: &str| -> (i32, String, String) {
         let mut cmd = Command::new(&xmsg_bin);
         cmd.args([
             "register",
@@ -2478,11 +2475,6 @@ async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() 
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-        if mutant_exit2 {
-            cmd.env(CODEX_HOOK_FAIL_CLOSED_MUTANT_ENV, "1");
-        } else {
-            cmd.env_remove(CODEX_HOOK_FAIL_CLOSED_MUTANT_ENV);
-        }
         let mut child = cmd.spawn().expect("spawn xmsg register codex --hook");
         child
             .stdin
@@ -2499,18 +2491,14 @@ async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() 
     };
 
     // Helper cell check that runs against a resumed root and verifies exit 0 + one-shot note + MCP refusal.
-    // Returns Err(reason) if any hook exits non-zero (e.g. exit 2 under mutant) or violates one-shot note / server refusal.
-    let run_resumed_root_cell = |root_resume: &str,
-                                 root_prompt: &str,
-                                 mutant_exit2: bool|
-     -> Result<(), String> {
+    // Returns Err(reason) if any hook exits non-zero (e.g. exit 2 under source mutant) or violates one-shot note / server refusal.
+    let run_resumed_root_cell = |root_resume: &str, root_prompt: &str| -> Result<(), String> {
         // 1. SessionStart(source="resume") on root_resume -> must exit 0 and emit note once; subsequent prompts emit nothing.
         let (code_ss, out_ss, err_ss) = invoke_hook_cli(
             "SessionStart",
             &agent_sock,
             &json!({"session_id": root_resume, "source": "resume", "cwd": "/workspace"})
                 .to_string(),
-            mutant_exit2,
         );
         if code_ss != 0 {
             return Err(format!(
@@ -2532,7 +2520,6 @@ async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() 
             "UserPromptSubmit",
             &agent_sock,
             &json!({"session_id": root_resume}).to_string(),
-            mutant_exit2,
         );
         if code_ups_after_ss != 0 {
             return Err(format!(
@@ -2551,7 +2538,6 @@ async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() 
             "UserPromptSubmit",
             &agent_sock,
             &json!({"session_id": root_prompt}).to_string(),
-            mutant_exit2,
         );
         if code_u1 != 0 {
             return Err(format!(
@@ -2575,7 +2561,6 @@ async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() 
             "UserPromptSubmit",
             &agent_sock,
             &json!({"session_id": root_prompt}).to_string(),
-            mutant_exit2,
         );
         if code_u2 != 0 {
             return Err(format!(
@@ -2600,7 +2585,7 @@ async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() 
             ),
             ("SessionEnd", json!({"session_id": root_prompt})),
         ] {
-            let (c, o, e) = invoke_hook_cli(ev, &agent_sock, &extra.to_string(), mutant_exit2);
+            let (c, o, e) = invoke_hook_cli(ev, &agent_sock, &extra.to_string());
             if c != 0 || !o.is_empty() {
                 return Err(format!(
                     "hook {ev} on resumed root failed open check: code={c} out={o:?} err={e:?}"
@@ -2633,7 +2618,6 @@ async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() 
             "SessionStart",
             &agent_sock,
             &json!({"session_id": r, "source": "startup", "cwd": "/workspace"}).to_string(),
-            false,
         );
         assert_eq!(code, 0, "fresh SessionStart failed: {err}");
         assert!(out.is_empty());
@@ -2647,7 +2631,7 @@ async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() 
     }
 
     // Production behavior: cell MUST PASS!
-    let prod_res = run_resumed_root_cell(root_a, root_b, false);
+    let prod_res = run_resumed_root_cell(root_a, root_b);
     assert!(
         prod_res.is_ok(),
         "C16 cell failed under production fail-open: {prod_res:?}"
@@ -2685,7 +2669,6 @@ async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() 
         "UserPromptSubmit",
         &dead_sock,
         &json!({"session_id": root_dead}).to_string(),
-        false,
     );
     assert_eq!(
         c_dead1, 0,
@@ -2699,7 +2682,6 @@ async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() 
         "UserPromptSubmit",
         &dead_sock,
         &json!({"session_id": root_dead}).to_string(),
-        false,
     );
     assert_eq!(c_dead2, 0);
     assert!(
@@ -2719,7 +2701,6 @@ async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() 
             &dead_sock,
             &json!({"session_id": root_dead, "source": "startup", "agent_id": root_dead})
                 .to_string(),
-            false,
         );
         assert_eq!(c_ev, 0, "unreachable daemon {ev} must exit 0");
         assert!(
@@ -2727,23 +2708,6 @@ async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() 
         "unreachable daemon {ev} after note already emitted must emit empty stdout: {out_ev}"
     );
     }
-
-    // Mutant check: restoring exit 2 (`XMSG_TEST_MUTANT_CODEX_HOOK_EXIT2=1`) MUST turn the cell RED!
-    let root_m1 = "019a0000-0000-7000-8000-000000000104";
-    let root_m2 = "019a0000-0000-7000-8000-000000000105";
-    {
-        let rt_arc = xmsg::codex::for_state(&env.state);
-        rt_arc.lock().unwrap().store.revoke_root(root_m2);
-    }
-    let mutant_res = run_resumed_root_cell(root_m1, root_m2, true);
-    assert!(
-        mutant_res.is_err(),
-        "mutant restoring exit 2 must turn the C16 cell RED, but got Ok(())"
-    );
-    assert!(
-        mutant_res.unwrap_err().contains("exited with code 2"),
-        "mutant failure must report exit code 2"
-    );
 
     srv_task.abort();
 }

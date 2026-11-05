@@ -391,10 +391,6 @@ fn run_register_codex(args: RegisterCodexArgs) {
     }
     let mut input = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut input) {
-        if xmsg::agent::is_codex_hook_fail_closed_mutant_active() {
-            eprintln!("xmsg register codex error: failed to read stdin: {e}");
-            std::process::exit(2);
-        }
         eprintln!("xmsg register codex notice: failed to read stdin: {e}");
         return;
     }
