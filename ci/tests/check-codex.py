@@ -1447,21 +1447,6 @@ sys.exit(proc.wait())
                 )
                 return ([msg_fn("CHILD_TURN_2_COMPLETE")], None)
 
-        if "REBIND_SEND_AFTER_RESUME" in joined_user:
-            idx_reb = max(
-                i
-                for i, it in enumerate(inp)
-                if it.get("type") == "message" and "REBIND_SEND_AFTER_RESUME" in json.dumps(it)
-            )
-            post_outputs = [it for it in inp[idx_reb:] if it.get("type") == "function_call_output"]
-            if len(post_outputs) == 0:
-                return (
-                    [fc_fn("send", {"to": "peer", "text": "REBOUND_AFTER_RESUME_OK"}, "mcp__xmsg")],
-                    None,
-                )
-            else:
-                return ([msg_fn("REBOUND_SEND_DONE")], None)
-
         if "SECOND_PROMPT_AFTER_RESUME" in joined_user:
             scenario_state["root_t4_input"] = json.dumps(inp)
             return ([msg_fn("SECOND_RESUME_PROMPT_DONE")], None)
@@ -1482,6 +1467,21 @@ sys.exit(proc.wait())
             else:
                 scenario_state["resume_tool_outputs"] = [fco_str(x) for x in post_outputs]
                 return ([msg_fn("RESUME_SEND_ATTEMPTED")], None)
+
+        if "REBIND_SEND_AFTER_RESUME" in joined_user:
+            idx_reb = max(
+                i
+                for i, it in enumerate(inp)
+                if it.get("type") == "message" and "REBIND_SEND_AFTER_RESUME" in json.dumps(it)
+            )
+            post_outputs = [it for it in inp[idx_reb:] if it.get("type") == "function_call_output"]
+            if len(post_outputs) == 0:
+                return (
+                    [fc_fn("send", {"to": "peer", "text": "REBOUND_AFTER_RESUME_OK"}, "mcp__xmsg")],
+                    None,
+                )
+            else:
+                return ([msg_fn("REBOUND_SEND_DONE")], None)
 
         # Root turn 2: RUN_DAEMON_FOLLOWUP:<child_id>:<root_msg_id>
         if "RUN_DAEMON_FOLLOWUP:" in joined_user:
