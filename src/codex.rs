@@ -514,6 +514,8 @@ pub struct CodexRolloutMeta {
     pub parent_thread_id: Option<String>,
     pub cwd: Option<String>,
     pub agent_type: Option<String>,
+    pub rollout_dev: u64,
+    pub rollout_ino: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -908,6 +910,8 @@ fn walk_sessions_dir_fd(
             parent_thread_id,
             cwd,
             agent_type,
+            rollout_dev: fst.st_dev as u64,
+            rollout_ino: fst.st_ino as u64,
         });
     }
 
@@ -1007,7 +1011,7 @@ pub fn find_nearest_codex_owner_from_peer(
     None
 }
 
-/// An admitted Codex root session (`P`) with its continuous writer-lease witness (§2.1).
+/// An admitted Codex root session (`P`) with its continuous writer-lease witness (§2.1, §6.2).
 #[derive(Debug)]
 pub struct CodexRootEntry {
     pub root_id: String,
@@ -1018,6 +1022,8 @@ pub struct CodexRootEntry {
     pub label: String,
     pub cwd: Option<String>,
     pub registered_at: i64,
+    pub rollout_dev: u64,
+    pub rollout_ino: u64,
     pub watch: LockLeaseWatch,
 }
 
@@ -1032,8 +1038,35 @@ impl CodexRootEntry {
             label: self.label.clone(),
             cwd: self.cwd.clone(),
             registered_at: self.registered_at,
+            rollout_dev: self.rollout_dev,
+            rollout_ino: self.rollout_ino,
         }
     }
+
+    pub fn to_stale(&self) -> StaleCodexRoot {
+        StaleCodexRoot {
+            root_id: self.root_id.clone(),
+            codex_home: self.codex_home.clone(),
+            rollout_dev: self.rollout_dev,
+            rollout_ino: self.rollout_ino,
+            label: self.label.clone(),
+            cwd: self.cwd.clone(),
+            generation: self.generation,
+        }
+    }
+}
+
+/// A parked (`StaleAfterResume`) Codex root record (`active = 0, revoked = 0`) that is
+/// non-addressable while parked, but rebindable via full witness re-attestation (§6.2).
+#[derive(Debug, Clone)]
+pub struct StaleCodexRoot {
+    pub root_id: String,
+    pub codex_home: PathBuf,
+    pub rollout_dev: u64,
+    pub rollout_ino: u64,
+    pub label: String,
+    pub cwd: Option<String>,
+    pub generation: u64,
 }
 
 /// A bounded, non-addressable retry candidate retained when a fresh `SessionStart`
@@ -1059,6 +1092,8 @@ pub struct CodexChildState {
     pub owner_pid: u32,
     pub owner_starttime: String,
     pub agent_type: Option<String>,
+    pub rollout_dev: u64,
+    pub rollout_ino: u64,
     pub active_turns: HashSet<String>,
     pub stopped_turns: HashSet<String>,
     pub stopped_all: bool,
@@ -1074,17 +1109,21 @@ pub struct CodexRootSnapshot {
     pub label: String,
     pub cwd: Option<String>,
     pub registered_at: i64,
+    pub rollout_dev: u64,
+    pub rollout_ino: u64,
 }
 
-/// In-memory store of admitted Codex roots, retry candidates, active child turns,
-/// and irrevocably revoked roots.
+/// In-memory store of admitted Codex roots, retry candidates, parked (`StaleAfterResume`)
+/// roots, active child turns, and deliberately/security-revoked (`RevokedByOperator`) roots (§6.2).
 #[derive(Debug)]
 pub struct CodexStore {
     next_generation: u64,
     roots: HashMap<String, CodexRootEntry>,
     candidates: HashMap<String, CodexRetryCandidate>,
+    stale_roots: HashMap<String, StaleCodexRoot>,
     children: HashMap<(String, String), CodexChildState>,
-    revoked_roots: HashSet<String>,
+    child_rollouts: HashMap<(String, String), (u64, u64)>,
+    revoked_by_operator: HashSet<String>,
     noted_unavailable_roots: HashSet<String>,
 }
 
@@ -1096,18 +1135,32 @@ impl Default for CodexStore {
 
 impl CodexStore {
     pub fn new(max_persisted_generation: u64, initially_revoked: HashSet<String>) -> Self {
+        Self::with_stale(max_persisted_generation, initially_revoked, HashMap::new())
+    }
+
+    pub fn with_stale(
+        max_persisted_generation: u64,
+        initially_revoked: HashSet<String>,
+        initially_stale: HashMap<String, StaleCodexRoot>,
+    ) -> Self {
         Self {
             next_generation: max_persisted_generation.saturating_add(1),
             roots: HashMap::new(),
             candidates: HashMap::new(),
+            stale_roots: initially_stale,
             children: HashMap::new(),
-            revoked_roots: initially_revoked,
+            child_rollouts: HashMap::new(),
+            revoked_by_operator: initially_revoked,
             noted_unavailable_roots: HashSet::new(),
         }
     }
 
     pub fn is_revoked(&self, root_id: &str) -> bool {
-        self.revoked_roots.contains(root_id)
+        self.revoked_by_operator.contains(root_id)
+    }
+
+    pub fn is_stale(&self, root_id: &str) -> bool {
+        self.stale_roots.contains_key(root_id)
     }
 
     pub fn has_root(&self, root_id: &str) -> bool {
@@ -1120,21 +1173,59 @@ impl CodexStore {
         self.noted_unavailable_roots.insert(root_id.to_string())
     }
 
-    /// Irrevocably revoke a root `P`, dropping its continuous watch, retry candidate,
-    /// and any in-memory child bindings. Returns `(owner_pid, generation)` if it was admitted.
-    pub fn revoke_root(&mut self, root_id: &str) -> Option<(u32, u64)> {
-        self.revoked_roots.insert(root_id.to_string());
+    /// Park an admitted root `P` into `StaleAfterResume` (`active = 0, revoked = 0`) on normal
+    /// `SessionEnd`, thread unload (`thread/unsubscribe`), owner exit, or lease close (§6.2.1).
+    /// While parked, `P` is not in `self.roots` (MCP calls fail closed), but `P` can re-attest
+    /// via `rebind_resumed_root` when a trusted owner holds `<P>.lock` and matching `(rollout_dev, rollout_ino)`.
+    pub fn park_root_for_resume(&mut self, root_id: &str) -> Option<(u32, u64)> {
         self.candidates.remove(root_id);
         self.children.retain(|(p, _), _| p != root_id);
-        self.roots
-            .remove(root_id)
-            .map(|r| (r.owner_pid, r.generation))
+        if let Some(entry) = self.roots.remove(root_id) {
+            let info = (entry.owner_pid, entry.generation);
+            if !self.revoked_by_operator.contains(root_id) {
+                self.stale_roots
+                    .insert(root_id.to_string(), entry.to_stale());
+            }
+            Some(info)
+        } else {
+            None
+        }
     }
 
-    /// Remove a root on normal `SessionEnd` and mark it revoked so stale hooks/retries
-    /// cannot resurrect the ended session.
+    /// Put a root `P` into `RevokedByOperator` (`active = 0, revoked = 1`) — sticky refusal
+    /// even when the caller holds a valid live `<P>.lock` and matching rollout witness (§6.2.1).
+    pub fn revoke_by_operator(&mut self, root_id: &str) -> Option<(u32, u64)> {
+        if let Some(entry) = self.roots.remove(root_id) {
+            let info = (entry.owner_pid, entry.generation);
+            self.stale_roots
+                .insert(root_id.to_string(), entry.to_stale());
+            self.revoked_by_operator.insert(root_id.to_string());
+            self.candidates.remove(root_id);
+            self.children.retain(|(p, _), _| p != root_id);
+            Some(info)
+        } else {
+            self.revoked_by_operator.insert(root_id.to_string());
+            self.candidates.remove(root_id);
+            self.children.retain(|(p, _), _| p != root_id);
+            None
+        }
+    }
+
+    /// Clear `RevokedByOperator` back to `StaleAfterResume` on explicit operator `--unrevoke` (§6.2.1).
+    pub fn unrevoke_by_operator(&mut self, root_id: &str) -> bool {
+        self.noted_unavailable_roots.remove(root_id);
+        self.revoked_by_operator.remove(root_id)
+    }
+
+    /// Alias for `revoke_by_operator` for security/integrity or operator revocations.
+    pub fn revoke_root(&mut self, root_id: &str) -> Option<(u32, u64)> {
+        self.revoke_by_operator(root_id)
+    }
+
+    /// Transition a root on normal `SessionEnd` to `StaleAfterResume` (`park_root_for_resume`)
+    /// so it is no longer live, yet can be rebound if later resumed with a valid witness (§6.2.1).
     pub fn end_root(&mut self, root_id: &str) -> Option<(u32, u64)> {
-        self.revoke_root(root_id)
+        self.park_root_for_resume(root_id)
     }
 
     /// Resolve the canonical trusted home `H` under which `owner_pid` currently holds
@@ -1196,10 +1287,22 @@ impl CodexStore {
         if !crate::claim::is_uuid_shaped(root_id) {
             return Err(format!("invalid codex root UUID: {root_id:?}"));
         }
-        if self.revoked_roots.contains(root_id) {
+        if self.revoked_by_operator.contains(root_id) {
             return Err(format!(
-                "codex root {root_id} has been revoked or resumed; start a fresh codex thread"
+                "codex root {root_id} has been revoked by operator; start a fresh codex thread"
             ));
+        }
+        if self.stale_roots.contains_key(root_id) {
+            return self
+                .rebind_resumed_root(
+                    config,
+                    owner_pid,
+                    owner_starttime,
+                    root_id,
+                    cwd_hint,
+                    label_override,
+                )
+                .map(Some);
         }
 
         if self.roots.contains_key(root_id) {
@@ -1214,16 +1317,25 @@ impl CodexStore {
                 .is_some_and(|r| r.owner_pid == owner_pid && r.owner_starttime == owner_starttime);
             if same_owner && continuity.is_ok() {
                 let canon_home = self.roots.get(root_id).unwrap().codex_home.clone();
-                verify_codex_rollout(&canon_home, root_id, root_id, None).map_err(|e| {
-                    self.revoke_root(root_id);
-                    format!("codex root {root_id} rollout revalidation failed: {e}")
-                })?;
+                let prev_dev = self.roots.get(root_id).unwrap().rollout_dev;
+                let prev_ino = self.roots.get(root_id).unwrap().rollout_ino;
+                let meta =
+                    verify_codex_rollout(&canon_home, root_id, root_id, None).map_err(|e| {
+                        self.revoke_by_operator(root_id);
+                        format!("codex root {root_id} rollout revalidation failed: {e}")
+                    })?;
+                if prev_ino != 0 && (meta.rollout_dev != prev_dev || meta.rollout_ino != prev_ino) {
+                    self.revoke_by_operator(root_id);
+                    return Err(format!(
+                        "codex root {root_id} rollout inode changed during revalidation"
+                    ));
+                }
                 if let Err(e) = self.roots.get(root_id).unwrap().watch.verify_continuity(
                     &config.proc_root,
                     owner_pid,
                     owner_starttime,
                 ) {
-                    self.revoke_root(root_id);
+                    self.park_root_for_resume(root_id);
                     return Err(format!("codex root {root_id} lease lost: {e}"));
                 }
                 return Ok(self.roots.get(root_id).map(CodexRootEntry::snapshot));
@@ -1243,17 +1355,23 @@ impl CodexStore {
                         existing.owner_pid
                     ));
                 }
-                self.revoke_root(root_id);
-                return Err(format!(
-                    "codex root {root_id} writer lease was lost or reopened; start a fresh thread"
-                ));
+                self.park_root_for_resume(root_id);
+                return self
+                    .rebind_resumed_root(
+                        config,
+                        owner_pid,
+                        owner_starttime,
+                        root_id,
+                        cwd_hint,
+                        label_override,
+                    )
+                    .map(Some);
             }
         }
 
         let (canon_home, watch, label, candidate_cwd) =
             if let Some(cand) = self.candidates.remove(root_id) {
                 if cand.owner_pid != owner_pid || cand.owner_starttime != owner_starttime {
-                    self.revoked_roots.insert(root_id.to_string());
                     return Err(format!(
                         "codex candidate {root_id} owner changed during retry"
                     ));
@@ -1262,7 +1380,6 @@ impl CodexStore {
                     cand.watch
                         .verify_continuity(&config.proc_root, owner_pid, owner_starttime)
                 {
-                    self.revoked_roots.insert(root_id.to_string());
                     return Err(format!("codex candidate {root_id} lease lost: {e}"));
                 }
                 (
@@ -1286,7 +1403,6 @@ impl CodexStore {
                 if let Err(e) =
                     watch.verify_continuity(&config.proc_root, owner_pid, owner_starttime)
                 {
-                    self.revoked_roots.insert(root_id.to_string());
                     return Err(format!(
                         "codex root {root_id} lease lost during admission commit: {e}"
                     ));
@@ -1304,6 +1420,7 @@ impl CodexStore {
                 } else {
                     label
                 };
+                self.noted_unavailable_roots.remove(root_id);
                 let entry = CodexRootEntry {
                     root_id: root_id.to_string(),
                     codex_home: canon_home,
@@ -1313,6 +1430,8 @@ impl CodexStore {
                     label: final_label,
                     cwd: final_cwd,
                     registered_at: crate::storage::now_epoch_secs(),
+                    rollout_dev: rollout_meta.rollout_dev,
+                    rollout_ino: rollout_meta.rollout_ino,
                     watch,
                 };
                 let snap = entry.snapshot();
@@ -1323,7 +1442,6 @@ impl CodexStore {
                 if let Err(e) =
                     watch.verify_continuity(&config.proc_root, owner_pid, owner_starttime)
                 {
-                    self.revoked_roots.insert(root_id.to_string());
                     return Err(format!("codex candidate {root_id} lease lost: {e}"));
                 }
                 self.candidates.insert(
@@ -1342,10 +1460,179 @@ impl CodexStore {
                 Ok(None)
             }
             Err(e) => {
-                self.revoked_roots.insert(root_id.to_string());
+                if matches!(e, RolloutLookupError::Invalid(_)) {
+                    self.revoke_by_operator(root_id);
+                }
                 Err(format!("codex root {root_id} admission refused: {e}"))
             }
         }
+    }
+
+    /// Re-attest from scratch and atomically rebind a resumed Codex root `P` on
+    /// `SessionStart(source="resume")` or first hook after resume/restart (§6.2.2).
+    pub fn rebind_resumed_root(
+        &mut self,
+        config: &CodexConfig,
+        owner_pid: u32,
+        owner_starttime: &str,
+        root_id: &str,
+        cwd_hint: Option<&str>,
+        label_override: Option<&str>,
+    ) -> std::result::Result<CodexRootSnapshot, String> {
+        // 1. UUID and RevokedByOperator gate (§6.2.2 step 1).
+        if !crate::claim::is_uuid_shaped(root_id) {
+            return Err(format!("invalid codex root UUID: {root_id:?}"));
+        }
+        if self.revoked_by_operator.contains(root_id) {
+            return Err(format!(
+                "codex root {root_id} is revoked by operator; start a fresh codex thread"
+            ));
+        }
+
+        // 3. Incumbent live-writer check (two-process race protection, §6.2.2 step 3).
+        if self.roots.contains_key(root_id) {
+            let (inc_pid, inc_start, inc_home, inc_dev, inc_ino, inc_alive) = {
+                let inc = self.roots.get(root_id).unwrap();
+                let alive = inc
+                    .watch
+                    .verify_continuity(&config.proc_root, inc.owner_pid, &inc.owner_starttime)
+                    .is_ok();
+                (
+                    inc.owner_pid,
+                    inc.owner_starttime.clone(),
+                    inc.codex_home.clone(),
+                    inc.rollout_dev,
+                    inc.rollout_ino,
+                    alive,
+                )
+            };
+            if inc_alive {
+                if inc_pid != owner_pid || inc_start != owner_starttime {
+                    return Err(format!(
+                        "codex root {root_id} already has a live writer pid={inc_pid}"
+                    ));
+                }
+                let meta =
+                    verify_codex_rollout(&inc_home, root_id, root_id, None).map_err(|e| {
+                        if matches!(e, RolloutLookupError::Invalid(_)) {
+                            self.revoke_by_operator(root_id);
+                        } else {
+                            self.park_root_for_resume(root_id);
+                        }
+                        format!("codex root {root_id} rollout verification failed on resume: {e}")
+                    })?;
+                if inc_ino != 0 && (meta.rollout_dev != inc_dev || meta.rollout_ino != inc_ino) {
+                    self.revoke_by_operator(root_id);
+                    return Err(format!(
+                        "codex root {root_id} rollout inode changed across resume"
+                    ));
+                }
+                if self
+                    .roots
+                    .get(root_id)
+                    .unwrap()
+                    .watch
+                    .verify_continuity(&config.proc_root, owner_pid, owner_starttime)
+                    .is_ok()
+                {
+                    return Ok(self.roots.get(root_id).unwrap().snapshot());
+                }
+            }
+            self.park_root_for_resume(root_id);
+        }
+
+        // 4. Live writer-lock attestation and fresh continuous witness (§6.2.2 step 4).
+        let (canon_home, watch) =
+            Self::locate_lock_home_and_watch(config, owner_pid, owner_starttime, root_id)?;
+
+        // 5. Rollout (st_dev, st_ino) continuity and XB2 verification (§6.2.2 step 5).
+        let rollout_meta = match verify_codex_rollout(&canon_home, root_id, root_id, None) {
+            Ok(meta) => meta,
+            Err(RolloutLookupError::Invalid(e)) => {
+                self.revoke_by_operator(root_id);
+                return Err(format!(
+                    "codex root {root_id} resume refused due to rollout integrity error: {e}"
+                ));
+            }
+            Err(RolloutLookupError::NotFound(e)) => {
+                return Err(format!(
+                    "codex root {root_id} resume refused: rollout not found: {e}"
+                ));
+            }
+        };
+
+        let prior = self.stale_roots.get(root_id).cloned();
+        if let Some(ref p) = prior {
+            if p.rollout_ino != 0 {
+                let prior_canon_home =
+                    std::fs::canonicalize(&p.codex_home).unwrap_or_else(|_| p.codex_home.clone());
+                if canon_home != prior_canon_home
+                    || rollout_meta.rollout_dev != p.rollout_dev
+                    || rollout_meta.rollout_ino != p.rollout_ino
+                {
+                    self.revoke_by_operator(root_id);
+                    return Err(format!(
+                        "codex root {root_id} rollout inode changed across resume"
+                    ));
+                }
+            }
+        }
+
+        // 6. Post-rollout lease re-check and atomic rebind (§6.2.2 step 6).
+        if let Err(e) = watch.verify_continuity(&config.proc_root, owner_pid, owner_starttime) {
+            return Err(format!(
+                "codex root {root_id} writer lease lost during resume rebind: {e}"
+            ));
+        }
+
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.saturating_add(1);
+
+        let final_cwd = rollout_meta
+            .cwd
+            .or_else(|| cwd_hint.map(String::from))
+            .or_else(|| prior.as_ref().and_then(|p| p.cwd.clone()));
+        let base_label = label_override
+            .and_then(crate::inbox::clean_label)
+            .or_else(|| {
+                prior
+                    .as_ref()
+                    .map(|p| p.label.clone())
+                    .filter(|l| !l.is_empty() && l != "codex")
+            })
+            .unwrap_or_else(|| "codex".to_string());
+        let final_label = if base_label == "codex" {
+            final_cwd
+                .as_deref()
+                .and_then(|p| Path::new(p).file_name())
+                .and_then(|n| n.to_str())
+                .and_then(crate::inbox::clean_label)
+                .unwrap_or(base_label)
+        } else {
+            base_label
+        };
+
+        self.stale_roots.remove(root_id);
+        self.candidates.remove(root_id);
+        self.children.retain(|(p, _), _| p != root_id);
+        self.noted_unavailable_roots.remove(root_id);
+
+        let entry = CodexRootEntry {
+            root_id: root_id.to_string(),
+            codex_home: canon_home,
+            owner_pid,
+            owner_starttime: owner_starttime.to_string(),
+            generation,
+            label: final_label,
+            cwd: final_cwd,
+            registered_at: crate::storage::now_epoch_secs(),
+            rollout_dev: rollout_meta.rollout_dev,
+            rollout_ino: rollout_meta.rollout_ino,
+            watch,
+        };
+        let snap = entry.snapshot();
+        self.roots.insert(root_id.to_string(), entry);
+        Ok(snap)
     }
 
     /// Revalidate an existing admitted root `P` under `(owner_pid, owner_starttime)`.
@@ -1360,9 +1647,9 @@ impl CodexStore {
         if !crate::claim::is_uuid_shaped(root_id) {
             return Err(format!("invalid codex root UUID: {root_id:?}"));
         }
-        if self.revoked_roots.contains(root_id) {
+        if self.revoked_by_operator.contains(root_id) {
             return Err(format!(
-                "codex root {root_id} is revoked or resumed; start a fresh codex thread"
+                "codex root {root_id} is revoked by operator; start a fresh codex thread"
             ));
         }
 
@@ -1394,7 +1681,7 @@ impl CodexStore {
                 .verify_continuity(&config.proc_root, entry.owner_pid, &entry.owner_starttime)
                 .is_err()
             {
-                self.revoke_root(root_id);
+                self.park_root_for_resume(root_id);
             }
             return Err(format!(
                 "codex root {root_id} does not belong to caller owner pid={owner_pid}"
@@ -1405,16 +1692,28 @@ impl CodexStore {
             .watch
             .verify_continuity(&config.proc_root, owner_pid, owner_starttime)
         {
-            self.revoke_root(root_id);
-            return Err(format!("codex root {root_id} writer lease revoked: {e}"));
+            self.park_root_for_resume(root_id);
+            return Err(format!("codex root {root_id} writer lease closed: {e}"));
         }
 
         let canon_home = entry.codex_home.clone();
-        if let Err(e) = verify_codex_rollout(&canon_home, root_id, root_id, None) {
-            self.revoke_root(root_id);
-            return Err(format!(
-                "codex root {root_id} rollout verification failed: {e}"
-            ));
+        let prev_dev = entry.rollout_dev;
+        let prev_ino = entry.rollout_ino;
+        match verify_codex_rollout(&canon_home, root_id, root_id, None) {
+            Ok(meta) => {
+                if prev_ino != 0 && (meta.rollout_dev != prev_dev || meta.rollout_ino != prev_ino) {
+                    self.revoke_by_operator(root_id);
+                    return Err(format!(
+                        "codex root {root_id} rollout inode changed during validation"
+                    ));
+                }
+            }
+            Err(e) => {
+                self.revoke_by_operator(root_id);
+                return Err(format!(
+                    "codex root {root_id} rollout verification failed: {e}"
+                ));
+            }
         }
 
         let entry = self.roots.get(root_id).unwrap();
@@ -1422,11 +1721,79 @@ impl CodexStore {
             .watch
             .verify_continuity(&config.proc_root, owner_pid, owner_starttime)
         {
-            self.revoke_root(root_id);
-            return Err(format!("codex root {root_id} writer lease revoked: {e}"));
+            self.park_root_for_resume(root_id);
+            return Err(format!("codex root {root_id} writer lease closed: {e}"));
         }
 
         Ok(self.roots.get(root_id).unwrap().snapshot())
+    }
+
+    /// Revalidate an active root `P` on a hook (`UserPromptSubmit`, `PreModelRequest`,
+    /// `Stop`, `SubagentStart`), or if `P` is not currently active in `self.roots`
+    /// (e.g. first hook after bus restart or after `thread/unsubscribe` + `thread/resume`
+    /// without a separate `SessionStart`), re-attest and rebind `P` from scratch via
+    /// `rebind_resumed_root` (§6.2.2).
+    ///
+    /// Returns `(snapshot, did_rebind)`.
+    pub fn validate_or_rebind_root_on_hook(
+        &mut self,
+        config: &CodexConfig,
+        owner_pid: u32,
+        owner_starttime: &str,
+        root_id: &str,
+        cwd_hint: Option<&str>,
+        label_override: Option<&str>,
+    ) -> std::result::Result<(CodexRootSnapshot, bool), String> {
+        if !crate::claim::is_uuid_shaped(root_id) {
+            return Err(format!("invalid codex root UUID: {root_id:?}"));
+        }
+        if self.revoked_by_operator.contains(root_id) {
+            return Err(format!(
+                "codex root {root_id} is revoked by operator; start a fresh codex thread"
+            ));
+        }
+        if self.candidates.contains_key(root_id) {
+            match self.register_fresh_root(
+                config,
+                owner_pid,
+                owner_starttime,
+                root_id,
+                cwd_hint,
+                label_override,
+                true,
+            )? {
+                Some(snap) => return Ok((snap, true)),
+                None => {
+                    return Err(format!(
+                        "codex root {root_id} rollout persistence is still not ready"
+                    ));
+                }
+            }
+        }
+        if self.roots.contains_key(root_id) {
+            match self.validate_or_retry_root(config, owner_pid, owner_starttime, root_id, false) {
+                Ok(snap) => return Ok((snap, false)),
+                Err(e) => {
+                    if self.revoked_by_operator.contains(root_id)
+                        || self.roots.contains_key(root_id)
+                    {
+                        return Err(e);
+                    }
+                    // Incumbent root lost its lease and was parked into `stale_roots`; fall through
+                    // to `rebind_resumed_root` so a new or reloaded owner holding `<root_id>.lock`
+                    // can re-attest from scratch.
+                }
+            }
+        }
+        let snap = self.rebind_resumed_root(
+            config,
+            owner_pid,
+            owner_starttime,
+            root_id,
+            cwd_hint,
+            label_override,
+        )?;
+        Ok((snap, true))
     }
 
     /// Revalidate a root `P` by its ID and expected `generation` alone.
@@ -1436,7 +1803,7 @@ impl CodexStore {
         root_id: &str,
         expected_generation: Option<u64>,
     ) -> std::result::Result<CodexRootSnapshot, String> {
-        if self.revoked_roots.contains(root_id) {
+        if self.revoked_by_operator.contains(root_id) {
             return Err(format!("codex root {root_id} is revoked"));
         }
         let Some(entry) = self.roots.get(root_id) else {
@@ -1456,16 +1823,16 @@ impl CodexStore {
     }
 
     /// Sweep all admitted roots and candidates, returning any root IDs whose writer lease
-    /// or owner continuity failed so the caller can clean up SQLite state.
+    /// or owner continuity failed so the caller can park/clean up SQLite state.
     pub fn sweep_live_roots(&mut self, config: &CodexConfig) -> Vec<(String, u32, u64)> {
         let root_ids: Vec<String> = self.roots.keys().cloned().collect();
-        let mut revoked = Vec::new();
+        let mut parked_or_revoked = Vec::new();
         for id in root_ids {
             let prev = self.roots.get(&id).map(|r| (r.owner_pid, r.generation));
             if self.validate_root_by_id(config, &id, None).is_err() {
-                let _ = self.revoke_root(&id);
+                let _ = self.park_root_for_resume(&id);
                 if let Some((pid, gen)) = prev {
-                    revoked.push((id, pid, gen));
+                    parked_or_revoked.push((id, pid, gen));
                 }
             }
         }
@@ -1478,10 +1845,9 @@ impl CodexStore {
             });
             if expired {
                 self.candidates.remove(&id);
-                self.revoked_roots.insert(id);
             }
         }
-        revoked
+        parked_or_revoked
     }
 
     /// Return a snapshot of all currently valid admitted roots after draining their watches.
@@ -1524,9 +1890,23 @@ impl CodexStore {
         let child_meta = verify_codex_rollout(&canon_home, child_id, root_id, Some(root_id))
             .map_err(|e| format!("admit_codex({root_id}, {child_id}) refused: {e}"))?;
 
+        let key = (root_id.to_string(), child_id.to_string());
+        if let Some(&(prev_dev, prev_ino)) = self.child_rollouts.get(&key) {
+            if prev_ino != 0
+                && (child_meta.rollout_dev != prev_dev || child_meta.rollout_ino != prev_ino)
+            {
+                return Err(format!(
+                    "admit_codex({root_id}, {child_id}) refused: child rollout inode changed across resume"
+                ));
+            }
+        }
+        self.child_rollouts.insert(
+            key.clone(),
+            (child_meta.rollout_dev, child_meta.rollout_ino),
+        );
+
         let root_snap = self.validate_root_by_id(config, root_id, Some(root_generation))?;
 
-        let key = (root_id.to_string(), child_id.to_string());
         let state = self.children.entry(key).or_insert_with(|| CodexChildState {
             root_id: root_id.to_string(),
             child_id: child_id.to_string(),
@@ -1534,6 +1914,8 @@ impl CodexStore {
             owner_pid,
             owner_starttime: owner_starttime.clone(),
             agent_type: None,
+            rollout_dev: child_meta.rollout_dev,
+            rollout_ino: child_meta.rollout_ino,
             active_turns: HashSet::new(),
             stopped_turns: HashSet::new(),
             stopped_all: false,
@@ -1542,6 +1924,8 @@ impl CodexStore {
             state.root_generation = root_generation;
             state.owner_pid = owner_pid;
             state.owner_starttime = owner_starttime;
+            state.rollout_dev = child_meta.rollout_dev;
+            state.rollout_ino = child_meta.rollout_ino;
             state.active_turns.clear();
             state.stopped_turns.clear();
             state.stopped_all = false;
@@ -1664,18 +2048,33 @@ fn registry() -> &'static Mutex<HashMap<usize, RegistrySlot>> {
 }
 
 /// Initialize (or replace) the `CodexRuntime` associated with `db`, running
-/// startup invalidation over persisted `codex_roots` and `codex_handoff` rows (§2.1, §2.5).
+/// startup invalidation over persisted `codex_roots` and `codex_handoff` rows (§2.1, §2.5, §6.2).
 pub fn init_for_db(
     db: &Arc<Mutex<rusqlite::Connection>>,
     config: CodexConfig,
 ) -> Arc<Mutex<CodexRuntime>> {
-    let (max_gen, revoked) = {
+    let (max_gen, revoked, stale_rows) = {
         let conn = db.lock().unwrap();
         crate::storage::startup_invalidate_codex(&conn).unwrap_or_default()
     };
+    let mut stale_map = HashMap::new();
+    for (root_id, s) in stale_rows {
+        stale_map.insert(
+            root_id,
+            StaleCodexRoot {
+                root_id: s.root_id,
+                codex_home: PathBuf::from(s.codex_home),
+                rollout_dev: s.rollout_dev,
+                rollout_ino: s.rollout_ino,
+                label: s.label,
+                cwd: s.cwd,
+                generation: s.generation,
+            },
+        );
+    }
     let rt = Arc::new(Mutex::new(CodexRuntime {
         config,
-        store: CodexStore::new(max_gen, revoked),
+        store: CodexStore::with_stale(max_gen, revoked, stale_map),
     }));
     let key = Arc::as_ptr(db) as usize;
     let mut map = registry().lock().unwrap();
@@ -1818,26 +2217,38 @@ pub fn codex_root_to_session(snap: &CodexRootSnapshot) -> crate::registry::Sessi
 }
 
 /// Sweep all admitted Codex roots in `for_db(db)`, draining their continuous watches,
-/// invalidating any revoked roots in SQLite, and returning the currently valid roots.
+/// parking any lease-lost roots in SQLite (`StaleAfterResume`) or invalidating operator-revoked
+/// roots, and returning the currently valid roots.
 pub fn sweep_codex_roots(db: &Arc<Mutex<rusqlite::Connection>>) -> Vec<CodexRootSnapshot> {
     let rt_arc = for_db(db);
-    let (revoked, live) = {
+    let (parked, live) = {
         let mut rt = rt_arc.lock().unwrap();
         let cfg = rt.config.clone();
-        let revoked = rt.store.sweep_live_roots(&cfg);
+        let lost = rt.store.sweep_live_roots(&cfg);
+        let parked: Vec<(String, bool)> = lost
+            .into_iter()
+            .map(|(id, _, _)| {
+                let is_rev = rt.store.is_revoked(&id);
+                (id, is_rev)
+            })
+            .collect();
         let live: Vec<CodexRootSnapshot> = rt
             .store
             .roots
             .values()
             .map(CodexRootEntry::snapshot)
             .collect();
-        (revoked, live)
+        (parked, live)
     };
-    if !revoked.is_empty() || !live.is_empty() {
+    if !parked.is_empty() || !live.is_empty() {
         if let Ok(conn) = db.lock() {
             let now = crate::storage::now_epoch_secs();
-            for (rev_id, _, _) in &revoked {
-                let _ = crate::storage::invalidate_codex_root(&conn, rev_id);
+            for (rev_id, is_rev) in &parked {
+                if *is_rev {
+                    let _ = crate::storage::invalidate_codex_root(&conn, rev_id);
+                } else {
+                    let _ = crate::storage::park_codex_root(&conn, rev_id);
+                }
             }
             for snap in &live {
                 let _ = crate::storage::mark_live(&conn, &snap.root_id, "codex", now);
@@ -1849,18 +2260,20 @@ pub fn sweep_codex_roots(db: &Arc<Mutex<rusqlite::Connection>>) -> Vec<CodexRoot
     sorted
 }
 
-/// Revalidate a single Codex root `root_id` in `for_db(db)`, syncing any revocation to SQLite.
+/// Revalidate a single Codex root `root_id` in `for_db(db)`, syncing any lease loss (`park_codex_root`)
+/// or revocation (`invalidate_codex_root`) to SQLite.
 pub fn resolve_codex_root(
     db: &Arc<Mutex<rusqlite::Connection>>,
     root_id: &str,
 ) -> Option<CodexRootSnapshot> {
     let rt_arc = for_db(db);
-    let (was_admitted, res) = {
+    let (was_admitted, res, is_rev) = {
         let mut rt = rt_arc.lock().unwrap();
         let cfg = rt.config.clone();
         let had = rt.store.roots.contains_key(root_id);
         let res = rt.store.validate_root_by_id(&cfg, root_id, None);
-        (had, res)
+        let is_rev = rt.store.is_revoked(root_id);
+        (had, res, is_rev)
     };
     match res {
         Ok(snap) => {
@@ -1877,7 +2290,11 @@ pub fn resolve_codex_root(
         Err(_) => {
             if was_admitted {
                 if let Ok(conn) = db.lock() {
-                    let _ = crate::storage::invalidate_codex_root(&conn, root_id);
+                    if is_rev {
+                        let _ = crate::storage::invalidate_codex_root(&conn, root_id);
+                    } else {
+                        let _ = crate::storage::park_codex_root(&conn, root_id);
+                    }
                 }
             }
             None
@@ -1907,14 +2324,15 @@ pub fn admit_codex_subagent(
         )));
     }
     let rt_arc = for_db(db);
-    let (res, root_revoked) = {
+    let (res, root_revoked, root_missing) = {
         let mut rt = rt_arc.lock().unwrap();
         let cfg = rt.config.clone();
         let res = rt
             .store
             .admit_child(&cfg, root_id, child_id, agent_type_hint);
-        let revoked = rt.store.is_revoked(root_id) || !rt.store.roots.contains_key(root_id);
-        (res, revoked)
+        let revoked = rt.store.is_revoked(root_id);
+        let missing = !rt.store.roots.contains_key(root_id);
+        (res, revoked, missing)
     };
 
     match res {
@@ -1965,6 +2383,8 @@ pub fn admit_codex_subagent(
                 let _ = crate::storage::subagent_delete_row(&conn, root_id, child_id);
                 if root_revoked {
                     let _ = crate::storage::invalidate_codex_root(&conn, root_id);
+                } else if root_missing {
+                    let _ = crate::storage::park_codex_root(&conn, root_id);
                 }
             }
             Err(AppError::NotRecipient(msg))

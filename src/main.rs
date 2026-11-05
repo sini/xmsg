@@ -35,8 +35,24 @@ enum Commands {
     /// Register credentials with running xmsg server
     Register(RegisterArgs),
 
+    /// Explicitly revoke or unregister a session (e.g. `--codex-session <P>`)
+    #[cfg(target_os = "linux")]
+    Unregister(UnregisterArgs),
+
     /// Load a peers file with every rule `serve` applies, and exit 0 or name the failure
     CheckPeers(CheckPeersArgs),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Parser, Debug)]
+pub struct UnregisterArgs {
+    /// Deliberately revoke a Codex root session ID (`RevokedByOperator`, sticky across resume)
+    #[arg(long = "codex-session")]
+    pub codex_session: String,
+
+    /// Agent socket path (defaults to $XDG_RUNTIME_DIR/xmsg/agent.sock)
+    #[arg(long, env = "XMSG_AGENT_SOCK")]
+    pub sock: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -77,8 +93,16 @@ pub struct RegisterCodexArgs {
     pub hook: bool,
 
     /// Hook event when `--hook` is passed
-    #[arg(long)]
+    #[arg(long, default_value = "")]
     pub event: String,
+
+    /// Deliberately revoke a Codex root session ID (`RevokedByOperator`, sticky across resume)
+    #[arg(long, conflicts_with = "unrevoke")]
+    pub revoke: Option<String>,
+
+    /// Clear `RevokedByOperator` on a Codex root session ID back to `StaleAfterResume`
+    #[arg(long, conflicts_with = "revoke")]
+    pub unrevoke: Option<String>,
 
     /// Agent socket path (defaults to $XDG_RUNTIME_DIR/xmsg/agent.sock)
     #[arg(long, env = "XMSG_AGENT_SOCK")]
@@ -315,6 +339,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 run_register_codex(codex_args);
             }
         },
+        #[cfg(target_os = "linux")]
+        Commands::Unregister(args) => {
+            if let Err(e) =
+                xmsg::agent::run_codex_revoke(&args.codex_session, true, args.sock.as_deref())
+            {
+                eprintln!("xmsg unregister error: {e}");
+                std::process::exit(1);
+            }
+        }
         Commands::CheckPeers(args) => {
             let own = match &args.fed_cert {
                 Some(cert) => Some(own_node_from_cert_file(cert)?),
@@ -385,8 +418,22 @@ fn run_register_claude(args: RegisterClaudeArgs) {
 #[cfg(target_os = "linux")]
 fn run_register_codex(args: RegisterCodexArgs) {
     use std::io::Read;
-    if !args.hook {
-        eprintln!("xmsg register codex error: --hook is required");
+    if let Some(ref sid) = args.revoke {
+        if let Err(e) = xmsg::agent::run_codex_revoke(sid, true, args.sock.as_deref()) {
+            eprintln!("xmsg register codex error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if let Some(ref sid) = args.unrevoke {
+        if let Err(e) = xmsg::agent::run_codex_revoke(sid, false, args.sock.as_deref()) {
+            eprintln!("xmsg register codex error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if !args.hook || args.event.trim().is_empty() {
+        eprintln!("xmsg register codex error: --hook --event <EVENT> (or --revoke/--unrevoke) is required");
         std::process::exit(2);
     }
     let mut input = String::new();

@@ -145,12 +145,25 @@ pub enum AgentFrame {
         label: Option<String>,
         payload: serde_json::Value,
     },
+    #[serde(alias = "codex-revoke")]
+    CodexRevoke {
+        #[serde(default)]
+        schema_version: Option<u32>,
+        session_id: String,
+        #[serde(default = "default_true")]
+        revoked: bool,
+    },
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Parses one `agent.sock` frame, refusing mismatched `schema_version` or retired v1 fields
 /// with an actionable stale-client diagnostic naming the session restart.
 pub fn parse_agent_frame(line: &str) -> Result<AgentFrame, AppError> {
     let raw: Option<serde_json::Value> = serde_json::from_str(line).ok();
+    let mut normalized_line: Option<String> = None;
     if let Some(obj) = raw.as_ref().and_then(serde_json::Value::as_object) {
         if let Some(ver_val) = obj.get("schema_version") {
             match ver_val.as_u64() {
@@ -168,9 +181,21 @@ pub fn parse_agent_frame(line: &str) -> Result<AgentFrame, AppError> {
                 }
             }
         }
+        if !obj.contains_key("action") {
+            if let Some(op_val) = obj.get("op").and_then(serde_json::Value::as_str) {
+                let mut cloned = obj.clone();
+                cloned.remove("op");
+                cloned.insert(
+                    "action".to_string(),
+                    serde_json::Value::String(op_val.to_string()),
+                );
+                normalized_line = serde_json::to_string(&cloned).ok();
+            }
+        }
     }
 
-    match surface::parse_frame::<AgentFrame>(line) {
+    let to_parse = normalized_line.as_deref().unwrap_or(line);
+    match surface::parse_frame::<AgentFrame>(to_parse) {
         Ok(frame) => Ok(frame),
         Err(AppError::BadRequest(detail)) => {
             if let Some(obj) = raw.as_ref().and_then(serde_json::Value::as_object) {
@@ -906,8 +931,52 @@ pub async fn run_agent_server_with_listener(
                     }
                     continue;
                 }
+                #[cfg(target_os = "linux")]
+                if let AgentFrame::CodexRevoke {
+                    session_id,
+                    revoked,
+                    ..
+                } = frame
+                {
+                    let sid = session_id.trim();
+                    if !crate::claim::is_uuid_shaped(sid) {
+                        let err = AppError::BadRequest(format!(
+                            "invalid codex session_id '{sid}': must be UUID-shaped"
+                        ))
+                        .frame();
+                        let _ = writer.write_all(format!("{err}\n").as_bytes()).await;
+                        let _ = writer.flush().await;
+                        continue;
+                    }
+                    let rt_arc = crate::codex::for_state(&state_clone);
+                    if revoked {
+                        {
+                            let mut rt = rt_arc.lock().unwrap();
+                            let _ = rt.store.revoke_by_operator(sid);
+                        }
+                        if let Ok(db) = state_clone.db.lock() {
+                            let _ = crate::storage::invalidate_codex_root(&db, sid);
+                        }
+                    } else {
+                        {
+                            let mut rt = rt_arc.lock().unwrap();
+                            rt.store.unrevoke_by_operator(sid);
+                        }
+                        if let Ok(db) = state_clone.db.lock() {
+                            let _ = crate::storage::unrevoke_codex_root_by_operator(&db, sid);
+                        }
+                    }
+                    let ok_line = serde_json::json!({
+                        "status": "ok",
+                        "session_id": sid,
+                        "revoked": revoked,
+                    });
+                    let _ = writer.write_all(format!("{ok_line}\n").as_bytes()).await;
+                    let _ = writer.flush().await;
+                    continue;
+                }
                 #[cfg(not(target_os = "linux"))]
-                if matches!(frame, AgentFrame::CodexHook { .. }) {
+                if matches!(frame, AgentFrame::CodexHook { .. } | AgentFrame::CodexRevoke { .. }) {
                     // INTERIM (HA9-A.codex.darwin): codex support on Darwin is pending.
                     let err = AppError::BadRequest(
                         "codex support on Darwin is pending".to_string(),
@@ -928,7 +997,7 @@ pub async fn run_agent_server_with_listener(
                 let caller_trace = trace_caller_or_codex_owner(&state_clone, &peer);
 
                 let resp: Result<serde_json::Value, AppError> = match frame {
-                    AgentFrame::CodexHook { .. } => unreachable!(),
+                    AgentFrame::CodexHook { .. } | AgentFrame::CodexRevoke { .. } => unreachable!(),
                     AgentFrame::McpStart {
                         ls_address,
                         csrf_token,
@@ -1477,6 +1546,51 @@ pub async fn handle_agent_frame(
             )),
             Err(e) => Err(e),
         },
+        AgentFrame::CodexRevoke {
+            session_id,
+            revoked,
+            ..
+        } => {
+            #[cfg(target_os = "linux")]
+            {
+                let sid = session_id.trim();
+                if !crate::claim::is_uuid_shaped(sid) {
+                    return Err(AppError::BadRequest(format!(
+                        "invalid codex session_id '{sid}': must be UUID-shaped"
+                    )));
+                }
+                let rt_arc = crate::codex::for_state(state);
+                if revoked {
+                    {
+                        let mut rt = rt_arc.lock().unwrap();
+                        let _ = rt.store.revoke_by_operator(sid);
+                    }
+                    if let Ok(db) = state.db.lock() {
+                        let _ = crate::storage::invalidate_codex_root(&db, sid);
+                    }
+                } else {
+                    {
+                        let mut rt = rt_arc.lock().unwrap();
+                        rt.store.unrevoke_by_operator(sid);
+                    }
+                    if let Ok(db) = state.db.lock() {
+                        let _ = crate::storage::unrevoke_codex_root_by_operator(&db, sid);
+                    }
+                }
+                Ok(serde_json::json!({
+                    "status": "ok",
+                    "session_id": sid,
+                    "revoked": revoked,
+                }))
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (session_id, revoked);
+                Err(AppError::BadRequest(
+                    "codex support on Darwin is pending".to_string(),
+                ))
+            }
+        }
     }
 }
 
@@ -2308,6 +2422,17 @@ pub async fn handle_codex_hook_frame(
     let mut cfg = rt_arc.lock().unwrap().config.clone();
     cfg.proc_root = state.agy_config.proc_root.clone();
 
+    let sync_root_failure_db = |sid: &str| {
+        let is_rev = rt_arc.lock().unwrap().store.is_revoked(sid);
+        if let Ok(db) = state.db.lock() {
+            if is_rev {
+                let _ = crate::storage::invalidate_codex_root(&db, sid);
+            } else {
+                let _ = crate::storage::park_codex_root(&db, sid);
+            }
+        }
+    };
+
     match event {
         "SessionStart" | "session-start" => {
             let source = hook_payload.source.as_deref().map(str::trim).unwrap_or("");
@@ -2332,7 +2457,7 @@ pub async fn handle_codex_hook_frame(
                                     .db
                                     .lock()
                                     .map_err(|e| AppError::Internal(e.to_string()))?;
-                                crate::storage::upsert_codex_root(&db, &root_snap)
+                                crate::storage::rebind_codex_root(&db, &root_snap)
                                     .map_err(|e| AppError::Internal(e.to_string()))?;
                                 crate::storage::reserve_codex_hook_batch(
                                     &db,
@@ -2368,9 +2493,7 @@ pub async fn handle_codex_hook_frame(
                             handoff_ids: Vec::new(),
                         }),
                         Err(msg) => {
-                            if let Ok(db) = state.db.lock() {
-                                let _ = crate::storage::invalidate_codex_root(&db, session_id);
-                            }
+                            sync_root_failure_db(session_id);
                             Err(AppError::NotRecipient(msg))
                         }
                     }
@@ -2398,29 +2521,70 @@ pub async fn handle_codex_hook_frame(
                             })
                         }
                         Err(msg) => {
-                            if let Ok(db) = state.db.lock() {
-                                let _ = crate::storage::invalidate_codex_root(&db, session_id);
-                            }
+                            sync_root_failure_db(session_id);
                             Err(AppError::NotRecipient(msg))
                         }
                     }
                 }
                 "resume" => {
-                    {
+                    let rebind_res = {
                         let mut rt = rt_arc.lock().unwrap();
-                        let _ = rt.store.revoke_root(session_id);
+                        rt.store.rebind_resumed_root(
+                            &cfg,
+                            owner_pid,
+                            &owner_starttime,
+                            session_id,
+                            hook_payload.cwd.as_deref(),
+                            label,
+                        )
+                    };
+                    match rebind_res {
+                        Ok(root_snap) => {
+                            let reserved = {
+                                let db = state
+                                    .db
+                                    .lock()
+                                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                                crate::storage::rebind_codex_root(&db, &root_snap)
+                                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                                crate::storage::reserve_codex_hook_batch(
+                                    &db,
+                                    session_id,
+                                    root_snap.generation,
+                                )
+                                .map_err(|e| AppError::Internal(e.to_string()))?
+                            };
+                            match reserved {
+                                Some((handoff_ids, context_text)) => {
+                                    let out = serde_json::json!({
+                                        "hookSpecificOutput": {
+                                            "hookEventName": "SessionStart",
+                                            "additionalContext": context_text,
+                                        }
+                                    });
+                                    Ok(CodexHookOutcome {
+                                        root_id: session_id.to_string(),
+                                        stdout: out.to_string(),
+                                        handoff_ids,
+                                    })
+                                }
+                                None => Ok(CodexHookOutcome {
+                                    root_id: session_id.to_string(),
+                                    stdout: String::new(),
+                                    handoff_ids: Vec::new(),
+                                }),
+                            }
+                        }
+                        Err(msg) => {
+                            sync_root_failure_db(session_id);
+                            Err(AppError::NotRecipient(msg))
+                        }
                     }
-                    if let Ok(db) = state.db.lock() {
-                        let _ = crate::storage::invalidate_codex_root(&db, session_id);
-                    }
-                    Err(AppError::NotRecipient(format!(
-                        "codex resume is unsupported in xmsg v1 for session '{session_id}'; start a fresh codex thread"
-                    )))
                 }
                 other => {
                     {
                         let mut rt = rt_arc.lock().unwrap();
-                        let _ = rt.store.revoke_root(session_id);
+                        let _ = rt.store.revoke_by_operator(session_id);
                     }
                     if let Ok(db) = state.db.lock() {
                         let _ = crate::storage::invalidate_codex_root(&db, session_id);
@@ -2434,11 +2598,25 @@ pub async fn handle_codex_hook_frame(
         "UserPromptSubmit" | "user-prompt-submit" => {
             let val_res = {
                 let mut rt = rt_arc.lock().unwrap();
-                rt.store
-                    .validate_or_retry_root(&cfg, owner_pid, &owner_starttime, session_id, true)
+                rt.store.validate_or_rebind_root_on_hook(
+                    &cfg,
+                    owner_pid,
+                    &owner_starttime,
+                    session_id,
+                    hook_payload.cwd.as_deref(),
+                    label,
+                )
             };
             match val_res {
-                Ok(root_snap) => {
+                Ok((root_snap, did_rebind)) => {
+                    if did_rebind {
+                        let db = state
+                            .db
+                            .lock()
+                            .map_err(|e| AppError::Internal(e.to_string()))?;
+                        crate::storage::rebind_codex_root(&db, &root_snap)
+                            .map_err(|e| AppError::Internal(e.to_string()))?;
+                    }
                     if let Some(agent_id) = hook_payload
                         .agent_id
                         .as_deref()
@@ -2529,8 +2707,10 @@ pub async fn handle_codex_hook_frame(
                             .db
                             .lock()
                             .map_err(|e| AppError::Internal(e.to_string()))?;
-                        crate::storage::upsert_codex_root(&db, &root_snap)
-                            .map_err(|e| AppError::Internal(e.to_string()))?;
+                        if !did_rebind {
+                            crate::storage::upsert_codex_root(&db, &root_snap)
+                                .map_err(|e| AppError::Internal(e.to_string()))?;
+                        }
                         crate::storage::reserve_codex_hook_batch(
                             &db,
                             session_id,
@@ -2560,9 +2740,7 @@ pub async fn handle_codex_hook_frame(
                     }
                 }
                 Err(msg) => {
-                    if let Ok(db) = state.db.lock() {
-                        let _ = crate::storage::invalidate_codex_root(&db, session_id);
-                    }
+                    sync_root_failure_db(session_id);
                     Err(AppError::NotRecipient(msg))
                 }
             }
@@ -2570,20 +2748,28 @@ pub async fn handle_codex_hook_frame(
         "PreModelRequest" | "pre-model-request" => {
             let val_res = {
                 let mut rt = rt_arc.lock().unwrap();
-                rt.store
-                    .validate_or_retry_root(&cfg, owner_pid, &owner_starttime, session_id, true)
+                rt.store.validate_or_rebind_root_on_hook(
+                    &cfg,
+                    owner_pid,
+                    &owner_starttime,
+                    session_id,
+                    hook_payload.cwd.as_deref(),
+                    label,
+                )
             };
             let _root_snap = match val_res {
-                Ok(snap) => {
+                Ok((snap, did_rebind)) => {
                     if let Ok(db) = state.db.lock() {
-                        let _ = crate::storage::upsert_codex_root(&db, &snap);
+                        if did_rebind {
+                            let _ = crate::storage::rebind_codex_root(&db, &snap);
+                        } else {
+                            let _ = crate::storage::upsert_codex_root(&db, &snap);
+                        }
                     }
                     snap
                 }
                 Err(msg) => {
-                    if let Ok(db) = state.db.lock() {
-                        let _ = crate::storage::invalidate_codex_root(&db, session_id);
-                    }
+                    sync_root_failure_db(session_id);
                     return Err(AppError::NotRecipient(msg));
                 }
             };
@@ -2644,15 +2830,29 @@ pub async fn handle_codex_hook_frame(
                 })?;
             let val_res = {
                 let mut rt = rt_arc.lock().unwrap();
-                rt.store
-                    .validate_or_retry_root(&cfg, owner_pid, &owner_starttime, session_id, true)
+                rt.store.validate_or_rebind_root_on_hook(
+                    &cfg,
+                    owner_pid,
+                    &owner_starttime,
+                    session_id,
+                    hook_payload.cwd.as_deref(),
+                    label,
+                )
             };
-            if let Err(msg) = val_res {
-                if let Ok(db) = state.db.lock() {
-                    let _ = crate::storage::invalidate_codex_root(&db, session_id);
+            let did_rebind = match val_res {
+                Ok((ref snap, rebound)) => {
+                    if rebound {
+                        if let Ok(db) = state.db.lock() {
+                            let _ = crate::storage::rebind_codex_root(&db, snap);
+                        }
+                    }
+                    rebound
                 }
-                return Err(AppError::NotRecipient(msg));
-            }
+                Err(msg) => {
+                    sync_root_failure_db(session_id);
+                    return Err(AppError::NotRecipient(msg));
+                }
+            };
             let (root_snap, _, _) = crate::codex::admit_codex_subagent(
                 &state.db,
                 session_id,
@@ -2670,7 +2870,9 @@ pub async fn handle_codex_hook_frame(
             };
             if let Ok(db) = state.db.lock() {
                 let now = crate::storage::now_epoch_secs();
-                let _ = crate::storage::upsert_codex_root(&db, &root_snap);
+                if !did_rebind {
+                    let _ = crate::storage::upsert_codex_root(&db, &root_snap);
+                }
                 let _ = crate::storage::subagent_start_turn(
                     &db,
                     session_id,
@@ -2713,9 +2915,7 @@ pub async fn handle_codex_hook_frame(
             let root_snap = match val_res {
                 Ok(snap) => snap,
                 Err(msg) => {
-                    if let Ok(db) = state.db.lock() {
-                        let _ = crate::storage::invalidate_codex_root(&db, session_id);
-                    }
+                    sync_root_failure_db(session_id);
                     return Err(AppError::NotRecipient(msg));
                 }
             };
@@ -2780,18 +2980,29 @@ pub async fn handle_codex_hook_frame(
             }
             let val_res = {
                 let mut rt = rt_arc.lock().unwrap();
-                rt.store
-                    .validate_or_retry_root(&cfg, owner_pid, &owner_starttime, session_id, true)
+                rt.store.validate_or_rebind_root_on_hook(
+                    &cfg,
+                    owner_pid,
+                    &owner_starttime,
+                    session_id,
+                    hook_payload.cwd.as_deref(),
+                    label,
+                )
             };
             match val_res {
-                Ok(root_snap) => {
+                Ok((root_snap, did_rebind)) => {
                     let reserved = {
                         let db = state
                             .db
                             .lock()
                             .map_err(|e| AppError::Internal(e.to_string()))?;
-                        crate::storage::upsert_codex_root(&db, &root_snap)
-                            .map_err(|e| AppError::Internal(e.to_string()))?;
+                        if did_rebind {
+                            crate::storage::rebind_codex_root(&db, &root_snap)
+                                .map_err(|e| AppError::Internal(e.to_string()))?;
+                        } else {
+                            crate::storage::upsert_codex_root(&db, &root_snap)
+                                .map_err(|e| AppError::Internal(e.to_string()))?;
+                        }
                         crate::storage::reserve_codex_hook_batch(
                             &db,
                             session_id,
@@ -2819,15 +3030,13 @@ pub async fn handle_codex_hook_frame(
                     }
                 }
                 Err(msg) => {
-                    if let Ok(db) = state.db.lock() {
-                        let _ = crate::storage::invalidate_codex_root(&db, session_id);
-                    }
+                    sync_root_failure_db(session_id);
                     Err(AppError::NotRecipient(msg))
                 }
             }
         }
         "SessionEnd" | "session-end" => {
-            let revoked = {
+            let (ended_ok, is_rev) = {
                 let mut rt = rt_arc.lock().unwrap();
                 let owned = rt
                     .store
@@ -2835,14 +3044,20 @@ pub async fn handle_codex_hook_frame(
                     .is_ok();
                 if owned {
                     let _ = rt.store.end_root(session_id);
-                    true
+                    (true, rt.store.is_revoked(session_id))
                 } else {
-                    rt.store.is_revoked(session_id)
+                    let rev = rt.store.is_revoked(session_id);
+                    let stale = rt.store.is_stale(session_id);
+                    (rev || stale, rev)
                 }
             };
-            if revoked {
+            if ended_ok {
                 if let Ok(db) = state.db.lock() {
-                    let _ = crate::storage::invalidate_codex_root(&db, session_id);
+                    if is_rev {
+                        let _ = crate::storage::invalidate_codex_root(&db, session_id);
+                    } else {
+                        let _ = crate::storage::park_codex_root(&db, session_id);
+                    }
                 }
                 Ok(CodexHookOutcome {
                     root_id: session_id.to_string(),
@@ -3125,7 +3340,10 @@ pub fn run_codex_hook<W: std::io::Write>(
         );
     }
 
-    if matches!(event, "SessionStart" | "session-start") {
+    if matches!(
+        event,
+        "SessionStart" | "session-start" | "UserPromptSubmit" | "user-prompt-submit"
+    ) {
         clear_client_unavailable_note(Some(&sock_path), session_id);
     }
 
@@ -3163,5 +3381,44 @@ pub fn run_codex_hook<W: std::io::Write>(
         let _ = reader.read_line(&mut ack_resp);
     }
 
+    Ok(())
+}
+
+/// Runs `xmsg register codex --revoke <session_id>` / `--unrevoke <session_id>` or
+/// `xmsg unregister --codex-session <session_id>`, sending `AgentFrame::CodexRevoke`
+/// on `agent.sock` (§6.2.1).
+#[cfg(target_os = "linux")]
+pub fn run_codex_revoke(
+    session_id: &str,
+    revoked: bool,
+    agent_sock: Option<&Path>,
+) -> Result<(), String> {
+    let sock_path = match agent_sock {
+        Some(p) => p.to_path_buf(),
+        None => default_agent_sock_path().map_err(|e| e.to_string())?,
+    };
+    let my_uid = current_uid();
+    if let Some(parent) = sock_path.parent() {
+        if parent.exists() {
+            ensure_secure_socket_dir(parent, my_uid).map_err(|e| e.to_string())?;
+        }
+    }
+    let frame = serde_json::json!({
+        "action": "codex_revoke",
+        "schema_version": surface::MCP_SCHEMA_VERSION,
+        "session_id": session_id.trim(),
+        "revoked": revoked,
+    });
+    let resp = crate::mcp::call_agent_sock(&sock_path, &frame)?;
+    if resp.get("status").and_then(serde_json::Value::as_str) == Some("error") {
+        let detail = resp
+            .get("detail")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown error");
+        return Err(detail.to_string());
+    }
+    if !revoked {
+        clear_client_unavailable_note(Some(&sock_path), Some(session_id.trim()));
+    }
     Ok(())
 }

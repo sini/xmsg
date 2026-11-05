@@ -1058,8 +1058,13 @@ def run_oracle_c11_with_homes(
             r.get("address", "").startswith(f"{fork_p}@") for r in recips.get("recipients", [])
         ), f"C11 failed: forked root {fork_p} did not register: {recips}"
 
-        # (d) resume: thread/unsubscribe + thread/resume + turn/start on root_p -> revokes/refuses
+        # (d) resume (§6): thread/unsubscribe parks root_p into StaleAfterResume; thread/resume + turn/start re-attests and rebinds root_p!
         unload_thread(client, root_p)
+        _, recips_unloaded = unix_http_request(http_sock, "GET", "/v1/recipients")
+        assert not any(
+            r.get("address", "").startswith(f"{root_p}@")
+            for r in recips_unloaded.get("recipients", [])
+        ), f"C11 failed: unloaded root {root_p} remained listed before resume: {recips_unloaded}"
         r_res = client.request("thread/resume", {"threadId": root_p})
         assert "result" in r_res, f"thread/resume failed: {r_res}"
         r_turn = client.request(
@@ -1071,9 +1076,9 @@ def run_oracle_c11_with_homes(
         )
         wait_turn_done(client, root_p, r_turn["result"]["turn"]["id"])
         _, recips = unix_http_request(http_sock, "GET", "/v1/recipients")
-        assert not any(
+        assert any(
             r.get("address", "").startswith(f"{root_p}@") for r in recips.get("recipients", [])
-        ), f"C11 failed: resumed root {root_p} remained registered: {recips}"
+        ), f"C11/C17 failed: resumed root {root_p} with valid witness did not re-attest: {recips}"
         # Sibling fork_p remains registered!
         assert any(
             r.get("address", "").startswith(f"{fork_p}@") for r in recips.get("recipients", [])
@@ -1442,6 +1447,21 @@ sys.exit(proc.wait())
                 )
                 return ([msg_fn("CHILD_TURN_2_COMPLETE")], None)
 
+        if "REBIND_SEND_AFTER_RESUME" in joined_user:
+            idx_reb = max(
+                i
+                for i, it in enumerate(inp)
+                if it.get("type") == "message" and "REBIND_SEND_AFTER_RESUME" in json.dumps(it)
+            )
+            post_outputs = [it for it in inp[idx_reb:] if it.get("type") == "function_call_output"]
+            if len(post_outputs) == 0:
+                return (
+                    [fc_fn("send", {"to": "peer", "text": "REBOUND_AFTER_RESUME_OK"}, "mcp__xmsg")],
+                    None,
+                )
+            else:
+                return ([msg_fn("REBOUND_SEND_DONE")], None)
+
         if "SECOND_PROMPT_AFTER_RESUME" in joined_user:
             scenario_state["root_t4_input"] = json.dumps(inp)
             return ([msg_fn("SECOND_RESUME_PROMPT_DONE")], None)
@@ -1743,8 +1763,8 @@ sys.exit(proc.wait())
         child_msg2 = recv.wait_for_text("CHILD_DAEMON_MSG_2")
         assert f"{root_p}/{child_x}@" in child_msg2["from_name"]
 
-        # C9 same-daemon unload then resume revokes old root generation AND its children,
-        # while sibling `sib_p` remains live and able to send!
+        # C9/C17 same-daemon unload parks root_p and clears child_x; thread/resume + turn/start re-attests root_p under g'
+        # while child_x remains unlisted until re-spawned, and sibling `sib_p` remains continuously live!
         client.request("thread/unsubscribe", {"threadId": root_p})
         deadline = time.time() + 10.0
         while time.time() < deadline:
@@ -1757,7 +1777,35 @@ sys.exit(proc.wait())
         assert not any(
             r.get("address", "").startswith(f"{root_p}")
             for r in recips_revoked.get("recipients", [])
-        ), f"C9 failed: unloaded/resumed root {root_p} or its child still listed: {recips_revoked}"
+        ), f"C9 failed: unloaded root {root_p} or its child still listed before turn: {recips_revoked}"
+
+        t_reb = client.request(
+            "turn/start",
+            {"threadId": root_p, "input": [{"type": "text", "text": "REBIND_SEND_AFTER_RESUME"}]},
+        )
+        t_reb_id = t_reb["result"]["turn"]["id"]
+        deadline = time.time() + 15.0
+        while time.time() < deadline:
+            if any(
+                n.get("method") == "turn/completed"
+                and n.get("params", {}).get("turn", {}).get("id") == t_reb_id
+                for n in client.notifications
+            ):
+                break
+            time.sleep(0.05)
+        reb_msg = recv.wait_for_text("REBOUND_AFTER_RESUME_OK")
+        assert f"{root_p}@" in reb_msg["from_name"], (
+            f"C17 failed: rebound root {root_p} bad attribution after same-daemon resume: {reb_msg}"
+        )
+
+        # Now operator-revoke `root_p` (`xmsg unregister --codex-session <root_p>` -> `RevokedByOperator`, C16 + C17.7)
+        # while `root_p` still holds its valid live writer lock and rollout:
+        subprocess.run(
+            [str(xmsg_bin), "unregister", "--codex-session", root_p],
+            env=os.environ.copy(),
+            check=True,
+        )
+
         t3 = client.request(
             "turn/start",
             {"threadId": root_p, "input": [{"type": "text", "text": "TRY_SEND_AFTER_RESUME"}]},
@@ -1790,11 +1838,11 @@ sys.exit(proc.wait())
         )
         assert not any(
             "SHOULD_REFUSE_AFTER_RESUME" in m.get("text", "") for m in recv.received
-        ), "C9 failed: resumed root was able to send after unload/resume"
+        ), "C9/C17.7 failed: RevokedByOperator root was able to send despite operator revocation"
         resume_outs = scenario_state.get("resume_tool_outputs", [])
         assert len(resume_outs) == 1 and (
-            "revoked or resumed" in resume_outs[0] or "not admitted" in resume_outs[0]
-        ), f"C9/fail-open failed: expected server MCP refusal on resumed root tool call, got: {resume_outs}"
+            "revoked" in resume_outs[0] or "not admitted" in resume_outs[0]
+        ), f"C9/fail-open failed: expected server MCP refusal on revoked root tool call, got: {resume_outs}"
         note_str = "xmsg unavailable for this thread (resumed); start a fresh thread to use xmsg"
         t3_in_str = scenario_state.get("root_t3_input", "")
         assert t3_in_str.count(note_str) == 1, (

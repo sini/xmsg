@@ -419,6 +419,9 @@ const SCHEMA_N: &str = r#"
             label TEXT NOT NULL,
             cwd TEXT,
             registered_at INTEGER NOT NULL,
+            rollout_dev INTEGER NOT NULL DEFAULT 0,
+            rollout_ino INTEGER NOT NULL DEFAULT 0,
+            active INTEGER NOT NULL DEFAULT 1,
             revoked INTEGER NOT NULL DEFAULT 0
         );
 
@@ -474,6 +477,20 @@ pub fn init_db(conn: &Connection) -> Result<()> {
         )?;
         if !has_reclaim_hash {
             conn.execute_batch("ALTER TABLE instance_seen ADD COLUMN reclaim_hash TEXT")?;
+        }
+        for (col, ddl) in [
+            ("rollout_dev", "INTEGER NOT NULL DEFAULT 0"),
+            ("rollout_ino", "INTEGER NOT NULL DEFAULT 0"),
+            ("active", "INTEGER NOT NULL DEFAULT 1"),
+        ] {
+            let has_col: bool = conn.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('codex_roots') WHERE name = ?1",
+                params![col],
+                |r| r.get(0),
+            )?;
+            if !has_col {
+                conn.execute_batch(&format!("ALTER TABLE codex_roots ADD COLUMN {col} {ddl}"))?;
+            }
         }
         return Ok(());
     }
@@ -2385,14 +2402,32 @@ pub fn inactive_instances(
 // HA9-A.codex: Codex root persistence, startup invalidation, and handoff state
 // -----------------------------------------------------------------------------
 
+/// Persisted record of a parked (`StaleAfterResume`) Codex root loaded at startup or
+/// retained when a root's writer lease closes cleanly (§6.2.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedStaleCodexRoot {
+    pub root_id: String,
+    pub codex_home: std::path::PathBuf,
+    pub rollout_dev: u64,
+    pub rollout_ino: u64,
+    pub label: String,
+    pub cwd: Option<String>,
+    pub generation: u64,
+}
+
 /// On bus startup, any persisted `codex_roots` loses its continuous writer-lease witness
-/// (§2.1): mark all existing rows `revoked = 1`, delete their child `subagents` and
-/// subagent queue rows, and transition any `inflight` rows in `codex_handoff` to `unknown`
-/// with message outcome `delivery_unknown` (§2.5).
-/// Returns `(max_persisted_generation, revoked_root_ids)`.
+/// (§2.1, §6.2.1): mark all existing rows `active = 0`, preserving `revoked = 0` rows in
+/// `StaleAfterResume` (`stale_roots`) and `revoked = 1` rows in `RevokedByOperator`,
+/// migrate any unread child queue messages to their parent root queue before deleting
+/// child `subagents` rows, and transition any `inflight` rows in `codex_handoff` to
+/// `unknown` with message outcome `delivery_unknown` (§2.5).
 pub fn startup_invalidate_codex(
     conn: &Connection,
-) -> Result<(u64, std::collections::HashSet<String>)> {
+) -> Result<(
+    u64,
+    std::collections::HashSet<String>,
+    std::collections::HashMap<String, PersistedStaleCodexRoot>,
+)> {
     let tx = conn.unchecked_transaction()?;
     let now = now_epoch_secs();
     let max_gen: i64 = tx
@@ -2404,21 +2439,65 @@ pub fn startup_invalidate_codex(
         .unwrap_or(0);
 
     let mut revoked = std::collections::HashSet::new();
-    {
-        let mut stmt = tx.prepare("SELECT root_id FROM codex_roots")?;
-        let ids = stmt
-            .query_map([], |r| r.get::<_, String>(0))?
-            .collect::<Result<Vec<_>>>()?;
-        for id in ids {
-            tx.execute("DELETE FROM subagents WHERE parent = ?1", params![id])?;
-            tx.execute(
-                "DELETE FROM instance_queue WHERE instance_id LIKE ?1 || '/%'",
-                params![id],
-            )?;
+    let mut stale = std::collections::HashMap::new();
+    let rows: Vec<(String, String, i64, i64, String, Option<String>, i64, i64)> = {
+        let mut stmt = tx.prepare(
+            "SELECT root_id, codex_home, rollout_dev, rollout_ino, label, cwd, generation, revoked FROM codex_roots",
+        )?;
+        let mapped = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2).unwrap_or(0),
+                r.get::<_, i64>(3).unwrap_or(0),
+                r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, i64>(6).unwrap_or(0),
+                r.get::<_, i64>(7).unwrap_or(0),
+            ))
+        })?;
+        mapped.collect::<Result<Vec<_>>>()?
+    };
+    for (id, home, r_dev, r_ino, label, cwd, gen, rev) in rows {
+        if rev == 0 {
+            let child_ids: Vec<String> = {
+                let mut cstmt = tx.prepare("SELECT agent_id FROM subagents WHERE parent = ?1")?;
+                let c_rows = cstmt.query_map(params![id], |r| r.get::<_, String>(0))?;
+                c_rows.collect::<Result<Vec<_>>>()?
+            };
+            for agent_id in child_ids {
+                let _ = take_codex_subagent_queue_to_parent(
+                    &tx,
+                    &id,
+                    gen.max(0) as u64,
+                    &agent_id,
+                    now,
+                );
+            }
+        }
+        tx.execute("DELETE FROM subagents WHERE parent = ?1", params![id])?;
+        tx.execute(
+            "DELETE FROM instance_queue WHERE instance_id LIKE ?1 || '/%' AND delivered_at IS NULL",
+            params![id],
+        )?;
+        if rev != 0 {
             revoked.insert(id);
+        } else {
+            stale.insert(
+                id.clone(),
+                PersistedStaleCodexRoot {
+                    root_id: id,
+                    codex_home: std::path::PathBuf::from(home),
+                    rollout_dev: r_dev.max(0) as u64,
+                    rollout_ino: r_ino.max(0) as u64,
+                    label,
+                    cwd,
+                    generation: gen.max(0) as u64,
+                },
+            );
         }
     }
-    tx.execute("UPDATE codex_roots SET revoked = 1", [])?;
+    tx.execute("UPDATE codex_roots SET active = 0", [])?;
 
     // Any handoff left `inflight` when the bus stopped becomes `unknown` (§2.5).
     let inflight_ids: Vec<String> = {
@@ -2441,16 +2520,16 @@ pub fn startup_invalidate_codex(
     }
 
     tx.commit()?;
-    Ok((max_gen.max(0) as u64, revoked))
+    Ok((max_gen.max(0) as u64, revoked, stale))
 }
 
-/// Persist an admitted Codex root generation in `codex_roots` and `instance_seen` (§2.1).
+/// Persist an admitted Codex root generation in `codex_roots` and `instance_seen` (§2.1, §6.2.1).
 #[cfg(target_os = "linux")]
 pub fn upsert_codex_root(conn: &Connection, snap: &crate::codex::CodexRootSnapshot) -> Result<()> {
     let now = now_epoch_secs();
     conn.execute(
-        "INSERT INTO codex_roots (root_id, codex_home, owner_pid, owner_starttime, generation, label, cwd, registered_at, revoked) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0) \
+        "INSERT INTO codex_roots (root_id, codex_home, owner_pid, owner_starttime, generation, label, cwd, registered_at, rollout_dev, rollout_ino, active, revoked) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, 0) \
          ON CONFLICT(root_id) DO UPDATE SET \
              codex_home = excluded.codex_home, \
              owner_pid = excluded.owner_pid, \
@@ -2459,6 +2538,9 @@ pub fn upsert_codex_root(conn: &Connection, snap: &crate::codex::CodexRootSnapsh
              label = excluded.label, \
              cwd = excluded.cwd, \
              registered_at = excluded.registered_at, \
+             rollout_dev = excluded.rollout_dev, \
+             rollout_ino = excluded.rollout_ino, \
+             active = 1, \
              revoked = 0",
         params![
             snap.root_id,
@@ -2469,19 +2551,117 @@ pub fn upsert_codex_root(conn: &Connection, snap: &crate::codex::CodexRootSnapsh
             snap.label,
             snap.cwd,
             snap.registered_at,
+            snap.rollout_dev as i64,
+            snap.rollout_ino as i64,
         ],
     )?;
     mark_live(conn, &snap.root_id, "codex", now)?;
     Ok(())
 }
 
-/// Mark a Codex root `revoked = 1` in `codex_roots` and delete its child bindings and
-/// child queue entries (§2.1, §2.3).
+/// Atomically rebind a resumed Codex root to `(owner_pid, owner_starttime, generation)`,
+/// migrating any unread `pending` root handoff rows from prior generations to the new
+/// generation and folding any unread child queue messages from prior-generation subagents
+/// back into the root queue with the §2.3 fallback header (§6.2.2 step 6).
+#[cfg(target_os = "linux")]
+pub fn rebind_codex_root(conn: &Connection, snap: &crate::codex::CodexRootSnapshot) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let now = now_epoch_secs();
+    tx.execute(
+        "INSERT INTO codex_roots (root_id, codex_home, owner_pid, owner_starttime, generation, label, cwd, registered_at, rollout_dev, rollout_ino, active, revoked) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, 0) \
+         ON CONFLICT(root_id) DO UPDATE SET \
+             codex_home = excluded.codex_home, \
+             owner_pid = excluded.owner_pid, \
+             owner_starttime = excluded.owner_starttime, \
+             generation = excluded.generation, \
+             label = excluded.label, \
+             cwd = excluded.cwd, \
+             registered_at = excluded.registered_at, \
+             rollout_dev = excluded.rollout_dev, \
+             rollout_ino = excluded.rollout_ino, \
+             active = 1, \
+             revoked = 0",
+        params![
+            snap.root_id,
+            snap.codex_home.to_string_lossy().as_ref(),
+            snap.owner_pid,
+            snap.owner_starttime,
+            snap.generation as i64,
+            snap.label,
+            snap.cwd,
+            snap.registered_at,
+            snap.rollout_dev as i64,
+            snap.rollout_ino as i64,
+        ],
+    )?;
+    mark_live(&tx, &snap.root_id, "codex", now)?;
+    tx.execute(
+        "UPDATE codex_handoff SET root_generation = ?2, updated_at = ?3 \
+         WHERE root_id = ?1 AND state = 'pending'",
+        params![snap.root_id, snap.generation as i64, now],
+    )?;
+    let child_ids: Vec<String> = {
+        let mut stmt = tx.prepare("SELECT agent_id FROM subagents WHERE parent = ?1")?;
+        let rows = stmt.query_map(params![snap.root_id], |r| r.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>>>()?
+    };
+    for agent_id in child_ids {
+        let _ = take_codex_subagent_queue_to_parent(
+            &tx,
+            &snap.root_id,
+            snap.generation,
+            &agent_id,
+            now,
+        );
+    }
+    tx.execute(
+        "DELETE FROM subagents WHERE parent = ?1",
+        params![snap.root_id],
+    )?;
+    tx.commit()
+}
+
+/// Park an admitted Codex root into `StaleAfterResume` (`active = 0, revoked = 0`),
+/// moving any unread child queue messages to the parent root queue and clearing
+/// stale `subagents` rows so child bindings must re-attest on resume (§6.2.1).
+pub fn park_codex_root(conn: &Connection, root_id: &str) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let now = now_epoch_secs();
+    let gen: i64 = tx
+        .query_row(
+            "SELECT generation FROM codex_roots WHERE root_id = ?1",
+            params![root_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let child_ids: Vec<String> = {
+        let mut stmt = tx.prepare("SELECT agent_id FROM subagents WHERE parent = ?1")?;
+        let rows = stmt.query_map(params![root_id], |r| r.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>>>()?
+    };
+    for agent_id in child_ids {
+        let _ =
+            take_codex_subagent_queue_to_parent(&tx, root_id, gen.max(0) as u64, &agent_id, now);
+    }
+    tx.execute(
+        "UPDATE codex_roots SET active = 0 WHERE root_id = ?1",
+        params![root_id],
+    )?;
+    tx.execute("DELETE FROM subagents WHERE parent = ?1", params![root_id])?;
+    tx.commit()
+}
+
+/// Mark a Codex root `RevokedByOperator` (`active = 0, revoked = 1`) in `codex_roots`
+/// and delete its child bindings and child queue entries (§2.1, §2.3, §6.2.1).
 pub fn invalidate_codex_root(conn: &Connection, root_id: &str) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
+    let now = now_epoch_secs();
     tx.execute(
-        "UPDATE codex_roots SET revoked = 1 WHERE root_id = ?1",
-        params![root_id],
+        "INSERT INTO codex_roots (root_id, codex_home, owner_pid, owner_starttime, generation, label, cwd, registered_at, rollout_dev, rollout_ino, active, revoked) \
+         VALUES (?1, '', 0, '', 0, 'codex', NULL, ?2, 0, 0, 0, 1) \
+         ON CONFLICT(root_id) DO UPDATE SET active = 0, revoked = 1",
+        params![root_id, now],
     )?;
     tx.execute("DELETE FROM subagents WHERE parent = ?1", params![root_id])?;
     tx.execute(
@@ -2489,6 +2669,16 @@ pub fn invalidate_codex_root(conn: &Connection, root_id: &str) -> Result<()> {
         params![root_id],
     )?;
     tx.commit()
+}
+
+/// Explicitly clear `RevokedByOperator` (`revoked = 0, active = 0`) for `root_id`
+/// so a subsequent `SessionStart(resume)` or hook with a valid witness can rebind it (§6.2.1).
+pub fn unrevoke_codex_root_by_operator(conn: &Connection, root_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE codex_roots SET revoked = 0, active = 0 WHERE root_id = ?1",
+        params![root_id],
+    )?;
+    Ok(())
 }
 
 /// Insert a root delivery into `pi_pending_messages` accompanied by a `codex_handoff` row
