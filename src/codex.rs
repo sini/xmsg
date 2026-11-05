@@ -503,13 +503,15 @@ impl LockLeaseWatch {
                     | libc::NOTE_ATTRIB
                     | libc::NOTE_FUNLOCK;
                 for ev in &events[..(n as usize)] {
-                    if (ev.flags & libc::EV_ERROR) != 0 {
-                        return Err(format!("kevent returned EV_ERROR data={}", ev.data));
+                    let flags = ev.flags;
+                    let fflags = ev.fflags;
+                    let data = ev.data;
+                    if (flags & libc::EV_ERROR) != 0 {
+                        return Err(format!("kevent returned EV_ERROR data={data}"));
                     }
-                    if !ignore_fflags && (ev.fflags & fatal_fflags) != 0 {
+                    if !ignore_fflags && (fflags & fatal_fflags) != 0 {
                         return Err(format!(
-                            "writer-lock lease discontinuity kevent fflags=0x{:x}",
-                            ev.fflags
+                            "writer-lock lease discontinuity kevent fflags=0x{fflags:x}"
                         ));
                     }
                 }

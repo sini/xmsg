@@ -176,7 +176,7 @@ pub fn resolve_validated_control_socket(codex_home: &Path) -> std::result::Resul
     if sock_meta.file_type().is_symlink() {
         return Err("resolved app-server-control.sock must not be a symlink".to_string());
     }
-    if (sock_meta.mode() & libc::S_IFMT) != libc::S_IFSOCK {
+    if !std::os::unix::fs::FileTypeExt::is_socket(&sock_meta.file_type()) {
         return Err("app-server-control.sock is not a unix socket".to_string());
     }
     if sock_meta.uid() != euid {
