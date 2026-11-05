@@ -50,9 +50,8 @@ fn make_test_state(tmp: &std::path::Path) -> Arc<AppState> {
     let my_proc_start =
         xmsg::process::starttime(std::path::Path::new(xmsg::process::LIVE_PROC_ROOT), my_pid)
             .unwrap_or_else(|_| "100".to_string());
-    let stat_content = format!(
-        "{my_pid} (xmsg) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {my_proc_start} 0 0\n"
-    );
+    let stat_content =
+        format!("{my_pid} (xmsg) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {my_proc_start} 0 0\n");
     fs::write(pid_dir.join("stat"), stat_content).unwrap();
     fs::create_dir_all(&presence_dir).unwrap();
     fs::create_dir_all(&brain_dir).unwrap();

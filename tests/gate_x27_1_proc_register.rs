@@ -746,10 +746,14 @@ async fn oracle_4_unreadable_environ_leaves_registration_to_the_hook() {
     let stop = Arc::new(AtomicBool::new(false));
     let scanned_once = Arc::new(AtomicBool::new(false));
     let scanned_flag = scanned_once.clone();
-    let _stat_fifo = serve_fifo(t.proc_root.join("4001").join("stat"), stop.clone(), move |_| {
-        scanned_flag.store(true, Ordering::SeqCst);
-        stat_line(4001, 4000, "200").into_bytes()
-    });
+    let _stat_fifo = serve_fifo(
+        t.proc_root.join("4001").join("stat"),
+        stop.clone(),
+        move |_| {
+            scanned_flag.store(true, Ordering::SeqCst);
+            stat_line(4001, 4000, "200").into_bytes()
+        },
+    );
     let (_dir, sock) = start_server(t.config(), store.clone()).await;
     for _ in 0..200 {
         if scanned_once.load(Ordering::SeqCst) {

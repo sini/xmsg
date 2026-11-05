@@ -114,7 +114,9 @@ async fn spawn_full_node(tmp: Option<TempDir>) -> FullNodeFixture {
                 status, stderr
             );
         }
-        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() && std::os::unix::net::UnixStream::connect(&register_sock).is_ok() {
+        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+            && std::os::unix::net::UnixStream::connect(&register_sock).is_ok()
+        {
             ready = true;
             break;
         }
@@ -379,7 +381,9 @@ async fn test_oracle_3_unacked_message_persists_across_sigterm_restart() {
     let mut guard1 = ChildGuard::new(child1);
 
     for _ in 0..600 {
-        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() && std::os::unix::net::UnixStream::connect(&register_sock).is_ok() {
+        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+            && std::os::unix::net::UnixStream::connect(&register_sock).is_ok()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -479,7 +483,9 @@ async fn test_oracle_3_unacked_message_persists_across_sigterm_restart() {
     let mut guard2 = ChildGuard::new(child2);
 
     for _ in 0..600 {
-        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() && std::os::unix::net::UnixStream::connect(&register_sock).is_ok() {
+        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+            && std::os::unix::net::UnixStream::connect(&register_sock).is_ok()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -605,7 +611,9 @@ async fn test_oracle_4_pid_1_unshare_container_sigterm_clean_shutdown() {
                 status, stderr
             );
         }
-        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() && std::os::unix::net::UnixStream::connect(&register_sock).is_ok() {
+        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+            && std::os::unix::net::UnixStream::connect(&register_sock).is_ok()
+        {
             ready = true;
             break;
         }

@@ -58,7 +58,9 @@ impl Node {
             .spawn()
             .expect("spawn xmsg serve");
         for _ in 0..1200 {
-            if std::os::unix::net::UnixStream::connect(&http_sock).is_ok() && std::os::unix::net::UnixStream::connect(&register_sock).is_ok() {
+            if std::os::unix::net::UnixStream::connect(&http_sock).is_ok()
+                && std::os::unix::net::UnixStream::connect(&register_sock).is_ok()
+            {
                 return Node {
                     _tmp: tmp,
                     http_sock,

@@ -231,10 +231,7 @@ async fn setup(max_body: usize) -> Env {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(
-        ready,
-        "the in-process server never bound its socket in 30s"
-    );
+    assert!(ready, "the in-process server never bound its socket in 30s");
     Env {
         _t: t,
         proc_root,

@@ -1993,7 +1993,12 @@ sys.exit(proc.wait())
     omitted_out = scenario_state.get("omitted_env_output", "")
     assert any(
         s in omitted_out
-        for s in ("XDG_RUNTIME_DIR", "insecure agent socket directory", "/nonexistent")
+        for s in (
+            "XDG_RUNTIME_DIR",
+            "insecure agent socket directory",
+            "/nonexistent",
+            "failed to connect to agent socket",
+        )
     ), f"C2 failed: expected socket resolution error when env_vars omitted, got: {omitted_out}"
     shutil.rmtree(noenv_home, ignore_errors=True)
     provider.state.custom_handler = None

@@ -283,7 +283,10 @@ fn xf1_1_pidns_server_helper() {
         });
 
         for _ in 0..200 {
-            if std::os::unix::net::UnixStream::connect(&reg_sock).is_ok() && std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() && std::os::unix::net::UnixStream::connect(&probe_sock).is_ok() {
+            if std::os::unix::net::UnixStream::connect(&reg_sock).is_ok()
+                && std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+                && std::os::unix::net::UnixStream::connect(&probe_sock).is_ok()
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

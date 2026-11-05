@@ -591,8 +591,7 @@ pub fn owner_holds_lock_inode(
     expected_ino: u64,
 ) -> bool {
     let euid = effective_uid();
-    let Ok(vnodes) =
-        crate::process::open_file_vnodes(proc_root, owner_pid, Some(owner_starttime))
+    let Ok(vnodes) = crate::process::open_file_vnodes(proc_root, owner_pid, Some(owner_starttime))
     else {
         return false;
     };

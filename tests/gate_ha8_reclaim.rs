@@ -76,7 +76,9 @@ impl Node {
             if let Ok(Some(_)) = child.try_wait() {
                 panic!("xmsg serve exited early");
             }
-            if std::os::unix::net::UnixStream::connect(&http_sock).is_ok() && std::os::unix::net::UnixStream::connect(&register_sock).is_ok() {
+            if std::os::unix::net::UnixStream::connect(&http_sock).is_ok()
+                && std::os::unix::net::UnixStream::connect(&register_sock).is_ok()
+            {
                 return Node {
                     _tmp: tmp,
                     child,

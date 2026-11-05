@@ -735,11 +735,11 @@ pub fn fallback_runtime_dir() -> Option<std::path::PathBuf> {
 
 #[cfg(target_os = "macos")]
 mod macos {
+    use std::cell::RefCell;
     use std::ffi::{CStr, OsStr};
     use std::io;
     use std::mem::{size_of, MaybeUninit};
     use std::os::unix::ffi::OsStrExt;
-    use std::cell::RefCell;
     use std::path::PathBuf;
 
     thread_local! {
@@ -1029,7 +1029,9 @@ mod macos {
                 format!("cannot list fds for process {pid}"),
             ));
         }
-        let alloc_bytes = (size_needed as usize).saturating_mul(2).max(size_needed as usize);
+        let alloc_bytes = (size_needed as usize)
+            .saturating_mul(2)
+            .max(size_needed as usize);
         let count = alloc_bytes / std::mem::size_of::<libc::proc_fdinfo>();
         let mut fd_list: Vec<libc::proc_fdinfo> = Vec::with_capacity(count);
         let buf_bytes = (count * std::mem::size_of::<libc::proc_fdinfo>()) as libc::c_int;
@@ -1091,7 +1093,11 @@ mod macos {
         if let Some(expected) = expected_starttime {
             let post_st = FORCE_POST_SCAN_STARTTIME
                 .with(|cell| cell.borrow().clone())
-                .unwrap_or_else(|| bsdinfo(pid).map(|i| starttime_token(&i)).unwrap_or_default());
+                .unwrap_or_else(|| {
+                    bsdinfo(pid)
+                        .map(|i| starttime_token(&i))
+                        .unwrap_or_default()
+                });
             if post_st != expected {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,

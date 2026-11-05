@@ -1872,12 +1872,8 @@ async fn c7_c9_hook_carriers_preamble_and_child_turn_lifecycle() {
     );
     {
         let db = env.state.db.lock().unwrap();
-        storage::complete_codex_handoff_accepted(
-            &db,
-            &child_ups.root_id,
-            &child_ups.handoff_ids,
-        )
-        .unwrap();
+        storage::complete_codex_handoff_accepted(&db, &child_ups.root_id, &child_ups.handoff_ids)
+            .unwrap();
     }
 
     // Queue a second message to P/X while turn-2 is active, then stop turn-2 with matching SubagentStop:
@@ -2261,9 +2257,7 @@ async fn c13_c14_restricted_relay_and_impostor_listener() {
         owner_pid: my_pid,
         owner_starttime: real_starttime.clone(),
         message_id: "01J00000000000000000000082".to_string(),
-        rendered_envelope: prefix_codex_untrusted_preamble(
-            "should queue when root_p not loaded",
-        ),
+        rendered_envelope: prefix_codex_untrusted_preamble("should queue when root_p not loaded"),
         proc_root: env.proc_root.clone(),
     };
     let unl_outcome = deliver_via_codex_relay(&unl_job, || Ok(())).await;
@@ -2446,8 +2440,8 @@ async fn c15_delivery_races_unknown_state_and_batch_limits() {
                 thread_id: id.to_string(),
                 return_host: None,
             };
-        let make_pi = |id: &str, session_id: &str, body: &str, created_at: i64| {
-            storage::PiPendingMessage {
+        let make_pi =
+            |id: &str, session_id: &str, body: &str, created_at: i64| storage::PiPendingMessage {
                 id: id.to_string(),
                 session_id: session_id.to_string(),
                 created_at,
@@ -2456,16 +2450,10 @@ async fn c15_delivery_races_unknown_state_and_batch_limits() {
                 text: body.to_string(),
                 envelope: format!("[xmsg] {body}"),
                 delivered_at: None,
-            }
-        };
+            };
         storage::insert_message(&db, &make_msg(m1, root_p, "msg 1", 1000)).unwrap();
-        storage::enqueue_codex_root_message(
-            &db,
-            root_p,
-            1,
-            &make_pi(m1, root_p, "msg 1", 1000),
-        )
-        .unwrap();
+        storage::enqueue_codex_root_message(&db, root_p, 1, &make_pi(m1, root_p, "msg 1", 1000))
+            .unwrap();
 
         // Push reserves M1 first:
         let push_reserved = storage::reserve_codex_single_for_push(&db, root_p, 1, m1).unwrap();
@@ -2535,9 +2523,8 @@ async fn c15_delivery_races_unknown_state_and_batch_limits() {
     let root_live_s = root_live.to_string();
     let start_res = tokio::task::spawn_blocking(move || {
         let mut out_buf = Vec::new();
-        let input = format!(
-            r#"{{"session_id":"{root_live_s}","source":"startup","cwd":"/workspace"}}"#
-        );
+        let input =
+            format!(r#"{{"session_id":"{root_live_s}","source":"startup","cwd":"/workspace"}}"#);
         run_codex_hook(
             "SessionStart",
             None,
@@ -2787,35 +2774,34 @@ async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() 
     let peer = env.peer(self_pid);
 
     let xmsg_bin = PathBuf::from(env!("CARGO_BIN_EXE_xmsg"));
-    let invoke_hook_cli =
-        |event: &str, sock: &Path, stdin_json: &str| -> (i32, String, String) {
-            let mut cmd = Command::new(&xmsg_bin);
-            cmd.args([
-                "register",
-                "codex",
-                "--hook",
-                "--event",
-                event,
-                "--sock",
-                sock.to_str().unwrap(),
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-            let mut child = cmd.spawn().expect("spawn xmsg register codex --hook");
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(stdin_json.as_bytes())
-                .unwrap();
-            let out = child.wait_with_output().unwrap();
-            (
-                out.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&out.stdout).trim().to_string(),
-                String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            )
-        };
+    let invoke_hook_cli = |event: &str, sock: &Path, stdin_json: &str| -> (i32, String, String) {
+        let mut cmd = Command::new(&xmsg_bin);
+        cmd.args([
+            "register",
+            "codex",
+            "--hook",
+            "--event",
+            event,
+            "--sock",
+            sock.to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+        let mut child = cmd.spawn().expect("spawn xmsg register codex --hook");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin_json.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        )
+    };
 
     // Helper cell check that runs against a resumed root and verifies exit 0 + one-shot note + MCP refusal.
     // Returns Err(reason) if any hook exits non-zero (e.g. exit 2 under source mutant) or violates one-shot note / server refusal.
@@ -2874,8 +2860,7 @@ async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() 
         let u1_val: Value = serde_json::from_str(&out_u1)
             .map_err(|e| format!("bad UserPromptSubmit #1 JSON: {e}"))?;
         if u1_val["systemMessage"].as_str() != Some(CODEX_HOOK_UNAVAILABLE_NOTE)
-            || u1_val["hookSpecificOutput"]["hookEventName"].as_str()
-                != Some("UserPromptSubmit")
+            || u1_val["hookSpecificOutput"]["hookEventName"].as_str() != Some("UserPromptSubmit")
             || u1_val["hookSpecificOutput"]["additionalContext"].as_str()
                 != Some(CODEX_HOOK_UNAVAILABLE_NOTE)
         {
@@ -3679,14 +3664,8 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
                 !rt.store.is_revoked(root_v3),
                 "C1: pre-v4 DB migration must clear revoked = 0 when adding active column"
             );
-            rt.store.rebind_resumed_root(
-                &cfg,
-                pid_o3,
-                "8103",
-                root_v3,
-                Some("/workspace"),
-                None,
-            )
+            rt.store
+                .rebind_resumed_root(&cfg, pid_o3, "8103", root_v3, Some("/workspace"), None)
         };
         assert!(
             v3_rebind.is_ok(),
@@ -3760,19 +3739,19 @@ async fn c18_push_mode_redetection_and_pending_handoff_migration_across_resume()
                     match method {
                         "initialize" => {
                             mock_ws_write_server_text(
-                            &mut stream,
-                            &json!({"jsonrpc":"2.0","id":id,"result":{"userAgent":"codex-o3"}})
-                                .to_string(),
-                        )
-                        .await;
+                                &mut stream,
+                                &json!({"jsonrpc":"2.0","id":id,"result":{"userAgent":"codex-o3"}})
+                                    .to_string(),
+                            )
+                            .await;
                         }
                         "thread/loaded/list" => {
                             mock_ws_write_server_text(
-                            &mut stream,
-                            &json!({"jsonrpc":"2.0","id":id,"result":{"data":[root_p_conn]}})
-                                .to_string(),
-                        )
-                        .await;
+                                &mut stream,
+                                &json!({"jsonrpc":"2.0","id":id,"result":{"data":[root_p_conn]}})
+                                    .to_string(),
+                            )
+                            .await;
                         }
                         "turn/start" => {
                             push_turns_conn.lock().unwrap().push(msg.clone());

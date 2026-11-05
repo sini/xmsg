@@ -268,7 +268,10 @@ impl Ha9Harness {
         });
 
         for _ in 0..500 {
-            if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() && std::os::unix::net::UnixStream::connect(&register_sock).is_ok() && std::os::unix::net::UnixStream::connect(&http_sock).is_ok() {
+            if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+                && std::os::unix::net::UnixStream::connect(&register_sock).is_ok()
+                && std::os::unix::net::UnixStream::connect(&http_sock).is_ok()
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1073,7 +1076,10 @@ impl ServeProcess {
             if let Ok(Some(_)) = child.try_wait() {
                 panic!("xmsg serve exited early");
             }
-            if std::os::unix::net::UnixStream::connect(&http_sock).is_ok() && std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() && std::os::unix::net::UnixStream::connect(&register_sock).is_ok() {
+            if std::os::unix::net::UnixStream::connect(&http_sock).is_ok()
+                && std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+                && std::os::unix::net::UnixStream::connect(&register_sock).is_ok()
+            {
                 return Self {
                     child,
                     http_sock,

@@ -264,7 +264,9 @@ async fn create_hub_test_node(
     });
 
     for _ in 0..1500 {
-        if std::os::unix::net::UnixStream::connect(&http_sock).is_ok() && std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() {
+        if std::os::unix::net::UnixStream::connect(&http_sock).is_ok()
+            && std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

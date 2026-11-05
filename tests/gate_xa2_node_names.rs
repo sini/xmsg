@@ -219,7 +219,11 @@ async fn spawn_node(spec: NodeSpec, prepared: Option<(TempDir, PathBuf)>) -> Res
             || tokio::net::TcpStream::connect(("127.0.0.1", fed_port))
                 .await
                 .is_ok();
-        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() && std::os::unix::net::UnixStream::connect(&register_sock).is_ok() && http_up && fed_up {
+        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+            && std::os::unix::net::UnixStream::connect(&register_sock).is_ok()
+            && http_up
+            && fed_up
+        {
             return Ok(Node {
                 tmp,
                 http_port,

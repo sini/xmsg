@@ -386,7 +386,9 @@ async fn spawn_client_node(
                 status, stderr
             );
         }
-        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() && std::os::unix::net::UnixStream::connect(&register_sock).is_ok() {
+        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+            && std::os::unix::net::UnixStream::connect(&register_sock).is_ok()
+        {
             ready = true;
             break;
         }
@@ -772,7 +774,9 @@ async fn test_oracle_4_off_by_default_no_pull_loop() {
                 status, stderr
             );
         }
-        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() && std::os::unix::net::UnixStream::connect(&register_sock).is_ok() {
+        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+            && std::os::unix::net::UnixStream::connect(&register_sock).is_ok()
+        {
             ready = true;
             break;
         }

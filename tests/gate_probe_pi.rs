@@ -226,13 +226,16 @@ async fn setup_gate_harness() -> GateHarness {
     let _app = build_router(app_state);
 
     for _ in 0..1500 {
-        if std::os::unix::net::UnixStream::connect(&register_sock_path).is_ok() && std::os::unix::net::UnixStream::connect(&agent_sock_path).is_ok() {
+        if std::os::unix::net::UnixStream::connect(&register_sock_path).is_ok()
+            && std::os::unix::net::UnixStream::connect(&agent_sock_path).is_ok()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(
-        std::os::unix::net::UnixStream::connect(&register_sock_path).is_ok() && std::os::unix::net::UnixStream::connect(&agent_sock_path).is_ok(),
+        std::os::unix::net::UnixStream::connect(&register_sock_path).is_ok()
+            && std::os::unix::net::UnixStream::connect(&agent_sock_path).is_ok(),
         "the in-process server never bound its socket in 30s"
     );
 

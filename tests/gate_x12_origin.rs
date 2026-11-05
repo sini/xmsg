@@ -187,7 +187,9 @@ async fn test_oracle_1_local_attested_session_origin() {
 
     // Wait for sockets to be ready
     for _ in 0..1500 {
-        if std::os::unix::net::UnixStream::connect(&reg_sock).is_ok() && std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() {
+        if std::os::unix::net::UnixStream::connect(&reg_sock).is_ok()
+            && std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -477,7 +479,9 @@ async fn create_fed_test_node(
 
     // Wait for sockets
     for _ in 0..1500 {
-        if std::os::unix::net::UnixStream::connect(&reg_sock).is_ok() && std::os::unix::net::UnixStream::connect(&agent_sock).is_ok() {
+        if std::os::unix::net::UnixStream::connect(&reg_sock).is_ok()
+            && std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
