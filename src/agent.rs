@@ -2866,23 +2866,6 @@ pub async fn handle_codex_hook_frame(
 pub const CODEX_HOOK_UNAVAILABLE_NOTE: &str =
     "xmsg unavailable for this thread (resumed); start a fresh thread to use xmsg";
 
-/// Environment variable that restores fail-closed exit-code-2 behavior on Codex hook refusals
-/// for mutation testing.
-pub const CODEX_HOOK_FAIL_CLOSED_MUTANT_ENV: &str = "XMSG_TEST_MUTANT_CODEX_HOOK_EXIT2";
-
-static CODEX_HOOK_FAIL_CLOSED_MUTANT: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-pub fn set_codex_hook_fail_closed_mutant_for_test(enabled: bool) {
-    CODEX_HOOK_FAIL_CLOSED_MUTANT.store(enabled, std::sync::atomic::Ordering::SeqCst);
-}
-
-pub fn is_codex_hook_fail_closed_mutant_active() -> bool {
-    CODEX_HOOK_FAIL_CLOSED_MUTANT.load(std::sync::atomic::Ordering::SeqCst)
-        || std::env::var_os(CODEX_HOOK_FAIL_CLOSED_MUTANT_ENV)
-            .is_some_and(|v| !v.is_empty() && v != "0")
-}
-
 pub fn canonical_codex_note_event(event: &str) -> Option<&'static str> {
     match event {
         "SessionStart" | "session-start" => Some("SessionStart"),
@@ -2980,23 +2963,15 @@ pub fn run_codex_hook<W: std::io::Write>(
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
 
-    let fail_closed_mutant = is_codex_hook_fail_closed_mutant_active();
-
     let payload_val: serde_json::Value = match serde_json::from_str::<serde_json::Value>(input) {
         Ok(v) if v.is_object() => v,
         Ok(_) => {
             let msg = "hook stdin JSON must be an object".to_string();
-            if fail_closed_mutant {
-                return Err(msg);
-            }
             eprintln!("xmsg register codex notice: {msg}");
             return Ok(());
         }
         Err(e) => {
             let msg = format!("malformed hook JSON on stdin: {e}");
-            if fail_closed_mutant {
-                return Err(msg);
-            }
             eprintln!("xmsg register codex notice: {msg}");
             return Ok(());
         }
@@ -3013,9 +2988,6 @@ pub fn run_codex_hook<W: std::io::Write>(
                             server_note_decision: Option<bool>,
                             writer: &mut W|
      -> Result<(), String> {
-        if fail_closed_mutant {
-            return Err(reason);
-        }
         eprintln!("xmsg register codex notice: {reason}");
         if let Some(note_json) = codex_unavailable_hook_stdout(event) {
             let should_emit = match server_note_decision {
