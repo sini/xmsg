@@ -382,6 +382,22 @@
             node ${../../extensions/pi}/${script}
             touch $out
           '';
+      codexCfprefsShim = lib.optionalString pkgs.stdenv.hostPlatform.isDarwin (
+        pkgs.runCommandCC "codex-cfprefs-shim.dylib" { } ''
+          $CC -dynamiclib -framework CoreFoundation -o $out -x c - <<'EOF'
+          extern unsigned char CFPreferencesAppSynchronize(const void *app_id);
+          extern unsigned char CFPreferencesAppValueIsForced(const void *key, const void *app_id);
+          static unsigned char shim_sync(const void *app_id) { (void)app_id; return 1; }
+          static unsigned char shim_forced(const void *k, const void *a) { (void)k; (void)a; return 0; }
+          typedef struct { const void *replacement; const void *replacee; } interpose_t;
+          __attribute__((used, section("__DATA,__interpose")))
+          static const interpose_t interposers[] = {
+            { (const void *)shim_sync, (const void *)CFPreferencesAppSynchronize },
+            { (const void *)shim_forced, (const void *)CFPreferencesAppValueIsForced },
+          };
+          EOF
+        ''
+      );
     in
     {
       checks = {
@@ -390,9 +406,13 @@
             {
               nativeBuildInputs = [
                 (pkgs.python3.withPackages (ps: [ ps.tomlkit ]))
+                pkgs.procps
               ];
             }
             ''
+              ${lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+                export DYLD_INSERT_LIBRARIES="${codexCfprefsShim}"
+              ''}
               python3 ${./check-codex.py} \
                 ${lib.getExe codexPkg} \
                 ${lib.getExe xmsgPkg} \

@@ -738,10 +738,12 @@ def write_codex_config(
     if trust_state and "hooks" in trust_state and "state" in trust_state["hooks"]:
         hooks_tbl = tomlkit.table()
         state_tbl = tomlkit.table()
+        real_tmp = str(Path("/tmp").resolve())
         for k, v in trust_state["hooks"]["state"].items():
-            entry = tomlkit.table()
-            entry["trusted_hash"] = v["trusted_hash"]
-            state_tbl[k] = entry
+            for cand_k in sorted({k, k.replace("/tmp/", real_tmp + "/")}):
+                entry = tomlkit.table()
+                entry["trusted_hash"] = v["trusted_hash"]
+                state_tbl[cand_k] = entry
         hooks_tbl["state"] = state_tbl
         doc["hooks"] = hooks_tbl
 
@@ -835,6 +837,13 @@ def run_oracle_c8(
     hooks_json_path.write_text(json.dumps({"hooks": hm_vectors_hooks}), encoding="utf-8")
     write_codex_config(ci_home, work_dir, provider_port, xmsg_bin, hm_vectors_trust_state)
 
+    real_tmp_prefix = str(Path("/tmp").resolve()) + "/"
+
+    def norm_tmp_key(k: str) -> str:
+        if real_tmp_prefix != "/tmp/" and k.startswith(real_tmp_prefix):
+            return "/tmp/" + k[len(real_tmp_prefix) :]
+        return k
+
     client = StdioAppServerClient(codex_bin, ci_home)
     try:
         client.initialize()
@@ -842,10 +851,10 @@ def run_oracle_c8(
         hooks_list = res["result"]["data"][0]["hooks"]
         expected_map = hm_vectors_trust_state["hooks"]["state"]
         assert len(hooks_list) == len(expected_map), (
-            f"C8 failed: expected {len(expected_map)} hooks from Codex hooks/list, got {len(hooks_list)}"
+            f"C8 failed: expected {len(expected_map)} hooks from Codex hooks/list, got {len(hooks_list)}: {res}"
         )
         for item in hooks_list:
-            key = item["key"]
+            key = norm_tmp_key(item["key"])
             assert key in expected_map, f"C8 failed: unexpected key {key} from hooks/list"
             nix_hash = expected_map[key]["trusted_hash"]
             assert item["currentHash"] == nix_hash, (
@@ -865,7 +874,7 @@ def run_oracle_c8(
         client.initialize()
         res = client.request("hooks/list", {"cwds": [str(work_dir)]})
         hooks_list = res["result"]["data"][0]["hooks"]
-        by_key = {item["key"]: item for item in hooks_list}
+        by_key = {norm_tmp_key(item["key"]): item for item in hooks_list}
         for ev_label in ("pre_tool_use", "session_end"):
             k0 = f"/tmp/xmsg-codex-ci-home/hooks.json:{ev_label}:0:0"
             k1 = f"/tmp/xmsg-codex-ci-home/hooks.json:{ev_label}:1:0"
@@ -2469,13 +2478,14 @@ def main():
     # Use a short `/tmp/xc-*` base directory so Unix domain socket paths
     # (`<codex_home>/app-server-control/app-server-control.sock`) stay well
     # under macOS's 104-byte `SUN_LEN` limit even when `/tmp` -> `/private/tmp`.
-    base_tmp = Path(tempfile.mkdtemp(prefix="xc-", dir="/tmp"))
+    base_tmp = Path(tempfile.mkdtemp(prefix="xc-", dir="/tmp")).resolve()
     xdg_run = base_tmp / "run"
     xdg_run.mkdir(parents=True, exist_ok=True)
     xdg_run.chmod(0o700)
     os.environ["XDG_RUNTIME_DIR"] = str(xdg_run)
     os.environ["HOME"] = str(base_tmp / "home")
-    Path(os.environ["HOME"]).mkdir(parents=True, exist_ok=True)
+    os.environ["CFFIXED_USER_HOME"] = os.environ["HOME"]
+    (Path(os.environ["HOME"]) / "Library/Preferences").mkdir(parents=True, exist_ok=True)
 
     work_dir = base_tmp / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
