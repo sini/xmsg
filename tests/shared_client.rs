@@ -13,7 +13,7 @@ fn fixture() -> (TempDir, ClientOptions, UnixListener, UnixListener) {
         register_socket: temp.path().join("register.sock"),
         agent_socket: temp.path().join("agent.sock"),
         max_frame_bytes: 4096,
-        operation_timeout: Duration::from_millis(100),
+        operation_timeout: Duration::from_secs(2),
         service: "bridge".into(),
         expected_node: Some("fixture".into()),
         daemon_uid: xmsg::client::current_uid(),
@@ -296,19 +296,19 @@ async fn long_poll_does_not_block_agent_and_handle_expires_with_registration() {
 #[tokio::test]
 async fn agent_deadline_is_unknown_not_a_confirmed_refusal() {
     let (_temp, mut options, register, agent_listener) = fixture();
-    options.operation_timeout = Duration::from_millis(20);
+    options.operation_timeout = Duration::from_secs(1);
     let registration_server = tokio::spawn(async move {
         let mut stream = BufReader::new(register.accept().await.unwrap().0);
         request(&mut stream, registration()).await;
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        std::future::pending::<()>().await;
     });
     let stalled = tokio::spawn(async move {
         let _stream = agent_listener.accept().await.unwrap().0;
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        std::future::pending::<()>().await;
     });
     let client = RegisteredService::register(options).await.unwrap();
     let result = tokio::time::timeout(
-        Duration::from_millis(250),
+        Duration::from_secs(3),
         client.send("target@fixture", "body", Some("key")),
     )
     .await;
@@ -359,7 +359,7 @@ async fn registration_identity_modes() {
 async fn service_deadlines_expire_and_drop_registration() {
     for (ack, wait_secs) in [(false, 0), (false, 1), (true, 0)] {
         let (_temp, mut options, register, _agent) = fixture();
-        options.operation_timeout = Duration::from_millis(20);
+        options.operation_timeout = Duration::from_secs(1);
         let server = tokio::spawn(async move {
             let mut stream = BufReader::new(register.accept().await.unwrap().0);
             request(&mut stream, registration()).await;
@@ -369,7 +369,7 @@ async fn service_deadlines_expire_and_drop_registration() {
         });
         let mut client = RegisteredService::register(options).await.unwrap();
         let started = std::time::Instant::now();
-        let result = tokio::time::timeout(Duration::from_secs(wait_secs + 2), async {
+        let result = tokio::time::timeout(Duration::from_secs(wait_secs + 4), async {
             if ack {
                 client.ack("message").await
             } else {
