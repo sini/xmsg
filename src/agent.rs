@@ -371,11 +371,18 @@ fn resolve_caller_session_peer_inner(
 
         // 4. Check Svc sessions (hop 0 only: a service daemon is attested by its own
         //    --svc-exe binary at peer_pid (GI-9); child processes spawned by a service
-        //    must not inherit the service's identity on agent.sock).
+        //    must not inherit the service's identity on agent.sock). Collect all matching
+        //    entries for `(curr_pid, st)` and refuse if more than one matches (XR4), never
+        //    taking the first match in HashMap iteration order.
         if curr_pid == peer_pid {
             let svc_lock = svc_store.read().unwrap();
-            for info in svc_lock.values() {
-                if info.pid == curr_pid && info.starttime == st {
+            let matches: Vec<&crate::svc::SvcSessionInfo> = svc_lock
+                .values()
+                .filter(|info| info.pid == curr_pid && info.starttime == st)
+                .collect();
+            match matches.as_slice() {
+                [] => {}
+                [info] => {
                     return Ok(CallerTrace::Session(Session {
                         session_id: info.session_id.clone(),
                         name: Some(info.name.clone()),
@@ -390,6 +397,15 @@ fn resolve_caller_session_peer_inner(
                         harness: "svc".to_string(),
                         registered: Some(true),
                     }));
+                }
+                many => {
+                    let mut names: Vec<&str> =
+                        many.iter().map(|info| info.session_id.as_str()).collect();
+                    names.sort_unstable();
+                    return Err(AppError::Ambiguous(format!(
+                        "process {curr_pid} matches multiple registered services: {}",
+                        names.join(", ")
+                    )));
                 }
             }
         }

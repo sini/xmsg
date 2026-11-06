@@ -1690,9 +1690,11 @@ async fn test_oracle_9_service_name_validation_refusals() {
     }
 
     let current_pid = std::process::id();
-    let current_start =
-        xmsg::process::starttime(std::path::Path::new(xmsg::process::LIVE_PROC_ROOT), current_pid)
-            .unwrap_or_else(|_| "100".to_string());
+    let current_start = xmsg::process::starttime(
+        std::path::Path::new(xmsg::process::LIVE_PROC_ROOT),
+        current_pid,
+    )
+    .unwrap_or_else(|_| "100".to_string());
     setup_mock_proc(&proc_root, current_pid, &current_start);
     let current_exe = std::env::current_exe().unwrap();
     let _ = fs::remove_file(proc_root.join(current_pid.to_string()).join("exe"));
@@ -1737,9 +1739,19 @@ async fn test_oracle_9_service_name_validation_refusals() {
         );
     }
 
-    // Positive control for every service name live in the mesh today: registers via
-    // RegisteredService::register and is accepted as a federation origin.
-    for live_svc in live_mesh_services {
+    // Positive control for every service name live in the mesh today: each registers under its
+    // own process identity `(current_pid, svc_start)` via RegisteredService::register, refuses
+    // a second service name from the same process with `process_already_registered`, and stamps
+    // its sends with its own service name.
+    for (idx, live_svc) in live_mesh_services.iter().enumerate() {
+        let svc_start = format!("{}", 200 + idx);
+        setup_mock_proc(&proc_root, current_pid, &svc_start);
+        let _ = fs::remove_file(proc_root.join(current_pid.to_string()).join("exe"));
+        let _ = std::os::unix::fs::symlink(
+            &current_exe,
+            proc_root.join(current_pid.to_string()).join("exe"),
+        );
+
         let opts = xmsg::client::ClientOptions {
             register_socket: reg_sock.clone(),
             agent_socket: agent_sock.clone(),
@@ -1749,13 +1761,38 @@ async fn test_oracle_9_service_name_validation_refusals() {
             expected_node: Some("test-node".to_string()),
             daemon_uid: my_uid,
         };
-        let client = xmsg::client::RegisteredService::register(opts)
+        let mut client = xmsg::client::RegisteredService::register(opts)
             .await
             .unwrap_or_else(|e| panic!("live mesh service {live_svc:?} must register: {e:?}"));
-        assert_eq!(
-            client.address(),
-            Some(format!("{live_svc}@test-node").as_str())
+        let addr = format!("{live_svc}@test-node");
+        assert_eq!(client.address(), Some(addr.as_str()));
+
+        let second_opts = xmsg::client::ClientOptions {
+            register_socket: reg_sock.clone(),
+            agent_socket: agent_sock.clone(),
+            max_frame_bytes: 65536,
+            operation_timeout: Duration::from_secs(2),
+            service: "gateway-child".to_string(),
+            expected_node: Some("test-node".to_string()),
+            daemon_uid: my_uid,
+        };
+        let second_err = match xmsg::client::RegisteredService::register(second_opts).await {
+            Ok(_) => panic!("register.sock must refuse second service name from same process"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(
+                &second_err,
+                xmsg::client::ClientError::Refused { code } if code == "process_already_registered"
+            ),
+            "second service name from same process must be refused with process_already_registered, got: {second_err:?}"
         );
+
+        let sent = client.send(&addr, "xa1 self-send", None).await.unwrap();
+        let delivered = client.poll(1).await.unwrap().unwrap();
+        assert_eq!(delivered.message_id(), sent.message_id);
+        assert_eq!(delivered.origin().service.as_deref(), Some(*live_svc));
+        client.ack(delivered.message_id()).await.unwrap();
         drop(client);
     }
 

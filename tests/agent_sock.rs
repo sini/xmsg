@@ -916,3 +916,146 @@ async fn test_xs2_svc_store_admits_only_hop0_while_refusing_child_of_svc() {
         .unwrap();
     assert_eq!(msg_count, 1, "only hop-0 svc send may be recorded");
 }
+
+/// XR4 consumer invariant: if `SvcStore` contains more than one entry matching `(curr_pid, st)`
+/// at hop 0, `resolve_caller_session` / `agent.sock` refuses the caller with `AppError::Ambiguous`
+/// (`error: "ambiguous"`), never taking the first entry in `HashMap` iteration order.
+#[tokio::test]
+async fn test_xr4_resolve_caller_session_refuses_ambiguous_multi_svc_pid() {
+    let tmp = tempdir().unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+
+    let sock_dir = tmp.path().join("xmsg");
+    fs::create_dir_all(&sock_dir).unwrap();
+    fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let agent_sock_path = sock_dir.join("agent.sock");
+    let proc_root = std::path::PathBuf::from(xmsg::process::LIVE_PROC_ROOT);
+    let sessions_dir = tmp.path().join("sessions");
+    let presence_dir = tmp.path().join("presence");
+    let proc_locks_path = tmp.path().join("locks");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    fs::create_dir_all(&presence_dir).unwrap();
+
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    xmsg::storage::init_db(&conn).unwrap();
+    let db = Arc::new(Mutex::new(conn));
+    let my_uid = current_uid();
+    let self_pid = std::process::id();
+    let self_start = get_self_proc_start();
+
+    let svc_store = xmsg::svc::new_svc_store();
+    {
+        let mut lock = svc_store.write().unwrap();
+        for name in ["matrix-xmsg", "genie"] {
+            lock.insert(
+                name.to_string(),
+                xmsg::svc::SvcSessionInfo {
+                    session_id: name.to_string(),
+                    name: name.to_string(),
+                    pid: self_pid,
+                    starttime: self_start.clone(),
+                    cwd: "/".to_string(),
+                    registered_at: 1000,
+                },
+            );
+        }
+    }
+
+    let agy_config = AgyConfig {
+        presence_dir,
+        proc_locks_path,
+        proc_root: proc_root.clone(),
+        agy_bin: "agy".to_string(),
+        trusted_agy_exes: Vec::new(),
+        brain_dir: std::path::PathBuf::new(),
+    };
+
+    // 1. Direct unit check on resolve_caller_session
+    let res = resolve_caller_session(
+        &proc_root,
+        &sessions_dir,
+        &agy_config,
+        &new_agy_store(),
+        &new_pi_store(),
+        &svc_store,
+        None,
+        self_pid,
+    );
+    match res {
+        Err(AppError::Ambiguous(msg)) => {
+            assert!(
+                msg.contains("genie") && msg.contains("matrix-xmsg"),
+                "ambiguous detail must name both conflicting services: {msg}"
+            );
+        }
+        other => panic!(
+            "expected AppError::Ambiguous when two services share (pid, starttime), got: {other:?}"
+        ),
+    }
+
+    // 2. Live agent.sock check: send from self_pid is refused with error "ambiguous"
+    let (notify_tx, _) = tokio::sync::broadcast::channel(16);
+    let (pi_notify_tx, _) = tokio::sync::broadcast::channel(16);
+    let app_state = Arc::new(AppState {
+        sessions_dirs: vec![sessions_dir],
+        agy_config,
+        agy_store: new_agy_store(),
+        pi_store: new_pi_store(),
+        pi_notify_tx,
+        svc_store,
+        svc_notify_tx: tokio::sync::broadcast::channel(16).0,
+        node_name: "test-host".to_string(),
+        max_body: 65536,
+        request_counter: AtomicU64::new(1),
+        db: db.clone(),
+        notify_tx,
+        reply_ttl: Duration::from_secs(3600),
+        idempotency_ttl: Duration::from_secs(86400),
+        long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
+        fed_state: None,
+    });
+
+    let s_path = agent_sock_path.clone();
+    let s_state = app_state.clone();
+    tokio::spawn(async move {
+        let _ = run_agent_server(s_path, s_state, my_uid).await;
+    });
+    for _ in 0..500 {
+        if std::os::unix::net::UnixStream::connect(&agent_sock_path).is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let stream = UnixStream::connect(&agent_sock_path).await.unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let send_req = serde_json::json!({
+        "action": "send",
+        "schema_version": 2,
+        "to": "genie",
+        "text": "from ambiguous svc pid"
+    });
+    writer
+        .write_all(format!("{send_req}\n").as_bytes())
+        .await
+        .unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let resp: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+        resp["status"], "error",
+        "ambiguous svc caller must fail: {resp}"
+    );
+    assert_eq!(resp["error"], "ambiguous", "{resp}");
+    let msg_count: i64 = db
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        msg_count, 0,
+        "ambiguous svc caller must not record a message"
+    );
+}

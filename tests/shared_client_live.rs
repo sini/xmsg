@@ -121,6 +121,14 @@ async fn exercise(binary: &Path, expects_effective_limits: bool) {
 #[tokio::test]
 #[ignore = "shared-client compat CI explicitly runs verified baseline and candidate binaries"]
 async fn pinned_and_candidate_service_contract() {
+    if let Ok(live_svc) = std::env::var("XMSG_LIVE_SVC_CHILD") {
+        let register_socket =
+            PathBuf::from(std::env::var_os("XMSG_LIVE_REG_SOCK").expect("XMSG_LIVE_REG_SOCK"));
+        let agent_socket =
+            PathBuf::from(std::env::var_os("XMSG_LIVE_AGENT_SOCK").expect("XMSG_LIVE_AGENT_SOCK"));
+        exercise_single_live_service(&live_svc, register_socket, agent_socket).await;
+        return;
+    }
     let baseline = PathBuf::from(
         std::env::var_os("XMSG_SHARED_BASELINE_BIN").expect("required baseline binary unset"),
     );
@@ -251,51 +259,76 @@ async fn exercise_candidate_service_name_validation(binary: &Path) {
         );
     }
 
-    // Positive control for every service name live in the mesh today: registers, lists,
-    // self-sends (which exercises check_origin on surface::deliver), and passes check_origin.
+    // Positive control for every service name live in the mesh today: each registers from its
+    // own OS process (one process holds one svc identity), self-sends (exercising check_origin
+    // on surface::deliver), and passes check_origin.
     for live_svc in live_mesh_services {
         assert!(
             xmsg::fed::check_origin(&xmsg::storage::Origin::service(live_svc, "test-node")).is_ok(),
             "live mesh service {live_svc:?} must pass check_origin"
         );
-        let live_opts = ClientOptions {
-            register_socket: register_socket.clone(),
-            agent_socket: agent_socket.clone(),
-            max_frame_bytes: 400_000,
-            operation_timeout: Duration::from_secs(5),
-            service: live_svc.to_owned(),
-            expected_node: Some(xmsg::node::local_node_name()),
-            daemon_uid: xmsg::client::current_uid(),
-        };
-        let mut client = RegisteredService::register(live_opts).await.unwrap();
-        let address = client.address().unwrap().to_owned();
-        let sent = client
-            .send(&address, "mesh positive control", None)
-            .await
-            .unwrap();
-        let delivery = client.poll(1).await.unwrap().unwrap();
-        assert_eq!(delivery.message_id(), sent.message_id);
-        assert_eq!(delivery.origin().service.as_deref(), Some(live_svc));
-        client.ack(delivery.message_id()).await.unwrap();
+        let out = Command::new(&executable)
+            .env("XMSG_LIVE_SVC_CHILD", live_svc)
+            .env("XMSG_LIVE_REG_SOCK", &register_socket)
+            .env("XMSG_LIVE_AGENT_SOCK", &agent_socket)
+            .arg("pinned_and_candidate_service_contract")
+            .arg("--exact")
+            .arg("--ignored")
+            .arg("--nocapture")
+            .output()
+            .expect("spawn per-service positive-control child");
+        assert!(
+            out.status.success(),
+            "live mesh service {live_svc:?} child failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
-    // Positive control: a valid name registers, lists, and self-sends.
+    // Positive control: a valid name registers in this process, lists, and self-sends.
     let valid_options = ClientOptions {
-        register_socket,
-        agent_socket,
+        register_socket: register_socket.clone(),
+        agent_socket: agent_socket.clone(),
         max_frame_bytes: 400_000,
         operation_timeout: Duration::from_secs(5),
         service: "gateway-child".to_owned(),
         expected_node: Some(xmsg::node::local_node_name()),
         daemon_uid: xmsg::client::current_uid(),
     };
-    let mut client = RegisteredService::register(valid_options).await.unwrap();
+    let mut client = RegisteredService::register(valid_options.clone())
+        .await
+        .unwrap();
     let address = client.address().unwrap().to_owned();
     let listed = client.list(ListQuery::default()).await.unwrap();
     assert!(listed
         .recipients
         .iter()
         .any(|r| r.address == address && r.kind == "service"));
+
+    // Producer invariant (XR4): a second, different service name from the same live process is
+    // refused with `process_already_registered`, and the first registration's sends continue to
+    // be stamped with the first service name.
+    let second_name_opts = ClientOptions {
+        register_socket: register_socket.clone(),
+        agent_socket: agent_socket.clone(),
+        max_frame_bytes: 400_000,
+        operation_timeout: Duration::from_secs(5),
+        service: "genie".to_owned(),
+        expected_node: Some(xmsg::node::local_node_name()),
+        daemon_uid: xmsg::client::current_uid(),
+    };
+    let dup_err = match RegisteredService::register(second_name_opts.clone()).await {
+        Ok(_) => panic!("register.sock must refuse second service name from the same process"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(
+            &dup_err,
+            ClientError::Refused { code } if code == "process_already_registered"
+        ),
+        "second service name from same process must be refused with process_already_registered, got: {dup_err:?}"
+    );
+
     let sent = client
         .send(&address, "positive control self-send", Some("xr4-key"))
         .await
@@ -304,6 +337,48 @@ async fn exercise_candidate_service_name_validation(binary: &Path) {
     assert_eq!(delivery.message_id(), sent.message_id);
     assert_eq!(delivery.origin().service.as_deref(), Some("gateway-child"));
     assert_eq!(delivery.text(), "positive control self-send");
+    client.ack(delivery.message_id()).await.unwrap();
+
+    // Re-registering the SAME service name from the same process remains permitted.
+    let mut reregistered = RegisteredService::register(valid_options).await.unwrap();
+    drop(client);
+    let sent2 = reregistered
+        .send(&address, "reregistered self-send", None)
+        .await
+        .unwrap();
+    let delivery2 = reregistered.poll(1).await.unwrap().unwrap();
+    assert_eq!(delivery2.message_id(), sent2.message_id);
+    assert_eq!(delivery2.origin().service.as_deref(), Some("gateway-child"));
+    reregistered.ack(delivery2.message_id()).await.unwrap();
+}
+
+async fn exercise_single_live_service(
+    live_svc: &str,
+    register_socket: PathBuf,
+    agent_socket: PathBuf,
+) {
+    assert!(
+        xmsg::fed::check_origin(&xmsg::storage::Origin::service(live_svc, "test-node")).is_ok(),
+        "live mesh service {live_svc:?} must pass check_origin"
+    );
+    let live_opts = ClientOptions {
+        register_socket,
+        agent_socket,
+        max_frame_bytes: 400_000,
+        operation_timeout: Duration::from_secs(5),
+        service: live_svc.to_owned(),
+        expected_node: Some(xmsg::node::local_node_name()),
+        daemon_uid: xmsg::client::current_uid(),
+    };
+    let mut client = RegisteredService::register(live_opts).await.unwrap();
+    let address = client.address().unwrap().to_owned();
+    let sent = client
+        .send(&address, "mesh positive control", None)
+        .await
+        .unwrap();
+    let delivery = client.poll(1).await.unwrap().unwrap();
+    assert_eq!(delivery.message_id(), sent.message_id);
+    assert_eq!(delivery.origin().service.as_deref(), Some(live_svc));
     client.ack(delivery.message_id()).await.unwrap();
 }
 

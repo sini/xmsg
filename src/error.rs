@@ -44,6 +44,9 @@ pub enum AppError {
     #[error("live elsewhere: {0}")]
     LiveElsewhere(String),
 
+    #[error("process already registered: {0}")]
+    ProcessAlreadyRegistered(String),
+
     #[error("session {session_id} process {pid} exited")]
     Gone { session_id: String, pid: u32 },
 
@@ -110,6 +113,9 @@ impl AppError {
             AppError::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             AppError::NotLive(_) => (StatusCode::CONFLICT, "not_live"),
             AppError::LiveElsewhere(_) => (StatusCode::CONFLICT, "live_elsewhere"),
+            AppError::ProcessAlreadyRegistered(_) => {
+                (StatusCode::CONFLICT, "process_already_registered")
+            }
             AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             AppError::Gone { .. } => (StatusCode::GONE, "gone"),
             AppError::PayloadTooLarge { .. } => {
@@ -159,6 +165,7 @@ impl AppError {
             | AppError::Unavailable(d)
             | AppError::NotLive(d)
             | AppError::LiveElsewhere(d)
+            | AppError::ProcessAlreadyRegistered(d)
             | AppError::Conflict(d)
             | AppError::InboxUnavailable(d)
             | AppError::Denied(d)

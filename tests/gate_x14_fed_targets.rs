@@ -820,8 +820,8 @@ async fn test_oracle_4_refused_target_does_not_consume_rate_limit_or_create_stor
     )
     .await;
 
-    // Register both daemons on node_b
-    let (_expert_reader, mut expert_writer) = connect_svc(&node_b.reg_sock).await;
+    // Register both daemons on node_b (each service in its own process identity)
+    let (mut expert_reader, mut expert_writer) = connect_svc(&node_b.reg_sock).await;
     expert_writer
         .write_all(
             format!(
@@ -836,9 +836,12 @@ async fn test_oracle_4_refused_target_does_not_consume_rate_limit_or_create_stor
         )
         .await
         .unwrap();
+    let expert_resp = read_json_line(&mut expert_reader).await;
+    assert_eq!(expert_resp["status"], "ok", "{expert_resp}");
 
-    let (_other_reader, mut other_writer) = connect_svc(&node_b.reg_sock).await;
-    other_writer
+    // Same process attempting to register a second service name is refused with process_already_registered
+    let (mut dup_reader, mut dup_writer) = connect_svc(&node_b.reg_sock).await;
+    dup_writer
         .write_all(
             format!(
                 "{}\n",
@@ -852,6 +855,28 @@ async fn test_oracle_4_refused_target_does_not_consume_rate_limit_or_create_stor
         )
         .await
         .unwrap();
+    let dup_resp = read_json_line(&mut dup_reader).await;
+    assert_eq!(dup_resp["status"], "error", "{dup_resp}");
+    assert_eq!(
+        dup_resp["error"], "process_already_registered",
+        "{dup_resp}"
+    );
+
+    // Register `other-worker` under its own distinct PID (9992) on node_b
+    let node_b_proc = &node_b.fed_state.agy_config.proc_root;
+    let node_b_trusted = node_b_proc.parent().unwrap().join("trusted_dispatcher");
+    setup_mock_proc(node_b_proc, 9992, &node_b_trusted, "2000");
+    node_b.fed_state.svc_store.write().unwrap().insert(
+        "other-worker".to_string(),
+        xmsg::svc::SvcSessionInfo {
+            session_id: "other-worker".to_string(),
+            name: "other-worker".to_string(),
+            pid: 9992,
+            starttime: "2000".to_string(),
+            cwd: "/workspace".to_string(),
+            registered_at: storage::now_epoch_secs(),
+        },
+    );
 
     // 1. Send to refused target directly via send_federated_message with known ID
     let refused_id = "01REFUSED_MSG_ID_ORACLE4";

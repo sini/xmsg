@@ -322,6 +322,16 @@ fn claude_file(node: &Node, tag: &str, pid: u32, id: &str, name: &str, inbox: &P
 struct Service {
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
+    child: Option<Child>,
+}
+
+impl Drop for Service {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 impl Service {
@@ -331,12 +341,48 @@ impl Service {
         let mut svc = Service {
             reader: BufReader::new(r),
             writer: w,
+            child: None,
         };
         let resp = svc
             .call(serde_json::json!({ "harness": "svc", "name": name }))
             .await;
         assert_eq!(resp["status"], "ok", "register {name}: {resp}");
         // AM-4: the `ok` frame carries the address and the node MA's origin check reads.
+        assert_eq!(resp["address"], format!("{name}@{}", node_name()), "{resp}");
+        assert_eq!(resp["node"], node_name(), "{resp}");
+        svc
+    }
+
+    async fn register_in_child(node: &Node, name: &str, test_name: &str) -> Service {
+        let relay_path = node.dir.join(format!("relay-{name}.sock"));
+        let _ = fs::remove_file(&relay_path);
+        let listener = UnixListener::bind(&relay_path).unwrap();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .arg(test_name)
+            .arg("--exact")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env("XMSG_XA3_SVC_RELAY_SOCK", &node.register_sock)
+            .env("XMSG_XA3_SVC_PARENT_SOCK", &relay_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn child svc relay");
+        let (stream, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .expect("child svc relay connect")
+            .unwrap();
+        let (r, w) = stream.into_split();
+        let mut svc = Service {
+            reader: BufReader::new(r),
+            writer: w,
+            child: Some(child),
+        };
+        let resp = svc
+            .call(serde_json::json!({ "harness": "svc", "name": name }))
+            .await;
+        assert_eq!(resp["status"], "ok", "register {name} in child: {resp}");
         assert_eq!(resp["address"], format!("{name}@{}", node_name()), "{resp}");
         assert_eq!(resp["node"], node_name(), "{resp}");
         svc
@@ -1059,10 +1105,20 @@ async fn test_oracle_11_no_hop_in_the_grammar() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oracle_12_names_compare_exactly() {
+    if let (Ok(reg_sock), Ok(parent_sock)) = (
+        std::env::var("XMSG_XA3_SVC_RELAY_SOCK"),
+        std::env::var("XMSG_XA3_SVC_PARENT_SOCK"),
+    ) {
+        let mut reg_stream = UnixStream::connect(reg_sock).await.unwrap();
+        let mut parent_stream = UnixStream::connect(parent_sock).await.unwrap();
+        let _ = tokio::io::copy_bidirectional(&mut reg_stream, &mut parent_stream).await;
+        return;
+    }
     let tmp = tempdir().unwrap();
     let node = Node::start(tmp.path(), &["dup", "DUP"]);
     let mut lower = Service::register(&node, "dup").await;
-    let mut upper = Service::register(&node, "DUP").await;
+    let mut upper =
+        Service::register_in_child(&node, "DUP", "test_oracle_12_names_compare_exactly").await;
     let me = node_name();
 
     for (to, svc) in [("DUP", &mut upper), ("dup", &mut lower)] {

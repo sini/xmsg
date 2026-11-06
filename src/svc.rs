@@ -43,6 +43,12 @@ pub fn new_svc_store() -> SvcStore {
     Arc::new(RwLock::new(HashMap::new()))
 }
 
+fn svc_conn_gen_map() -> &'static Mutex<HashMap<(usize, String), u64>> {
+    static MAP: std::sync::OnceLock<Mutex<HashMap<(usize, String), u64>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 pub fn is_svc_session_alive(proc_root: &Path, info: &SvcSessionInfo) -> bool {
     match crate::process::starttime(proc_root, info.pid) {
         Ok(st) => st == info.starttime,
@@ -268,18 +274,50 @@ pub async fn handle_svc_connection_peer<
 
     let session_id = name.clone();
 
-    // Single live registration check (Gate r2 G5 / Oracle 5)
-    let conflict = {
-        let store_lock = store.read().unwrap();
-        let existing = store_lock.get(&session_id);
-        if let Some(existing) = existing {
+    // Single live registration check (Gate r2 G5 / Oracle 5) and one-service-per-process
+    // invariant (XR4): a live process `(peer_pid, starttime)` may hold at most one `svc`
+    // identity. Re-registering the same `session_id` from the same `(peer_pid, starttime)`
+    // remains permitted; registering a different `session_id` from the same live process is
+    // refused with `process_already_registered`.
+    let store_key = (Arc::as_ptr(&store) as usize, session_id.clone());
+    let (name_conflict, other_svc_for_pid, conn_gen) = {
+        let mut store_lock = store.write().unwrap();
+        let name_conflict = store_lock.get(&session_id).is_some_and(|existing| {
             (existing.pid != peer_pid || existing.starttime != starttime)
                 && is_svc_session_alive(&proc_root, existing)
+        });
+        let other_svc_for_pid = if name_conflict {
+            None
         } else {
-            false
+            store_lock
+                .values()
+                .find(|existing| {
+                    existing.session_id != session_id
+                        && existing.pid == peer_pid
+                        && existing.starttime == starttime
+                        && is_svc_session_alive(&proc_root, existing)
+                })
+                .map(|existing| existing.session_id.clone())
+        };
+        let mut gen_val = 0u64;
+        if !name_conflict && other_svc_for_pid.is_none() {
+            let mut gen_map = svc_conn_gen_map().lock().unwrap();
+            let entry = gen_map.entry(store_key.clone()).or_insert(0);
+            *entry += 1;
+            gen_val = *entry;
+            let info = SvcSessionInfo {
+                session_id: session_id.clone(),
+                name: name.clone(),
+                pid: peer_pid,
+                starttime: starttime.clone(),
+                cwd: req.cwd.unwrap_or_else(|| "/".to_string()),
+                registered_at: now_epoch_secs(),
+            };
+            store_lock.insert(session_id.clone(), info);
         }
+        (name_conflict, other_svc_for_pid, gen_val)
     };
-    if conflict {
+    if name_conflict {
         let e = AppError::BadRequest(format!(
             "service '{session_id}' already has an active registration"
         ));
@@ -287,17 +325,13 @@ pub async fn handle_svc_connection_peer<
         let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
         return Err(e.into());
     }
-
-    {
-        let info = SvcSessionInfo {
-            session_id: session_id.clone(),
-            name: name.clone(),
-            pid: peer_pid,
-            starttime: starttime.clone(),
-            cwd: req.cwd.unwrap_or_else(|| "/".to_string()),
-            registered_at: now_epoch_secs(),
-        };
-        store.write().unwrap().insert(session_id.clone(), info);
+    if let Some(existing_svc) = other_svc_for_pid {
+        let e = AppError::ProcessAlreadyRegistered(format!(
+            "process {peer_pid} already holds active registration for service '{existing_svc}'"
+        ));
+        let err_resp = e.frame();
+        let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+        return Err(e.into());
     }
 
     // The registration's address, this node's name (AM-4), and the daemon's effective
@@ -457,9 +491,13 @@ pub async fn handle_svc_connection_peer<
 
     {
         let mut store_lock = store.write().unwrap();
-        if let Some(info) = store_lock.get(&session_id) {
-            if info.pid == peer_pid && info.starttime == starttime {
-                store_lock.remove(&session_id);
+        let is_current_gen =
+            svc_conn_gen_map().lock().unwrap().get(&store_key).copied() == Some(conn_gen);
+        if is_current_gen {
+            if let Some(info) = store_lock.get(&session_id) {
+                if info.pid == peer_pid && info.starttime == starttime {
+                    store_lock.remove(&session_id);
+                }
             }
         }
     }
