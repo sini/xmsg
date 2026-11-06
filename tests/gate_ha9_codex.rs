@@ -4389,6 +4389,157 @@ async fn c19_shared_home_sibling_flock_scan_and_unlocked_fd_rejection() {
     }
 }
 
+/// Cross-platform C19.2 (`LIVE_PROC_ROOT` on both Linux and Darwin):
+/// Verifies that when a process opens `<P>.lock` `O_RDWR` without `flock(LOCK_EX)`,
+/// `owner_holds_lock_inode` returns `false` and both `SessionStart(startup)` and
+/// `SessionStart(resume)` refuse registration; once `flock(LOCK_EX | LOCK_NB)` is
+/// acquired on the descriptor, both `owner_holds_lock_inode` and registration succeed.
+#[tokio::test]
+async fn c19_2_live_unlocked_o_rdwr_descriptor_rejected() {
+    use std::io::{BufRead, Write};
+    use std::os::unix::fs::MetadataExt;
+
+    let mut env = CodexTestEnv::new();
+    let my_exe = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+    let live_proc_root = PathBuf::from(xmsg::process::LIVE_PROC_ROOT);
+    Arc::get_mut(&mut env.state).unwrap().agy_config.proc_root = live_proc_root.clone();
+    let live_cfg = CodexConfig {
+        trusted_codex_exes: vec![my_exe.clone()],
+        codex_homes: vec![env.codex_home.clone()],
+        proc_root: live_proc_root.clone(),
+    };
+    init_for_state(&env.state, live_cfg);
+
+    let mut child = std::process::Command::new(&my_exe)
+        .env("XMSG_HA9_C3_CHILD_HELPER", "1")
+        .args(["c3_live_child_helper_entry", "--exact", "--nocapture"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .expect("spawn distinct C19.2 child helper");
+    let child_pid = child.id();
+    assert_ne!(
+        child_pid,
+        std::process::id(),
+        "C19.2 live: child holder must be a distinct process"
+    );
+    let mut child_in = child.stdin.take().unwrap();
+    let mut child_out = std::io::BufReader::new(child.stdout.take().unwrap());
+
+    let mut send_cmd = |cmd: &str| {
+        writeln!(child_in, "{cmd}").unwrap();
+        child_in.flush().unwrap();
+        loop {
+            let mut line = String::new();
+            let n = child_out.read_line(&mut line).unwrap();
+            assert!(n > 0, "unexpected EOF from C19.2 child helper on {cmd:?}");
+            if line.trim() == "OK" {
+                break;
+            }
+        }
+    };
+
+    let p_unlocked = "019a0000-0000-7000-8000-000000000199";
+    let locks_dir = env.codex_home.join("thread-writer-locks");
+    let lock_unlocked = locks_dir.join(format!("{p_unlocked}.lock"));
+    env.write_root_rollout(&env.codex_home, p_unlocked, "/workspace");
+
+    // 1. Child opens `<p_unlocked>.lock` `O_RDWR` WITHOUT `flock(LOCK_EX)`:
+    send_cmd(&format!("OPEN_UNLOCKED {}", lock_unlocked.display()));
+    let child_starttime = xmsg::process::starttime(&live_proc_root, child_pid).unwrap();
+    let peer_child = PeerCred::unpinned(env.my_uid, child_pid);
+    let meta_unlocked = fs::symlink_metadata(&lock_unlocked).unwrap();
+
+    assert!(
+        !xmsg::codex::owner_holds_lock_inode(
+            &live_proc_root,
+            child_pid,
+            &child_starttime,
+            &lock_unlocked,
+            meta_unlocked.dev(),
+            meta_unlocked.ino(),
+        ),
+        "C19.2: owner_holds_lock_inode must reject an O_RDWR descriptor that never held flock(LOCK_EX)"
+    );
+
+    let startup_refused = handle_codex_hook_frame(
+        &env.state,
+        &peer_child,
+        "SessionStart",
+        None,
+        &json!({"session_id": p_unlocked, "source": "startup", "cwd": "/workspace"}),
+    )
+    .await;
+    assert!(
+        startup_refused.is_err(),
+        "C19.2: SessionStart(startup) must refuse registration when owner holds <P>.lock O_RDWR without flock"
+    );
+
+    // 2. Positive control: acquiring `flock(LOCK_EX | LOCK_NB)` on that descriptor admits `p_unlocked`:
+    send_cmd(&format!("FLOCK {}", lock_unlocked.display()));
+    assert!(
+        xmsg::codex::owner_holds_lock_inode(
+            &live_proc_root,
+            child_pid,
+            &child_starttime,
+            &lock_unlocked,
+            meta_unlocked.dev(),
+            meta_unlocked.ino(),
+        ),
+        "C19.2 positive control: owner_holds_lock_inode must accept descriptor once flock(LOCK_EX) is held"
+    );
+    handle_codex_hook_frame(
+        &env.state,
+        &peer_child,
+        "SessionStart",
+        None,
+        &json!({"session_id": p_unlocked, "source": "startup", "cwd": "/workspace"}),
+    )
+    .await
+    .expect("C19.2 positive control: SessionStart(startup) must succeed once flock(LOCK_EX) is held");
+
+    // 3. Park `p_unlocked` (`SessionEnd`), close the locked fd, reopen `<p_unlocked>.lock` `O_RDWR`
+    //    without `flock`, and verify `SessionStart(resume)` also refuses it:
+    handle_codex_hook_frame(
+        &env.state,
+        &peer_child,
+        "SessionEnd",
+        None,
+        &json!({"session_id": p_unlocked}),
+    )
+    .await
+    .unwrap();
+    send_cmd(&format!("CLOSE {}", lock_unlocked.display()));
+    send_cmd(&format!("OPEN_UNLOCKED {}", lock_unlocked.display()));
+    assert!(
+        !xmsg::codex::owner_holds_lock_inode(
+            &live_proc_root,
+            child_pid,
+            &child_starttime,
+            &lock_unlocked,
+            meta_unlocked.dev(),
+            meta_unlocked.ino(),
+        ),
+        "C19.2 resume: owner_holds_lock_inode must reject reopened O_RDWR descriptor that never held flock(LOCK_EX)"
+    );
+    let resume_refused = handle_codex_hook_frame(
+        &env.state,
+        &peer_child,
+        "SessionStart",
+        None,
+        &json!({"session_id": p_unlocked, "source": "resume", "cwd": "/workspace"}),
+    )
+    .await;
+    assert!(
+        resume_refused.is_err(),
+        "C19.2 resume: SessionStart(resume) must refuse rebind when owner holds <P>.lock O_RDWR without flock"
+    );
+
+    let _ = writeln!(child_in, "QUIT");
+    let _ = child.wait();
+}
+
 /// C19.3: Post-admission owner release transition without unlink (`N3`, `N4`, `Q5`, `N1`)
 /// in both fake-proc and live distinct-child `LIVE_PROC_ROOT`.
 #[cfg(target_os = "linux")]
@@ -4824,6 +4975,32 @@ fn c3_live_child_helper_entry() {
             locks.insert(path.to_string(), f);
             writeln!(stdout, "OK").unwrap();
             stdout.flush().unwrap();
+        } else if let Some(path) = trimmed.strip_prefix("OPEN_UNLOCKED ") {
+            let f = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)
+                .expect("child helper open unlocked O_RDWR descriptor");
+            locks.insert(path.to_string(), f);
+            writeln!(stdout, "OK").unwrap();
+            stdout.flush().unwrap();
+        } else if let Some(path) = trimmed.strip_prefix("FLOCK ") {
+            let f = locks
+                .get(path)
+                .expect("descriptor must be open before FLOCK");
+            let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            assert_eq!(rc, 0, "child helper FLOCK failed on {path}");
+            writeln!(stdout, "OK").unwrap();
+            stdout.flush().unwrap();
+        } else if let Some(path) = trimmed.strip_prefix("CLOSE ") {
+            let old = locks
+                .remove(path)
+                .expect("descriptor must be open before CLOSE");
+            drop(old);
+            writeln!(stdout, "OK").unwrap();
+            stdout.flush().unwrap();
         } else if let Some(path) = trimmed.strip_prefix("REOPEN_SAME_INODE ") {
             // Replicate Codex `ThreadWriterLock::drop` when `remove_file` fails (e.g. chmod 0555 dir):
             // 1) attempt `remove_file` (which fails with EACCES),
@@ -4947,6 +5124,38 @@ async fn c3_live_distinct_child_same_inode_flock_reopen_and_mutants() {
 
     let child_starttime = xmsg::process::starttime(&live_proc_root, child_pid).unwrap();
     let peer_child = PeerCred::unpinned(env.my_uid, child_pid);
+
+    // Direct C19.2 / C20 arm: a descriptor opened `O_RDWR` on `<p_unlocked>.lock` without `flock(LOCK_EX)`
+    // must be rejected by `owner_holds_lock_inode` and refused by `SessionStart(startup)`.
+    let p_unlocked = "019a0000-0000-7000-8000-000000000305";
+    let lock_unlocked = locks_dir.join(format!("{p_unlocked}.lock"));
+    send_cmd(&format!("OPEN_UNLOCKED {}", lock_unlocked.display()));
+    env.write_root_rollout(&env.codex_home, p_unlocked, "/workspace");
+    let meta_unlocked = fs::symlink_metadata(&lock_unlocked).unwrap();
+    assert!(
+        !xmsg::codex::owner_holds_lock_inode(
+            &live_proc_root,
+            child_pid,
+            &child_starttime,
+            &lock_unlocked,
+            meta_unlocked.dev(),
+            meta_unlocked.ino(),
+        ),
+        "C20 / C19.2: owner_holds_lock_inode must reject an O_RDWR descriptor that never held flock(LOCK_EX)"
+    );
+    let reg_unlocked = handle_codex_hook_frame(
+        &env.state,
+        &peer_child,
+        "SessionStart",
+        None,
+        &json!({"session_id": p_unlocked, "source": "startup", "cwd": "/workspace"}),
+    )
+    .await;
+    assert!(
+        reg_unlocked.is_err(),
+        "C20 / C19.2: SessionStart(startup) must refuse registration when owner holds <P>.lock O_RDWR without flock"
+    );
+    send_cmd(&format!("CLOSE {}", lock_unlocked.display()));
 
     for r in [p_main, p_sib] {
         handle_codex_hook_frame(
