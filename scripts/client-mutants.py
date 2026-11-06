@@ -1,5 +1,6 @@
 """Single-site source mutants for the shared transport; no runtime mutation flags."""
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -26,21 +27,40 @@ CASES = [
     ("missing-test-target", "Cargo.toml", '[[test]]\nname = "agent_sock"\npath = "tests/agent_sock.rs"\nrequired-features = ["daemon"]', "", "@graph"),
     ("empty-registration-node", "src/client/mod.rs", "|| registration.node.is_empty()", "|| false", "registration_identity_modes"),
     ("ignored-daemon-uid", "src/client/mod.rs", "let parent = file.parent()", "let expected_uid = unsafe { libc::geteuid() }; let parent = file.parent()", "registration_identity_modes"),
+    ("poll-deadline", "src/client/mod.rs", "timeout(wait, connection.exchange(&frame))", "timeout(Duration::from_secs(3600), connection.exchange(&frame))", "service_deadlines_expire_and_drop_registration"),
 ]
 
 
 def run(directory, test):
     env = {**os.environ, "CARGO_TARGET_DIR": str(ROOT / "target" / "client-mutants")}
     if test == "@graph":
-        argv = ["python3", "scripts/client-graph.py"]
+        return subprocess.run(["python3", "scripts/client-graph.py"], cwd=directory, env=env, capture_output=True, text=True, timeout=60)
+    # Clear only this package: copied source trees must not reuse a prior mutant binary.
+    subprocess.run(["cargo", "clean", "-p", "xmsg"], cwd=directory, env=env, check=True, capture_output=True, timeout=120)
+    argv = ["cargo", "test", "--locked", "--profile", env.get("CARGO_PROFILE", "dev")]
+    if test == "@live":
+        argv += ["--test", "shared_client_live"]
+        target, selected, runtime_args = "shared_client_live", "pinned_and_candidate_service_contract", ["--ignored", "--nocapture"]
+    elif test == "@feature":
+        argv += ["--no-default-features", "--features", "client", "--lib"]
+        target, selected, runtime_args = "xmsg", "client::feature_tests::no_daemon", ["--ignored"]
     else:
-        subprocess.run(["cargo", "clean", "-p", "xmsg"], cwd=directory, env=env, check=True, capture_output=True)
-        if test == "@live":
-            argv = ["cargo", "test", "--locked", "--test", "shared_client_live", "pinned_and_candidate_service_contract", "--", "--ignored", "--exact", "--nocapture"]
-        else:
-            argv = ["cargo", "test", "--locked", "--no-default-features", "--features", "client"]
-            argv += ["--lib", "client::feature_tests::no_daemon", "--", "--ignored", "--exact"] if test == "@feature" else ["--test", "shared_client", test, "--", "--exact"]
-    return subprocess.run(argv, cwd=directory, env=env, capture_output=True, text=True, timeout=180)
+        argv += ["--no-default-features", "--features", "client", "--test", "shared_client"]
+        target, selected, runtime_args = "shared_client", test, []
+    # Compilation has a separate budget; a build timeout is never a rejecting test.
+    build = subprocess.run([*argv, "--no-run", "--message-format=json"], cwd=directory, env=env, capture_output=True, text=True, timeout=900)
+    if build.returncode:
+        return build
+    executables = []
+    for line in build.stdout.splitlines():
+        try:
+            artifact = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if artifact.get("reason") == "compiler-artifact" and artifact.get("target", {}).get("name") == target and artifact.get("profile", {}).get("test") and artifact.get("executable"):
+            executables.append(artifact["executable"])
+    assert len(executables) == 1 and Path(executables[0]).is_file(), ("missing intended test executable", target, build.stdout)
+    return subprocess.run([executables[0], selected, "--exact", *runtime_args], cwd=directory, env=env, capture_output=True, text=True, timeout=90 if test == "@live" else 30)
 
 
 def main():

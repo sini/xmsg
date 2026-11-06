@@ -171,14 +171,15 @@ async fn oversized_and_unterminated_frames_are_refused() {
             stream.read_line(&mut line).await.unwrap();
             stream.get_mut().write_all(&response).await.unwrap();
             if response.len() > 4096 {
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                std::future::pending::<()>().await;
             }
         });
         assert!(matches!(
             RegisteredService::register(options).await,
             Err(ClientError::Protocol)
         ));
-        server.await.unwrap();
+        server.abort();
+        let _ = server.await;
     }
 }
 
@@ -351,5 +352,36 @@ async fn registration_identity_modes() {
             server.abort();
             let _ = server.await;
         }
+    }
+}
+
+#[tokio::test]
+async fn service_deadlines_expire_and_drop_registration() {
+    for (ack, wait_secs) in [(false, 0), (false, 1), (true, 0)] {
+        let (_temp, mut options, register, _agent) = fixture();
+        options.operation_timeout = Duration::from_millis(20);
+        let server = tokio::spawn(async move {
+            let mut stream = BufReader::new(register.accept().await.unwrap().0);
+            request(&mut stream, registration()).await;
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let mut client = RegisteredService::register(options).await.unwrap();
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(wait_secs + 2), async {
+            if ack {
+                client.ack("message").await
+            } else {
+                client.poll(wait_secs).await.map(|_| ())
+            }
+        })
+        .await;
+        assert!(matches!(result, Ok(Err(ClientError::Timeout))));
+        assert!(started.elapsed() >= Duration::from_secs(wait_secs));
+        assert!(client.address().is_none());
+        assert!(client.node().is_none());
+        server.abort();
+        let _ = server.await;
     }
 }

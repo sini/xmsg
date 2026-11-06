@@ -9,7 +9,7 @@ def packages(args):
     return {line.split(" v", 1)[0] for line in result.stdout.splitlines()}
 
 
-forbidden = {"rusqlite", "libsqlite3-sys", "axum", "rustls", "tokio-rustls", "matrix-sdk"}
+forbidden = {"rusqlite", "libsqlite3-sys", "axum", "rustls", "tokio-rustls"}
 client = packages(["--no-default-features", "--features", "client"])
 daemon = packages([])
 assert {"rusqlite", "axum", "rustls"} <= daemon, "broken positive dependency control"

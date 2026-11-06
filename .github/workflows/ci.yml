@@ -78,6 +78,8 @@ jobs:
             refs+=("./ci#checks.x86_64-linux.$c")
           done
           nix build -L --keep-going --no-link --print-out-paths "${refs[@]}" | tee -a /tmp/attic-paths
+      - name: Source revision provenance and warm-store red drive
+        run: python3 scripts/client-pin.py
       - name: Build cargoArtifacts
         run: |
           nix build -L --no-link --print-out-paths .#packages.x86_64-linux.cargoArtifacts | tee -a /tmp/attic-paths

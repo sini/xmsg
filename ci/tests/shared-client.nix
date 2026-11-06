@@ -11,15 +11,7 @@
       craneLib = inputs.crane.mkLib pkgs;
       package = inputs.xmsg.packages.${system}.default;
       pin = builtins.fromTOML (builtins.readFile ../xmsg-pin.toml);
-      repository = builtins.match "https://github.com/([^/]+)/([^/]+)" pin.repository;
-      baselineSrc =
-        assert repository != null;
-        pkgs.fetchFromGitHub {
-          owner = builtins.elemAt repository 0;
-          repo = builtins.elemAt repository 1;
-          rev = pin.revision;
-          hash = pin.source_hash;
-        };
+      baselineSrc = import ../xmsg-source.nix { inherit pkgs pin; };
       baseline = pkgs.rustPlatform.buildRustPackage {
         pname = "xmsg-shared-client-baseline";
         version = "0.1.0";

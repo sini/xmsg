@@ -25,7 +25,9 @@ agent handle for list/send/reply without serializing those calls behind a long
 poll. Dropping/cancelling/losing registration invalidates that handle once detected.
 Cancellation or a failed exchange discards the partial registration stream. The
 consumer chooses reconnection/backoff and must obtain a new handle after registering.
-The library does not automatically retry a send or a reply.
+The library does not automatically retry a send or a reply. A register-socket
+refusal deliberately drops the otherwise synchronised stream too; re-registration
+can redeliver in-flight items, which the consumer must deduplicate.
 
 `Delivery` is constructed by the validated decoder and exposes read-only accessors
 for message ID, `from_name`, text, envelope, structured origin and in-reply-to.
@@ -53,6 +55,11 @@ python3 scripts/client-graph.py
 python3 scripts/client-mutants.py
 ```
 
+The mutation runner compiles each control with a separate build budget and then
+executes the selected test binary under a shorter runtime bound. Compiler failures
+or compilation timeouts never count as killed mutants. CI reuses its configured
+Cargo profile rather than starting an unrelated debug dependency build.
+
 The feature sentinel is deliberately ignored by default daemon tests; client CI
 explicitly runs it and requires one executed, passing case. The graph check uses
 normal production edges, with a default-daemon positive control. The initial
@@ -66,12 +73,19 @@ attribution, list, keyed send/deduplication, poll/ACK and pushed reply correlati
 It requires actual executed tests and a completion marker; missing binaries,
 wrong revision identity, ignored/skipped cases and zero cases fail.
 
-`ci/xmsg-pin.toml` binds the baseline revision to a fixed-output source hash. The
-baseline build patches only its CLI version string to include that revision; the
-live cell checks it before use, rather than mistaking every `0.1.0` binary for the
-same source. The candidate binary comes from the current Cargo build. Every pin
-change reruns compatibility before acceptance. Consumers also keep their pinned
-compatibility arms during migration; this baseline does not silently replace them.
+`ci/xmsg-pin.toml` supplies the baseline revision and expected source hash.
+`ci/xmsg-source.nix` includes that revision in the fetch object's name, so changing
+only the revision cannot reuse the old fixed-output store path. CI drives that
+forgotten-hash re-pin at the Nix fetch layer and requires it to fail; removing the
+revision-bearing name must make this oracle red. A hash alone does not bind a
+revision label when its already-realised store path can be reused.
+
+The baseline build also patches its CLI version string to include the selected
+revision. The live test's comparison checks the binary label against the pin; it
+is not independent proof of source provenance. The Nix fetch identity/hash check
+provides that binding. The candidate comes from the current Cargo build. Every
+pin change reruns compatibility before acceptance; consumers retain their own
+pinned compatibility arms during migration.
 
 The default daemon and its tests remain an independent regression plane. CI cost
 includes a second client-only dependency build and an old-daemon build; timings
