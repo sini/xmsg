@@ -11,12 +11,15 @@
       craneLib = inputs.crane.mkLib pkgs;
       package = inputs.xmsg.packages.${system}.default;
       pin = builtins.fromTOML (builtins.readFile ../xmsg-pin.toml);
-      baselineSrc = pkgs.fetchFromGitHub {
-        owner = "sini";
-        repo = "xmsg";
-        rev = pin.revision;
-        hash = pin.source_hash;
-      };
+      repository = builtins.match "https://github.com/([^/]+)/([^/]+)" pin.repository;
+      baselineSrc =
+        assert repository != null;
+        pkgs.fetchFromGitHub {
+          owner = builtins.elemAt repository 0;
+          repo = builtins.elemAt repository 1;
+          rev = pin.revision;
+          hash = pin.source_hash;
+        };
       baseline = pkgs.rustPlatform.buildRustPackage {
         pname = "xmsg-shared-client-baseline";
         version = "0.1.0";
@@ -66,6 +69,7 @@
           pname = "xmsg-shared-client-compat";
           dontBuild = true;
           XMSG_SHARED_BASELINE_BIN = lib.getExe baseline;
+          nativeBuildInputs = (package.nativeBuildInputs or [ ]) ++ [ pkgs.python3 ];
           checkPhase = ''
             runHook preCheck
             set -o pipefail
@@ -77,6 +81,18 @@
               echo 'shared-client live compatibility was skipped' >&2
               exit 1
             fi
+            set +e
+            XMSG_SHARED_BASELINE_BIN=/nonexistent/required-xmsg-baseline \
+              cargoWithProfile test --locked --test shared_client_live \
+                pinned_and_candidate_service_contract -- --ignored --exact > missing.log 2>&1
+            missing_rc=$?
+            set -e
+            if [ "$missing_rc" -eq 0 ]; then
+              echo 'missing baseline executable was accepted' >&2
+              exit 1
+            fi
+            grep -F 'test pinned_and_candidate_service_contract ... FAILED' missing.log
+            python3 scripts/client-mutants.py --live
             runHook postCheck
           '';
         };

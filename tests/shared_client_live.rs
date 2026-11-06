@@ -30,6 +30,7 @@ async fn exercise(binary: &Path) {
     };
     let executable = std::env::current_exe().unwrap();
     let child = Command::new(binary)
+        .env_clear()
         .env("HOME", temp.path())
         .env("XDG_RUNTIME_DIR", &run)
         .env_remove("XMSG_HOST_LABEL")
@@ -111,11 +112,21 @@ async fn pinned_and_candidate_service_contract() {
         std::env::var_os("XMSG_SHARED_BASELINE_BIN").expect("required baseline binary unset"),
     );
     let pin = include_str!("../ci/xmsg-pin.toml");
-    let revision = pin.lines().find_map(|line| line.strip_prefix("revision = "))
-        .expect("baseline revision missing").trim_matches('"');
-    let version = Command::new(&baseline).arg("--version").output().expect("baseline executable missing");
+    let revision = pin
+        .lines()
+        .find_map(|line| line.strip_prefix("revision = "))
+        .expect("baseline revision missing")
+        .trim_matches('"');
+    let version = Command::new(&baseline)
+        .arg("--version")
+        .output()
+        .expect("baseline executable missing");
     assert!(version.status.success());
-    assert_eq!(String::from_utf8(version.stdout).unwrap().trim(), format!("xmsg 0.1.0+{revision}"), "baseline binary provenance mismatch");
+    assert_eq!(
+        String::from_utf8(version.stdout).unwrap().trim(),
+        format!("xmsg 0.1.0+{revision}"),
+        "baseline binary provenance mismatch"
+    );
     exercise(&baseline).await;
     exercise(Path::new(env!("CARGO_BIN_EXE_xmsg"))).await;
     println!("shared-client: verified baseline and candidate service contract completed");

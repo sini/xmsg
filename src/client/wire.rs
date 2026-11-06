@@ -203,14 +203,14 @@ pub struct DeliveryFrame {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ServiceResponse {
-    Deliver(DeliveryFrame),
+    Deliver(Box<DeliveryFrame>),
     Timeout,
 }
 
 #[cfg(feature = "daemon")]
 impl DeliveryFrame {
     pub fn envelope(self) -> ServiceResponse {
-        ServiceResponse::Deliver(self)
+        ServiceResponse::Deliver(Box::new(self))
     }
 }
 

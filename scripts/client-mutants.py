@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,41 +14,65 @@ CASES = [
     ("wrong-registration-node", "src/client/mod.rs", "registration.node != expected.node", 'false', "missing_or_wrong_registration_identity_is_refused"),
     ("agent-version", "src/client/mod.rs", "schema_version: Some(SCHEMA_VERSION),", "schema_version: None,", "socket_specific_exact_frame_keys"),
     ("forbidden-sender-field", "src/client/mod.rs", "as_agent: None,", 'as_agent: Some("injected".to_owned()),', "socket_specific_exact_frame_keys"),
+    ("normal-edge-leak", "Cargo.toml", 'client = []', 'client = ["dep:rusqlite"]', "@graph"),
+    ("self-dev-default-leak", "Cargo.toml", 'xmsg = { path = ".", default-features = false, features = ["test-hooks"] }', 'xmsg = { path = ".", features = ["test-hooks"] }', "@feature"),
+    ("live-wrong-revision", "ci/xmsg-pin.toml", "9b5bd5e241554d345bcb394cc5dfffcf4fa0ee9b", "9d1f5fa38356a8f9208594db951c8e6502fe8e5d", "@live"),
+    ("live-agent-version", "src/client/mod.rs", "pub const SCHEMA_VERSION: u32 = 2;", "pub const SCHEMA_VERSION: u32 = 3;", "@live"),
+    ("live-register-version", "src/client/mod.rs", "serde_json::to_vec(request)", 'serde_json::to_vec(&{ let mut v = serde_json::to_value(request).unwrap(); v.as_object_mut().unwrap().insert("schema_version".into(), serde_json::json!(2)); v })', "@live"),
+    ("live-skip", "tests/shared_client_live.rs", "let baseline = PathBuf::from", "return; let baseline = PathBuf::from", "@live"),
+    ("agent-deadline", "src/client/mod.rs", "timeout(self.options.operation_timeout, async", "timeout(Duration::from_secs(60), async", "agent_deadline_is_unknown_not_a_confirmed_refusal"),
+    ("registration-address-fallback", "src/client/mod.rs", "serde_json::from_value(response).map_err(|_| ClientError::Protocol)?", 'serde_json::from_value({ let mut r = response; r.as_object_mut().unwrap().entry("address").or_insert(serde_json::json!(format!("{}@{}", expected.service, expected.node))); r }).map_err(|_| ClientError::Protocol)?', "missing_or_wrong_registration_identity_is_refused"),
+    ("registration-lifetime", "src/client/mod.rs", "live.store(false, Ordering::Release);", "live.store(true, Ordering::Release);", "long_poll_does_not_block_agent_and_handle_expires_with_registration"),
+    ("missing-test-target", "Cargo.toml", '[[test]]\nname = "agent_sock"\npath = "tests/agent_sock.rs"\nrequired-features = ["daemon"]', "", "@graph"),
 ]
 
 
 def run(directory, test):
-    subprocess.run(["cargo", "clean", "-p", "xmsg", "--target-dir", str(ROOT / "target" / "client-mutants")], cwd=directory, check=True, capture_output=True)
-    return subprocess.run(["cargo", "test", "--locked", "--no-default-features", "--features", "client", "--test", "shared_client", test, "--", "--exact"], cwd=directory,
-                          env={**os.environ, "CARGO_TARGET_DIR": str(ROOT / "target" / "client-mutants")}, text=True, capture_output=True, timeout=120)
+    env = {**os.environ, "CARGO_TARGET_DIR": str(ROOT / "target" / "client-mutants")}
+    if test == "@graph":
+        argv = ["python3", "scripts/client-graph.py"]
+    else:
+        subprocess.run(["cargo", "clean", "-p", "xmsg"], cwd=directory, env=env, check=True, capture_output=True)
+        if test == "@live":
+            argv = ["cargo", "test", "--locked", "--test", "shared_client_live", "pinned_and_candidate_service_contract", "--", "--ignored", "--exact", "--nocapture"]
+        else:
+            argv = ["cargo", "test", "--locked", "--no-default-features", "--features", "client"]
+            argv += ["--lib", "client::feature_tests::no_daemon", "--", "--ignored", "--exact"] if test == "@feature" else ["--test", "shared_client", test, "--", "--exact"]
+    return subprocess.run(argv, cwd=directory, env=env, capture_output=True, text=True, timeout=180)
 
 
 def main():
-    for name, filename, old, new, test in CASES:
+    live = "--live" in sys.argv[1:]
+    cases = [case for case in CASES if (case[-1] == "@live") == live]
+    for name, filename, old, new, test in cases:
         with tempfile.TemporaryDirectory(prefix="xmsg-client-mutant-") as directory:
             dest = Path(directory)
             for file in ("Cargo.toml", "Cargo.lock"):
                 shutil.copy2(ROOT / file, dest / file)
-            for folder in ("src", "tests"):
+            for folder in ("src", "tests", "scripts", "ci"):
                 shutil.copytree(ROOT / folder, dest / folder)
             green = run(dest, test)
-            assert green.returncode == 0 and "1 passed; 0 failed; 0 ignored" in green.stdout, (name, "invalid green", green.stdout, green.stderr)
+            marker = "forbidden dependencies absent with live daemon positive control" if test == "@graph" else "1 passed; 0 failed; 0 ignored"
+            assert green.returncode == 0 and marker in green.stdout and (test != "@live" or "shared-client: verified baseline and candidate service contract completed" in green.stdout), (name, "invalid green", green.stdout, green.stderr)
             source = dest / filename
             text = source.read_text()
-            count = text.count(old)
-            # Send and reply each have the same optional identity fields; mutate only send.
-            if name in ("forbidden-sender-field", "agent-version"):
-                assert count == 3, count
-            else:
-                assert count == 1, (name, count)
+            expected_count = 3 if name in ("forbidden-sender-field", "agent-version") else 1
+            assert text.count(old) == expected_count, (name, text.count(old))
             source.write_text(text.replace(old, new, 1))
             red = run(dest, test)
-            assert red.returncode == 101 and f"test {test} ... FAILED" in red.stdout, (name, "survived or wrong red", red.stdout, red.stderr)
+            if test == "@graph":
+                reason = "test target inventory mismatch" if name == "missing-test-target" else "rusqlite"
+                assert red.returncode == 1 and "AssertionError" in red.stderr and reason in red.stderr, (name, red.stdout, red.stderr)
+            elif name == "live-skip":
+                assert red.returncode == 0 and "1 passed; 0 failed; 0 ignored" in red.stdout and "shared-client: verified baseline and candidate service contract completed" not in red.stdout, (name, red.stdout, red.stderr)
+            else:
+                failed = "pinned_and_candidate_service_contract" if test == "@live" else ("client::feature_tests::no_daemon" if test == "@feature" else test)
+                assert red.returncode == 101 and f"test {failed} ... FAILED" in red.stdout, (name, "survived or wrong red", red.stdout, red.stderr)
             evidence = ROOT / ".artifacts" / "client-mutants"
             evidence.mkdir(parents=True, exist_ok=True)
             (evidence / (name + ".log")).write_text(red.stdout + red.stderr)
             print(name + ": GREEN baseline, RED intended test", flush=True)
-    print(f"{len(CASES)}/{len(CASES)} shared-client mutants killed", flush=True)
+    print(f"{len(cases)}/{len(cases)} shared-client mutants killed", flush=True)
 
 
 if __name__ == "__main__":

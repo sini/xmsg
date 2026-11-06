@@ -311,3 +311,31 @@ async fn long_poll_does_not_block_agent_and_handle_expires_with_registration() {
     service.await.unwrap();
     sender.await.unwrap();
 }
+
+#[tokio::test]
+async fn agent_deadline_is_unknown_not_a_confirmed_refusal() {
+    let (_temp, mut options, expected, register, agent_listener) = fixture();
+    options.operation_timeout = Duration::from_millis(20);
+    let registration_server = tokio::spawn(async move {
+        let mut stream = BufReader::new(register.accept().await.unwrap().0);
+        request(&mut stream, registration()).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    });
+    let stalled = tokio::spawn(async move {
+        let _stream = agent_listener.accept().await.unwrap().0;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    });
+    let client = RegisteredService::register(options, expected)
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_millis(250),
+        client.send("target@fixture", "body", Some("key")),
+    )
+    .await;
+    assert!(matches!(result, Ok(Err(ClientError::Timeout))));
+    stalled.abort();
+    registration_server.abort();
+    let _ = stalled.await;
+    let _ = registration_server.await;
+}

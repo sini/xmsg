@@ -289,7 +289,7 @@ impl RegisteredService {
                     self.connection = None;
                     return Err(ClientError::Protocol);
                 }
-                Ok(Some(Delivery(frame)))
+                Ok(Some(Delivery(*frame)))
             }
         }
     }
