@@ -84,14 +84,7 @@ pub fn parse_agent_frame(line: &str) -> Result<AgentFrame, AppError> {
     }
 }
 
-pub fn current_uid() -> u32 {
-    unsafe {
-        extern "C" {
-            fn getuid() -> u32;
-        }
-        getuid()
-    }
-}
+pub use crate::client::current_uid;
 
 /// Creates `dir` and any missing parents at mode 0700 in the `mkdir` call itself, so no
 /// concurrent caller can observe it at the umask mode; an existing directory is left as is.

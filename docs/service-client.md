@@ -15,7 +15,8 @@ A gateway must require an expected node in its own startup configuration; Matrix
 can preserve its local-daemon discovery policy by explicitly passing `None`.
 The client checks socket-directory ownership/mode, socket ownership, peer UID and
 the actual registration address/node; it never fabricates a registration result.
-The daemon still authenticates the real process executable. Registration, polling
+Consumers can reuse `current_uid()` for the same-user service profile. The daemon
+still authenticates the real process executable. Registration, polling
 and agent requests must originate from that same process. Child processes do not
 inherit the registered service identity.
 

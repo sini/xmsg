@@ -1687,14 +1687,7 @@ pub async fn deliver_agy_envelope(
 }
 
 /// Returns current process UID.
-pub fn current_uid() -> u32 {
-    unsafe {
-        extern "C" {
-            fn getuid() -> u32;
-        }
-        getuid()
-    }
-}
+pub use crate::client::current_uid;
 
 /// Returns the default registration socket path (see [`crate::agent::socket_dir_for_env`]).
 pub fn default_register_sock_path() -> Result<PathBuf, AppError> {

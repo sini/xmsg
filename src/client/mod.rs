@@ -24,6 +24,11 @@ use wire::{
     AgentFrame, DeliveryFrame, Registration, ServiceResponse, SvcFrame, SvcRegisterRequest,
 };
 
+/// Returns the real process UID used by the daemon's same-user service checks.
+pub fn current_uid() -> u32 {
+    unsafe { libc::getuid() }
+}
+
 pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Error)]

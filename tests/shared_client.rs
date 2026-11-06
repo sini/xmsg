@@ -16,7 +16,7 @@ fn fixture() -> (TempDir, ClientOptions, UnixListener, UnixListener) {
         operation_timeout: Duration::from_millis(100),
         service: "bridge".into(),
         expected_node: Some("fixture".into()),
-        daemon_uid: unsafe { libc::geteuid() },
+        daemon_uid: xmsg::client::current_uid(),
     };
     let register = UnixListener::bind(&options.register_socket).unwrap();
     let agent = UnixListener::bind(&options.agent_socket).unwrap();
@@ -244,7 +244,7 @@ async fn wrong_uid_and_public_directory_are_refused() {
         RegisteredService::register(options.clone()).await,
         Err(ClientError::Peer)
     ));
-    options.daemon_uid = unsafe { libc::geteuid() };
+    options.daemon_uid = xmsg::client::current_uid();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(matches!(
         RegisteredService::register(options).await,

@@ -29,7 +29,7 @@ async fn exercise(binary: &Path) {
         operation_timeout: Duration::from_secs(5),
         service: "bridge".into(),
         expected_node: Some(xmsg::node::local_node_name()),
-        daemon_uid: unsafe { libc::geteuid() },
+        daemon_uid: xmsg::client::current_uid(),
     };
     let executable = std::env::current_exe().unwrap();
     let child = Command::new(binary)
