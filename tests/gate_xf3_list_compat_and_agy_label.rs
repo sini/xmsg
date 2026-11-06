@@ -1130,12 +1130,28 @@ async fn test_oracle_2_harness_on_every_kind_live_and_inactive() {
                 .join(format!("{id_codex_live}.lock")),
         )
         .unwrap();
+        {
+            use std::os::fd::AsRawFd;
+            assert_eq!(
+                unsafe { libc::flock(codex_lock_live.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+                0
+            );
+        }
         let codex_lock_closed = fs::File::create(
             codex_home
                 .join("thread-writer-locks")
                 .join(format!("{id_codex_closed}.lock")),
         )
         .unwrap();
+        {
+            use std::os::fd::AsRawFd;
+            assert_eq!(
+                unsafe {
+                    libc::flock(codex_lock_closed.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
+                },
+                0
+            );
+        }
         for cid in [id_codex_live, id_codex_closed] {
             fs::write(
                 codex_home
@@ -2316,6 +2332,18 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
                 .join(format!("{root_codex}.lock")),
         )
         .unwrap();
+        {
+            use std::os::fd::AsRawFd;
+            assert_eq!(
+                unsafe {
+                    libc::flock(
+                        _codex_writer_lock.as_raw_fd(),
+                        libc::LOCK_EX | libc::LOCK_NB,
+                    )
+                },
+                0
+            );
+        }
         fs::write(
             codex_home
                 .join("sessions/2026/11/04")
@@ -2523,9 +2551,7 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
                 "C10: live pre-codex (09af11b) sidecar subprocess check passed (root + child refused with missing _meta)"
             );
         } else {
-            eprintln!(
-                "XMSG_PRE_CODEX_BIN unset; skipping live pre-codex sidecar subprocess check"
-            );
+            eprintln!("XMSG_PRE_CODEX_BIN unset; skipping live pre-codex sidecar subprocess check");
         }
     }
 }

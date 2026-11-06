@@ -221,11 +221,7 @@ impl LockLeaseWatch {
         let inotify_fd = unsafe { OwnedFd::from_raw_fd(raw_inotify) };
 
         let watch_target_c = CString::new(fd_proc_path.as_bytes()).unwrap();
-        let mask = libc::IN_CLOSE_WRITE
-            | libc::IN_DELETE_SELF
-            | libc::IN_MOVE_SELF
-            | libc::IN_UNMOUNT
-            | libc::IN_IGNORED;
+        let mask = LEASE_FATAL_MASK & !libc::IN_Q_OVERFLOW;
         let wd = unsafe {
             libc::inotify_add_watch(inotify_fd.as_raw_fd(), watch_target_c.as_ptr(), mask)
         };
@@ -248,8 +244,8 @@ impl LockLeaseWatch {
         Ok(watch)
     }
 
-    /// Drain all pending `inotify` events on the watched lock inode. Any close-write,
-    /// delete-self, move-self, unmount, ignored, overflow, or read failure returns `Err`.
+    /// Drain all pending `inotify` events on the watched lock inode. Any delete-self,
+    /// move-self, unmount, ignored, overflow, or read failure returns `Err`.
     pub fn drain_events(&self) -> std::result::Result<(), String> {
         let mut buf = [0u8; 4096];
         loop {
@@ -279,13 +275,7 @@ impl LockLeaseWatch {
                 let ev: libc::inotify_event = unsafe {
                     std::ptr::read_unaligned(buf[offset..].as_ptr() as *const libc::inotify_event)
                 };
-                let fatal_mask = libc::IN_CLOSE_WRITE
-                    | libc::IN_DELETE_SELF
-                    | libc::IN_MOVE_SELF
-                    | libc::IN_UNMOUNT
-                    | libc::IN_IGNORED
-                    | libc::IN_Q_OVERFLOW;
-                if (ev.mask & fatal_mask) != 0 {
+                if (ev.mask & LEASE_FATAL_MASK) != 0 {
                     return Err(format!(
                         "writer-lock lease discontinuity event mask=0x{:x}",
                         ev.mask
@@ -354,9 +344,20 @@ impl LockLeaseWatch {
     }
 }
 
+/// Structural `inotify` mask for writer-lock lease discontinuity (§7.2.1 `F4`).
+/// `IN_CLOSE_WRITE` is intentionally omitted because Codex 0.166.0's
+/// `WriterLockCoordinator::remove_stale_thread_locks`, `WriterLockCoordinator::acquire`,
+/// and `WriterLockCoordinator::try_acquire_for_publication` open sibling `<P>.lock`
+/// files `O_RDWR` and close them on `WouldBlock`.
+const LEASE_FATAL_MASK: u32 = libc::IN_DELETE_SELF
+    | libc::IN_MOVE_SELF
+    | libc::IN_UNMOUNT
+    | libc::IN_IGNORED
+    | libc::IN_Q_OVERFLOW;
+
 /// Check that `owner_pid` has `owner_starttime` and currently holds an open file descriptor
-/// to `(expected_dev, expected_ino)` whose symlink in `<proc_root>/<owner_pid>/fd` resolves
-/// to `expected_lock_path` (not a deleted file or a symlink alias elsewhere).
+/// with an active kernel `flock(LOCK_EX)` write lock (§7.2.1) to `(expected_dev, expected_ino)`
+/// whose symlink in `<proc_root>/<owner_pid>/fd` resolves to `expected_lock_path`.
 pub fn owner_holds_lock_inode(
     proc_root: &Path,
     owner_pid: u32,
@@ -372,10 +373,24 @@ pub fn owner_holds_lock_inode(
     {
         return false;
     }
+    let euid = effective_uid();
+    let Ok(lst) = std::fs::symlink_metadata(expected_lock_path) else {
+        return false;
+    };
+    if lst.file_type().is_symlink()
+        || (lst.mode() & libc::S_IFMT) != libc::S_IFREG
+        || lst.uid() != euid
+        || lst.dev() != expected_dev
+        || lst.ino() != expected_ino
+        || lst.nlink() == 0
+    {
+        return false;
+    }
     let fd_dir = proc_root.join(owner_pid.to_string()).join("fd");
     let Ok(entries) = std::fs::read_dir(&fd_dir) else {
         return false;
     };
+    let mut found_fd = false;
     for entry in entries.flatten() {
         let fd_path = entry.path();
         let Ok(target) = std::fs::read_link(&fd_path) else {
@@ -388,14 +403,35 @@ pub fn owner_holds_lock_inode(
             continue;
         };
         if (meta.mode() & libc::S_IFMT) == libc::S_IFREG
+            && meta.uid() == euid
             && meta.dev() == expected_dev
             && meta.ino() == expected_ino
             && meta.nlink() >= 1
         {
-            return true;
+            found_fd = true;
+            break;
         }
     }
-    false
+    if !found_fd {
+        return false;
+    }
+    let has_flock = matches!(
+        crate::agy::attested_lock_holder(
+            proc_root,
+            &proc_root.join("locks"),
+            owner_pid,
+            expected_dev,
+            expected_ino,
+        ),
+        Ok(Some(holder)) if holder == owner_pid
+    );
+    if !has_flock {
+        return false;
+    }
+    crate::process::starttime(proc_root, owner_pid)
+        .ok()
+        .as_deref()
+        == Some(owner_starttime)
 }
 
 /// Open a directory with `O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC` and verify UID.

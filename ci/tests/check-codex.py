@@ -7,6 +7,8 @@ SSE provider (no auth, no external network).
 """
 
 import base64
+import ctypes
+import errno
 import fcntl
 import hashlib
 import http.server
@@ -2235,6 +2237,101 @@ def run_oracle_c14(
         assert busy_turn_id in completed_turn_ids, (
             f"C14 busy turn {busy_turn_id} did not complete: {completed_turn_ids}"
         )
+
+        # 2b. C19.1 (M1 / F5 / N2): Second real `codex` process (`O2`) starting a thread in the
+        #     SAME `codex_home` runs `WriterLockCoordinator::remove_stale_thread_locks`, which opens
+        #     `<root_p>.lock` O_RDWR, gets `WouldBlock` on `try_lock()`, and closes its writable fd.
+        #     On Linux (`N2`), attach an independent test-side `inotify` watch for `IN_CLOSE_WRITE`
+        #     AFTER `root_p` is admitted and immediately BEFORE `O2` starts, assert `>= 1`
+        #     `IN_CLOSE_WRITE` delta after `O2` acquires `root_p2`, and verify both `root_p` and
+        #     `root_p2` remain active in `GET /v1/recipients`!
+        p1_lock_path = codex_home / "thread-writer-locks" / f"{root_p}.lock"
+        assert p1_lock_path.exists(), f"C19.1 failed: {p1_lock_path} missing"
+        c19_ifd = None
+        c19_libc = None
+        if sys.platform.startswith("linux"):
+            c19_libc = ctypes.CDLL("libc.so.6", use_errno=True)
+            IN_CLOSE_WRITE = 0x00000008
+            IN_NONBLOCK = 0o4000
+            IN_CLOEXEC = 0o2000000
+            c19_ifd = c19_libc.inotify_init1(IN_NONBLOCK | IN_CLOEXEC)
+            assert c19_ifd >= 0, "C19.1 inotify_init1 failed"
+            c19_wd = c19_libc.inotify_add_watch(
+                c19_ifd, os.fsencode(str(p1_lock_path)), IN_CLOSE_WRITE
+            )
+            assert c19_wd >= 0, "C19.1 inotify_add_watch failed"
+
+            def _drain_c19_close_write(fd: int) -> int:
+                cnt = 0
+                hdr_sz = struct.calcsize("iIII")
+                while True:
+                    try:
+                        raw = os.read(fd, 4096)
+                    except OSError as e:
+                        if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                            break
+                        raise
+                    if not raw:
+                        break
+                    off = 0
+                    while off + hdr_sz <= len(raw):
+                        _wd, mask, _cookie, name_len = struct.unpack_from("iIII", raw, off)
+                        if mask & IN_CLOSE_WRITE:
+                            cnt += 1
+                        off += hdr_sz + name_len
+                return cnt
+
+            assert _drain_c19_close_write(c19_ifd) == 0, (
+                "C19.1 / N2: test-side watch must have 0 IN_CLOSE_WRITE events before O2 starts"
+            )
+
+        sib_app = StdioAppServerClient(codex_bin, codex_home)
+        try:
+            sib_app.initialize()
+            t2_res = sib_app.request("thread/start", {"cwd": str(work_dir)})
+            root_p2 = t2_res["result"]["thread"]["id"]
+            sib_app.request(
+                "turn/start",
+                {
+                    "threadId": root_p2,
+                    "input": [{"type": "text", "text": "C19_1_SIBLING_PROCESS_TURN"}],
+                },
+            )
+            deadline = time.time() + 10.0
+            while time.time() < deadline:
+                _, recips_c19 = unix_http_request(http_sock, "GET", "/v1/recipients")
+                addrs_c19 = [r.get("address", "") for r in recips_c19.get("recipients", [])]
+                if any(a.startswith(f"{root_p2}@") for a in addrs_c19):
+                    break
+                time.sleep(0.05)
+            else:
+                raise AssertionError(
+                    f"C19.1 failed: sibling root_p2 {root_p2} did not register: {addrs_c19}"
+                )
+
+            if c19_ifd is not None:
+                cw_delta = _drain_c19_close_write(c19_ifd)
+                os.close(c19_ifd)
+                c19_ifd = None
+                assert cw_delta >= 1, (
+                    f"C19.1 / F5 / N2 failed: expected >= 1 IN_CLOSE_WRITE on P1.lock from O2's remove_stale_thread_locks, got {cw_delta}"
+                )
+
+            _, recips_both = unix_http_request(http_sock, "GET", "/v1/recipients")
+            addrs_both = [r.get("address", "") for r in recips_both.get("recipients", [])]
+            assert any(a.startswith(f"{root_p}@") for a in addrs_both), (
+                f"C19.1 / M1 failed: root_p {root_p} was revoked/parked by sibling O2's stale-lock scan! Recipients: {addrs_both}"
+            )
+            assert any(a.startswith(f"{root_p2}@") for a in addrs_both), (
+                f"C19.1 failed: sibling root_p2 {root_p2} missing from recipients: {addrs_both}"
+            )
+        finally:
+            if c19_ifd is not None:
+                try:
+                    os.close(c19_ifd)
+                except Exception:
+                    pass
+            sib_app.close()
 
         # 3. Impostor listener in imp_home while real peer control in codex_home is live:
         #    Start an embedded codex process in imp_home that holds a writer lock + registration,
