@@ -4,10 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "Fast, lightweight local HTTP bridge into live agent sessions"
 license = "MIT"
+autotests = false
 
 [[bin]]
 name = "xmsg"
 path = "src/main.rs"
+required-features = ["daemon"]
 
 [lib]
 name = "xmsg"
@@ -15,42 +17,431 @@ path = "src/lib.rs"
 
 [dependencies]
 tokio = { version = "1.43", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "sync", "fs", "process", "signal"] }
-axum = { version = "0.8.1", features = ["tokio", "http1", "json"] }
+axum = { optional = true, version = "0.8.1", features = ["tokio", "http1", "json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-clap = { version = "4.5", features = ["derive", "env"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { optional = true, version = "4.5", features = ["derive", "env"] }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { optional = true, version = "0.3", features = ["env-filter"] }
 thiserror = "2.0"
-gethostname = "1.1"
-unicode-general-category = "1.1"
-regex = "1.11"
-rusqlite = { version = "0.40", features = ["bundled"] }
-ulid = "1.2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "blocking"] }
-rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
-rcgen = { version = "0.14.10", features = ["pem", "ring"] }
-sha2 = "0.11.0"
-hex = "0.4.3"
-http-body-util = "0.1.5"
-tower = { version = "0.5.3", features = ["util"] }
-hyper-util = { version = "0.1.21", features = ["server", "client", "tokio", "http1", "server-auto", "service"] }
-x509-parser = "0.18.1"
-bytes = "1.12.1"
-hyper = { version = "1.12.0", features = ["full"] }
-webpki = { package = "rustls-webpki", version = "0.103.15", default-features = false, features = ["ring"] }
+gethostname = { version = "1.1", optional = true }
+unicode-general-category = { version = "1.1", optional = true }
+regex = { version = "1.11", optional = true }
+rusqlite = { optional = true, version = "0.40", features = ["bundled"] }
+ulid = { version = "1.2", optional = true }
+reqwest = { optional = true, version = "0.12", default-features = false, features = ["json", "blocking"] }
+rustls = { optional = true, version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { optional = true, version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
+rcgen = { optional = true, version = "0.14.10", features = ["pem", "ring"] }
+sha2 = { version = "0.11.0", optional = true }
+hex = { version = "0.4.3", optional = true }
+http-body-util = { version = "0.1.5", optional = true }
+tower = { optional = true, version = "0.5.3", features = ["util"] }
+hyper-util = { optional = true, version = "0.1.21", features = ["server", "client", "tokio", "http1", "server-auto", "service"] }
+x509-parser = { version = "0.18.1", optional = true }
+bytes = { version = "1.12.1", optional = true }
+hyper = { optional = true, version = "1.12.0", features = ["full"] }
+webpki = { optional = true, package = "rustls-webpki", version = "0.103.15", default-features = false, features = ["ring"] }
 libc = "0.2"
-getrandom = "0.3"
-subtle = "2.6"
+getrandom = { version = "0.3", optional = true }
+subtle = { version = "2.6", optional = true }
+
 
 [features]
+default = ["daemon"]
+client = []
+daemon = ["client", "dep:axum", "dep:clap", "dep:tracing", "dep:tracing-subscriber", "dep:gethostname", "dep:unicode-general-category", "dep:regex", "dep:rusqlite", "dep:ulid", "dep:reqwest", "dep:rustls", "dep:tokio-rustls", "dep:rcgen", "dep:sha2", "dep:hex", "dep:http-body-util", "dep:tower", "dep:hyper-util", "dep:x509-parser", "dep:bytes", "dep:hyper", "dep:webpki", "dep:getrandom", "dep:subtle"]
 test-hooks = []
 
 [dev-dependencies]
 proptest = "1.6"
 tempfile = "3.17"
-xmsg = { path = ".", features = ["test-hooks"] }
+xmsg = { path = ".", default-features = false, features = ["test-hooks"] }
 
 [profile.release]
 opt-level = 2
+
+[[test]]
+name = "agent_sock"
+path = "tests/agent_sock.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "agy_proc_locks"
+path = "tests/agy_proc_locks.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "ancestor_walk"
+path = "tests/ancestor_walk.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "claude_lstart_macos"
+path = "tests/claude_lstart_macos.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "e2e_agy_delivery"
+path = "tests/e2e_agy_delivery.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "e2e_http"
+path = "tests/e2e_http.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "e2e_mcp"
+path = "tests/e2e_mcp.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "e2e_pi"
+path = "tests/e2e_pi.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "e2e_register"
+path = "tests/e2e_register.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "e2e_register_cli"
+path = "tests/e2e_register_cli.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "e2e_replies"
+path = "tests/e2e_replies.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "encoding_properties"
+path = "tests/encoding_properties.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "fed_p1"
+path = "tests/fed_p1.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate2_agent"
+path = "tests/gate2_agent.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate2_comm"
+path = "tests/gate2_comm.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate2_http"
+path = "tests/gate2_http.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_delivered_acked"
+path = "tests/gate_delivered_acked.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_h5_hub_admission"
+path = "tests/gate_h5_hub_admission.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_h6_default_route"
+path = "tests/gate_h6_default_route.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_ha8_reclaim"
+path = "tests/gate_ha8_reclaim.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_ha9_agy"
+path = "tests/gate_ha9_agy.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_ha9_codex"
+path = "tests/gate_ha9_codex.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_ha9_oc"
+path = "tests/gate_ha9_oc.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_ha9_subaddress"
+path = "tests/gate_ha9_subaddress.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_http_unix_timeout"
+path = "tests/gate_http_unix_timeout.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_idem_atomic"
+path = "tests/gate_idem_atomic.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_label_attested_cap"
+path = "tests/gate_label_attested_cap.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_probe_http"
+path = "tests/gate_probe_http.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_probe_pi"
+path = "tests/gate_probe_pi.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_r1_agy_autoreg"
+path = "tests/gate_r1_agy_autoreg.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_svc_delivered_acked"
+path = "tests/gate_svc_delivered_acked.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_u8_replies"
+path = "tests/gate_u8_replies.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_u9_1_repairs"
+path = "tests/gate_u9_1_repairs.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_u9_identity"
+path = "tests/gate_u9_identity.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_x10_idempotent_send"
+path = "tests/gate_x10_idempotent_send.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_x12_origin"
+path = "tests/gate_x12_origin.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_x13_agy_reregister"
+path = "tests/gate_x13_agy_reregister.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_x14_fed_targets"
+path = "tests/gate_x14_fed_targets.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_x16_ca_peers"
+path = "tests/gate_x16_ca_peers.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_x17_reload"
+path = "tests/gate_x17_reload.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_x18_fed_list"
+path = "tests/gate_x18_fed_list.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_x19_leaf_svc"
+path = "tests/gate_x19_leaf_svc.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_x20_agy_queue"
+path = "tests/gate_x20_agy_queue.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_x22_svc_fed_reply"
+path = "tests/gate_x22_svc_fed_reply.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_x23_outbound_link"
+path = "tests/gate_x23_outbound_link.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_x24_leaf_reply_store"
+path = "tests/gate_x24_leaf_reply_store.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_x25_sigterm"
+path = "tests/gate_x25_sigterm.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_x26_hub_forwarding"
+path = "tests/gate_x26_hub_forwarding.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_x27_1_proc_register"
+path = "tests/gate_x27_1_proc_register.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_x2_leaf"
+path = "tests/gate_x2_leaf.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_x7_multi_sessions_dir"
+path = "tests/gate_x7_multi_sessions_dir.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_x8_unix_http_mcp"
+path = "tests/gate_x8_unix_http_mcp.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_x9_svc_daemon"
+path = "tests/gate_x9_svc_daemon.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_xa1_instance_identity"
+path = "tests/gate_xa1_instance_identity.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_xa2_node_names"
+path = "tests/gate_xa2_node_names.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_xa3_core"
+path = "tests/gate_xa3_core.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_xa4_delivery"
+path = "tests/gate_xa4_delivery.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_xa5_wire"
+path = "tests/gate_xa5_wire.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_xa6_mesh"
+path = "tests/gate_xa6_mesh.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_xa7_queue"
+path = "tests/gate_xa7_queue.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_xb2_input_validation"
+path = "tests/gate_xb2_input_validation.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_xf1_1_unmapped_peer"
+path = "tests/gate_xf1_1_unmapped_peer.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_xf1_follow_ups"
+path = "tests/gate_xf1_follow_ups.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_xf2_reply_before_return"
+path = "tests/gate_xf2_reply_before_return.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_xf3_list_compat_and_agy_label"
+path = "tests/gate_xf3_list_compat_and_agy_label.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_xf4_agy_bus_restart"
+path = "tests/gate_xf4_agy_bus_restart.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_xf5_fed_send_retry_trace"
+path = "tests/gate_xf5_fed_send_retry_trace.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_xf6_svc_in_flight"
+path = "tests/gate_xf6_svc_in_flight.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_xh2_fed"
+path = "tests/gate_xh2_fed.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_xh2_plugin"
+path = "tests/gate_xh2_plugin.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_xl1_list_live_default"
+path = "tests/gate_xl1_list_live_default.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_xu1_api_ergonomics"
+path = "tests/gate_xu1_api_ergonomics.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "pi_proc"
+path = "tests/pi_proc.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "pi_queue"
+path = "tests/pi_queue.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "registry_fixtures"
+path = "tests/registry_fixtures.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "shared_client"
+path = "tests/shared_client.rs"
+required-features = ["client"]
+
+[[test]]
+name = "shared_client_live"
+path = "tests/shared_client_live.rs"
+required-features = ["daemon"]

@@ -1123,3 +1123,5 @@ programs.xmsg.federation = { enable = true; port = 7788; };
 ```
 
 It adds the port to `networking.firewall.allowedTCPPorts` when federation is enabled, and does nothing else.
+
+Rust service consumers can use the [shared service client](docs/service-client.md).

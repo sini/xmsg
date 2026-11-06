@@ -19,7 +19,7 @@ use crate::storage::{self, MessageRecord, Origin, ReplyRecord, Reservation};
 pub const MAX_WAIT_SECS: u64 = 60;
 
 /// Wire schema version spoken between `xmsg mcp` and `xmsg serve` on `agent.sock`.
-pub const MCP_SCHEMA_VERSION: u32 = 2;
+pub use crate::client::SCHEMA_VERSION as MCP_SCHEMA_VERSION;
 
 /// What local delivery reads, borrowed from an `AppState` or a `FedState`.
 pub struct Local<'a> {
@@ -312,34 +312,7 @@ pub fn parse_to(to: &str) -> Result<(&str, Option<&str>), AppError> {
 /// Default `within` window for `list` with `status: "inactive"` (24 hours).
 pub const DEFAULT_INACTIVE_WITHIN_SECS: u64 = 86_400;
 
-/// One entry of `list` (A13, A-12, A16, XL1, XF3): its address, kind, harness, label and
-/// status (`live`, `parked` or `closed`), the node holding it, the user it belongs to, and
-/// its timestamp (`registered_at` when live, `last_seen` when inactive).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Recipient {
-    pub address: String,
-    pub kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    pub status: String,
-    pub node: String,
-    pub user: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub registered_at: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_seen: Option<i64>,
-}
-
-/// What `list` returns: the recipients, and how each node asked answered (A-12).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ListResult {
-    pub recipients: Vec<Recipient>,
-    pub nodes: Vec<crate::fed::NodeStatus>,
-}
+pub use crate::client::wire::{ListResult, Recipient};
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1624,13 +1597,7 @@ pub async fn push_reply(
 
 /// What `send` returns (A13): the message ID, the resolved address (`id@node` for an
 /// instance, `name@node` for a service) and the outcome.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SendResult {
-    pub message_id: String,
-    pub address: String,
-    pub outcome: String,
-}
+pub use crate::client::wire::SendResult;
 
 fn check_idempotency_key(key: &str) -> Result<(), AppError> {
     if key.is_empty() || key.len() > 128 || key.chars().any(|c| c.is_control()) {

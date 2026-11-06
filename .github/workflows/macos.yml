@@ -57,4 +57,4 @@ jobs:
           nix --version
           echo "sandbox = $(nix config show sandbox)"
           sys=$(nix eval --impure --raw --expr builtins.currentSystem)
-          nix build "./ci#checks.$sys.package" -L --no-link
+          nix build "./ci#checks.$sys.package" "./ci#checks.$sys.shared-client" -L --no-link

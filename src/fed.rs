@@ -4898,32 +4898,7 @@ pub const LIST_TIMEOUT: Duration = Duration::from_secs(5);
 /// withholds `list` counts as one that could not be asked (gate v0 C4): `unreachable`, with
 /// the detail `withholds list`. So does a dial-out client that does not answer in time
 /// (A-1).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct NodeStatus {
-    pub node: String,
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-impl NodeStatus {
-    pub fn ok(node: &str) -> Self {
-        Self {
-            node: node.to_string(),
-            status: "ok".to_string(),
-            detail: None,
-        }
-    }
-
-    fn failed(node: &str, status: &str, detail: String) -> Self {
-        Self {
-            node: node.to_string(),
-            status: status.to_string(),
-            detail: Some(detail),
-        }
-    }
-}
+pub use crate::client::wire::NodeStatus;
 
 /// Asks the peer keyed `peer_key` for its `list` (A4, A-1), bounded by `LIST_TIMEOUT`: a
 /// direct peer over `/fed/v2/sessions`, a dial-out client through its mailbox. Returns the

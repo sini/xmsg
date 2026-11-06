@@ -32,11 +32,12 @@
               path: type:
               let
                 base = baseNameOf path;
+                relative = nixpkgs.lib.removePrefix ((toString ./.) + "/") (toString path);
               in
-              !(
+              (if nixpkgs.lib.hasPrefix "ci/" relative then relative == "ci/xmsg-pin.toml" else true)
+              && !(
                 base == "nix"
                 || base == "docs"
-                || base == "ci"
                 || base == ".github"
                 || base == "README.md"
                 || base == "AGENTS.md"

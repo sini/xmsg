@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -10,50 +9,22 @@ use crate::error::AppError;
 use crate::registry::{Session, SessionsQuery};
 use crate::storage::{self, now_epoch_secs};
 
-/// A service's registration frame on `register.sock`. Unknown fields are refused (plan
-/// §6 D3); `harness` is the multiplexer's tag.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SvcRegisterRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness: Option<String>,
-    pub name: String,
-    #[serde(default)]
-    pub cwd: Option<String>,
-}
-
-/// A registered service's frames on `register.sock`: `poll`, `ack` and `reply`. It runs
-/// `list`, `send` and `replies` over `agent.sock` (AM-4; plan §6 D15).
-#[derive(Debug, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-enum SvcFrame {
-    Poll {
-        #[serde(default, rename = "waitSecs")]
-        wait_secs: Option<u64>,
-    },
-    Ack {
-        #[serde(rename = "messageId")]
-        message_id: String,
-    },
-    Reply {
-        #[serde(rename = "messageId")]
-        message_id: String,
-        text: String,
-        #[serde(default, rename = "idempotencyKey")]
-        idempotency_key: Option<String>,
-    },
-}
+use crate::client::wire::SvcFrame;
+pub use crate::client::wire::SvcRegisterRequest;
 
 fn deliver_frame(msg: &storage::SvcPendingMessage) -> serde_json::Value {
-    serde_json::json!({
-        "action": "deliver",
-        "messageId": msg.id,
-        "fromName": msg.from_name,
-        "text": msg.text,
-        "envelope": msg.envelope,
-        "origin": msg.origin,
-        "inReplyTo": msg.in_reply_to,
-    })
+    serde_json::to_value(
+        crate::client::wire::DeliveryFrame {
+            message_id: msg.id.clone(),
+            from_name: msg.from_name.clone(),
+            text: msg.text.clone(),
+            envelope: msg.envelope.clone(),
+            origin: msg.origin.clone(),
+            in_reply_to: msg.in_reply_to.clone(),
+        }
+        .envelope(),
+    )
+    .expect("serializable service delivery")
 }
 
 #[derive(Debug, Clone)]
@@ -359,11 +330,11 @@ pub async fn handle_svc_connection_peer<
 
     // The registration's address and this node's name (AM-4); MA's origin check reads
     // the node.
-    let ok_resp = serde_json::json!({
-        "status": "ok",
-        "address": format!("{session_id}@{}", state.node_name),
-        "node": state.node_name,
-    });
+    let ok_resp = serde_json::to_value(crate::client::wire::Registration {
+        status: "ok".to_owned(),
+        address: format!("{session_id}@{}", state.node_name),
+        node: state.node_name.clone(),
+    })?;
     writer.write_all(format!("{ok_resp}\n").as_bytes()).await?;
 
     // Handle commands from daemon
