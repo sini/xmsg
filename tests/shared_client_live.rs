@@ -3,7 +3,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-use xmsg::client::{ClientOptions, ListQuery, RegisteredService, RegistrationExpectation};
+use xmsg::client::{ClientOptions, ListQuery, RegisteredService};
 
 struct Node(Child);
 impl Drop for Node {
@@ -27,6 +27,9 @@ async fn exercise(binary: &Path) {
         agent_socket: run.join("agent.sock"),
         max_frame_bytes: 400_000,
         operation_timeout: Duration::from_secs(5),
+        service: "bridge".into(),
+        expected_node: Some(xmsg::node::local_node_name()),
+        daemon_uid: unsafe { libc::geteuid() },
     };
     let executable = std::env::current_exe().unwrap();
     let child = Command::new(binary)
@@ -61,14 +64,7 @@ async fn exercise(binary: &Path) {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let expected = RegistrationExpectation {
-        service: "bridge".into(),
-        node: xmsg::node::local_node_name(),
-        daemon_uid: unsafe { libc::geteuid() },
-    };
-    let mut client = RegisteredService::register(options, expected)
-        .await
-        .unwrap();
+    let mut client = RegisteredService::register(options).await.unwrap();
     let address = client.address().unwrap().to_owned();
     let listed = client.list(ListQuery::default()).await.unwrap();
     assert!(listed

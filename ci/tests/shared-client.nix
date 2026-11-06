@@ -68,6 +68,9 @@
         shared-client-compat = package.overrideAttrs {
           pname = "xmsg-shared-client-compat";
           dontBuild = true;
+          installPhase = ''
+            touch "$out"
+          '';
           XMSG_SHARED_BASELINE_BIN = lib.getExe baseline;
           nativeBuildInputs = (package.nativeBuildInputs or [ ]) ++ [ pkgs.python3 ];
           checkPhase = ''

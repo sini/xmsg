@@ -4,17 +4,9 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use xmsg::client::{
-    ClientError, ClientOptions, ListQuery, RegisteredService, RegistrationExpectation,
-};
+use xmsg::client::{ClientError, ClientOptions, ListQuery, RegisteredService};
 
-fn fixture() -> (
-    TempDir,
-    ClientOptions,
-    RegistrationExpectation,
-    UnixListener,
-    UnixListener,
-) {
+fn fixture() -> (TempDir, ClientOptions, UnixListener, UnixListener) {
     let temp = tempfile::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let options = ClientOptions {
@@ -22,15 +14,13 @@ fn fixture() -> (
         agent_socket: temp.path().join("agent.sock"),
         max_frame_bytes: 4096,
         operation_timeout: Duration::from_millis(100),
-    };
-    let expected = RegistrationExpectation {
         service: "bridge".into(),
-        node: "fixture".into(),
+        expected_node: Some("fixture".into()),
         daemon_uid: unsafe { libc::geteuid() },
     };
     let register = UnixListener::bind(&options.register_socket).unwrap();
     let agent = UnixListener::bind(&options.agent_socket).unwrap();
-    (temp, options, expected, register, agent)
+    (temp, options, register, agent)
 }
 
 async fn request(stream: &mut BufReader<UnixStream>, response: Value) -> Value {
@@ -59,7 +49,7 @@ fn delivery(origin: Value) -> Value {
 
 #[tokio::test]
 async fn socket_specific_exact_frame_keys() {
-    let (_temp, options, expected, register, agent) = fixture();
+    let (_temp, options, register, agent) = fixture();
     let svc = tokio::spawn(async move {
         let mut stream = BufReader::new(register.accept().await.unwrap().0);
         let registration = request(&mut stream, registration()).await;
@@ -83,9 +73,7 @@ async fn socket_specific_exact_frame_keys() {
         }
         frames
     });
-    let mut client = RegisteredService::register(options, expected)
-        .await
-        .unwrap();
+    let mut client = RegisteredService::register(options).await.unwrap();
     let delivered = client.poll(0).await.unwrap().unwrap();
     assert_eq!(delivered.message_id(), "msg");
     assert_eq!(delivered.from_name(), "display · sender@fixture");
@@ -135,10 +123,10 @@ async fn socket_specific_exact_frame_keys() {
 async fn missing_or_wrong_registration_identity_is_refused() {
     for response in [
         json!({"status":"ok","node":"fixture"}),
-        json!({"status":"ok","node":"foreign","address":"bridge@fixture"}),
+        json!({"status":"ok","node":"foreign","address":"bridge@foreign"}),
         json!({"status":"ok","node":"fixture","address":"impostor@fixture"}),
     ] {
-        let (_temp, options, expected, register, _agent) = fixture();
+        let (_temp, options, register, _agent) = fixture();
         let server = tokio::spawn(async move {
             request(
                 &mut BufReader::new(register.accept().await.unwrap().0),
@@ -146,16 +134,14 @@ async fn missing_or_wrong_registration_identity_is_refused() {
             )
             .await;
         });
-        assert!(RegisteredService::register(options, expected)
-            .await
-            .is_err());
+        assert!(RegisteredService::register(options).await.is_err());
         server.await.unwrap();
     }
 }
 
 #[tokio::test]
 async fn registration_deadline_is_a_client_error() {
-    let (_temp, mut options, expected, register, _agent) = fixture();
+    let (_temp, mut options, register, _agent) = fixture();
     options.operation_timeout = Duration::from_millis(20);
     let server = tokio::spawn(async move {
         let _stream = register.accept().await.unwrap().0;
@@ -163,7 +149,7 @@ async fn registration_deadline_is_a_client_error() {
     });
     let result = tokio::time::timeout(
         Duration::from_millis(250),
-        RegisteredService::register(options, expected),
+        RegisteredService::register(options),
     )
     .await;
     assert!(matches!(result, Ok(Err(ClientError::Timeout))));
@@ -178,7 +164,7 @@ async fn oversized_and_unterminated_frames_are_refused() {
         b"{\"status\":\"ok\"}".to_vec(),
         vec![0xff, b'\n'],
     ] {
-        let (_temp, options, expected, register, _agent) = fixture();
+        let (_temp, options, register, _agent) = fixture();
         let server = tokio::spawn(async move {
             let mut stream = BufReader::new(register.accept().await.unwrap().0);
             let mut line = String::new();
@@ -189,7 +175,7 @@ async fn oversized_and_unterminated_frames_are_refused() {
             }
         });
         assert!(matches!(
-            RegisteredService::register(options, expected).await,
+            RegisteredService::register(options).await,
             Err(ClientError::Protocol)
         ));
         server.await.unwrap();
@@ -209,15 +195,13 @@ async fn delivery_requires_origin_and_preserves_all_origin_kinds() {
     ] {
         let valid = origin.get("node").and_then(Value::as_str) == Some("fixture")
             && !(origin.get("id").is_some() && origin.get("service").is_some());
-        let (_temp, options, expected, register, _agent) = fixture();
+        let (_temp, options, register, _agent) = fixture();
         let server = tokio::spawn(async move {
             let mut stream = BufReader::new(register.accept().await.unwrap().0);
             request(&mut stream, registration()).await;
             request(&mut stream, delivery(origin)).await;
         });
-        let mut client = RegisteredService::register(options, expected)
-            .await
-            .unwrap();
+        let mut client = RegisteredService::register(options).await.unwrap();
         assert_eq!(client.poll(0).await.is_ok(), valid);
         if !valid {
             assert!(client.node().is_none());
@@ -228,7 +212,7 @@ async fn delivery_requires_origin_and_preserves_all_origin_kinds() {
 
 #[tokio::test]
 async fn timeout_or_cancellation_discards_registration() {
-    let (_temp, options, expected, register, _agent) = fixture();
+    let (_temp, options, register, _agent) = fixture();
     let server = tokio::spawn(async move {
         let mut stream = BufReader::new(register.accept().await.unwrap().0);
         request(&mut stream, registration()).await;
@@ -236,9 +220,7 @@ async fn timeout_or_cancellation_discards_registration() {
         stream.read_line(&mut line).await.unwrap();
         tokio::time::sleep(Duration::from_secs(1)).await;
     });
-    let mut client = RegisteredService::register(options, expected)
-        .await
-        .unwrap();
+    let mut client = RegisteredService::register(options).await.unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(20), client.poll(0))
             .await
@@ -256,23 +238,23 @@ async fn timeout_or_cancellation_discards_registration() {
 
 #[tokio::test]
 async fn wrong_uid_and_public_directory_are_refused() {
-    let (temp, options, mut expected, _register, _agent) = fixture();
-    expected.daemon_uid = expected.daemon_uid.wrapping_add(1);
+    let (temp, mut options, _register, _agent) = fixture();
+    options.daemon_uid = options.daemon_uid.wrapping_add(1);
     assert!(matches!(
-        RegisteredService::register(options.clone(), expected.clone()).await,
+        RegisteredService::register(options.clone()).await,
         Err(ClientError::Peer)
     ));
-    expected.daemon_uid = unsafe { libc::geteuid() };
+    options.daemon_uid = unsafe { libc::geteuid() };
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(matches!(
-        RegisteredService::register(options, expected).await,
+        RegisteredService::register(options).await,
         Err(ClientError::Peer)
     ));
 }
 
 #[tokio::test]
 async fn long_poll_does_not_block_agent_and_handle_expires_with_registration() {
-    let (_temp, options, expected, register, agent_listener) = fixture();
+    let (_temp, options, register, agent_listener) = fixture();
     let (polled_tx, polled_rx) = tokio::sync::oneshot::channel();
     let (sent_tx, sent_rx) = tokio::sync::oneshot::channel();
     let service = tokio::spawn(async move {
@@ -293,9 +275,7 @@ async fn long_poll_does_not_block_agent_and_handle_expires_with_registration() {
         request(&mut stream, json!({"status":"ok","message_id":"sent","address":"receiver@fixture","outcome":"queued"})).await;
         sent_tx.send(()).unwrap();
     });
-    let mut client = RegisteredService::register(options, expected)
-        .await
-        .unwrap();
+    let mut client = RegisteredService::register(options).await.unwrap();
     let agent = client.agent_client();
     let (poll, sent) = tokio::join!(client.poll(1), async {
         polled_rx.await.unwrap();
@@ -314,7 +294,7 @@ async fn long_poll_does_not_block_agent_and_handle_expires_with_registration() {
 
 #[tokio::test]
 async fn agent_deadline_is_unknown_not_a_confirmed_refusal() {
-    let (_temp, mut options, expected, register, agent_listener) = fixture();
+    let (_temp, mut options, register, agent_listener) = fixture();
     options.operation_timeout = Duration::from_millis(20);
     let registration_server = tokio::spawn(async move {
         let mut stream = BufReader::new(register.accept().await.unwrap().0);
@@ -325,9 +305,7 @@ async fn agent_deadline_is_unknown_not_a_confirmed_refusal() {
         let _stream = agent_listener.accept().await.unwrap().0;
         tokio::time::sleep(Duration::from_secs(1)).await;
     });
-    let client = RegisteredService::register(options, expected)
-        .await
-        .unwrap();
+    let client = RegisteredService::register(options).await.unwrap();
     let result = tokio::time::timeout(
         Duration::from_millis(250),
         client.send("target@fixture", "body", Some("key")),
@@ -338,4 +316,40 @@ async fn agent_deadline_is_unknown_not_a_confirmed_refusal() {
     registration_server.abort();
     let _ = stalled.await;
     let _ = registration_server.await;
+}
+
+#[tokio::test]
+async fn registration_identity_modes() {
+    for pin in [None, Some("fixture")] {
+        for (node, wrong_uid, accepted) in [
+            ("fixture", false, true),
+            ("reported", false, pin.is_none()),
+            ("", false, false),
+            ("fixture", true, false),
+        ] {
+            let (_temp, mut options, register, _agent) = fixture();
+            options.expected_node = pin.map(str::to_owned);
+            if wrong_uid {
+                options.daemon_uid = options.daemon_uid.wrapping_add(1);
+            }
+            let response = json!({"status":"ok","node":node,"address":format!("bridge@{node}")});
+            let server = tokio::spawn(async move {
+                request(
+                    &mut BufReader::new(register.accept().await.unwrap().0),
+                    response,
+                )
+                .await;
+            });
+            let result = RegisteredService::register(options).await;
+            if accepted {
+                let client = result.unwrap();
+                assert_eq!(client.node(), Some(node));
+                assert_eq!(client.address(), Some(format!("bridge@{node}").as_str()));
+            } else {
+                assert!(matches!(result, Err(ClientError::Peer)));
+            }
+            server.abort();
+            let _ = server.await;
+        }
+    }
 }

@@ -6,9 +6,13 @@ a consumer's authorization policy. Enable `client` with default features disable
 the default `daemon` feature retains the executable and existing library surface.
 Use the accepted immutable repository revision in consumers' lockfiles.
 
-Register using `RegisteredService::register(ClientOptions, RegistrationExpectation)`.
-The options specify private socket paths, a frame byte limit and a total operation
-deadline. The expectation supplies the service, canonical node and daemon UID.
+Register using `RegisteredService::register(ClientOptions)`.
+The options specify private socket paths, service, daemon UID, a frame byte limit,
+a total operation deadline and `expected_node: Option<String>`. After UID checking,
+`None` accepts the daemon's nonempty reported node; `Some(node)` additionally pins
+it exactly. Both modes require the real address to equal service@reported-node.
+A gateway must require an expected node in its own startup configuration; Matrix
+can preserve its local-daemon discovery policy by explicitly passing `None`.
 The client checks socket-directory ownership/mode, socket ownership, peer UID and
 the actual registration address/node; it never fabricates a registration result.
 The daemon still authenticates the real process executable. Registration, polling

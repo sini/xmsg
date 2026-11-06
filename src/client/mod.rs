@@ -50,12 +50,8 @@ pub struct ClientOptions {
     pub agent_socket: PathBuf,
     pub max_frame_bytes: usize,
     pub operation_timeout: Duration,
-}
-
-#[derive(Clone, Debug)]
-pub struct RegistrationExpectation {
     pub service: String,
-    pub node: String,
+    pub expected_node: Option<String>,
     pub daemon_uid: u32,
 }
 
@@ -170,54 +166,56 @@ impl Connection {
 pub struct RegisteredService {
     connection: Option<Connection>,
     options: ClientOptions,
-    expected: RegistrationExpectation,
     address: String,
+    node: String,
     live: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
 pub struct AgentClient {
     options: ClientOptions,
-    expected: RegistrationExpectation,
     live: Arc<AtomicBool>,
 }
 
 impl RegisteredService {
-    pub async fn register(
-        options: ClientOptions,
-        expected: RegistrationExpectation,
-    ) -> Result<Self, ClientError> {
+    pub async fn register(options: ClientOptions) -> Result<Self, ClientError> {
         if options.max_frame_bytes == 0
             || options.max_frame_bytes > 16 * 1024 * 1024
             || options.operation_timeout.is_zero()
             || !options.register_socket.is_absolute()
             || !options.agent_socket.is_absolute()
-            || expected.service.is_empty()
-            || expected.service.contains('@')
-            || expected.node.is_empty()
+            || options.service.is_empty()
+            || options.service.contains('@')
+            || options
+                .expected_node
+                .as_ref()
+                .is_some_and(|node| node.is_empty())
         {
             return Err(ClientError::Configuration);
         }
-        let (mut connection, address) = timeout(options.operation_timeout, async {
+        let (mut connection, address, node) = timeout(options.operation_timeout, async {
             let mut connection =
-                Connection::connect(&options.register_socket, &options, expected.daemon_uid)
-                    .await?;
+                Connection::connect(&options.register_socket, &options, options.daemon_uid).await?;
             let response = connection
                 .exchange(&SvcRegisterRequest {
                     harness: Some("svc".to_owned()),
-                    name: expected.service.clone(),
+                    name: options.service.clone(),
                     cwd: Some("/".to_owned()),
                 })
                 .await?;
             let registration: Registration =
                 serde_json::from_value(response).map_err(|_| ClientError::Protocol)?;
             if registration.status != "ok"
-                || registration.node != expected.node
-                || registration.address != format!("{}@{}", expected.service, expected.node)
+                || registration.node.is_empty()
+                || options
+                    .expected_node
+                    .as_ref()
+                    .is_some_and(|node| node != &registration.node)
+                || registration.address != format!("{}@{}", options.service, registration.node)
             {
                 return Err(ClientError::Peer);
             }
-            Ok((connection, registration.address))
+            Ok((connection, registration.address, registration.node))
         })
         .await
         .map_err(|_| ClientError::Timeout)??;
@@ -226,8 +224,8 @@ impl RegisteredService {
         Ok(Self {
             connection: Some(connection),
             options,
-            expected,
             address,
+            node,
             live,
         })
     }
@@ -236,9 +234,7 @@ impl RegisteredService {
         self.connection.as_ref().map(|_| self.address.as_str())
     }
     pub fn node(&self) -> Option<&str> {
-        self.connection
-            .as_ref()
-            .map(|_| self.expected.node.as_str())
+        self.connection.as_ref().map(|_| self.node.as_str())
     }
 
     async fn service_exchange(
@@ -313,7 +309,6 @@ impl RegisteredService {
     pub fn agent_client(&self) -> AgentClient {
         AgentClient {
             options: self.options.clone(),
-            expected: self.expected.clone(),
             live: self.live.clone(),
         }
     }
@@ -347,7 +342,7 @@ impl AgentClient {
             let mut connection = Connection::connect(
                 &self.options.agent_socket,
                 &self.options,
-                self.expected.daemon_uid,
+                self.options.daemon_uid,
             )
             .await?;
             let result = connection.exchange(&request).await?;
