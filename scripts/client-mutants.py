@@ -35,9 +35,10 @@ def run(directory, test):
     env = {**os.environ, "CARGO_TARGET_DIR": str(ROOT / "target" / "client-mutants")}
     if test == "@graph":
         return subprocess.run(["python3", "scripts/client-graph.py"], cwd=directory, env=env, capture_output=True, text=True, timeout=60)
+    profile = env.get("CARGO_PROFILE", "dev")
     # Clear only this package: copied source trees must not reuse a prior mutant binary.
-    subprocess.run(["cargo", "clean", "-p", "xmsg"], cwd=directory, env=env, check=True, capture_output=True, timeout=120)
-    argv = ["cargo", "test", "--locked", "--profile", env.get("CARGO_PROFILE", "dev")]
+    subprocess.run(["cargo", "clean", "-p", "xmsg", "--profile", profile], cwd=directory, env=env, check=True, capture_output=True, timeout=120)
+    argv = ["cargo", "test", "--locked", "--profile", profile]
     if test == "@live":
         argv += ["--test", "shared_client_live"]
         target, selected, runtime_args = "shared_client_live", "pinned_and_candidate_service_contract", ["--ignored", "--nocapture"]
