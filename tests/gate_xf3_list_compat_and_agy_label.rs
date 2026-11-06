@@ -2309,6 +2309,13 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
 
     // Release `open_lock_agy` before Phase 3 (`codex`), so `my_pid` is no longer attested as `agy`
     // and the ancestry walk reaches step 5 (`CodexOwner`).
+    {
+        use std::os::fd::AsRawFd;
+        assert_eq!(
+            unsafe { libc::flock(open_lock_agy.as_raw_fd(), libc::LOCK_UN) },
+            0
+        );
+    }
     drop(open_lock_agy);
     let _ = fs::remove_file(&lock_agy);
     let _ = use_inproc_agent;

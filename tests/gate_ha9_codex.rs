@@ -68,6 +68,64 @@ mod linux_gate {
     use xmsg::process::PeerCred;
     use xmsg::storage;
 
+    #[test]
+    fn writer_lock_handover_during_concurrent_spawn() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream as BlockingStream;
+        use std::os::unix::process::CommandExt;
+        use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+        use std::process::Command;
+        use std::sync::mpsc;
+
+        let env = CodexTestEnv::new();
+        let root = "019a0000-0000-7000-8000-000000000171";
+        env.create_writer_lock(&env.codex_home, 101, root, 3);
+        let (tx, rx) = mpsc::channel();
+        let spawner = std::thread::spawn(move || {
+            for _ in 0..200 {
+                let (parent, child) = BlockingStream::pair().unwrap();
+                if tx.send(parent).is_err() {
+                    break;
+                }
+                let fd = child.as_raw_fd();
+                let mut command = Command::new("true");
+                // Hold the inherited OFD before exec closes CLOEXEC descriptors.
+                unsafe {
+                    command.pre_exec(move || {
+                        let mut byte = [1u8];
+                        if libc::write(fd, byte.as_ptr().cast(), 1) != 1
+                            || libc::read(fd, byte.as_mut_ptr().cast(), 1) != 1
+                        {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+                assert!(command.status().unwrap().success());
+            }
+        });
+        let mut failure = None;
+        for _ in 0..200 {
+            let mut gate = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            gate.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut ready = [0u8];
+            gate.read_exact(&mut ready).unwrap();
+            let handover = catch_unwind(AssertUnwindSafe(|| {
+                env.create_writer_lock(&env.codex_home, 102, root, 4);
+            }));
+            gate.write_all(&[1]).unwrap();
+            if let Err(error) = handover {
+                failure = Some(error);
+                break;
+            }
+        }
+        drop(rx);
+        spawner.join().unwrap();
+        if let Some(error) = failure {
+            resume_unwind(error);
+        }
+    }
+
     struct CodexTestEnv {
         _dir: TempDir,
         proc_root: PathBuf,
@@ -197,7 +255,16 @@ mod linux_gate {
             let lock_dir = home.join("thread-writer-locks");
             fs::create_dir_all(&lock_dir).unwrap();
             let lock_path = lock_dir.join(format!("{root_id}.lock"));
-            self.held_locks.lock().unwrap().remove(&lock_path);
+            if let Some(old) = self.held_locks.lock().unwrap().remove(&lock_path) {
+                // A concurrent fork can retain this OFD until exec, despite CLOEXEC.
+                let rc = unsafe { libc::flock(old.as_raw_fd(), libc::LOCK_UN) };
+                assert_eq!(
+                    rc,
+                    0,
+                    "release fixture writer lock: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
             let file = fs::OpenOptions::new()
                 .create(true)
                 .read(true)
