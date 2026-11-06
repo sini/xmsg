@@ -1174,8 +1174,9 @@ pub async fn deliver(
                 in_reply_to: None,
             };
             {
+                let cap = storage::svc_queue_cap_for_db(local.db);
                 let db = local.db.lock().map_err(db_err)?;
-                if !storage::insert_svc_message(&db, &svc_msg).map_err(db_err)? {
+                if !storage::insert_svc_message_with_cap(&db, &svc_msg, cap).map_err(db_err)? {
                     return Err(AppError::ServiceUnavailable(
                         "svc session message queue is full".to_string(),
                     ));
@@ -1558,8 +1559,11 @@ pub async fn push_reply(
                         origin: replier_origin,
                         in_reply_to: Some(in_reply_to.to_string()),
                     };
+                    let cap = storage::svc_queue_cap_for_db(local.db);
                     let inserted = match local.db.lock() {
-                        Ok(db) => storage::insert_svc_message(&db, &svc_msg).unwrap_or(false),
+                        Ok(db) => {
+                            storage::insert_svc_message_with_cap(&db, &svc_msg, cap).unwrap_or(false)
+                        }
                         Err(_) => false,
                     };
                     if inserted {

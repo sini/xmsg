@@ -25,3 +25,8 @@ print(f"all {len(actual)} integration targets registered with feature requiremen
 for target in manifest["test"]:
     expected = ["client"] if target["name"] == "shared_client" else ["daemon"]
     assert target.get("required-features") == expected, ("test feature requirement mismatch", target)
+
+client_mod = Path("src/client/mod.rs").read_text()
+assert "pub fn validate_service_name(" in client_mod, "xmsg::client::validate_service_name missing from client surface"
+assert "pub use wire::{ListResult, NodeStatus, Recipient, Registration, ReplyRecord, SendResult};" in client_mod, "xmsg::client::Registration missing from client surface"
+print("xmsg::client::validate_service_name and xmsg::client::Registration exported under client-only feature")

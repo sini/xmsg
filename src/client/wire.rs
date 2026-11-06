@@ -180,11 +180,17 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Registration {
     pub status: String,
     pub address: String,
     pub node: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_ttl_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_ttl_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub svc_queue_cap: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

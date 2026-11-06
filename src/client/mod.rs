@@ -4,7 +4,7 @@ mod origin;
 pub(crate) mod wire;
 
 pub use origin::Origin;
-pub use wire::{ListResult, NodeStatus, Recipient, ReplyRecord, SendResult};
+pub use wire::{ListResult, NodeStatus, Recipient, Registration, ReplyRecord, SendResult};
 
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -20,13 +20,88 @@ use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::time::timeout;
-use wire::{
-    AgentFrame, DeliveryFrame, Registration, ServiceResponse, SvcFrame, SvcRegisterRequest,
-};
+use wire::{AgentFrame, DeliveryFrame, ServiceResponse, SvcFrame, SvcRegisterRequest};
 
 /// Returns the real process UID used by the daemon's same-user service checks.
 pub fn current_uid() -> u32 {
     unsafe { libc::getuid() }
+}
+
+pub(crate) fn is_uuid_shaped(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    for (i, &b) in bytes.iter().enumerate() {
+        if i == 8 || i == 13 || i == 18 || i == 23 {
+            if b != b'-' {
+                return false;
+            }
+        } else if !b.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    true
+}
+
+pub(crate) fn is_instance_ref(s: &str) -> bool {
+    match s.split_once('~') {
+        Some((base, n)) => n.parse::<u32>().is_ok() && is_uuid_shaped(base),
+        None => is_uuid_shaped(s),
+    }
+}
+
+pub(crate) fn split_subaddress(ref_str: &str) -> Option<(&str, &str)> {
+    let (parent, child) = ref_str.split_once('/')?;
+    if is_instance_ref(parent) {
+        Some((parent, child))
+    } else {
+        None
+    }
+}
+
+/// Validates a service name across consumer configuration (`xmsg::client::validate_service_name`),
+/// service registration (`register.sock` in `src/svc.rs`), subagent names (`validate_subagent_name`),
+/// and origin checking (`check_origin` in `src/fed.rs`):
+/// - non-empty and at most 32 bytes;
+/// - not the reserved `"xmsg"`;
+/// - no collision with the instance or subagent namespace (`is_instance_ref`, `split_subaddress`, or `'/'`);
+/// - no forbidden address/delimiter characters (`@`, `·`, `~`, `.`, `:`, `/`) and only ASCII `[A-Za-z0-9_-]`.
+pub fn validate_service_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("service name must not be empty".to_string());
+    }
+    if name.len() > 32 {
+        return Err(format!(
+            "service name '{name}' exceeds maximum length of 32 bytes"
+        ));
+    }
+    if name == "xmsg" {
+        return Err("service name 'xmsg' is reserved".to_string());
+    }
+    if is_instance_ref(name) || split_subaddress(name).is_some() {
+        return Err(format!(
+            "service name '{name}' is UUID-shaped or collides with the instance/subagent namespace"
+        ));
+    }
+    if name.contains('@')
+        || name.contains('·')
+        || name.contains('~')
+        || name.contains('.')
+        || name.contains(':')
+        || name.contains('/')
+    {
+        return Err(format!(
+            "service name '{name}' contains forbidden character (@, ·, ~, ., : or /)"
+        ));
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(format!("invalid service name '{name}'"));
+    }
+    Ok(())
 }
 
 pub const SCHEMA_VERSION: u32 = 2;
@@ -171,8 +246,7 @@ impl Connection {
 pub struct RegisteredService {
     connection: Option<Connection>,
     options: ClientOptions,
-    address: String,
-    node: String,
+    registration: Registration,
     live: Arc<AtomicBool>,
 }
 
@@ -198,7 +272,7 @@ impl RegisteredService {
         {
             return Err(ClientError::Configuration);
         }
-        let (mut connection, address, node) = timeout(options.operation_timeout, async {
+        let (mut connection, registration) = timeout(options.operation_timeout, async {
             let mut connection =
                 Connection::connect(&options.register_socket, &options, options.daemon_uid).await?;
             let response = connection
@@ -220,7 +294,7 @@ impl RegisteredService {
             {
                 return Err(ClientError::Peer);
             }
-            Ok((connection, registration.address, registration.node))
+            Ok((connection, registration))
         })
         .await
         .map_err(|_| ClientError::Timeout)??;
@@ -229,17 +303,34 @@ impl RegisteredService {
         Ok(Self {
             connection: Some(connection),
             options,
-            address,
-            node,
+            registration,
             live,
         })
     }
 
+    pub fn registration(&self) -> Option<&Registration> {
+        self.connection.as_ref().map(|_| &self.registration)
+    }
     pub fn address(&self) -> Option<&str> {
-        self.connection.as_ref().map(|_| self.address.as_str())
+        self.connection.as_ref().map(|_| self.registration.address.as_str())
     }
     pub fn node(&self) -> Option<&str> {
-        self.connection.as_ref().map(|_| self.node.as_str())
+        self.connection.as_ref().map(|_| self.registration.node.as_str())
+    }
+    pub fn reply_ttl_secs(&self) -> Option<u64> {
+        self.connection
+            .as_ref()
+            .and_then(|_| self.registration.reply_ttl_secs)
+    }
+    pub fn idempotency_ttl_secs(&self) -> Option<u64> {
+        self.connection
+            .as_ref()
+            .and_then(|_| self.registration.idempotency_ttl_secs)
+    }
+    pub fn svc_queue_cap(&self) -> Option<usize> {
+        self.connection
+            .as_ref()
+            .and_then(|_| self.registration.svc_queue_cap)
     }
 
     async fn service_exchange(

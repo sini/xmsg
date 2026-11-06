@@ -39,28 +39,12 @@ pub fn cmp_proc_start(a: &str, b: &str) -> Ordering {
 }
 
 pub fn is_uuid_shaped(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    if bytes.len() != 36 {
-        return false;
-    }
-    for (i, &b) in bytes.iter().enumerate() {
-        if i == 8 || i == 13 || i == 18 || i == 23 {
-            if b != b'-' {
-                return false;
-            }
-        } else if !b.is_ascii_hexdigit() {
-            return false;
-        }
-    }
-    true
+    crate::client::is_uuid_shaped(s)
 }
 
 /// A11: a UUID, optionally followed by `~<n>`, is an instance ID; anything else is a name.
 pub fn is_instance_ref(s: &str) -> bool {
-    match s.split_once('~') {
-        Some((base, n)) => n.parse::<u32>().is_ok() && is_uuid_shaped(base),
-        None => is_uuid_shaped(s),
-    }
+    crate::client::is_instance_ref(s)
 }
 
 pub fn mint_uuid_v4() -> String {
@@ -85,28 +69,11 @@ pub fn mint_uuid_v4() -> String {
     )
 }
 
+/// Validates a service name across registration (`register.sock` in `src/svc.rs`),
+/// subagent names (`validate_subagent_name`), and origin checking (`check_origin` in `src/fed.rs`),
+/// delegating to the single shared validator `crate::client::validate_service_name`.
 pub fn validate_service_name(name: &str) -> Result<(), AppError> {
-    if name == "xmsg" {
-        return Err(AppError::BadRequest(
-            "service name 'xmsg' is reserved".to_string(),
-        ));
-    }
-    if name.contains('@')
-        || name.contains('·')
-        || name.contains('~')
-        || name.contains('.')
-        || name.contains(':')
-    {
-        return Err(AppError::BadRequest(format!(
-            "service name '{name}' contains forbidden character (@, ·, ~, . or :)"
-        )));
-    }
-    if is_uuid_shaped(name) {
-        return Err(AppError::BadRequest(format!(
-            "service name '{name}' is UUID-shaped"
-        )));
-    }
-    Ok(())
+    crate::client::validate_service_name(name).map_err(AppError::BadRequest)
 }
 
 /// HA9-A §2.1 & E3: splits a `<parent>/<child>` reference when the part before the first `/`
@@ -114,12 +81,7 @@ pub fn validate_service_name(name: &str) -> Result<(), AppError> {
 /// (such as a label `"fix/x"` or a service name `"a/b"`) returns `None` and takes the
 /// existing service/label lookup unchanged.
 pub fn split_subaddress(ref_str: &str) -> Option<(&str, &str)> {
-    let (parent, child) = ref_str.split_once('/')?;
-    if is_instance_ref(parent) {
-        Some((parent, child))
-    } else {
-        None
-    }
+    crate::client::split_subaddress(ref_str)
 }
 
 /// HA9-A §2.1: measured Claude subagent `agent_id` shapes:

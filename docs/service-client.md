@@ -18,7 +18,17 @@ the actual registration address/node; it never fabricates a registration result.
 Consumers can reuse `current_uid()` for the same-user service profile. The daemon
 still authenticates the real process executable. Registration, polling
 and agent requests must originate from that same process. Child processes do not
-inherit the registered service identity.
+inherit the registered service identity. Consumers can call
+`xmsg::client::validate_service_name` at config load to enforce the same
+service-name validator that `register.sock`, addressing and origin checking use
+(`1..=32` ASCII `[A-Za-z0-9_-]`, not `"xmsg"`, not UUID/instance-shaped, and no
+`/` or subagent prefix); `register.sock` refuses invalid service names at
+registration with `ClientError::Refused { code: "bad_request" }`.
+On registration, the daemon also reports its effective limits in force
+(`reply_ttl_secs`, `idempotency_ttl_secs`, and `svc_queue_cap` on
+`xmsg::client::Registration` and via accessors on `RegisteredService`);
+the fields are additive (`Option<...>`), so older clients ignore them and
+older daemons decode with `None`.
 
 Keep `RegisteredService` alive for poll/ACK. `agent_client()` returns a clonable
 agent handle for list/send/reply without serializing those calls behind a long

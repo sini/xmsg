@@ -196,6 +196,14 @@ pub struct ServeArgs {
     #[arg(long, env = "XMSG_IDEMPOTENCY_TTL", default_value_t = 86400)]
     pub idempotency_ttl: u64,
 
+    /// Per-service pending queue capacity (default: 100)
+    #[arg(
+        long,
+        env = "XMSG_SVC_QUEUE_CAP",
+        default_value_t = storage::MAX_SVC_QUEUE_PER_SESSION
+    )]
+    pub svc_queue_cap: usize,
+
     /// Registration socket path (defaults to $XDG_RUNTIME_DIR/xmsg/register.sock; on macOS without it, the Darwin user temp dir)
     #[arg(long, env = "XMSG_REGISTER_SOCK")]
     pub register_sock: Option<PathBuf>,
@@ -1050,6 +1058,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let reply_ttl = Duration::from_secs(args.reply_ttl);
     let idempotency_ttl = Duration::from_secs(args.idempotency_ttl);
+    storage::set_svc_queue_cap(&db, args.svc_queue_cap);
 
     let sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;

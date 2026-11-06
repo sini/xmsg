@@ -949,6 +949,37 @@ pub fn purge_agy_messages(conn: &Connection, ttl_secs: u64) -> Result<usize> {
 }
 
 pub const MAX_SVC_QUEUE_PER_SESSION: usize = 100;
+pub const DEFAULT_REPLY_TTL_SECS: u64 = 604_800;
+pub const DEFAULT_IDEMPOTENCY_TTL_SECS: u64 = 86_400;
+
+type SvcQueueCapEntry = (std::sync::Weak<std::sync::Mutex<Connection>>, usize);
+
+fn svc_queue_cap_registry() -> &'static std::sync::Mutex<std::collections::HashMap<usize, SvcQueueCapEntry>> {
+    static REGISTRY: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<usize, SvcQueueCapEntry>>,
+    > = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+pub fn set_svc_queue_cap(db: & std::sync::Arc<std::sync::Mutex<Connection>>, cap: usize) {
+    let key = std::sync::Arc::as_ptr(db) as usize;
+    let weak = std::sync::Arc::downgrade(db);
+    let mut map = svc_queue_cap_registry().lock().unwrap();
+    map.retain(|_, (w, _)| w.strong_count() > 0);
+    map.insert(key, (weak, cap));
+}
+
+pub fn svc_queue_cap_for_db(db: &std::sync::Arc<std::sync::Mutex<Connection>>) -> usize {
+    let key = std::sync::Arc::as_ptr(db) as usize;
+    let weak = std::sync::Arc::downgrade(db);
+    let map = svc_queue_cap_registry().lock().unwrap();
+    if let Some((w, cap)) = map.get(&key) {
+        if std::sync::Weak::ptr_eq(w, &weak) {
+            return *cap;
+        }
+    }
+    MAX_SVC_QUEUE_PER_SESSION
+}
 
 pub fn count_pending_svc_messages(conn: &Connection, session_id: &str) -> Result<usize> {
     let mut stmt = conn.prepare(
@@ -959,8 +990,16 @@ pub fn count_pending_svc_messages(conn: &Connection, session_id: &str) -> Result
 }
 
 pub fn insert_svc_message(conn: &Connection, msg: &SvcPendingMessage) -> Result<bool> {
+    insert_svc_message_with_cap(conn, msg, MAX_SVC_QUEUE_PER_SESSION)
+}
+
+pub fn insert_svc_message_with_cap(
+    conn: &Connection,
+    msg: &SvcPendingMessage,
+    cap: usize,
+) -> Result<bool> {
     let pending = count_pending_svc_messages(conn, &msg.session_id)?;
-    if pending >= MAX_SVC_QUEUE_PER_SESSION {
+    if pending >= cap {
         return Ok(false);
     }
     let origin_json = serde_json::to_string(&msg.origin)

@@ -1401,42 +1401,174 @@ async fn test_oracle_8_pi_server_minted_uuid_v4() {
 }
 
 // =============================================================================
-// Oracle 9: Service name validation refusals
+// Oracle 9: Service name validation refusals (including XR4 unified validator,
+// old inline fed regex vs validate_service_name corpus table, and live mesh names)
 // Mutant M9a-site: drop the check at registration => RED
 // Mutant M9a-fn: drop the char and UUID checks => RED
 // Mutant M9b: drop the xmsg reservation => RED
+// Mutant live-check-origin-skip-service-name-validation: skip validate_service_name in check_origin => RED
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oracle_9_service_name_validation_refusals() {
-    // 1. Direct validation tests for validate_service_name (catches M9a-fn and M9b)
-    assert!(
-        validate_service_name("xmsg").is_err(),
-        "Name 'xmsg' must be refused"
-    );
-    assert!(
-        validate_service_name("worker@host").is_err(),
-        "Name with '@' must be refused"
-    );
-    assert!(
-        validate_service_name("worker·daemon").is_err(),
-        "Name with '·' must be refused"
-    );
-    assert!(
-        validate_service_name("worker~2").is_err(),
-        "Name with '~' must be refused"
-    );
-    assert!(
-        validate_service_name("worker.daemon").is_err(),
-        "Name with '.' must be refused"
-    );
-    assert!(
-        validate_service_name("550e8400-e29b-41d4-a716-446655440000").is_err(),
-        "UUID-shaped service name must be refused"
-    );
-    assert!(validate_service_name("guard").is_ok());
-    assert!(validate_service_name("dispatcher").is_ok());
+    // 0. XR4 condition (1): Table cell comparing the old inline fed regex
+    //    `^[A-Za-z0-9._-]{1,32}$` versus `validate_service_name` (and `check_origin`) over a
+    //    generated corpus of names:
+    //    - valid names & live mesh service names (`matrix-xmsg`, `genie`, `genie-guard`,
+    //      `genie-expert-trusted`, `genie-expert-public`, `gateway`)
+    //    - edge lengths (0, 1, 31, 32, 33, 64)
+    //    - every ASCII punctuation & control byte (0x00..=0x7f) embedded in `a<byte>b` and single-byte
+    //    - non-ASCII Unicode (`café`, `worker·daemon`, `λ`, emoji)
+    //    - instance-shaped (`550e8400-e29b-41d4-a716-446655440000`, `<uuid>~2`)
+    //    - subaddress-shaped (`<uuid>/child`, `<uuid>~2/child`, `gateway/child`)
+    let old_fed_re = regex::Regex::new(r"^[A-Za-z0-9._-]{1,32}$").expect("valid regex");
+    let live_mesh_services = [
+        "matrix-xmsg",
+        "genie",
+        "genie-guard",
+        "genie-expert-trusted",
+        "genie-expert-public",
+        "gateway",
+    ];
+    let mut corpus: Vec<String> = Vec::new();
+    for s in live_mesh_services {
+        corpus.push(s.to_string());
+    }
+    for s in [
+        "",
+        "a",
+        "Z",
+        "0",
+        "_",
+        "-",
+        "guard",
+        "dispatcher",
+        "svc_01",
+        "xmsg",
+        "worker.daemon",
+        ".leading",
+        "trailing.",
+        "a..b",
+        "gateway/child",
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/child",
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa~2/child",
+        "550e8400-e29b-41d4-a716-446655440000",
+        "550e8400-e29b-41d4-a716-446655440000~2",
+        "café",
+        "worker·daemon",
+        "λ-svc",
+        "🤖",
+    ] {
+        corpus.push(s.to_string());
+    }
+    for len in [1usize, 31, 32, 33, 36, 64] {
+        corpus.push("a".repeat(len));
+        corpus.push("9".repeat(len));
+        corpus.push("_".repeat(len));
+        corpus.push("-".repeat(len));
+    }
+    for b in 0u8..=127u8 {
+        let ch = b as char;
+        corpus.push(ch.to_string());
+        corpus.push(format!("a{ch}b"));
+    }
 
-    // 2. Registration site validation via handle_svc_connection (catches M9a-site)
+    let mut disagreements_old_true_new_false: Vec<String> = Vec::new();
+    let mut disagreements_old_false_new_true: Vec<String> = Vec::new();
+    for cand in &corpus {
+        let old_ok = old_fed_re.is_match(cand);
+        let new_ok = validate_service_name(cand).is_ok();
+        let origin_ok =
+            xmsg::fed::check_origin(&xmsg::storage::Origin::service(cand, "test-node")).is_ok();
+        assert_eq!(
+            new_ok, origin_ok,
+            "check_origin and validate_service_name must agree on {cand:?}"
+        );
+        if old_ok && !new_ok {
+            disagreements_old_true_new_false.push(cand.clone());
+        } else if !old_ok && new_ok {
+            disagreements_old_false_new_true.push(cand.clone());
+        }
+    }
+    assert!(
+        disagreements_old_false_new_true.is_empty(),
+        "validate_service_name must never accept a name that the old fed regex rejected: {disagreements_old_false_new_true:?}"
+    );
+    // Every disagreement where `old_fed_re` matched (`true`) and `validate_service_name` refused (`false`)
+    // MUST be either `"xmsg"` (reserved sender name) or contain `'.'` (which the old `validate_service_name`
+    // at registration already rejected because `.` is a forbidden delimiter). Nothing previously valid in
+    // BOTH registration and parsing is rejected!
+    for d in &disagreements_old_true_new_false {
+        assert!(
+            d == "xmsg" || d.contains('.'),
+            "unexpected disagreement where old_fed_re=true and validate_service_name=false: {d:?}"
+        );
+    }
+    println!(
+        "XR4 table cell: corpus_size={} old_false_new_true=0 old_true_new_false={:?}",
+        corpus.len(),
+        disagreements_old_true_new_false
+    );
+
+    // XR4 condition (2): Positive control that every service name live in the mesh today
+    // is accepted by `validate_service_name` and `check_origin`.
+    for live_svc in live_mesh_services {
+        assert!(
+            validate_service_name(live_svc).is_ok(),
+            "live mesh service {live_svc:?} must pass validate_service_name"
+        );
+        assert!(
+            xmsg::fed::check_origin(&xmsg::storage::Origin::service(live_svc, "sini.hub")).is_ok(),
+            "live mesh service {live_svc:?} must pass check_origin"
+        );
+    }
+
+    // 1. Direct validation tests for validate_service_name and check_origin parity (catches M9a-fn, M9b, XR4)
+    let long_name = "a".repeat(33);
+    let max_valid_name = "a".repeat(32);
+    let refused = [
+        "",
+        "xmsg",
+        "worker@host",
+        "worker·daemon",
+        "worker~2",
+        "worker.daemon",
+        "svc:worker",
+        "gateway/child",
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/child",
+        "550e8400-e29b-41d4-a716-446655440000",
+        "550e8400-e29b-41d4-a716-446655440000~2",
+        "bad space",
+        "bad\nnewline",
+        long_name.as_str(),
+    ];
+    for bad in refused {
+        assert!(
+            validate_service_name(bad).is_err(),
+            "validate_service_name must refuse {bad:?}"
+        );
+        assert!(
+            xmsg::fed::check_origin(&xmsg::storage::Origin::service(bad, "test-node")).is_err(),
+            "check_origin must refuse service name {bad:?}"
+        );
+    }
+    for good in [
+        "guard",
+        "dispatcher",
+        "gateway-child",
+        "svc_01",
+        max_valid_name.as_str(),
+    ] {
+        assert!(
+            validate_service_name(good).is_ok(),
+            "validate_service_name must accept {good:?}"
+        );
+        assert!(
+            xmsg::fed::check_origin(&xmsg::storage::Origin::service(good, "test-node")).is_ok(),
+            "check_origin must accept service name {good:?}"
+        );
+    }
+
+    // 2. Registration site validation via handle_svc_connection (catches M9a-site & XR4)
     let tmp = tempdir().unwrap();
     let proc_root = tmp.path().join("proc");
     fs::create_dir_all(&proc_root).unwrap();
@@ -1452,21 +1584,39 @@ async fn test_oracle_9_service_name_validation_refusals() {
     fs::write(&exe_path, "exe").unwrap();
     let _ = std::os::unix::fs::symlink(&exe_path, proc_root.join("9991").join("exe"));
 
-    let bad_names = [
-        "xmsg",
-        "worker@host",
-        "550e8400-e29b-41d4-a716-446655440000",
-        "worker.dot",
-        "worker~tilde",
-        "svc:worker",
-    ];
-
+    let current_exe = std::env::current_exe().unwrap();
     let mut trusted = std::collections::HashMap::new();
-    for bad_name in bad_names {
-        trusted.insert(bad_name.to_string(), exe_path.clone());
+    for bad_name in refused {
+        trusted.insert(bad_name.to_string(), current_exe.clone());
+    }
+    trusted.insert("gateway-child".to_string(), current_exe.clone());
+    for live_svc in live_mesh_services {
+        trusted.insert(live_svc.to_string(), current_exe.clone());
     }
 
-    for bad_name in bad_names {
+    let state = std::sync::Arc::new(xmsg::http::AppState {
+        sessions_dirs: vec![],
+        agy_config: xmsg::agy::AgyConfig {
+            proc_root: proc_root.clone(),
+            ..Default::default()
+        },
+        agy_store: xmsg::agy::new_agy_store(),
+        pi_store: xmsg::pi::new_pi_store(),
+        pi_notify_tx: tokio::sync::broadcast::channel(16).0,
+        svc_store: svc_store.clone(),
+        svc_notify_tx: svc_notify_tx.clone(),
+        node_name: "test-node".to_string(),
+        max_body: 65536,
+        request_counter: std::sync::atomic::AtomicU64::new(1),
+        db: db.clone(),
+        notify_tx: tokio::sync::broadcast::channel(16).0,
+        reply_ttl: Duration::from_secs(60),
+        idempotency_ttl: Duration::from_secs(60),
+        long_poll_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
+        fed_state: None,
+    });
+
+    for bad_name in refused {
         let (client_read, server_write) = tokio::io::duplex(1024);
         let reader = tokio::io::BufReader::new(tokio::io::empty());
 
@@ -1479,27 +1629,7 @@ async fn test_oracle_9_service_name_validation_refusals() {
         let res = xmsg::svc::handle_svc_connection(
             reader,
             server_write,
-            std::sync::Arc::new(xmsg::http::AppState {
-                sessions_dirs: vec![],
-                agy_config: xmsg::agy::AgyConfig {
-                    proc_root: proc_root.clone(),
-                    ..Default::default()
-                },
-                agy_store: xmsg::agy::new_agy_store(),
-                pi_store: xmsg::pi::new_pi_store(),
-                pi_notify_tx: tokio::sync::broadcast::channel(16).0,
-                svc_store: svc_store.clone(),
-                svc_notify_tx: svc_notify_tx.clone(),
-                node_name: "test-node".to_string(),
-                max_body: 65536,
-                request_counter: std::sync::atomic::AtomicU64::new(1),
-                db: db.clone(),
-                notify_tx: tokio::sync::broadcast::channel(16).0,
-                reply_ttl: Duration::from_secs(60),
-                idempotency_ttl: Duration::from_secs(60),
-                long_poll_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
-                fed_state: None,
-            }),
+            state.clone(),
             &trusted,
             my_uid,
             my_uid,
@@ -1521,9 +1651,116 @@ async fn test_oracle_9_service_name_validation_refusals() {
         let v: serde_json::Value = serde_json::from_str(&resp_line).expect("valid JSON response");
         assert_eq!(
             v["status"], "error",
-            "Registration response for '{bad_name}' must be error"
+            "Registration response for '{bad_name}' must be error: {v}"
+        );
+        assert_eq!(
+            v["error"], "bad_request",
+            "Registration refusal for '{bad_name}' must carry error code bad_request: {v}"
         );
     }
+
+    // 3. End-to-end positive and negative control through xmsg::client::RegisteredService::register
+    let sock_dir = tmp.path().join("sock");
+    fs::create_dir_all(&sock_dir).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let reg_sock = sock_dir.join("register.sock");
+    let agent_sock = sock_dir.join("agent.sock");
+
+    let srv_reg_sock = reg_sock.clone();
+    let srv_state = state.clone();
+    let srv_trusted = trusted.clone();
+    let reg_srv = tokio::spawn(async move {
+        let _ = xmsg::agy::run_register_server(srv_reg_sock, srv_state, my_uid, srv_trusted).await;
+    });
+    let agent_listener = tokio::net::UnixListener::bind(&agent_sock).unwrap();
+    fs::set_permissions(&agent_sock, fs::Permissions::from_mode(0o600)).unwrap();
+    let srv_agent_state = state.clone();
+    let agent_srv = tokio::spawn(async move {
+        let _ =
+            xmsg::agent::run_agent_server_with_listener(agent_listener, srv_agent_state, my_uid)
+                .await;
+    });
+
+    for _ in 0..50 {
+        if reg_sock.exists() && agent_sock.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let current_pid = std::process::id();
+    let current_start =
+        xmsg::process::starttime(std::path::Path::new(xmsg::process::LIVE_PROC_ROOT), current_pid)
+            .unwrap_or_else(|_| "100".to_string());
+    setup_mock_proc(&proc_root, current_pid, &current_start);
+    let current_exe = std::env::current_exe().unwrap();
+    let _ = fs::remove_file(proc_root.join(current_pid.to_string()).join("exe"));
+    let _ = std::os::unix::fs::symlink(
+        &current_exe,
+        proc_root.join(current_pid.to_string()).join("exe"),
+    );
+    fs::write(&exe_path, fs::read(&current_exe).unwrap_or_default()).ok();
+
+    for bad_client_name in [
+        "gateway/child",
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/child",
+        "550e8400-e29b-41d4-a716-446655440000",
+        "550e8400-e29b-41d4-a716-446655440000~2",
+        "xmsg",
+        "worker.dot",
+        "svc:worker",
+        "worker~2",
+        "worker·daemon",
+        "bad space",
+        long_name.as_str(),
+    ] {
+        let opts = xmsg::client::ClientOptions {
+            register_socket: reg_sock.clone(),
+            agent_socket: agent_sock.clone(),
+            max_frame_bytes: 65536,
+            operation_timeout: Duration::from_secs(2),
+            service: bad_client_name.to_string(),
+            expected_node: Some("test-node".to_string()),
+            daemon_uid: my_uid,
+        };
+        let err = match xmsg::client::RegisteredService::register(opts).await {
+            Ok(_) => panic!("RegisteredService::register must refuse {bad_client_name:?}"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(
+                &err,
+                xmsg::client::ClientError::Refused { code } if code == "bad_request"
+            ),
+            "RegisteredService::register for {bad_client_name:?} must surface Refused {{ code: \"bad_request\" }}, got: {err:?}"
+        );
+    }
+
+    // Positive control for every service name live in the mesh today: registers via
+    // RegisteredService::register and is accepted as a federation origin.
+    for live_svc in live_mesh_services {
+        let opts = xmsg::client::ClientOptions {
+            register_socket: reg_sock.clone(),
+            agent_socket: agent_sock.clone(),
+            max_frame_bytes: 65536,
+            operation_timeout: Duration::from_secs(2),
+            service: live_svc.to_string(),
+            expected_node: Some("test-node".to_string()),
+            daemon_uid: my_uid,
+        };
+        let client = xmsg::client::RegisteredService::register(opts)
+            .await
+            .unwrap_or_else(|e| panic!("live mesh service {live_svc:?} must register: {e:?}"));
+        assert_eq!(
+            client.address(),
+            Some(format!("{live_svc}@test-node").as_str())
+        );
+        drop(client);
+    }
+
+    reg_srv.abort();
+    agent_srv.abort();
 }
 
 /// XS3 (HB1 self-review C3a): `sync_claims_entries` (and `resolve_caller_session_peer` /

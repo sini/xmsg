@@ -2166,14 +2166,11 @@ pub fn check_origin(origin: &storage::Origin) -> Result<(), AppError> {
             origin.node
         )));
     }
-    let name_re = regex::Regex::new(r"^[A-Za-z0-9._-]{1,32}$").expect("valid regex");
     match (&origin.service, &origin.id) {
         (Some(_), Some(_)) => Err(AppError::BadRequest(
             "origin names both a service and an instance".to_string(),
         )),
-        (Some(name), None) if !name_re.is_match(name) => Err(AppError::BadRequest(format!(
-            "invalid service name '{name}'"
-        ))),
+        (Some(name), None) => crate::claim::validate_service_name(name),
         (None, Some(id))
             if id.is_empty()
                 || id.len() > 128

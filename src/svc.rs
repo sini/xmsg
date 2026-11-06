@@ -219,20 +219,8 @@ pub async fn handle_svc_connection_peer<
     let reply_ttl = state.reply_ttl;
     let raw_name = req.name.trim();
     let name = raw_name.to_string();
-    if name.is_empty() {
-        let err_resp = serde_json::json!({
-            "status": "error",
-            "detail": "service name must not be empty",
-        });
-        let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
-        return Err(AppError::BadRequest("service name must not be empty".to_string()).into());
-    }
-
     if let Err(e) = crate::claim::validate_service_name(&name) {
-        let err_resp = serde_json::json!({
-            "status": "error",
-            "detail": e.to_string(),
-        });
+        let err_resp = e.frame();
         let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
         return Err(e.into());
     }
@@ -241,38 +229,28 @@ pub async fn handle_svc_connection_peer<
         let expected_name =
             crate::surface::leaf_service_name(leaf_principal.as_deref().unwrap_or(""));
         if name != expected_name {
-            let err_resp = serde_json::json!({
-                "status": "error",
-                "detail": format!("service name '{raw_name}' does not match leaf principal"),
-            });
-            let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
-            return Err(AppError::NotRecipient(format!(
+            let e = AppError::NotRecipient(format!(
                 "service name '{raw_name}' does not match leaf principal"
-            ))
-            .into());
+            ));
+            let err_resp = e.frame();
+            let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+            return Err(e.into());
         }
 
         if peer_uid != my_uid {
-            let err_resp = serde_json::json!({
-                "status": "error",
-                "detail": format!("peer UID {peer_uid} does not match server UID {my_uid}"),
-            });
-            let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
-            return Err(AppError::NotRecipient(format!(
+            let e = AppError::NotRecipient(format!(
                 "peer UID {peer_uid} does not match server UID {my_uid}"
-            ))
-            .into());
+            ));
+            let err_resp = e.frame();
+            let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+            return Err(e.into());
         }
 
         if !peer.is_pin_alive() {
-            let err_resp = serde_json::json!({
-                "status": "error",
-                "detail": format!("peer process {peer_pid} is no longer alive"),
-            });
+            let e = AppError::NotFound(format!("peer process {peer_pid} is no longer alive"));
+            let err_resp = e.frame();
             let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
-            return Err(
-                AppError::NotFound(format!("peer process {peer_pid} is no longer alive")).into(),
-            );
+            return Err(e.into());
         }
 
         peer.starttime(&proc_root)
@@ -281,10 +259,7 @@ pub async fn handle_svc_connection_peer<
         match verify_svc_process_peer(&proc_root, trusted_svc_exes, my_uid, &peer, &name) {
             Ok(st) => st,
             Err(e) => {
-                let err_resp = serde_json::json!({
-                    "status": "error",
-                    "detail": e.to_string(),
-                });
+                let err_resp = e.frame();
                 let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
                 return Err(e.into());
             }
@@ -305,15 +280,12 @@ pub async fn handle_svc_connection_peer<
         }
     };
     if conflict {
-        let err_resp = serde_json::json!({
-            "status": "error",
-            "detail": format!("service '{session_id}' already has an active registration"),
-        });
-        let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
-        return Err(AppError::BadRequest(format!(
+        let e = AppError::BadRequest(format!(
             "service '{session_id}' already has an active registration"
-        ))
-        .into());
+        ));
+        let err_resp = e.frame();
+        let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+        return Err(e.into());
     }
 
     {
@@ -328,12 +300,18 @@ pub async fn handle_svc_connection_peer<
         store.write().unwrap().insert(session_id.clone(), info);
     }
 
-    // The registration's address and this node's name (AM-4); MA's origin check reads
-    // the node.
+    // The registration's address, this node's name (AM-4), and the daemon's effective
+    // limits in force (XR5): reply TTL, idempotency TTL, and per-service queue cap.
+    let reply_ttl_secs = state.reply_ttl.as_secs();
+    let idempotency_ttl_secs = state.idempotency_ttl.as_secs();
+    let svc_queue_cap = storage::svc_queue_cap_for_db(&state.db);
     let ok_resp = serde_json::to_value(crate::client::wire::Registration {
         status: "ok".to_owned(),
         address: format!("{session_id}@{}", state.node_name),
         node: state.node_name.clone(),
+        reply_ttl_secs: Some(reply_ttl_secs),
+        idempotency_ttl_secs: Some(idempotency_ttl_secs),
+        svc_queue_cap: Some(svc_queue_cap),
     })?;
     writer.write_all(format!("{ok_resp}\n").as_bytes()).await?;
 
@@ -786,13 +764,14 @@ pub async fn run_leaf_inbox_task(
 
                 // F2 (no silent loss or spin): propagate storage errors, do not ack hub, back off and repoll
                 let store_res = (|| -> Result<bool, AppError> {
+                    let cap = storage::svc_queue_cap_for_db(&db);
                     let mut conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
                     let tx = conn
                         .transaction()
                         .map_err(|e| AppError::Internal(e.to_string()))?;
                     storage::insert_message(&tx, &msg_record)
                         .map_err(|e| AppError::Internal(e.to_string()))?;
-                    let queued = storage::insert_svc_message(&tx, &svc_msg)
+                    let queued = storage::insert_svc_message_with_cap(&tx, &svc_msg, cap)
                         .map_err(|e| AppError::Internal(e.to_string()))?;
                     if !queued {
                         return Err(AppError::ServiceUnavailable(

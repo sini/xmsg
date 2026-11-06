@@ -4,7 +4,9 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use xmsg::client::{ClientError, ClientOptions, ListQuery, RegisteredService};
+use xmsg::client::{
+    validate_service_name, ClientError, ClientOptions, ListQuery, RegisteredService,
+};
 
 fn fixture() -> (TempDir, ClientOptions, UnixListener, UnixListener) {
     let temp = tempfile::tempdir().unwrap();
@@ -381,6 +383,100 @@ async fn service_deadlines_expire_and_drop_registration() {
         assert!(started.elapsed() >= Duration::from_secs(wait_secs));
         assert!(client.address().is_none());
         assert!(client.node().is_none());
+        server.abort();
+        let _ = server.await;
+    }
+}
+
+#[test]
+fn exported_service_name_validator_matches_mesh_and_refusals() {
+    for live in [
+        "matrix-xmsg",
+        "genie",
+        "genie-guard",
+        "genie-expert-trusted",
+        "genie-expert-public",
+        "gateway",
+        "bridge",
+        &"a".repeat(32),
+    ] {
+        assert!(
+            validate_service_name(live).is_ok(),
+            "live/valid service {live:?} must pass validate_service_name"
+        );
+    }
+    for bad in [
+        "",
+        "xmsg",
+        "gateway/child",
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/child",
+        "550e8400-e29b-41d4-a716-446655440000",
+        "550e8400-e29b-41d4-a716-446655440000~2",
+        "worker@host",
+        "worker·daemon",
+        "worker~2",
+        "worker.daemon",
+        "svc:worker",
+        "bad space",
+        "bad\nnewline",
+        &"a".repeat(33),
+    ] {
+        assert!(
+            validate_service_name(bad).is_err(),
+            "invalid service {bad:?} must be refused by validate_service_name"
+        );
+    }
+}
+
+#[tokio::test]
+async fn registration_exposes_effective_limits_and_absent_baseline_fields() {
+    // 1. Pre-XR5 baseline daemon response (fields absent -> None)
+    {
+        let (_temp, options, register, _agent) = fixture();
+        let server = tokio::spawn(async move {
+            let mut stream = BufReader::new(register.accept().await.unwrap().0);
+            request(&mut stream, registration()).await;
+            std::future::pending::<()>().await;
+        });
+        let client = RegisteredService::register(options).await.unwrap();
+        assert_eq!(client.reply_ttl_secs(), None);
+        assert_eq!(client.idempotency_ttl_secs(), None);
+        assert_eq!(client.svc_queue_cap(), None);
+        let reg = client.registration().unwrap();
+        assert_eq!(reg.reply_ttl_secs, None);
+        assert_eq!(reg.idempotency_ttl_secs, None);
+        assert_eq!(reg.svc_queue_cap, None);
+        server.abort();
+        let _ = server.await;
+    }
+
+    // 2. XR5 daemon response (effective limits populated -> Some(...))
+    {
+        let (_temp, options, register, _agent) = fixture();
+        let server = tokio::spawn(async move {
+            let mut stream = BufReader::new(register.accept().await.unwrap().0);
+            request(
+                &mut stream,
+                json!({
+                    "status": "ok",
+                    "address": "bridge@fixture",
+                    "node": "fixture",
+                    "reply_ttl_secs": 3600,
+                    "idempotency_ttl_secs": 1800,
+                    "svc_queue_cap": 42
+                }),
+            )
+            .await;
+            std::future::pending::<()>().await;
+        });
+        let client = RegisteredService::register(options).await.unwrap();
+        assert_eq!(client.reply_ttl_secs(), Some(3600));
+        assert_eq!(client.idempotency_ttl_secs(), Some(1800));
+        assert_eq!(client.svc_queue_cap(), Some(42));
+        let reg = client.registration().unwrap();
+        assert_eq!(reg.reply_ttl_secs, Some(3600));
+        assert_eq!(reg.idempotency_ttl_secs, Some(1800));
+        assert_eq!(reg.svc_queue_cap, Some(42));
         server.abort();
         let _ = server.await;
     }
