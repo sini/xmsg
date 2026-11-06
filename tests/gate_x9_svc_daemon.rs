@@ -601,6 +601,7 @@ async fn test_oracle_5_second_live_registration_refused() {
                 starttime: child_start.to_string(),
                 cwd: "/workspace".to_string(),
                 registered_at: xmsg::storage::now_epoch_secs(),
+                token: 1,
             },
         );
     }

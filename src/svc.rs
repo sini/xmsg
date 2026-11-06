@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
@@ -35,6 +36,7 @@ pub struct SvcSessionInfo {
     pub starttime: String,
     pub cwd: String,
     pub registered_at: i64,
+    pub token: u64,
 }
 
 pub type SvcStore = Arc<RwLock<HashMap<String, SvcSessionInfo>>>;
@@ -43,10 +45,10 @@ pub fn new_svc_store() -> SvcStore {
     Arc::new(RwLock::new(HashMap::new()))
 }
 
-fn svc_conn_gen_map() -> &'static Mutex<HashMap<(usize, String), u64>> {
-    static MAP: std::sync::OnceLock<Mutex<HashMap<(usize, String), u64>>> =
-        std::sync::OnceLock::new();
-    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+static NEXT_SVC_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+pub fn next_svc_token() -> u64 {
+    NEXT_SVC_TOKEN.fetch_add(1, Ordering::Relaxed)
 }
 
 pub fn is_svc_session_alive(proc_root: &Path, info: &SvcSessionInfo) -> bool {
@@ -279,8 +281,7 @@ pub async fn handle_svc_connection_peer<
     // identity. Re-registering the same `session_id` from the same `(peer_pid, starttime)`
     // remains permitted; registering a different `session_id` from the same live process is
     // refused with `process_already_registered`.
-    let store_key = (Arc::as_ptr(&store) as usize, session_id.clone());
-    let (name_conflict, other_svc_for_pid, conn_gen) = {
+    let (name_conflict, other_svc_for_pid, my_token) = {
         let mut store_lock = store.write().unwrap();
         let name_conflict = store_lock.get(&session_id).is_some_and(|existing| {
             (existing.pid != peer_pid || existing.starttime != starttime)
@@ -299,12 +300,9 @@ pub async fn handle_svc_connection_peer<
                 })
                 .map(|existing| existing.session_id.clone())
         };
-        let mut gen_val = 0u64;
+        let mut token_val = 0u64;
         if !name_conflict && other_svc_for_pid.is_none() {
-            let mut gen_map = svc_conn_gen_map().lock().unwrap();
-            let entry = gen_map.entry(store_key.clone()).or_insert(0);
-            *entry += 1;
-            gen_val = *entry;
+            token_val = next_svc_token();
             let info = SvcSessionInfo {
                 session_id: session_id.clone(),
                 name: name.clone(),
@@ -312,10 +310,11 @@ pub async fn handle_svc_connection_peer<
                 starttime: starttime.clone(),
                 cwd: req.cwd.unwrap_or_else(|| "/".to_string()),
                 registered_at: now_epoch_secs(),
+                token: token_val,
             };
             store_lock.insert(session_id.clone(), info);
         }
-        (name_conflict, other_svc_for_pid, gen_val)
+        (name_conflict, other_svc_for_pid, token_val)
     };
     if name_conflict {
         let e = AppError::BadRequest(format!(
@@ -491,13 +490,9 @@ pub async fn handle_svc_connection_peer<
 
     {
         let mut store_lock = store.write().unwrap();
-        let is_current_gen =
-            svc_conn_gen_map().lock().unwrap().get(&store_key).copied() == Some(conn_gen);
-        if is_current_gen {
-            if let Some(info) = store_lock.get(&session_id) {
-                if info.pid == peer_pid && info.starttime == starttime {
-                    store_lock.remove(&session_id);
-                }
+        if let Some(info) = store_lock.get(&session_id) {
+            if info.pid == peer_pid && info.starttime == starttime && info.token == my_token {
+                store_lock.remove(&session_id);
             }
         }
     }

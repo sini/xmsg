@@ -1793,7 +1793,56 @@ async fn test_oracle_9_service_name_validation_refusals() {
         assert_eq!(delivered.message_id(), sent.message_id);
         assert_eq!(delivered.origin().service.as_deref(), Some(*live_svc));
         client.ack(delivered.message_id()).await.unwrap();
+
+        // R-2 EOF token oracle: same process re-registers `live_svc` on connection 2, closes
+        // connection 1, and asserts `live_svc` remains registered and connection 2's sends
+        // continue to be stamped with `live_svc`.
+        let token1 = svc_store.read().unwrap().get(*live_svc).unwrap().token;
+        let opts2 = xmsg::client::ClientOptions {
+            register_socket: reg_sock.clone(),
+            agent_socket: agent_sock.clone(),
+            max_frame_bytes: 65536,
+            operation_timeout: Duration::from_secs(2),
+            service: live_svc.to_string(),
+            expected_node: Some("test-node".to_string()),
+            daemon_uid: my_uid,
+        };
+        let mut client2 = xmsg::client::RegisteredService::register(opts2)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("same-name re-registration for {live_svc:?} must succeed: {e:?}")
+            });
+        let token2 = svc_store.read().unwrap().get(*live_svc).unwrap().token;
+        assert_ne!(
+            token1, token2,
+            "each registration must receive a distinct token"
+        );
         drop(client);
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(
+            svc_store.read().unwrap().contains_key(*live_svc),
+            "closing superseded connection 1 must not remove connection 2's registration for {live_svc:?}"
+        );
+        let listed = client2
+            .list(xmsg::client::ListQuery::default())
+            .await
+            .unwrap();
+        assert!(
+            listed
+                .recipients
+                .iter()
+                .any(|r| r.address == addr && r.kind == "service"),
+            "connection 2 must still be listed after connection 1 EOF"
+        );
+        let sent2 = client2
+            .send(&addr, "xa1 reregistered self-send", None)
+            .await
+            .unwrap();
+        let delivered2 = client2.poll(1).await.unwrap().unwrap();
+        assert_eq!(delivered2.message_id(), sent2.message_id);
+        assert_eq!(delivered2.origin().service.as_deref(), Some(*live_svc));
+        client2.ack(delivered2.message_id()).await.unwrap();
+        drop(client2);
     }
 
     reg_srv.abort();

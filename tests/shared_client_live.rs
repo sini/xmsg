@@ -339,9 +339,22 @@ async fn exercise_candidate_service_name_validation(binary: &Path) {
     assert_eq!(delivery.text(), "positive control self-send");
     client.ack(delivery.message_id()).await.unwrap();
 
-    // Re-registering the SAME service name from the same process remains permitted.
+    // Re-registering the SAME service name from the same process remains permitted:
+    // connection 1 (`client`) registers `"gateway-child"`, connection 2 (`reregistered`)
+    // re-registers `"gateway-child"`, connection 1 is closed and its server-side EOF runs,
+    // and `"gateway-child"` remains registered while connection 2's sends remain stamped
+    // with `"gateway-child"`.
     let mut reregistered = RegisteredService::register(valid_options).await.unwrap();
     drop(client);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let listed_after_eof = reregistered.list(ListQuery::default()).await.unwrap();
+    assert!(
+        listed_after_eof
+            .recipients
+            .iter()
+            .any(|r| r.address == address && r.kind == "service"),
+        "closing superseded connection 1 must not remove connection 2's registration for {address}"
+    );
     let sent2 = reregistered
         .send(&address, "reregistered self-send", None)
         .await
