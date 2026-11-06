@@ -490,6 +490,14 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             )?;
             if !has_col {
                 conn.execute_batch(&format!("ALTER TABLE codex_roots ADD COLUMN {col} {ddl}"))?;
+                if col == "active" {
+                    // C1: In pre-resume databases (which lack the `active` column), every
+                    // unloaded, ended, or restarted root had `revoked = 1` because `revoked`
+                    // was the only non-live column. Clear `revoked = 0` when adding `active`
+                    // so pre-existing rows upgrade as `StaleAfterResume` rather than
+                    // sticky `RevokedByOperator`.
+                    conn.execute_batch("UPDATE codex_roots SET revoked = 0")?;
+                }
             }
         }
         return Ok(());
@@ -2481,8 +2489,9 @@ pub fn startup_invalidate_codex(
             params![id],
         )?;
         if rev != 0 {
-            revoked.insert(id);
-        } else {
+            revoked.insert(id.clone());
+        }
+        if !home.is_empty() {
             stale.insert(
                 id.clone(),
                 PersistedStaleCodexRoot {

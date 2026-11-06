@@ -2982,6 +2982,14 @@ mod linux_gate {
             replaced_ino_res.is_err(),
             "resume with a replaced rollout inode must be refused"
         );
+        assert!(
+            xmsg::codex::for_state(&env.state)
+                .lock()
+                .unwrap()
+                .store
+                .is_revoked(root_p),
+            "P8: rollout inode replacement on resume must transition root_p to RevokedByOperator (is_revoked == true)"
+        );
         // Restore original rollout inode and clear the security revocation caused by the inode-mismatch probe:
         fs::remove_file(&root_rollout_path).unwrap();
         fs::rename(&orig_rollout_backup, &root_rollout_path).unwrap();
@@ -2991,6 +2999,49 @@ mod linux_gate {
             let db = env.state.db.lock().unwrap();
             storage::unrevoke_codex_root_by_operator(&db, root_p).unwrap();
         }
+
+        // C2: While `root_p` is parked (`StaleAfterResume`), an MCP tool call from `root_p` is refused,
+        // `xmsg serve` restarts (`init_for_state`), and a valid-witness resume follows and returns `Ok`
+        // (proving `resolve_codex_mcp_caller` did NOT flip `codex_roots.revoked = 1` on a parked root).
+        let parked_mcp_res = handle_agent_frame(
+            &env.state,
+            &peer_o2,
+            AgentFrame::List {
+                schema_version: None,
+                name: None,
+                node: None,
+                kind: None,
+                status: None,
+                within: None,
+                as_agent: None,
+                codex_session: Some(root_p.to_string()),
+                codex_thread: Some(root_p.to_string()),
+                codex_turn: None,
+            },
+        )
+        .await;
+        assert!(
+            parked_mcp_res.is_err(),
+            "C2: MCP call from parked root must be refused"
+        );
+        xmsg::codex::init_for_state(
+            &env.state,
+            CodexConfig {
+                trusted_codex_exes: vec![env.codex_exe.clone()],
+                codex_homes: vec![env.codex_home.clone()],
+                proc_root: env.proc_root.clone(),
+            },
+        );
+        // Re-admit sender_p after bus restart so sender_p can send in Case 3:
+        handle_codex_hook_frame(
+            &env.state,
+            &peer_sender,
+            "SessionStart",
+            None,
+            &json!({"session_id": sender_p, "source": "resume", "cwd": "/workspace"}),
+        )
+        .await
+        .unwrap();
 
         // Case 3: `--no-daemon` (`codex --no-daemon exec resume <P>`) rebinds `P` to embedded owner O3 and drains/sends:
         let _ = fs::remove_file(env.proc_root.join(pid_o2.to_string()).join("fd/4"));
@@ -3140,7 +3191,8 @@ mod linux_gate {
             "Case 7 RevokedByOperator root must be refused for MCP tool calls"
         );
 
-        // Explicit operator `--unrevoke` (`revoked: false`) clears `RevokedByOperator` and allows re-admission:
+        // Explicit operator `--unrevoke` (`revoked: false`) clears `RevokedByOperator` back to `StaleAfterResume`
+        // while preserving the `(rollout_dev, rollout_ino)` pin both before and after a bus restart (C3):
         handle_agent_frame(
             &env.state,
             &peer_o3,
@@ -3161,9 +3213,179 @@ mod linux_gate {
         )
         .await;
         assert!(
-        unrev_res.is_ok(),
-        "After explicit operator --unrevoke, SessionStart(resume) with valid witness must succeed: {unrev_res:?}"
-    );
+            unrev_res.is_ok(),
+            "After explicit operator --unrevoke (before restart), SessionStart(resume) with valid witness must succeed: {unrev_res:?}"
+        );
+
+        // C3: Now revoke `root_p`, restart the bus (`init_for_state`), run `--unrevoke` AFTER the restart,
+        // and verify that `root_p`'s `(rollout_dev, rollout_ino)` pin was preserved across the restart
+        // (replacing the rollout inode after `--unrevoke` fails closed and re-revokes `root_p`, whereas the
+        // original rollout inode succeeds):
+        handle_agent_frame(
+            &env.state,
+            &peer_o3,
+            AgentFrame::CodexRevoke {
+                schema_version: None,
+                session_id: root_p.to_string(),
+                revoked: true,
+            },
+        )
+        .await
+        .unwrap();
+        xmsg::codex::init_for_state(
+            &env.state,
+            CodexConfig {
+                trusted_codex_exes: vec![env.codex_exe.clone()],
+                codex_homes: vec![env.codex_home.clone()],
+                proc_root: env.proc_root.clone(),
+            },
+        );
+        assert!(
+            handle_codex_hook_frame(
+                &env.state,
+                &peer_o3,
+                "SessionStart",
+                None,
+                &json!({"session_id": root_p, "source": "resume", "cwd": "/workspace"}),
+            )
+            .await
+            .is_err(),
+            "C3: revoked root must remain refused after bus restart"
+        );
+        handle_agent_frame(
+            &env.state,
+            &peer_o3,
+            AgentFrame::CodexRevoke {
+                schema_version: None,
+                session_id: root_p.to_string(),
+                revoked: false,
+            },
+        )
+        .await
+        .unwrap();
+        let c3_rollout_bak = env._dir.path().join("c3_root_rollout.bak");
+        fs::rename(&root_rollout_path, &c3_rollout_bak).unwrap();
+        fs::write(
+            &root_rollout_path,
+            format!(
+                "{}\n",
+                json!({"timestamp": "2026-11-04T12:00:00Z", "type": "session_meta", "payload": {"id": root_p, "session_id": root_p, "cwd": "/workspace"}})
+            ),
+        )
+        .unwrap();
+        let c3_swapped_res = handle_codex_hook_frame(
+            &env.state,
+            &peer_o3,
+            "SessionStart",
+            None,
+            &json!({"session_id": root_p, "source": "resume", "cwd": "/workspace"}),
+        )
+        .await;
+        assert!(
+            c3_swapped_res.is_err(),
+            "C3: rollout inode pin must survive revoke -> bus restart -> unrevoke and refuse a swapped rollout inode"
+        );
+        assert!(
+            xmsg::codex::for_state(&env.state)
+                .lock()
+                .unwrap()
+                .store
+                .is_revoked(root_p),
+            "C3: swapped rollout inode after restart + unrevoke must re-revoke root_p"
+        );
+        fs::remove_file(&root_rollout_path).unwrap();
+        fs::rename(&c3_rollout_bak, &root_rollout_path).unwrap();
+        handle_agent_frame(
+            &env.state,
+            &peer_o3,
+            AgentFrame::CodexRevoke {
+                schema_version: None,
+                session_id: root_p.to_string(),
+                revoked: false,
+            },
+        )
+        .await
+        .unwrap();
+        let c3_ok_res = handle_codex_hook_frame(
+            &env.state,
+            &peer_o3,
+            "SessionStart",
+            None,
+            &json!({"session_id": root_p, "source": "resume", "cwd": "/workspace"}),
+        )
+        .await;
+        assert!(
+            c3_ok_res.is_ok(),
+            "C3: after restoring original rollout inode and --unrevoke across restart, resume must succeed: {c3_ok_res:?}"
+        );
+
+        // C1: Build a real pre-resume v3-shaped SQLite database (`codex_roots` with `revoked = 1` and NO `active` column),
+        // run `storage::init_db` + `init_for_state`, and verify a valid-witness resume succeeds!
+        {
+            let v3_conn = rusqlite::Connection::open_in_memory().unwrap();
+            v3_conn
+                .execute_batch(
+                    "PRAGMA user_version = 3;
+                     CREATE TABLE codex_roots (
+                         root_id TEXT PRIMARY KEY,
+                         codex_home TEXT NOT NULL,
+                         owner_pid INTEGER NOT NULL,
+                         owner_starttime TEXT NOT NULL,
+                         generation INTEGER NOT NULL,
+                         label TEXT NOT NULL,
+                         cwd TEXT,
+                         registered_at INTEGER NOT NULL,
+                         revoked INTEGER NOT NULL DEFAULT 0
+                     );",
+                )
+                .unwrap();
+            let root_v3 = "019a0000-0000-7000-8000-000000000178";
+            v3_conn
+                .execute(
+                    "INSERT INTO codex_roots (root_id, codex_home, owner_pid, owner_starttime, generation, label, cwd, registered_at, revoked)
+                     VALUES (?1, ?2, ?3, ?4, 1, 'v3-root', '/workspace', 1000, 1)",
+                    rusqlite::params![
+                        root_v3,
+                        env.codex_home.to_string_lossy().as_ref(),
+                        pid_o1,
+                        "8101"
+                    ],
+                )
+                .unwrap();
+            storage::init_db(&v3_conn).unwrap();
+            let v3_db = Arc::new(Mutex::new(v3_conn));
+            xmsg::codex::init_for_db(
+                &v3_db,
+                CodexConfig {
+                    trusted_codex_exes: vec![env.codex_exe.clone()],
+                    codex_homes: vec![env.codex_home.clone()],
+                    proc_root: env.proc_root.clone(),
+                },
+            );
+            env.create_writer_lock(&env.codex_home, pid_o3, root_v3, 6);
+            env.write_root_rollout(&env.codex_home, root_v3, "/workspace");
+            let v3_rt = xmsg::codex::for_db(&v3_db);
+            let v3_rebind = {
+                let mut rt = v3_rt.lock().unwrap();
+                let cfg = rt.config.clone();
+                assert!(
+                    !rt.store.is_revoked(root_v3),
+                    "C1: pre-v4 DB migration must clear revoked = 0 when adding active column"
+                );
+                rt.store.rebind_resumed_root(
+                    &cfg,
+                    pid_o3,
+                    "8103",
+                    root_v3,
+                    Some("/workspace"),
+                    None,
+                )
+            };
+            assert!(
+                v3_rebind.is_ok(),
+                "C1: valid-witness resume on a root migrated from a pre-v4 DB (revoked=1, no active column) must succeed: {v3_rebind:?}"
+            );
+        }
     }
 
     /// C18: Push-mode re-detection & pending handoff migration across resume (spec v4 §6.3):

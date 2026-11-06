@@ -2263,15 +2263,16 @@ pub fn resolve_codex_mcp_caller(
         })?;
 
     let rt_arc = crate::codex::for_state(state);
-    let (root_res, is_revoked) = {
+    let (root_res, is_revoked, has_root) = {
         let mut rt = rt_arc.lock().unwrap();
         let mut cfg = rt.config.clone();
         cfg.proc_root = state.agy_config.proc_root.clone();
         let res =
             rt.store
                 .validate_or_retry_root(&cfg, owner_pid, owner_starttime, session_id, true);
-        let rev = rt.store.is_revoked(session_id) || !rt.store.has_root(session_id);
-        (res, rev)
+        let rev = rt.store.is_revoked(session_id);
+        let has = rt.store.has_root(session_id);
+        (res, rev, has)
     };
 
     let root_snap = match root_res {
@@ -2282,9 +2283,11 @@ pub fn resolve_codex_mcp_caller(
             snap
         }
         Err(msg) => {
-            if is_revoked {
-                if let Ok(db) = state.db.lock() {
+            if let Ok(db) = state.db.lock() {
+                if is_revoked {
                     let _ = crate::storage::invalidate_codex_root(&db, session_id);
+                } else if !has_root {
+                    let _ = crate::storage::park_codex_root(&db, session_id);
                 }
             }
             return Err(AppError::NotRecipient(msg));

@@ -826,9 +826,15 @@ pub async fn try_push_codex_queued_message(
             .validate_root_by_id(&cfg, &root_snap.root_id, Some(root_snap.generation))
             .is_err()
         {
+            let is_rev = rt.store.is_revoked(&root_snap.root_id);
+            let has_root = rt.store.has_root(&root_snap.root_id);
             drop(rt);
             if let Ok(db) = local.db.lock() {
-                let _ = storage::invalidate_codex_root(&db, &root_snap.root_id);
+                if is_rev {
+                    let _ = storage::invalidate_codex_root(&db, &root_snap.root_id);
+                } else if !has_root {
+                    let _ = storage::park_codex_root(&db, &root_snap.root_id);
+                }
             }
             return Err(AppError::Gone {
                 session_id: root_snap.root_id.clone(),

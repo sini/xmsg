@@ -1321,7 +1321,11 @@ impl CodexStore {
                 let prev_ino = self.roots.get(root_id).unwrap().rollout_ino;
                 let meta =
                     verify_codex_rollout(&canon_home, root_id, root_id, None).map_err(|e| {
-                        self.revoke_by_operator(root_id);
+                        if matches!(e, RolloutLookupError::Invalid(_)) {
+                            self.revoke_by_operator(root_id);
+                        } else {
+                            self.park_root_for_resume(root_id);
+                        }
                         format!("codex root {root_id} rollout revalidation failed: {e}")
                     })?;
                 if prev_ino != 0 && (meta.rollout_dev != prev_dev || meta.rollout_ino != prev_ino) {
@@ -1709,7 +1713,11 @@ impl CodexStore {
                 }
             }
             Err(e) => {
-                self.revoke_by_operator(root_id);
+                if matches!(e, RolloutLookupError::Invalid(_)) {
+                    self.revoke_by_operator(root_id);
+                } else {
+                    self.park_root_for_resume(root_id);
+                }
                 return Err(format!(
                     "codex root {root_id} rollout verification failed: {e}"
                 ));
