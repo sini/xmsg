@@ -434,8 +434,11 @@ impl CodexTestEnv {
             .join("thread-writer-locks")
             .join(format!("{root_id}.lock"));
         let old_inode = fs::metadata(&path).unwrap().ino();
-        // Model WriterLockGuard cleanup, keeping delayed old-OFD events off the new inode.
-        fs::remove_file(&path).unwrap();
+        // Allocate while the old inode still exists: unlink/create can recycle its number.
+        // The fixture isolates generations atomically; Codex itself uses close/remove/create.
+        let replacement = tempfile::NamedTempFile::new_in(path.parent().unwrap()).unwrap();
+        assert_ne!(replacement.as_file().metadata().unwrap().ino(), old_inode);
+        replacement.persist(&path).unwrap();
         let recreated = self.create_writer_lock(home, owner_pid, root_id, fd_num);
         assert_ne!(fs::metadata(&recreated).unwrap().ino(), old_inode);
         recreated

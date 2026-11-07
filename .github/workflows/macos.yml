@@ -14,8 +14,8 @@ on:
         description: Optional isolated probe test name
         default: ""
       revision:
-        description: Revision under measurement
-        default: 7d9d1ed3f7c37c3433a95c65570892736fd914ab
+        description: Optional revision under measurement (defaults to the dispatched ref)
+        default: ""
 
 permissions:
   contents: read
@@ -88,7 +88,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ inputs.revision }}
+          ref: ${{ inputs.revision || github.sha }}
       - name: Install toolchain
         run: rustup toolchain install 1.95.0 --profile minimal
       - name: Preserve admission diagnostics in disposable checkout
