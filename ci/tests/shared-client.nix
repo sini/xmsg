@@ -33,7 +33,11 @@
         cargoExtraArgs = "--no-default-features --features client";
         __darwinAllowLocalNetworking = true;
       };
-      clientArtifacts = craneLib.buildDepsOnly clientArgs;
+      # The self-dev-dependency mutant intentionally enables daemon. Retain both
+      # dependency graphs so no arm pays for a cold daemon build.
+      clientArtifacts = craneLib.buildDepsOnly (
+        clientArgs // { cargoArtifacts = inputs.xmsg.packages.${system}.cargoArtifacts; }
+      );
     in
     {
       checks = {
@@ -59,6 +63,7 @@
               grep -F '1 passed; 0 failed; 0 ignored' feature.log
               python3 scripts/client-mutants.py | tee client-mutants.log
               grep -Fx '25/25 shared-client mutants killed' client-mutants.log
+              python3 -c 'import runpy; runpy.run_path("scripts/client-mutants.py")["require_cached_builds"]("client-mutants.log", 46)'
             '';
           }
         );
@@ -96,6 +101,7 @@
             grep -F 'test pinned_and_candidate_service_contract ... FAILED' missing.log
             python3 scripts/client-mutants.py --live | tee live-mutants.log
             grep -Fx '13/13 shared-client mutants killed' live-mutants.log
+            python3 -c 'import runpy; runpy.run_path("scripts/client-mutants.py")["require_cached_builds"]("live-mutants.log", 26)'
             runHook postCheck
           '';
         };

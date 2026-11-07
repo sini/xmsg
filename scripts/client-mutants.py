@@ -20,6 +20,10 @@ def require(condition, detail):
         raise RuntimeError(detail)
 
 ROOT = Path(__file__).resolve().parents[1]
+TARGET_DIR = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+if not TARGET_DIR.is_absolute():
+    TARGET_DIR = ROOT / TARGET_DIR
+TARGET_DIR = TARGET_DIR.resolve()
 CASES = [
     ("bounded-read", "src/client/mod.rs", ".take(self.max_frame_bytes as u64 + 1)", "", "oversized_and_unterminated_frames_are_refused"),
     ("registration-deadline", "src/client/mod.rs", "timeout(options.operation_timeout, async", "timeout(Duration::from_secs(60), async", "registration_deadline_is_a_client_error"),
@@ -111,7 +115,7 @@ def report_build(output, *, marker, started, target_dir, result):
 
 
 def run_marked(directory, test, changed_source, marker):
-    env = {**os.environ, "CARGO_TARGET_DIR": str(ROOT / "target" / "client-mutants")}
+    env = {**os.environ, "CARGO_TARGET_DIR": str(TARGET_DIR)}
     if test == "@graph":
         return subprocess.run(["python3", "scripts/client-graph.py"], cwd=directory, env=env, capture_output=True, text=True, timeout=60)
     profile = env.get("CARGO_PROFILE", "dev")
@@ -197,6 +201,14 @@ def run_marked(directory, test, changed_source, marker):
     if app is not None:
         require(f"client-mutant-app:{app}" in result.stdout + result.stderr, "test did not execute the built candidate path")
     return result
+
+
+def require_cached_builds(log, expected):
+    prefix = "client-build-timing "
+    rows = [json.loads(line[len(prefix):]) for line in Path(log).read_text().splitlines() if line.startswith(prefix)]
+    require(len(rows) == expected, ("build timing inventory mismatch", len(rows), expected))
+    require(all(row["result"] == 0 and not row["rebuilt_dependencies"] for row in rows), ("mutant arm rebuilt dependencies", rows))
+    print(f"client-build-cache-complete:{expected} arms; zero dependency rebuilds", flush=True)
 
 
 def main():
