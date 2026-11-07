@@ -218,6 +218,19 @@ fn retained_previous_description_cannot_revoke_recreated_writer_lease() {
 #[cfg(target_os = "macos")]
 #[test]
 fn xf6_close_only_handover_before_new_watch() {
+    const CHILD: &str = "XMSG_XF6_CLOSE_ONLY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // Other tests deliberately retain inherited descriptors across fork. Measure
+        // the close-only lifecycle in its own exec'd process, as in the standalone probe.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "xf6_close_only_handover_before_new_watch", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "close-only child failed: {} {}",
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        return;
+    }
     let env = CodexTestEnv::new();
     let root = "019a0000-0000-7000-8000-000000000182";
     let pid = 102;
