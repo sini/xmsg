@@ -281,18 +281,19 @@ async fn test_xf1_peerpidfd_rejects_reaped_recycled_root_pid_and_fallback() {
         "Ancestry::from_peer must record WalkEnd::Reused(pid) when pidfd signals ESRCH"
     );
 
-    let db_guard = db.lock().unwrap();
-    let res_peer = resolve_caller_session_peer(
-        &proc_root,
-        &state.sessions_dirs[..],
-        &agy_config,
-        &state.agy_store,
-        &state.pi_store,
-        &state.svc_store,
-        Some(&*db_guard),
-        &peer_a,
-    );
-    drop(db_guard);
+    let res_peer = {
+        let db_guard = db.lock().unwrap();
+        resolve_caller_session_peer(
+            &proc_root,
+            &state.sessions_dirs[..],
+            &agy_config,
+            &state.agy_store,
+            &state.pi_store,
+            &state.svc_store,
+            Some(&*db_guard),
+            &peer_a,
+        )
+    };
     assert!(
         res_peer.is_err(),
         "resolve_caller_session_peer must reject reaped peer with planted recycled proc entry, got: {res_peer:?}"
@@ -405,7 +406,7 @@ async fn test_xf1_peerpidfd_rejects_reaped_recycled_root_pid_and_fallback() {
 
     // Target must have received the legitimate message attributed to Victim (0199cecf-0500-7000-8000-000000000500)!
     for _ in 0..250 {
-        if target_received.lock().unwrap().len() >= 1 {
+        if !target_received.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -599,19 +600,20 @@ async fn test_xf1_live_peer_cred_attests_caller() {
     );
     assert_eq!(walk.end(), Some(WalkEnd::Root));
 
-    let db_guard = db.lock().unwrap();
-    let resolved = resolve_caller_session_peer(
-        &proc_root,
-        &state.sessions_dirs[..],
-        &agy_config,
-        &state.agy_store,
-        &state.pi_store,
-        &state.svc_store,
-        Some(&*db_guard),
-        &peer_raw,
-    )
-    .expect("live peer must resolve to 0199cecf-0500-7000-8000-000000000500");
-    drop(db_guard);
+    let resolved = {
+        let db_guard = db.lock().unwrap();
+        resolve_caller_session_peer(
+            &proc_root,
+            &state.sessions_dirs[..],
+            &agy_config,
+            &state.agy_store,
+            &state.pi_store,
+            &state.svc_store,
+            Some(&*db_guard),
+            &peer_raw,
+        )
+        .expect("live peer must resolve to 0199cecf-0500-7000-8000-000000000500")
+    };
     assert_eq!(resolved.session_id, "0199cecf-0500-7000-8000-000000000500");
 
     accepted_raw.write_all(b"pong\n").await.unwrap();

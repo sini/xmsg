@@ -329,7 +329,7 @@ async fn test_oracle_1_h0_hub_off_by_default() {
     );
 
     for _ in 0..250 {
-        if received.lock().unwrap().len() >= 1 {
+        if !received.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -460,7 +460,7 @@ async fn test_oracle_2_pattern_admission_and_xa2_naming() {
     assert!(res1.is_ok(), "Client 1 send failed: {res1:?}");
 
     for _ in 0..250 {
-        if received.lock().unwrap().len() >= 1 {
+        if !received.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1293,7 +1293,7 @@ async fn test_oracle_6_collision_refusal_no_last_writer_wins() {
     assert!(res1.is_ok(), "Client 1 send should succeed: {res1:?}");
 
     for _ in 0..250 {
-        if received.lock().unwrap().len() >= 1 {
+        if !received.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

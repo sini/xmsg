@@ -364,7 +364,7 @@ async fn test_oracle_1_outbound_presents_reloaded_cert() {
     );
 
     for _ in 0..250 {
-        if b_received.lock().unwrap().len() >= 1 {
+        if !b_received.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -448,7 +448,7 @@ async fn test_oracle_2_peer_ca_bundle_reload_refuses_old_ca() {
     );
 
     for _ in 0..250 {
-        if a_received.lock().unwrap().len() >= 1 {
+        if !a_received.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -546,7 +546,7 @@ async fn test_oracle_3_garbage_cert_preserves_old_config() {
     let res1 = send_federated_message(&node_a.fed_state, "node-b", &envelope1).await;
     assert!(res1.is_ok(), "Initial send must succeed: {:?}", res1);
     for _ in 0..250 {
-        if b_received.lock().unwrap().len() >= 1 {
+        if !b_received.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

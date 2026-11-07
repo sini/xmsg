@@ -241,7 +241,7 @@ async fn test_reply_roundtrip_and_envelope_footer() {
 
     // 2. Check stand-in socket received message with footer (§8.2)
     for _ in 0..250 {
-        if harness.received_lines.lock().await.len() >= 1 {
+        if !harness.received_lines.lock().await.is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

@@ -430,6 +430,7 @@
         pre-xl1-compat = xmsgPkg.overrideAttrs {
           pname = "xmsg-pre-xl1-compat";
           dontBuild = true;
+          preCheck = "";
           XMSG_PRE_XL1_BIN = lib.getExe xmsgPreXl1;
           XMSG_PRE_DEPLOY_BIN = lib.getExe xmsgPreDeploy;
           XMSG_PRE_CODEX_BIN = lib.getExe xmsgPreCodex;

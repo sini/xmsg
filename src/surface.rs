@@ -2166,13 +2166,15 @@ pub async fn reply(
         tokio::spawn(async move {
             let res = deliver_reply(
                 &state,
-                &caller,
-                msg,
-                is_forwarded,
-                caller_is_sender,
-                &message_id,
-                &text,
-                reply_id,
+                ReplyDelivery {
+                    caller: &caller,
+                    msg,
+                    is_forwarded,
+                    caller_is_sender,
+                    message_id: &message_id,
+                    text: &text,
+                    reply_id,
+                },
             )
             .await;
             if let Some(key) = key {
@@ -2229,17 +2231,30 @@ pub(crate) fn record_pushed_reply(
     let _ = storage::insert_message(db, &pushed);
 }
 
-/// `reply`'s push and record, under its reserved `reply_id`.
-async fn deliver_reply(
-    state: &AppState,
-    caller: &Session,
+struct ReplyDelivery<'a> {
+    caller: &'a Session,
     msg: MessageRecord,
     is_forwarded: bool,
     caller_is_sender: bool,
-    message_id: &str,
-    text: &str,
+    message_id: &'a str,
+    text: &'a str,
     reply_id: String,
+}
+
+/// `reply`'s push and record, under its reserved `reply_id`.
+async fn deliver_reply(
+    state: &AppState,
+    delivery: ReplyDelivery<'_>,
 ) -> Result<ReplyRecord, AppError> {
+    let ReplyDelivery {
+        caller,
+        msg,
+        is_forwarded,
+        caller_is_sender,
+        message_id,
+        text,
+        reply_id,
+    } = delivery;
     let (remote_host, has_inbox, ret_harness, ret_session_id) = if caller_is_sender {
         if msg.recipient_harness == "fed" {
             let db = state.db.lock().map_err(db_err)?;

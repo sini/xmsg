@@ -2404,7 +2404,8 @@ pub fn startup_invalidate_codex(
 
     let mut revoked = std::collections::HashSet::new();
     let mut stale = std::collections::HashMap::new();
-    let rows: Vec<(String, String, i64, i64, String, Option<String>, i64, i64)> = {
+    type CodexRootRow = (String, String, i64, i64, String, Option<String>, i64, i64);
+    let rows: Vec<CodexRootRow> = {
         let mut stmt = tx.prepare(
             "SELECT root_id, codex_home, rollout_dev, rollout_ino, label, cwd, generation, revoked FROM codex_roots",
         )?;

@@ -852,8 +852,8 @@ async fn test_oracle_6_fork_notice_exact_text_and_single_delivery() {
     .unwrap();
     xmsg::claim::deliver_fork_notices(&conn, notices).await;
     for _ in 0..250 {
-        if listener_p1.received_lines.lock().await.len() >= 1
-            && listener_p2.received_lines.lock().await.len() >= 1
+        if !listener_p1.received_lines.lock().await.is_empty()
+            && !listener_p2.received_lines.lock().await.is_empty()
         {
             break;
         }

@@ -75,6 +75,36 @@ fn shutdown(fd: RawFd) -> io::Result<bool> {
     Ok(event.revents & (libc::POLLHUP | libc::POLLRDHUP) != 0)
 }
 
+#[cfg(target_os = "macos")]
+fn shutdown(fd: RawFd) -> io::Result<bool> {
+    let queue = unsafe { libc::kqueue() };
+    if queue < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let _queue = unsafe { OwnedFd::from_raw_fd(queue) };
+    let change = libc::kevent {
+        ident: fd as libc::uintptr_t,
+        filter: libc::EVFILT_READ,
+        flags: libc::EV_ADD | libc::EV_ENABLE,
+        fflags: 0,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    };
+    let mut event = change;
+    let wait = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let result = unsafe { libc::kevent(queue, &change, 1, &mut event, 1, &wait) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if result > 0 && event.flags & libc::EV_ERROR != 0 {
+        return Err(io::Error::from_raw_os_error(event.data as i32));
+    }
+    Ok(result > 0 && event.flags & libc::EV_EOF != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,34 +173,4 @@ mod tests {
         );
         assert!(matches!(guard.check(), Err(ClientError::Disconnected)));
     }
-}
-
-#[cfg(target_os = "macos")]
-fn shutdown(fd: RawFd) -> io::Result<bool> {
-    let queue = unsafe { libc::kqueue() };
-    if queue < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let _queue = unsafe { OwnedFd::from_raw_fd(queue) };
-    let change = libc::kevent {
-        ident: fd as libc::uintptr_t,
-        filter: libc::EVFILT_READ,
-        flags: libc::EV_ADD | libc::EV_ENABLE,
-        fflags: 0,
-        data: 0,
-        udata: std::ptr::null_mut(),
-    };
-    let mut event = change;
-    let wait = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    let result = unsafe { libc::kevent(queue, &change, 1, &mut event, 1, &wait) };
-    if result < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if result > 0 && event.flags & libc::EV_ERROR != 0 {
-        return Err(io::Error::from_raw_os_error(event.data as i32));
-    }
-    Ok(result > 0 && event.flags & libc::EV_EOF != 0)
 }

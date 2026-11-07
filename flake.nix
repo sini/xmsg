@@ -64,6 +64,10 @@
             commonArgs
             // {
               inherit cargoArtifacts;
+              nativeBuildInputs = [ pkgs.clippy ];
+              preCheck = ''
+                cargoWithProfile clippy --all-targets --locked -- -D warnings
+              '';
               doCheck = true;
               meta = {
                 description = "Fast, lightweight local HTTP bridge into live agent sessions";

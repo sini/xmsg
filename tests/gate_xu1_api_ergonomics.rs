@@ -446,7 +446,7 @@ async fn test_gate2_addressable_header_and_reject_dot() {
 
     // 2. Bob inspects incoming envelope: ref= MUST be attested address "SESS_ALICE@node-alpha"
     for _ in 0..250 {
-        if bob_rx.lock().unwrap().len() >= 1 {
+        if !bob_rx.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -480,7 +480,7 @@ async fn test_gate2_addressable_header_and_reject_dot() {
     .await;
     assert_eq!(reply_send["status"], "ok");
     for _ in 0..250 {
-        if alice_rx.lock().unwrap().len() >= 1 {
+        if !alice_rx.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1045,7 +1045,7 @@ async fn test_gate5_header_names_all_four_tools() {
     assert_eq!(send_res["status"], "ok");
 
     for _ in 0..250 {
-        if bob_rx.lock().unwrap().len() >= 1 {
+        if !bob_rx.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

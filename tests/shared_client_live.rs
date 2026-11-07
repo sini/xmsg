@@ -448,7 +448,15 @@ async fn exercise_candidate_effective_limits(binary: &Path) {
         node: String,
     }
 
-    let cases: &[(&[(&str, &str)], &[&str], u64, u64, usize, usize)] = &[
+    type CapMatrixCase<'a> = (
+        &'a [(&'a str, &'a str)],
+        &'a [&'a str],
+        u64,
+        u64,
+        usize,
+        usize,
+    );
+    let cases: &[CapMatrixCase<'_>] = &[
         // Positive control: defaults (reply_ttl=604800, idempotency_ttl=86400, svc_queue_cap=100, max_body_bytes=65536)
         (&[], &[], 604_800, 86_400, 100, 65_536),
         // Cell 1: non-default --reply-ttl vs default idempotency_ttl, svc_queue_cap & max_body_bytes

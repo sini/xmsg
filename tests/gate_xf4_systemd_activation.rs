@@ -464,10 +464,11 @@ async fn oracle_1_socket_activated_fed_exact_port_mtls_and_stopping() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let msgs = received.lock().unwrap();
-    assert_eq!(msgs.len(), 1);
-    assert!(msgs[0].contains("hello over socket-activated fed port"));
-    drop(msgs);
+    {
+        let msgs = received.lock().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].contains("hello over socket-activated fed port"));
+    }
 
     // Send SIGTERM and assert STOPPING=1 is emitted on NOTIFY_SOCKET
     let pid = guard.child_mut().id().unwrap() as i32;
