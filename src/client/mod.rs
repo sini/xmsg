@@ -1,17 +1,17 @@
 //! Bounded, same-process service transport shared by xmsg consumers.
 
+mod health;
 mod origin;
 pub(crate) mod wire;
 
 pub use origin::Origin;
 pub use wire::{ListResult, NodeStatus, Recipient, Registration, ReplyRecord, SendResult};
 
+use health::RegistrationHealth;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -171,13 +171,13 @@ impl Delivery {
 struct Connection {
     stream: BufReader<UnixStream>,
     max_frame_bytes: usize,
-    registration: Option<Arc<AtomicBool>>,
+    registration: Option<Arc<RegistrationHealth>>,
 }
 
 impl Drop for Connection {
     fn drop(&mut self) {
         if let Some(live) = &self.registration {
-            live.store(false, Ordering::Release);
+            live.dispose();
         }
     }
 }
@@ -247,13 +247,13 @@ pub struct RegisteredService {
     connection: Option<Connection>,
     options: ClientOptions,
     registration: Registration,
-    live: Arc<AtomicBool>,
+    live: Arc<RegistrationHealth>,
 }
 
 #[derive(Clone)]
 pub struct AgentClient {
     options: ClientOptions,
-    live: Arc<AtomicBool>,
+    live: Arc<RegistrationHealth>,
 }
 
 impl RegisteredService {
@@ -298,7 +298,9 @@ impl RegisteredService {
         })
         .await
         .map_err(|_| ClientError::Timeout)??;
-        let live = Arc::new(AtomicBool::new(true));
+        let live = Arc::new(RegistrationHealth::new(
+            connection.stream.get_ref().as_raw_fd(),
+        ));
         connection.registration = Some(live.clone());
         Ok(Self {
             connection: Some(connection),
@@ -310,6 +312,10 @@ impl RegisteredService {
 
     pub fn registration(&self) -> Option<&Registration> {
         self.connection.as_ref().map(|_| &self.registration)
+    }
+    /// Non-consuming, point-in-time health of the registration transport.
+    pub fn health(&self) -> Result<(), ClientError> {
+        self.live.check()
     }
     pub fn address(&self) -> Option<&str> {
         self.connection
@@ -442,11 +448,14 @@ impl RegisteredService {
 }
 
 impl AgentClient {
+    /// Non-consuming, point-in-time health shared with the registration owner.
+    pub fn health(&self) -> Result<(), ClientError> {
+        self.live.check()
+    }
+
     async fn agent(&self, request: AgentFrame) -> Result<Value, ClientError> {
-        if !self.live.load(Ordering::Acquire) {
-            return Err(ClientError::Disconnected);
-        }
-        timeout(self.options.operation_timeout, async {
+        self.health()?;
+        let result = timeout(self.options.operation_timeout, async {
             let mut connection = Connection::connect(
                 &self.options.agent_socket,
                 &self.options,
@@ -460,7 +469,11 @@ impl AgentClient {
             Ok(result)
         })
         .await
-        .map_err(|_| ClientError::Timeout)?
+        .map_err(|_| ClientError::Timeout)?;
+        if result.is_err() {
+            self.health()?;
+        }
+        result
     }
 
     pub async fn send(

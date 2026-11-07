@@ -32,7 +32,7 @@ CASES = [
     ("live-skip", "tests/shared_client_live.rs", "let baseline = PathBuf::from", "return; let baseline = PathBuf::from", "@live"),
     ("agent-deadline", "src/client/mod.rs", "timeout(self.options.operation_timeout, async", "timeout(Duration::from_secs(60), async", "agent_deadline_is_unknown_not_a_confirmed_refusal"),
     ("registration-address-fallback", "src/client/mod.rs", "serde_json::from_value(response).map_err(|_| ClientError::Protocol)?", 'serde_json::from_value({ let mut r = response; r.as_object_mut().unwrap().entry("address").or_insert(serde_json::json!(format!("{}@{}", options.service, options.expected_node.as_deref().unwrap()))); r }).map_err(|_| ClientError::Protocol)?', "missing_or_wrong_registration_identity_is_refused"),
-    ("registration-lifetime", "src/client/mod.rs", "live.store(false, Ordering::Release);", "live.store(true, Ordering::Release);", "long_poll_does_not_block_agent_and_handle_expires_with_registration"),
+    ("registration-lifetime", "src/client/mod.rs", "live.dispose();", "();", "long_poll_does_not_block_agent_and_handle_expires_with_registration"),
     ("missing-test-target", "Cargo.toml", '[[test]]\nname = "agent_sock"\npath = "tests/agent_sock.rs"\nrequired-features = ["daemon"]', "", "@graph"),
     ("empty-registration-node", "src/client/mod.rs", "|| registration.node.is_empty()", "|| false", "registration_identity_modes"),
     ("ignored-daemon-uid", "src/client/mod.rs", "let parent = file.parent()", "let expected_uid = unsafe { libc::geteuid() }; let parent = file.parent()", "registration_identity_modes"),

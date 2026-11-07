@@ -40,6 +40,159 @@ async fn request(stream: &mut BufReader<UnixStream>, response: Value) -> Value {
 fn registration() -> Value {
     json!({"status":"ok","address":"bridge@fixture","node":"fixture"})
 }
+
+#[tokio::test]
+async fn registration_health_preserves_pending_frames_and_detects_shutdown() {
+    for close in [false, true] {
+        for partial in [false, true] {
+            let (_temp, options, register, _agent) = fixture();
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let mut stream = BufReader::new(register.accept().await.unwrap().0);
+                request(&mut stream, registration()).await;
+                let frame = format!(
+                    "{}\n",
+                    delivery(json!({"service":"sender","node":"fixture"}))
+                );
+                let split = if partial {
+                    frame.len() / 2
+                } else {
+                    frame.len()
+                };
+                stream
+                    .get_mut()
+                    .write_all(&frame.as_bytes()[..split])
+                    .await
+                    .unwrap();
+                if close {
+                    stream.get_mut().shutdown().await.unwrap();
+                }
+                ready_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+                if !close && partial {
+                    stream
+                        .get_mut()
+                        .write_all(&frame.as_bytes()[split..])
+                        .await
+                        .unwrap();
+                }
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Value>(&line).unwrap()["action"],
+                    "poll"
+                );
+            });
+            let mut client = RegisteredService::register(options).await.unwrap();
+            let snapshot = client.agent_client();
+            ready_rx.await.unwrap();
+            for _ in 0..3 {
+                assert_eq!(
+                    snapshot.health().is_ok(),
+                    !close,
+                    "pending-data shutdown detection"
+                );
+                assert_eq!(client.health().is_ok(), !close);
+            }
+            release_tx.send(()).unwrap();
+            if close && partial {
+                assert!(matches!(client.poll(0).await, Err(ClientError::Protocol)));
+            } else {
+                let frame = client.poll(0).await.unwrap().unwrap();
+                assert_eq!(frame.message_id(), "msg", "health must preserve the frame");
+                assert_eq!(frame.text(), "body");
+            }
+            server.await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn registration_health_is_idle_and_snapshots_die_with_owner() {
+    let (_temp, options, register, _agent) = fixture();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut stream = BufReader::new(register.accept().await.unwrap().0);
+        request(&mut stream, registration()).await;
+        ready_tx.send(()).unwrap();
+        let mut extra = String::new();
+        assert_eq!(
+            stream.read_line(&mut extra).await.unwrap(),
+            0,
+            "health emits no frame"
+        );
+    });
+    let client = RegisteredService::register(options).await.unwrap();
+    let snapshot = client.agent_client();
+    ready_rx.await.unwrap();
+    for _ in 0..100 {
+        client.health().unwrap();
+        snapshot.health().unwrap();
+    }
+    drop(client);
+    assert!(matches!(snapshot.health(), Err(ClientError::Disconnected)));
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn registration_health_distinguishes_refusal_from_disconnect_after_request() {
+    for close in [false, true] {
+        for accepted in [false, true] {
+            let (_temp, options, register, agent) = fixture();
+            let (registration_tx, registration_rx) = tokio::sync::oneshot::channel();
+            let registrar = tokio::spawn(async move {
+                let mut stream = BufReader::new(register.accept().await.unwrap().0);
+                request(&mut stream, registration()).await;
+                registration_tx.send(stream).unwrap();
+            });
+            let server = tokio::spawn(async move {
+                let mut registration = registration_rx.await.unwrap();
+                let mut stream = BufReader::new(agent.accept().await.unwrap().0);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Value>(&line).unwrap()["action"],
+                    "send"
+                );
+                if close {
+                    registration.get_mut().shutdown().await.unwrap();
+                }
+                let response = if accepted {
+                    json!({"status":"ok","message_id":"accepted","address":"target@fixture","outcome":"pending"})
+                } else {
+                    json!({"status":"error","error":"denied"})
+                };
+                stream
+                    .get_mut()
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
+                let mut eof = String::new();
+                stream.read_line(&mut eof).await.unwrap();
+                registration
+            });
+            let client = RegisteredService::register(options).await.unwrap();
+            let result = client.send("target@fixture", "body", None).await;
+            if accepted {
+                assert_eq!(
+                    result.unwrap().message_id,
+                    "accepted",
+                    "accepted receipt survives EOF"
+                );
+            } else if close {
+                assert!(
+                    matches!(result, Err(ClientError::Disconnected)),
+                    "causal EOF is not denial"
+                );
+            } else {
+                assert!(matches!(result, Err(ClientError::Refused { code }) if code == "denied"));
+            }
+            drop(server.await.unwrap());
+            registrar.await.unwrap();
+        }
+    }
+}
 fn delivery(origin: Value) -> Value {
     let missing = origin == json!("missing");
     let mut value = json!({"action":"deliver","messageId":"msg","fromName":"display · sender@fixture","text":"body","envelope":"rendered","origin":origin,"inReplyTo":"parent"});
@@ -52,6 +205,7 @@ fn delivery(origin: Value) -> Value {
 #[tokio::test]
 async fn socket_specific_exact_frame_keys() {
     let (_temp, options, register, agent) = fixture();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let svc = tokio::spawn(async move {
         let mut stream = BufReader::new(register.accept().await.unwrap().0);
         let registration = request(&mut stream, registration()).await;
@@ -61,6 +215,7 @@ async fn socket_specific_exact_frame_keys() {
         )
         .await;
         let ack = request(&mut stream, json!({"status":"ok"})).await;
+        release_rx.await.unwrap();
         (registration, poll, ack)
     });
     let calls = tokio::spawn(async move {
@@ -105,6 +260,7 @@ async fn socket_specific_exact_frame_keys() {
         .unwrap()
         .recipients
         .is_empty());
+    release_tx.send(()).unwrap();
     let (reg, poll, ack) = svc.await.unwrap();
     assert_eq!(reg, json!({"harness":"svc","name":"bridge","cwd":"/"}));
     assert_eq!(poll, json!({"action":"poll","waitSecs":0}));
