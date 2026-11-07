@@ -185,6 +185,70 @@ fn writer_lock_handover_during_concurrent_spawn() {
     }
 }
 
+/// Codex 0.166 releases by close plus remove. If Codex ever unlocks explicitly on a
+/// reused inode, Darwin can emit a delayed NOTE_FUNLOCK that revokes a live identity;
+/// see XF6. Re-run this retained-reference cell at every Codex pin bump.
+#[cfg(target_os = "macos")]
+#[test]
+fn retained_previous_description_cannot_revoke_recreated_writer_lease() {
+    let env = CodexTestEnv::new();
+    let root = "019a0000-0000-7000-8000-000000000181";
+    let old_pid = 101;
+    let new_pid = 102;
+    env.write_fake_proc(new_pid, 1, "102", &env.codex_exe);
+    let lock_path = env.create_writer_lock(&env.codex_home, old_pid, root, 3);
+    // A fork can retain the old open file description after its explicit unlock.
+    let inherited = env.held_locks.lock().unwrap()[&lock_path]
+        .try_clone()
+        .unwrap();
+    env.recreate_writer_lock(&env.codex_home, new_pid, root, 4);
+    let watch = xmsg::codex::LockLeaseWatch::install(&env.codex_home, root).unwrap();
+    watch
+        .verify_continuity(&env.proc_root, new_pid, "102")
+        .unwrap();
+    drop(inherited);
+    let result = watch.verify_continuity(&env.proc_root, new_pid, "102");
+    eprintln!("XF6 delayed previous description close: {result:?}");
+    assert!(
+        result.is_ok(),
+        "an already-unlocked previous description must not revoke the new holder: {result:?}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn xf6_close_only_handover_before_new_watch() {
+    const CHILD: &str = "XMSG_XF6_CLOSE_ONLY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // Other tests deliberately retain inherited descriptors across fork. Measure
+        // the close-only lifecycle in its own exec'd process, as in the standalone probe.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "xf6_close_only_handover_before_new_watch", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "close-only child failed: {} {}",
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    let env = CodexTestEnv::new();
+    let root = "019a0000-0000-7000-8000-000000000182";
+    let pid = 102;
+    env.write_fake_proc(pid, 1, "102", &env.codex_exe);
+    for iteration in 0..1000 {
+        let lock_path = env.create_writer_lock(&env.codex_home, pid, root, 4);
+        // Production publication probes drop their file without an explicit unlock.
+        drop(env.held_locks.lock().unwrap().remove(&lock_path));
+        env.create_writer_lock(&env.codex_home, pid, root, 4);
+        let watch = xmsg::codex::LockLeaseWatch::install(&env.codex_home, root).unwrap();
+        watch
+            .verify_continuity(&env.proc_root, pid, "102")
+            .unwrap_or_else(|error| panic!("XF6 close-only iteration={iteration}: {error}"));
+        drop(watch);
+        drop(env.held_locks.lock().unwrap().remove(&lock_path));
+    }
+}
+
 struct CodexTestEnv {
     _dir: TempDir,
     base_dir: PathBuf,
@@ -356,6 +420,25 @@ impl CodexTestEnv {
         std::os::unix::fs::symlink(&lock_path, &fd_link).unwrap();
         self.set_writer_lock_fdinfo(owner_pid, fd_num, &lock_path, true);
         lock_path
+    }
+
+    fn recreate_writer_lock(
+        &self,
+        home: &Path,
+        owner_pid: u32,
+        root_id: &str,
+        fd_num: u32,
+    ) -> PathBuf {
+        use std::os::unix::fs::MetadataExt;
+        let path = home
+            .join("thread-writer-locks")
+            .join(format!("{root_id}.lock"));
+        let old_inode = fs::metadata(&path).unwrap().ino();
+        // Model WriterLockGuard cleanup, keeping delayed old-OFD events off the new inode.
+        fs::remove_file(&path).unwrap();
+        let recreated = self.create_writer_lock(home, owner_pid, root_id, fd_num);
+        assert_ne!(fs::metadata(&recreated).unwrap().ino(), old_inode);
+        recreated
     }
 
     fn create_unlocked_writer_lock(
@@ -3169,7 +3252,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
     // Case 2 & Case 6b: O1 dies/releases `<P>.lock`, O2 acquires `<P>.lock` on the same rollout `(dev, ino)`:
     // First verify that if O3 does NOT hold `<P>.lock`, O3 is refused when trying to resume `root_p`:
     let _ = fs::remove_file(env.proc_root.join(pid_o1.to_string()).join("fd/3"));
-    env.create_writer_lock(&env.codex_home, pid_o2, root_p, 4);
+    env.recreate_writer_lock(&env.codex_home, pid_o2, root_p, 4);
     let o3_steal = handle_codex_hook_frame(
         &env.state,
         &peer_o3,
@@ -3337,7 +3420,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
 
     // Case 3: `--no-daemon` (`codex --no-daemon exec resume <P>`) rebinds `P` to embedded owner O3 and drains/sends:
     let _ = fs::remove_file(env.proc_root.join(pid_o2.to_string()).join("fd/4"));
-    env.create_writer_lock(&env.codex_home, pid_o3, root_p, 5);
+    env.recreate_writer_lock(&env.codex_home, pid_o3, root_p, 5);
     handle_codex_hook_frame(
         &env.state,
         &peer_o3,
@@ -3792,7 +3875,7 @@ async fn c18_push_mode_redetection_and_pending_handoff_migration_across_resume()
     let _ = fs::remove_file(env.proc_root.join(pid_o1.to_string()).join("fd/3"));
 
     // Resume under `--no-daemon` O2 (`pid_o2` != `my_pid`, so `app-server-control.sock` peer check sees stale socket and falls back to QueueOnly!):
-    env.create_writer_lock(&env.codex_home, pid_o2, root_p, 4);
+    env.recreate_writer_lock(&env.codex_home, pid_o2, root_p, 4);
     handle_codex_hook_frame(
         &env.state,
         &peer_o2,
@@ -3871,7 +3954,7 @@ async fn c18_push_mode_redetection_and_pending_handoff_migration_across_resume()
     let _ = fs::remove_file(env.proc_root.join(pid_o2.to_string()).join("fd/4"));
 
     // Resume in daemon O3 (`my_pid`):
-    env.create_writer_lock(&env.codex_home, my_pid, root_p, 5);
+    env.recreate_writer_lock(&env.codex_home, my_pid, root_p, 5);
     let resume_o3 = handle_codex_hook_frame(
         &env.state,
         &peer_o3,

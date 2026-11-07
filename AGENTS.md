@@ -25,5 +25,8 @@ This document records internal engineering invariants, security boundaries, and 
 
 ## 2. Verification & CI Discipline
 
+- **Codex pin and writer-lock lifecycle (`XF6`):** The real harness check in `ci/flake.nix` / `ci/tests/harness-checks.nix` uses Codex 0.166.0. Its `WriterLockGuard` releases by closing the file and removing its path under the home coordination lock, without explicitly unlocking a reused inode. Darwin can emit a delayed `NOTE_FUNLOCK` when an old explicitly-unlocked open file description finally closes, revoking a new live identity on that same inode. Every Codex pin bump must review this upstream dependency and re-run `retained_previous_description_cannot_revoke_recreated_writer_lease` and the close-only handover probe on macOS. C17/C18 model remove/recreate; same-inode revocation cells remain separate.
+
 - Run all Rust checks (`cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check`) and Nix checks (`nix develop ./ci --command ci`, `nix flake check ./ci`).
+
 - Never point Codex tests or probes at `~/.codex`; always use isolated temporary `CODEX_HOME` directories.
