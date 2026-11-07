@@ -2476,29 +2476,34 @@ impl DynamicTls {
 
 mod initial_peers {
     use super::PeersMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
-    /// Startup `PeersMap` fallback used exclusively by `FedState::current_peers()` when no
-    /// `CredentialReloader` has populated `dynamic_tls`. The inner `Arc<PeersMap>` is private
-    /// to this submodule so request handlers and outbound helpers cannot read the stale startup
-    /// copy (`fed_state.peers` has no `PeersMap` methods or `Deref`).
+    /// Startup `PeersMap` fallback used exclusively by `FedState::current_peers()` before any
+    /// `CredentialReloader` has populated `dynamic_tls`. Once `dynamic_tls` is populated, the
+    /// startup copy is cleared (`None`) so it can never be returned after the first reload, and
+    /// `dynamic_tls` reads recover through lock poison (`unwrap_or_else(|e| e.into_inner())`).
     #[derive(Clone, Default)]
-    pub struct InitialPeers(Arc<PeersMap>);
+    pub struct InitialPeers(Arc<Mutex<Option<Arc<PeersMap>>>>);
 
     impl From<Arc<PeersMap>> for InitialPeers {
         fn from(peers: Arc<PeersMap>) -> Self {
-            Self(peers)
+            Self(Arc::new(Mutex::new(Some(peers))))
         }
     }
 
     impl super::FedState {
+        pub(super) fn clear_initial_peers(&self) {
+            *self.peers.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+
         pub fn current_peers(&self) -> Arc<PeersMap> {
-            if let Ok(guard) = self.dynamic_tls.read() {
-                if let Some(ref dyn_tls) = *guard {
-                    return dyn_tls.peers.clone();
-                }
+            let guard = self.dynamic_tls.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(ref dyn_tls) = *guard {
+                return dyn_tls.peers.clone();
             }
-            self.peers.0.clone()
+            let init = self.peers.0.lock().unwrap_or_else(|e| e.into_inner());
+            init.clone()
+                .expect("initial peers cleared only after dynamic_tls is populated")
         }
     }
 }
@@ -2534,10 +2539,9 @@ pub struct FedState {
 
 impl FedState {
     pub fn cert_chain(&self) -> Vec<CertificateDer<'static>> {
-        if let Ok(guard) = self.dynamic_tls.read() {
-            if let Some(ref dyn_tls) = *guard {
-                return dyn_tls.cert_chain();
-            }
+        let guard = self.dynamic_tls.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref dyn_tls) = *guard {
+            return dyn_tls.cert_chain();
         }
         if !self.cert_chain_der.is_empty() {
             self.cert_chain_der
@@ -2550,10 +2554,9 @@ impl FedState {
     }
 
     pub fn key_der(&self) -> Vec<u8> {
-        if let Ok(guard) = self.dynamic_tls.read() {
-            if let Some(ref dyn_tls) = *guard {
-                return dyn_tls.key_der.clone();
-            }
+        let guard = self.dynamic_tls.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref dyn_tls) = *guard {
+            return dyn_tls.key_der.clone();
         }
         self.key_der.clone()
     }
@@ -2568,10 +2571,9 @@ impl FedState {
     }
 
     pub fn get_tls_acceptor(&self) -> Option<tokio_rustls::TlsAcceptor> {
-        if let Ok(guard) = self.dynamic_tls.read() {
-            if let Some(ref dyn_tls) = *guard {
-                return Some(dyn_tls.acceptor.clone());
-            }
+        let guard = self.dynamic_tls.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref dyn_tls) = *guard {
+            return Some(dyn_tls.acceptor.clone());
         }
         None
     }
@@ -5657,9 +5659,13 @@ impl CredentialReloader {
                 }
                 *self.ca_paths.lock().unwrap() = new_ca_paths;
 
-                *self.peers.lock().unwrap() = Arc::new(new_peers_map.clone());
-                *self.dynamic_tls.write().unwrap() = Some(new_dyn_tls);
-                *self.file_hashes.lock().unwrap() = current_hashes;
+                *self.peers.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Arc::new(new_peers_map.clone());
+                *self.dynamic_tls.write().unwrap_or_else(|e| e.into_inner()) = Some(new_dyn_tls);
+                if let Some(ref fs) = self.fed_state {
+                    fs.clear_initial_peers();
+                }
+                *self.file_hashes.lock().unwrap_or_else(|e| e.into_inner()) = current_hashes;
 
                 // Reconcile outbound pull loops
                 if let Some(ref fs) = self.fed_state {

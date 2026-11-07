@@ -1083,6 +1083,130 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
             .is_err(),
         "removed peer1 must be refused on new inbox connection after READY=1"
     );
+
+    // 4. Poisoned dynamic_tls lock cell:
+    //    After a reload that removed peer1.test, even if a subsequent reloader panics while
+    //    holding the dynamic_tls write lock (poisoning the RwLock), current_peers(), cert_chain(),
+    //    key_der(), and get_tls_acceptor() must recover the last committed DynamicTls rather than
+    //    falling back to the startup PeersMap (which still contained peer1.test).
+    {
+        use rustls::pki_types::pem::PemObject;
+        let init_peers_json = serde_json::json!({
+            "peer1.test": {
+                "ca": ca1_path.display().to_string(),
+                "identities": [uri_peer1],
+                "allow": ["send", "reply"],
+                "leaf": true
+            },
+            "peer2.test": {
+                "address": "127.0.0.1:9",
+                "ca": ca2_path.display().to_string(),
+                "identities": [uri_peer2],
+                "allow": ["send", "reply"]
+            }
+        });
+        let init_peers_file = tmp.path().join("poison-peers.json");
+        fs::write(&init_peers_file, init_peers_json.to_string()).unwrap();
+
+        let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+            rustls::pki_types::CertificateDer::pem_slice_iter(s_cert_pem.as_bytes())
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+        let key =
+            rustls::pki_types::PrivateKeyDer::from_pem_slice(s_key_pem.as_bytes()).unwrap();
+        let cert_der = certs[0].to_vec();
+        let cert_chain_der: Vec<Vec<u8>> = certs.into_iter().map(|c| c.to_vec()).collect();
+        let key_der = key.secret_der().to_vec();
+        let own = xmsg::node::own_node_from_der(&cert_der).unwrap();
+        let startup_pm = Arc::new(
+            PeersMap::load_from_file_for(&init_peers_file, Some(&own)).unwrap(),
+        );
+
+        let db_conn = xmsg::storage::init_db(&tmp.path().join("poison.db")).unwrap();
+        let (notify_tx, _) = broadcast::channel(16);
+        let (pi_notify_tx, _) = broadcast::channel(16);
+        let (svc_notify_tx, _) = broadcast::channel(16);
+        let poison_fs = Arc::new(FedState {
+            node_name: own.name.clone(),
+            peers: startup_pm.clone().into(),
+            cert_der,
+            cert_chain_der,
+            key_der,
+            rate_limiter: Arc::new(RateLimiter::new(60, 20)),
+            db: Arc::new(Mutex::new(db_conn)),
+            sessions_dirs: vec![],
+            agy_config: xmsg::agy::AgyConfig::default(),
+            agy_store: xmsg::agy::new_agy_store(),
+            pi_store: xmsg::pi::new_pi_store(),
+            pi_notify_tx,
+            svc_store: xmsg::svc::new_svc_store(),
+            svc_notify_tx,
+            notify_tx,
+            max_body: 65536,
+            is_leaf: false,
+            leaf_principal: None,
+            outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+            dynamic_tls: Default::default(),
+            reply_ttl: Duration::from_secs(600),
+            list_queries: Default::default(),
+        });
+        let reloader = xmsg::fed::CredentialReloader::new_full(
+            cert_path.clone(),
+            key_path.clone(),
+            Some(init_peers_file.clone()),
+            Some(own),
+            startup_pm,
+            poison_fs.dynamic_tls.clone(),
+            Some(poison_fs.clone()),
+            Arc::new(Mutex::new(std::collections::HashSet::new())),
+        )
+        .unwrap();
+        assert!(poison_fs.current_peers().get("peer1.test").is_some());
+
+        // Reload removing peer1.test
+        fs::write(
+            &init_peers_file,
+            serde_json::json!({
+                "peer2.test": {
+                    "address": "127.0.0.1:9",
+                    "ca": ca2_path.display().to_string(),
+                    "identities": [uri_peer2],
+                    "allow": ["send", "reply"]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        reloader.force_reload().unwrap();
+        assert!(poison_fs.current_peers().get("peer1.test").is_none());
+        assert!(poison_fs.current_peers().get("peer2.test").is_some());
+
+        // Poison dynamic_tls write lock
+        let dtls = poison_fs.dynamic_tls.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = dtls.write().unwrap();
+            panic!("simulated reloader panic while holding dynamic_tls write guard");
+        })
+        .join();
+        assert!(
+            poison_fs.dynamic_tls.read().is_err(),
+            "dynamic_tls RwLock must be poisoned"
+        );
+
+        // Even while poisoned, current_peers() must still exclude removed peer1.test and retain peer2.test
+        assert!(
+            poison_fs.current_peers().get("peer1.test").is_none(),
+            "poisoned dynamic_tls must not fall back to startup peers containing removed peer1.test"
+        );
+        assert!(
+            poison_fs.current_peers().get("peer2.test").is_some(),
+            "poisoned dynamic_tls must still return last committed peers containing peer2.test"
+        );
+        assert!(
+            poison_fs.get_tls_acceptor().is_some(),
+            "poisoned dynamic_tls must still return last committed TlsAcceptor"
+        );
+    }
 }
 
 // -----------------------------------------------------------------------------
