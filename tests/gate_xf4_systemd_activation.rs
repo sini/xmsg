@@ -1112,22 +1112,19 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
             rustls::pki_types::CertificateDer::pem_slice_iter(s_cert_pem.as_bytes())
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
-        let key =
-            rustls::pki_types::PrivateKeyDer::from_pem_slice(s_key_pem.as_bytes()).unwrap();
+        let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(s_key_pem.as_bytes()).unwrap();
         let cert_der = certs[0].to_vec();
         let cert_chain_der: Vec<Vec<u8>> = certs.into_iter().map(|c| c.to_vec()).collect();
         let key_der = key.secret_der().to_vec();
-        let own = xmsg::node::own_node_from_der(&cert_der).unwrap();
-        let startup_pm = Arc::new(
-            PeersMap::load_from_file_for(&init_peers_file, Some(&own)).unwrap(),
-        );
+        let startup_pm = Arc::new(PeersMap::load_from_file_for(&init_peers_file, None).unwrap());
 
-        let db_conn = xmsg::storage::init_db(&tmp.path().join("poison.db")).unwrap();
-        let (notify_tx, _) = broadcast::channel(16);
-        let (pi_notify_tx, _) = broadcast::channel(16);
-        let (svc_notify_tx, _) = broadcast::channel(16);
+        let db_conn = rusqlite::Connection::open_in_memory().unwrap();
+        xmsg::storage::init_db(&db_conn).unwrap();
+        let (notify_tx, _) = tokio::sync::broadcast::channel(16);
+        let (pi_notify_tx, _) = tokio::sync::broadcast::channel(16);
+        let (svc_notify_tx, _) = tokio::sync::broadcast::channel(16);
         let poison_fs = Arc::new(FedState {
-            node_name: own.name.clone(),
+            node_name: "reload-server.test".to_string(),
             peers: startup_pm.clone().into(),
             cert_der,
             cert_chain_der,
@@ -1154,7 +1151,7 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
             cert_path.clone(),
             key_path.clone(),
             Some(init_peers_file.clone()),
-            Some(own),
+            None,
             startup_pm,
             poison_fs.dynamic_tls.clone(),
             Some(poison_fs.clone()),
