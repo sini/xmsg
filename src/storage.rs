@@ -951,17 +951,19 @@ pub fn purge_agy_messages(conn: &Connection, ttl_secs: u64) -> Result<usize> {
 pub const MAX_SVC_QUEUE_PER_SESSION: usize = 100;
 pub const DEFAULT_REPLY_TTL_SECS: u64 = 604_800;
 pub const DEFAULT_IDEMPOTENCY_TTL_SECS: u64 = 86_400;
+pub const DEFAULT_MAX_BODY_BYTES: usize = 65_536;
 
 type SvcQueueCapEntry = (std::sync::Weak<std::sync::Mutex<Connection>>, usize);
 
-fn svc_queue_cap_registry() -> &'static std::sync::Mutex<std::collections::HashMap<usize, SvcQueueCapEntry>> {
+fn svc_queue_cap_registry(
+) -> &'static std::sync::Mutex<std::collections::HashMap<usize, SvcQueueCapEntry>> {
     static REGISTRY: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<usize, SvcQueueCapEntry>>,
     > = std::sync::OnceLock::new();
     REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-pub fn set_svc_queue_cap(db: & std::sync::Arc<std::sync::Mutex<Connection>>, cap: usize) {
+pub fn set_svc_queue_cap(db: &std::sync::Arc<std::sync::Mutex<Connection>>, cap: usize) {
     let key = std::sync::Arc::as_ptr(db) as usize;
     let weak = std::sync::Arc::downgrade(db);
     let mut map = svc_queue_cap_registry().lock().unwrap();

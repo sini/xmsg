@@ -1561,9 +1561,8 @@ pub async fn push_reply(
                     };
                     let cap = storage::svc_queue_cap_for_db(local.db);
                     let inserted = match local.db.lock() {
-                        Ok(db) => {
-                            storage::insert_svc_message_with_cap(&db, &svc_msg, cap).unwrap_or(false)
-                        }
+                        Ok(db) => storage::insert_svc_message_with_cap(&db, &svc_msg, cap)
+                            .unwrap_or(false),
                         Err(_) => false,
                     };
                     if inserted {
@@ -2506,7 +2505,7 @@ pub async fn replies(
     // A message sent to a dialable peer: its replies may still be there.
     if let (Some(outbound), Some(fed_state)) = (outbound, state.fed_state.as_ref()) {
         let peer_is_leaf = fed_state
-            .peers
+            .current_peers()
             .get(&outbound.peer)
             .map(|p| p.leaf)
             .unwrap_or(false);

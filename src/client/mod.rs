@@ -312,25 +312,37 @@ impl RegisteredService {
         self.connection.as_ref().map(|_| &self.registration)
     }
     pub fn address(&self) -> Option<&str> {
-        self.connection.as_ref().map(|_| self.registration.address.as_str())
+        self.connection
+            .as_ref()
+            .map(|_| self.registration.address.as_str())
     }
     pub fn node(&self) -> Option<&str> {
-        self.connection.as_ref().map(|_| self.registration.node.as_str())
+        self.connection
+            .as_ref()
+            .map(|_| self.registration.node.as_str())
     }
     pub fn reply_ttl_secs(&self) -> Option<u64> {
         self.connection
             .as_ref()
-            .and_then(|_| self.registration.reply_ttl_secs)
+            .and(self.registration.reply_ttl_secs)
     }
     pub fn idempotency_ttl_secs(&self) -> Option<u64> {
         self.connection
             .as_ref()
-            .and_then(|_| self.registration.idempotency_ttl_secs)
+            .and(self.registration.idempotency_ttl_secs)
     }
     pub fn svc_queue_cap(&self) -> Option<usize> {
         self.connection
             .as_ref()
-            .and_then(|_| self.registration.svc_queue_cap)
+            .and(self.registration.svc_queue_cap)
+    }
+    /// Effective maximum message body length in BYTES (`--max-body` / `XMSG_MAX_BODY`),
+    /// sourced from `state.max_body` enforced by `surface::send` and `surface::reply`,
+    /// or `None` when disconnected or when an older daemon omitted the field.
+    pub fn max_body_bytes(&self) -> Option<usize> {
+        self.connection
+            .as_ref()
+            .and(self.registration.max_body_bytes)
     }
 
     async fn service_exchange(

@@ -2123,10 +2123,60 @@ pub async fn run_agy_proc_watcher(
     }
 }
 
+pub async fn bind_register_listener(
+    sock_path: &Path,
+    my_uid: u32,
+) -> io::Result<tokio::net::UnixListener> {
+    if let Some(parent) = sock_path.parent() {
+        if let Err(e) = crate::agent::ensure_secure_socket_dir(parent, my_uid) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                e.to_string(),
+            ));
+        }
+    }
+    if sock_path.exists() {
+        if tokio::net::UnixStream::connect(sock_path).await.is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!(
+                    "another server instance is actively listening on {}",
+                    sock_path.display()
+                ),
+            ));
+        }
+        let _ = fs::remove_file(sock_path);
+    }
+
+    let listener = tokio::net::UnixListener::bind(sock_path)?;
+    fs::set_permissions(
+        sock_path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("failed to set permissions on {}: {e}", sock_path.display()),
+        )
+    })?;
+    Ok(listener)
+}
+
 /// Runs the registration Unix domain socket server multiplexing agy and pi harnesses.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_register_server(
     sock_path: PathBuf,
+    state: Arc<crate::http::AppState>,
+    my_uid: u32,
+    trusted_svc_exes: HashMap<String, PathBuf>,
+) -> io::Result<()> {
+    let listener = bind_register_listener(&sock_path, my_uid).await?;
+    run_register_server_with_listener(listener, state, my_uid, trusted_svc_exes).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_register_server_with_listener(
+    listener: tokio::net::UnixListener,
     state: Arc<crate::http::AppState>,
     my_uid: u32,
     trusted_svc_exes: HashMap<String, PathBuf>,
@@ -2137,38 +2187,6 @@ pub async fn run_register_server(
     let db = state.db.clone();
     let pi_notify_tx = state.pi_notify_tx.clone();
     let reply_ttl = state.reply_ttl;
-    if let Some(parent) = sock_path.parent() {
-        if let Err(e) = crate::agent::ensure_secure_socket_dir(parent, my_uid) {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                e.to_string(),
-            ));
-        }
-    }
-    if sock_path.exists() {
-        if tokio::net::UnixStream::connect(&sock_path).await.is_ok() {
-            return Err(io::Error::new(
-                io::ErrorKind::AddrInUse,
-                format!(
-                    "another server instance is actively listening on {}",
-                    sock_path.display()
-                ),
-            ));
-        }
-        let _ = fs::remove_file(&sock_path);
-    }
-
-    let listener = tokio::net::UnixListener::bind(&sock_path)?;
-    fs::set_permissions(
-        &sock_path,
-        std::os::unix::fs::PermissionsExt::from_mode(0o600),
-    )
-    .map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!("failed to set permissions on {}: {e}", sock_path.display()),
-        )
-    })?;
 
     let stand_down_counts: Arc<tokio::sync::RwLock<HashMap<String, u32>>> =
         Arc::new(tokio::sync::RwLock::new(HashMap::new()));

@@ -69,18 +69,22 @@ async fn exercise(binary: &Path, expects_effective_limits: bool) {
         assert_eq!(client.reply_ttl_secs(), Some(604_800));
         assert_eq!(client.idempotency_ttl_secs(), Some(86_400));
         assert_eq!(client.svc_queue_cap(), Some(100));
+        assert_eq!(client.max_body_bytes(), Some(65_536));
         let reg = client.registration().unwrap();
         assert_eq!(reg.reply_ttl_secs, Some(604_800));
         assert_eq!(reg.idempotency_ttl_secs, Some(86_400));
         assert_eq!(reg.svc_queue_cap, Some(100));
+        assert_eq!(reg.max_body_bytes, Some(65_536));
     } else {
         assert_eq!(client.reply_ttl_secs(), None);
         assert_eq!(client.idempotency_ttl_secs(), None);
         assert_eq!(client.svc_queue_cap(), None);
+        assert_eq!(client.max_body_bytes(), None);
         let reg = client.registration().unwrap();
         assert_eq!(reg.reply_ttl_secs, None);
         assert_eq!(reg.idempotency_ttl_secs, None);
         assert_eq!(reg.svc_queue_cap, None);
+        assert_eq!(reg.max_body_bytes, None);
     }
     let address = client.address().unwrap().to_owned();
     let listed = client.list(ListQuery::default()).await.unwrap();
@@ -406,22 +410,25 @@ async fn exercise_candidate_effective_limits(binary: &Path) {
         node: String,
     }
 
-    let cases: &[(&[(&str, &str)], &[&str], u64, u64, usize)] = &[
-        // Positive control: defaults (reply_ttl=604800, idempotency_ttl=86400, svc_queue_cap=100)
-        (&[], &[], 604_800, 86_400, 100),
-        // Cell 1: non-default --reply-ttl vs default idempotency_ttl & svc_queue_cap
-        (&[], &["--reply-ttl", "3600"], 3_600, 86_400, 100),
-        // Cell 2: non-default --idempotency-ttl (and env XMSG_IDEMPOTENCY_TTL) vs default reply_ttl & svc_queue_cap
+    let cases: &[(&[(&str, &str)], &[&str], u64, u64, usize, usize)] = &[
+        // Positive control: defaults (reply_ttl=604800, idempotency_ttl=86400, svc_queue_cap=100, max_body_bytes=65536)
+        (&[], &[], 604_800, 86_400, 100, 65_536),
+        // Cell 1: non-default --reply-ttl vs default idempotency_ttl, svc_queue_cap & max_body_bytes
+        (&[], &["--reply-ttl", "3600"], 3_600, 86_400, 100, 65_536),
+        // Cell 2: non-default --idempotency-ttl (and env XMSG_IDEMPOTENCY_TTL) vs default reply_ttl, svc_queue_cap & max_body_bytes
         (
             &[("XMSG_IDEMPOTENCY_TTL", "7200")],
             &[],
             604_800,
             7_200,
             100,
+            65_536,
         ),
-        // Cell 3: non-default --svc-queue-cap vs default reply_ttl & idempotency_ttl
-        (&[], &["--svc-queue-cap", "3"], 604_800, 86_400, 3),
-        // Cell 4: all three non-default simultaneously
+        // Cell 3: non-default --svc-queue-cap vs default reply_ttl, idempotency_ttl & max_body_bytes
+        (&[], &["--svc-queue-cap", "3"], 604_800, 86_400, 3, 65_536),
+        // Cell 4: non-default --max-body 4096 vs default reply_ttl, idempotency_ttl & svc_queue_cap
+        (&[], &["--max-body", "4096"], 604_800, 86_400, 100, 4_096),
+        // Cell 5: all four non-default simultaneously
         (
             &[],
             &[
@@ -431,15 +438,18 @@ async fn exercise_candidate_effective_limits(binary: &Path) {
                 "900",
                 "--svc-queue-cap",
                 "2",
+                "--max-body",
+                "4096",
             ],
             1_800,
             900,
             2,
+            4_096,
         ),
     ];
 
     let executable = std::env::current_exe().unwrap();
-    for &(envs, extra_args, exp_reply_ttl, exp_idem_ttl, exp_queue_cap) in cases {
+    for &(envs, extra_args, exp_reply_ttl, exp_idem_ttl, exp_queue_cap, exp_max_body) in cases {
         let temp = tempfile::tempdir().unwrap();
         let run = temp.path().join("run");
         let sessions = temp.path().join("sessions");
@@ -506,7 +516,7 @@ async fn exercise_candidate_effective_limits(binary: &Path) {
         }
 
         // Second: register via the current xmsg::client::RegisteredService and assert
-        // all three effective values match.
+        // all four effective values match.
         let options = ClientOptions {
             register_socket: register_socket.clone(),
             agent_socket: agent_socket.clone(),
@@ -520,10 +530,55 @@ async fn exercise_candidate_effective_limits(binary: &Path) {
         assert_eq!(client.reply_ttl_secs(), Some(exp_reply_ttl));
         assert_eq!(client.idempotency_ttl_secs(), Some(exp_idem_ttl));
         assert_eq!(client.svc_queue_cap(), Some(exp_queue_cap));
+        assert_eq!(client.max_body_bytes(), Some(exp_max_body));
         let reg = client.registration().unwrap();
         assert_eq!(reg.reply_ttl_secs, Some(exp_reply_ttl));
         assert_eq!(reg.idempotency_ttl_secs, Some(exp_idem_ttl));
         assert_eq!(reg.svc_queue_cap, Some(exp_queue_cap));
+        assert_eq!(reg.max_body_bytes, Some(exp_max_body));
+
+        // When a non-default --max-body bound is in force, prove that a send at exactly
+        // the reported bound is accepted and a send (and reply) at bound + 1 is refused
+        // with the existing `payload_too_large` error.
+        if exp_max_body == 4_096 {
+            let address = client.address().unwrap().to_owned();
+            let reported_bound = client.max_body_bytes().unwrap();
+            assert_eq!(reported_bound, 4_096);
+            let exact_body = "x".repeat(reported_bound);
+            let exact_sent = client
+                .send(&address, &exact_body, None)
+                .await
+                .expect("send at exact max_body_bytes bound must be accepted");
+            assert_eq!(exact_sent.outcome, "queued");
+            let delivered = client.poll(1).await.unwrap().unwrap();
+            assert_eq!(delivered.message_id(), exact_sent.message_id);
+            assert_eq!(delivered.text().len(), reported_bound);
+            client.ack(delivered.message_id()).await.unwrap();
+
+            let over_body = "x".repeat(reported_bound + 1);
+            let send_err = client
+                .send(&address, &over_body, None)
+                .await
+                .expect_err("send at max_body_bytes + 1 must be refused");
+            assert!(
+                matches!(
+                    &send_err,
+                    ClientError::Refused { code } if code == "payload_too_large"
+                ),
+                "expected payload_too_large at bound + 1 on send, got {send_err:?}"
+            );
+            let reply_err = client
+                .reply(&exact_sent.message_id, &over_body, None)
+                .await
+                .expect_err("reply at max_body_bytes + 1 must be refused");
+            assert!(
+                matches!(
+                    &reply_err,
+                    ClientError::Refused { code } if code == "payload_too_large"
+                ),
+                "expected payload_too_large at bound + 1 on reply, got {reply_err:?}"
+            );
+        }
 
         // When a small non-default queue cap is in force, prove the daemon actually enforces
         // that effective queue cap on service deliveries.

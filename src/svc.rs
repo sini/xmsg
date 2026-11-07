@@ -334,10 +334,12 @@ pub async fn handle_svc_connection_peer<
     }
 
     // The registration's address, this node's name (AM-4), and the daemon's effective
-    // limits in force (XR5): reply TTL, idempotency TTL, and per-service queue cap.
+    // limits in force (XR5): reply TTL, idempotency TTL, per-service queue cap, and
+    // maximum message body size in BYTES (sourced from `state.max_body`).
     let reply_ttl_secs = state.reply_ttl.as_secs();
     let idempotency_ttl_secs = state.idempotency_ttl.as_secs();
     let svc_queue_cap = storage::svc_queue_cap_for_db(&state.db);
+    let max_body_bytes = state.max_body;
     let ok_resp = serde_json::to_value(crate::client::wire::Registration {
         status: "ok".to_owned(),
         address: format!("{session_id}@{}", state.node_name),
@@ -345,6 +347,7 @@ pub async fn handle_svc_connection_peer<
         reply_ttl_secs: Some(reply_ttl_secs),
         idempotency_ttl_secs: Some(idempotency_ttl_secs),
         svc_queue_cap: Some(svc_queue_cap),
+        max_body_bytes: Some(max_body_bytes),
     })?;
     writer.write_all(format!("{ok_resp}\n").as_bytes()).await?;
 
@@ -565,6 +568,25 @@ where
     }
 }
 
+pub fn bind_leaf_register_listener(
+    sock_path: &Path,
+    my_uid: u32,
+) -> std::io::Result<tokio::net::UnixListener> {
+    if let Some(parent) = sock_path.parent() {
+        crate::agent::ensure_secure_socket_dir(parent, my_uid).map_err(std::io::Error::other)?;
+    }
+    if sock_path.exists() {
+        let _ = std::fs::remove_file(sock_path);
+    }
+
+    let listener = tokio::net::UnixListener::bind(sock_path)?;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o600));
+
+    tracing::info!(path = %sock_path.display(), "bound leaf register socket (mode 0600)");
+    Ok(listener)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_leaf_register_server(
     sock_path: PathBuf,
@@ -572,19 +594,17 @@ pub async fn run_leaf_register_server(
     my_uid: u32,
     leaf_principal: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if let Some(parent) = sock_path.parent() {
-        crate::agent::ensure_secure_socket_dir(parent, my_uid)?;
-    }
-    if sock_path.exists() {
-        let _ = std::fs::remove_file(&sock_path);
-    }
+    let listener = bind_leaf_register_listener(&sock_path, my_uid)?;
+    run_leaf_register_server_with_listener(listener, state, my_uid, leaf_principal).await
+}
 
-    let listener = tokio::net::UnixListener::bind(&sock_path)?;
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600));
-
-    tracing::info!(path = %sock_path.display(), "bound leaf register socket (mode 0600)");
-
+#[allow(clippy::too_many_arguments)]
+pub async fn run_leaf_register_server_with_listener(
+    listener: tokio::net::UnixListener,
+    state: Arc<crate::http::AppState>,
+    my_uid: u32,
+    leaf_principal: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(conn) => conn,
@@ -751,7 +771,7 @@ pub async fn run_leaf_inbox_task(
                 // A12: one render, from the origin the hub attests.
                 let from_name = msg
                     .origin
-                    .render(fed_state.peers.display_name(&msg.origin.node));
+                    .render(fed_state.current_peers().display_name(&msg.origin.node));
                 // A sender with an inbox gets its reply pushed back through the hub.
                 let (return_harness, return_session_id) = match msg.origin.key() {
                     Some(key) => (Some("fed".to_string()), Some(key.to_string())),

@@ -191,6 +191,11 @@ pub struct Registration {
     pub idempotency_ttl_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub svc_queue_cap: Option<usize>,
+    /// Effective maximum message body length in BYTES (`--max-body` / `XMSG_MAX_BODY`),
+    /// sourced from `state.max_body` enforced by `surface::send` and `surface::reply`.
+    /// `None` when registering against an older daemon that omits `max_body_bytes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_body_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

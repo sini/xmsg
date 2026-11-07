@@ -2595,7 +2595,7 @@ async fn fed_send_message_handler(
 
     // 1. Check peer config and allow list
     let peer_cfg = fed_state
-        .peers
+        .current_peers()
         .get_peer_config(&peer.name)
         .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
 
@@ -3447,7 +3447,7 @@ async fn fed_get_replies_handler(
     Query(query): Query<crate::http::LongPollQuery>,
 ) -> Result<Response, AppError> {
     let _peer_cfg = fed_state
-        .peers
+        .current_peers()
         .get_peer_config(&peer.name)
         .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
 
@@ -3643,7 +3643,7 @@ async fn fed_get_inbox_handler(
     Query(query): Query<FedInboxQuery>,
 ) -> Result<Response, AppError> {
     let peer_cfg = fed_state
-        .peers
+        .current_peers()
         .get_peer_config(&peer.name)
         .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
 
@@ -3718,7 +3718,7 @@ async fn fed_ack_inbox_handler(
     AxumPath(id): AxumPath<String>,
 ) -> Result<Response, AppError> {
     let peer_cfg = fed_state
-        .peers
+        .current_peers()
         .get_peer_config(&peer.name)
         .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
 
@@ -3752,8 +3752,8 @@ pub fn queue_leaf_mailbox_message(
     envelope: &FedEnvelope,
     from_name: &str,
 ) -> Result<DeliveryResponse, AppError> {
-    let peer_cfg = fed_state
-        .peers
+    let current_peers = fed_state.current_peers();
+    let peer_cfg = current_peers
         .get(peer_name)
         .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
 
@@ -3982,8 +3982,8 @@ pub async fn send_federated_message_with(
     envelope: &FedEnvelope,
     live_only: bool,
 ) -> Result<DeliveryResponse, AppError> {
-    let peer = fed_state
-        .peers
+    let current_peers = fed_state.current_peers();
+    let peer = current_peers
         .get(peer_name)
         .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
     let peer_name = peer.name.as_str();
@@ -4139,8 +4139,8 @@ pub async fn send_federated_reply(
         .outbound_replies_pushed
         .fetch_add(1, Ordering::SeqCst);
 
-    let peer = fed_state
-        .peers
+    let current_peers = fed_state.current_peers();
+    let peer = current_peers
         .get(peer_name)
         .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
     let peer_name = peer.name.as_str();
@@ -4246,8 +4246,8 @@ pub async fn poll_federated_replies(
     after_seq: i64,
     wait_secs: u64,
 ) -> Result<Vec<storage::ReplyRecord>, AppError> {
-    let peer = fed_state
-        .peers
+    let current_peers = fed_state.current_peers();
+    let peer = current_peers
         .get(peer_name)
         .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
     let peer_name = peer.name.as_str();
@@ -4339,8 +4339,8 @@ pub async fn get_federated_inbox(
     peer_name: &str,
     wait_secs: u64,
 ) -> Result<Option<FedInboxItem>, AppError> {
-    let peer = fed_state
-        .peers
+    let current_peers = fed_state.current_peers();
+    let peer = current_peers
         .get(peer_name)
         .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
     let peer_name = peer.name.as_str();
@@ -4429,8 +4429,8 @@ pub async fn ack_federated_inbox(
     peer_name: &str,
     message_id: &str,
 ) -> Result<(), AppError> {
-    let peer = fed_state
-        .peers
+    let current_peers = fed_state.current_peers();
+    let peer = current_peers
         .get(peer_name)
         .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
     let peer_name = peer.name.as_str();
@@ -5436,6 +5436,7 @@ pub struct CredentialReloader {
     pub peers: Mutex<Arc<PeersMap>>,
     pub fed_state: Option<Arc<FedState>>,
     pub active_pull_loops: Arc<Mutex<std::collections::HashSet<String>>>,
+    pub initialized: std::sync::atomic::AtomicBool,
 }
 
 impl CredentialReloader {
@@ -5485,10 +5486,14 @@ impl CredentialReloader {
             peers: Mutex::new(peers),
             fed_state,
             active_pull_loops,
+            initialized: std::sync::atomic::AtomicBool::new(false),
         };
 
         // Populate initial configuration and hashes
         reloader.check_and_reload()?;
+        reloader
+            .initialized
+            .store(true, std::sync::atomic::Ordering::Release);
         Ok(reloader)
     }
 
@@ -5499,11 +5504,35 @@ impl CredentialReloader {
     }
 
     pub fn check_and_reload(&self) -> Result<bool, AppError> {
+        self.check_and_reload_inner(false)
+    }
+
+    pub fn force_reload(&self) -> Result<bool, AppError> {
+        self.check_and_reload_inner(true)
+    }
+
+    fn check_and_reload_inner(&self, force: bool) -> Result<bool, AppError> {
+        let initialized = self.initialized.load(std::sync::atomic::Ordering::Acquire);
+        let mut notified_reloading = false;
+        let ensure_reloading = |notified: &mut bool| {
+            if initialized && !*notified {
+                crate::systemd::notify_reloading();
+                *notified = true;
+            }
+        };
+        if force {
+            ensure_reloading(&mut notified_reloading);
+        }
+
         let mut current_hashes = HashMap::new();
 
         let cert_hash = match Self::compute_file_hash(&self.cert_path) {
             Ok(h) => h,
             Err(e) => {
+                ensure_reloading(&mut notified_reloading);
+                if initialized {
+                    crate::systemd::notify_reload_failed("cannot read cert file");
+                }
                 tracing::error!("failed to read cert file {}: {e}", self.cert_path.display());
                 return Err(AppError::Internal(format!("failed to read cert file: {e}")));
             }
@@ -5513,6 +5542,10 @@ impl CredentialReloader {
         let key_hash = match Self::compute_file_hash(&self.key_path) {
             Ok(h) => h,
             Err(e) => {
+                ensure_reloading(&mut notified_reloading);
+                if initialized {
+                    crate::systemd::notify_reload_failed("cannot read key file");
+                }
                 tracing::error!("failed to read key file {}: {e}", self.key_path.display());
                 return Err(AppError::Internal(format!("failed to read key file: {e}")));
             }
@@ -5523,6 +5556,10 @@ impl CredentialReloader {
             let peers_hash = match Self::compute_file_hash(peers_path) {
                 Ok(h) => h,
                 Err(e) => {
+                    ensure_reloading(&mut notified_reloading);
+                    if initialized {
+                        crate::systemd::notify_reload_failed("cannot read peers file");
+                    }
                     tracing::error!("failed to read peers file {}: {e}", peers_path.display());
                     return Err(AppError::Internal(format!(
                         "failed to read peers file: {e}"
@@ -5537,6 +5574,10 @@ impl CredentialReloader {
             let ca_hash = match Self::compute_file_hash(ca_path) {
                 Ok(h) => h,
                 Err(e) => {
+                    ensure_reloading(&mut notified_reloading);
+                    if initialized {
+                        crate::systemd::notify_reload_failed("cannot read ca file");
+                    }
                     tracing::error!(
                         "failed to read CA file {} for peer {peer_name}: {e}",
                         ca_path.display()
@@ -5552,9 +5593,11 @@ impl CredentialReloader {
             *old_hashes != current_hashes
         };
 
-        if !changed {
+        if !changed && !force {
             return Ok(false);
         }
+
+        ensure_reloading(&mut notified_reloading);
 
         // If peers file is configured, reload it
         let new_peers_map = if let Some(ref peers_path) = self.peers_path {
@@ -5566,6 +5609,9 @@ impl CredentialReloader {
                     pm
                 }
                 Err(e) => {
+                    if initialized {
+                        crate::systemd::notify_reload_failed("invalid peers file");
+                    }
                     tracing::error!(
                         "invalid peers file '{}' during reload; keeping previous configuration: {e}",
                         peers_path.display()
@@ -5611,10 +5657,16 @@ impl CredentialReloader {
                     }
                 }
 
+                if initialized {
+                    crate::systemd::notify_ready();
+                }
                 tracing::info!("successfully reloaded federation TLS credentials and peers");
                 Ok(true)
             }
             Err(e) => {
+                if initialized {
+                    crate::systemd::notify_reload_failed("invalid tls credentials");
+                }
                 tracing::error!(
                     "invalid TLS credentials during reload; keeping previous configuration: {e}"
                 );

@@ -442,15 +442,17 @@ async fn registration_exposes_effective_limits_and_absent_baseline_fields() {
         assert_eq!(client.reply_ttl_secs(), None);
         assert_eq!(client.idempotency_ttl_secs(), None);
         assert_eq!(client.svc_queue_cap(), None);
+        assert_eq!(client.max_body_bytes(), None);
         let reg = client.registration().unwrap();
         assert_eq!(reg.reply_ttl_secs, None);
         assert_eq!(reg.idempotency_ttl_secs, None);
         assert_eq!(reg.svc_queue_cap, None);
+        assert_eq!(reg.max_body_bytes, None);
         server.abort();
         let _ = server.await;
     }
 
-    // 2. XR5 daemon response (effective limits populated -> Some(...))
+    // 2. Older XR5 daemon response that omits max_body_bytes (max_body_bytes -> None)
     {
         let (_temp, options, register, _agent) = fixture();
         let server = tokio::spawn(async move {
@@ -473,10 +475,46 @@ async fn registration_exposes_effective_limits_and_absent_baseline_fields() {
         assert_eq!(client.reply_ttl_secs(), Some(3600));
         assert_eq!(client.idempotency_ttl_secs(), Some(1800));
         assert_eq!(client.svc_queue_cap(), Some(42));
+        assert_eq!(client.max_body_bytes(), None);
         let reg = client.registration().unwrap();
         assert_eq!(reg.reply_ttl_secs, Some(3600));
         assert_eq!(reg.idempotency_ttl_secs, Some(1800));
         assert_eq!(reg.svc_queue_cap, Some(42));
+        assert_eq!(reg.max_body_bytes, None);
+        server.abort();
+        let _ = server.await;
+    }
+
+    // 3. Current daemon response (all four effective limits populated -> Some(...))
+    {
+        let (_temp, options, register, _agent) = fixture();
+        let server = tokio::spawn(async move {
+            let mut stream = BufReader::new(register.accept().await.unwrap().0);
+            request(
+                &mut stream,
+                json!({
+                    "status": "ok",
+                    "address": "bridge@fixture",
+                    "node": "fixture",
+                    "reply_ttl_secs": 3600,
+                    "idempotency_ttl_secs": 1800,
+                    "svc_queue_cap": 42,
+                    "max_body_bytes": 4096
+                }),
+            )
+            .await;
+            std::future::pending::<()>().await;
+        });
+        let client = RegisteredService::register(options).await.unwrap();
+        assert_eq!(client.reply_ttl_secs(), Some(3600));
+        assert_eq!(client.idempotency_ttl_secs(), Some(1800));
+        assert_eq!(client.svc_queue_cap(), Some(42));
+        assert_eq!(client.max_body_bytes(), Some(4096));
+        let reg = client.registration().unwrap();
+        assert_eq!(reg.reply_ttl_secs, Some(3600));
+        assert_eq!(reg.idempotency_ttl_secs, Some(1800));
+        assert_eq!(reg.svc_queue_cap, Some(42));
+        assert_eq!(reg.max_body_bytes, Some(4096));
         server.abort();
         let _ = server.await;
     }

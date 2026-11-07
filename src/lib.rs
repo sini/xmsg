@@ -42,3 +42,5 @@ pub mod storage;
 pub mod surface;
 #[cfg(feature = "daemon")]
 pub mod svc;
+#[cfg(feature = "daemon")]
+pub mod systemd;

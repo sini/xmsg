@@ -440,11 +440,7 @@ fn resolve_caller_session_peer_inner(
     }))
 }
 
-pub async fn run_agent_server(
-    sock_path: PathBuf,
-    state: Arc<AppState>,
-    my_uid: u32,
-) -> io::Result<()> {
+pub async fn bind_agent_listener(sock_path: &Path, my_uid: u32) -> io::Result<UnixListener> {
     if let Some(parent) = sock_path.parent() {
         if let Err(e) = ensure_secure_socket_dir(parent, my_uid) {
             return Err(io::Error::new(
@@ -454,7 +450,7 @@ pub async fn run_agent_server(
         }
     }
     if sock_path.exists() {
-        if tokio::net::UnixStream::connect(&sock_path).await.is_ok() {
+        if tokio::net::UnixStream::connect(sock_path).await.is_ok() {
             return Err(io::Error::new(
                 io::ErrorKind::AddrInUse,
                 format!(
@@ -463,17 +459,25 @@ pub async fn run_agent_server(
                 ),
             ));
         }
-        let _ = fs::remove_file(&sock_path);
+        let _ = fs::remove_file(sock_path);
     }
 
-    let listener = UnixListener::bind(&sock_path)?;
-    fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600)).map_err(|e| {
+    let listener = UnixListener::bind(sock_path)?;
+    fs::set_permissions(sock_path, fs::Permissions::from_mode(0o600)).map_err(|e| {
         io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!("failed to set permissions on {}: {e}", sock_path.display()),
         )
     })?;
+    Ok(listener)
+}
 
+pub async fn run_agent_server(
+    sock_path: PathBuf,
+    state: Arc<AppState>,
+    my_uid: u32,
+) -> io::Result<()> {
+    let listener = bind_agent_listener(&sock_path, my_uid).await?;
     run_agent_server_with_listener(listener, state, my_uid).await
 }
 

@@ -392,6 +392,11 @@ path = "tests/gate_xf4_agy_bus_restart.rs"
 required-features = ["daemon"]
 
 [[test]]
+name = "gate_xf4_systemd_activation"
+path = "tests/gate_xf4_systemd_activation.rs"
+required-features = ["daemon"]
+
+[[test]]
 name = "gate_xf5_fed_send_retry_trace"
 path = "tests/gate_xf5_fed_send_retry_trace.rs"
 required-features = ["daemon"]

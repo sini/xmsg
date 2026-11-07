@@ -25,7 +25,8 @@ service-name validator that `register.sock`, addressing and origin checking use
 `/` or subagent prefix); `register.sock` refuses invalid service names at
 registration with `ClientError::Refused { code: "bad_request" }`.
 On registration, the daemon also reports its effective limits in force
-(`reply_ttl_secs`, `idempotency_ttl_secs`, and `svc_queue_cap` on
+(`reply_ttl_secs`, `idempotency_ttl_secs`, `svc_queue_cap`, and
+`max_body_bytes` in bytes on
 `xmsg::client::Registration` and via accessors on `RegisteredService`);
 the fields are additive (`Option<...>`), so older clients ignore them and
 older daemons decode with `None`.

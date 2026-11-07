@@ -181,7 +181,11 @@ pub struct ServeArgs {
     pub sessions_dirs: Vec<PathBuf>,
 
     /// Maximum request body size in bytes
-    #[arg(long, env = "XMSG_MAX_BODY", default_value_t = 65536)]
+    #[arg(
+        long,
+        env = "XMSG_MAX_BODY",
+        default_value_t = storage::DEFAULT_MAX_BODY_BYTES
+    )]
     pub max_body: usize,
 
     /// Path to SQLite database
@@ -1050,6 +1054,16 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         None => xmsg::agent::default_register_sock_path()
             .map_err(|e| format!("cannot determine register socket path: {e}"))?,
     };
+    let leaf_reg_sock_path = if args.leaf {
+        Some(
+            args.leaf_register_sock
+                .clone()
+                .or_else(|| args.register_sock.clone())
+                .unwrap_or_else(|| register_sock_path.clone()),
+        )
+    } else {
+        None
+    };
     let agent_sock_path = match args.agent_sock {
         Some(p) => p,
         None => xmsg::agent::default_agent_sock_path()
@@ -1062,6 +1076,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let mut bg_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
@@ -1074,16 +1089,57 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                 .into(),
         );
     }
+    if args.fed_listen.is_some() && args.peers_file.is_none() {
+        return Err("--fed-listen requires --peers-file".to_string().into());
+    }
 
-    let fed_listener = if let Some(ref fed_listen_addr) = args.fed_listen {
-        let addr: std::net::SocketAddr = fed_listen_addr
-            .parse()
-            .map_err(|e| format!("invalid --fed-listen address '{fed_listen_addr}': {e}"))?;
-        let listener = tokio::net::TcpListener::bind(addr)
-            .await
-            .map_err(|e| format!("failed to bind federation listener on {fed_listen_addr}: {e}"))?;
-        info!(listen = %fed_listen_addr, "bound federation mTLS listener");
-        Some((listener, fed_listen_addr.clone()))
+    let fed_listen_addr: Option<std::net::SocketAddr> = match &args.fed_listen {
+        Some(s) => Some(
+            s.parse()
+                .map_err(|e| format!("invalid --fed-listen address '{s}': {e}"))?,
+        ),
+        None => None,
+    };
+    let listen_addr: Option<std::net::SocketAddr> = match &args.listen {
+        Some(s) => Some(
+            s.parse()
+                .map_err(|e| format!("invalid --listen address '{s}': {e}"))?,
+        ),
+        None => None,
+    };
+
+    let mut activated = xmsg::systemd::take_activated_sockets(&xmsg::systemd::ActivatedConfig {
+        fed_listen: fed_listen_addr,
+        listen: listen_addr,
+        agent_sock: if args.leaf {
+            None
+        } else {
+            Some(agent_sock_path.as_path())
+        },
+        register_sock: if args.leaf {
+            leaf_reg_sock_path.as_deref().unwrap_or(&register_sock_path)
+        } else {
+            register_sock_path.as_path()
+        },
+        http_sock: if args.leaf {
+            None
+        } else {
+            Some(http_sock_path.as_path())
+        },
+    })?;
+
+    let fed_listener = if let Some(addr) = fed_listen_addr {
+        let listener = match activated.fed.take() {
+            Some(listener) => listener,
+            None => tokio::net::TcpListener::bind(addr)
+                .await
+                .map_err(|e| format!("failed to bind federation listener on {addr}: {e}"))?,
+        };
+        let actual_addr = listener
+            .local_addr()
+            .map_err(|e| format!("failed to query federation listener local_addr: {e}"))?;
+        info!(listen = %actual_addr, "bound federation mTLS listener");
+        Some((listener, actual_addr))
     } else {
         None
     };
@@ -1139,6 +1195,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let active_pull_loops = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let mut reloader_for_sighup: Option<Arc<xmsg::fed::CredentialReloader>> = None;
 
     let fed_state = if let Some(peers_file) = args.peers_file {
         let peers = xmsg::fed::PeersMap::load_from_file_for(&peers_file, own.as_ref())
@@ -1177,21 +1234,24 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         });
 
         if let (Some(cert_path), Some(key_path)) = (&args.fed_cert, &args.fed_key) {
-            let reloader = xmsg::fed::CredentialReloader::new_full(
-                cert_path.clone(),
-                key_path.clone(),
-                Some(peers_file.clone()),
-                own.clone(),
-                peers_arc.clone(),
-                fs.dynamic_tls.clone(),
-                Some(fs.clone()),
-                active_pull_loops.clone(),
-            )
-            .map_err(|e| format!("failed to initialize credential reloader: {e}"))?;
+            let reloader = Arc::new(
+                xmsg::fed::CredentialReloader::new_full(
+                    cert_path.clone(),
+                    key_path.clone(),
+                    Some(peers_file.clone()),
+                    own.clone(),
+                    peers_arc.clone(),
+                    fs.dynamic_tls.clone(),
+                    Some(fs.clone()),
+                    active_pull_loops.clone(),
+                )
+                .map_err(|e| format!("failed to initialize credential reloader: {e}"))?,
+            );
+
+            reloader_for_sighup = Some(reloader.clone());
 
             if args.fed_reload_interval_secs > 0 {
-                Arc::new(reloader)
-                    .start_watcher(Duration::from_secs(args.fed_reload_interval_secs));
+                reloader.start_watcher(Duration::from_secs(args.fed_reload_interval_secs));
             }
         }
 
@@ -1219,6 +1279,23 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
         None
     };
+
+    {
+        let reloader_sighup = reloader_for_sighup.clone();
+        bg_tasks.push(tokio::spawn(async move {
+            while sighup.recv().await.is_some() {
+                info!("SIGHUP received, reloading configuration");
+                if let Some(ref reloader) = reloader_sighup {
+                    if let Err(e) = reloader.force_reload() {
+                        tracing::error!("SIGHUP credential reload failed: {e}");
+                    }
+                } else {
+                    xmsg::systemd::notify_reloading();
+                    xmsg::systemd::notify_ready();
+                }
+            }
+        }));
+    }
 
     let state = Arc::new(AppState {
         sessions_dirs,
@@ -1276,21 +1353,34 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if !args.leaf {
-        let agent_sock = agent_sock_path.clone();
+        let agent_listener = match activated.agent.take() {
+            Some(listener) => listener,
+            None => xmsg::agent::bind_agent_listener(&agent_sock_path, my_uid).await?,
+        };
         let agent_state = state.clone();
         bg_tasks.push(tokio::spawn(async move {
-            if let Err(e) = xmsg::agent::run_agent_server(agent_sock, agent_state, my_uid).await {
+            if let Err(e) =
+                xmsg::agent::run_agent_server_with_listener(agent_listener, agent_state, my_uid)
+                    .await
+            {
                 tracing::error!("agent server error: {e}");
             }
         }));
 
-        let reg_sock = register_sock_path.clone();
+        let reg_listener = match activated.register.take() {
+            Some(listener) => listener,
+            None => xmsg::agy::bind_register_listener(&register_sock_path, my_uid).await?,
+        };
         let reg_state = state.clone();
         let reg_trusted_svc_exes = trusted_svc_exes.clone();
         bg_tasks.push(tokio::spawn(async move {
-            if let Err(e) =
-                xmsg::agy::run_register_server(reg_sock, reg_state, my_uid, reg_trusted_svc_exes)
-                    .await
+            if let Err(e) = xmsg::agy::run_register_server_with_listener(
+                reg_listener,
+                reg_state,
+                my_uid,
+                reg_trusted_svc_exes,
+            )
+            .await
             {
                 tracing::error!("register server error: {e}");
             }
@@ -1315,18 +1405,22 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let app = build_router(state.clone());
 
     if args.leaf {
-        let leaf_reg_sock = args
-            .leaf_register_sock
-            .or_else(|| args.register_sock.clone())
-            .unwrap_or_else(|| {
-                xmsg::agent::default_register_sock_path().expect("default register sock")
-            });
+        let leaf_reg_sock = leaf_reg_sock_path.expect("leaf_reg_sock_path");
+        let leaf_reg_listener = match activated.register.take() {
+            Some(listener) => listener,
+            None => xmsg::svc::bind_leaf_register_listener(&leaf_reg_sock, my_uid)?,
+        };
         let leaf_p = args.leaf_principal.clone().unwrap();
         let leaf_state = state.clone();
 
         bg_tasks.push(tokio::spawn(async move {
-            if let Err(e) =
-                xmsg::svc::run_leaf_register_server(leaf_reg_sock, leaf_state, my_uid, leaf_p).await
+            if let Err(e) = xmsg::svc::run_leaf_register_server_with_listener(
+                leaf_reg_listener,
+                leaf_state,
+                my_uid,
+                leaf_p,
+            )
+            .await
             {
                 tracing::error!("leaf register server error: {e}");
             }
@@ -1352,9 +1446,13 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        let tcp_addr = args.listen.as_ref().unwrap();
-        let tcp_listener = tokio::net::TcpListener::bind(tcp_addr).await?;
-        info!(listen = %tcp_addr, "starting leaf tcp http server");
+        let tcp_addr = listen_addr.unwrap();
+        let tcp_listener = match activated.listen.take() {
+            Some(listener) => listener,
+            None => tokio::net::TcpListener::bind(tcp_addr).await?,
+        };
+        let actual_tcp_addr = tcp_listener.local_addr()?;
+        info!(listen = %actual_tcp_addr, "starting leaf tcp http server");
         let mut shutdown_rx_leaf = shutdown_rx.clone();
         let leaf_task = tokio::spawn(async move {
             let server = axum::serve(tcp_listener, app);
@@ -1366,14 +1464,18 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
             }
         });
 
+        xmsg::systemd::notify_ready();
         run_shutdown_drain(sigterm, sigint, shutdown_tx, bg_tasks, vec![leaf_task], db).await?;
         return Ok(());
     }
 
     let mut server_tasks = Vec::new();
 
-    if let Some(ref tcp_addr) = args.listen {
-        let tcp_listener = tokio::net::TcpListener::bind(tcp_addr).await?;
+    if let Some(tcp_addr) = listen_addr {
+        let tcp_listener = match activated.listen.take() {
+            Some(listener) => listener,
+            None => tokio::net::TcpListener::bind(tcp_addr).await?,
+        };
         let tcp_app = app.clone();
         let mut shutdown_rx_tcp = shutdown_rx.clone();
         server_tasks.push(tokio::spawn(async move {
@@ -1387,7 +1489,10 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         }));
     }
 
-    let ucred_listener = xmsg::http::bind_ucred_unix_listener(&http_sock_path, my_uid, None)?;
+    let ucred_listener = match activated.http.take() {
+        Some(listener) => xmsg::http::adopt_ucred_unix_listener(listener, my_uid, None),
+        None => xmsg::http::bind_ucred_unix_listener(&http_sock_path, my_uid, None)?,
+    };
     let mut shutdown_rx_unix = shutdown_rx.clone();
     server_tasks.push(tokio::spawn(async move {
         // A15: only http.sock carries the peer credentials a caller is traced by.
@@ -1403,6 +1508,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }));
 
+    xmsg::systemd::notify_ready();
     run_shutdown_drain(sigterm, sigint, shutdown_tx, bg_tasks, server_tasks, db).await?;
     Ok(())
 }
@@ -1420,6 +1526,7 @@ async fn run_shutdown_drain(
         _ = sigterm.recv() => "SIGTERM",
         _ = sigint.recv() => "SIGINT",
     };
+    xmsg::systemd::notify_stopping();
     info!("shutdown signal received ({sig_name}), starting graceful drain");
 
     // Spawn listener for second signal to exit immediately non-zero

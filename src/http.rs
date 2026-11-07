@@ -782,6 +782,18 @@ pub fn bind_ucred_unix_listener(
     })
 }
 
+pub fn adopt_ucred_unix_listener(
+    listener: tokio::net::UnixListener,
+    expected_uid: u32,
+    peer_uid_checker: Option<PeerUidChecker>,
+) -> UcredUnixListener {
+    UcredUnixListener {
+        listener,
+        expected_uid,
+        peer_uid_checker,
+    }
+}
+
 pub fn http_request_unix(
     sock_path: &Path,
     method: &str,

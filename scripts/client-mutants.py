@@ -27,6 +27,7 @@ CASES = [
     ("live-register-declared-reply-ttl", "src/svc.rs", "let reply_ttl_secs = state.reply_ttl.as_secs();", "let reply_ttl_secs = storage::DEFAULT_REPLY_TTL_SECS;", "@live"),
     ("live-register-declared-idempotency-ttl", "src/svc.rs", "let idempotency_ttl_secs = state.idempotency_ttl.as_secs();", "let idempotency_ttl_secs = storage::DEFAULT_IDEMPOTENCY_TTL_SECS;", "@live"),
     ("live-register-declared-svc-queue-cap", "src/svc.rs", "let svc_queue_cap = storage::svc_queue_cap_for_db(&state.db);", "let svc_queue_cap = storage::MAX_SVC_QUEUE_PER_SESSION;", "@live"),
+    ("live-register-declared-max-body-bytes", "src/svc.rs", "let max_body_bytes = state.max_body;", "let max_body_bytes = storage::DEFAULT_MAX_BODY_BYTES;", "@live"),
     ("client-validate-service-name", "src/client/mod.rs", 'if name == "xmsg" {', "if false {", "exported_service_name_validator_matches_mesh_and_refusals"),
     ("live-skip", "tests/shared_client_live.rs", "let baseline = PathBuf::from", "return; let baseline = PathBuf::from", "@live"),
     ("agent-deadline", "src/client/mod.rs", "timeout(self.options.operation_timeout, async", "timeout(Duration::from_secs(60), async", "agent_deadline_is_unknown_not_a_confirmed_refusal"),
