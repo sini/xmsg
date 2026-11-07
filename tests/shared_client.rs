@@ -47,10 +47,12 @@ async fn registration_health_preserves_pending_frames_and_detects_shutdown() {
         for partial in [false, true] {
             let (_temp, options, register, _agent) = fixture();
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let (write_tx, write_rx) = tokio::sync::oneshot::channel();
             let (release_tx, release_rx) = tokio::sync::oneshot::channel();
             let server = tokio::spawn(async move {
                 let mut stream = BufReader::new(register.accept().await.unwrap().0);
                 request(&mut stream, registration()).await;
+                write_rx.await.unwrap();
                 let frame = format!(
                     "{}\n",
                     delivery(json!({"service":"sender","node":"fixture"}))
@@ -86,6 +88,7 @@ async fn registration_health_preserves_pending_frames_and_detects_shutdown() {
             });
             let mut client = RegisteredService::register(options).await.unwrap();
             let snapshot = client.agent_client();
+            write_tx.send(()).unwrap();
             ready_rx.await.unwrap();
             for _ in 0..3 {
                 assert_eq!(
@@ -133,6 +136,39 @@ async fn registration_health_is_idle_and_snapshots_die_with_owner() {
     drop(client);
     assert!(matches!(snapshot.health(), Err(ClientError::Disconnected)));
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn registration_health_detects_idle_eof_and_half_close() {
+    for half_close in [false, true] {
+        let (_temp, options, register, _agent) = fixture();
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut stream = BufReader::new(register.accept().await.unwrap().0);
+            request(&mut stream, registration()).await;
+            close_rx.await.unwrap();
+            if half_close {
+                stream.get_mut().shutdown().await.unwrap();
+                closed_tx.send(Some(stream)).unwrap();
+            } else {
+                drop(stream);
+                closed_tx.send(None).unwrap();
+            }
+        });
+        let client = RegisteredService::register(options).await.unwrap();
+        let snapshot = client.agent_client();
+        client.health().unwrap();
+        snapshot.health().unwrap();
+        close_tx.send(()).unwrap();
+        let _held_half = closed_rx.await.unwrap();
+        assert!(
+            matches!(client.health(), Err(ClientError::Disconnected)),
+            "idle EOF invalidates registration"
+        );
+        assert!(matches!(snapshot.health(), Err(ClientError::Disconnected)));
+        server.await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -191,6 +227,96 @@ async fn registration_health_distinguishes_refusal_from_disconnect_after_request
             drop(server.await.unwrap());
             registrar.await.unwrap();
         }
+    }
+}
+
+#[tokio::test]
+async fn registration_health_can_race_a_split_response_reader() {
+    let (_temp, options, register, _agent) = fixture();
+    let (split_tx, split_rx) = tokio::sync::oneshot::channel();
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut stream = BufReader::new(register.accept().await.unwrap().0);
+        request(&mut stream, registration()).await;
+        let mut line = String::new();
+        stream.read_line(&mut line).await.unwrap();
+        let frame = format!(
+            "{}\n",
+            delivery(json!({"service":"sender","node":"fixture"}))
+        );
+        let split = frame.len() / 2;
+        stream
+            .get_mut()
+            .write_all(&frame.as_bytes()[..split])
+            .await
+            .unwrap();
+        split_tx.send(()).unwrap();
+        finish_rx.await.unwrap();
+        stream
+            .get_mut()
+            .write_all(&frame.as_bytes()[split..])
+            .await
+            .unwrap();
+        release_rx.await.unwrap();
+    });
+    let mut client = RegisteredService::register(options).await.unwrap();
+    let snapshot = client.agent_client();
+    let reader = tokio::spawn(async move {
+        let delivered = client.poll(0).await.unwrap().unwrap();
+        assert_eq!(delivered.message_id(), "msg");
+        assert_eq!(delivered.text(), "body");
+        client
+    });
+    split_rx.await.unwrap();
+    for _ in 0..100 {
+        snapshot.health().unwrap();
+    }
+    finish_tx.send(()).unwrap();
+    let client = reader.await.unwrap();
+    snapshot.health().unwrap();
+    drop(client);
+    assert!(matches!(snapshot.health(), Err(ClientError::Disconnected)));
+    release_tx.send(()).unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn registration_health_rechecks_after_an_agent_timeout() {
+    for close in [false, true] {
+        let (_temp, mut options, register, agent) = fixture();
+        options.operation_timeout = Duration::from_millis(100);
+        let (registration_tx, registration_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let registrar = tokio::spawn(async move {
+            let mut stream = BufReader::new(register.accept().await.unwrap().0);
+            request(&mut stream, registration()).await;
+            registration_tx.send(stream).unwrap();
+        });
+        let server = tokio::spawn(async move {
+            let mut registration = registration_rx.await.unwrap();
+            let mut stream = BufReader::new(agent.accept().await.unwrap().0);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            if close {
+                registration.get_mut().shutdown().await.unwrap();
+            }
+            release_rx.await.unwrap();
+            (registration, stream)
+        });
+        let client = RegisteredService::register(options).await.unwrap();
+        let result = client.send("target@fixture", "body", None).await;
+        if close {
+            assert!(
+                matches!(result, Err(ClientError::Disconnected)),
+                "timeout after registration EOF is disconnected"
+            );
+        } else {
+            assert!(matches!(result, Err(ClientError::Timeout)));
+        }
+        release_tx.send(()).unwrap();
+        drop(server.await.unwrap());
+        registrar.await.unwrap();
     }
 }
 fn delivery(origin: Value) -> Value {

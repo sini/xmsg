@@ -103,3 +103,25 @@ includes a second client-only dependency build and an old-daemon build; timings
 and Nix closure deltas must be measured on actual CI, not inferred from the package
 counts. Linux runs live compatibility; macOS runs the daemon and portable client
 checks. No fleet sockets, credentials or live peers are used by these fixtures.
+
+## Registration health
+
+`RegisteredService::health()` and `AgentClient::health()` return a nonblocking,
+non-consuming snapshot of the registration connection. An idle connection or
+pending data is healthy; peer close or write-half shutdown returns
+`ClientError::Disconnected`, including when unread bytes precede EOF. Linux uses
+`poll` shutdown flags; macOS uses a read `kqueue` event's `EV_EOF` flag. A peek
+alone cannot detect shutdown behind pending data.
+
+Health sends no protocol frames and never polls or ACKs the service queue. A
+short descriptor-lifetime mutex prevents inspection racing with owner disposal
+and descriptor reuse; it is never held across asynchronous I/O. Agent snapshots
+do not keep a registration socket open after its owner is dropped. The normal
+service reader can still consume a buffered response after health reports EOF.
+
+Agent operations check health before submission and recheck it after an error,
+including timeout. A genuine refusal on a healthy registration remains Refused;
+an accepted successful receipt remains successful even if EOF follows it.
+Health is point-in-time and provides neither delivery guarantees nor automatic
+re-registration. Consumers implement recovery through the same validated
+registration API and must invalidate their old snapshots.

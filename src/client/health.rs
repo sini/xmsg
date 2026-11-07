@@ -70,6 +70,51 @@ fn shutdown(fd: RawFd) -> io::Result<bool> {
     Ok(event.revents & (libc::POLLHUP | libc::POLLRDHUP) != 0)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn closed_peer_keeps_complete_and_partial_frames_readable() {
+        for frame in [
+            b"{\"action\":\"timeout\"}\n".as_slice(),
+            b"{\"action\":".as_slice(),
+        ] {
+            let (mut reader, mut writer) = UnixStream::pair().unwrap();
+            let guard = RegistrationHealth::new(reader.as_raw_fd());
+            guard.check().unwrap();
+            writer.write_all(frame).unwrap();
+            drop(writer);
+            assert!(
+                matches!(guard.check(), Err(ClientError::Disconnected)),
+                "shutdown behind data"
+            );
+            let mut received = Vec::new();
+            reader.read_to_end(&mut received).unwrap();
+            assert_eq!(received, frame, "normal reader preserves pre-EOF bytes");
+            assert_eq!(reader.read(&mut [0; 1]).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn disposed_descriptor_cannot_become_a_new_registration() {
+        let (original, _peer) = UnixStream::pair().unwrap();
+        let guard = RegistrationHealth::new(original.as_raw_fd());
+        guard.check().unwrap();
+        guard.dispose();
+        let (replacement, _replacement_peer) = UnixStream::pair().unwrap();
+        // Both descriptor numbers remain owned throughout the forced reuse.
+        assert_eq!(
+            unsafe { libc::dup2(replacement.as_raw_fd(), original.as_raw_fd()) },
+            original.as_raw_fd()
+        );
+        assert!(matches!(guard.check(), Err(ClientError::Disconnected)));
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn shutdown(fd: RawFd) -> io::Result<bool> {
     let queue = unsafe { libc::kqueue() };

@@ -469,7 +469,8 @@ impl AgentClient {
             Ok(result)
         })
         .await
-        .map_err(|_| ClientError::Timeout)?;
+        .map_err(|_| ClientError::Timeout)
+        .and_then(|result| result);
         if result.is_err() {
             self.health()?;
         }

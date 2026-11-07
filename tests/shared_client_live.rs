@@ -32,7 +32,8 @@ async fn exercise(binary: &Path, expects_effective_limits: bool) {
         daemon_uid: xmsg::client::current_uid(),
     };
     let executable = std::env::current_exe().unwrap();
-    let child = Command::new(binary)
+    let mut command = Command::new(binary);
+    let child = command
         .env_clear()
         .env("HOME", temp.path())
         .env("XDG_RUNTIME_DIR", &run)
@@ -64,7 +65,7 @@ async fn exercise(binary: &Path, expects_effective_limits: bool) {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let mut client = RegisteredService::register(options).await.unwrap();
+    let mut client = RegisteredService::register(options.clone()).await.unwrap();
     if expects_effective_limits {
         assert_eq!(client.reply_ttl_secs(), Some(604_800));
         assert_eq!(client.idempotency_ttl_secs(), Some(86_400));
@@ -120,6 +121,43 @@ async fn exercise(binary: &Path, expects_effective_limits: bool) {
     assert_eq!(pushed.in_reply_to(), Some(sent.message_id.as_str()));
     assert_eq!(pushed.text(), "live reply");
     client.ack(pushed.message_id()).await.unwrap();
+    let snapshot = client.agent_client();
+    client.health().unwrap();
+    node.0.kill().unwrap();
+    node.0.wait().unwrap();
+    assert!(
+        matches!(client.health(), Err(ClientError::Disconnected)),
+        "real daemon EOF"
+    );
+    assert!(matches!(
+        snapshot.send(&address, "old snapshot", None).await,
+        Err(ClientError::Disconnected)
+    ));
+    for socket in [
+        &options.register_socket,
+        &options.agent_socket,
+        &run.join("http.sock"),
+    ] {
+        if socket.exists() {
+            fs::remove_file(socket).unwrap();
+        }
+    }
+    node.0 = command.spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !options.register_socket.exists() || !options.agent_socket.exists() {
+        assert!(Instant::now() < deadline, "restarted daemon readiness");
+        assert!(node.0.try_wait().unwrap().is_none());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut recovered = RegisteredService::register(options).await.unwrap();
+    let sent = recovered
+        .send(&address, "after restart", None)
+        .await
+        .unwrap();
+    let delivered = recovered.poll(1).await.unwrap().unwrap();
+    assert_eq!(delivered.message_id(), sent.message_id);
+    assert_eq!(delivered.origin().service.as_deref(), Some("bridge"));
+    recovered.ack(delivered.message_id()).await.unwrap();
 }
 
 #[tokio::test]
