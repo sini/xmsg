@@ -5362,26 +5362,30 @@ pub async fn run_fed_listener_with_acceptor(
                 remote_ip: remote_addr.ip(),
             });
 
-            // N1: Perform source address check ONCE PER CONNECTION in run_fed_listener
-            let reject_msg = check_peer_source(&peer_config, &peer_info.remote_ip)
-                .err()
-                .map(|e| match e {
-                    AppError::PeerRejected(msg) => msg,
-                    other => other.to_string(),
-                });
-
             let router = router.clone();
+            let fed_state_req = fed_state.clone();
             let service =
                 hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                     let mut router = router.clone();
                     let peer_info = peer_info.clone();
-                    let reject_msg = reject_msg.clone();
+                    let fed_state_req = fed_state_req.clone();
                     async move {
-                        if let Some(msg) = reject_msg {
-                            use axum::response::IntoResponse;
+                        use axum::response::IntoResponse;
+                        // Re-verify peer membership and source-IP CIDR policy (N1) on every
+                        // request against current_peers() so reload-time peer removal or `from`
+                        // narrowing takes effect immediately on established keep-alive
+                        // connections across every /fed/v2/* route.
+                        let current_peers = fed_state_req.current_peers();
+                        let Some(current_peer_cfg) = current_peers.get_peer_config(&peer_info.name)
+                        else {
                             return Ok::<_, std::convert::Infallible>(
-                                AppError::PeerRejected(msg).into_response(),
+                                AppError::UnknownPeer(peer_info.name.clone()).into_response(),
                             );
+                        };
+                        drop(current_peers);
+                        if let Err(err) = check_peer_source(&current_peer_cfg, &peer_info.remote_ip)
+                        {
+                            return Ok::<_, std::convert::Infallible>(err.into_response());
                         }
                         let mut req = req.map(axum::body::Body::new);
                         req.extensions_mut().insert(peer_info);
@@ -5481,6 +5485,7 @@ impl CredentialReloader {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_full(
         cert_path: PathBuf,
         key_path: PathBuf,

@@ -1100,17 +1100,10 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         ),
         None => None,
     };
-    let listen_addr: Option<std::net::SocketAddr> = match &args.listen {
-        Some(s) => Some(
-            s.parse()
-                .map_err(|e| format!("invalid --listen address '{s}': {e}"))?,
-        ),
-        None => None,
-    };
 
     let mut activated = xmsg::systemd::take_activated_sockets(&xmsg::systemd::ActivatedConfig {
         fed_listen: fed_listen_addr,
-        listen: listen_addr,
+        listen: args.listen.as_deref(),
         agent_sock: if args.leaf {
             None
         } else {
@@ -1446,7 +1439,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        let tcp_addr = listen_addr.unwrap();
+        let tcp_addr = args.listen.as_deref().unwrap();
         let tcp_listener = match activated.listen.take() {
             Some(listener) => listener,
             None => tokio::net::TcpListener::bind(tcp_addr).await?,
@@ -1471,10 +1464,10 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut server_tasks = Vec::new();
 
-    if let Some(tcp_addr) = listen_addr {
+    if let Some(ref tcp_addr) = args.listen {
         let tcp_listener = match activated.listen.take() {
             Some(listener) => listener,
-            None => tokio::net::TcpListener::bind(tcp_addr).await?,
+            None => tokio::net::TcpListener::bind(tcp_addr.as_str()).await?,
         };
         let tcp_app = app.clone();
         let mut shutdown_rx_tcp = shutdown_rx.clone();

@@ -11,7 +11,7 @@ const CANONICAL_SLOTS: &[&str] = &["fed", "listen", "agent", "register", "http"]
 #[derive(Debug, Clone, Copy)]
 pub struct ActivatedConfig<'a> {
     pub fed_listen: Option<SocketAddr>,
-    pub listen: Option<SocketAddr>,
+    pub listen: Option<&'a str>,
     pub agent_sock: Option<&'a Path>,
     pub register_sock: &'a Path,
     pub http_sock: Option<&'a Path>,
@@ -141,8 +141,11 @@ pub fn take_activated_sockets(cfg: &ActivatedConfig<'_>) -> Result<ActivatedSock
                 out.fed = Some(listener);
             }
             "listen" => {
-                let expected = cfg.listen.ok_or_else(|| {
+                let raw_listen = cfg.listen.ok_or_else(|| {
                     "LISTEN_FDS provided slot 'listen', but --listen is not configured".to_string()
+                })?;
+                let expected: SocketAddr = raw_listen.parse().map_err(|e| {
+                    format!("invalid --listen address '{raw_listen}' for socket activation: {e}")
                 })?;
                 let listener = adopt_tcp_listener(fd, family, "listen", expected)?;
                 out.listen = Some(listener);

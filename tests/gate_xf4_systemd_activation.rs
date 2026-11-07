@@ -365,7 +365,7 @@ async fn oracle_1_socket_activated_fed_exact_port_mtls_and_stopping() {
     let prebound_addr = prebound_fed.local_addr().unwrap();
 
     let notify_path = run_dir.join("notify.sock");
-    let notify_sock = StdUnixDatagram::bind(&notify_path).unwrap();
+    let notify_sock = Arc::new(StdUnixDatagram::bind(&notify_path).unwrap());
 
     let agent_sock = run_dir.join("agent.sock");
     let register_sock = run_dir.join("register.sock");
@@ -409,15 +409,33 @@ async fn oracle_1_socket_activated_fed_exact_port_mtls_and_stopping() {
     let mut guard = ChildGuard::new(child);
 
     let msg = tokio::task::spawn_blocking({
-        let notify_path = notify_path.clone();
-        move || {
-            let _ = notify_path;
-            recv_notify_datagram(&notify_sock, Duration::from_secs(10))
-        }
+        let s = notify_sock.clone();
+        move || recv_notify_datagram(&s, Duration::from_secs(10))
     })
     .await
     .unwrap();
     assert_eq!(msg.trim(), "READY=1", "expected READY=1 on NOTIFY_SOCKET");
+
+    // C3: Verify FD_CLOEXEC (O_CLOEXEC = 0o2000000) was re-applied on adopted fd 3
+    #[cfg(target_os = "linux")]
+    {
+        let child_pid = guard.child_mut().id().unwrap();
+        let fdinfo_path = format!("/proc/{child_pid}/fdinfo/3");
+        let fdinfo = fs::read_to_string(&fdinfo_path)
+            .unwrap_or_else(|e| panic!("failed to read {fdinfo_path}: {e}"));
+        let flags_octal = fdinfo
+            .lines()
+            .find_map(|line| line.strip_prefix("flags:").map(str::trim))
+            .unwrap_or_else(|| panic!("missing flags: line in {fdinfo_path}: {fdinfo}"));
+        let flags = u64::from_str_radix(flags_octal, 8).unwrap_or_else(|e| {
+            panic!("invalid octal flags '{flags_octal}' in {fdinfo_path}: {e}")
+        });
+        assert_ne!(
+            flags & 0o2000000,
+            0,
+            "adopted fd 3 in {fdinfo_path} must have O_CLOEXEC (0o2000000) set, got octal {flags_octal}"
+        );
+    }
 
     // Send mTLS federated message to the exact pre-bound port
     let (_sender_tmp, sender_fs) = build_sender_fed_state(
@@ -451,13 +469,22 @@ async fn oracle_1_socket_activated_fed_exact_port_mtls_and_stopping() {
     assert!(msgs[0].contains("hello over socket-activated fed port"));
     drop(msgs);
 
-    // Send SIGTERM and assert STOPPING=1 is emitted
-    let notify_sock_stop = StdUnixDatagram::bind(run_dir.join("unused.sock")).unwrap();
-    drop(notify_sock_stop);
+    // Send SIGTERM and assert STOPPING=1 is emitted on NOTIFY_SOCKET
     let pid = guard.child_mut().id().unwrap() as i32;
     unsafe {
         libc::kill(pid, libc::SIGTERM);
     }
+    let stop_msg = tokio::task::spawn_blocking({
+        let s = notify_sock.clone();
+        move || recv_notify_datagram(&s, Duration::from_secs(5))
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        stop_msg.trim(),
+        "STOPPING=1",
+        "expected STOPPING=1 on NOTIFY_SOCKET after SIGTERM"
+    );
     let status = tokio::time::timeout(Duration::from_secs(5), guard.child_mut().wait())
         .await
         .expect("child exit on SIGTERM")
@@ -601,14 +628,12 @@ async fn oracle_3_notify_ready_strictly_after_all_listeners_accept() {
     )
     .unwrap();
 
-    // Reserve two ephemeral TCP ports for fresh bind (so READY=1 must wait for xmsg to bind them
-    // AND bind agent.sock, register.sock, http.sock)
+    // Pre-bind two ephemeral TCP listeners and pass them via LISTEN_FDS=2 (LISTEN_FDNAMES=fed:listen)
+    // while agent.sock, register.sock, and http.sock are freshly bound by xmsg serve.
     let p1 = StdTcpListener::bind("127.0.0.1:0").unwrap();
     let fed_addr = p1.local_addr().unwrap();
     let p2 = StdTcpListener::bind("127.0.0.1:0").unwrap();
     let http_tcp_addr = p2.local_addr().unwrap();
-    drop(p1);
-    drop(p2);
 
     let agent_sock = run_dir.join("agent.sock");
     let register_sock = run_dir.join("register.sock");
@@ -616,13 +641,11 @@ async fn oracle_3_notify_ready_strictly_after_all_listeners_accept() {
     let notify_path = run_dir.join("notify.sock");
     let notify_sock = StdUnixDatagram::bind(&notify_path).unwrap();
 
-    let bin = env!("CARGO_BIN_EXE_xmsg");
-    let child = tokio::process::Command::new(bin)
-        .env("XDG_RUNTIME_DIR", &run_dir)
+    let mut cmd = new_xmsg_cmd(true);
+    cmd.env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
-        .env_remove("LISTEN_FDS")
-        .env_remove("LISTEN_PID")
-        .env_remove("LISTEN_FDNAMES")
+        .env("LISTEN_FDS", "2")
+        .env("LISTEN_FDNAMES", "fed:listen")
         .env("NOTIFY_SOCKET", &notify_path)
         .args([
             "serve",
@@ -648,9 +671,11 @@ async fn oracle_3_notify_ready_strictly_after_all_listeners_accept() {
             peers_path.to_str().unwrap(),
         ])
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn xmsg serve");
+        .stderr(std::process::Stdio::piped());
+    configure_systemd_fds(&mut cmd, vec![p1.as_raw_fd(), p2.as_raw_fd()], true);
+    let child = cmd.spawn().expect("spawn xmsg serve");
+    drop(p1);
+    drop(p2);
     let mut guard = ChildGuard::new(child);
 
     let notify_sock_arc = Arc::new(notify_sock);
@@ -716,17 +741,20 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
     let (ca1_params, ca1_key, _ca1_der, ca1_pem) = generate_ca("XF4 Reload CA 1");
     let (ca2_params, ca2_key, _ca2_der, ca2_pem) = generate_ca("XF4 Reload CA 2");
 
-    let uri_server = "spiffe://example.org/ns/test/sa/reload-server";
+    // Use host-form SPIFFE URIs sharing user `alice` so same-user routes (/fed/v2/handoff and
+    // /fed/v2/handoff/ack) reach their handler logic when peer1 is present and are gated on
+    // peer membership when peer1 is removed.
+    let uri_server = "spiffe://example.org/host/srv/user/alice";
     let (_s_der, _s_key, s_cert_pem, s_key_pem) =
-        issue_cert(&ca1_params, &ca1_key, "reload-server", &[uri_server]);
+        issue_cert(&ca1_params, &ca1_key, "alice.srv", &[uri_server]);
 
-    let uri_peer1 = "spiffe://example.org/ns/test/sa/peer1";
+    let uri_peer1 = "spiffe://example.org/host/p1/user/alice";
     let (_p1_der, _p1_key, p1_cert_pem, p1_key_pem) =
-        issue_cert(&ca1_params, &ca1_key, "peer1", &[uri_peer1]);
+        issue_cert(&ca1_params, &ca1_key, "alice.p1", &[uri_peer1]);
 
-    let uri_peer2 = "spiffe://example.org/ns/test/sa/peer2";
+    let uri_peer2 = "spiffe://example.org/host/p2/user/alice";
     let (_p2_der, _p2_key, p2_cert_pem, p2_key_pem) =
-        issue_cert(&ca2_params, &ca2_key, "peer2", &[uri_peer2]);
+        issue_cert(&ca2_params, &ca2_key, "alice.p2", &[uri_peer2]);
 
     let cert_path = tmp.path().join("server-cert.pem");
     let key_path = tmp.path().join("server-key.pem");
@@ -738,14 +766,14 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
     fs::write(&ca1_path, &ca1_pem).unwrap();
     fs::write(&ca2_path, &ca2_pem).unwrap();
 
-    // Initially only peer1.test is configured (with send, reply, and leaf=true so send, replies, and inbox are all permitted)
+    // Initially only alice.p1 is configured (with send, reply, list, and leaf=true)
     fs::write(
         &peers_path,
         serde_json::json!({
-            "peer1.test": {
+            "alice.p1": {
                 "ca": ca1_path.display().to_string(),
                 "identities": [uri_peer1],
-                "allow": ["send", "reply"],
+                "allow": ["send", "reply", "list"],
                 "leaf": true
             }
         })
@@ -806,10 +834,10 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
     .unwrap();
     assert_eq!(initial_ready.trim(), "READY=1");
 
-    // Before reload: peer2.test is not in peers.json => rejected
+    // Before reload: alice.p2 is not in peers.json => rejected
     let (_p2_tmp, p2_fs) = build_sender_fed_state(
-        "peer2.test",
-        "reload-server.test",
+        "alice.p2",
+        "alice.srv",
         fed_addr,
         uri_server,
         &ca1_pem,
@@ -819,23 +847,23 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
     .await;
     let env_before = make_envelope("recipient-reload", "before reload");
     assert!(
-        send_federated_message(&p2_fs, "reload-server.test", &env_before)
+        send_federated_message(&p2_fs, "alice.srv", &env_before)
             .await
             .is_err(),
-        "peer2 must be rejected before reload"
+        "alice.p2 must be rejected before reload"
     );
 
-    // Update peers.json to add peer2.test and send SIGHUP
+    // Update peers.json to add alice.p2 and send SIGHUP
     fs::write(
         &peers_path,
         serde_json::json!({
-            "peer1.test": {
+            "alice.p1": {
                 "ca": ca1_path.display().to_string(),
                 "identities": [uri_peer1],
-                "allow": ["send", "reply"],
+                "allow": ["send", "reply", "list"],
                 "leaf": true
             },
-            "peer2.test": {
+            "alice.p2": {
                 "address": "127.0.0.1:9",
                 "ca": ca2_path.display().to_string(),
                 "identities": [uri_peer2],
@@ -876,11 +904,11 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
     .unwrap();
     assert_eq!(ready_after_reload.trim(), "READY=1");
 
-    // Immediately after READY=1, peer2.test is honoured!
+    // Immediately after READY=1, alice.p2 is honoured!
     let env_after = make_envelope("recipient-reload", "after sighup reload");
-    send_federated_message(&p2_fs, "reload-server.test", &env_after)
+    send_federated_message(&p2_fs, "alice.srv", &env_after)
         .await
-        .expect("peer2 must succeed after SIGHUP reload READY=1");
+        .expect("alice.p2 must succeed after SIGHUP reload READY=1");
 
     for _ in 0..200 {
         if !received.lock().unwrap().is_empty() {
@@ -927,17 +955,16 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
 
     // Previous config still active after failed reload
     let env_still_ok = make_envelope("recipient-reload", "still active after failed reload");
-    send_federated_message(&p2_fs, "reload-server.test", &env_still_ok)
+    send_federated_message(&p2_fs, "alice.srv", &env_still_ok)
         .await
         .expect("previous configuration must remain active after failed reload");
 
-    // Peer revocation cell:
-    // 1. While peer1.test is still present in the active configuration, open a persistent
-    //    HTTP/1.1 keep-alive mTLS connection as peer1.test and verify send, replies, and inbox
-    //    succeed before removal.
+    // Keep-alive `from` narrowing + peer revocation cell (C1 + `from` ruling):
+    // 1. Open a persistent HTTP/1.1 keep-alive mTLS connection as alice.p1 and verify requests
+    //    succeed before narrowing `from` or removing alice.p1.
     let (_p1_tmp, p1_fs) = build_sender_fed_state(
-        "peer1.test",
-        "reload-server.test",
+        "alice.p1",
+        "alice.srv",
         fed_addr,
         uri_server,
         &ca1_pem,
@@ -945,14 +972,10 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
         &p1_key_pem,
     )
     .await;
-    let p1_peer_cfg = p1_fs
-        .current_peers()
-        .get("reload-server.test")
-        .unwrap()
-        .clone();
+    let p1_peer_cfg = p1_fs.current_peers().get("alice.srv").unwrap().clone();
     let p1_connector = xmsg::fed::make_tls_connector_for_peer(&p1_fs, &p1_peer_cfg).unwrap();
     let p1_tcp = tokio::net::TcpStream::connect(fed_addr).await.unwrap();
-    let p1_sni = rustls::pki_types::ServerName::try_from("reload-server.test".to_string()).unwrap();
+    let p1_sni = rustls::pki_types::ServerName::try_from("alice.srv".to_string()).unwrap();
     let p1_tls = p1_connector.connect(p1_sni, p1_tcp).await.unwrap();
     let (mut p1_keepalive, p1_conn) =
         hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(p1_tls))
@@ -962,31 +985,129 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
         let _ = p1_conn.await;
     });
 
-    let p1_env_before = make_envelope("recipient-reload", "peer1 before removal");
-    let p1_deliv = send_federated_message(&p1_fs, "reload-server.test", &p1_env_before)
-        .await
-        .expect("peer1 send must succeed before removal");
-    let p1_msg_id = p1_deliv.message_id;
-    xmsg::fed::poll_federated_replies(&p1_fs, "reload-server.test", &p1_msg_id, 0, 0)
-        .await
-        .expect("peer1 replies poll must succeed before removal");
-    xmsg::fed::get_federated_inbox(&p1_fs, "reload-server.test", 0)
-        .await
-        .expect("peer1 inbox poll must succeed before removal");
+    async fn send_ka(
+        ka: &mut hyper::client::conn::http1::SendRequest<http_body_util::Full<bytes::Bytes>>,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> (u16, String) {
+        let payload = body
+            .map(|v| serde_json::to_vec(&v).unwrap())
+            .unwrap_or_default();
+        let req = hyper::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("host", "alice.srv")
+            .body(http_body_util::Full::new(bytes::Bytes::from(payload)))
+            .unwrap();
+        let resp = ka.send_request(req).await.unwrap();
+        let st = resp.status().as_u16();
+        use http_body_util::BodyExt;
+        let b = resp.into_body().collect().await.unwrap().to_bytes();
+        (st, String::from_utf8_lossy(&b).to_string())
+    }
 
-    // 2. Rewrite peers.json to REMOVE peer1.test (keeping only peer2.test, plus a sibling peer on
-    //    ca1_path so ca1 remains an active CA anchor), send SIGHUP, and await RELOADING=1 -> READY=1.
-    let uri_peer_keep = "spiffe://example.org/ns/test/sa/peer-keep";
+    let p1_env_before = make_envelope("recipient-reload", "peer1 before removal");
+    let p1_deliv = send_federated_message(&p1_fs, "alice.srv", &p1_env_before)
+        .await
+        .expect("alice.p1 send must succeed before removal");
+    let p1_msg_id = p1_deliv.message_id;
+    xmsg::fed::poll_federated_replies(&p1_fs, "alice.srv", &p1_msg_id, 0, 0)
+        .await
+        .expect("alice.p1 replies poll must succeed before removal");
+    xmsg::fed::get_federated_inbox(&p1_fs, "alice.srv", 0)
+        .await
+        .expect("alice.p1 inbox poll must succeed before removal");
+
+    let ack_body = serde_json::json!({ "id": "gate-probe-none", "messages": [] });
+    let ack_before = send_ka(
+        &mut p1_keepalive,
+        "POST",
+        "/fed/v2/handoff/ack",
+        Some(ack_body.clone()),
+    )
+    .await;
+    assert_eq!(
+        ack_before.0, 200,
+        "positive control: present same-user peer alice.p1 reaches handoff/ack on keep-alive: {ack_before:?}"
+    );
+
+    // 2. Narrow `from` on alice.p1 to ["192.0.2.1/32"] by reload, send SIGHUP, and await
+    //    RELOADING=1 -> READY=1. Existing keep-alive connection from 127.0.0.1 must be refused
+    //    with 403 Forbidden (`not allowed for peer`).
     fs::write(
         &peers_path,
         serde_json::json!({
-            "peer-keep.test": {
+            "alice.p1": {
+                "ca": ca1_path.display().to_string(),
+                "identities": [uri_peer1],
+                "allow": ["send", "reply", "list"],
+                "from": ["192.0.2.1/32"],
+                "leaf": true
+            },
+            "alice.p2": {
+                "address": "127.0.0.1:9",
+                "ca": ca2_path.display().to_string(),
+                "identities": [uri_peer2],
+                "allow": ["send", "reply"]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    unsafe {
+        libc::kill(pid, libc::SIGHUP);
+    }
+    let reloading_from = tokio::task::spawn_blocking({
+        let s = notify_sock.clone();
+        move || recv_notify_datagram(&s, Duration::from_secs(5))
+    })
+    .await
+    .unwrap();
+    assert!(
+        reloading_from.starts_with("RELOADING=1\nMONOTONIC_USEC="),
+        "expected RELOADING=1 on `from` narrowing reload, got: {reloading_from:?}"
+    );
+    let ready_from = tokio::task::spawn_blocking({
+        let s = notify_sock.clone();
+        move || recv_notify_datagram(&s, Duration::from_secs(5))
+    })
+    .await
+    .unwrap();
+    assert_eq!(ready_from.trim(), "READY=1");
+
+    let from_narrowed_ack = send_ka(
+        &mut p1_keepalive,
+        "POST",
+        "/fed/v2/handoff/ack",
+        Some(ack_body.clone()),
+    )
+    .await;
+    assert_eq!(
+        from_narrowed_ack.0, 403,
+        "keep-alive request must be refused with 403 when `from` is narrowed by reload: {from_narrowed_ack:?}"
+    );
+    assert!(
+        from_narrowed_ack
+            .1
+            .contains("not allowed by peer 'from' CIDR rules"),
+        "expected `not allowed by peer 'from' CIDR rules` in 403 body, got: {from_narrowed_ack:?}"
+    );
+
+    // 3. Rewrite peers.json to REMOVE alice.p1 (keeping alice.p2, plus a sibling peer alice.pk on
+    //    ca1_path so ca1 remains an active CA anchor), send SIGHUP, and await RELOADING=1 -> READY=1.
+    let uri_peer_keep = "spiffe://example.org/host/pk/user/alice";
+    fs::write(
+        &peers_path,
+        serde_json::json!({
+            "alice.pk": {
                 "address": "127.0.0.1:9",
                 "ca": ca1_path.display().to_string(),
                 "identities": [uri_peer_keep],
                 "allow": ["send", "reply"]
             },
-            "peer2.test": {
+            "alice.p2": {
                 "address": "127.0.0.1:9",
                 "ca": ca2_path.display().to_string(),
                 "identities": [uri_peer2],
@@ -1017,88 +1138,133 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
     .unwrap();
     assert_eq!(ready_revoke.trim(), "READY=1");
 
-    // 3. Immediately after READY=1, the removed peer1.test must be refused on send, replies, and
-    //    inbox — both on its pre-existing HTTP/1.1 keep-alive connection (which reaches
-    //    handle_fed_send, fed_get_replies_handler, and fed_get_inbox_handler directly) and on new
-    //    connections.
-    let send_body =
-        serde_json::to_vec(&make_envelope("recipient-reload", "peer1 after removal")).unwrap();
-    let req_send = hyper::Request::builder()
-        .method("POST")
-        .uri("/fed/v2/messages")
-        .header("content-type", "application/json")
-        .header("host", "reload-server.test")
-        .body(http_body_util::Full::new(bytes::Bytes::from(send_body)))
-        .unwrap();
-    let resp_send = p1_keepalive.send_request(req_send).await.unwrap();
+    // 4. Immediately after READY=1, the removed alice.p1 must be refused with 404 (`unknown node`)
+    //    across every /fed/v2/* route on its pre-existing HTTP/1.1 keep-alive connection, as well
+    //    as on new connections.
+    let env_val =
+        serde_json::to_value(make_envelope("recipient-reload", "peer1 after removal")).unwrap();
+    let ka_send = send_ka(&mut p1_keepalive, "POST", "/fed/v2/messages", Some(env_val)).await;
     assert_eq!(
-        resp_send.status(),
-        hyper::StatusCode::NOT_FOUND,
-        "removed peer1 must be refused on POST /fed/v2/messages right after READY=1"
+        ka_send.0, 404,
+        "removed peer on keep-alive POST /fed/v2/messages: {ka_send:?}"
     );
+    assert!(ka_send.1.contains("unknown node"), "body: {ka_send:?}");
 
-    let req_replies = hyper::Request::builder()
-        .method("GET")
-        .uri(format!(
-            "/fed/v2/messages/{p1_msg_id}/replies?after=0&wait=0"
-        ))
-        .header("host", "reload-server.test")
-        .body(http_body_util::Full::new(bytes::Bytes::new()))
-        .unwrap();
-    let resp_replies = p1_keepalive.send_request(req_replies).await.unwrap();
+    let ka_handoff_ack = send_ka(
+        &mut p1_keepalive,
+        "POST",
+        "/fed/v2/handoff/ack",
+        Some(ack_body),
+    )
+    .await;
     assert_eq!(
-        resp_replies.status(),
-        hyper::StatusCode::NOT_FOUND,
-        "removed peer1 must be refused on GET /fed/v2/messages/{{id}}/replies right after READY=1"
-    );
-
-    let req_inbox = hyper::Request::builder()
-        .method("GET")
-        .uri("/fed/v2/inbox?wait=0")
-        .header("host", "reload-server.test")
-        .body(http_body_util::Full::new(bytes::Bytes::new()))
-        .unwrap();
-    let resp_inbox = p1_keepalive.send_request(req_inbox).await.unwrap();
-    assert_eq!(
-        resp_inbox.status(),
-        hyper::StatusCode::NOT_FOUND,
-        "removed peer1 must be refused on GET /fed/v2/inbox right after READY=1"
-    );
-
-    assert!(
-        send_federated_message(&p1_fs, "reload-server.test", &p1_env_before)
-            .await
-            .is_err(),
-        "removed peer1 must be refused on new send connection after READY=1"
+        ka_handoff_ack.0, 404,
+        "removed peer on keep-alive POST /fed/v2/handoff/ack: {ka_handoff_ack:?}"
     );
     assert!(
-        xmsg::fed::poll_federated_replies(&p1_fs, "reload-server.test", &p1_msg_id, 0, 0)
-            .await
-            .is_err(),
-        "removed peer1 must be refused on new replies connection after READY=1"
-    );
-    assert!(
-        xmsg::fed::get_federated_inbox(&p1_fs, "reload-server.test", 0)
-            .await
-            .is_err(),
-        "removed peer1 must be refused on new inbox connection after READY=1"
+        ka_handoff_ack.1.contains("unknown node"),
+        "body: {ka_handoff_ack:?}"
     );
 
-    // 4. Poisoned dynamic_tls lock cell:
-    //    After a reload that removed peer1.test, even if a subsequent reloader panics while
+    let ka_handoff = send_ka(
+        &mut p1_keepalive,
+        "POST",
+        "/fed/v2/handoff",
+        Some(serde_json::json!({ "id": "gate-probe-none" })),
+    )
+    .await;
+    assert_eq!(
+        ka_handoff.0, 404,
+        "removed peer on keep-alive POST /fed/v2/handoff: {ka_handoff:?}"
+    );
+    assert!(
+        ka_handoff.1.contains("unknown node"),
+        "body: {ka_handoff:?}"
+    );
+
+    let ka_list_answer = send_ka(
+        &mut p1_keepalive,
+        "POST",
+        "/fed/v2/list/q1",
+        Some(serde_json::json!({ "sessions": [] })),
+    )
+    .await;
+    assert_eq!(
+        ka_list_answer.0, 404,
+        "removed peer on keep-alive POST /fed/v2/list/q1: {ka_list_answer:?}"
+    );
+    assert!(
+        ka_list_answer.1.contains("unknown node"),
+        "body: {ka_list_answer:?}"
+    );
+
+    let ka_sessions = send_ka(&mut p1_keepalive, "GET", "/fed/v2/sessions", None).await;
+    assert_eq!(
+        ka_sessions.0, 404,
+        "removed peer on keep-alive GET /fed/v2/sessions: {ka_sessions:?}"
+    );
+    assert!(
+        ka_sessions.1.contains("unknown node"),
+        "body: {ka_sessions:?}"
+    );
+
+    let ka_replies = send_ka(
+        &mut p1_keepalive,
+        "GET",
+        &format!("/fed/v2/messages/{p1_msg_id}/replies?after=0&wait=0"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        ka_replies.0, 404,
+        "removed peer on keep-alive GET /fed/v2/messages/{{id}}/replies: {ka_replies:?}"
+    );
+    assert!(
+        ka_replies.1.contains("unknown node"),
+        "body: {ka_replies:?}"
+    );
+
+    let ka_inbox = send_ka(&mut p1_keepalive, "GET", "/fed/v2/inbox?wait=0", None).await;
+    assert_eq!(
+        ka_inbox.0, 404,
+        "removed peer on keep-alive GET /fed/v2/inbox: {ka_inbox:?}"
+    );
+    assert!(ka_inbox.1.contains("unknown node"), "body: {ka_inbox:?}");
+
+    assert!(
+        send_federated_message(&p1_fs, "alice.srv", &p1_env_before)
+            .await
+            .is_err(),
+        "removed alice.p1 must be refused on new send connection after READY=1"
+    );
+    assert!(
+        xmsg::fed::poll_federated_replies(&p1_fs, "alice.srv", &p1_msg_id, 0, 0)
+            .await
+            .is_err(),
+        "removed alice.p1 must be refused on new replies connection after READY=1"
+    );
+    assert!(
+        xmsg::fed::get_federated_inbox(&p1_fs, "alice.srv", 0)
+            .await
+            .is_err(),
+        "removed alice.p1 must be refused on new inbox connection after READY=1"
+    );
+
+    // 5. Poisoned dynamic_tls lock cell:
+    //    After a reload that removed alice.p1, even if a subsequent reloader panics while
     //    holding the dynamic_tls write lock (poisoning the RwLock), current_peers(), cert_chain(),
     //    key_der(), and get_tls_acceptor() must recover the last committed DynamicTls rather than
-    //    falling back to the startup PeersMap (which still contained peer1.test).
+    //    falling back to the startup PeersMap (which still contained alice.p1).
     {
         use rustls::pki_types::pem::PemObject;
         let init_peers_json = serde_json::json!({
-            "peer1.test": {
+            "alice.p1": {
                 "ca": ca1_path.display().to_string(),
                 "identities": [uri_peer1],
                 "allow": ["send", "reply"],
                 "leaf": true
             },
-            "peer2.test": {
+            "alice.p2": {
                 "address": "127.0.0.1:9",
                 "ca": ca2_path.display().to_string(),
                 "identities": [uri_peer2],
@@ -1124,7 +1290,7 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
         let (pi_notify_tx, _) = tokio::sync::broadcast::channel(16);
         let (svc_notify_tx, _) = tokio::sync::broadcast::channel(16);
         let poison_fs = Arc::new(FedState {
-            node_name: "reload-server.test".to_string(),
+            node_name: "alice.srv".to_string(),
             peers: startup_pm.clone().into(),
             cert_der,
             cert_chain_der,
@@ -1158,13 +1324,13 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
             Arc::new(Mutex::new(std::collections::HashSet::new())),
         )
         .unwrap();
-        assert!(poison_fs.current_peers().get("peer1.test").is_some());
+        assert!(poison_fs.current_peers().get("alice.p1").is_some());
 
-        // Reload removing peer1.test
+        // Reload removing alice.p1
         fs::write(
             &init_peers_file,
             serde_json::json!({
-                "peer2.test": {
+                "alice.p2": {
                     "address": "127.0.0.1:9",
                     "ca": ca2_path.display().to_string(),
                     "identities": [uri_peer2],
@@ -1175,8 +1341,8 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
         )
         .unwrap();
         reloader.force_reload().unwrap();
-        assert!(poison_fs.current_peers().get("peer1.test").is_none());
-        assert!(poison_fs.current_peers().get("peer2.test").is_some());
+        assert!(poison_fs.current_peers().get("alice.p1").is_none());
+        assert!(poison_fs.current_peers().get("alice.p2").is_some());
 
         // Poison dynamic_tls write lock
         let dtls = poison_fs.dynamic_tls.clone();
@@ -1190,14 +1356,14 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
             "dynamic_tls RwLock must be poisoned"
         );
 
-        // Even while poisoned, current_peers() must still exclude removed peer1.test and retain peer2.test
+        // Even while poisoned, current_peers() must still exclude removed alice.p1 and retain alice.p2
         assert!(
-            poison_fs.current_peers().get("peer1.test").is_none(),
-            "poisoned dynamic_tls must not fall back to startup peers containing removed peer1.test"
+            poison_fs.current_peers().get("alice.p1").is_none(),
+            "poisoned dynamic_tls must not fall back to startup peers containing removed alice.p1"
         );
         assert!(
-            poison_fs.current_peers().get("peer2.test").is_some(),
-            "poisoned dynamic_tls must still return last committed peers containing peer2.test"
+            poison_fs.current_peers().get("alice.p2").is_some(),
+            "poisoned dynamic_tls must still return last committed peers containing alice.p2"
         );
         assert!(
             poison_fs.get_tls_acceptor().is_some(),
@@ -1326,6 +1492,89 @@ async fn oracle_5_wrong_listen_pid_ignored_and_s5_no_env_vars_binds_fresh() {
         assert!(Instant::now() < deadline, "S-5 fresh start timed out");
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+    drop(_guard2);
+
+    // C4: `--listen localhost:<port>` without LISTEN_FDS resolves hostname and binds fresh
+    let run_dir3 = tmp.path().join("run3");
+    fs::create_dir_all(&run_dir3).unwrap();
+    fs::set_permissions(&run_dir3, fs::Permissions::from_mode(0o700)).unwrap();
+    let probe_localhost = StdTcpListener::bind("127.0.0.1:0").unwrap();
+    let localhost_port = probe_localhost.local_addr().unwrap().port();
+    drop(probe_localhost);
+    let notify_path3 = run_dir3.join("notify.sock");
+    let notify_sock3 = StdUnixDatagram::bind(&notify_path3).unwrap();
+
+    let child3 = new_xmsg_cmd(false)
+        .env("XDG_RUNTIME_DIR", &run_dir3)
+        .env("HOME", &run_dir3)
+        .env_remove("LISTEN_FDS")
+        .env_remove("LISTEN_PID")
+        .env_remove("LISTEN_FDNAMES")
+        .env("NOTIFY_SOCKET", &notify_path3)
+        .args([
+            "serve",
+            "--db-path",
+            tmp.path().join("xmsg3.db").to_str().unwrap(),
+            "--sessions-dir",
+            sessions_dir.to_str().unwrap(),
+            "--register-sock",
+            run_dir3.join("register.sock").to_str().unwrap(),
+            "--agent-sock",
+            run_dir3.join("agent.sock").to_str().unwrap(),
+            "--http-sock",
+            run_dir3.join("http.sock").to_str().unwrap(),
+            "--listen",
+            &format!("localhost:{localhost_port}"),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn --listen localhost:<port> xmsg serve");
+    let _guard3 = ChildGuard::new(child3);
+
+    let msg3 = tokio::task::spawn_blocking(move || {
+        recv_notify_datagram(&notify_sock3, Duration::from_secs(10))
+    })
+    .await
+    .unwrap();
+    assert_eq!(msg3.trim(), "READY=1");
+
+    let mut s3 = TcpStream::connect(format!("localhost:{localhost_port}"))
+        .await
+        .expect("connect to --listen localhost:<port>");
+    s3.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut resp3 = String::new();
+    s3.read_to_string(&mut resp3).await.unwrap();
+    assert!(resp3.starts_with("HTTP/1.1 200 OK"), "resp3: {resp3}");
+    drop(_guard3);
+
+    // P2 (Ma): take_activated_sockets unsets LISTEN_FDS, LISTEN_PID, and LISTEN_FDNAMES from the
+    // process environment so a child process spawned afterwards sees none of them.
+    std::env::set_var("LISTEN_FDS", "1");
+    std::env::set_var("LISTEN_PID", "99999999");
+    std::env::set_var("LISTEN_FDNAMES", "listen");
+    let reg_dummy = tmp.path().join("dummy-reg.sock");
+    xmsg::systemd::take_activated_sockets(&xmsg::systemd::ActivatedConfig {
+        fed_listen: None,
+        listen: None,
+        agent_sock: None,
+        register_sock: &reg_dummy,
+        http_sock: None,
+    })
+    .expect("take_activated_sockets with non-matching LISTEN_PID");
+
+    let child_env_out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("printf '%s|%s|%s' \"${LISTEN_FDS-unset}\" \"${LISTEN_PID-unset}\" \"${LISTEN_FDNAMES-unset}\"")
+        .output()
+        .expect("spawn child to inspect inherited LISTEN_* env");
+    assert_eq!(
+        String::from_utf8_lossy(&child_env_out.stdout),
+        "unset|unset|unset",
+        "child process spawned after take_activated_sockets must not inherit LISTEN_FDS, LISTEN_PID, or LISTEN_FDNAMES"
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -1472,6 +1721,23 @@ async fn oracle_6_refuses_bad_fd_type_s1_bad_names_and_s2_addr_mismatch() {
         Some("http"),
         &[],
         "does not match configured path",
+    )
+    .await;
+
+    // 6g: S-2 nonzero TCP port mismatch — 127.0.0.1:P1 adopted vs 127.0.0.1:P2 (P2 != P1, P2 != 0) configured
+    let port_sock_1 = StdTcpListener::bind("127.0.0.1:0").unwrap();
+    let p1 = port_sock_1.local_addr().unwrap().port();
+    let port_sock_2 = StdTcpListener::bind("127.0.0.1:0").unwrap();
+    let p2 = port_sock_2.local_addr().unwrap().port();
+    assert_ne!(p1, p2);
+    run_expect_refusal(
+        tmp.path(),
+        "case_s2_port_mismatch",
+        port_sock_1.as_raw_fd(),
+        "1",
+        Some("listen"),
+        &["--listen", &format!("127.0.0.1:{p2}")],
+        "does not match configured address",
     )
     .await;
     let _ = bin;
