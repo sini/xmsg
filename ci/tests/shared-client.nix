@@ -35,9 +35,11 @@
       };
       # The self-dev-dependency mutant intentionally enables daemon. Retain both
       # dependency graphs so no arm pays for a cold daemon build.
-      clientArtifacts = craneLib.buildDepsOnly (
-        clientArgs // { cargoArtifacts = inputs.xmsg.packages.${system}.cargoArtifacts; }
-      );
+      # buildDepsOnly resets cargoArtifacts; override the resulting derivation so
+      # inheritCargoArtifactsHook receives the daemon cache during postPatch.
+      clientArtifacts = (craneLib.buildDepsOnly clientArgs).overrideAttrs {
+        cargoArtifacts = inputs.xmsg.packages.${system}.cargoArtifacts;
+      };
     in
     {
       checks = {
