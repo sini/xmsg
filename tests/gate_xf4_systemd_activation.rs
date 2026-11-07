@@ -721,7 +721,7 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
         issue_cert(&ca1_params, &ca1_key, "reload-server", &[uri_server]);
 
     let uri_peer1 = "spiffe://example.org/ns/test/sa/peer1";
-    let (_p1_der, _p1_key, _p1_cert_pem, _p1_key_pem) =
+    let (_p1_der, _p1_key, p1_cert_pem, p1_key_pem) =
         issue_cert(&ca1_params, &ca1_key, "peer1", &[uri_peer1]);
 
     let uri_peer2 = "spiffe://example.org/ns/test/sa/peer2";
@@ -738,15 +738,15 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
     fs::write(&ca1_path, &ca1_pem).unwrap();
     fs::write(&ca2_path, &ca2_pem).unwrap();
 
-    // Initially only peer1.test is configured
+    // Initially only peer1.test is configured (with send, reply, and leaf=true so send, replies, and inbox are all permitted)
     fs::write(
         &peers_path,
         serde_json::json!({
             "peer1.test": {
-                "address": "127.0.0.1:9",
                 "ca": ca1_path.display().to_string(),
                 "identities": [uri_peer1],
-                "allow": ["send", "reply"]
+                "allow": ["send", "reply"],
+                "leaf": true
             }
         })
         .to_string(),
@@ -830,10 +830,10 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
         &peers_path,
         serde_json::json!({
             "peer1.test": {
-                "address": "127.0.0.1:9",
                 "ca": ca1_path.display().to_string(),
                 "identities": [uri_peer1],
-                "allow": ["send", "reply"]
+                "allow": ["send", "reply"],
+                "leaf": true
             },
             "peer2.test": {
                 "address": "127.0.0.1:9",
@@ -930,6 +930,159 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
     send_federated_message(&p2_fs, "reload-server.test", &env_still_ok)
         .await
         .expect("previous configuration must remain active after failed reload");
+
+    // Peer revocation cell:
+    // 1. While peer1.test is still present in the active configuration, open a persistent
+    //    HTTP/1.1 keep-alive mTLS connection as peer1.test and verify send, replies, and inbox
+    //    succeed before removal.
+    let (_p1_tmp, p1_fs) = build_sender_fed_state(
+        "peer1.test",
+        "reload-server.test",
+        fed_addr,
+        uri_server,
+        &ca1_pem,
+        &p1_cert_pem,
+        &p1_key_pem,
+    )
+    .await;
+    let p1_peer_cfg = p1_fs
+        .current_peers()
+        .get("reload-server.test")
+        .unwrap()
+        .clone();
+    let p1_connector = xmsg::fed::make_tls_connector_for_peer(&p1_fs, &p1_peer_cfg).unwrap();
+    let p1_tcp = tokio::net::TcpStream::connect(fed_addr).await.unwrap();
+    let p1_sni = rustls::pki_types::ServerName::try_from("reload-server.test".to_string()).unwrap();
+    let p1_tls = p1_connector.connect(p1_sni, p1_tcp).await.unwrap();
+    let (mut p1_keepalive, p1_conn) =
+        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(p1_tls))
+            .await
+            .unwrap();
+    tokio::spawn(async move {
+        let _ = p1_conn.await;
+    });
+
+    let p1_env_before = make_envelope("recipient-reload", "peer1 before removal");
+    let p1_deliv = send_federated_message(&p1_fs, "reload-server.test", &p1_env_before)
+        .await
+        .expect("peer1 send must succeed before removal");
+    let p1_msg_id = p1_deliv.message_id;
+    xmsg::fed::poll_federated_replies(&p1_fs, "reload-server.test", &p1_msg_id, 0, 0)
+        .await
+        .expect("peer1 replies poll must succeed before removal");
+    xmsg::fed::get_federated_inbox(&p1_fs, "reload-server.test", 0)
+        .await
+        .expect("peer1 inbox poll must succeed before removal");
+
+    // 2. Rewrite peers.json to REMOVE peer1.test (keeping only peer2.test, plus a sibling peer on
+    //    ca1_path so ca1 remains an active CA anchor), send SIGHUP, and await RELOADING=1 -> READY=1.
+    let uri_peer_keep = "spiffe://example.org/ns/test/sa/peer-keep";
+    fs::write(
+        &peers_path,
+        serde_json::json!({
+            "peer-keep.test": {
+                "address": "127.0.0.1:9",
+                "ca": ca1_path.display().to_string(),
+                "identities": [uri_peer_keep],
+                "allow": ["send", "reply"]
+            },
+            "peer2.test": {
+                "address": "127.0.0.1:9",
+                "ca": ca2_path.display().to_string(),
+                "identities": [uri_peer2],
+                "allow": ["send", "reply"]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    unsafe {
+        libc::kill(pid, libc::SIGHUP);
+    }
+    let reloading_revoke = tokio::task::spawn_blocking({
+        let s = notify_sock.clone();
+        move || recv_notify_datagram(&s, Duration::from_secs(5))
+    })
+    .await
+    .unwrap();
+    assert!(
+        reloading_revoke.starts_with("RELOADING=1\nMONOTONIC_USEC="),
+        "expected RELOADING=1 on peer removal reload, got: {reloading_revoke:?}"
+    );
+    let ready_revoke = tokio::task::spawn_blocking({
+        let s = notify_sock.clone();
+        move || recv_notify_datagram(&s, Duration::from_secs(5))
+    })
+    .await
+    .unwrap();
+    assert_eq!(ready_revoke.trim(), "READY=1");
+
+    // 3. Immediately after READY=1, the removed peer1.test must be refused on send, replies, and
+    //    inbox — both on its pre-existing HTTP/1.1 keep-alive connection (which reaches
+    //    handle_fed_send, fed_get_replies_handler, and fed_get_inbox_handler directly) and on new
+    //    connections.
+    let send_body =
+        serde_json::to_vec(&make_envelope("recipient-reload", "peer1 after removal")).unwrap();
+    let req_send = hyper::Request::builder()
+        .method("POST")
+        .uri("/fed/v2/messages")
+        .header("content-type", "application/json")
+        .header("host", "reload-server.test")
+        .body(http_body_util::Full::new(bytes::Bytes::from(send_body)))
+        .unwrap();
+    let resp_send = p1_keepalive.send_request(req_send).await.unwrap();
+    assert_eq!(
+        resp_send.status(),
+        hyper::StatusCode::NOT_FOUND,
+        "removed peer1 must be refused on POST /fed/v2/messages right after READY=1"
+    );
+
+    let req_replies = hyper::Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/fed/v2/messages/{p1_msg_id}/replies?after=0&wait=0"
+        ))
+        .header("host", "reload-server.test")
+        .body(http_body_util::Full::new(bytes::Bytes::new()))
+        .unwrap();
+    let resp_replies = p1_keepalive.send_request(req_replies).await.unwrap();
+    assert_eq!(
+        resp_replies.status(),
+        hyper::StatusCode::NOT_FOUND,
+        "removed peer1 must be refused on GET /fed/v2/messages/{{id}}/replies right after READY=1"
+    );
+
+    let req_inbox = hyper::Request::builder()
+        .method("GET")
+        .uri("/fed/v2/inbox?wait=0")
+        .header("host", "reload-server.test")
+        .body(http_body_util::Full::new(bytes::Bytes::new()))
+        .unwrap();
+    let resp_inbox = p1_keepalive.send_request(req_inbox).await.unwrap();
+    assert_eq!(
+        resp_inbox.status(),
+        hyper::StatusCode::NOT_FOUND,
+        "removed peer1 must be refused on GET /fed/v2/inbox right after READY=1"
+    );
+
+    assert!(
+        send_federated_message(&p1_fs, "reload-server.test", &p1_env_before)
+            .await
+            .is_err(),
+        "removed peer1 must be refused on new send connection after READY=1"
+    );
+    assert!(
+        xmsg::fed::poll_federated_replies(&p1_fs, "reload-server.test", &p1_msg_id, 0, 0)
+            .await
+            .is_err(),
+        "removed peer1 must be refused on new replies connection after READY=1"
+    );
+    assert!(
+        xmsg::fed::get_federated_inbox(&p1_fs, "reload-server.test", 0)
+            .await
+            .is_err(),
+        "removed peer1 must be refused on new inbox connection after READY=1"
+    );
 }
 
 // -----------------------------------------------------------------------------
