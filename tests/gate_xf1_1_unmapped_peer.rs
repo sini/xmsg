@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 mod short_sock;
 
 use std::fs;
@@ -50,7 +52,6 @@ fn write_fake_stat(proc_root: &Path, pid: u32, ppid: u32, starttime: &str) {
 /// then reaps the child via `waitpid` while returning the still-open connected `UnixStream`
 /// in the parent. Because the kernel pins `sk_peer_pid` to the task that called `connect()`,
 /// the server accepting this connection sees the reaped child's `pidfd` (`Pid: -1`).
-#[cfg(target_os = "linux")]
 fn connect_from_reaped_child(sock_path: &Path, payload: &[u8]) -> UnixStream {
     use std::os::fd::FromRawFd;
     use std::os::unix::ffi::OsStrExt;
@@ -102,7 +103,6 @@ fn connect_from_reaped_child(sock_path: &Path, payload: &[u8]) -> UnixStream {
     UnixStream::from_std(std_stream).unwrap()
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 #[ignore]
 fn xf1_1_pidns_server_helper() {
@@ -328,7 +328,6 @@ fn xf1_1_pidns_server_helper() {
     unsafe { libc::_exit(0) };
 }
 
-#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_xf1_1_unmapped_peer_pid_namespace_and_ancestry_oracles() {
     process::set_force_peerpidfd_errno_for_test(0);
@@ -747,22 +746,23 @@ async fn test_xf1_1_unmapped_peer_pid_namespace_and_ancestry_oracles() {
     assert!(walk.next().is_none());
     assert_eq!(walk.end(), Some(WalkEnd::Unreadable(0)));
 
-    let db_guard = db.lock().unwrap();
-    assert!(
-        resolve_caller_session_peer(
-            &proc_root,
-            &state.sessions_dirs[..],
-            &agy_config,
-            &state.agy_store,
-            &state.pi_store,
-            &state.svc_store,
-            Some(&*db_guard),
-            &unmapped_peer,
-        )
-        .is_err(),
-        "resolve_caller_session_peer must reject alive-unmapped peer"
-    );
-    drop(db_guard);
+    {
+        let db_guard = db.lock().unwrap();
+        assert!(
+            resolve_caller_session_peer(
+                &proc_root,
+                &state.sessions_dirs[..],
+                &agy_config,
+                &state.agy_store,
+                &state.pi_store,
+                &state.svc_store,
+                Some(&*db_guard),
+                &unmapped_peer,
+            )
+            .is_err(),
+            "resolve_caller_session_peer must reject alive-unmapped peer"
+        );
+    }
 
     assert!(
         xmsg::pi::verify_pi_process_peer(&proc_root, uid, &unmapped_peer).is_err(),

@@ -412,7 +412,7 @@ async fn test_gate_probe_b3_attested_name_sanitization_and_envelope_integrity() 
 
     // Inspect delivered line on target socket
     for _ in 0..250 {
-        if harness.target_received.lock().unwrap().len() >= 1 {
+        if !harness.target_received.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

@@ -1322,7 +1322,7 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
             node.register_sock.to_str().unwrap(),
         ])
         .env("ANTIGRAVITY_CONVERSATION_ID", conv_1)
-        .env("ANTIGRAVITY_LS_ADDRESS", ls_addr.to_string())
+        .env("ANTIGRAVITY_LS_ADDRESS", ls_addr)
         .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-1")
         .env_remove("XMSG_AGY_LABEL")
         .output()
@@ -1366,7 +1366,7 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
             "agy-ops",
         ])
         .env("ANTIGRAVITY_CONVERSATION_ID", conv_1)
-        .env("ANTIGRAVITY_LS_ADDRESS", ls_addr.to_string())
+        .env("ANTIGRAVITY_LS_ADDRESS", ls_addr)
         .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-1")
         .output()
         .unwrap();
@@ -1416,7 +1416,7 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
             node.register_sock.to_str().unwrap(),
         ])
         .env("ANTIGRAVITY_CONVERSATION_ID", conv_1)
-        .env("ANTIGRAVITY_LS_ADDRESS", ls_addr.to_string())
+        .env("ANTIGRAVITY_LS_ADDRESS", ls_addr)
         .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-1")
         .env_remove("XMSG_AGY_LABEL")
         .output()
@@ -1440,7 +1440,7 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
             node.register_sock.to_str().unwrap(),
         ])
         .env("ANTIGRAVITY_CONVERSATION_ID", conv_2)
-        .env("ANTIGRAVITY_LS_ADDRESS", ls_addr.to_string())
+        .env("ANTIGRAVITY_LS_ADDRESS", ls_addr)
         .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-2")
         .env_remove("XMSG_AGY_LABEL")
         .output()
@@ -1488,7 +1488,7 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
             "agy-ops",
         ])
         .env("ANTIGRAVITY_CONVERSATION_ID", conv_1)
-        .env("ANTIGRAVITY_LS_ADDRESS", ls_addr.to_string())
+        .env("ANTIGRAVITY_LS_ADDRESS", ls_addr)
         .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-1")
         .output()
         .unwrap();

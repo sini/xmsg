@@ -96,7 +96,7 @@ fn setup_mock_socket(
     received_lines: Arc<Mutex<Vec<String>>>,
     stop_signal: Arc<AtomicBool>,
 ) {
-    if std::os::unix::net::UnixStream::connect(&sock_path).is_ok() {
+    if std::os::unix::net::UnixStream::connect(sock_path).is_ok() {
         let _ = fs::remove_file(sock_path);
     }
     let listener = UnixListener::bind(sock_path).expect("bind unix socket");
@@ -220,7 +220,7 @@ async fn test_oracle_1_send_twice_one_key_one_delivery() {
     assert!(!msg_id1.is_empty());
 
     for _ in 0..250 {
-        if harness.received_lines.lock().await.len() >= 1 {
+        if !harness.received_lines.lock().await.is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -270,7 +270,7 @@ async fn test_oracle_2_same_key_different_body_409() {
     assert_eq!(res1.status(), reqwest::StatusCode::ACCEPTED);
 
     for _ in 0..250 {
-        if harness.received_lines.lock().await.len() >= 1 {
+        if !harness.received_lines.lock().await.is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -323,7 +323,7 @@ async fn test_oracle_3_different_principals_independent() {
     let msg_id_alice = json_alice["message_id"].as_str().unwrap().to_string();
 
     for _ in 0..250 {
-        if harness.received_lines.lock().await.len() >= 1 {
+        if !harness.received_lines.lock().await.is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -403,7 +403,7 @@ async fn test_oracle_4_survives_server_restart_persisted() {
         let id = json1["message_id"].as_str().unwrap().to_string();
 
         for _ in 0..250 {
-            if received_lines.lock().await.len() >= 1 {
+            if !received_lines.lock().await.is_empty() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -497,7 +497,7 @@ async fn test_oracle_5_attested_agent_and_anonymous_http_principal_isolation() {
         .to_string();
 
     for _ in 0..250 {
-        if harness.received_lines.lock().await.len() >= 1 {
+        if !harness.received_lines.lock().await.is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

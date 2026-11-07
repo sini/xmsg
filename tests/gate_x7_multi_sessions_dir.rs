@@ -236,7 +236,7 @@ async fn test_oracle_1_multi_dir_listed_and_deliverable() {
     );
 
     for _ in 0..250 {
-        if listener_a.received_lines.lock().await.len() >= 1 {
+        if !listener_a.received_lines.lock().await.is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -266,7 +266,7 @@ async fn test_oracle_1_multi_dir_listed_and_deliverable() {
     );
 
     for _ in 0..250 {
-        if listener_b.received_lines.lock().await.len() >= 1 {
+        if !listener_b.received_lines.lock().await.is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -479,7 +479,7 @@ async fn test_oracle_3_duplicate_session_across_dirs_assigned_suffixes_and_route
     // 5. Verify sockets received their expected messages
     for _ in 0..250 {
         if listener.received_lines.lock().await.len() >= 2
-            && listener_b.received_lines.lock().await.len() >= 1
+            && !listener_b.received_lines.lock().await.is_empty()
         {
             break;
         }

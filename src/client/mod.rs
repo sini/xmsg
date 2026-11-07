@@ -558,9 +558,7 @@ mod feature_tests {
     #[test]
     #[ignore = "client-only CI explicitly executes this feature-leak sentinel"]
     fn no_daemon() {
-        assert!(
-            !cfg!(feature = "daemon"),
-            "daemon leaked into client-only tests"
-        );
+        #[cfg(feature = "daemon")]
+        panic!("daemon leaked into client-only tests");
     }
 }

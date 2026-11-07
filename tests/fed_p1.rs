@@ -323,7 +323,7 @@ async fn test_oracle_1_attested_cross_host_send() {
 
     // Wait for delivery to 0199cecf-000b-7000-8000-00000000000b's inbox
     for _ in 0..250 {
-        if node_b.inbox_rx.lock().unwrap().len() >= 1 {
+        if !node_b.inbox_rx.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -416,7 +416,7 @@ async fn test_oracle_2_reply_pushed_back_and_recorded() {
     let message_id = resp["message_id"].as_str().unwrap().to_string();
 
     for _ in 0..250 {
-        if node_b.inbox_rx.lock().unwrap().len() >= 1 {
+        if !node_b.inbox_rx.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -567,7 +567,8 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
             )]
             .into_iter()
             .collect(),
-        )).into(),
+        ))
+        .into(),
         cert_der: cert_a.clone(),
         cert_chain_der: Vec::new(),
         key_der: key_a.clone(),
@@ -596,7 +597,7 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
         "Expected success for source within from CIDR: {res1:?}"
     );
     for _ in 0..250 {
-        if node_b_allow.inbox_rx.lock().unwrap().len() >= 1 {
+        if !node_b_allow.inbox_rx.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -662,7 +663,8 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
             )]
             .into_iter()
             .collect(),
-        )).into(),
+        ))
+        .into(),
         cert_der: cert_a,
         cert_chain_der: Vec::new(),
         key_der: key_a,
@@ -766,7 +768,8 @@ async fn test_oracle_2_from_absent_pin_only_accepted() {
             )]
             .into_iter()
             .collect(),
-        )).into(),
+        ))
+        .into(),
         cert_der: cert_a,
         cert_chain_der: Vec::new(),
         key_der: key_a,
@@ -793,7 +796,7 @@ async fn test_oracle_2_from_absent_pin_only_accepted() {
     assert!(res.is_ok(), "Pin-only message should be accepted: {res:?}");
 
     for _ in 0..250 {
-        if node_b.inbox_rx.lock().unwrap().len() >= 1 {
+        if !node_b.inbox_rx.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -913,7 +916,8 @@ async fn test_oracle_4_reply_route_source_check() {
             )]
             .into_iter()
             .collect(),
-        )).into(),
+        ))
+        .into(),
         cert_der: cert_b,
         cert_chain_der: Vec::new(),
         key_der: key_b,
@@ -1129,7 +1133,8 @@ async fn test_oracle_6_anonymous_from_with_colon_gives_400() {
             )]
             .into_iter()
             .collect(),
-        )).into(),
+        ))
+        .into(),
         cert_der: cert_a,
         cert_chain_der: Vec::new(),
         key_der: key_a,
@@ -1209,7 +1214,8 @@ async fn test_oracle_7_root_harness_rejected_and_badge_spoof_sanitized() {
             )]
             .into_iter()
             .collect(),
-        )).into(),
+        ))
+        .into(),
         cert_der: cert_a,
         cert_chain_der: Vec::new(),
         key_der: key_a,
@@ -1279,7 +1285,7 @@ async fn test_oracle_7_root_harness_rejected_and_badge_spoof_sanitized() {
     assert!(res_spoof.is_ok());
 
     for _ in 0..250 {
-        if node_b.inbox_rx.lock().unwrap().len() >= 1 {
+        if !node_b.inbox_rx.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1338,7 +1344,8 @@ async fn test_n4_attested_name_ascii_only_u0387() {
             )]
             .into_iter()
             .collect(),
-        )).into(),
+        ))
+        .into(),
         cert_der: cert_a,
         cert_chain_der: Vec::new(),
         key_der: key_a,
@@ -1433,7 +1440,8 @@ async fn test_oracle_8_no_forward_rejected() {
             )]
             .into_iter()
             .collect(),
-        )).into(),
+        ))
+        .into(),
         cert_der: cert_a,
         cert_chain_der: Vec::new(),
         key_der: key_a,
@@ -1528,7 +1536,8 @@ async fn test_oracle_9_forged_reply_id_gives_403() {
             )]
             .into_iter()
             .collect(),
-        )).into(),
+        ))
+        .into(),
         cert_der: cert_b,
         cert_chain_der: Vec::new(),
         key_der: key_b,
@@ -1670,7 +1679,8 @@ async fn test_oracle_10_duplicate_id_delivered_once() {
             )]
             .into_iter()
             .collect(),
-        )).into(),
+        ))
+        .into(),
         cert_der: cert_a,
         cert_chain_der: Vec::new(),
         key_der: key_a,
@@ -1719,7 +1729,7 @@ async fn test_oracle_10_duplicate_id_delivered_once() {
     assert_eq!(r1.message_id, dup_id);
 
     for _ in 0..250 {
-        if node_b.inbox_rx.lock().unwrap().len() >= 1 {
+        if !node_b.inbox_rx.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1787,7 +1797,8 @@ async fn test_oracle_11_rate_limit_429() {
             )]
             .into_iter()
             .collect(),
-        )).into(),
+        ))
+        .into(),
         cert_der: cert_a,
         cert_chain_der: Vec::new(),
         key_der: key_a,
@@ -1972,7 +1983,8 @@ async fn test_amendment_a_peer_without_send_gets_403_op_denied() {
             )]
             .into_iter()
             .collect(),
-        )).into(),
+        ))
+        .into(),
         cert_der: cert_a,
         cert_chain_der: Vec::new(),
         key_der: key_a,
@@ -2331,7 +2343,8 @@ fn make_client_fed_state(
             )]
             .into_iter()
             .collect(),
-        )).into(),
+        ))
+        .into(),
         cert_der,
         cert_chain_der: Vec::new(),
         key_der,
@@ -2540,7 +2553,7 @@ async fn test_f2_session_sender_always_pushed() {
     let res = send_federated_reply(&fed_state_b, "host-a", &reply).await;
     assert!(res.is_ok(), "{res:?}");
     for _ in 0..250 {
-        if node_a.inbox_rx.lock().unwrap().len() >= 1 {
+        if !node_a.inbox_rx.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2708,7 +2721,7 @@ async fn test_f3_http_origin_federated_send() {
 
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
     for _ in 0..250 {
-        if node_b.inbox_rx.lock().unwrap().len() >= 1 {
+        if !node_b.inbox_rx.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2837,7 +2850,7 @@ async fn test_f4_one_way_link() {
         "A must be able to send to B on a one-way link: {res:?}"
     );
     for _ in 0..250 {
-        if node_b.inbox_rx.lock().unwrap().len() >= 1 {
+        if !node_b.inbox_rx.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -3606,7 +3619,8 @@ async fn test_n1_offsource_flood_leaves_legit_bucket_intact() {
             )]
             .into_iter()
             .collect(),
-        )).into(),
+        ))
+        .into(),
         cert_der: off.cert_der.clone(),
         cert_chain_der: Vec::new(),
         key_der: off.key_der.clone(),
