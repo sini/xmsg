@@ -1151,15 +1151,63 @@ def run_oracle_c11_with_homes(
             f"PTY tail: {bytes(pty_out[since_idx:][-600:] )!r}"
         )
 
+    def wait_turn_idle(since_idx: int, prompt_marker: bytes | None = None, timeout: float = 15.0) -> int:
+        deadline = time.time() + timeout
+        idx = since_idx
+        if prompt_marker is not None:
+            idx = wait_pty(prompt_marker, idx, timeout=max(0.1, deadline - time.time()))
+        idx = wait_pty(b"ECHO:", idx, timeout=max(0.1, deadline - time.time()))
+        idx = wait_pty(
+            b"\x1b]7501;state=done:app=codex\x1b\\",
+            idx,
+            timeout=max(0.1, deadline - time.time()),
+        )
+        return idx
+
+    def wait_fresh_thread_ready(
+        exclude_roots: tuple[str, ...], since_idx: int, timeout: float = 15.0
+    ) -> tuple[str, int]:
+        deadline = time.time() + timeout
+        idx = wait_pty(
+            b"Ask Codex to do anything",
+            since_idx,
+            timeout=max(0.1, deadline - time.time()),
+        )
+        idle_title = f"\x1b]0;{work_dir.name}\x07".encode("utf-8")
+        locks_dir = tui_home / "thread-writer-locks"
+        while time.time() < deadline:
+            drain_pty(0.05)
+            if locks_dir.exists():
+                active_locks = [
+                    p.stem for p in locks_dir.glob("*.lock") if not p.name.startswith(".")
+                ]
+                fresh = [c for c in active_locks if c not in exclude_roots]
+                old_gone = all(old not in active_locks for old in exclude_roots)
+                # Ensure any in-flight SessionStart hook spinner has settled back to the idle title
+                tail = bytes(pty_out[since_idx:])
+                last_idle = tail.rfind(idle_title)
+                last_working = tail.rfind(b"\x1b]7501;state=working:app=codex\x1b\\")
+                spinner_settled = last_idle != -1 and (
+                    last_working == -1
+                    or tail.find(b"\x1b]7501;state=idle:app=codex\x1b\\", last_working) != -1
+                    or last_idle > last_working
+                )
+                if fresh and old_gone and spinner_settled:
+                    return fresh[0], len(pty_out)
+        raise AssertionError(
+            f"C11 timed out waiting for fresh TUI thread lock (excluding {exclude_roots}). "
+            f"PTY tail: {bytes(pty_out[since_idx:][-600:])!r}"
+        )
+
     try:
-        # Wait for initial TUI root registration AND its initial turn completion (`ECHO:`)
+        # Wait for initial TUI root registration AND its initial turn completion (`state=done`)
         tui_root_1 = None
         deadline = time.time() + 15.0
         while time.time() < deadline:
             drain_pty(0.1)
             locks_dir = tui_home / "thread-writer-locks"
             if locks_dir.exists():
-                locks = [p.stem for p in locks_dir.glob("*.lock")]
+                locks = [p.stem for p in locks_dir.glob("*.lock") if not p.name.startswith(".")]
                 if locks:
                     _, recips = unix_http_request(http_sock, "GET", "/v1/recipients")
                     for cand in locks:
@@ -1172,9 +1220,9 @@ def run_oracle_c11_with_homes(
             if tui_root_1:
                 break
         assert tui_root_1 is not None, (
-            f"C11/C14 failed: plain TUI did not register initial root. PTY: {pty_out.decode('utf-8', 'replace')[-600:]}"
+            f"C11/C14 failed: plain TUI did not register initial root. PTY: {bytes(pty_out[-600:])!r}"
         )
-        mark = wait_pty(b"ECHO:", 0)
+        mark = wait_turn_idle(0)
 
         # C14 check on plain TUI auto-daemon topology: app-server-control.sock exists and live push delivers!
         ctrl_sock = tui_home / "app-server-control" / "app-server-control.sock"
@@ -1190,16 +1238,16 @@ def run_oracle_c11_with_homes(
         assert st in (200, 201, 202) and push_res.get("outcome") == "delivered", (
             f"C14 failed: live push to plain auto-daemon TUI {tui_root_1} did not deliver: {st} {push_res}"
         )
-        # Wait for the live-pushed turn to finish (`ECHO:`) before typing `/clear`
-        mark = wait_pty(b"ECHO:", mark)
+        # Wait for the live-pushed turn to echo its marker AND complete (`state=done`) before typing `/clear`
+        mark = wait_turn_idle(mark, b"PLAIN_TUI_LIVE_PUSH_MARKER")
 
         # Send `/clear`, wait for slash-command completion popup (`clear the terminal`),
-        # press Enter, wait for the fresh composer placeholder (`Ask Codex to do anything`),
+        # press Enter, wait for observed fresh-thread readiness (new writer lock + SessionStart settled),
         # type `AFTER_CLEAR_PROMPT`, wait for echo, and press Enter.
         os.write(master, b"/clear")
         mark = wait_pty(b"clear the terminal", mark)
         os.write(master, b"\r")
-        mark = wait_pty(b"Ask Codex to do anything", mark)
+        expected_clear_root, mark = wait_fresh_thread_ready((tui_root_1,), mark)
         os.write(master, b"AFTER_CLEAR_PROMPT")
         mark = wait_pty(b"AFTER_CLEAR_PROMPT", mark)
         os.write(master, b"\r")
@@ -1212,7 +1260,7 @@ def run_oracle_c11_with_homes(
             if locks_dir.exists():
                 for p in locks_dir.glob("*.lock"):
                     cand = p.stem
-                    if cand != tui_root_1:
+                    if not p.name.startswith(".") and cand != tui_root_1:
                         _, recips = unix_http_request(http_sock, "GET", "/v1/recipients")
                         if any(
                             r.get("address", "").startswith(f"{cand}@")
@@ -1222,19 +1270,19 @@ def run_oracle_c11_with_homes(
                             break
             if tui_root_clear:
                 break
-        assert tui_root_clear is not None, (
-            f"C11 failed: TUI /clear did not register a fresh root. PTY: {pty_out.decode('utf-8', 'replace')[-600:]}"
+        assert tui_root_clear is not None and tui_root_clear == expected_clear_root, (
+            f"C11 failed: TUI /clear did not register a fresh root. PTY: {bytes(pty_out[-600:])!r}"
         )
-        # Wait for `AFTER_CLEAR_PROMPT` turn to finish (`ECHO:`) so the composer is idle before `/new`!
-        mark = wait_pty(b"ECHO:", mark)
+        # Wait for `AFTER_CLEAR_PROMPT` turn to complete (`state=done`) so the composer is idle before `/new`!
+        mark = wait_turn_idle(mark)
 
         # Send `/new`, wait for slash-command completion popup (`start a new chat`),
-        # press Enter, wait for the fresh composer placeholder (`Ask Codex to do anything`),
+        # press Enter, wait for observed fresh-thread readiness (new writer lock + SessionStart settled),
         # type `AFTER_NEW_PROMPT`, wait for echo, and press Enter.
         os.write(master, b"/new")
         mark = wait_pty(b"start a new chat", mark)
         os.write(master, b"\r")
-        mark = wait_pty(b"Ask Codex to do anything", mark)
+        expected_new_root, mark = wait_fresh_thread_ready((tui_root_1, tui_root_clear), mark)
         os.write(master, b"AFTER_NEW_PROMPT")
         mark = wait_pty(b"AFTER_NEW_PROMPT", mark)
         os.write(master, b"\r")
@@ -1247,7 +1295,7 @@ def run_oracle_c11_with_homes(
             if locks_dir.exists():
                 for p in locks_dir.glob("*.lock"):
                     cand = p.stem
-                    if cand not in (tui_root_1, tui_root_clear):
+                    if not p.name.startswith(".") and cand not in (tui_root_1, tui_root_clear):
                         _, recips = unix_http_request(http_sock, "GET", "/v1/recipients")
                         if any(
                             r.get("address", "").startswith(f"{cand}@")
@@ -1257,10 +1305,10 @@ def run_oracle_c11_with_homes(
                             break
             if tui_root_new:
                 break
-        assert tui_root_new is not None, (
-            f"C11 failed: TUI /new did not register a fresh root. PTY: {pty_out.decode('utf-8', 'replace')[-600:]}"
+        assert tui_root_new is not None and tui_root_new == expected_new_root, (
+            f"C11 failed: TUI /new did not register a fresh root. PTY: {bytes(pty_out[-600:])!r}"
         )
-        mark = wait_pty(b"ECHO:", mark)
+        mark = wait_turn_idle(mark)
     finally:
         try:
             os.close(master)
