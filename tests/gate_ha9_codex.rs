@@ -212,6 +212,26 @@ fn xf6_delayed_close_of_unlocked_previous_description_preserves_new_lease() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn xf6_close_only_handover_before_new_watch() {
+    let env = CodexTestEnv::new();
+    let root = "019a0000-0000-7000-8000-000000000182";
+    let pid = 102;
+    env.write_fake_proc(pid, 1, "102", &env.codex_exe);
+    for iteration in 0..1000 {
+        let lock_path = env.create_writer_lock(&env.codex_home, pid, root, 4);
+        // Production publication probes drop their file without an explicit unlock.
+        drop(env.held_locks.lock().unwrap().remove(&lock_path));
+        env.create_writer_lock(&env.codex_home, pid, root, 4);
+        let watch = xmsg::codex::LockLeaseWatch::install(&env.codex_home, root).unwrap();
+        watch.verify_continuity(&env.proc_root, pid, "102")
+            .unwrap_or_else(|error| panic!("XF6 close-only iteration={iteration}: {error}"));
+        drop(watch);
+        drop(env.held_locks.lock().unwrap().remove(&lock_path));
+    }
+}
+
 struct CodexTestEnv {
     _dir: TempDir,
     base_dir: PathBuf,

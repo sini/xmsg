@@ -10,6 +10,9 @@ on:
         description: Run twenty writer-lock fixture iterations
         type: boolean
         default: false
+      test_filter:
+        description: Optional isolated probe test name
+        default: ""
       revision:
         description: Revision under measurement
         default: 7d9d1ed3f7c37c3433a95c65570892736fd914ab
@@ -110,11 +113,13 @@ jobs:
         run: cargo +1.95.0 test --locked -j 4 --test gate_ha9_codex --no-run
       - name: Twenty fixture-suite iterations without retries
         shell: bash
+        env:
+          TEST_FILTER: ${{ inputs.test_filter }}
         run: |
           failures=0
           for iteration in $(seq 1 20); do
             echo "XF6 iteration=$iteration begin"
-            if cargo +1.95.0 test --locked -j 4 --test gate_ha9_codex -- --nocapture > "iteration-$iteration.log" 2>&1; then
+            if cargo +1.95.0 test --locked -j 4 --test gate_ha9_codex "$TEST_FILTER" -- --nocapture > "iteration-$iteration.log" 2>&1; then
               echo "XF6 iteration=$iteration PASS"
             else
               failures=$((failures+1))
