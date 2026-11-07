@@ -2267,12 +2267,14 @@ pub async fn handle_codex_hook_frame(
                         let mut rt = rt_arc.lock().unwrap();
                         rt.store.register_fresh_root(
                             &cfg,
-                            owner_pid,
-                            &owner_starttime,
-                            session_id,
-                            hook_payload.cwd.as_deref(),
-                            label,
-                            true,
+                            crate::codex::FreshRootRegistration {
+                                owner_pid,
+                                owner_starttime: &owner_starttime,
+                                root_id: session_id,
+                                cwd_hint: hook_payload.cwd.as_deref(),
+                                label_override: label,
+                                allow_candidate: true,
+                            },
                         )
                     };
                     match reg_res {

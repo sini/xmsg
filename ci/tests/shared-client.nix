@@ -47,9 +47,13 @@
           clientArgs
           // {
             cargoArtifacts = clientArtifacts;
-            nativeBuildInputs = [ pkgs.python3 ];
+            nativeBuildInputs = [
+              pkgs.clippy
+              pkgs.python3
+            ];
             cargoTestExtraArgs = "--lib --test shared_client";
             preCheck = ''
+              cargoWithProfile clippy --all-targets --locked --no-default-features --features client -- -D warnings
               python3 scripts/client-graph.py
             '';
             postCheck = ''
@@ -74,6 +78,7 @@
         shared-client-compat = package.overrideAttrs {
           pname = "xmsg-shared-client-compat";
           dontBuild = true;
+          preCheck = "";
           installPhase = ''
             touch "$out"
           '';

@@ -315,7 +315,7 @@ async fn test_oracle_1_ca_peer_accepted_and_delivered() {
     assert!(res.is_ok(), "Expected send to succeed, got: {res:?}");
 
     for _ in 0..250 {
-        if received.lock().unwrap().len() >= 1 {
+        if !received.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -672,7 +672,7 @@ async fn test_oracle_4_expired_and_not_yet_valid_refused() {
         "Expected valid cert to succeed: {res_valid:?}"
     );
     for _ in 0..250 {
-        if received.lock().unwrap().len() >= 1 {
+        if !received.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1007,7 +1007,7 @@ async fn test_oracle_6_prefix_wildcard_matching() {
     }
 
     for _ in 0..250 {
-        if received.lock().unwrap().len() >= 1 {
+        if !received.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1383,7 +1383,7 @@ async fn test_oracle_9_ca_peer_policy_targets_enforced() {
         "Expected send to allowed target to succeed: {res_allowed:?}"
     );
     for _ in 0..250 {
-        if rx1.lock().unwrap().len() >= 1 {
+        if !rx1.lock().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

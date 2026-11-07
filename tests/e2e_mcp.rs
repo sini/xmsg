@@ -428,7 +428,7 @@ async fn test_mcp_send_and_reply_with_derived_caller() {
 
     // Check socket delivery to target-agent
     for _ in 0..250 {
-        if harness.received_lines.lock().await.len() >= 1 {
+        if !harness.received_lines.lock().await.is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

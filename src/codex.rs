@@ -1375,6 +1375,16 @@ impl Default for CodexStore {
     }
 }
 
+/// Parameters for admitting or revalidating a fresh Codex root `P` (`startup`, `clear`, `fork`).
+pub struct FreshRootRegistration<'a> {
+    pub owner_pid: u32,
+    pub owner_starttime: &'a str,
+    pub root_id: &'a str,
+    pub cwd_hint: Option<&'a str>,
+    pub label_override: Option<&'a str>,
+    pub allow_candidate: bool,
+}
+
 impl CodexStore {
     pub fn new(max_persisted_generation: u64, initially_revoked: HashSet<String>) -> Self {
         Self::with_stale(max_persisted_generation, initially_revoked, HashMap::new())
@@ -1519,13 +1529,16 @@ impl CodexStore {
     pub fn register_fresh_root(
         &mut self,
         config: &CodexConfig,
-        owner_pid: u32,
-        owner_starttime: &str,
-        root_id: &str,
-        cwd_hint: Option<&str>,
-        label_override: Option<&str>,
-        allow_candidate: bool,
+        req: FreshRootRegistration<'_>,
     ) -> std::result::Result<Option<CodexRootSnapshot>, String> {
+        let FreshRootRegistration {
+            owner_pid,
+            owner_starttime,
+            root_id,
+            cwd_hint,
+            label_override,
+            allow_candidate,
+        } = req;
         if !crate::claim::is_uuid_shaped(root_id) {
             return Err(format!("invalid codex root UUID: {root_id:?}"));
         }
@@ -1902,12 +1915,14 @@ impl CodexStore {
         if allow_candidate_retry && self.candidates.contains_key(root_id) {
             match self.register_fresh_root(
                 config,
-                owner_pid,
-                owner_starttime,
-                root_id,
-                None,
-                None,
-                true,
+                FreshRootRegistration {
+                    owner_pid,
+                    owner_starttime,
+                    root_id,
+                    cwd_hint: None,
+                    label_override: None,
+                    allow_candidate: true,
+                },
             )? {
                 Some(snap) => return Ok(snap),
                 None => {
@@ -2005,12 +2020,14 @@ impl CodexStore {
         if self.candidates.contains_key(root_id) {
             match self.register_fresh_root(
                 config,
-                owner_pid,
-                owner_starttime,
-                root_id,
-                cwd_hint,
-                label_override,
-                true,
+                FreshRootRegistration {
+                    owner_pid,
+                    owner_starttime,
+                    root_id,
+                    cwd_hint,
+                    label_override,
+                    allow_candidate: true,
+                },
             )? {
                 Some(snap) => return Ok((snap, true)),
                 None => {
@@ -2313,7 +2330,7 @@ pub fn init_for_db(
             root_id,
             StaleCodexRoot {
                 root_id: s.root_id,
-                codex_home: PathBuf::from(s.codex_home),
+                codex_home: s.codex_home,
                 rollout_dev: s.rollout_dev,
                 rollout_ino: s.rollout_ino,
                 label: s.label,
