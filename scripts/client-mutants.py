@@ -8,6 +8,7 @@ import sys
 import tempfile
 import hashlib
 import uuid
+import re
 
 RUN_NONCE = uuid.uuid4().hex
 ARTIFACT_VARIANTS = {}
@@ -60,7 +61,35 @@ CASES = [
 ]
 
 
-def run(directory, test):
+def run(directory, test, *, changed_source=None, label="probe"):
+    if test == "@graph":
+        return run_marked(directory, test, changed_source, None)
+    if test == "@live":
+        entry, selected = "tests/shared_client_live.rs", "pinned_and_candidate_service_contract"
+    elif test in ("@feature", "@health-disposal", "@health-peek"):
+        entry = "src/client/mod.rs" if test == "@feature" else "src/client/health.rs"
+        selected = {"@feature": "no_daemon", "@health-disposal": "disposed_descriptor_cannot_become_a_new_registration", "@health-peek": "peek_observes_idle_data_and_eof_without_consumption"}[test]
+    else:
+        entry, selected = "tests/shared_client.rs", test
+    source = Path(directory) / entry
+    original = source.read_text()
+    marker = f"client-mutant-arm:{RUN_NONCE}:{label}:{uuid.uuid4().hex}"
+    inserted = f'\n    eprintln!({json.dumps(marker)});'
+    if test == "@live":
+        inserted += '\n    eprintln!("client-mutant-app:{}", env!("CARGO_BIN_EXE_xmsg"));'
+    instrumented, count = re.subn(rf"\bfn {re.escape(selected)}\(\)\s*\{{", lambda match: match[0] + inserted, original)
+    require(count == 1, ("missing named marker site", entry, selected))
+    source.write_text(instrumented)
+    try:
+        result = run_marked(directory, test, changed_source, marker)
+        if result.returncode in (0, 101):
+            require(marker in result.stdout + result.stderr, ("compiled arm marker not executed", label, result.stdout, result.stderr))
+        return result
+    finally:
+        source.write_text(original)
+
+
+def run_marked(directory, test, changed_source, marker):
     env = {**os.environ, "CARGO_TARGET_DIR": str(ROOT / "target" / "client-mutants")}
     if test == "@graph":
         return subprocess.run(["python3", "scripts/client-graph.py"], cwd=directory, env=env, capture_output=True, text=True, timeout=60)
@@ -88,16 +117,28 @@ def run(directory, test):
     if build.returncode:
         return build
     executables = []
+    artifacts = []
     for line in build.stdout.splitlines():
         try:
             artifact = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if artifact.get("reason") == "compiler-artifact":
+            artifacts.append(artifact)
         if artifact.get("reason") == "compiler-artifact" and artifact.get("target", {}).get("name") == target and artifact.get("profile", {}).get("test") and artifact.get("executable"):
             if artifact.get("fresh") is not False:
                 raise RuntimeError(("cached intended test executable", target))
             executables.append(artifact["executable"])
     require(len(executables) == 1 and Path(executables[0]).is_file(), ("missing intended test executable", target, build.stdout))
+    if target != "xmsg":
+        libraries = [item for item in artifacts if item.get("target", {}).get("name") == "xmsg" and "lib" in item.get("target", {}).get("kind", []) and not item.get("profile", {}).get("test")]
+        require(len(libraries) == 1 and libraries[0].get("fresh") is False, ("cached or missing changed library", target))
+    app = None
+    daemon_mutation = changed_source is not None and changed_source.startswith("src/") and not changed_source.startswith("src/client/")
+    if test == "@live":
+        apps = [item for item in artifacts if item.get("target", {}).get("name") == "xmsg" and not item.get("profile", {}).get("test") and item.get("executable")]
+        require(len(apps) == 1 and apps[0].get("fresh") is False, "cached or missing candidate daemon")
+        app = Path(apps[0]["executable"])
     executable = Path(executables[0])
     digest = hashlib.sha256(executable.read_bytes()).hexdigest()
     source = hashlib.sha256()
@@ -107,11 +148,27 @@ def run(directory, test):
     for file in ("Cargo.toml", "Cargo.lock"):
         source.update((Path(directory) / file).read_bytes())
     variant = source.hexdigest()
-    if digest in ARTIFACT_VARIANTS and ARTIFACT_VARIANTS[digest] != variant:
-        raise RuntimeError("test executable hash reused across source variants")
-    ARTIFACT_VARIANTS[digest] = variant
-    print(f"artifact nonce={RUN_NONCE} test={selected} path={executable} mtime_ns={executable.stat().st_mtime_ns} sha256={digest} source={variant}", flush=True)
-    return subprocess.run([str(executable), selected, "--exact", *runtime_args], cwd=directory, env=env, capture_output=True, text=True, timeout=90 if test == "@live" else 30)
+    if not daemon_mutation:
+        if ("test", digest) in ARTIFACT_VARIANTS and ARTIFACT_VARIANTS[("test", digest)] != variant:
+            raise RuntimeError("test executable hash reused across source variants")
+        ARTIFACT_VARIANTS[("test", digest)] = variant
+    print(f"artifact nonce={RUN_NONCE} arm={marker} kind=test test={selected} path={executable} mtime_ns={executable.stat().st_mtime_ns} sha256={digest} source={variant}", flush=True)
+    if app is not None:
+        app_digest = hashlib.sha256(app.read_bytes()).hexdigest()
+        app_source = hashlib.sha256()
+        for file in sorted((Path(directory) / "src").rglob("*.rs")):
+            app_source.update(str(file.relative_to(directory)).encode())
+            app_source.update(file.read_bytes())
+        app_variant = app_source.hexdigest()
+        if daemon_mutation:
+            if ("app", app_digest) in ARTIFACT_VARIANTS and ARTIFACT_VARIANTS[("app", app_digest)] != app_variant:
+                raise RuntimeError("daemon executable hash reused across daemon source variants")
+            ARTIFACT_VARIANTS[("app", app_digest)] = app_variant
+        print(f"artifact nonce={RUN_NONCE} arm={marker} kind=app test={selected} path={app} mtime_ns={app.stat().st_mtime_ns} sha256={app_digest} source={app_variant}", flush=True)
+    result = subprocess.run([str(executable), selected, "--exact", "--show-output", *runtime_args], cwd=directory, env=env, capture_output=True, text=True, timeout=90 if test == "@live" else 30)
+    if app is not None:
+        require(f"client-mutant-app:{app}" in result.stdout + result.stderr, "test did not execute the built candidate path")
+    return result
 
 
 def main():
@@ -126,7 +183,7 @@ def main():
                 shutil.copyfile(ROOT / file, dest / file)
             for folder in ("src", "tests", "scripts", "ci"):
                 shutil.copytree(ROOT / folder, dest / folder, copy_function=shutil.copyfile)
-            green = run(dest, test)
+            green = run(dest, test, changed_source=filename, label=f"{name}:baseline")
             marker = "forbidden dependencies absent with live daemon positive control" if test == "@graph" else "1 passed; 0 failed; 0 ignored"
             require(green.returncode == 0 and marker in green.stdout and (test != "@live" or "shared-client: verified baseline and candidate service contract completed" in green.stdout), (name, "invalid green", green.stdout, green.stderr))
             source = dest / filename
@@ -134,7 +191,7 @@ def main():
             expected_count = 3 if name in ("forbidden-sender-field", "agent-version") else (2 if name == "live-health-eof" else 1)
             require(text.count(old) == expected_count, (name, text.count(old)))
             source.write_text(text.replace(old, new, 1))
-            red = run(dest, test)
+            red = run(dest, test, changed_source=filename, label=f"{name}:mutant")
             if test == "@graph":
                 reason = "test target inventory mismatch" if name == "missing-test-target" else "rusqlite"
                 require(red.returncode == 1 and "AssertionError" in red.stderr and reason in red.stderr, (name, red.stdout, red.stderr))
