@@ -23,32 +23,37 @@ impl RegistrationHealth {
     pub(super) fn check(&self) -> Result<(), ClientError> {
         let mut descriptor = self.descriptor.lock().unwrap_or_else(|e| e.into_inner());
         let fd = descriptor.ok_or(ClientError::Disconnected)?;
-        if shutdown(fd)? {
+        if disconnected(fd)? {
             *descriptor = None;
             return Err(ClientError::Disconnected);
         }
-        let mut byte = 0_u8;
-        // The lifetime mutex prevents disposal and descriptor reuse during this probe.
-        let result = unsafe {
-            libc::recv(
-                fd,
-                (&mut byte as *mut u8).cast(),
-                1,
-                libc::MSG_PEEK | libc::MSG_DONTWAIT,
-            )
-        };
-        if result == 0 {
-            *descriptor = None;
-            Err(ClientError::Disconnected)
-        } else if result > 0 {
-            Ok(())
+        Ok(())
+    }
+}
+
+fn disconnected(fd: RawFd) -> io::Result<bool> {
+    Ok(shutdown(fd)? || peek_eof(fd)?)
+}
+
+fn peek_eof(fd: RawFd) -> io::Result<bool> {
+    let mut byte = 0_u8;
+    // The caller holds the descriptor-lifetime mutex throughout this probe.
+    let result = unsafe {
+        libc::recv(
+            fd,
+            (&mut byte as *mut u8).cast(),
+            1,
+            libc::MSG_PEEK | libc::MSG_DONTWAIT,
+        )
+    };
+    if result >= 0 {
+        Ok(result == 0)
+    } else {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::WouldBlock {
+            Ok(false)
         } else {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::WouldBlock {
-                Ok(())
-            } else {
-                Err(error.into())
-            }
+            Err(error)
         }
     }
 }
@@ -76,6 +81,31 @@ mod tests {
     use std::io::{Read, Write};
     use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn peek_observes_idle_data_and_eof_without_consumption() {
+        for half_close in [false, true] {
+            let (mut reader, mut writer) = UnixStream::pair().unwrap();
+            assert!(!peek_eof(reader.as_raw_fd()).unwrap());
+            writer.write_all(b"frame\n").unwrap();
+            for _ in 0..3 {
+                assert!(!peek_eof(reader.as_raw_fd()).unwrap());
+            }
+            if half_close {
+                writer.shutdown(std::net::Shutdown::Write).unwrap();
+            } else {
+                drop(writer);
+            }
+            assert!(!peek_eof(reader.as_raw_fd()).unwrap());
+            let mut frame = [0; 6];
+            reader.read_exact(&mut frame).unwrap();
+            assert_eq!(&frame, b"frame\n");
+            assert!(
+                peek_eof(reader.as_raw_fd()).unwrap(),
+                "zero-byte peek observes EOF"
+            );
+        }
+    }
 
     #[test]
     fn closed_peer_keeps_complete_and_partial_frames_readable() {
