@@ -107,8 +107,8 @@
             fi
             grep -F 'test pinned_and_candidate_service_contract ... FAILED' missing.log
             python3 scripts/client-mutants.py --live | tee live-mutants.log
-            grep -Fx '13/13 shared-client mutants killed' live-mutants.log
-            python3 -c 'import runpy; runpy.run_path("scripts/client-mutants.py")["require_cached_builds"]("live-mutants.log", 26)'
+            grep -Fx '15/15 shared-client mutants killed' live-mutants.log
+            python3 -c 'import runpy; runpy.run_path("scripts/client-mutants.py")["require_cached_builds"]("live-mutants.log", 30)'
             runHook postCheck
           '';
         };

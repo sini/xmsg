@@ -801,40 +801,11 @@ pub async fn run_agent_server_with_listener(
                     ..
                 } = frame
                 {
-                    let sid = session_id.trim();
-                    if !crate::claim::is_uuid_shaped(sid) {
-                        let err = AppError::BadRequest(format!(
-                            "invalid codex session_id '{sid}': must be UUID-shaped"
-                        ))
-                        .frame();
-                        let _ = writer.write_all(format!("{err}\n").as_bytes()).await;
-                        let _ = writer.flush().await;
-                        continue;
-                    }
-                    let rt_arc = crate::codex::for_state(&state_clone);
-                    if revoked {
-                        {
-                            let mut rt = rt_arc.lock().unwrap();
-                            let _ = rt.store.revoke_by_operator(sid);
-                        }
-                        if let Ok(db) = state_clone.db.lock() {
-                            let _ = crate::storage::invalidate_codex_root(&db, sid);
-                        }
-                    } else {
-                        {
-                            let mut rt = rt_arc.lock().unwrap();
-                            rt.store.unrevoke_by_operator(sid);
-                        }
-                        if let Ok(db) = state_clone.db.lock() {
-                            let _ = crate::storage::unrevoke_codex_root_by_operator(&db, sid);
-                        }
-                    }
-                    let ok_line = serde_json::json!({
-                        "status": "ok",
-                        "session_id": sid,
-                        "revoked": revoked,
-                    });
-                    let _ = writer.write_all(format!("{ok_line}\n").as_bytes()).await;
+                    let line = match apply_codex_revoke(&state_clone, &session_id, revoked) {
+                        Ok(ok_val) => ok_val.to_string(),
+                        Err(e) => e.frame().to_string(),
+                    };
+                    let _ = writer.write_all(format!("{line}\n").as_bytes()).await;
                     let _ = writer.flush().await;
                     continue;
                 }
@@ -1402,38 +1373,53 @@ pub async fn handle_agent_frame(
             session_id,
             revoked,
             ..
-        } => {
-            let sid = session_id.trim();
-            if !crate::claim::is_uuid_shaped(sid) {
-                return Err(AppError::BadRequest(format!(
-                    "invalid codex session_id '{sid}': must be UUID-shaped"
-                )));
-            }
-            let rt_arc = crate::codex::for_state(state);
-            if revoked {
-                {
-                    let mut rt = rt_arc.lock().unwrap();
-                    let _ = rt.store.revoke_by_operator(sid);
-                }
-                if let Ok(db) = state.db.lock() {
-                    let _ = crate::storage::invalidate_codex_root(&db, sid);
-                }
-            } else {
-                {
-                    let mut rt = rt_arc.lock().unwrap();
-                    rt.store.unrevoke_by_operator(sid);
-                }
-                if let Ok(db) = state.db.lock() {
-                    let _ = crate::storage::unrevoke_codex_root_by_operator(&db, sid);
-                }
-            }
-            Ok(serde_json::json!({
-                "status": "ok",
-                "session_id": sid,
-                "revoked": revoked,
-            }))
+        } => apply_codex_revoke(state, &session_id, revoked),
+    }
+}
+
+/// Persist operator `revoke` / `unrevoke` to SQLite first, updating in-memory `CodexStore`
+/// and returning `status: "ok"` only when the SQLite write succeeds so in-memory and DB
+/// state cannot diverge (`XR7`, §6.2.1).
+pub fn apply_codex_revoke(
+    state: &AppState,
+    session_id: &str,
+    revoked: bool,
+) -> Result<serde_json::Value, AppError> {
+    let sid = session_id.trim();
+    if !crate::claim::is_uuid_shaped(sid) {
+        return Err(AppError::BadRequest(format!(
+            "invalid codex session_id '{sid}': must be UUID-shaped"
+        )));
+    }
+    {
+        let db = state
+            .db
+            .lock()
+            .map_err(|e| AppError::Internal(format!("failed to lock db for codex_revoke: {e}")))?;
+        if revoked {
+            crate::storage::invalidate_codex_root(&db, sid).map_err(|e| {
+                AppError::Internal(format!("failed to persist codex revoke for '{sid}': {e}"))
+            })?;
+        } else {
+            crate::storage::unrevoke_codex_root_by_operator(&db, sid).map_err(|e| {
+                AppError::Internal(format!("failed to persist codex unrevoke for '{sid}': {e}"))
+            })?;
         }
     }
+    let rt_arc = crate::codex::for_state(state);
+    {
+        let mut rt = rt_arc.lock().unwrap();
+        if revoked {
+            let _ = rt.store.revoke_by_operator(sid);
+        } else {
+            rt.store.unrevoke_by_operator(sid);
+        }
+    }
+    Ok(serde_json::json!({
+        "status": "ok",
+        "session_id": sid,
+        "revoked": revoked,
+    }))
 }
 
 /// Resolves `as_agent` against `parent` in `subagents` (HA9-A §2.3 step 3, E1, E2, D1, D5, D6).
@@ -3231,12 +3217,18 @@ pub fn run_codex_revoke(
         "revoked": revoked,
     });
     let resp = crate::mcp::call_agent_sock(&sock_path, &frame)?;
-    if resp.get("status").and_then(serde_json::Value::as_str) == Some("error") {
-        let detail = resp
-            .get("detail")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("unknown error");
-        return Err(detail.to_string());
+    match resp.get("status").and_then(serde_json::Value::as_str) {
+        Some("ok") => {}
+        Some("error") => {
+            let detail = resp
+                .get("detail")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown error");
+            return Err(detail.to_string());
+        }
+        _ => {
+            return Err(format!("unexpected response from agent socket: {resp}"));
+        }
     }
     if !revoked {
         clear_client_unavailable_note(Some(&sock_path), Some(session_id.trim()));

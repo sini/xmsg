@@ -5952,3 +5952,326 @@ async fn xr8_sweep_lease_loss_is_recoverable() {
         .iter()
         .any(|s| s.root_id == root));
 }
+
+/// XR7 gate:
+/// - Cell 1: `xmsg register codex --unrevoke <sid>` prints outcome to stdout, sets SQLite `codex_roots.revoked = 0`,
+///   and subsequent `SessionStart(resume)` + `UserPromptSubmit` admit the root.
+/// - Cell 2: unreachable `agent.sock` => non-zero exit (`1`) + error message on stderr (no silent success).
+/// - Cell 3: real SQLite write failure (`PRAGMA query_only = ON`) in `CodexRevoke` => daemon returns `"status": "error"`
+///   (never `"ok"`), CLI exits non-zero, and in-memory `CodexStore` does not diverge from SQLite.
+/// - Mutants (driven as single-site source mutants by `scripts/client-mutants.py --live`):
+///   - `xr7-discard-db-error` (`M1`): restores `let _ = crate::storage::unrevoke_codex_root_by_operator(&db, sid);` => `RED`.
+///   - `xr7-connect-failure-ok` (`M2`): makes `run_codex_revoke` return `Ok(())` on a connect failure => `RED`.
+#[tokio::test]
+async fn xr7_codex_unrevoke_cli_and_sqlite_first_persistence() {
+    let bin = env!("CARGO_BIN_EXE_xmsg");
+    let env = CodexTestEnv::new();
+    let root_p = "01a1ad54-532f-7770-a4b5-9c855f6e10fb";
+    let pid_o1 = 7101u32;
+    let start_o1 = "910001";
+
+    env.write_fake_proc(pid_o1, 1, start_o1, &env.codex_exe);
+    let _lock_path = env.create_writer_lock(&env.codex_home, pid_o1, root_p, 9);
+    let _rollout_path = env.write_root_rollout(&env.codex_home, root_p, "/workspace");
+    let peer_o1 = env.peer(pid_o1);
+
+    // Admit `root_p` via `SessionStart(startup)`.
+    handle_codex_hook_frame(
+        &env.state,
+        &peer_o1,
+        "SessionStart",
+        Some("xr7-pane"),
+        &json!({"session_id": root_p, "source": "startup", "cwd": "/workspace"}),
+    )
+    .await
+    .expect("initial SessionStart(startup) must succeed");
+
+    // Start the real `run_agent_server_with_listener` on a Unix socket inside a 0700 tempdir.
+    let sock_dir = tempfile::Builder::new()
+        .prefix("xr7-s-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    fs::set_permissions(sock_dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let agent_sock = sock_dir.path().join("agent.sock");
+    let listener = UnixListener::bind(&agent_sock).unwrap();
+    fs::set_permissions(&agent_sock, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut srv_agy_cfg = env.state.agy_config.clone();
+    srv_agy_cfg.proc_root = PathBuf::from(xmsg::process::LIVE_PROC_ROOT);
+    let state_srv = Arc::new(AppState {
+        db: env.state.db.clone(),
+        sessions_dirs: env.state.sessions_dirs.clone(),
+        max_body: env.state.max_body,
+        node_name: env.state.node_name.clone(),
+        request_counter: AtomicU64::new(0),
+        notify_tx: env.state.notify_tx.clone(),
+        agy_config: srv_agy_cfg,
+        agy_store: env.state.agy_store.clone(),
+        pi_store: env.state.pi_store.clone(),
+        pi_notify_tx: env.state.pi_notify_tx.clone(),
+        svc_store: env.state.svc_store.clone(),
+        svc_notify_tx: env.state.svc_notify_tx.clone(),
+        reply_ttl: env.state.reply_ttl,
+        idempotency_ttl: env.state.idempotency_ttl,
+        long_poll_semaphore: env.state.long_poll_semaphore.clone(),
+        fed_state: None,
+    });
+    let my_uid = env.my_uid;
+    let srv_handle = tokio::spawn(async move {
+        let _ = run_agent_server_with_listener(listener, state_srv, my_uid).await;
+    });
+
+    // Cell 2: Unreachable socket => non-zero exit plus an error message on stderr.
+    let missing_sock = sock_dir.path().join("missing-agent.sock");
+    let out_unreachable = tokio::task::spawn_blocking({
+        let missing_sock = missing_sock.clone();
+        move || {
+            std::process::Command::new(bin)
+                .args([
+                    "register",
+                    "codex",
+                    "--unrevoke",
+                    root_p,
+                    "--sock",
+                    missing_sock.to_str().unwrap(),
+                ])
+                .output()
+                .expect("spawn xmsg register codex --unrevoke against unreachable socket")
+        }
+    })
+    .await
+    .unwrap();
+    let unreachable_stdout = String::from_utf8_lossy(&out_unreachable.stdout);
+    let unreachable_stderr = String::from_utf8_lossy(&out_unreachable.stderr);
+    assert!(
+        !out_unreachable.status.success(),
+        "XR7 Cell 2 / M2: unreachable socket must exit non-zero, got {:?}",
+        out_unreachable.status
+    );
+    assert!(
+        unreachable_stdout.trim().is_empty(),
+        "XR7 Cell 2: unreachable socket must not print success to stdout, got: {unreachable_stdout:?}"
+    );
+    assert!(
+        unreachable_stderr.contains("xmsg register codex error:")
+            && unreachable_stderr.contains("failed to connect to agent socket"),
+        "XR7 Cell 2: unreachable socket must print connect failure to stderr, got: {unreachable_stderr:?}"
+    );
+
+    // Operator revoke via CLI (`xmsg register codex --revoke <root_p>`): prints outcome and sets `revoked = 1`.
+    let out_revoke = tokio::task::spawn_blocking({
+        let agent_sock = agent_sock.clone();
+        move || {
+            std::process::Command::new(bin)
+                .args([
+                    "register",
+                    "codex",
+                    "--revoke",
+                    root_p,
+                    "--sock",
+                    agent_sock.to_str().unwrap(),
+                ])
+                .output()
+                .expect("spawn xmsg register codex --revoke")
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        out_revoke.status.success(),
+        "revoke CLI failed: stderr={}",
+        String::from_utf8_lossy(&out_revoke.stderr)
+    );
+    let revoke_stdout = String::from_utf8_lossy(&out_revoke.stdout);
+    assert_eq!(
+        revoke_stdout.trim(),
+        format!("revoked codex session {root_p}"),
+        "revoke CLI must print outcome to stdout"
+    );
+    {
+        let db = env.state.db.lock().unwrap();
+        let (active, revoked): (i64, i64) = db
+            .query_row(
+                "SELECT active, revoked FROM codex_roots WHERE root_id = ?1",
+                rusqlite::params![root_p],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((active, revoked), (0, 1));
+    }
+
+    // Cell 3: Induce a real SQLite read-only database failure (`PRAGMA query_only = ON`) during `--unrevoke` =>
+    // daemon returns error frame (no `ok`), CLI exits non-zero, and in-memory `CodexStore` remains revoked
+    // (`is_revoked == true`), matching SQLite (`revoked = 1`).
+    {
+        let db = env.state.db.lock().unwrap();
+        db.execute_batch("PRAGMA query_only = ON;").unwrap();
+    }
+    let out_db_fail = tokio::task::spawn_blocking({
+        let agent_sock = agent_sock.clone();
+        move || {
+            std::process::Command::new(bin)
+                .args([
+                    "register",
+                    "codex",
+                    "--unrevoke",
+                    root_p,
+                    "--sock",
+                    agent_sock.to_str().unwrap(),
+                ])
+                .output()
+                .expect("spawn xmsg register codex --unrevoke against read-only SQLite db")
+        }
+    })
+    .await
+    .unwrap();
+    let db_fail_stdout = String::from_utf8_lossy(&out_db_fail.stdout);
+    let db_fail_stderr = String::from_utf8_lossy(&out_db_fail.stderr);
+    assert!(
+        !out_db_fail.status.success(),
+        "XR7 Cell 3 / M1: SQLite write failure on --unrevoke must exit non-zero, got {:?}",
+        out_db_fail.status
+    );
+    assert!(
+        db_fail_stdout.trim().is_empty(),
+        "XR7 Cell 3: SQLite write failure must not print ok/unrevoked to stdout, got: {db_fail_stdout:?}"
+    );
+    assert!(
+        db_fail_stderr.contains("failed to persist codex unrevoke")
+            && db_fail_stderr.contains("readonly"),
+        "XR7 Cell 3: stderr must report the read-only SQLite write error, got: {db_fail_stderr:?}"
+    );
+    assert!(
+        xmsg::codex::for_state(&env.state)
+            .lock()
+            .unwrap()
+            .store
+            .is_revoked(root_p),
+        "XR7 Cell 3 / M1: in-memory CodexStore must stay revoked when SQLite write fails"
+    );
+    {
+        let db = env.state.db.lock().unwrap();
+        let revoked: i64 = db
+            .query_row(
+                "SELECT revoked FROM codex_roots WHERE root_id = ?1",
+                rusqlite::params![root_p],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(revoked, 1, "SQLite row must still have revoked=1 after read-only write refusal");
+        db.execute_batch("PRAGMA query_only = OFF;").unwrap();
+    }
+
+    // Cell 1: `xmsg register codex --unrevoke <root_p>` succeeds, prints outcome to stdout, sets SQLite `revoked = 0`,
+    // and subsequent `SessionStart(resume)` + `UserPromptSubmit` admit `root_p`!
+    let out_unrevoke = tokio::task::spawn_blocking({
+        let agent_sock = agent_sock.clone();
+        move || {
+            std::process::Command::new(bin)
+                .args([
+                    "register",
+                    "codex",
+                    "--unrevoke",
+                    root_p,
+                    "--sock",
+                    agent_sock.to_str().unwrap(),
+                ])
+                .output()
+                .expect("spawn xmsg register codex --unrevoke")
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        out_unrevoke.status.success(),
+        "XR7 Cell 1: --unrevoke must exit 0, stderr={}",
+        String::from_utf8_lossy(&out_unrevoke.stderr)
+    );
+    let unrevoke_stdout = String::from_utf8_lossy(&out_unrevoke.stdout);
+    assert_eq!(
+        unrevoke_stdout.trim(),
+        format!("unrevoked codex session {root_p}"),
+        "XR7 Cell 1: --unrevoke must print outcome to stdout"
+    );
+    {
+        let db = env.state.db.lock().unwrap();
+        let (active, revoked): (i64, i64) = db
+            .query_row(
+                "SELECT active, revoked FROM codex_roots WHERE root_id = ?1",
+                rusqlite::params![root_p],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (active, revoked),
+            (0, 0),
+            "XR7 Cell 1: SQLite codex_roots must have revoked=0 immediately after --unrevoke"
+        );
+    }
+
+    // Now resume `root_p` via `SessionStart(source="resume")` and `UserPromptSubmit`: must re-attest and admit `root_p`!
+    let resume_res = handle_codex_hook_frame(
+        &env.state,
+        &peer_o1,
+        "SessionStart",
+        Some("xr7-pane"),
+        &json!({"session_id": root_p, "source": "resume", "cwd": "/workspace"}),
+    )
+    .await;
+    assert!(
+        resume_res.is_ok(),
+        "XR7 Cell 1: SessionStart(resume) after --unrevoke must admit root_p: {resume_res:?}"
+    );
+    let prompt_res = handle_codex_hook_frame(
+        &env.state,
+        &peer_o1,
+        "UserPromptSubmit",
+        Some("xr7-pane"),
+        &json!({"session_id": root_p, "turn_id": "turn-after-unrevoke", "cwd": "/workspace"}),
+    )
+    .await;
+    assert!(
+        prompt_res.is_ok(),
+        "XR7 Cell 1: UserPromptSubmit after --unrevoke must admit root_p: {prompt_res:?}"
+    );
+    {
+        let db = env.state.db.lock().unwrap();
+        let (active, revoked): (i64, i64) = db
+            .query_row(
+                "SELECT active, revoked FROM codex_roots WHERE root_id = ?1",
+                rusqlite::params![root_p],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (active, revoked),
+            (1, 0),
+            "XR7 Cell 1: codex_roots must be active=1, revoked=0 after post-unrevoke admission"
+        );
+    }
+
+    // Also verify Cell 3 in the `--revoke` direction: when SQLite is read-only (`PRAGMA query_only = ON`)
+    // during `--revoke`, the daemon returns an error frame and in-memory `CodexStore` remains unrevoked (`is_revoked == false`).
+    {
+        let db = env.state.db.lock().unwrap();
+        db.execute_batch("PRAGMA query_only = ON;").unwrap();
+    }
+    let revoke_err = xmsg::agent::apply_codex_revoke(&env.state, root_p, true);
+    assert!(
+        revoke_err.is_err(),
+        "XR7 Cell 3: apply_codex_revoke(true) must return Err when SQLite is read-only"
+    );
+    assert!(
+        !xmsg::codex::for_state(&env.state)
+            .lock()
+            .unwrap()
+            .store
+            .is_revoked(root_p),
+        "XR7 Cell 3 / M1: in-memory CodexStore must not be marked revoked when SQLite revoke fails"
+    );
+    {
+        let db = env.state.db.lock().unwrap();
+        db.execute_batch("PRAGMA query_only = OFF;").unwrap();
+    }
+
+    srv_handle.abort();
+}

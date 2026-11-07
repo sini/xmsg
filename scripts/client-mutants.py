@@ -63,6 +63,8 @@ CASES = [
     ("live-health-eof", "src/client/mod.rs", "self.live.check()", "Ok(())", "@live"),
     ("health-timeout-recheck", "src/client/mod.rs", ".map_err(|_| ClientError::Timeout)\n        .and_then(|result| result)", ".map_err(|_| ClientError::Timeout)?", "registration_health_rechecks_after_an_agent_timeout"),
     ("health-peek-eof", "src/client/health.rs", "Ok(result == 0)", "Ok(false)", "@health-peek"),
+    ("xr7-discard-db-error", "src/agent.rs", 'crate::storage::unrevoke_codex_root_by_operator(&db, sid).map_err(|e| {\n                AppError::Internal(format!("failed to persist codex unrevoke for \'{sid}\': {e}"))\n            })?;', "let _ = crate::storage::unrevoke_codex_root_by_operator(&db, sid);", "@codex-revoke"),
+    ("xr7-connect-failure-ok", "src/agent.rs", "let resp = crate::mcp::call_agent_sock(&sock_path, &frame)?;", "let Ok(resp) = crate::mcp::call_agent_sock(&sock_path, &frame) else { return Ok(()); };", "@codex-revoke"),
 ]
 
 
@@ -71,6 +73,8 @@ def run(directory, test, *, changed_source=None, label="probe"):
         return run_marked(directory, test, changed_source, None)
     if test == "@live":
         entry, selected = "tests/shared_client_live.rs", "pinned_and_candidate_service_contract"
+    elif test == "@codex-revoke":
+        entry, selected = "tests/gate_ha9_codex.rs", "xr7_codex_unrevoke_cli_and_sqlite_first_persistence"
     elif test in ("@feature", "@health-disposal", "@health-peek"):
         entry = "src/client/mod.rs" if test == "@feature" else "src/client/health.rs"
         selected = {"@feature": "no_daemon", "@health-disposal": "disposed_descriptor_cannot_become_a_new_registration", "@health-peek": "peek_observes_idle_data_and_eof_without_consumption"}[test]
@@ -80,7 +84,7 @@ def run(directory, test, *, changed_source=None, label="probe"):
     original = source.read_text()
     marker = f"client-mutant-arm:{RUN_NONCE}:{label}:{uuid.uuid4().hex}"
     inserted = f'\n    eprintln!({json.dumps(marker)});'
-    if test == "@live":
+    if test in ("@live", "@codex-revoke"):
         inserted += '\n    eprintln!("client-mutant-app:{}", env!("CARGO_BIN_EXE_xmsg"));'
     instrumented, count = re.subn(rf"\bfn {re.escape(selected)}\(\)\s*\{{", lambda match: match[0] + inserted, original)
     require(count == 1, ("missing named marker site", entry, selected))
@@ -125,6 +129,9 @@ def run_marked(directory, test, changed_source, marker):
     if test == "@live":
         argv += ["--test", "shared_client_live"]
         target, selected, runtime_args = "shared_client_live", "pinned_and_candidate_service_contract", ["--ignored", "--nocapture"]
+    elif test == "@codex-revoke":
+        argv += ["--test", "gate_ha9_codex"]
+        target, selected, runtime_args = "gate_ha9_codex", "xr7_codex_unrevoke_cli_and_sqlite_first_persistence", ["--nocapture"]
     elif test == "@feature":
         argv += ["--no-default-features", "--features", "client", "--lib"]
         target, selected, runtime_args = "xmsg", "client::feature_tests::no_daemon", ["--ignored"]
@@ -167,7 +174,7 @@ def run_marked(directory, test, changed_source, marker):
         require(len(libraries) == 1 and libraries[0].get("fresh") is False, ("cached or missing changed library", target))
     app = None
     daemon_mutation = changed_source is not None and changed_source.startswith("src/") and not changed_source.startswith("src/client/")
-    if test == "@live":
+    if test in ("@live", "@codex-revoke"):
         apps = [item for item in artifacts if item.get("target", {}).get("name") == "xmsg" and not item.get("profile", {}).get("test") and item.get("executable")]
         require(len(apps) == 1 and apps[0].get("fresh") is False, "cached or missing candidate daemon")
         app = Path(apps[0]["executable"])
@@ -197,7 +204,7 @@ def run_marked(directory, test, changed_source, marker):
                 raise RuntimeError("daemon executable hash reused across daemon source variants")
             ARTIFACT_VARIANTS[("app", app_digest)] = app_variant
         print(f"artifact nonce={RUN_NONCE} arm={marker} kind=app test={selected} path={app} mtime_ns={app.stat().st_mtime_ns} sha256={app_digest} source={app_variant}", flush=True)
-    result = subprocess.run([str(executable), selected, "--exact", "--show-output", *runtime_args], cwd=directory, env=env, capture_output=True, text=True, timeout=90 if test == "@live" else 30)
+    result = subprocess.run([str(executable), selected, "--exact", "--show-output", *runtime_args], cwd=directory, env=env, capture_output=True, text=True, timeout=90 if test in ("@live", "@codex-revoke") else 30)
     if app is not None:
         require(f"client-mutant-app:{app}" in result.stdout + result.stderr, "test did not execute the built candidate path")
     return result
@@ -213,8 +220,8 @@ def require_cached_builds(log, expected):
 
 def main():
     live = "--live" in sys.argv[1:]
-    cases = [case for case in CASES if (case[-1] == "@live") == live]
-    require(len(cases) == (13 if live else 25), "client mutant inventory count changed")
+    cases = [case for case in CASES if (case[-1] in ("@live", "@codex-revoke")) == live]
+    require(len(cases) == (15 if live else 25), "client mutant inventory count changed")
     require(len({case[0] for case in CASES}) == len(CASES), "duplicate client mutant names")
     for name, filename, old, new, test in cases:
         with tempfile.TemporaryDirectory(prefix="xmsg-client-mutant-") as directory:
@@ -238,7 +245,7 @@ def main():
             elif name == "live-skip":
                 require(red.returncode == 0 and "1 passed; 0 failed; 0 ignored" in red.stdout and "shared-client: verified baseline and candidate service contract completed" not in red.stdout, (name, red.stdout, red.stderr))
             else:
-                failed = "pinned_and_candidate_service_contract" if test == "@live" else ("client::feature_tests::no_daemon" if test == "@feature" else ("client::health::tests::disposed_descriptor_cannot_become_a_new_registration" if test == "@health-disposal" else test))
+                failed = "pinned_and_candidate_service_contract" if test == "@live" else ("xr7_codex_unrevoke_cli_and_sqlite_first_persistence" if test == "@codex-revoke" else ("client::feature_tests::no_daemon" if test == "@feature" else ("client::health::tests::disposed_descriptor_cannot_become_a_new_registration" if test == "@health-disposal" else test)))
                 if test == "@health-peek":
                     failed = "client::health::tests::peek_observes_idle_data_and_eof_without_consumption"
                 require(red.returncode == 101 and f"test {failed} ... FAILED" in red.stdout, (name, "survived or wrong red", red.stdout, red.stderr))

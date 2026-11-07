@@ -351,6 +351,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("xmsg unregister error: {e}");
                 std::process::exit(1);
             }
+            println!("revoked codex session {}", args.codex_session.trim());
         }
         Commands::CheckPeers(args) => {
             let own = match &args.fed_cert {
@@ -426,6 +427,7 @@ fn run_register_codex(args: RegisterCodexArgs) {
             eprintln!("xmsg register codex error: {e}");
             std::process::exit(1);
         }
+        println!("revoked codex session {}", sid.trim());
         return;
     }
     if let Some(ref sid) = args.unrevoke {
@@ -433,6 +435,7 @@ fn run_register_codex(args: RegisterCodexArgs) {
             eprintln!("xmsg register codex error: {e}");
             std::process::exit(1);
         }
+        println!("unrevoked codex session {}", sid.trim());
         return;
     }
     if !args.hook || args.event.trim().is_empty() {
