@@ -209,7 +209,7 @@ async fn test_oracle_2_body_from_ignored_and_attributed_to_leaf_principal() {
 
     let node_b_fed_state = Arc::new(FedState {
         node_name: "target-node".to_string(),
-        peers: Arc::new(PeersMap::new(node_b_peers)),
+        peers: (Arc::new(PeersMap::new(node_b_peers))).into(),
         cert_der: node_b_cert.clone(),
         cert_chain_der: Vec::new(),
         key_der: node_b_key.clone(),
@@ -306,7 +306,7 @@ async fn test_oracle_2_body_from_ignored_and_attributed_to_leaf_principal() {
 
     let leaf_fed_state = Arc::new(FedState {
         node_name: "leaf-node".to_string(),
-        peers: Arc::new(PeersMap::new(leaf_peers)),
+        peers: (Arc::new(PeersMap::new(leaf_peers))).into(),
         cert_der: leaf_cert,
         cert_chain_der: Vec::new(),
         key_der: leaf_key,
@@ -466,7 +466,7 @@ async fn test_oracle_3_leaf_pull_replies_node_zero_outbound_connections() {
 
     let node_b_fed_state = Arc::new(FedState {
         node_name: "target-node".to_string(),
-        peers: Arc::new(PeersMap::new(node_b_peers)),
+        peers: (Arc::new(PeersMap::new(node_b_peers))).into(),
         cert_der: node_b_cert,
         cert_chain_der: Vec::new(),
         key_der: node_b_key,
@@ -603,7 +603,7 @@ async fn test_oracle_3_leaf_pull_replies_node_zero_outbound_connections() {
 
     let leaf_fed_state = Arc::new(FedState {
         node_name: "leaf-node".to_string(),
-        peers: Arc::new(PeersMap::new(leaf_peers)),
+        peers: (Arc::new(PeersMap::new(leaf_peers))).into(),
         cert_der: leaf_cert,
         cert_chain_der: Vec::new(),
         key_der: leaf_key,

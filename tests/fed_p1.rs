@@ -148,7 +148,7 @@ async fn create_test_node_full_inner(
 
     let fed_state = Arc::new(FedState {
         node_name: name.to_string(),
-        peers: peers_arc,
+        peers: (peers_arc).into(),
         cert_der: cert_der.clone(),
         cert_chain_der: Vec::new(),
         key_der: key_der.clone(),
@@ -567,7 +567,7 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
             )]
             .into_iter()
             .collect(),
-        )),
+        )).into(),
         cert_der: cert_a.clone(),
         cert_chain_der: Vec::new(),
         key_der: key_a.clone(),
@@ -662,7 +662,7 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
             )]
             .into_iter()
             .collect(),
-        )),
+        )).into(),
         cert_der: cert_a,
         cert_chain_der: Vec::new(),
         key_der: key_a,
@@ -766,7 +766,7 @@ async fn test_oracle_2_from_absent_pin_only_accepted() {
             )]
             .into_iter()
             .collect(),
-        )),
+        )).into(),
         cert_der: cert_a,
         cert_chain_der: Vec::new(),
         key_der: key_a,
@@ -913,7 +913,7 @@ async fn test_oracle_4_reply_route_source_check() {
             )]
             .into_iter()
             .collect(),
-        )),
+        )).into(),
         cert_der: cert_b,
         cert_chain_der: Vec::new(),
         key_der: key_b,
@@ -1129,7 +1129,7 @@ async fn test_oracle_6_anonymous_from_with_colon_gives_400() {
             )]
             .into_iter()
             .collect(),
-        )),
+        )).into(),
         cert_der: cert_a,
         cert_chain_der: Vec::new(),
         key_der: key_a,
@@ -1209,7 +1209,7 @@ async fn test_oracle_7_root_harness_rejected_and_badge_spoof_sanitized() {
             )]
             .into_iter()
             .collect(),
-        )),
+        )).into(),
         cert_der: cert_a,
         cert_chain_der: Vec::new(),
         key_der: key_a,
@@ -1338,7 +1338,7 @@ async fn test_n4_attested_name_ascii_only_u0387() {
             )]
             .into_iter()
             .collect(),
-        )),
+        )).into(),
         cert_der: cert_a,
         cert_chain_der: Vec::new(),
         key_der: key_a,
@@ -1433,7 +1433,7 @@ async fn test_oracle_8_no_forward_rejected() {
             )]
             .into_iter()
             .collect(),
-        )),
+        )).into(),
         cert_der: cert_a,
         cert_chain_der: Vec::new(),
         key_der: key_a,
@@ -1528,7 +1528,7 @@ async fn test_oracle_9_forged_reply_id_gives_403() {
             )]
             .into_iter()
             .collect(),
-        )),
+        )).into(),
         cert_der: cert_b,
         cert_chain_der: Vec::new(),
         key_der: key_b,
@@ -1670,7 +1670,7 @@ async fn test_oracle_10_duplicate_id_delivered_once() {
             )]
             .into_iter()
             .collect(),
-        )),
+        )).into(),
         cert_der: cert_a,
         cert_chain_der: Vec::new(),
         key_der: key_a,
@@ -1787,7 +1787,7 @@ async fn test_oracle_11_rate_limit_429() {
             )]
             .into_iter()
             .collect(),
-        )),
+        )).into(),
         cert_der: cert_a,
         cert_chain_der: Vec::new(),
         key_der: key_a,
@@ -1972,7 +1972,7 @@ async fn test_amendment_a_peer_without_send_gets_403_op_denied() {
             )]
             .into_iter()
             .collect(),
-        )),
+        )).into(),
         cert_der: cert_a,
         cert_chain_der: Vec::new(),
         key_der: key_a,
@@ -2331,7 +2331,7 @@ fn make_client_fed_state(
             )]
             .into_iter()
             .collect(),
-        )),
+        )).into(),
         cert_der,
         cert_chain_der: Vec::new(),
         key_der,
@@ -3606,7 +3606,7 @@ async fn test_n1_offsource_flood_leaves_legit_bucket_intact() {
             )]
             .into_iter()
             .collect(),
-        )),
+        )).into(),
         cert_der: off.cert_der.clone(),
         cert_chain_der: Vec::new(),
         key_der: off.key_der.clone(),

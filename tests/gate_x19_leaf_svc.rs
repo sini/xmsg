@@ -202,7 +202,7 @@ async fn create_hub_test_node(
 
     let fed_state = Arc::new(FedState {
         node_name: name.to_string(),
-        peers: peers_arc,
+        peers: (peers_arc).into(),
         cert_der,
         cert_chain_der: Vec::new(),
         key_der,
@@ -359,7 +359,7 @@ async fn create_leaf_test_node(
 
     let fed_state = Arc::new(FedState {
         node_name: name.to_string(),
-        peers: peers_arc.clone(),
+        peers: (peers_arc.clone()).into(),
         cert_der,
         cert_chain_der: Vec::new(),
         key_der,
@@ -952,7 +952,7 @@ async fn test_oracle_4_peer_mailbox_isolation_and_non_leaf_denied() {
 
     let leaf1_fed_state = FedState {
         node_name: "leaf1".to_string(),
-        peers: Arc::new(leaf1_peers),
+        peers: (Arc::new(leaf1_peers)).into(),
         cert_der: creds_leaf1.0,
         cert_chain_der: Vec::new(),
         key_der: creds_leaf1.1,
@@ -1027,7 +1027,7 @@ async fn test_oracle_4_peer_mailbox_isolation_and_non_leaf_denied() {
 
     let nonleaf_fed_state = FedState {
         node_name: "nonleaf".to_string(),
-        peers: Arc::new(nonleaf_peers),
+        peers: (Arc::new(nonleaf_peers)).into(),
         cert_der: creds_nonleaf.0,
         cert_chain_der: Vec::new(),
         key_der: creds_nonleaf.1,

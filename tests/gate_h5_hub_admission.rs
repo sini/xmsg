@@ -113,7 +113,7 @@ async fn create_test_node(
 
     let fed_state = Arc::new(FedState {
         node_name: name.to_string(),
-        peers: Arc::new(peers_map),
+        peers: (Arc::new(peers_map)).into(),
         cert_der,
         cert_chain_der,
         key_der,
@@ -473,7 +473,8 @@ async fn test_oracle_2_pattern_admission_and_xa2_naming() {
             "Expected message to contain attested origin node 'sini.bitstream', got: {}",
             msgs[0]
         );
-        let admitted = hub_node.fed_state.peers.admitted_clients.read().unwrap();
+        let current_peers = hub_node.fed_state.current_peers();
+        let admitted = current_peers.admitted_clients.read().unwrap();
         assert!(admitted.contains_key("sini.bitstream"));
         assert_eq!(
             admitted.get("sini.bitstream").unwrap().uri,
@@ -510,7 +511,8 @@ async fn test_oracle_2_pattern_admission_and_xa2_naming() {
             "Expected message to contain attested origin node 'genie-guard.genie', got: {}",
             msgs[1]
         );
-        let admitted = hub_node.fed_state.peers.admitted_clients.read().unwrap();
+        let current_peers = hub_node.fed_state.current_peers();
+        let admitted = current_peers.admitted_clients.read().unwrap();
         assert!(admitted.contains_key("genie-guard.genie"));
         assert_eq!(
             admitted.get("genie-guard.genie").unwrap().uri,
@@ -664,7 +666,7 @@ async fn test_oracle_3_strict_path_segment_matching() {
     let cert_valid_der = rustls::pki_types::CertificateDer::from(cert_valid.clone());
     let direct_res = hub_star_node
         .fed_state
-        .peers
+        .current_peers()
         .resolve_incoming_peer(&cert_valid_der, &[]);
     assert!(
         direct_res.is_err(),
@@ -789,7 +791,8 @@ async fn test_oracle_4_closed_by_default_unruled_may_do_nothing() {
     );
 
     // 3. list -> denied (403 OpDenied)
-    let hub_peer_cfg = client_node.fed_state.peers.get("hub.hub").unwrap();
+    let current_peers = client_node.fed_state.current_peers();
+    let hub_peer_cfg = current_peers.get("hub.hub").unwrap();
     let res_list = list_direct_peer(&client_node.fed_state, hub_peer_cfg).await;
     assert!(
         matches!(res_list, Err(AppError::OpDenied(_))),
@@ -1098,7 +1101,8 @@ async fn test_oracle_5c_list_gate() {
         key_no_list,
     )
     .await;
-    let peer_cfg = no_list_node.fed_state.peers.get("hub.hub").unwrap();
+    let current_peers = no_list_node.fed_state.current_peers();
+    let peer_cfg = current_peers.get("hub.hub").unwrap();
     let res_disallowed = list_direct_peer(&no_list_node.fed_state, peer_cfg).await;
     assert!(
         matches!(res_disallowed, Err(AppError::OpDenied(ref msg)) if msg.contains("list operation not allowed")),
@@ -1115,7 +1119,8 @@ async fn test_oracle_5c_list_gate() {
         key_list_ok,
     )
     .await;
-    let peer_cfg_ok = list_ok_node.fed_state.peers.get("hub.hub").unwrap();
+    let current_peers_ok = list_ok_node.fed_state.current_peers();
+    let peer_cfg_ok = current_peers_ok.get("hub.hub").unwrap();
     let res_allowed = list_direct_peer(&list_ok_node.fed_state, peer_cfg_ok).await;
     assert!(
         matches!(res_allowed, Ok((FedListAnswer::Ok { .. }, _))),
@@ -1297,7 +1302,8 @@ async fn test_oracle_6_collision_refusal_no_last_writer_wins() {
 
     // Verify client 1 is registered
     {
-        let admitted = hub_node.fed_state.peers.admitted_clients.read().unwrap();
+        let current_peers = hub_node.fed_state.current_peers();
+        let admitted = current_peers.admitted_clients.read().unwrap();
         assert_eq!(admitted.get("genie-guard.genie").unwrap().uri, uri1);
     }
 
@@ -1321,7 +1327,7 @@ async fn test_oracle_6_collision_refusal_no_last_writer_wins() {
     // Check that the error names BOTH URIs:
     // At TLS layer or fed layer, error names the collision
     // Let's also check direct resolve_incoming_peer on hub_node
-    let resolve_res = hub_node.fed_state.peers.resolve_incoming_peer(
+    let resolve_res = hub_node.fed_state.current_peers().resolve_incoming_peer(
         &rustls::pki_types::CertificateDer::from(cert2.as_slice()),
         &[],
     );
@@ -1340,7 +1346,8 @@ async fn test_oracle_6_collision_refusal_no_last_writer_wins() {
 
     // Client 1's registration is unchanged (no last-writer-wins)
     {
-        let admitted = hub_node.fed_state.peers.admitted_clients.read().unwrap();
+        let current_peers = hub_node.fed_state.current_peers();
+        let admitted = current_peers.admitted_clients.read().unwrap();
         assert_eq!(admitted.get("genie-guard.genie").unwrap().uri, uri1);
     }
 }

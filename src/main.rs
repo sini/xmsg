@@ -1210,7 +1210,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
 
         let fs = Arc::new(xmsg::fed::FedState {
             node_name: node_name.clone(),
-            peers: peers_arc.clone(),
+            peers: peers_arc.clone().into(),
             cert_der: cert_der.clone(),
             cert_chain_der: cert_chain_der.clone(),
             key_der: key_der.clone(),
@@ -1388,7 +1388,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
 
         if let Some(ref fs) = fed_state {
             bg_tasks.push(xmsg::handoff::spawn(state.clone()));
-            for (peer_name, peer_cfg) in fs.peers.iter() {
+            for (peer_name, peer_cfg) in fs.current_peers().iter() {
                 if peer_cfg.is_outbound() {
                     let fs_clone = fs.clone();
                     let peer_clone = peer_name.clone();
@@ -1427,7 +1427,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         }));
 
         if let Some(ref fs) = fed_state {
-            for peer_name in fs.peers.keys() {
+            for peer_name in fs.current_peers().keys() {
                 let fs_clone = fs.clone();
                 let peer_clone = peer_name.clone();
                 let leaf_p_clone = args.leaf_principal.clone().unwrap();

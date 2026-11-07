@@ -2474,9 +2474,39 @@ impl DynamicTls {
     }
 }
 
+mod initial_peers {
+    use super::PeersMap;
+    use std::sync::Arc;
+
+    /// Startup `PeersMap` fallback used exclusively by `FedState::current_peers()` when no
+    /// `CredentialReloader` has populated `dynamic_tls`. The inner `Arc<PeersMap>` is private
+    /// to this submodule so request handlers and outbound helpers cannot read the stale startup
+    /// copy (`fed_state.peers` has no `PeersMap` methods or `Deref`).
+    #[derive(Clone, Default)]
+    pub struct InitialPeers(Arc<PeersMap>);
+
+    impl From<Arc<PeersMap>> for InitialPeers {
+        fn from(peers: Arc<PeersMap>) -> Self {
+            Self(peers)
+        }
+    }
+
+    impl super::FedState {
+        pub fn current_peers(&self) -> Arc<PeersMap> {
+            if let Ok(guard) = self.dynamic_tls.read() {
+                if let Some(ref dyn_tls) = *guard {
+                    return dyn_tls.peers.clone();
+                }
+            }
+            self.peers.0.clone()
+        }
+    }
+}
+pub use initial_peers::InitialPeers;
+
 pub struct FedState {
     pub node_name: String,
-    pub peers: Arc<PeersMap>,
+    pub peers: InitialPeers,
     pub cert_der: Vec<u8>,
     pub cert_chain_der: Vec<Vec<u8>>,
     pub key_der: Vec<u8>,
@@ -2526,15 +2556,6 @@ impl FedState {
             }
         }
         self.key_der.clone()
-    }
-
-    pub fn current_peers(&self) -> Arc<PeersMap> {
-        if let Ok(guard) = self.dynamic_tls.read() {
-            if let Some(ref dyn_tls) = *guard {
-                return dyn_tls.peers.clone();
-            }
-        }
-        self.peers.clone()
     }
 
     pub fn get_ca_anchors(

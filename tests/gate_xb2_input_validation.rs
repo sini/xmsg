@@ -593,7 +593,7 @@ async fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
 
     let hub_fed_state = Arc::new(FedState {
         node_name: "sini.hub".to_string(),
-        peers: hub_peers,
+        peers: (hub_peers).into(),
         cert_der: hub_cert_der.clone(),
         cert_chain_der: vec![hub_cert_der],
         key_der: hub_key_der,
@@ -678,7 +678,7 @@ async fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
 
     let leaf_fed_state = Arc::new(FedState {
         node_name: "sini.leaf".to_string(),
-        peers: leaf_peers,
+        peers: (leaf_peers).into(),
         cert_der: leaf_cert_der.clone(),
         cert_chain_der: vec![leaf_cert_der],
         key_der: leaf_key_der,

@@ -146,7 +146,7 @@ async fn create_fed_test_node(
 
     let fed_state = Arc::new(FedState {
         node_name: name.to_string(),
-        peers: peers_arc,
+        peers: (peers_arc).into(),
         cert_der,
         cert_chain_der: Vec::new(),
         key_der,

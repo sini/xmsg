@@ -228,7 +228,7 @@ async fn build_sender_fed_state(
     };
     let fed_state = Arc::new(FedState {
         node_name: name.to_string(),
-        peers: peers_arc.clone(),
+        peers: (peers_arc.clone()).into(),
         cert_der: Vec::new(),
         cert_chain_der: Vec::new(),
         key_der: Vec::new(),

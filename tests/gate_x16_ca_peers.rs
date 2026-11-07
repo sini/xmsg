@@ -126,7 +126,7 @@ async fn create_test_node(
 
     let fed_state = Arc::new(FedState {
         node_name: name.to_string(),
-        peers: Arc::new(peers_map),
+        peers: (Arc::new(peers_map)).into(),
         cert_der,
         cert_chain_der,
         key_der,

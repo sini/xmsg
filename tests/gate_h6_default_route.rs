@@ -945,7 +945,7 @@ async fn test_oracle_7_removed_pull_loop_exits_on_reload() {
 
     let fs = Arc::new(FedState {
         node_name: "test-node".to_string(),
-        peers: peers_arc.clone(),
+        peers: (peers_arc.clone()).into(),
         cert_der: Vec::new(),
         cert_chain_der: Vec::new(),
         key_der: Vec::new(),
@@ -1070,7 +1070,7 @@ async fn test_oracle_8_reload_adds_pull_loop() {
 
     let fs = Arc::new(FedState {
         node_name: "test-node".to_string(),
-        peers: peers_arc.clone(),
+        peers: (peers_arc.clone()).into(),
         cert_der: Vec::new(),
         cert_chain_der: Vec::new(),
         key_der: Vec::new(),
