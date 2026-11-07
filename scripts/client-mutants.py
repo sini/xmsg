@@ -9,6 +9,7 @@ import tempfile
 import hashlib
 import uuid
 import re
+import time
 
 RUN_NONCE = uuid.uuid4().hex
 ARTIFACT_VARIANTS = {}
@@ -89,6 +90,26 @@ def run(directory, test, *, changed_source=None, label="probe"):
         source.write_text(original)
 
 
+def report_build(output, *, marker, started, target_dir, result):
+    if isinstance(output, bytes):
+        output = output.decode(errors="replace")
+    artifacts = []
+    for line in (output or "").splitlines():
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if item.get("reason") == "compiler-artifact":
+            artifacts.append(item)
+    dependencies = [item for item in artifacts if not item.get("package_id", "").startswith("path+file:")]
+    print("client-build-timing " + json.dumps({
+        "arm": marker, "seconds": round(time.monotonic() - started, 3),
+        "target_dir": str(target_dir), "result": result,
+        "fresh_dependencies": len({item["package_id"] for item in dependencies if item.get("fresh")}),
+        "rebuilt_dependencies": sorted({item["package_id"] for item in dependencies if item.get("fresh") is False}),
+    }, sort_keys=True), flush=True)
+
+
 def run_marked(directory, test, changed_source, marker):
     env = {**os.environ, "CARGO_TARGET_DIR": str(ROOT / "target" / "client-mutants")}
     if test == "@graph":
@@ -113,7 +134,14 @@ def run_marked(directory, test, changed_source, marker):
         argv += ["--no-default-features", "--features", "client", "--test", "shared_client"]
         target, selected, runtime_args = "shared_client", test, []
     # Compilation has a separate budget; a build timeout is never a rejecting test.
-    build = subprocess.run([*argv, "--no-run", "--message-format=json"], cwd=directory, env=env, capture_output=True, text=True, timeout=900)
+    started = time.monotonic()
+    print(f"client-build-start arm={marker} target={env['CARGO_TARGET_DIR']} profile={profile}", flush=True)
+    try:
+        build = subprocess.run([*argv, "--no-run", "--message-format=json"], cwd=directory, env=env, capture_output=True, text=True, timeout=900)
+    except subprocess.TimeoutExpired as error:
+        report_build(error.stdout, marker=marker, started=started, target_dir=env["CARGO_TARGET_DIR"], result="build-timeout-not-a-kill")
+        raise
+    report_build(build.stdout, marker=marker, started=started, target_dir=env["CARGO_TARGET_DIR"], result=build.returncode)
     if build.returncode:
         return build
     executables = []
