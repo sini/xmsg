@@ -30,10 +30,14 @@ def automatic_site(reason):
 
 
 CASES = {
+    "O1-dev-only-reboot": ("src/codex.rs", "        let prior = self.stale_roots.get(root_id).cloned();", "        let prior = self.stale_roots.get(root_id).cloned();\n        if prior.as_ref().is_some_and(|p| p.rollout_dev != rollout_meta.rollout_dev && p.rollout_ino == rollout_meta.rollout_ino) { return Err(\"device changed with same inode\".into()); }", HISTORY),
+    "O2-sweep-operator": ("src/codex.rs", "let _ = self.park_root_for_resume(&id);", "let _ = self.revoke_by_operator(&id);", "xr8_sweep_lease_loss_is_recoverable"),
+    "O3-park-unrevokes": ("src/codex.rs", "pub fn park_root_for_resume(&mut self, root_id: &str) -> Option<(u32, u64)> {", "pub fn park_root_for_resume(&mut self, root_id: &str) -> Option<(u32, u64)> {\n        self.revoked_by_operator.remove(root_id);", "c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_witness"),
+    "O4-sqlite-only-operator": ("src/agent.rs", 'let _ = crate::storage::park_codex_root(&db, session_id);\n                    }\n                    Err(AppError::NotRecipient(format!(\n                        "unsupported or missing SessionStart source', 'let _ = crate::storage::invalidate_codex_root(&db, session_id);\n                    }\n                    Err(AppError::NotRecipient(format!(\n                        "unsupported or missing SessionStart source', AUTOMATIC),
     "direct-parentage": ("src/codex.rs", "if actual_parent != expected_parent {", "if false {", "c5_c6_server_enforcement_and_direct_child_admission"),
     "nested-meta-provenance": ("src/mcp.rs", '.and_then(|p| p.get("_meta"))', '.and_then(|p| p.get("arguments").and_then(|a| a.get("_meta")).or_else(|| p.get("_meta")))', "c1_xh1_and_metadata_boundary_sidecar_before_server"),
     "historical-dev": ("src/codex.rs", "        let prior = self.stale_roots.get(root_id).cloned();", "        let prior = self.stale_roots.get(root_id).cloned();\n        if prior.as_ref().is_some_and(|p| p.rollout_dev != rollout_meta.rollout_dev) { return Err(\"historical device mismatch\".into()); }", HISTORY),
-    "historical-inode": ("src/codex.rs", "        let prior = self.stale_roots.get(root_id).cloned();", "        let prior = self.stale_roots.get(root_id).cloned();\n        if prior.as_ref().is_some_and(|p| p.rollout_ino != rollout_meta.rollout_ino) { return Err(\"historical inode mismatch\".into()); }", HISTORY),
+    "historical-inode": ("src/codex.rs", "        let prior = self.stale_roots.get(root_id).cloned();", "        let prior = self.stale_roots.get(root_id).cloned();\n        if prior.as_ref().is_some_and(|p| p.rollout_ino != rollout_meta.rollout_ino) { return Err(\"historical inode mismatch\".into()); }", "xr8_valid_rollout_replacement_keeps_root_and_child_usable"),
     "fresh-live-operator": automatic_site("rollout revalidation failed"),
     "resume-live-operator": automatic_site("rollout verification failed on resume"),
     "fresh-invalid-operator": ("src/codex.rs", "if matches!(e, RolloutLookupError::Invalid(_)) {\n                    self.park_root_for_resume(root_id);", "if matches!(e, RolloutLookupError::Invalid(_)) {\n                    self.revoke_by_operator(root_id);", AUTOMATIC),
@@ -62,7 +66,7 @@ def arm(name, mutation, seed):
         original = test.read_text()
         if mutation is None:
             instrumented, count = re.subn(r"async fn (xr8_\w+)\(\) \{", lambda m: m[0] + f'\n    eprintln!("{marker}:{m[1]}");', original)
-            if count != 5:
+            if count != 6:
                 raise RuntimeError(f"XR8 control inventory changed: {count}")
         else:
             instrumented = replace_once(original, f"async fn {selected}() {{", f'async fn {selected}() {{\n    eprintln!("{marker}");')
@@ -88,7 +92,7 @@ def arm(name, mutation, seed):
         binary = Path(binaries[0]["executable"])
         result = subprocess.run([str(binary), selected, *(["--exact"] if mutation else []), "--nocapture"], cwd=checkout, env=env, text=True, capture_output=True, timeout=60)
         output = result.stdout + result.stderr
-        if marker not in output or ("running 1 test" if mutation else "running 5 tests") not in output:
+        if marker not in output or ("running 1 test" if mutation else "running 6 tests") not in output:
             raise RuntimeError(f"{name}: intended compiled arm did not execute: {output}")
         if result.returncode != (0 if mutation is None else 101):
             raise RuntimeError(f"{name}: unexpected test outcome {result.returncode}: {output}")

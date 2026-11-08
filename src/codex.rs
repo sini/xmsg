@@ -1772,7 +1772,7 @@ impl CodexStore {
             Self::locate_lock_home_and_watch(config, owner_pid, owner_starttime, root_id)?;
 
         // XR8 / GT3: file history is not an admission key; re-attest metadata and the live lease.
-        // See den-ag-design@871a194cf, xmsg/ha9-codex-subaddress-spec.md §6.2 amendment.
+        // See the XR8 amendment at den-ag-design@871a194cf.
         let rollout_meta = match verify_codex_rollout(&canon_home, root_id, root_id, None) {
             Ok(meta) => meta,
             Err(RolloutLookupError::Invalid(e)) => {

@@ -33,14 +33,15 @@ This document records internal engineering invariants, security boundaries, and 
 
 ## XR8 admission amendment (owner steering 2026-11-07)
 
-Authority: `den-ag-design@871a194cf`,
-`xmsg/ha9-codex-subaddress-spec.md` §6.2 amendment.
+Authority: `den-ag-design@871a194cf` (XR8 amendment).
 
 Rollout file identity is not an admission key. Under GT3, a same-UID writer can
 also edit the SQLite database; another UID cannot bypass ownership and live
 writer-lease attestation. Persisted device/inode observations are informational
 only: mount IDs can change on reboot, and a valid restored rollout remains usable.
 Admission validates UUID/session/parent metadata with bounded, no-symlink reads
-and a trusted live writer lease. Within-operation open/fstat race checks remain.
+and a trusted live writer lease. A parked root may re-attest under any configured,
+euid-owned Codex home with those witnesses; its historical home is not a pin.
+Within-operation open/fstat race checks remain.
 Automatic metadata or lease failures park the root for re-attestation; only an
 explicit operator revoke sets sticky `RevokedByOperator`.

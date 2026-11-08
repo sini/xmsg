@@ -1166,6 +1166,28 @@ async fn c3_registration_xb2_and_continuous_lease_watch() {
     );
     fs::remove_file(&sym_path).unwrap();
 
+    let direct = env
+        .codex_home
+        .join("sessions/2026/11/04")
+        .join(format!("direct-{p_sym}.jsonl"));
+    fs::copy(&outside, &direct).unwrap();
+    assert!(
+        verify_codex_rollout(&env.codex_home, p_sym, p_sym, None).is_ok(),
+        "P4 control: the internal target's metadata is valid"
+    );
+    let inside = env.codex_home.join("sessions/linked-data");
+    fs::rename(&direct, &inside).unwrap();
+    std::os::unix::fs::symlink(&inside, &sym_path).unwrap();
+    assert!(
+        matches!(
+            verify_codex_rollout(&env.codex_home, p_sym, p_sym, None),
+            Err(RolloutLookupError::Invalid(_))
+        ),
+        "P4: symlink to an in-sessions file must be refused by the symlink guard"
+    );
+    fs::remove_file(&sym_path).unwrap();
+    fs::remove_file(&inside).unwrap();
+
     // (d) Oversized (>1 MiB) first line in rollout
     let p_big = "019a0000-0000-7000-8000-000000000024";
     let big_path = env
@@ -3528,6 +3550,35 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
     .await
     .unwrap();
 
+    let unsupported = handle_codex_hook_frame(
+        &env.state,
+        &peer_o3,
+        "SessionStart",
+        None,
+        &json!({"session_id": root_p, "source": "unsupported"}),
+    )
+    .await;
+    assert!(unsupported.is_err());
+    assert!(
+        xmsg::codex::for_state(&env.state)
+            .lock()
+            .unwrap()
+            .store
+            .is_revoked(root_p),
+        "O3: automatic parking must not clear an explicit operator revoke"
+    );
+    let revoked: i64 = env
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT revoked FROM codex_roots WHERE root_id = ?1",
+            [root_p],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(revoked, 1, "explicit operator intent must remain durable");
     for (ev, payload) in [
         (
             "SessionStart",
@@ -3540,9 +3591,10 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
         ("UserPromptSubmit", json!({"session_id": root_p})),
     ] {
         let rev_res = handle_codex_hook_frame(&env.state, &peer_o3, ev, None, &payload).await;
+        let error = rev_res.unwrap_err().to_string();
         assert!(
-            rev_res.is_err(),
-            "Case 7 RevokedByOperator root with valid witness must be refused on {ev}"
+            error.contains("revoked by operator"),
+            "O3: explicit revocation must keep the operator message on {ev}: {error}"
         );
     }
     assert!(
@@ -5451,12 +5503,28 @@ async fn xr8_resume_ignores_historical_file_identity_after_unrevoke() {
     {
         let db = env.state.db.lock().unwrap();
         storage::invalidate_codex_root(&db, root).unwrap();
-        // Simulate the historical observation made before reboot and/or file restoration.
+        let before: (i64, i64) = db
+            .query_row(
+                "SELECT rollout_dev, rollout_ino FROM codex_roots WHERE root_id = ?1",
+                [root],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        // Reboot renumbers the device while retaining the inode (O1).
         db.execute(
-            "UPDATE codex_roots SET rollout_dev = 1, rollout_ino = 1 WHERE root_id = ?1",
+            "UPDATE codex_roots SET rollout_dev = rollout_dev + 1 WHERE root_id = ?1",
             [root],
         )
         .unwrap();
+        let after: (i64, i64) = db
+            .query_row(
+                "SELECT rollout_dev, rollout_ino FROM codex_roots WHERE root_id = ?1",
+                [root],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_ne!(before.0, after.0, "O1 must renumber only the device");
+        assert_eq!(before.1, after.1, "O1 must preserve the original inode");
     }
     init_for_state(&env.state, cfg.clone());
     assert!(handle_codex_hook_frame(
@@ -5742,6 +5810,21 @@ async fn xr8_automatic_admission_errors_recover_on_next_attestation() {
                 .is_revoked(root),
             "{source}: automatic failure must be recoverable"
         );
+        let revoked: i64 = env
+            .state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COALESCE((SELECT revoked FROM codex_roots WHERE root_id = ?1), 0)",
+                [root],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            revoked, 0,
+            "O4: {source} must not persist an operator revoke"
+        );
         env.write_root_rollout(&env.codex_home, root, "/workspace");
         handle_codex_hook_frame(
             &env.state,
@@ -5802,4 +5885,70 @@ async fn xr8_live_writer_conflict_is_recoverable_after_handover() {
     )
     .await
     .unwrap();
+}
+
+/// O2: lease loss through the production sweep parks durably and permits a later resume.
+#[tokio::test]
+async fn xr8_sweep_lease_loss_is_recoverable() {
+    let env = CodexTestEnv::new();
+    let root = "019a0000-0000-7000-8000-000000000807";
+    let pid = 8808;
+    env.write_fake_proc(pid, 1, "8808", &env.codex_exe);
+    let lock = env.create_writer_lock(&env.codex_home, pid, root, 3);
+    env.write_root_rollout(&env.codex_home, root, "/workspace");
+    handle_codex_hook_frame(
+        &env.state,
+        &env.peer(pid),
+        "SessionStart",
+        None,
+        &json!({"session_id": root, "source": "startup"}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        xmsg::codex::sweep_codex_roots(&env.state.db)
+            .iter()
+            .any(|s| s.root_id == root),
+        "O2 control: root is live before lease loss"
+    );
+    let held = env.held_locks.lock().unwrap().remove(&lock).unwrap();
+    assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_UN) }, 0);
+    drop(held);
+    env.set_writer_lock_fdinfo(pid, 3, &lock, false);
+    assert!(!xmsg::codex::sweep_codex_roots(&env.state.db)
+        .iter()
+        .any(|s| s.root_id == root));
+    assert!(
+        !xmsg::codex::for_state(&env.state)
+            .lock()
+            .unwrap()
+            .store
+            .is_revoked(root),
+        "O2: sweep lease loss must park, not revoke by operator"
+    );
+    let state: (i64, i64) = env
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT active, revoked FROM codex_roots WHERE root_id = ?1",
+            [root],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, (0, 0), "O2: the swept root must be durably parked");
+    env.recreate_writer_lock(&env.codex_home, pid, root, 3);
+    handle_codex_hook_frame(
+        &env.state,
+        &env.peer(pid),
+        "SessionStart",
+        None,
+        &json!({"session_id": root, "source": "resume"}),
+    )
+    .await
+    .unwrap();
+    assert!(xmsg::codex::sweep_codex_roots(&env.state.db)
+        .iter()
+        .any(|s| s.root_id == root));
 }
