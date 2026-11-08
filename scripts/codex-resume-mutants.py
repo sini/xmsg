@@ -101,6 +101,13 @@ def arm(name, mutation, seed):
 
 
 def main():
+    subprocess.run(
+        ["cargo", "test", "--locked", "--test", "gate_ha9_codex", "--no-run"],
+        cwd=ROOT,
+        env={**os.environ, "CARGO_TARGET_DIR": str(SEED), "CARGO_BUILD_JOBS": "4"},
+        check=True,
+        timeout=900,
+    )
     # Freeze the dependency seed before running arms; do not share mutable build directories.
     arm("control", None, SEED)
     for name, mutation in CASES.items():
