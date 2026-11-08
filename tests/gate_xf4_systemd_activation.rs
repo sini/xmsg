@@ -22,20 +22,150 @@ use xmsg::pi::new_pi_store;
 use xmsg::storage;
 use xmsg::svc::new_svc_store;
 
-struct ChildGuard(Option<tokio::process::Child>);
+struct ChildGuard {
+    child: Option<tokio::process::Child>,
+    stdout_buf: Arc<Mutex<String>>,
+    stderr_buf: Arc<Mutex<String>>,
+    stderr_reader: Option<std::thread::JoinHandle<()>>,
+}
+
+fn strip_ansi(input: &str) -> String {
+    let mut clean = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            while let Some(&nc) = chars.peek() {
+                chars.next();
+                if nc.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            clean.push(c);
+        }
+    }
+    clean
+}
+
+fn parse_logged_listen_addr(line: &str, marker: &str) -> Option<SocketAddr> {
+    let clean = strip_ansi(line);
+    if !clean.contains(marker) {
+        return None;
+    }
+    let idx = clean.find("listen=")?;
+    let rest = &clean[idx + "listen=".len()..];
+    let tok = rest.split_whitespace().next()?;
+    tok.parse().ok()
+}
 
 impl ChildGuard {
-    fn new(child: tokio::process::Child) -> Self {
-        Self(Some(child))
+    fn new(mut child: tokio::process::Child) -> Self {
+        let stdout_buf = Arc::new(Mutex::new(String::new()));
+        let stderr_buf = Arc::new(Mutex::new(String::new()));
+
+        if let Some(out) = child.stdout.take() {
+            if let Ok(std_out) = out.into_owned_fd() {
+                let mut file = std::fs::File::from(std_out);
+                let buf_clone = stdout_buf.clone();
+                std::thread::spawn(move || {
+                    use std::io::Read;
+                    let mut chunk = [0u8; 1024];
+                    while let Ok(n) = file.read(&mut chunk) {
+                        if n == 0 {
+                            break;
+                        }
+                        buf_clone
+                            .lock()
+                            .unwrap()
+                            .push_str(&String::from_utf8_lossy(&chunk[..n]));
+                    }
+                });
+            }
+        }
+
+        let stderr_reader = child.stderr.take().and_then(|err| {
+            err.into_owned_fd().ok().map(|std_err| {
+                let mut file = std::fs::File::from(std_err);
+                let buf_clone = stderr_buf.clone();
+                std::thread::spawn(move || {
+                    use std::io::Read;
+                    let mut chunk = [0u8; 1024];
+                    while let Ok(n) = file.read(&mut chunk) {
+                        if n == 0 {
+                            break;
+                        }
+                        buf_clone
+                            .lock()
+                            .unwrap()
+                            .push_str(&String::from_utf8_lossy(&chunk[..n]));
+                    }
+                })
+            })
+        });
+
+        Self {
+            child: Some(child),
+            stdout_buf,
+            stderr_buf,
+            stderr_reader,
+        }
     }
+
     fn child_mut(&mut self) -> &mut tokio::process::Child {
-        self.0.as_mut().unwrap()
+        self.child.as_mut().unwrap()
+    }
+
+    fn format_timeout_diagnostics(&mut self) -> String {
+        let mut exit_status = self.child_mut().try_wait();
+        if matches!(exit_status, Ok(None)) {
+            std::thread::sleep(Duration::from_millis(20));
+            exit_status = self.child_mut().try_wait();
+        }
+        if matches!(exit_status, Ok(Some(_))) {
+            if let Some(handle) = self.stderr_reader.take() {
+                let _ = handle.join();
+            }
+        }
+        let stderr_full = self.stderr_buf.lock().unwrap().clone();
+        const MAX_STDERR_TAIL: usize = 4096;
+        let stderr_tail = if stderr_full.len() > MAX_STDERR_TAIL {
+            let mut start = stderr_full.len() - MAX_STDERR_TAIL;
+            while !stderr_full.is_char_boundary(start) {
+                start += 1;
+            }
+            &stderr_full[start..]
+        } else {
+            &stderr_full[..]
+        };
+        format!("child_exit_status={exit_status:?}, stderr_tail={stderr_tail:?}")
+    }
+
+    fn wait_for_bound_tcp_addr(&mut self, timeout: Duration) -> SocketAddr {
+        let deadline = Instant::now() + timeout;
+        loop {
+            {
+                let out = self.stdout_buf.lock().unwrap();
+                for line in out.lines() {
+                    if let Some(addr) = parse_logged_listen_addr(line, "bound tcp http server") {
+                        return addr;
+                    }
+                }
+            }
+            if Instant::now() >= deadline {
+                let out = self.stdout_buf.lock().unwrap().clone();
+                let diag = self.format_timeout_diagnostics();
+                panic!(
+                    "timed out waiting for 'bound tcp http server' log line within {timeout:?}; stdout={out:?}; {diag}"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
+        if let Some(mut child) = self.child.take() {
             let _ = child.start_kill();
         }
     }
@@ -305,13 +435,32 @@ fn configure_systemd_fds(
     }
 }
 
-fn recv_notify_datagram(sock: &StdUnixDatagram, timeout: Duration) -> String {
-    sock.set_read_timeout(Some(timeout)).unwrap();
+fn recv_notify_datagram(
+    sock: &StdUnixDatagram,
+    timeout: Duration,
+    guard: &mut ChildGuard,
+) -> String {
+    let deadline = Instant::now() + timeout;
     let mut buf = [0u8; 1024];
-    let n = sock
-        .recv(&mut buf)
-        .expect("expected sd_notify datagram within timeout");
-    String::from_utf8(buf[..n].to_vec()).unwrap()
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        sock.set_read_timeout(Some(remaining.max(Duration::from_millis(1))))
+            .unwrap();
+        match sock.recv(&mut buf) {
+            Ok(n) => return String::from_utf8(buf[..n].to_vec()).unwrap(),
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
+                if Instant::now() < deadline {
+                    continue;
+                }
+                let diag = guard.format_timeout_diagnostics();
+                panic!("expected sd_notify datagram within {timeout:?}: {err}; {diag}");
+            }
+            Err(err) => {
+                let diag = guard.format_timeout_diagnostics();
+                panic!("expected sd_notify datagram within {timeout:?}: {err}; {diag}");
+            }
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -408,12 +557,7 @@ async fn oracle_1_socket_activated_fed_exact_port_mtls_and_stopping() {
     drop(prebound_fed); // parent drops its copy; only child holds the pre-bound socket if adopted
     let mut guard = ChildGuard::new(child);
 
-    let msg = tokio::task::spawn_blocking({
-        let s = notify_sock.clone();
-        move || recv_notify_datagram(&s, Duration::from_secs(10))
-    })
-    .await
-    .unwrap();
+    let msg = recv_notify_datagram(&notify_sock, Duration::from_secs(10), &mut guard);
     assert_eq!(msg.trim(), "READY=1", "expected READY=1 on NOTIFY_SOCKET");
 
     // C3: Verify FD_CLOEXEC (O_CLOEXEC = 0o2000000) was re-applied on adopted fd 3
@@ -475,12 +619,7 @@ async fn oracle_1_socket_activated_fed_exact_port_mtls_and_stopping() {
     unsafe {
         libc::kill(pid, libc::SIGTERM);
     }
-    let stop_msg = tokio::task::spawn_blocking({
-        let s = notify_sock.clone();
-        move || recv_notify_datagram(&s, Duration::from_secs(5))
-    })
-    .await
-    .unwrap();
+    let stop_msg = recv_notify_datagram(&notify_sock, Duration::from_secs(5), &mut guard);
     assert_eq!(
         stop_msg.trim(),
         "STOPPING=1",
@@ -565,13 +704,9 @@ async fn oracle_2_pre_occupied_port_contention_control() {
     configure_systemd_fds(&mut cmd, vec![prebound.as_raw_fd()], true);
     let child = cmd.spawn().expect("spawn xmsg serve under contention");
     drop(prebound);
-    let _guard = ChildGuard::new(child);
+    let mut guard = ChildGuard::new(child);
 
-    let msg = tokio::task::spawn_blocking(move || {
-        recv_notify_datagram(&notify_sock, Duration::from_secs(10))
-    })
-    .await
-    .unwrap();
+    let msg = recv_notify_datagram(&notify_sock, Duration::from_secs(10), &mut guard);
     stop_contender.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = contender_handle.join();
     assert_eq!(msg.trim(), "READY=1");
@@ -680,12 +815,7 @@ async fn oracle_3_notify_ready_strictly_after_all_listeners_accept() {
     let mut guard = ChildGuard::new(child);
 
     let notify_sock_arc = Arc::new(notify_sock);
-    let dgram = tokio::task::spawn_blocking({
-        let s = notify_sock_arc.clone();
-        move || recv_notify_datagram(&s, Duration::from_secs(10))
-    })
-    .await
-    .unwrap();
+    let dgram = recv_notify_datagram(&notify_sock_arc, Duration::from_secs(10), &mut guard);
     assert_eq!(dgram.trim(), "READY=1");
 
     // ZERO-RETRY immediate connect on all 5 listeners right on READY=1
@@ -714,12 +844,7 @@ async fn oracle_3_notify_ready_strictly_after_all_listeners_accept() {
     unsafe {
         libc::kill(pid, libc::SIGTERM);
     }
-    let stop_dgram = tokio::task::spawn_blocking({
-        let s = notify_sock_arc.clone();
-        move || recv_notify_datagram(&s, Duration::from_secs(5))
-    })
-    .await
-    .unwrap();
+    let stop_dgram = recv_notify_datagram(&notify_sock_arc, Duration::from_secs(5), &mut guard);
     assert_eq!(stop_dgram.trim(), "STOPPING=1");
 }
 
@@ -952,12 +1077,7 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
     drop(prebound_fed);
     let mut guard = ChildGuard::new(child);
 
-    let initial_ready = tokio::task::spawn_blocking({
-        let s = notify_sock.clone();
-        move || recv_notify_datagram(&s, Duration::from_secs(10))
-    })
-    .await
-    .unwrap();
+    let initial_ready = recv_notify_datagram(&notify_sock, Duration::from_secs(10), &mut guard);
     assert_eq!(initial_ready.trim(), "READY=1");
 
     // Before reload: alice.p2 is not in peers.json => rejected
@@ -1005,12 +1125,7 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
         libc::kill(pid, libc::SIGHUP);
     }
 
-    let reloading_msg = tokio::task::spawn_blocking({
-        let s = notify_sock.clone();
-        move || recv_notify_datagram(&s, Duration::from_secs(5))
-    })
-    .await
-    .unwrap();
+    let reloading_msg = recv_notify_datagram(&notify_sock, Duration::from_secs(5), &mut guard);
     assert!(
         reloading_msg.starts_with("RELOADING=1\nMONOTONIC_USEC="),
         "expected RELOADING=1 with MONOTONIC_USEC, got: {reloading_msg:?}"
@@ -1022,12 +1137,7 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
     let usec: u64 = usec_str.parse().expect("valid u64 MONOTONIC_USEC");
     assert!(usec > 0);
 
-    let ready_after_reload = tokio::task::spawn_blocking({
-        let s = notify_sock.clone();
-        move || recv_notify_datagram(&s, Duration::from_secs(5))
-    })
-    .await
-    .unwrap();
+    let ready_after_reload = recv_notify_datagram(&notify_sock, Duration::from_secs(5), &mut guard);
     assert_eq!(ready_after_reload.trim(), "READY=1");
 
     // Immediately after READY=1, alice.p2 is honoured!
@@ -1052,23 +1162,13 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
         libc::kill(pid, libc::SIGHUP);
     }
 
-    let reloading_fail = tokio::task::spawn_blocking({
-        let s = notify_sock.clone();
-        move || recv_notify_datagram(&s, Duration::from_secs(5))
-    })
-    .await
-    .unwrap();
+    let reloading_fail = recv_notify_datagram(&notify_sock, Duration::from_secs(5), &mut guard);
     assert!(
         reloading_fail.starts_with("RELOADING=1\nMONOTONIC_USEC="),
         "expected RELOADING=1 before failed reload, got: {reloading_fail:?}"
     );
 
-    let ready_fail = tokio::task::spawn_blocking({
-        let s = notify_sock.clone();
-        move || recv_notify_datagram(&s, Duration::from_secs(5))
-    })
-    .await
-    .unwrap();
+    let ready_fail = recv_notify_datagram(&notify_sock, Duration::from_secs(5), &mut guard);
     assert_eq!(
         ready_fail.trim(),
         "READY=1\nSTATUS=reload failed: invalid peers file",
@@ -1185,22 +1285,12 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
     unsafe {
         libc::kill(pid, libc::SIGHUP);
     }
-    let reloading_from = tokio::task::spawn_blocking({
-        let s = notify_sock.clone();
-        move || recv_notify_datagram(&s, Duration::from_secs(5))
-    })
-    .await
-    .unwrap();
+    let reloading_from = recv_notify_datagram(&notify_sock, Duration::from_secs(5), &mut guard);
     assert!(
         reloading_from.starts_with("RELOADING=1\nMONOTONIC_USEC="),
         "expected RELOADING=1 on `from` narrowing reload, got: {reloading_from:?}"
     );
-    let ready_from = tokio::task::spawn_blocking({
-        let s = notify_sock.clone();
-        move || recv_notify_datagram(&s, Duration::from_secs(5))
-    })
-    .await
-    .unwrap();
+    let ready_from = recv_notify_datagram(&notify_sock, Duration::from_secs(5), &mut guard);
     assert_eq!(ready_from.trim(), "READY=1");
 
     let from_narrowed_ack = send_ka(
@@ -1246,22 +1336,12 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
     unsafe {
         libc::kill(pid, libc::SIGHUP);
     }
-    let reloading_revoke = tokio::task::spawn_blocking({
-        let s = notify_sock.clone();
-        move || recv_notify_datagram(&s, Duration::from_secs(5))
-    })
-    .await
-    .unwrap();
+    let reloading_revoke = recv_notify_datagram(&notify_sock, Duration::from_secs(5), &mut guard);
     assert!(
         reloading_revoke.starts_with("RELOADING=1\nMONOTONIC_USEC="),
         "expected RELOADING=1 on peer removal reload, got: {reloading_revoke:?}"
     );
-    let ready_revoke = tokio::task::spawn_blocking({
-        let s = notify_sock.clone();
-        move || recv_notify_datagram(&s, Duration::from_secs(5))
-    })
-    .await
-    .unwrap();
+    let ready_revoke = recv_notify_datagram(&notify_sock, Duration::from_secs(5), &mut guard);
     assert_eq!(ready_revoke.trim(), "READY=1");
 
     // 4. Immediately after READY=1, the removed alice.p1 must be refused with 404 (`unknown node`)
@@ -1391,11 +1471,9 @@ async fn oracle_5_wrong_listen_pid_ignored_and_s5_no_env_vars_binds_fresh() {
     let sessions_dir = tmp.path().join("sessions");
     fs::create_dir_all(&sessions_dir).unwrap();
 
-    // Keep decoy_listener open in parent on decoy_addr, and reserve fresh_addr for --listen.
+    // Keep decoy_listener open in parent on decoy_addr; child binds 127.0.0.1:0 itself.
     let decoy_listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
-    let probe_fresh = StdTcpListener::bind("127.0.0.1:0").unwrap();
-    let fresh_addr = probe_fresh.local_addr().unwrap();
-    drop(probe_fresh);
+    let decoy_addr = decoy_listener.local_addr().unwrap();
 
     let notify_path = run_dir.join("notify.sock");
     let notify_sock = StdUnixDatagram::bind(&notify_path).unwrap();
@@ -1421,7 +1499,7 @@ async fn oracle_5_wrong_listen_pid_ignored_and_s5_no_env_vars_binds_fresh() {
             "--http-sock",
             run_dir.join("http.sock").to_str().unwrap(),
             "--listen",
-            &fresh_addr.to_string(),
+            "127.0.0.1:0",
         ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -1429,20 +1507,32 @@ async fn oracle_5_wrong_listen_pid_ignored_and_s5_no_env_vars_binds_fresh() {
     // Pass decoy_listener as fd 3, but do NOT overwrite LISTEN_PID with child PID
     configure_systemd_fds(&mut cmd, vec![decoy_listener.as_raw_fd()], false);
     let child = cmd.spawn().expect("spawn xmsg serve with wrong LISTEN_PID");
-    drop(decoy_listener);
-    let _guard = ChildGuard::new(child);
+    let mut guard = ChildGuard::new(child);
 
-    let msg = tokio::task::spawn_blocking(move || {
-        recv_notify_datagram(&notify_sock, Duration::from_secs(10))
-    })
-    .await
-    .unwrap();
+    let msg = recv_notify_datagram(&notify_sock, Duration::from_secs(10), &mut guard);
     assert_eq!(msg.trim(), "READY=1");
 
-    // Daemon must have ignored fd 3 (decoy_listener) and bound fresh_addr!
-    let mut stream = TcpStream::connect(fresh_addr)
+    let bound_addr = guard.wait_for_bound_tcp_addr(Duration::from_secs(5));
+    assert_ne!(
+        bound_addr.port(),
+        0,
+        "logged bound tcp http server address must report non-zero kernel-allocated port, got {bound_addr}"
+    );
+    assert_ne!(
+        bound_addr, decoy_addr,
+        "wrong LISTEN_PID must ignore fd 3 ({decoy_addr}) and bind a fresh ephemeral port"
+    );
+    drop(decoy_listener);
+
+    // Daemon must have ignored fd 3 (decoy_listener) and bound bound_addr!
+    let mut stream = TcpStream::connect(bound_addr)
         .await
-        .expect("wrong LISTEN_PID must ignore fd 3 and bind fresh_addr");
+        .expect("wrong LISTEN_PID must ignore fd 3 and bind logged bound_addr");
+    assert_eq!(
+        stream.peer_addr().unwrap(),
+        bound_addr,
+        "logged bound address must equal the real bound socket"
+    );
     stream
         .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .await
@@ -1450,7 +1540,7 @@ async fn oracle_5_wrong_listen_pid_ignored_and_s5_no_env_vars_binds_fresh() {
     let mut resp = String::new();
     stream.read_to_string(&mut resp).await.unwrap();
     assert!(resp.starts_with("HTTP/1.1 200 OK"), "resp: {resp}");
-    drop(_guard);
+    drop(guard);
 
     // S-5: Start with NO LISTEN_* or NOTIFY_SOCKET variables set
     let run_dir2 = tmp.path().join("run2");
@@ -1499,19 +1589,17 @@ async fn oracle_5_wrong_listen_pid_ignored_and_s5_no_env_vars_binds_fresh() {
     }
     drop(_guard2);
 
-    // C4: `--listen localhost:<port>` without LISTEN_FDS resolves hostname and binds fresh
+    // C4: `--listen localhost:0` without LISTEN_FDS resolves hostname and binds fresh
     let run_dir3 = tmp.path().join("run3");
     fs::create_dir_all(&run_dir3).unwrap();
     fs::set_permissions(&run_dir3, fs::Permissions::from_mode(0o700)).unwrap();
-    let probe_localhost = StdTcpListener::bind("127.0.0.1:0").unwrap();
-    let localhost_port = probe_localhost.local_addr().unwrap().port();
-    drop(probe_localhost);
     let notify_path3 = run_dir3.join("notify.sock");
     let notify_sock3 = Arc::new(StdUnixDatagram::bind(&notify_path3).unwrap());
 
     let child3 = new_xmsg_cmd(false)
         .env("XDG_RUNTIME_DIR", &run_dir3)
         .env("HOME", &run_dir3)
+        .env("RUST_LOG", "info")
         .env_remove("LISTEN_FDS")
         .env_remove("LISTEN_PID")
         .env_remove("LISTEN_FDNAMES")
@@ -1529,25 +1617,32 @@ async fn oracle_5_wrong_listen_pid_ignored_and_s5_no_env_vars_binds_fresh() {
             "--http-sock",
             run_dir3.join("http.sock").to_str().unwrap(),
             "--listen",
-            &format!("localhost:{localhost_port}"),
+            "localhost:0",
         ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("spawn --listen localhost:<port> xmsg serve");
+        .expect("spawn --listen localhost:0 xmsg serve");
     let mut guard3 = ChildGuard::new(child3);
 
-    let msg3 = tokio::task::spawn_blocking({
-        let s = notify_sock3.clone();
-        move || recv_notify_datagram(&s, Duration::from_secs(10))
-    })
-    .await
-    .unwrap();
+    let msg3 = recv_notify_datagram(&notify_sock3, Duration::from_secs(10), &mut guard3);
     assert_eq!(msg3.trim(), "READY=1");
 
-    let mut s3 = TcpStream::connect(format!("localhost:{localhost_port}"))
+    let bound_addr3 = guard3.wait_for_bound_tcp_addr(Duration::from_secs(5));
+    assert_ne!(
+        bound_addr3.port(),
+        0,
+        "logged bound tcp http server address for localhost:0 must report non-zero port, got {bound_addr3}"
+    );
+
+    let mut s3 = TcpStream::connect(bound_addr3)
         .await
-        .expect("connect to --listen localhost:<port>");
+        .expect("connect to logged bound_addr3 for --listen localhost:0");
+    assert_eq!(
+        s3.peer_addr().unwrap(),
+        bound_addr3,
+        "logged bound address for localhost:0 must equal the real bound socket"
+    );
     s3.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .await
         .unwrap();
@@ -1561,22 +1656,12 @@ async fn oracle_5_wrong_listen_pid_ignored_and_s5_no_env_vars_binds_fresh() {
     unsafe {
         libc::kill(pid3, libc::SIGHUP);
     }
-    let reloading_nofed = tokio::task::spawn_blocking({
-        let s = notify_sock3.clone();
-        move || recv_notify_datagram(&s, Duration::from_secs(5))
-    })
-    .await
-    .unwrap();
+    let reloading_nofed = recv_notify_datagram(&notify_sock3, Duration::from_secs(5), &mut guard3);
     assert!(
         reloading_nofed.starts_with("RELOADING=1\nMONOTONIC_USEC="),
         "expected RELOADING=1 on SIGHUP without federation, got: {reloading_nofed:?}"
     );
-    let ready_nofed = tokio::task::spawn_blocking({
-        let s = notify_sock3.clone();
-        move || recv_notify_datagram(&s, Duration::from_secs(5))
-    })
-    .await
-    .unwrap();
+    let ready_nofed = recv_notify_datagram(&notify_sock3, Duration::from_secs(5), &mut guard3);
     assert_eq!(
         ready_nofed.trim(),
         "READY=1\nSTATUS=nothing to reload",
@@ -1608,6 +1693,79 @@ async fn oracle_5_wrong_listen_pid_ignored_and_s5_no_env_vars_binds_fresh() {
         String::from_utf8_lossy(&child_env_out.stdout),
         "unset|unset|unset",
         "child process spawned after take_activated_sockets must not inherit LISTEN_FDS, LISTEN_PID, or LISTEN_FDNAMES"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// XF9 Cell 2: recv_notify_datagram timeout dumps child exit status and stderr tail
+// -----------------------------------------------------------------------------
+#[tokio::test]
+async fn oracle_5_recv_notify_timeout_dumps_exit_status_and_stderr() {
+    let tmp = tempdir().unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let run_dir = tmp.path().join("run");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::set_permissions(&run_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let sessions_dir = tmp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+
+    let notify_path = run_dir.join("notify.sock");
+    let notify_sock = StdUnixDatagram::bind(&notify_path).unwrap();
+
+    // Deliberately occupied TCP listener so the child fails to bind and exits non-zero
+    // without ever emitting READY=1 on NOTIFY_SOCKET.
+    let occupied = StdTcpListener::bind("127.0.0.1:0").unwrap();
+    let occupied_addr = occupied.local_addr().unwrap();
+
+    let child = new_xmsg_cmd(false)
+        .env("XDG_RUNTIME_DIR", &run_dir)
+        .env("HOME", &run_dir)
+        .env_remove("LISTEN_FDS")
+        .env_remove("LISTEN_PID")
+        .env_remove("LISTEN_FDNAMES")
+        .env("NOTIFY_SOCKET", &notify_path)
+        .args([
+            "serve",
+            "--db-path",
+            tmp.path().join("xmsg.db").to_str().unwrap(),
+            "--sessions-dir",
+            sessions_dir.to_str().unwrap(),
+            "--register-sock",
+            run_dir.join("register.sock").to_str().unwrap(),
+            "--agent-sock",
+            run_dir.join("agent.sock").to_str().unwrap(),
+            "--http-sock",
+            run_dir.join("http.sock").to_str().unwrap(),
+            "--listen",
+            &occupied_addr.to_string(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn deliberately failing xmsg serve");
+    let mut guard = ChildGuard::new(child);
+
+    let panic_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        recv_notify_datagram(&notify_sock, Duration::from_millis(250), &mut guard)
+    }));
+    drop(occupied);
+
+    let panic_payload = panic_res.expect_err("recv_notify_datagram must panic on timeout");
+    let panic_msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else {
+        panic!("unexpected panic payload type");
+    };
+
+    assert!(
+        panic_msg.contains("child_exit_status=Ok(Some("),
+        "timeout panic must include child exit status from try_wait(), got: {panic_msg}"
+    );
+    assert!(
+        panic_msg.contains("stderr_tail=") && panic_msg.contains("Address already in use"),
+        "timeout panic must include child stderr tail showing bind failure, got: {panic_msg}"
     );
 }
 

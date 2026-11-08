@@ -23,6 +23,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 
 mod http_child;
+mod short_sock;
 use http_child::{FakeParent, Via};
 
 const CHILD: &str = "http_child_entry";
@@ -47,14 +48,6 @@ fn live_starttime(pid: u32) -> String {
         .expect("live start time")
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
 // -----------------------------------------------------------------------------
 // A real `xmsg serve`
 // -----------------------------------------------------------------------------
@@ -69,7 +62,7 @@ struct Spec {
     leaf: bool,
     /// (cert PEM, key PEM, peers file) for a federated node.
     fed: Option<(String, String, String)>,
-    fed_listen: Option<u16>,
+    fed_listen: bool,
 }
 
 struct Node {
@@ -78,21 +71,12 @@ struct Node {
     http_sock: PathBuf,
     register_sock: PathBuf,
     tcp: Option<String>,
+    fed_port: Option<u16>,
     child: Child,
 }
 
 impl Node {
     fn start(spec: Spec) -> Node {
-        for _ in 0..5 {
-            if let Some(node) = Node::try_start(&spec) {
-                return node;
-            }
-        }
-        panic!("xmsg serve did not start in 5 attempts");
-    }
-
-    /// `None` when the server exits at start (a lost port race); panics if it never serves.
-    fn try_start(spec: &Spec) -> Option<Node> {
         let tmp = tempdir().unwrap();
         fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let run = tmp.path().join("run");
@@ -107,6 +91,7 @@ impl Node {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_xmsg"));
         cmd.env("XDG_RUNTIME_DIR", &run)
             .env("HOME", &run)
+            .env("RUST_LOG", "info")
             .env_remove("XMSG_HOST_LABEL")
             .arg("serve")
             .arg("--db-path")
@@ -119,7 +104,7 @@ impl Node {
             .arg(run.join("agent.sock"))
             .arg("--register-sock")
             .arg(&register_sock)
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null());
         for name in &spec.services {
             cmd.arg("--svc-exe")
@@ -128,9 +113,8 @@ impl Node {
         if let Some(ttl) = spec.reply_ttl {
             cmd.arg("--reply-ttl").arg(ttl.to_string());
         }
-        let tcp = (spec.listen || spec.leaf).then(|| format!("127.0.0.1:{}", free_port()));
-        if let Some(addr) = &tcp {
-            cmd.arg("--listen").arg(addr);
+        if spec.listen || spec.leaf {
+            cmd.arg("--listen").arg("127.0.0.1:0");
         }
         if spec.leaf {
             cmd.args(["--leaf", "--leaf-principal", "svc:matrix"]);
@@ -151,13 +135,32 @@ impl Node {
                 .arg("--peers-file")
                 .arg(p);
         }
-        if let Some(port) = spec.fed_listen {
-            cmd.arg("--fed-listen").arg(format!("127.0.0.1:{port}"));
+        if spec.fed_listen {
+            cmd.arg("--fed-listen").arg("127.0.0.1:0");
         }
         let mut child = cmd.spawn().expect("spawn xmsg serve");
+        let stdout = short_sock::StdoutCapture::from_std(child.stdout.take().unwrap());
+        let tcp = if spec.leaf {
+            Some(
+                stdout
+                    .wait_for_addr("starting leaf tcp http server", Duration::from_secs(15))
+                    .to_string(),
+            )
+        } else if spec.listen {
+            Some(
+                stdout
+                    .wait_for_addr("bound tcp http server", Duration::from_secs(15))
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        let fed_port = spec.fed_listen.then(|| {
+            stdout.wait_for_port("bound federation mTLS listener", Duration::from_secs(15))
+        });
         for _ in 0..1200 {
-            if let Ok(Some(_)) = child.try_wait() {
-                return None;
+            if let Ok(Some(status)) = child.try_wait() {
+                panic!("xmsg serve exited prematurely: {status:?}");
             }
             let up = if spec.leaf {
                 std::net::TcpStream::connect(tcp.as_deref().unwrap()).is_ok()
@@ -167,19 +170,19 @@ impl Node {
                     && tcp
                         .as_deref()
                         .is_none_or(|a| std::net::TcpStream::connect(a).is_ok())
-                    && spec
-                        .fed_listen
+                    && fed_port
                         .is_none_or(|p| std::net::TcpStream::connect(("127.0.0.1", p)).is_ok())
             };
             if up {
-                return Some(Node {
+                return Node {
                     _tmp: tmp,
                     sessions,
                     http_sock,
                     register_sock,
                     tcp,
+                    fed_port,
                     child,
-                });
+                };
             }
             std::thread::sleep(Duration::from_millis(25));
         }
@@ -747,24 +750,24 @@ async fn test_oracle_7_filter_names_the_anonymous_principal() {
     use xmsg::fed::{generate_self_signed_ed25519_pem, normalize_pin};
     let (s_cert, s_key, s_pin) = generate_self_signed_ed25519_pem("s").unwrap();
     let (r_cert, r_key, r_pin) = generate_self_signed_ed25519_pem("r").unwrap();
-    let (s_fed, r_fed) = (free_port(), free_port());
-    let s_peers = json!({ "r": {
-        "address": format!("127.0.0.1:{r_fed}"), "pin": normalize_pin(&r_pin),
-        "allow": ["send", "reply"],
-    }});
     let r_peers = json!({ "s": {
-        "address": format!("127.0.0.1:{s_fed}"), "pin": normalize_pin(&s_pin),
+        "address": "127.0.0.1:9", "pin": normalize_pin(&s_pin),
         "allow": ["send", "reply"], "principals": ["anon:ci"],
     }});
     let r = Node::start(Spec {
         services: vec!["worker".to_string()],
         fed: Some((r_cert, r_key, r_peers.to_string())),
-        fed_listen: Some(r_fed),
+        fed_listen: true,
         ..Default::default()
     });
+    let r_fed = r.fed_port.expect("r fed_port");
+    let s_peers = json!({ "r": {
+        "address": format!("127.0.0.1:{r_fed}"), "pin": normalize_pin(&r_pin),
+        "allow": ["send", "reply"],
+    }});
     let s = Node::start(Spec {
         fed: Some((s_cert, s_key, s_peers.to_string())),
-        fed_listen: Some(s_fed),
+        fed_listen: true,
         ..Default::default()
     });
     // The service registers on R; this process stays untraced on S.

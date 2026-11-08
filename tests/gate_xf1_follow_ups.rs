@@ -38,11 +38,6 @@ impl Drop for ChildGuard {
     }
 }
 
-fn get_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind free port");
-    listener.local_addr().expect("local addr").port()
-}
-
 fn write_fake_stat(proc_root: &Path, pid: u32, ppid: u32, starttime: &str) {
     let dir = proc_root.join(pid.to_string());
     fs::create_dir_all(&dir).unwrap();
@@ -739,128 +734,132 @@ async fn spawn_test_node<F>(
 where
     F: FnMut(u16, u16) -> Value,
 {
-    let mut attempt = 0u32;
-    loop {
-        attempt += 1;
-        let fed_port = get_free_port();
-        let http_port = get_free_port();
-        let peers_json = make_peers_json(fed_port, http_port);
+    let peers_json = make_peers_json(0, 0);
 
-        let tmp = tempdir().unwrap();
-        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let tmp = tempdir().unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
 
-        let cert_file = tmp.path().join("cert.pem");
-        let key_file = tmp.path().join("key.pem");
-        let peers_file = tmp.path().join("peers.json");
-        let db_path = tmp.path().join("node.db");
-        let stderr_path = tmp.path().join("stderr.log");
+    let cert_file = tmp.path().join("cert.pem");
+    let key_file = tmp.path().join("key.pem");
+    let peers_file = tmp.path().join("peers.json");
+    let db_path = tmp.path().join("node.db");
+    let stderr_path = tmp.path().join("stderr.log");
 
-        fs::write(&cert_file, cert_pem.as_bytes()).unwrap();
-        fs::write(&key_file, key_pem.as_bytes()).unwrap();
-        fs::write(&peers_file, peers_json.to_string()).unwrap();
+    fs::write(&cert_file, cert_pem.as_bytes()).unwrap();
+    fs::write(&key_file, key_pem.as_bytes()).unwrap();
+    fs::write(&peers_file, peers_json.to_string()).unwrap();
 
-        let run_dir = tmp.path().join("run");
-        fs::create_dir_all(&run_dir).unwrap();
-        fs::set_permissions(&run_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let run_dir = tmp.path().join("run");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::set_permissions(&run_dir, fs::Permissions::from_mode(0o700)).unwrap();
 
-        let sessions_dir = tmp.path().join("sessions");
-        fs::create_dir_all(&sessions_dir).unwrap();
-        fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let sessions_dir = tmp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o700)).unwrap();
 
-        let agent_sock = run_dir.join("agent.sock");
-        let register_sock = run_dir.join("register.sock");
-        let http_sock = run_dir.join("http.sock");
-        let stderr_file = fs::File::create(&stderr_path).unwrap();
-        let stdout_file = stderr_file.try_clone().unwrap();
+    let agent_sock = run_dir.join("agent.sock");
+    let register_sock = run_dir.join("register.sock");
+    let http_sock = run_dir.join("http.sock");
+    let stderr_file = fs::File::create(&stderr_path).unwrap();
+    let stdout_file = stderr_file.try_clone().unwrap();
 
-        let bin = env!("CARGO_BIN_EXE_xmsg");
-        let child = tokio::process::Command::new(bin)
-            .env("RUST_LOG", "info")
-            .env("XDG_RUNTIME_DIR", &run_dir)
-            .env("HOME", &run_dir)
-            .args([
-                "serve",
-                "--listen",
-                &format!("127.0.0.1:{http_port}"),
-                "--fed-listen",
-                &format!("127.0.0.1:{fed_port}"),
-                "--peers-file",
-                peers_file.to_str().unwrap(),
-                "--fed-cert",
-                cert_file.to_str().unwrap(),
-                "--fed-key",
-                key_file.to_str().unwrap(),
-                "--db-path",
-                db_path.to_str().unwrap(),
-                "--sessions-dir",
-                sessions_dir.to_str().unwrap(),
-                "--register-sock",
-                register_sock.to_str().unwrap(),
-                "--agent-sock",
-                agent_sock.to_str().unwrap(),
-                "--http-sock",
-                http_sock.to_str().unwrap(),
-            ])
-            .stdout(std::process::Stdio::from(stdout_file))
-            .stderr(std::process::Stdio::from(stderr_file))
-            .spawn()
-            .expect("spawn test node");
+    let bin = env!("CARGO_BIN_EXE_xmsg");
+    let child = tokio::process::Command::new(bin)
+        .env("RUST_LOG", "info")
+        .env("XDG_RUNTIME_DIR", &run_dir)
+        .env("HOME", &run_dir)
+        .args([
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--fed-listen",
+            "127.0.0.1:0",
+            "--peers-file",
+            peers_file.to_str().unwrap(),
+            "--fed-cert",
+            cert_file.to_str().unwrap(),
+            "--fed-key",
+            key_file.to_str().unwrap(),
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "--sessions-dir",
+            sessions_dir.to_str().unwrap(),
+            "--register-sock",
+            register_sock.to_str().unwrap(),
+            "--agent-sock",
+            agent_sock.to_str().unwrap(),
+            "--http-sock",
+            http_sock.to_str().unwrap(),
+        ])
+        .stdout(std::process::Stdio::from(stdout_file))
+        .stderr(std::process::Stdio::from(stderr_file))
+        .spawn()
+        .expect("spawn test node");
 
-        let mut guard = ChildGuard::new(child);
+    let mut guard = ChildGuard::new(child);
 
-        let mut ready = false;
-        let mut exited = None;
-        for _ in 0..600 {
-            if let Ok(Some(status)) = guard.child_mut().try_wait() {
-                exited = Some(status);
-                break;
+    let mut fed_port = None;
+    let mut http_port = None;
+    let mut ready = false;
+    let mut exited = None;
+    for _ in 0..600 {
+        if let Ok(Some(status)) = guard.child_mut().try_wait() {
+            exited = Some(status);
+            break;
+        }
+        if fed_port.is_none() || http_port.is_none() {
+            if let Ok(log_text) = fs::read_to_string(&stderr_path) {
+                for line in log_text.lines() {
+                    if fed_port.is_none() {
+                        fed_port = short_sock::parse_logged_listen_addr(
+                            line,
+                            "bound federation mTLS listener",
+                        )
+                        .map(|a| a.port());
+                    }
+                    if http_port.is_none() {
+                        http_port =
+                            short_sock::parse_logged_listen_addr(line, "bound tcp http server")
+                                .map(|a| a.port());
+                    }
+                }
             }
+        }
+        if let (Some(fp), Some(hp)) = (fed_port, http_port) {
             if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
-                && tokio::net::TcpStream::connect(("127.0.0.1", fed_port))
+                && tokio::net::TcpStream::connect(("127.0.0.1", fp))
                     .await
                     .is_ok()
-                && tokio::net::TcpStream::connect(("127.0.0.1", http_port))
+                && tokio::net::TcpStream::connect(("127.0.0.1", hp))
                     .await
                     .is_ok()
             {
                 ready = true;
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
-        if ready {
-            return TestNode {
-                _tmp: tmp,
-                name: name.to_string(),
-                fed_port,
-                http_port,
-                agent_sock,
-                http_sock,
-                sessions_dir,
-                db_path,
-                stderr_path,
-                child: guard,
-            };
-        }
-
+    if !ready {
         let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
-        if exited.is_some()
-            && (stderr.contains("AddrInUse")
-                || stderr.contains("address already in use")
-                || stderr.contains("Address already in use")
-                || stderr.contains("failed to bind federation listener"))
-            && attempt < 5
-        {
-            eprintln!(
-                "node {name} lost port (fed={fed_port}, http={http_port}) before binding, retrying (attempt {attempt}): {stderr}"
-            );
-            continue;
-        }
         panic!(
             "node {name} exited prematurely: {:?}, stderr:\n{}",
             exited, stderr
         );
+    }
+
+    TestNode {
+        _tmp: tmp,
+        name: name.to_string(),
+        fed_port: fed_port.unwrap(),
+        http_port: http_port.unwrap(),
+        agent_sock,
+        http_sock,
+        sessions_dir,
+        db_path,
+        stderr_path,
+        child: guard,
     }
 }
 

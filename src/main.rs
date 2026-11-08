@@ -1008,7 +1008,6 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     info!(
-        listen = ?args.listen,
         http_sock = %http_sock_path.display(),
         sessions_dirs = ?sessions_dirs,
         db_path = %db_path.display(),
@@ -1471,6 +1470,8 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
             Some(listener) => listener,
             None => tokio::net::TcpListener::bind(tcp_addr.as_str()).await?,
         };
+        let actual_tcp_addr = tcp_listener.local_addr()?;
+        info!(listen = %actual_tcp_addr, "bound tcp http server");
         let tcp_app = app.clone();
         let mut shutdown_rx_tcp = shutdown_rx.clone();
         server_tasks.push(tokio::spawn(async move {

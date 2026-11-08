@@ -11,7 +11,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -27,6 +27,7 @@ mod hop_client;
 use hop_client::Origin;
 mod http_child;
 use http_child::{FakeParent, Via};
+mod short_sock;
 
 const BIN: &str = env!("CARGO_BIN_EXE_xmsg");
 const CHILD: &str = "http_child_entry";
@@ -47,11 +48,6 @@ fn uri(node: &str) -> String {
 // -----------------------------------------------------------------------------
 // Fixtures
 // -----------------------------------------------------------------------------
-
-fn get_free_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    l.local_addr().unwrap().port()
-}
 
 struct Ca {
     params: rcgen::CertificateParams,
@@ -109,31 +105,28 @@ impl Ca {
     }
 }
 
-/// A node's tempdir and ports, fixed before any node starts so peers can name them.
+/// A node's tempdir, prepared before any node starts.
 struct Prepared {
     tmp: TempDir,
-    fed_port: u16,
-    http_port: u16,
 }
 
 fn prepare(ca: &Ca) -> Prepared {
     let tmp = tempdir().unwrap();
     fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(tmp.path().join("ca.pem"), &ca.pem).unwrap();
-    Prepared {
-        tmp,
-        fed_port: get_free_port(),
-        http_port: get_free_port(),
-    }
+    Prepared { tmp }
 }
 
 struct Node {
     name: String,
     tmp: TempDir,
     http_port: u16,
+    fed_port: u16,
     sessions_dir: PathBuf,
+    peers_file: PathBuf,
     args: Vec<String>,
     run_dir: PathBuf,
+    stdout: Option<short_sock::StdoutCapture>,
     child: Option<tokio::process::Child>,
 }
 
@@ -158,11 +151,7 @@ async fn start_with(
     peers: Value,
     extra: &[String],
 ) -> Node {
-    let Prepared {
-        tmp,
-        fed_port,
-        http_port,
-    } = p;
+    let Prepared { tmp } = p;
     let run_dir = tmp.path().join("run");
     let sessions_dir = tmp.path().join("sessions");
     for d in [&run_dir, &sessions_dir] {
@@ -181,7 +170,7 @@ async fn start_with(
     let args: Vec<String> = vec![
         "serve".into(),
         "--listen".into(),
-        format!("127.0.0.1:{http_port}"),
+        "127.0.0.1:0".into(),
         "--db-path".into(),
         s(&tmp.path().join("node.db")),
         "--sessions-dir".into(),
@@ -195,7 +184,7 @@ async fn start_with(
         "--peers-file".into(),
         s(&peers_file),
         "--fed-listen".into(),
-        format!("127.0.0.1:{fed_port}"),
+        "127.0.0.1:0".into(),
         "--agent-sock".into(),
         s(&run_dir.join("agent.sock")),
         "--http-sock".into(),
@@ -207,18 +196,21 @@ async fn start_with(
     let mut node = Node {
         name: name.to_string(),
         tmp,
-        http_port,
+        http_port: 0,
+        fed_port: 0,
         sessions_dir,
+        peers_file,
         args,
         run_dir,
+        stdout: None,
         child: None,
     };
-    node.spawn(fed_port).await;
+    node.spawn().await;
     node
 }
 
 impl Node {
-    async fn spawn(&mut self, fed_port: u16) {
+    async fn spawn(&mut self) {
         let agent_sock = self.run_dir.join("agent.sock");
         let http_sock = self.run_dir.join("http.sock");
         let _ = fs::remove_file(&agent_sock);
@@ -226,12 +218,34 @@ impl Node {
         let mut child = tokio::process::Command::new(BIN)
             .env("XDG_RUNTIME_DIR", &self.run_dir)
             .env("HOME", &self.run_dir)
-            .env("RUST_LOG", "warn")
+            .env("RUST_LOG", "xmsg=info")
             .args(&self.args)
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn xmsg serve");
+        let stdout =
+            short_sock::StdoutCapture::from_tokio(child.stdout.take().expect("piped stdout"));
+        let http_port = stdout
+            .try_wait_for_port("bound tcp http server", Duration::from_secs(10))
+            .unwrap_or_else(|| {
+                panic!(
+                    "node '{}' did not log 'bound tcp http server' within 10s; stdout:\n{}",
+                    self.name,
+                    stdout.snapshot()
+                )
+            });
+        let fed_port = stdout
+            .try_wait_for_port("bound federation mTLS listener", Duration::from_secs(10))
+            .unwrap_or_else(|| {
+                panic!(
+                    "node '{}' did not log 'bound federation mTLS listener' within 10s; stdout:\n{}",
+                    self.name,
+                    stdout.snapshot()
+                )
+            });
+        self.http_port = http_port;
+        self.fed_port = fed_port;
         for _ in 0..600 {
             if let Ok(Some(_)) = child.try_wait() {
                 let mut err = String::new();
@@ -245,10 +259,11 @@ impl Node {
                 && tokio::net::TcpStream::connect(("127.0.0.1", self.http_port))
                     .await
                     .is_ok()
-                && tokio::net::TcpStream::connect(("127.0.0.1", fed_port))
+                && tokio::net::TcpStream::connect(("127.0.0.1", self.fed_port))
                     .await
                     .is_ok();
             if up {
+                self.stdout = Some(stdout);
                 self.child = Some(child);
                 return;
             }
@@ -258,11 +273,33 @@ impl Node {
         panic!("xmsg serve neither served nor exited within 30s");
     }
 
+    fn reload_peers(&self, peers: Value) {
+        let stdout = self.stdout.as_ref().expect("node stdout capture");
+        let prev = stdout
+            .line_count_containing("successfully reloaded federation TLS credentials and peers");
+        fs::write(&self.peers_file, peers.to_string()).unwrap();
+        let pid = self.child.as_ref().unwrap().id().expect("child pid") as i32;
+        unsafe {
+            libc::kill(pid, libc::SIGHUP);
+        }
+        assert!(
+            stdout.wait_for_line_count(
+                "successfully reloaded federation TLS credentials and peers",
+                prev + 1,
+                Duration::from_secs(5),
+            ),
+            "node '{}' did not log SIGHUP peer reload within 5s; stdout:\n{}",
+            self.name,
+            stdout.snapshot()
+        );
+    }
+
     /// Kills the node outright (SIGKILL): a crash.
     async fn crash(&mut self) {
         if let Some(mut c) = self.child.take() {
             c.kill().await.unwrap();
         }
+        self.stdout = None;
     }
 
     fn db(&self) -> rusqlite::Connection {
@@ -303,35 +340,6 @@ impl Node {
     }
 }
 
-async fn run_with_port_retry<F, Fut>(f: F)
-where
-    F: Fn() -> Fut + Send + Sync + 'static,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
-{
-    for attempt in 1..=5 {
-        match tokio::task::spawn(f()).await {
-            Ok(()) => return,
-            Err(e) if e.is_panic() => {
-                let p = e.into_panic();
-                let msg = p
-                    .downcast_ref::<String>()
-                    .cloned()
-                    .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
-                    .unwrap_or_default();
-                let port_race = msg.contains("failed to bind")
-                    || msg.contains("AddrInUse")
-                    || msg.contains("ddress already in use");
-                if port_race && attempt < 5 {
-                    tokio::time::sleep(Duration::from_millis(150)).await;
-                    continue;
-                }
-                std::panic::resume_unwind(p);
-            }
-            Err(e) => panic!("join error: {e}"),
-        }
-    }
-}
-
 fn entry(port: u16, ca_file: &Path, node: &str) -> Value {
     json!({
         "address": format!("127.0.0.1:{port}"),
@@ -359,17 +367,12 @@ async fn mesh_with(names: &[&str], dead: &[&str], extra: &[(&str, Vec<String>)])
     let creds: HashMap<String, Creds> =
         names.iter().map(|n| (n.to_string(), ca.issue(n))).collect();
     let preps: Vec<(&str, Prepared)> = names.iter().map(|n| (*n, prepare(&ca))).collect();
-    let fed_ports: HashMap<String, u16> = preps
-        .iter()
-        .map(|(n, p)| (n.to_string(), p.fed_port))
-        .chain(dead.iter().map(|n| (n.to_string(), get_free_port())))
-        .collect();
     let mut nodes = HashMap::new();
     for (me, p) in preps {
         let ca_file = p.tmp.path().join("ca.pem");
         let mut peers = serde_json::Map::new();
         for other in names.iter().chain(dead).filter(|o| **o != me) {
-            peers.insert(other.to_string(), entry(fed_ports[*other], &ca_file, other));
+            peers.insert(other.to_string(), entry(9, &ca_file, other));
         }
         let args = extra
             .iter()
@@ -377,6 +380,20 @@ async fn mesh_with(names: &[&str], dead: &[&str], extra: &[(&str, Vec<String>)])
             .map_or(&[][..], |(_, a)| a.as_slice());
         let node = start_with(me, p, &creds[me], Value::Object(peers), args).await;
         nodes.insert(me.to_string(), node);
+    }
+    let fed_ports: HashMap<String, u16> = nodes
+        .iter()
+        .map(|(n, node)| (n.clone(), node.fed_port))
+        .chain(dead.iter().map(|n| (n.to_string(), 9)))
+        .collect();
+    for &me in names {
+        let node = &nodes[me];
+        let ca_file = node.tmp.path().join("ca.pem");
+        let mut peers = serde_json::Map::new();
+        for other in names.iter().chain(dead).filter(|o| **o != me) {
+            peers.insert(other.to_string(), entry(fed_ports[*other], &ca_file, other));
+        }
+        node.reload_peers(Value::Object(peers));
     }
     Mesh {
         creds,
@@ -593,7 +610,7 @@ struct Fault {
 async fn proxy(
     asker: &Creds,
     holder: &Creds,
-    holder_port: u16,
+    holder_port: Arc<AtomicU16>,
     fault: Fault,
 ) -> (u16, Arc<AtomicUsize>) {
     let peers = HashMap::from([(
@@ -623,7 +640,8 @@ async fn proxy(
     tokio::spawn(async move {
         while let Ok((tcp, _)) = listener.accept().await {
             let (acceptor, fault, seen) = (acceptor.clone(), fault.clone(), seen_c.clone());
-            let (asker, holder_pin) = (asker.clone(), holder_pin.clone());
+            let (asker, holder_pin, holder_port) =
+                (asker.clone(), holder_pin.clone(), holder_port.clone());
             tokio::spawn(async move {
                 let Ok(tls) = acceptor.accept(tcp).await else {
                     return;
@@ -631,7 +649,8 @@ async fn proxy(
                 let svc = hyper::service::service_fn(
                     move |req: hyper::Request<hyper::body::Incoming>| {
                         let (fault, seen) = (fault.clone(), seen.clone());
-                        let (asker, holder_pin) = (asker.clone(), holder_pin.clone());
+                        let (asker, holder_pin, holder_port) =
+                            (asker.clone(), holder_pin.clone(), holder_port.clone());
                         async move {
                             use http_body_util::BodyExt;
                             let (method, path) =
@@ -644,6 +663,7 @@ async fn proxy(
                                     .drop
                                     .as_ref()
                                     .is_some_and(|d| d.load(Ordering::SeqCst));
+                            let target_port = holder_port.load(Ordering::SeqCst);
                             let answer = if dropped {
                                 None
                             } else if first && fault.hold_before {
@@ -651,13 +671,20 @@ async fn proxy(
                                     tx.send(()).unwrap();
                                     resume.notified().await;
                                 }
-                                forward(&asker, &holder_pin, holder_port, &method, &path, &body)
-                                    .await
+                                forward(
+                                    &asker,
+                                    &holder_pin,
+                                    holder_port.load(Ordering::SeqCst),
+                                    &method,
+                                    &path,
+                                    &body,
+                                )
+                                .await
                             } else {
                                 let answer = if first && !fault.forward {
                                     None
                                 } else {
-                                    forward(&asker, &holder_pin, holder_port, &method, &path, &body)
+                                    forward(&asker, &holder_pin, target_port, &method, &path, &body)
                                         .await
                                 };
                                 match (first, answer) {
@@ -743,34 +770,31 @@ async fn forward(
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_1_the_queue_follows_the_conversation() {
-    run_with_port_retry(|| async {
-        let m = mesh(&["sini.p", "sini.q"], &[]).await;
-        let (p, q) = (m.node("sini.p"), m.node("sini.q"));
-        park(p, X).await;
-        queue_at(p, "first while parked").await;
-        queue_at(p, "second while parked").await;
-        let held = p.queued(X);
-        assert_eq!(held.len(), 2);
+    let m = mesh(&["sini.p", "sini.q"], &[]).await;
+    let (p, q) = (m.node("sini.p"), m.node("sini.q"));
+    park(p, X).await;
+    queue_at(p, "first while parked").await;
+    queue_at(p, "second while parked").await;
+    let held = p.queued(X);
+    assert_eq!(held.len(), 2);
 
-        let on_q = claude(q, X);
-        assert_eq!(q.status_of(X).await.as_deref(), Some("live"));
-        assert!(on_q.got("first while parked").await, "not delivered on Q");
-        assert!(on_q.got("second while parked").await, "not delivered on Q");
-        assert!(drained(p).await, "P still holds the queue");
-        assert_eq!(p.status_of(X).await, None, "P still lists X");
-        let db = q.db();
-        for (id, expires) in held {
-            let e: i64 = db
-                .query_row(
-                    "SELECT expires_at FROM instance_queue WHERE id = ?1",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert_eq!(e, expires, "the expiry did not travel with {id}");
-        }
-    })
-    .await;
+    let on_q = claude(q, X);
+    assert_eq!(q.status_of(X).await.as_deref(), Some("live"));
+    assert!(on_q.got("first while parked").await, "not delivered on Q");
+    assert!(on_q.got("second while parked").await, "not delivered on Q");
+    assert!(drained(p).await, "P still holds the queue");
+    assert_eq!(p.status_of(X).await, None, "P still lists X");
+    let db = q.db();
+    for (id, expires) in held {
+        let e: i64 = db
+            .query_row(
+                "SELECT expires_at FROM instance_queue WHERE id = ?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(e, expires, "the expiry did not travel with {id}");
+    }
 }
 
 // =============================================================================
@@ -780,14 +804,11 @@ async fn test_oracle_1_the_queue_follows_the_conversation() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_2_parked_and_parked_is_one_destination() {
-    run_with_port_retry(|| async {
-        let m = mesh(&["sini.p", "sini.q", "bob.s"], &[]).await;
-        park_on_all(&[m.node("sini.p"), m.node("sini.q")], X).await;
-        let (status, body) = http_send(m.node("bob.s"), X, "to x").await;
-        assert_eq!(status, 202, "{body}");
-        assert_eq!(body["outcome"], "queued", "{body}");
-    })
-    .await;
+    let m = mesh(&["sini.p", "sini.q", "bob.s"], &[]).await;
+    park_on_all(&[m.node("sini.p"), m.node("sini.q")], X).await;
+    let (status, body) = http_send(m.node("bob.s"), X, "to x").await;
+    assert_eq!(status, 202, "{body}");
+    assert_eq!(body["outcome"], "queued", "{body}");
 }
 
 // =============================================================================
@@ -797,39 +818,84 @@ async fn test_oracle_2_parked_and_parked_is_one_destination() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_3_a_lost_acknowledgement_delivers_once() {
-    run_with_port_retry(|| async {
-        let m = mesh_with_proxy(Fault {
-            path: "/fed/v2/handoff/ack",
-            forward: false,
-            drop: None,
-            hold_before: false,
-            crashed: None,
-        })
-        .await;
-        let (p, q) = (m.mesh.node("sini.p"), m.mesh.node("sini.q"));
-        park(p, X).await;
-        queue_at(p, "only once").await;
-
-        let on_q = claude(q, X);
-        assert_eq!(q.status_of(X).await.as_deref(), Some("live"));
-        assert!(on_q.got("only once").await, "not delivered on Q");
-        assert!(
-            drained(p).await,
-            "the repeated transfer was never acknowledged"
-        );
-        assert!(
-            m.seen.load(Ordering::SeqCst) >= 2,
-            "the transfer did not repeat"
-        );
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert_eq!(on_q.count("only once"), 1, "delivered twice");
+    let m = mesh_with_proxy(Fault {
+        path: "/fed/v2/handoff/ack",
+        forward: false,
+        drop: None,
+        hold_before: false,
+        crashed: None,
     })
     .await;
+    let (p, q) = (m.mesh.node("sini.p"), m.mesh.node("sini.q"));
+    park(p, X).await;
+    queue_at(p, "only once").await;
+
+    let on_q = claude(q, X);
+    assert_eq!(q.status_of(X).await.as_deref(), Some("live"));
+    assert!(on_q.got("only once").await, "not delivered on Q");
+    assert!(
+        drained(p).await,
+        "the repeated transfer was never acknowledged"
+    );
+    assert!(
+        m.seen.load(Ordering::SeqCst) >= 2,
+        "the transfer did not repeat"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(on_q.count("only once"), 1, "delivered twice");
 }
 
 struct Proxied {
     mesh: Mesh,
     seen: Arc<AtomicUsize>,
+    proxy_port: u16,
+    holder_port: Arc<AtomicU16>,
+}
+
+impl Proxied {
+    async fn respawn(&mut self, name: &str) {
+        let node = self.mesh.nodes.get_mut(name).unwrap();
+        node.spawn().await;
+        let new_fed = node.fed_port;
+        self.mesh.fed_ports.insert(name.to_string(), new_fed);
+        if name == "sini.p" {
+            self.holder_port.store(new_fed, Ordering::SeqCst);
+        }
+        let names: Vec<String> = self.mesh.nodes.keys().cloned().collect();
+        for me in &names {
+            if me == name {
+                continue;
+            }
+            let other_node = &self.mesh.nodes[me];
+            if other_node.child.is_none() {
+                continue;
+            }
+            let ca_file = other_node.tmp.path().join("ca.pem");
+            let mut peers = serde_json::Map::new();
+            for peer in names.iter().filter(|o| *o != me) {
+                let port = if (me.as_str(), peer.as_str()) == ("sini.q", "sini.p") {
+                    self.proxy_port
+                } else {
+                    self.mesh.fed_ports[peer]
+                };
+                peers.insert(peer.clone(), entry(port, &ca_file, peer));
+            }
+            other_node.reload_peers(Value::Object(peers));
+        }
+        // Also ensure the respawned node itself has current peers.json
+        let node = &self.mesh.nodes[name];
+        let ca_file = node.tmp.path().join("ca.pem");
+        let mut peers = serde_json::Map::new();
+        for peer in names.iter().filter(|o| *o != name) {
+            let port = if (name, peer.as_str()) == ("sini.q", "sini.p") {
+                self.proxy_port
+            } else {
+                self.mesh.fed_ports[peer]
+            };
+            peers.insert(peer.clone(), entry(port, &ca_file, peer));
+        }
+        node.reload_peers(Value::Object(peers));
+    }
 }
 
 /// P and Q of user sini, with Q's entry for P routed through a fault proxy.
@@ -844,15 +910,12 @@ async fn mesh_with_proxy_and(others: &[&str], fault: Fault) -> Proxied {
     let creds: HashMap<String, Creds> =
         names.iter().map(|n| (n.to_string(), ca.issue(n))).collect();
     let preps: Vec<(&str, Prepared)> = names.iter().map(|n| (*n, prepare(&ca))).collect();
-    let fed_ports: HashMap<String, u16> = preps
-        .iter()
-        .map(|(n, p)| (n.to_string(), p.fed_port))
-        .collect();
+    let holder_port = Arc::new(AtomicU16::new(9));
     // Q reaches P through the proxy, whose port is fixed before Q starts.
     let (proxy_port, seen) = proxy(
         &creds["sini.q"],
         &creds["sini.p"],
-        fed_ports["sini.p"],
+        holder_port.clone(),
         fault,
     )
     .await;
@@ -864,12 +927,31 @@ async fn mesh_with_proxy_and(others: &[&str], fault: Fault) -> Proxied {
             let port = if (me, *other) == ("sini.q", "sini.p") {
                 proxy_port
             } else {
-                fed_ports[*other]
+                9
             };
             peers.insert(other.to_string(), entry(port, &ca_file, other));
         }
         let node = start(me, p, &creds[me], Value::Object(peers)).await;
         nodes.insert(me.to_string(), node);
+    }
+    let fed_ports: HashMap<String, u16> = nodes
+        .iter()
+        .map(|(n, node)| (n.clone(), node.fed_port))
+        .collect();
+    holder_port.store(fed_ports["sini.p"], Ordering::SeqCst);
+    for &me in &names {
+        let node = &nodes[me];
+        let ca_file = node.tmp.path().join("ca.pem");
+        let mut peers = serde_json::Map::new();
+        for other in names.iter().filter(|o| **o != me) {
+            let port = if (me, *other) == ("sini.q", "sini.p") {
+                proxy_port
+            } else {
+                fed_ports[*other]
+            };
+            peers.insert(other.to_string(), entry(port, &ca_file, other));
+        }
+        node.reload_peers(Value::Object(peers));
     }
     Proxied {
         mesh: Mesh {
@@ -878,6 +960,8 @@ async fn mesh_with_proxy_and(others: &[&str], fault: Fault) -> Proxied {
             fed_ports,
         },
         seen,
+        proxy_port,
+        holder_port,
     }
 }
 
@@ -888,27 +972,24 @@ async fn mesh_with_proxy_and(others: &[&str], fault: Fault) -> Proxied {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_4_two_live_listings_take_nothing() {
-    run_with_port_retry(|| async {
-        let m = mesh(&["sini.p", "sini.q", "sini.r"], &[]).await;
-        let (p, q, r) = (m.node("sini.p"), m.node("sini.q"), m.node("sini.r"));
-        park(p, X).await;
-        queue_at(p, "held at p").await;
+    let m = mesh(&["sini.p", "sini.q", "sini.r"], &[]).await;
+    let (p, q, r) = (m.node("sini.p"), m.node("sini.q"), m.node("sini.r"));
+    park(p, X).await;
+    queue_at(p, "held at p").await;
 
-        let (on_q, on_r) = (claude(q, X), claude(r, X));
-        assert_eq!(q.status_of(X).await.as_deref(), Some("live"));
-        assert_eq!(r.status_of(X).await.as_deref(), Some("live"));
-        let (status, body) = http_send(p, X, "to x").await;
-        assert_eq!(status, 409, "{body}");
-        assert_eq!(body["error"], "ambiguous", "{body}");
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        assert_eq!(
-            on_q.count("held at p") + on_r.count("held at p"),
-            0,
-            "handed over"
-        );
-        assert_eq!(p.queued(X).len(), 1, "P's queue moved");
-    })
-    .await;
+    let (on_q, on_r) = (claude(q, X), claude(r, X));
+    assert_eq!(q.status_of(X).await.as_deref(), Some("live"));
+    assert_eq!(r.status_of(X).await.as_deref(), Some("live"));
+    let (status, body) = http_send(p, X, "to x").await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"], "ambiguous", "{body}");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        on_q.count("held at p") + on_r.count("held at p"),
+        0,
+        "handed over"
+    );
+    assert_eq!(p.queued(X).len(), 1, "P's queue moved");
 }
 
 // =============================================================================
@@ -918,44 +999,41 @@ async fn test_oracle_4_two_live_listings_take_nothing() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_5_another_user_cannot_pull() {
-    run_with_port_retry(|| async {
-        let m = mesh(&["sini.p", "eve.e"], &[]).await;
-        let (p, e) = (m.node("sini.p"), m.node("eve.e"));
-        park(p, X).await;
-        queue_at(p, "for sini's x").await;
-        let on_e = claude(e, X);
-        assert_eq!(e.status_of(X).await.as_deref(), Some("live"));
+    let m = mesh(&["sini.p", "eve.e"], &[]).await;
+    let (p, e) = (m.node("sini.p"), m.node("eve.e"));
+    park(p, X).await;
+    queue_at(p, "for sini's x").await;
+    let on_e = claude(e, X);
+    assert_eq!(e.status_of(X).await.as_deref(), Some("live"));
 
-        let ce = &m.creds["eve.e"];
-        let asker = Origin {
-            cert_der: &ce.cert_der,
-            key_der: &ce.key_der,
-        };
-        let (status, res) = hop_client::request(
-            &asker,
-            &m.creds["sini.p"].pin,
-            m.fed_ports["sini.p"],
-            "POST",
-            "/fed/v2/handoff",
-            Some(json!({ "id": X })),
-        )
-        .await;
-        assert_eq!(status, 403, "{res}");
-        assert_eq!(res["error"], "denied", "{res}");
-        let (status, _) = hop_client::request(
-            &asker,
-            &m.creds["sini.p"].pin,
-            m.fed_ports["sini.p"],
-            "POST",
-            "/fed/v2/handoff/ack",
-            Some(json!({ "id": X, "messages": [] })),
-        )
-        .await;
-        assert_eq!(status, 403, "eve acknowledged a hand-off");
-        assert_eq!(p.queued(X).len(), 1, "P's queue moved");
-        assert_eq!(on_e.count("for sini's x"), 0);
-    })
+    let ce = &m.creds["eve.e"];
+    let asker = Origin {
+        cert_der: &ce.cert_der,
+        key_der: &ce.key_der,
+    };
+    let (status, res) = hop_client::request(
+        &asker,
+        &m.creds["sini.p"].pin,
+        m.fed_ports["sini.p"],
+        "POST",
+        "/fed/v2/handoff",
+        Some(json!({ "id": X })),
+    )
     .await;
+    assert_eq!(status, 403, "{res}");
+    assert_eq!(res["error"], "denied", "{res}");
+    let (status, _) = hop_client::request(
+        &asker,
+        &m.creds["sini.p"].pin,
+        m.fed_ports["sini.p"],
+        "POST",
+        "/fed/v2/handoff/ack",
+        Some(json!({ "id": X, "messages": [] })),
+    )
+    .await;
+    assert_eq!(status, 403, "eve acknowledged a hand-off");
+    assert_eq!(p.queued(X).len(), 1, "P's queue moved");
+    assert_eq!(on_e.count("for sini's x"), 0);
 }
 
 // =============================================================================
@@ -966,44 +1044,39 @@ async fn test_oracle_5_another_user_cannot_pull() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_6_a_crash_loses_nothing() {
-    run_with_port_retry(|| async {
-        let (crashed_tx, mut crashed) = tokio::sync::mpsc::unbounded_channel();
-        let resume = Arc::new(tokio::sync::Notify::new());
-        let mut m = mesh_with_proxy(Fault {
-            path: "/fed/v2/handoff",
-            forward: true,
-            drop: None,
-            hold_before: false,
-            crashed: Some((crashed_tx, resume.clone())),
-        })
-        .await;
-        let p_fed = m.mesh.fed_ports["sini.p"];
-        {
-            let p = m.mesh.node("sini.p");
-            park(p, X).await;
-            queue_at(p, "survives the crash").await;
-        }
-        let on_q = claude(m.mesh.node("sini.q"), X);
-        assert_eq!(
-            m.mesh.node("sini.q").status_of(X).await.as_deref(),
-            Some("live")
-        );
-
-        tokio::time::timeout(Duration::from_secs(30), crashed.recv())
-            .await
-            .expect("no transfer was asked for within 30s")
-            .unwrap();
-        let p = m.mesh.nodes.get_mut("sini.p").unwrap();
-        p.crash().await;
-        resume.notify_one();
-        p.spawn(p_fed).await;
-
-        assert!(on_q.got("survives the crash").await, "lost in the crash");
-        assert!(drained(m.mesh.node("sini.p")).await, "never acknowledged");
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert_eq!(on_q.count("survives the crash"), 1, "delivered twice");
+    let (crashed_tx, mut crashed) = tokio::sync::mpsc::unbounded_channel();
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let mut m = mesh_with_proxy(Fault {
+        path: "/fed/v2/handoff",
+        forward: true,
+        drop: None,
+        hold_before: false,
+        crashed: Some((crashed_tx, resume.clone())),
     })
     .await;
+    {
+        let p = m.mesh.node("sini.p");
+        park(p, X).await;
+        queue_at(p, "survives the crash").await;
+    }
+    let on_q = claude(m.mesh.node("sini.q"), X);
+    assert_eq!(
+        m.mesh.node("sini.q").status_of(X).await.as_deref(),
+        Some("live")
+    );
+
+    tokio::time::timeout(Duration::from_secs(30), crashed.recv())
+        .await
+        .expect("no transfer was asked for within 30s")
+        .unwrap();
+    m.mesh.nodes.get_mut("sini.p").unwrap().crash().await;
+    resume.notify_one();
+    m.respawn("sini.p").await;
+
+    assert!(on_q.got("survives the crash").await, "lost in the crash");
+    assert!(drained(m.mesh.node("sini.p")).await, "never acknowledged");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(on_q.count("survives the crash"), 1, "delivered twice");
 }
 
 // =============================================================================
@@ -1014,20 +1087,17 @@ async fn test_oracle_6_a_crash_loses_nothing() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_7_an_incomplete_view_keeps_the_queue() {
-    run_with_port_retry(|| async {
-        let m = mesh(&["sini.p", "sini.q"], &["sini.r"]).await;
-        let (p, q) = (m.node("sini.p"), m.node("sini.q"));
-        park(p, X).await;
-        queue_at(p, "stays at p").await;
+    let m = mesh(&["sini.p", "sini.q"], &["sini.r"]).await;
+    let (p, q) = (m.node("sini.p"), m.node("sini.q"));
+    park(p, X).await;
+    queue_at(p, "stays at p").await;
 
-        let on_q = claude(q, X);
-        assert_eq!(q.status_of(X).await.as_deref(), Some("live"));
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        assert_eq!(on_q.count("stays at p"), 0, "handed over");
-        assert_eq!(p.queued(X).len(), 1, "P's queue moved");
-        assert_eq!(p.status_of(X).await.as_deref(), Some("parked"));
-    })
-    .await;
+    let on_q = claude(q, X);
+    assert_eq!(q.status_of(X).await.as_deref(), Some("live"));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(on_q.count("stays at p"), 0, "handed over");
+    assert_eq!(p.queued(X).len(), 1, "P's queue moved");
+    assert_eq!(p.status_of(X).await.as_deref(), Some("parked"));
 }
 
 // =============================================================================
@@ -1038,26 +1108,23 @@ async fn test_oracle_7_an_incomplete_view_keeps_the_queue() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_8_pull_all() {
-    run_with_port_retry(|| async {
-        let m = mesh(&["sini.p", "sini.q", "sini.r"], &[]).await;
-        let (p, q, r) = (m.node("sini.p"), m.node("sini.q"), m.node("sini.r"));
-        park_on_all(&[p, q], X).await;
-        queue_at(p, "queued at p").await;
-        queue_at(q, "queued at q").await;
+    let m = mesh(&["sini.p", "sini.q", "sini.r"], &[]).await;
+    let (p, q, r) = (m.node("sini.p"), m.node("sini.q"), m.node("sini.r"));
+    park_on_all(&[p, q], X).await;
+    queue_at(p, "queued at p").await;
+    queue_at(q, "queued at q").await;
 
-        let on_r = claude(r, X);
-        assert_eq!(r.status_of(X).await.as_deref(), Some("live"));
-        assert!(
-            on_r.got("queued at p").await,
-            "P's queue not delivered on R"
-        );
-        assert!(
-            on_r.got("queued at q").await,
-            "Q's queue not delivered on R"
-        );
-        assert!(drained(p).await && drained(q).await);
-    })
-    .await;
+    let on_r = claude(r, X);
+    assert_eq!(r.status_of(X).await.as_deref(), Some("live"));
+    assert!(
+        on_r.got("queued at p").await,
+        "P's queue not delivered on R"
+    );
+    assert!(
+        on_r.got("queued at q").await,
+        "Q's queue not delivered on R"
+    );
+    assert!(drained(p).await && drained(q).await);
 }
 
 // =============================================================================
@@ -1069,59 +1136,56 @@ async fn test_oracle_8_pull_all() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_9_a_handed_over_message_keeps_its_reply() {
-    run_with_port_retry(|| async {
-        const AT_O: &str = "5e5e5e5e-0000-4000-8000-00000000005e";
-        const AT_P: &str = "5f5f5f5f-0000-4000-8000-00000000005f";
-        let m = mesh(&["sini.o", "sini.p", "sini.q"], &[]).await;
-        let (o, p, q) = (m.node("sini.o"), m.node("sini.p"), m.node("sini.q"));
-        park(p, X).await;
-        let (from_o, from_p) = (
-            claude_in(&o.sessions_dir, AT_O, true),
-            claude_in(&p.sessions_dir, AT_P, true),
-        );
-        assert_eq!(o.status_of(AT_O).await.as_deref(), Some("live"));
-        assert_eq!(p.status_of(AT_P).await.as_deref(), Some("live"));
-        let mut ids = Vec::new();
-        for (who, node, text) in [(&from_o, o, "asked-from-o"), (&from_p, p, "asked-from-p")] {
-            let (st, body) = who
-                .req(
-                    node,
-                    "POST",
-                    "/v1/messages",
-                    json!({ "to": X, "text": text }),
-                )
-                .await;
-            assert_eq!(st, 202, "{body}");
-            assert_eq!(body["outcome"], "queued", "{body}");
-            ids.push(body["message_id"].as_str().unwrap().to_string());
-        }
+    const AT_O: &str = "5e5e5e5e-0000-4000-8000-00000000005e";
+    const AT_P: &str = "5f5f5f5f-0000-4000-8000-00000000005f";
+    let m = mesh(&["sini.o", "sini.p", "sini.q"], &[]).await;
+    let (o, p, q) = (m.node("sini.o"), m.node("sini.p"), m.node("sini.q"));
+    park(p, X).await;
+    let (from_o, from_p) = (
+        claude_in(&o.sessions_dir, AT_O, true),
+        claude_in(&p.sessions_dir, AT_P, true),
+    );
+    assert_eq!(o.status_of(AT_O).await.as_deref(), Some("live"));
+    assert_eq!(p.status_of(AT_P).await.as_deref(), Some("live"));
+    let mut ids = Vec::new();
+    for (who, node, text) in [(&from_o, o, "asked-from-o"), (&from_p, p, "asked-from-p")] {
+        let (st, body) = who
+            .req(
+                node,
+                "POST",
+                "/v1/messages",
+                json!({ "to": X, "text": text }),
+            )
+            .await;
+        assert_eq!(st, 202, "{body}");
+        assert_eq!(body["outcome"], "queued", "{body}");
+        ids.push(body["message_id"].as_str().unwrap().to_string());
+    }
 
-        let x = claude_in(&q.sessions_dir, X, true);
-        assert_eq!(q.status_of(X).await.as_deref(), Some("live"));
-        assert!(x.got("asked-from-o").await, "not delivered on Q");
-        assert!(x.got("asked-from-p").await, "not delivered on Q");
-        assert!(drained(p).await, "P still holds the queue");
-        for (mid, answer) in ids.iter().zip(["answer-to-o", "answer-to-p"]) {
-            let (st, body) = x
-                .req(
-                    q,
-                    "POST",
-                    &format!("/v1/messages/{mid}/replies"),
-                    json!({ "text": answer }),
-                )
-                .await;
-            assert_eq!(st, 200, "the reply to {mid} was refused on Q: {body}");
-        }
-        assert!(
-            from_o.got("answer-to-o").await,
-            "the reply never reached O's sender"
-        );
-        assert!(
-            from_p.got("answer-to-p").await,
-            "the reply never reached P's sender"
-        );
-    })
-    .await;
+    let x = claude_in(&q.sessions_dir, X, true);
+    assert_eq!(q.status_of(X).await.as_deref(), Some("live"));
+    assert!(x.got("asked-from-o").await, "not delivered on Q");
+    assert!(x.got("asked-from-p").await, "not delivered on Q");
+    assert!(drained(p).await, "P still holds the queue");
+    for (mid, answer) in ids.iter().zip(["answer-to-o", "answer-to-p"]) {
+        let (st, body) = x
+            .req(
+                q,
+                "POST",
+                &format!("/v1/messages/{mid}/replies"),
+                json!({ "text": answer }),
+            )
+            .await;
+        assert_eq!(st, 200, "the reply to {mid} was refused on Q: {body}");
+    }
+    assert!(
+        from_o.got("answer-to-o").await,
+        "the reply never reached O's sender"
+    );
+    assert!(
+        from_p.got("answer-to-p").await,
+        "the reply never reached P's sender"
+    );
 }
 
 // =============================================================================
@@ -1133,56 +1197,51 @@ async fn test_oracle_9_a_handed_over_message_keeps_its_reply() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_10_an_owed_acknowledgement_survives_a_restart() {
-    run_with_port_retry(|| async {
-        let dropping = Arc::new(AtomicBool::new(true));
-        let mut m = mesh_with_proxy_and(
-            &["sini.r"],
-            Fault {
-                path: "/fed/v2/handoff/ack",
-                forward: true,
-                drop: Some(dropping.clone()),
-                hold_before: false,
-                crashed: None,
-            },
-        )
-        .await;
-        let q_fed = m.mesh.fed_ports["sini.q"];
-        {
-            let (p, q) = (m.mesh.node("sini.p"), m.mesh.node("sini.q"));
-            park(p, X).await;
-            queue_at(p, "once overall").await;
-            let on_q = claude(q, X);
-            assert_eq!(q.status_of(X).await.as_deref(), Some("live"));
-            assert!(on_q.got("once overall").await, "not delivered on Q");
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            assert_eq!(on_q.count("once overall"), 1, "delivered twice on Q");
-            for _ in 0..200 {
-                if m.seen.load(Ordering::SeqCst) > 0 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            assert!(m.seen.load(Ordering::SeqCst) > 0, "Q never acknowledged");
-            assert_eq!(p.queued(X).len(), 1, "an acknowledgement landed");
-            on_q.exit();
-            assert_eq!(q.status_of(X).await.as_deref(), Some("parked"));
-        }
-        let q = m.mesh.nodes.get_mut("sini.q").unwrap();
-        q.crash().await;
-        dropping.store(false, Ordering::SeqCst);
-        q.spawn(q_fed).await;
-        assert!(
-            drained(m.mesh.node("sini.p")).await,
-            "the owed acknowledgement was not resumed after the restart"
-        );
-
-        let r = m.mesh.node("sini.r");
-        let on_r = claude(r, X);
-        assert_eq!(r.status_of(X).await.as_deref(), Some("live"));
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        assert_eq!(on_r.count("once overall"), 0, "delivered again on R");
-    })
+    let dropping = Arc::new(AtomicBool::new(true));
+    let mut m = mesh_with_proxy_and(
+        &["sini.r"],
+        Fault {
+            path: "/fed/v2/handoff/ack",
+            forward: true,
+            drop: Some(dropping.clone()),
+            hold_before: false,
+            crashed: None,
+        },
+    )
     .await;
+    {
+        let (p, q) = (m.mesh.node("sini.p"), m.mesh.node("sini.q"));
+        park(p, X).await;
+        queue_at(p, "once overall").await;
+        let on_q = claude(q, X);
+        assert_eq!(q.status_of(X).await.as_deref(), Some("live"));
+        assert!(on_q.got("once overall").await, "not delivered on Q");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(on_q.count("once overall"), 1, "delivered twice on Q");
+        for _ in 0..200 {
+            if m.seen.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(m.seen.load(Ordering::SeqCst) > 0, "Q never acknowledged");
+        assert_eq!(p.queued(X).len(), 1, "an acknowledgement landed");
+        on_q.exit();
+        assert_eq!(q.status_of(X).await.as_deref(), Some("parked"));
+    }
+    m.mesh.nodes.get_mut("sini.q").unwrap().crash().await;
+    dropping.store(false, Ordering::SeqCst);
+    m.respawn("sini.q").await;
+    assert!(
+        drained(m.mesh.node("sini.p")).await,
+        "the owed acknowledgement was not resumed after the restart"
+    );
+
+    let r = m.mesh.node("sini.r");
+    let on_r = claude(r, X);
+    assert_eq!(r.status_of(X).await.as_deref(), Some("live"));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(on_r.count("once overall"), 0, "delivered again on R");
 }
 
 // =============================================================================
@@ -1193,45 +1252,40 @@ async fn test_oracle_10_an_owed_acknowledgement_survives_a_restart() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_11_a_pull_resumes_after_a_restart() {
-    run_with_port_retry(|| async {
-        let dropping = Arc::new(AtomicBool::new(true));
-        let mut m = mesh_with_proxy(Fault {
-            path: "/fed/v2/handoff",
-            forward: true,
-            drop: Some(dropping.clone()),
-            hold_before: false,
-            crashed: None,
-        })
-        .await;
-        let q_fed = m.mesh.fed_ports["sini.q"];
-        {
-            let p = m.mesh.node("sini.p");
-            park(p, X).await;
-            queue_at(p, "after the restart").await;
-        }
-        let on_q = claude(m.mesh.node("sini.q"), X);
-        assert_eq!(
-            m.mesh.node("sini.q").status_of(X).await.as_deref(),
-            Some("live")
-        );
-        for _ in 0..200 {
-            if m.seen.load(Ordering::SeqCst) > 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert!(m.seen.load(Ordering::SeqCst) > 0, "Q never asked P");
-        let q = m.mesh.nodes.get_mut("sini.q").unwrap();
-        q.crash().await;
-        dropping.store(false, Ordering::SeqCst);
-        q.spawn(q_fed).await;
-        assert!(
-            on_q.got("after the restart").await,
-            "the ask was not resumed after the restart"
-        );
-        assert!(drained(m.mesh.node("sini.p")).await, "never acknowledged");
+    let dropping = Arc::new(AtomicBool::new(true));
+    let mut m = mesh_with_proxy(Fault {
+        path: "/fed/v2/handoff",
+        forward: true,
+        drop: Some(dropping.clone()),
+        hold_before: false,
+        crashed: None,
     })
     .await;
+    {
+        let p = m.mesh.node("sini.p");
+        park(p, X).await;
+        queue_at(p, "after the restart").await;
+    }
+    let on_q = claude(m.mesh.node("sini.q"), X);
+    assert_eq!(
+        m.mesh.node("sini.q").status_of(X).await.as_deref(),
+        Some("live")
+    );
+    for _ in 0..200 {
+        if m.seen.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(m.seen.load(Ordering::SeqCst) > 0, "Q never asked P");
+    m.mesh.nodes.get_mut("sini.q").unwrap().crash().await;
+    dropping.store(false, Ordering::SeqCst);
+    m.respawn("sini.q").await;
+    assert!(
+        on_q.got("after the restart").await,
+        "the ask was not resumed after the restart"
+    );
+    assert!(drained(m.mesh.node("sini.p")).await, "never acknowledged");
 }
 
 // =============================================================================
@@ -1241,42 +1295,39 @@ async fn test_oracle_11_a_pull_resumes_after_a_restart() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_12_a_send_in_the_window_follows() {
-    run_with_port_retry(|| async {
-        let (tx, mut held) = tokio::sync::mpsc::unbounded_channel();
-        let resume = Arc::new(tokio::sync::Notify::new());
-        let m = mesh_with_proxy(Fault {
-            path: "/fed/v2/handoff/ack",
-            forward: true,
-            drop: None,
-            hold_before: true,
-            crashed: Some((tx, resume.clone())),
-        })
-        .await;
-        let (p, q) = (m.mesh.node("sini.p"), m.mesh.node("sini.q"));
-        park(p, X).await;
-        queue_at(p, "before the transfer").await;
-        let on_q = claude(q, X);
-        assert_eq!(q.status_of(X).await.as_deref(), Some("live"));
-        tokio::time::timeout(Duration::from_secs(30), held.recv())
-            .await
-            .expect("Q never acknowledged within 30s")
-            .unwrap();
-        let (status, body) = http_send(p, &format!("{X}@sini.p"), "in the window").await;
-        assert_eq!(
-            (status, body["outcome"].as_str()),
-            (202, Some("queued")),
-            "{body}"
-        );
-        resume.notify_one();
-        assert!(on_q.got("before the transfer").await, "not delivered on Q");
-        assert!(
-            on_q.got("in the window").await,
-            "the send in the window is stranded at P"
-        );
-        assert!(drained(p).await, "P still holds a message");
-        assert_eq!(p.status_of(X).await, None, "P still lists X");
+    let (tx, mut held) = tokio::sync::mpsc::unbounded_channel();
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let m = mesh_with_proxy(Fault {
+        path: "/fed/v2/handoff/ack",
+        forward: true,
+        drop: None,
+        hold_before: true,
+        crashed: Some((tx, resume.clone())),
     })
     .await;
+    let (p, q) = (m.mesh.node("sini.p"), m.mesh.node("sini.q"));
+    park(p, X).await;
+    queue_at(p, "before the transfer").await;
+    let on_q = claude(q, X);
+    assert_eq!(q.status_of(X).await.as_deref(), Some("live"));
+    tokio::time::timeout(Duration::from_secs(30), held.recv())
+        .await
+        .expect("Q never acknowledged within 30s")
+        .unwrap();
+    let (status, body) = http_send(p, &format!("{X}@sini.p"), "in the window").await;
+    assert_eq!(
+        (status, body["outcome"].as_str()),
+        (202, Some("queued")),
+        "{body}"
+    );
+    resume.notify_one();
+    assert!(on_q.got("before the transfer").await, "not delivered on Q");
+    assert!(
+        on_q.got("in the window").await,
+        "the send in the window is stranded at P"
+    );
+    assert!(drained(p).await, "P still holds a message");
+    assert_eq!(p.status_of(X).await, None, "P still lists X");
 }
 
 // =============================================================================
@@ -1287,33 +1338,30 @@ async fn test_oracle_12_a_send_in_the_window_follows() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_13_a_queue_over_one_transfer_moves_whole() {
-    run_with_port_retry(|| async {
-        const N: usize = 80;
-        let small = vec!["--max-body".to_string(), "1024".to_string()];
-        let m = mesh_with(
-            &["sini.p", "sini.q"],
-            &[],
-            &[("sini.p", small.clone()), ("sini.q", small)],
-        )
-        .await;
-        let (p, q) = (m.node("sini.p"), m.node("sini.q"));
-        park(p, X).await;
-        let pad = "z".repeat(900);
-        for i in 0..N {
-            queue_at(p, &format!("big-{i:03}-{pad}")).await;
-        }
-        let on_q = claude(q, X);
-        assert_eq!(q.status_of(X).await.as_deref(), Some("live"));
-        for _ in 0..400 {
-            if on_q.count("big-") == N {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert_eq!(on_q.count("big-"), N, "the queue did not move whole");
-        assert!(drained(p).await, "P still holds part of the queue");
-    })
+    const N: usize = 80;
+    let small = vec!["--max-body".to_string(), "1024".to_string()];
+    let m = mesh_with(
+        &["sini.p", "sini.q"],
+        &[],
+        &[("sini.p", small.clone()), ("sini.q", small)],
+    )
     .await;
+    let (p, q) = (m.node("sini.p"), m.node("sini.q"));
+    park(p, X).await;
+    let pad = "z".repeat(900);
+    for i in 0..N {
+        queue_at(p, &format!("big-{i:03}-{pad}")).await;
+    }
+    let on_q = claude(q, X);
+    assert_eq!(q.status_of(X).await.as_deref(), Some("live"));
+    for _ in 0..400 {
+        if on_q.count("big-") == N {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(on_q.count("big-"), N, "the queue did not move whole");
+    assert!(drained(p).await, "P still holds part of the queue");
 }
 
 // =============================================================================
@@ -1324,48 +1372,45 @@ async fn test_oracle_13_a_queue_over_one_transfer_moves_whole() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_14_a_handoff_ask_keeps_every_dirs_claims() {
-    run_with_port_retry(|| async {
-        const Y: &str = "0b0b0b0b-0000-4000-8000-00000000000b";
-        const Y2: &str = "0c0c0c0c-0000-4000-8000-00000000000c";
-        let d2 = tempdir().unwrap();
-        fs::set_permissions(d2.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let second = vec![
-            "--sessions-dir".to_string(),
-            d2.path().display().to_string(),
-        ];
-        let m = mesh_with(&["sini.p", "sini.q"], &[], &[("sini.p", second)]).await;
-        let p = m.node("sini.p");
-        let (_y, _y2) = (claude_in(d2.path(), Y, false), claude(p, Y2));
-        assert_eq!(p.status_of(Y).await.as_deref(), Some("live"));
-        assert_eq!(p.status_of(Y2).await.as_deref(), Some("live"));
-        let released = |id: &str| -> Vec<i64> {
-            let db = p.db();
-            let mut s = db
-                .prepare("SELECT released FROM instance_claims WHERE id = ?1")
-                .unwrap();
-            s.query_map([id], |r| r.get(0))
-                .unwrap()
-                .collect::<Result<_, _>>()
-                .unwrap()
-        };
-        let c = &m.creds["sini.q"];
-        let (status, res) = hop_client::request(
-            &Origin {
-                cert_der: &c.cert_der,
-                key_der: &c.key_der,
-            },
-            &m.creds["sini.p"].pin,
-            m.fed_ports["sini.p"],
-            "POST",
-            "/fed/v2/handoff",
-            Some(json!({ "id": X })),
-        )
-        .await;
-        assert_eq!(status, 404, "{res}");
-        assert_eq!(released(Y2), vec![0], "the first dir's claim was released");
-        assert_eq!(released(Y), vec![0], "the second dir's claim was released");
-    })
+    const Y: &str = "0b0b0b0b-0000-4000-8000-00000000000b";
+    const Y2: &str = "0c0c0c0c-0000-4000-8000-00000000000c";
+    let d2 = tempdir().unwrap();
+    fs::set_permissions(d2.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let second = vec![
+        "--sessions-dir".to_string(),
+        d2.path().display().to_string(),
+    ];
+    let m = mesh_with(&["sini.p", "sini.q"], &[], &[("sini.p", second)]).await;
+    let p = m.node("sini.p");
+    let (_y, _y2) = (claude_in(d2.path(), Y, false), claude(p, Y2));
+    assert_eq!(p.status_of(Y).await.as_deref(), Some("live"));
+    assert_eq!(p.status_of(Y2).await.as_deref(), Some("live"));
+    let released = |id: &str| -> Vec<i64> {
+        let db = p.db();
+        let mut s = db
+            .prepare("SELECT released FROM instance_claims WHERE id = ?1")
+            .unwrap();
+        s.query_map([id], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let c = &m.creds["sini.q"];
+    let (status, res) = hop_client::request(
+        &Origin {
+            cert_der: &c.cert_der,
+            key_der: &c.key_der,
+        },
+        &m.creds["sini.p"].pin,
+        m.fed_ports["sini.p"],
+        "POST",
+        "/fed/v2/handoff",
+        Some(json!({ "id": X })),
+    )
     .await;
+    assert_eq!(status, 404, "{res}");
+    assert_eq!(released(Y2), vec![0], "the first dir's claim was released");
+    assert_eq!(released(Y), vec![0], "the second dir's claim was released");
 }
 
 // =============================================================================
@@ -1375,24 +1420,21 @@ async fn test_oracle_14_a_handoff_ask_keeps_every_dirs_claims() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_15_the_queue_follows_into_a_second_sessions_dir() {
-    run_with_port_retry(|| async {
-        let d2 = tempdir().unwrap();
-        fs::set_permissions(d2.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let second = vec![
-            "--sessions-dir".to_string(),
-            d2.path().display().to_string(),
-        ];
-        let m = mesh_with(&["sini.p", "sini.q"], &[], &[("sini.q", second)]).await;
-        let (p, q) = (m.node("sini.p"), m.node("sini.q"));
-        park(p, X).await;
-        queue_at(p, "into dir two").await;
-        let x = claude_in(d2.path(), X, false);
-        assert_eq!(q.status_of(X).await.as_deref(), Some("live"));
-        assert!(
-            x.got("into dir two").await,
-            "not delivered in Q's second dir"
-        );
-        assert!(drained(p).await, "P still holds the queue");
-    })
-    .await;
+    let d2 = tempdir().unwrap();
+    fs::set_permissions(d2.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let second = vec![
+        "--sessions-dir".to_string(),
+        d2.path().display().to_string(),
+    ];
+    let m = mesh_with(&["sini.p", "sini.q"], &[], &[("sini.q", second)]).await;
+    let (p, q) = (m.node("sini.p"), m.node("sini.q"));
+    park(p, X).await;
+    queue_at(p, "into dir two").await;
+    let x = claude_in(d2.path(), X, false);
+    assert_eq!(q.status_of(X).await.as_deref(), Some("live"));
+    assert!(
+        x.got("into dir two").await,
+        "not delivered in Q's second dir"
+    );
+    assert!(drained(p).await, "P still holds the queue");
 }

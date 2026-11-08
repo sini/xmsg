@@ -131,11 +131,6 @@ impl Drop for ChildGuard {
     }
 }
 
-fn get_free_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    l.local_addr().unwrap().port()
-}
-
 struct Ca {
     params: rcgen::CertificateParams,
     key: rcgen::KeyPair,
@@ -194,19 +189,13 @@ impl Ca {
 
 struct Prepared {
     tmp: TempDir,
-    fed_port: u16,
-    http_port: u16,
 }
 
 fn prepare(ca: &Ca) -> Prepared {
     let tmp = tempdir().unwrap();
     fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(tmp.path().join("ca.pem"), &ca.pem).unwrap();
-    Prepared {
-        tmp,
-        fed_port: get_free_port(),
-        http_port: get_free_port(),
-    }
+    Prepared { tmp }
 }
 
 impl Prepared {
@@ -229,11 +218,7 @@ struct Node {
 }
 
 async fn start_node(p: Prepared, creds: &Creds, peers: Value) -> Node {
-    let Prepared {
-        tmp,
-        fed_port,
-        http_port,
-    } = p;
+    let Prepared { tmp } = p;
     let run_dir = tmp.path().join("run");
     let sessions_dir = tmp.path().join("sessions");
     for d in [&run_dir, &sessions_dir] {
@@ -254,7 +239,7 @@ async fn start_node(p: Prepared, creds: &Creds, peers: Value) -> Node {
     let args: Vec<String> = vec![
         "serve".into(),
         "--listen".into(),
-        format!("127.0.0.1:{http_port}"),
+        "127.0.0.1:0".into(),
         "--db-path".into(),
         db_path.display().to_string(),
         "--sessions-dir".into(),
@@ -272,18 +257,22 @@ async fn start_node(p: Prepared, creds: &Creds, peers: Value) -> Node {
         "--peers-file".into(),
         peers_file.display().to_string(),
         "--fed-listen".into(),
-        format!("127.0.0.1:{fed_port}"),
+        "127.0.0.1:0".into(),
     ];
 
     let mut child = tokio::process::Command::new(BIN)
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
-        .env("RUST_LOG", "warn")
+        .env("RUST_LOG", "info")
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn xmsg serve");
+
+    let stdout = short_sock::StdoutCapture::from_tokio(child.stdout.take().unwrap());
+    let fed_port = stdout.wait_for_port("bound federation mTLS listener", Duration::from_secs(15));
+    let http_port = stdout.wait_for_port("bound tcp http server", Duration::from_secs(15));
 
     for _ in 0..600 {
         if let Ok(Some(_)) = child.try_wait() {
@@ -291,7 +280,7 @@ async fn start_node(p: Prepared, creds: &Creds, peers: Value) -> Node {
             if let Some(mut e) = child.stderr.take() {
                 let _ = e.read_to_string(&mut err).await;
             }
-            panic!("node exited at start (failed to bind?): {err}");
+            panic!("node exited at start: {err}");
         }
         let up = std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
             && std::os::unix::net::UnixStream::connect(&register_sock).is_ok()
@@ -420,35 +409,6 @@ async fn stub_older_peer(creds: &Creds, client_pin: &str, entries: Value) -> u16
     port
 }
 
-async fn run_with_port_retry<F, Fut>(f: F)
-where
-    F: Fn() -> Fut + Send + Sync + 'static,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
-{
-    for attempt in 1..=5 {
-        match tokio::task::spawn(f()).await {
-            Ok(()) => return,
-            Err(e) if e.is_panic() => {
-                let p = e.into_panic();
-                let msg = p
-                    .downcast_ref::<String>()
-                    .cloned()
-                    .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
-                    .unwrap_or_default();
-                let port_race = msg.contains("failed to bind")
-                    || msg.contains("AddrInUse")
-                    || msg.contains("ddress already in use");
-                if port_race && attempt < 5 {
-                    tokio::time::sleep(Duration::from_millis(150)).await;
-                    continue;
-                }
-                std::panic::resume_unwind(p);
-            }
-            Err(e) => panic!("join error: {e}"),
-        }
-    }
-}
-
 // =============================================================================
 // Oracle 1, 3, 5:
 // - Oracle 1: Default `list` with one live and one parked instance returns only
@@ -460,7 +420,7 @@ where
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_1_3_5_local_default_list_registered_at_and_parked_send() {
-    run_with_port_retry(|| async {
+    {
         let ca = Ca::new();
         let ca_a = ca.issue(URI_A);
         let pa = prepare(&ca);
@@ -473,7 +433,13 @@ async fn test_oracle_1_3_5_local_default_list_registered_at_and_parked_send() {
         let in_parked = inbox();
 
         let t_before_reg = storage::now_epoch_secs();
-        write_claude_session(&a.sessions_dir, s_live.pid(), ID_LIVE, "live-agent", &in_live.sock);
+        write_claude_session(
+            &a.sessions_dir,
+            s_live.pid(),
+            ID_LIVE,
+            "live-agent",
+            &in_live.sock,
+        );
         write_claude_session(
             &a.sessions_dir,
             s_parked.pid(),
@@ -486,7 +452,11 @@ async fn test_oracle_1_3_5_local_default_list_registered_at_and_parked_send() {
         let (st, initial) = a.http_get("/v1/recipients").await;
         let t_after_reg = storage::now_epoch_secs();
         assert_eq!(st, 200, "{initial}");
-        assert_eq!(initial["recipients"].as_array().unwrap().len(), 2, "{initial}");
+        assert_eq!(
+            initial["recipients"].as_array().unwrap().len(),
+            2,
+            "{initial}"
+        );
 
         // Wait 2 seconds so list time is strictly greater than registration time (Oracle 3)
         tokio::time::sleep(Duration::from_millis(2100)).await;
@@ -496,7 +466,10 @@ async fn test_oracle_1_3_5_local_default_list_registered_at_and_parked_send() {
         s_parked.end();
 
         let t_list = storage::now_epoch_secs();
-        assert!(t_list > t_after_reg, "clock advanced past registration window");
+        assert!(
+            t_list > t_after_reg,
+            "clock advanced past registration window"
+        );
 
         // Oracle 1: Default `list` over HTTP returns ONLY the live instance
         let (st, listed) = a.http_get("/v1/recipients").await;
@@ -564,7 +537,9 @@ async fn test_oracle_1_3_5_local_default_list_registered_at_and_parked_send() {
             "plugin list must contain only live entries: {plist}"
         );
         assert!(
-            !precs.iter().any(|r| r["address"] == format!("{ID_PARKED}@sini.a")),
+            !precs
+                .iter()
+                .any(|r| r["address"] == format!("{ID_PARKED}@sini.a")),
             "plugin list must not contain parked instance: {plist}"
         );
         drop(pw);
@@ -603,9 +578,12 @@ async fn test_oracle_1_3_5_local_default_list_registered_at_and_parked_send() {
         let (send_st, send_body) = a.http_send(ID_PARKED, "for parked").await;
         assert_eq!(send_st, 202, "{send_body}");
         assert_eq!(send_body["outcome"], "queued", "{send_body}");
-        assert_eq!(send_body["address"], format!("{ID_PARKED}@sini.a"), "{send_body}");
-    })
-    .await;
+        assert_eq!(
+            send_body["address"],
+            format!("{ID_PARKED}@sini.a"),
+            "{send_body}"
+        );
+    }
 }
 
 // =============================================================================
@@ -622,7 +600,7 @@ async fn test_oracle_1_3_5_local_default_list_registered_at_and_parked_send() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_2_and_2b_federated_live_default_and_older_peer_compat() {
-    run_with_port_retry(|| async {
+    {
         let ca = Ca::new();
         let (ca_a, ca_b, ca_old) = (ca.issue(URI_A), ca.issue(URI_B), ca.issue(URI_OLD));
         let (pa, pb) = (prepare(&ca), prepare(&ca));
@@ -646,15 +624,15 @@ async fn test_oracle_2_and_2b_federated_live_default_and_older_peer_compat() {
         ]);
         let old_port = stub_older_peer(&ca_old, &ca_a.pin, old_wire_entries).await;
 
+        let peers_b = json!({
+            "sini.a": ca_entry(9, &pb.ca_file(), URI_A, &["send", "reply", "list"]),
+        });
+        let b = start_node(pb, &ca_b, peers_b).await;
+
         let peers_a = json!({
-            "eve.b": ca_entry(pb.fed_port, &pa.ca_file(), URI_B, &["send", "reply", "list"]),
+            "eve.b": ca_entry(b.fed_port, &pa.ca_file(), URI_B, &["send", "reply", "list"]),
             "eve.old": ca_entry(old_port, &pa.ca_file(), URI_OLD, &["send", "reply", "list"]),
         });
-        let peers_b = json!({
-            "sini.a": ca_entry(pa.fed_port, &pb.ca_file(), URI_A, &["send", "reply", "list"]),
-        });
-
-        let b = start_node(pb, &ca_b, peers_b).await;
         let a = start_node(pa, &ca_a, peers_a).await;
 
         // On B (an XL1 peer), create one live instance and one parked instance
@@ -662,7 +640,13 @@ async fn test_oracle_2_and_2b_federated_live_default_and_older_peer_compat() {
         let in_b_live = inbox();
         let s_b_parked = Sleeper::new();
         let in_b_parked = inbox();
-        write_claude_session(&b.sessions_dir, s_b_live.pid(), ID_LIVE, "b-live", &in_b_live.sock);
+        write_claude_session(
+            &b.sessions_dir,
+            s_b_live.pid(),
+            ID_LIVE,
+            "b-live",
+            &in_b_live.sock,
+        );
         write_claude_session(
             &b.sessions_dir,
             s_b_parked.pid(),
@@ -731,8 +715,7 @@ async fn test_oracle_2_and_2b_federated_live_default_and_older_peer_compat() {
             !inactive_addrs.contains(&format!("{ID_LIVE}@eve.b")),
             "live entries must not appear in status=inactive: {inactive_list}"
         );
-    })
-    .await;
+    }
 }
 
 // =============================================================================
@@ -746,7 +729,7 @@ async fn test_oracle_2_and_2b_federated_live_default_and_older_peer_compat() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_4_and_4b_inactive_window_and_instance_seen_pruning() {
-    run_with_port_retry(|| async {
+    {
         let ca = Ca::new();
         let ca_a = ca.issue(URI_A);
         let pa = prepare(&ca);
@@ -773,7 +756,8 @@ async fn test_oracle_4_and_4b_inactive_window_and_instance_seen_pruning() {
             .unwrap();
 
             // Plant an 8d-old instance_seen row that has an undelivered, unexpired agy_pending_messages row:
-            storage::mark_live(&conn, ID_EXPIRED_SEEN_WITH_AGY_PENDING, "agy", seen_8d_ago).unwrap();
+            storage::mark_live(&conn, ID_EXPIRED_SEEN_WITH_AGY_PENDING, "agy", seen_8d_ago)
+                .unwrap();
             conn.execute(
                 "INSERT INTO agy_pending_messages (id, session_id, created_at, from_name, bytes, text, envelope, delivered_at) \
                  VALUES ('01MSGAGY000000000000000001', ?1, ?2, 'sender@sini.a', 12, 'pending-body', 'pending-body', NULL)",
@@ -862,6 +846,5 @@ async fn test_oracle_4_and_4b_inactive_window_and_instance_seen_pruning() {
                 "instance_seen row older than reply_ttl with an undelivered, unexpired agy_pending_messages row must survive sync"
             );
         }
-    })
-    .await;
+    }
 }

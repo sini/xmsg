@@ -1,3 +1,4 @@
+mod short_sock;
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -25,11 +26,6 @@ use xmsg::storage::{self, MessageRecord, ReplyRecord};
 use xmsg::surface::SendResult as DeliveryResponse;
 use xmsg::svc::new_svc_store;
 
-fn get_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind free port");
-    listener.local_addr().expect("local addr").port()
-}
-
 // -----------------------------------------------------------------------------
 // Oracle 1: --leaf binds no agent.sock/register.sock and no fed listener
 // Mutant: bind register.sock => RED
@@ -56,78 +52,67 @@ async fn test_oracle_1_leaf_binds_no_harness_sockets_or_fed_listener() {
     let agent_sock = runtime_dir.join("xmsg/agent.sock");
     let http_sock = runtime_dir.join("xmsg/http.sock");
 
-    // get_free_port() releases the port before the child binds it at the end
-    // of its startup, and the other tests in this binary bind and connect on
-    // loopback meanwhile. If one of them takes the port, the child exits with
-    // AddrInUse: start it again on a fresh port instead of failing.
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(1))
         .build()
         .unwrap();
-    let mut attempt = 0;
-    let mut child = loop {
-        attempt += 1;
-        let port = get_free_port();
-        let listen_addr = format!("127.0.0.1:{port}");
+    let mut child = std::process::Command::new(bin)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("HOME", &runtime_dir)
+        .env("RUST_LOG", "info")
+        .args([
+            "serve",
+            "--leaf",
+            "--leaf-principal",
+            "svc:matrix",
+            "--listen",
+            "127.0.0.1:0",
+            "--peers-file",
+            peers_file.to_str().unwrap(),
+            "--fed-cert",
+            cert_file.to_str().unwrap(),
+            "--fed-key",
+            key_file.to_str().unwrap(),
+            "--db-path",
+            tmp.path().join("leaf.db").to_str().unwrap(),
+            "--sessions-dir",
+            tmp.path().join("sessions").to_str().unwrap(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn leaf serve");
 
-        let mut child = std::process::Command::new(bin)
-            .env("XDG_RUNTIME_DIR", &runtime_dir)
-            .env("HOME", &runtime_dir)
-            .args([
-                "serve",
-                "--leaf",
-                "--leaf-principal",
-                "svc:matrix",
-                "--listen",
-                &listen_addr,
-                "--peers-file",
-                peers_file.to_str().unwrap(),
-                "--fed-cert",
-                cert_file.to_str().unwrap(),
-                "--fed-key",
-                key_file.to_str().unwrap(),
-                "--db-path",
-                tmp.path().join("leaf.db").to_str().unwrap(),
-                "--sessions-dir",
-                tmp.path().join("sessions").to_str().unwrap(),
-            ])
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn leaf serve");
+    let stdout = short_sock::StdoutCapture::from_std(child.stdout.take().unwrap());
+    let listen_addr =
+        stdout.wait_for_addr("starting leaf tcp http server", Duration::from_secs(15));
 
-        // Wait for HTTP server to become responsive
-        let healthz_url = format!("http://{listen_addr}/healthz");
-        let mut ready = false;
-        let mut exited = None;
-        for _ in 0..600 {
-            if let Some(status) = child.try_wait().unwrap() {
-                exited = Some(status);
+    // Wait for HTTP server to become responsive
+    let healthz_url = format!("http://{listen_addr}/healthz");
+    let mut ready = false;
+    let mut exited = None;
+    for _ in 0..600 {
+        if let Some(status) = child.try_wait().unwrap() {
+            exited = Some(status);
+            break;
+        }
+        if let Ok(resp) = client.get(&healthz_url).send().await {
+            if resp.status().is_success() {
+                ready = true;
                 break;
             }
-            if let Ok(resp) = client.get(&healthz_url).send().await {
-                if resp.status().is_success() {
-                    ready = true;
-                    break;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        if ready {
-            break child;
-        }
-
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    if !ready {
         let mut stderr = String::new();
         if exited.is_none() {
             let _ = child.kill();
             let _ = child.wait();
         }
         let _ = std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr);
-        if exited.is_some() && stderr.contains("AddrInUse") && attempt < 3 {
-            eprintln!("leaf serve lost {listen_addr} before binding it, retrying: {stderr}");
-            continue;
-        }
         panic!("Leaf HTTP server should respond on --listen (exit: {exited:?}): {stderr}");
-    };
+    }
 
     // In X19, leaf mode additionally serves register.sock (mode 0600) for its svc daemon. Its
     // bind and chmod run in a spawned task, so they can trail the HTTP listener.

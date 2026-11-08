@@ -324,157 +324,142 @@ async fn start_pair() -> Pair {
     let (cert_b_pem, key_b_pem, pin_b) = generate_self_signed_ed25519_pem("node_b").unwrap();
     let (cert_a, key_a, pin_a) = generate_self_signed_ed25519("node_a").unwrap();
 
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let port_b = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+    // Pre-bind node A's in-process federation listener (kept open, passed into create_full_test_node)
+    let listener_a = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fed_addr_a = listener_a.local_addr().unwrap();
 
-        let node_a = create_full_test_node(
-            "node_a",
-            "sess-a",
-            vec![PeerConfig {
-                name: "node_b".to_string(),
-                address: format!("127.0.0.1:{port_b}"),
-                pin: Some(pin_b.clone()),
-                ca: None,
-                identities: None,
-                allow: vec!["send".to_string(), "reply".to_string()],
-                from: None,
-                leaf: false,
-                principals: Vec::new(),
-                targets: None,
-                dial: None,
-            }],
-            None,
-            Some((cert_a.clone(), key_a.clone(), pin_a.clone())),
-            "dummy",
-        )
-        .await;
+    // Set up real node B files and directories
+    let tmp_b = tempdir().unwrap();
+    fs::set_permissions(tmp_b.path(), fs::Permissions::from_mode(0o700)).unwrap();
 
-        // Set up real node B files and directories
-        let tmp_b = tempdir().unwrap();
-        fs::set_permissions(tmp_b.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let cert_file = tmp_b.path().join("cert.pem");
+    let key_file = tmp_b.path().join("key.pem");
+    let peers_file = tmp_b.path().join("peers.json");
+    fs::write(&cert_file, &cert_b_pem).unwrap();
+    fs::write(&key_file, &key_b_pem).unwrap();
 
-        let cert_file = tmp_b.path().join("cert.pem");
-        let key_file = tmp_b.path().join("key.pem");
-        let peers_file = tmp_b.path().join("peers.json");
-        fs::write(&cert_file, &cert_b_pem).unwrap();
-        fs::write(&key_file, &key_b_pem).unwrap();
-
-        let peers_json = serde_json::json!({
-            "node_a": {
-                "address": node_a.fed_addr.to_string(),
-                "pin": pin_a,
-                "allow": ["send", "reply", "list"]
-            }
-        });
-        fs::write(&peers_file, peers_json.to_string()).unwrap();
-
-        let sock_dir_b = tmp_b.path().join("run");
-        fs::create_dir_all(&sock_dir_b).unwrap();
-        fs::set_permissions(&sock_dir_b, fs::Permissions::from_mode(0o700)).unwrap();
-
-        let sessions_dir_b = tmp_b.path().join("sessions");
-        fs::create_dir_all(&sessions_dir_b).unwrap();
-        fs::set_permissions(&sessions_dir_b, fs::Permissions::from_mode(0o700)).unwrap();
-
-        let db_path_b = tmp_b.path().join("test.db");
-        let register_sock_b = sock_dir_b.join("register.sock");
-        let agent_sock_b = sock_dir_b.join("agent.sock");
-        let http_sock_b = sock_dir_b.join("http.sock");
-
-        let current_exe = std::env::current_exe().unwrap();
-
-        // Spawn node B as real xmsg serve process
-        let bin = env!("CARGO_BIN_EXE_xmsg");
-        let child = tokio::process::Command::new(bin)
-            .env("XDG_RUNTIME_DIR", &sock_dir_b)
-            .env("HOME", tmp_b.path())
-            .args([
-                "serve",
-                "--listen",
-                "127.0.0.1:0",
-                "--fed-listen",
-                &format!("127.0.0.1:{port_b}"),
-                "--peers-file",
-                peers_file.to_str().unwrap(),
-                "--fed-cert",
-                cert_file.to_str().unwrap(),
-                "--fed-key",
-                key_file.to_str().unwrap(),
-                "--db-path",
-                db_path_b.to_str().unwrap(),
-                "--sessions-dir",
-                sessions_dir_b.to_str().unwrap(),
-                "--register-sock",
-                register_sock_b.to_str().unwrap(),
-                "--agent-sock",
-                agent_sock_b.to_str().unwrap(),
-                "--http-sock",
-                http_sock_b.to_str().unwrap(),
-                "--svc-exe",
-                &format!("guard={}", current_exe.display()),
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-
-        let mut child_guard = ChildGuard(child);
-
-        // Wait for node B to be ready
-        let mut ready = false;
-        let mut exited = None;
-        for _ in 0..600 {
-            if let Ok(Some(status)) = child_guard.0.try_wait() {
-                exited = Some(status);
-                break;
-            }
-            if std::os::unix::net::UnixStream::connect(&register_sock_b).is_ok()
-                && tokio::net::TcpStream::connect(("127.0.0.1", port_b))
-                    .await
-                    .is_ok()
-            {
-                ready = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+    let peers_json = serde_json::json!({
+        "node_a": {
+            "address": fed_addr_a.to_string(),
+            "pin": pin_a,
+            "allow": ["send", "reply", "list"]
         }
+    });
+    fs::write(&peers_file, peers_json.to_string()).unwrap();
 
-        if ready {
-            return Pair {
-                _child: child_guard,
-                register_sock_b,
-                http_sock_b,
-                node_a,
-                _tmp_b: tmp_b,
-            };
+    let sock_dir_b = tmp_b.path().join("run");
+    fs::create_dir_all(&sock_dir_b).unwrap();
+    fs::set_permissions(&sock_dir_b, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let sessions_dir_b = tmp_b.path().join("sessions");
+    fs::create_dir_all(&sessions_dir_b).unwrap();
+    fs::set_permissions(&sessions_dir_b, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let db_path_b = tmp_b.path().join("test.db");
+    let register_sock_b = sock_dir_b.join("register.sock");
+    let agent_sock_b = sock_dir_b.join("agent.sock");
+    let http_sock_b = sock_dir_b.join("http.sock");
+
+    let current_exe = std::env::current_exe().unwrap();
+
+    // Spawn node B as real xmsg serve process binding --fed-listen 127.0.0.1:0 itself
+    let bin = env!("CARGO_BIN_EXE_xmsg");
+    let mut child = tokio::process::Command::new(bin)
+        .env("XDG_RUNTIME_DIR", &sock_dir_b)
+        .env("HOME", tmp_b.path())
+        .env("RUST_LOG", "info")
+        .args([
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--fed-listen",
+            "127.0.0.1:0",
+            "--peers-file",
+            peers_file.to_str().unwrap(),
+            "--fed-cert",
+            cert_file.to_str().unwrap(),
+            "--fed-key",
+            key_file.to_str().unwrap(),
+            "--db-path",
+            db_path_b.to_str().unwrap(),
+            "--sessions-dir",
+            sessions_dir_b.to_str().unwrap(),
+            "--register-sock",
+            register_sock_b.to_str().unwrap(),
+            "--agent-sock",
+            agent_sock_b.to_str().unwrap(),
+            "--http-sock",
+            http_sock_b.to_str().unwrap(),
+            "--svc-exe",
+            &format!("guard={}", current_exe.display()),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let stdout_b = short_sock::StdoutCapture::from_tokio(child.stdout.take().unwrap());
+    let mut child_guard = ChildGuard(child);
+    let port_b = stdout_b.wait_for_port("bound federation mTLS listener", Duration::from_secs(15));
+
+    // Wait for node B to be ready
+    let mut ready = false;
+    let mut exited = None;
+    for _ in 0..600 {
+        if let Ok(Some(status)) = child_guard.0.try_wait() {
+            exited = Some(status);
+            break;
         }
+        if std::os::unix::net::UnixStream::connect(&register_sock_b).is_ok()
+            && tokio::net::TcpStream::connect(("127.0.0.1", port_b))
+                .await
+                .is_ok()
+        {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
+    if !ready {
         let mut stderr = String::new();
         if let Some(mut err) = child_guard.0.stderr.take() {
             let _ = tokio::io::AsyncReadExt::read_to_string(&mut err, &mut stderr).await;
-        }
-        if exited.is_some()
-            && (stderr.contains("AddrInUse")
-                || stderr.contains("address already in use")
-                || stderr.contains("Address already in use")
-                || stderr.contains("failed to bind"))
-            && attempt < 5
-        {
-            eprintln!(
-                "child node_b lost port {port_b} before binding, retrying (attempt {attempt}): {stderr}"
-            );
-            continue;
         }
         panic!(
             "child node_b exited prematurely: {:?}, stderr:\n{}",
             exited, stderr
         );
+    }
+
+    let node_a = create_full_test_node(
+        "node_a",
+        "sess-a",
+        vec![PeerConfig {
+            name: "node_b".to_string(),
+            address: format!("127.0.0.1:{port_b}"),
+            pin: Some(pin_b),
+            ca: None,
+            identities: None,
+            allow: vec!["send".to_string(), "reply".to_string()],
+            from: None,
+            leaf: false,
+            principals: Vec::new(),
+            targets: None,
+            dial: None,
+        }],
+        Some(listener_a),
+        Some((cert_a, key_a, pin_a)),
+        "dummy",
+    )
+    .await;
+
+    Pair {
+        _child: child_guard,
+        register_sock_b,
+        http_sock_b,
+        node_a,
+        _tmp_b: tmp_b,
     }
 }
 

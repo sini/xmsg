@@ -34,11 +34,6 @@ impl Drop for ChildGuard {
     }
 }
 
-fn get_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind free port");
-    listener.local_addr().expect("local addr").port()
-}
-
 async fn connect_svc(sock_path: &Path) -> (BufReader<OwnedReadHalf>, OwnedWriteHalf) {
     let stream = UnixStream::connect(sock_path).await.unwrap();
     let (reader, writer) = stream.into_split();
@@ -151,133 +146,120 @@ async fn spawn_hub_node(
     leaf_pin: &str,
     leaf_address: &str,
 ) -> (HubFixture, u16) {
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let fed_port = get_free_port();
-        let http_port = get_free_port();
+    let tmp = tempdir().unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
 
-        let tmp = tempdir().unwrap();
-        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let cert_file = tmp.path().join("cert.pem");
+    let key_file = tmp.path().join("key.pem");
+    let peers_file = tmp.path().join("peers.json");
+    let db_path = tmp.path().join("hub.db");
 
-        let cert_file = tmp.path().join("cert.pem");
-        let key_file = tmp.path().join("key.pem");
-        let peers_file = tmp.path().join("peers.json");
-        let db_path = tmp.path().join("hub.db");
+    fs::write(&cert_file, cert_pem.as_bytes()).unwrap();
+    fs::write(&key_file, key_pem.as_bytes()).unwrap();
 
-        fs::write(&cert_file, cert_pem.as_bytes()).unwrap();
-        fs::write(&key_file, key_pem.as_bytes()).unwrap();
-
-        let peers_json = serde_json::json!({
-            leaf_name: {
-                "address": leaf_address,
-                "pin": normalize_pin(leaf_pin),
-                "leaf": true,
-                "allow": ["send", "reply", "inbox"]
-            }
-        });
-        fs::write(&peers_file, peers_json.to_string()).unwrap();
-
-        let run_dir = tmp.path().join("run");
-        fs::create_dir_all(&run_dir).unwrap();
-        fs::set_permissions(&run_dir, fs::Permissions::from_mode(0o700)).unwrap();
-
-        let sessions_dir = tmp.path().join("sessions");
-        fs::create_dir_all(&sessions_dir).unwrap();
-        fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o700)).unwrap();
-
-        let agent_sock = run_dir.join("agent.sock");
-        let register_sock = run_dir.join("register.sock");
-        let http_sock = run_dir.join("http.sock");
-
-        let bin = env!("CARGO_BIN_EXE_xmsg");
-        let child = tokio::process::Command::new(bin)
-            .env("XDG_RUNTIME_DIR", &run_dir)
-            .env("HOME", &run_dir)
-            .args([
-                "serve",
-                "--listen",
-                &format!("127.0.0.1:{http_port}"),
-                "--fed-listen",
-                &format!("127.0.0.1:{fed_port}"),
-                "--peers-file",
-                peers_file.to_str().unwrap(),
-                "--fed-cert",
-                cert_file.to_str().unwrap(),
-                "--fed-key",
-                key_file.to_str().unwrap(),
-                "--db-path",
-                db_path.to_str().unwrap(),
-                "--sessions-dir",
-                sessions_dir.to_str().unwrap(),
-                "--register-sock",
-                register_sock.to_str().unwrap(),
-                "--agent-sock",
-                agent_sock.to_str().unwrap(),
-                "--http-sock",
-                http_sock.to_str().unwrap(),
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn hub node");
-
-        let mut guard = ChildGuard::new(child);
-
-        let mut ready = false;
-        let mut exited = None;
-        for _ in 0..600 {
-            if let Ok(Some(status)) = guard.child_mut().try_wait() {
-                exited = Some(status);
-                break;
-            }
-            if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
-                && tokio::net::TcpStream::connect(("127.0.0.1", fed_port))
-                    .await
-                    .is_ok()
-                && tokio::net::TcpStream::connect(("127.0.0.1", http_port))
-                    .await
-                    .is_ok()
-            {
-                ready = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+    let peers_json = serde_json::json!({
+        leaf_name: {
+            "address": leaf_address,
+            "pin": normalize_pin(leaf_pin),
+            "leaf": true,
+            "allow": ["send", "reply", "inbox"]
         }
+    });
+    fs::write(&peers_file, peers_json.to_string()).unwrap();
 
-        if ready {
-            return (
-                HubFixture {
-                    _tmp: tmp,
-                    http_port,
-                    agent_sock,
-                    db_path,
-                    sessions_dir,
-                    child: guard,
-                },
-                fed_port,
-            );
+    let run_dir = tmp.path().join("run");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::set_permissions(&run_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let sessions_dir = tmp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let agent_sock = run_dir.join("agent.sock");
+    let register_sock = run_dir.join("register.sock");
+    let http_sock = run_dir.join("http.sock");
+
+    let bin = env!("CARGO_BIN_EXE_xmsg");
+    let mut child = tokio::process::Command::new(bin)
+        .env("XDG_RUNTIME_DIR", &run_dir)
+        .env("HOME", &run_dir)
+        .env("RUST_LOG", "info")
+        .args([
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--fed-listen",
+            "127.0.0.1:0",
+            "--peers-file",
+            peers_file.to_str().unwrap(),
+            "--fed-cert",
+            cert_file.to_str().unwrap(),
+            "--fed-key",
+            key_file.to_str().unwrap(),
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "--sessions-dir",
+            sessions_dir.to_str().unwrap(),
+            "--register-sock",
+            register_sock.to_str().unwrap(),
+            "--agent-sock",
+            agent_sock.to_str().unwrap(),
+            "--http-sock",
+            http_sock.to_str().unwrap(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn hub node");
+
+    let stdout = short_sock::StdoutCapture::from_tokio(child.stdout.take().unwrap());
+    let mut guard = ChildGuard::new(child);
+    let fed_port = stdout.wait_for_port("bound federation mTLS listener", Duration::from_secs(15));
+    let http_port = stdout.wait_for_port("bound tcp http server", Duration::from_secs(15));
+
+    let mut ready = false;
+    let mut exited = None;
+    for _ in 0..600 {
+        if let Ok(Some(status)) = guard.child_mut().try_wait() {
+            exited = Some(status);
+            break;
         }
+        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+            && tokio::net::TcpStream::connect(("127.0.0.1", fed_port))
+                .await
+                .is_ok()
+            && tokio::net::TcpStream::connect(("127.0.0.1", http_port))
+                .await
+                .is_ok()
+        {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
+    if !ready {
         let mut stderr = String::new();
         if let Some(mut err) = guard.child_mut().stderr.take() {
             let _ = tokio::io::AsyncReadExt::read_to_string(&mut err, &mut stderr).await;
-        }
-        if exited.is_some()
-            && (stderr.contains("AddrInUse")
-                || stderr.contains("address already in use")
-                || stderr.contains("Address already in use")
-                || stderr.contains("failed to bind"))
-            && attempt < 5
-        {
-            eprintln!("hub node lost port before binding, retrying (attempt {attempt}): {stderr}");
-            continue;
         }
         panic!(
             "hub node exited prematurely: {:?}, stderr:\n{}",
             exited, stderr
         );
     }
+
+    (
+        HubFixture {
+            _tmp: tmp,
+            http_port,
+            agent_sock,
+            db_path,
+            sessions_dir,
+            child: guard,
+        },
+        fed_port,
+    )
 }
 
 struct LeafFixture {
@@ -296,114 +278,100 @@ async fn spawn_leaf_node(
     hub_pin: &str,
     leaf_principal: &str,
 ) -> LeafFixture {
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let leaf_http_port = get_free_port();
+    let tmp = tempdir().unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
 
-        let tmp = tempdir().unwrap();
-        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let cert_file = tmp.path().join("cert.pem");
+    let key_file = tmp.path().join("key.pem");
+    let peers_file = tmp.path().join("peers.json");
+    let db_path = tmp.path().join("leaf.db");
 
-        let cert_file = tmp.path().join("cert.pem");
-        let key_file = tmp.path().join("key.pem");
-        let peers_file = tmp.path().join("peers.json");
-        let db_path = tmp.path().join("leaf.db");
+    fs::write(&cert_file, cert_pem.as_bytes()).unwrap();
+    fs::write(&key_file, key_pem.as_bytes()).unwrap();
 
-        fs::write(&cert_file, cert_pem.as_bytes()).unwrap();
-        fs::write(&key_file, key_pem.as_bytes()).unwrap();
-
-        let peers_json = serde_json::json!({
-            hub_name: {
-                "address": format!("127.0.0.1:{hub_fed_port}"),
-                "pin": normalize_pin(hub_pin),
-                "allow": ["send", "reply", "inbox"]
-            }
-        });
-        fs::write(&peers_file, peers_json.to_string()).unwrap();
-
-        let run_dir = tmp.path().join("run");
-        fs::create_dir_all(&run_dir).unwrap();
-        fs::set_permissions(&run_dir, fs::Permissions::from_mode(0o700)).unwrap();
-
-        let sessions_dir = tmp.path().join("sessions");
-        fs::create_dir_all(&sessions_dir).unwrap();
-        fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o700)).unwrap();
-
-        let reg_sock = run_dir.join("register.sock");
-
-        let bin = env!("CARGO_BIN_EXE_xmsg");
-        let child = tokio::process::Command::new(bin)
-            .env("XDG_RUNTIME_DIR", &run_dir)
-            .env("HOME", &run_dir)
-            .args([
-                "serve",
-                "--leaf",
-                "--leaf-principal",
-                leaf_principal,
-                "--listen",
-                &format!("127.0.0.1:{leaf_http_port}"),
-                "--peers-file",
-                peers_file.to_str().unwrap(),
-                "--fed-cert",
-                cert_file.to_str().unwrap(),
-                "--fed-key",
-                key_file.to_str().unwrap(),
-                "--db-path",
-                db_path.to_str().unwrap(),
-                "--sessions-dir",
-                sessions_dir.to_str().unwrap(),
-                "--register-sock",
-                reg_sock.to_str().unwrap(),
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn leaf node");
-
-        let mut guard = ChildGuard::new(child);
-
-        let mut ready = false;
-        let mut exited = None;
-        for _ in 0..600 {
-            if let Ok(Some(status)) = guard.child_mut().try_wait() {
-                exited = Some(status);
-                break;
-            }
-            if std::os::unix::net::UnixStream::connect(&reg_sock).is_ok() {
-                ready = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+    let peers_json = serde_json::json!({
+        hub_name: {
+            "address": format!("127.0.0.1:{hub_fed_port}"),
+            "pin": normalize_pin(hub_pin),
+            "allow": ["send", "reply", "inbox"]
         }
+    });
+    fs::write(&peers_file, peers_json.to_string()).unwrap();
 
-        if ready {
-            return LeafFixture {
-                _tmp: tmp,
-                reg_sock,
-                child: guard,
-            };
+    let run_dir = tmp.path().join("run");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::set_permissions(&run_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let sessions_dir = tmp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let reg_sock = run_dir.join("register.sock");
+
+    let bin = env!("CARGO_BIN_EXE_xmsg");
+    let mut child = tokio::process::Command::new(bin)
+        .env("XDG_RUNTIME_DIR", &run_dir)
+        .env("HOME", &run_dir)
+        .env("RUST_LOG", "info")
+        .args([
+            "serve",
+            "--leaf",
+            "--leaf-principal",
+            leaf_principal,
+            "--listen",
+            "127.0.0.1:0",
+            "--peers-file",
+            peers_file.to_str().unwrap(),
+            "--fed-cert",
+            cert_file.to_str().unwrap(),
+            "--fed-key",
+            key_file.to_str().unwrap(),
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "--sessions-dir",
+            sessions_dir.to_str().unwrap(),
+            "--register-sock",
+            reg_sock.to_str().unwrap(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn leaf node");
+
+    let stdout = short_sock::StdoutCapture::from_tokio(child.stdout.take().unwrap());
+    let mut guard = ChildGuard::new(child);
+    let _leaf_http_port =
+        stdout.wait_for_port("starting leaf tcp http server", Duration::from_secs(15));
+
+    let mut ready = false;
+    let mut exited = None;
+    for _ in 0..600 {
+        if let Ok(Some(status)) = guard.child_mut().try_wait() {
+            exited = Some(status);
+            break;
         }
+        if std::os::unix::net::UnixStream::connect(&reg_sock).is_ok() {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
+    if !ready {
         let mut stderr = String::new();
         if let Some(mut err) = guard.child_mut().stderr.take() {
             let _ = tokio::io::AsyncReadExt::read_to_string(&mut err, &mut stderr).await;
-        }
-        if exited.is_some()
-            && (stderr.contains("AddrInUse")
-                || stderr.contains("address already in use")
-                || stderr.contains("Address already in use")
-                || stderr.contains("failed to bind"))
-            && attempt < 5
-        {
-            eprintln!(
-                "leaf node lost port {leaf_http_port} before binding, retrying (attempt {attempt}): {stderr}"
-            );
-            continue;
         }
         panic!(
             "leaf node exited prematurely: {:?}, stderr:\n{}",
             exited, stderr
         );
+    }
+
+    LeafFixture {
+        _tmp: tmp,
+        reg_sock,
+        child: guard,
     }
 }
 
@@ -417,17 +385,8 @@ async fn test_oracle_1_http_caller_leaf_reply_stored_and_polled() {
     let (cert_hub, key_hub, pin_hub) = generate_self_signed_ed25519_pem("hub").unwrap();
     let (cert_leaf, key_leaf, pin_leaf) = generate_self_signed_ed25519_pem("leaf").unwrap();
 
-    let dummy_leaf_port = get_free_port();
-
-    let (hub, fed_port) = spawn_hub_node(
-        "hub",
-        &cert_hub,
-        &key_hub,
-        "leaf",
-        &pin_leaf,
-        &format!("127.0.0.1:{dummy_leaf_port}"),
-    )
-    .await;
+    let (hub, fed_port) =
+        spawn_hub_node("hub", &cert_hub, &key_hub, "leaf", &pin_leaf, "127.0.0.1:9").await;
 
     let leaf = spawn_leaf_node(
         "leaf",
@@ -556,17 +515,8 @@ async fn test_oracle_2_attested_sender_reply_stored_and_readable() {
     let (cert_hub, key_hub, pin_hub) = generate_self_signed_ed25519_pem("hub").unwrap();
     let (cert_leaf, key_leaf, pin_leaf) = generate_self_signed_ed25519_pem("leaf").unwrap();
 
-    let dummy_leaf_port = get_free_port();
-
-    let (hub, fed_port) = spawn_hub_node(
-        "hub",
-        &cert_hub,
-        &key_hub,
-        "leaf",
-        &pin_leaf,
-        &format!("127.0.0.1:{dummy_leaf_port}"),
-    )
-    .await;
+    let (hub, fed_port) =
+        spawn_hub_node("hub", &cert_hub, &key_hub, "leaf", &pin_leaf, "127.0.0.1:9").await;
 
     let leaf = spawn_leaf_node(
         "leaf",
@@ -739,17 +689,8 @@ async fn test_oracle_4_push_capable_sender_gets_pushed_exactly_once() {
     let (cert_hub, key_hub, pin_hub) = generate_self_signed_ed25519_pem("hub").unwrap();
     let (cert_leaf, key_leaf, pin_leaf) = generate_self_signed_ed25519_pem("leaf").unwrap();
 
-    let dummy_leaf_port = get_free_port();
-
-    let (hub, fed_port) = spawn_hub_node(
-        "hub",
-        &cert_hub,
-        &key_hub,
-        "leaf",
-        &pin_leaf,
-        &format!("127.0.0.1:{dummy_leaf_port}"),
-    )
-    .await;
+    let (hub, fed_port) =
+        spawn_hub_node("hub", &cert_hub, &key_hub, "leaf", &pin_leaf, "127.0.0.1:9").await;
 
     let leaf = spawn_leaf_node(
         "leaf",

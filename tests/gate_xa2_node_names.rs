@@ -41,11 +41,6 @@ impl Drop for ChildGuard {
     }
 }
 
-fn get_free_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    l.local_addr().unwrap().port()
-}
-
 /// A certificate authority issuing SPIFFE leaves.
 struct Ca {
     params: rcgen::CertificateParams,
@@ -126,6 +121,7 @@ struct Node {
     register_sock: PathBuf,
     sessions_dir: PathBuf,
     ca_file: PathBuf,
+    stdout: short_sock::StdoutCapture,
     child: ChildGuard,
 }
 
@@ -148,13 +144,11 @@ async fn spawn_node(spec: NodeSpec, prepared: Option<(TempDir, PathBuf)>) -> Res
     }
     let agent_sock = run_dir.join("agent.sock");
     let register_sock = run_dir.join("register.sock");
-    let http_port = get_free_port();
-    let fed_port = get_free_port();
 
     let mut args: Vec<String> = vec![
         "serve".into(),
         "--listen".into(),
-        format!("127.0.0.1:{http_port}"),
+        "127.0.0.1:0".into(),
         "--db-path".into(),
         tmp.path().join("node.db").display().to_string(),
         "--sessions-dir".into(),
@@ -184,7 +178,7 @@ async fn spawn_node(spec: NodeSpec, prepared: Option<(TempDir, PathBuf)>) -> Res
         args.extend(["--peers-file".into(), f.display().to_string()]);
     }
     if spec.fed {
-        args.extend(["--fed-listen".into(), format!("127.0.0.1:{fed_port}")]);
+        args.extend(["--fed-listen".into(), "127.0.0.1:0".into()]);
     }
     if let Some(svc) = &spec.svc_exe {
         args.extend(["--svc-exe".into(), svc.clone()]);
@@ -194,7 +188,7 @@ async fn spawn_node(spec: NodeSpec, prepared: Option<(TempDir, PathBuf)>) -> Res
     let mut cmd = tokio::process::Command::new(BIN);
     cmd.env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
-        .env("RUST_LOG", "warn")
+        .env("RUST_LOG", "info")
         .env_remove("XMSG_HOST_LABEL")
         .args(&args)
         .stdout(std::process::Stdio::piped())
@@ -203,6 +197,10 @@ async fn spawn_node(spec: NodeSpec, prepared: Option<(TempDir, PathBuf)>) -> Res
         cmd.env(k, v);
     }
     let mut child = cmd.spawn().expect("spawn xmsg serve");
+    let stdout = short_sock::StdoutCapture::from_tokio(child.stdout.take().expect("stdout"));
+
+    let mut http_port = None;
+    let mut fed_port = if spec.fed { None } else { Some(0) };
 
     for _ in 0..600 {
         if let Ok(Some(_)) = child.try_wait() {
@@ -212,28 +210,37 @@ async fn spawn_node(spec: NodeSpec, prepared: Option<(TempDir, PathBuf)>) -> Res
             }
             return Err(err);
         }
-        let http_up = tokio::net::TcpStream::connect(("127.0.0.1", http_port))
-            .await
-            .is_ok();
-        let fed_up = !spec.fed
-            || tokio::net::TcpStream::connect(("127.0.0.1", fed_port))
+        if http_port.is_none() {
+            http_port = stdout.try_wait_for_port("bound tcp http server", Duration::ZERO);
+        }
+        if fed_port.is_none() {
+            fed_port = stdout.try_wait_for_port("bound federation mTLS listener", Duration::ZERO);
+        }
+        if let (Some(hp), Some(fp)) = (http_port, fed_port) {
+            let http_up = tokio::net::TcpStream::connect(("127.0.0.1", hp))
                 .await
                 .is_ok();
-        if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
-            && std::os::unix::net::UnixStream::connect(&register_sock).is_ok()
-            && http_up
-            && fed_up
-        {
-            return Ok(Node {
-                tmp,
-                http_port,
-                fed_port,
-                agent_sock,
-                register_sock,
-                sessions_dir,
-                ca_file,
-                child: ChildGuard(Some(child)),
-            });
+            let fed_up = !spec.fed
+                || tokio::net::TcpStream::connect(("127.0.0.1", fp))
+                    .await
+                    .is_ok();
+            if std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+                && std::os::unix::net::UnixStream::connect(&register_sock).is_ok()
+                && http_up
+                && fed_up
+            {
+                return Ok(Node {
+                    tmp,
+                    http_port: hp,
+                    fed_port: fp,
+                    agent_sock,
+                    register_sock,
+                    sessions_dir,
+                    ca_file,
+                    stdout,
+                    child: ChildGuard(Some(child)),
+                });
+            }
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -241,11 +248,11 @@ async fn spawn_node(spec: NodeSpec, prepared: Option<(TempDir, PathBuf)>) -> Res
     panic!("xmsg serve neither served nor exited within 30s: {args:?}");
 }
 
-/// A node that must start; a lost port race panics with a message the retry wrapper reads.
+/// A node that must start.
 async fn start(spec: NodeSpec, prepared: Option<(TempDir, PathBuf)>) -> Node {
     match spawn_node(spec, prepared).await {
         Ok(n) => n,
-        Err(stderr) => panic!("node exited at start (failed to bind?): {stderr}"),
+        Err(stderr) => panic!("node exited at start: {stderr}"),
     }
 }
 
@@ -255,48 +262,32 @@ async fn refused(spec: NodeSpec) -> String {
 }
 
 impl Node {
+    fn reload_peers(&self, peers: &str) {
+        let prev = self
+            .stdout
+            .line_count_containing("successfully reloaded federation TLS credentials and peers");
+        fs::write(self.tmp.path().join("peers.json"), peers).unwrap();
+        let pid = self.child.0.as_ref().unwrap().id().expect("child pid") as i32;
+        unsafe {
+            libc::kill(pid, libc::SIGHUP);
+        }
+        self.stdout.wait_for_line_count(
+            "successfully reloaded federation TLS credentials and peers",
+            prev + 1,
+            Duration::from_secs(5),
+        );
+    }
+
     /// Stops the node and returns everything it logged (tracing writes to stdout).
     async fn stop_and_log(mut self) -> String {
         let mut child = self.child.0.take().unwrap();
         let _ = child.start_kill();
         let _ = child.wait().await;
-        let mut log = String::new();
-        if let Some(mut o) = child.stdout.take() {
-            let _ = o.read_to_string(&mut log).await;
-        }
+        let mut log = self.stdout.snapshot();
         if let Some(mut e) = child.stderr.take() {
             let _ = e.read_to_string(&mut log).await;
         }
         log
-    }
-}
-
-async fn run_with_port_retry<F, Fut>(f: F)
-where
-    F: Fn() -> Fut + Send + Sync + 'static,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
-{
-    for attempt in 1..=5 {
-        match tokio::task::spawn(f()).await {
-            Ok(()) => return,
-            Err(e) if e.is_panic() => {
-                let p = e.into_panic();
-                let msg = p
-                    .downcast_ref::<String>()
-                    .cloned()
-                    .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
-                    .unwrap_or_default();
-                let port_race = msg.contains("failed to bind")
-                    || msg.contains("AddrInUse")
-                    || msg.contains("ddress already in use");
-                if port_race && attempt < 5 {
-                    tokio::time::sleep(Duration::from_millis(150)).await;
-                    continue;
-                }
-                std::panic::resume_unwind(p);
-            }
-            Err(e) => panic!("join error: {e}"),
-        }
     }
 }
 
@@ -447,92 +438,87 @@ const GENIE_HOST_GENIE_GUARD_USER: &str = "spiffe://json64.dev/host/genie/user/g
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_1_ca_names_in_received_origins() {
-    run_with_port_retry(|| async {
-        let ca = Ca::new();
-        let r_creds = ca.issue(SINI_CORTEX);
-        let s1_creds = ca.issue(SINI_BITSTREAM);
-        let s2_creds = ca.issue(GENIE_GUARD_POD);
+    let ca = Ca::new();
+    let r_creds = ca.issue(SINI_CORTEX);
+    let s1_creds = ca.issue(SINI_BITSTREAM);
+    let s2_creds = ca.issue(GENIE_GUARD_POD);
 
-        let r_dir = node_dir();
-        fs::write(&r_dir.1, &ca.pem).unwrap();
-        let s1_dir = node_dir();
-        fs::write(&s1_dir.1, &ca.pem).unwrap();
-        let s2_dir = node_dir();
-        fs::write(&s2_dir.1, &ca.pem).unwrap();
+    let r_dir = node_dir();
+    fs::write(&r_dir.1, &ca.pem).unwrap();
+    let s1_dir = node_dir();
+    fs::write(&s1_dir.1, &ca.pem).unwrap();
+    let s2_dir = node_dir();
+    fs::write(&s2_dir.1, &ca.pem).unwrap();
 
-        // The receiver's peers file is checked first against its own certificate.
-        let s1_fed = get_free_port();
-        let s2_fed = get_free_port();
-        let r_peers = json!({
-            "sini.bitstream": ca_entry(&addr(s1_fed), &r_dir.1, SINI_BITSTREAM, &["send", "reply"]),
-            "genie-guard.genie": ca_entry(&addr(s2_fed), &r_dir.1, GENIE_GUARD_POD, &["send", "reply"]),
-        })
-        .to_string();
-        let (ok, out) = check_peers(&r_peers, Some(&r_creds.cert));
-        assert!(
-            ok && out.contains("loads for node sini.cortex"),
-            "the receiver's peers file must load for node sini.cortex: {out}"
-        );
-
-        let r = start(
-            NodeSpec {
-                creds: Some(r_creds),
-                peers: Some(r_peers),
-                fed: true,
-                svc_exe: Some(svc_exe("fed-worker")),
-                ..Default::default()
-            },
-            Some(r_dir),
-        )
-        .await;
-        let to_r = |dir: &Path| {
-            json!({ "sini.cortex": ca_entry(&addr(r.fed_port), dir, SINI_CORTEX, &["send", "reply"]) })
-                .to_string()
-        };
-        let s1 = start(
-            NodeSpec {
-                creds: Some(s1_creds),
-                peers: Some(to_r(&s1_dir.1)),
-                ..Default::default()
-            },
-            Some(s1_dir),
-        )
-        .await;
-        let s2 = start(
-            NodeSpec {
-                creds: Some(s2_creds),
-                peers: Some(to_r(&s2_dir.1)),
-                ..Default::default()
-            },
-            Some(s2_dir),
-        )
-        .await;
-
-        let (mut sr, mut sw) = register_svc(&r, "fed-worker").await;
-        for (s, text) in [(&s1, "from bitstream"), (&s2, "from the pod")] {
-            let (status, body) = http_send(s, "fed-worker@sini.cortex", text).await;
-            assert_eq!(status, 202, "send to sini.cortex: {body}");
-        }
-        let mut origins = Vec::new();
-        for _ in 0..2 {
-            let d = svc_poll(&mut sr, &mut sw).await;
-            assert_eq!(d["action"], "deliver", "{d}");
-            origins.push((
-                d["text"].as_str().unwrap().to_string(),
-                d["origin"]["node"].as_str().unwrap_or_default().to_string(),
-            ));
-        }
-        origins.sort();
-        assert_eq!(
-            origins,
-            vec![
-                ("from bitstream".to_string(), "sini.bitstream".to_string()),
-                ("from the pod".to_string(), "genie-guard.genie".to_string()),
-            ],
-            "received origins carry the certificate-derived node names"
-        );
+    // The receiver's peers file is checked first against its own certificate.
+    let r_peers = json!({
+        "sini.bitstream": ca_entry(&addr(9), &r_dir.1, SINI_BITSTREAM, &["send", "reply"]),
+        "genie-guard.genie": ca_entry(&addr(9), &r_dir.1, GENIE_GUARD_POD, &["send", "reply"]),
     })
+    .to_string();
+    let (ok, out) = check_peers(&r_peers, Some(&r_creds.cert));
+    assert!(
+        ok && out.contains("loads for node sini.cortex"),
+        "the receiver's peers file must load for node sini.cortex: {out}"
+    );
+
+    let r = start(
+        NodeSpec {
+            creds: Some(r_creds),
+            peers: Some(r_peers),
+            fed: true,
+            svc_exe: Some(svc_exe("fed-worker")),
+            ..Default::default()
+        },
+        Some(r_dir),
+    )
     .await;
+    let to_r = |dir: &Path| {
+        json!({ "sini.cortex": ca_entry(&addr(r.fed_port), dir, SINI_CORTEX, &["send", "reply"]) })
+            .to_string()
+    };
+    let s1 = start(
+        NodeSpec {
+            creds: Some(s1_creds),
+            peers: Some(to_r(&s1_dir.1)),
+            ..Default::default()
+        },
+        Some(s1_dir),
+    )
+    .await;
+    let s2 = start(
+        NodeSpec {
+            creds: Some(s2_creds),
+            peers: Some(to_r(&s2_dir.1)),
+            ..Default::default()
+        },
+        Some(s2_dir),
+    )
+    .await;
+
+    let (mut sr, mut sw) = register_svc(&r, "fed-worker").await;
+    for (s, text) in [(&s1, "from bitstream"), (&s2, "from the pod")] {
+        let (status, body) = http_send(s, "fed-worker@sini.cortex", text).await;
+        assert_eq!(status, 202, "send to sini.cortex: {body}");
+    }
+    let mut origins = Vec::new();
+    for _ in 0..2 {
+        let d = svc_poll(&mut sr, &mut sw).await;
+        assert_eq!(d["action"], "deliver", "{d}");
+        origins.push((
+            d["text"].as_str().unwrap().to_string(),
+            d["origin"]["node"].as_str().unwrap_or_default().to_string(),
+        ));
+    }
+    origins.sort();
+    assert_eq!(
+        origins,
+        vec![
+            ("from bitstream".to_string(), "sini.bitstream".to_string()),
+            ("from the pod".to_string(), "genie-guard.genie".to_string()),
+        ],
+        "received origins carry the certificate-derived node names"
+    );
 }
 
 // =============================================================================
@@ -587,106 +573,131 @@ async fn test_oracle_2_ca_entry_keyed_by_other_name_refused() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_3_pinned_names_cross_the_wire_canonical() {
-    run_with_port_retry(|| async {
-        let l_creds = pinned_creds("laptop-host");
-        let c_creds = pinned_creds("c-host");
-        let h_creds = pinned_creds("hub-host");
-        let l_name = node_name_from_pin(&l_creds.pin).unwrap();
-        let c_name = node_name_from_pin(&c_creds.pin).unwrap();
-        assert_eq!(l_name.len(), 16);
+    let l_creds = pinned_creds("laptop-host");
+    let c_creds = pinned_creds("c-host");
+    let h_creds = pinned_creds("hub-host");
+    let l_name = node_name_from_pin(&l_creds.pin).unwrap();
+    let c_name = node_name_from_pin(&c_creds.pin).unwrap();
+    assert_eq!(l_name.len(), 16);
 
-        // H is started last: L and C dial it, it dials them. L also knows C, as `cee`.
-        let l_dir = node_dir();
-        let c_dir = node_dir();
-        let h_fed = get_free_port();
-        let c = start(
-            NodeSpec {
-                creds: Some(c_creds.clone()),
-                peers: Some(
-                    json!({
-                        "peers": {
-                            "hub": pin_entry(&addr(h_fed), &h_creds.pin, &["send", "reply", "relayed"])
-                        }
-                    })
-                    .to_string(),
-                ),
-                fed: true,
-                ..Default::default()
-            },
-            Some(c_dir),
-        )
-        .await;
-        let l = start(
-            NodeSpec {
-                creds: Some(l_creds.clone()),
-                peers: Some(
-                    json!({
-                        "peers": {
-                            "hub": json!({
-                                "address": addr(h_fed),
-                                "pin": normalize_pin(&h_creds.pin),
-                                "allow": ["send", "reply"],
-                                "default_route": true
-                            }),
-                            "cee": pin_entry("", &c_creds.pin, &["send", "reply"])
-                        }
-                    })
-                    .to_string(),
-                ),
-                fed: true,
-                ..Default::default()
-            },
-            Some(l_dir),
-        )
-        .await;
-        let h_peers = json!({
+    let l_dir = node_dir();
+    let c_dir = node_dir();
+    let c = start(
+        NodeSpec {
+            creds: Some(c_creds.clone()),
+            peers: Some(
+                json!({
+                    "peers": {
+                        "hub": pin_entry(&addr(9), &h_creds.pin, &["send", "reply", "relayed"])
+                    }
+                })
+                .to_string(),
+            ),
+            fed: true,
+            ..Default::default()
+        },
+        Some(c_dir),
+    )
+    .await;
+    let l = start(
+        NodeSpec {
+            creds: Some(l_creds.clone()),
+            peers: Some(
+                json!({
+                    "peers": {
+                        "hub": json!({
+                            "address": addr(9),
+                            "pin": normalize_pin(&h_creds.pin),
+                            "allow": ["send", "reply"],
+                            "default_route": true
+                        }),
+                        "cee": pin_entry("", &c_creds.pin, &["send", "reply"])
+                    }
+                })
+                .to_string(),
+            ),
+            fed: true,
+            ..Default::default()
+        },
+        Some(l_dir),
+    )
+    .await;
+    let h_peers = json!({
+        "peers": {
+            "laptop": pin_entry(&addr(l.fed_port), &l_creds.pin, &["send", "reply", "forward"]),
+            "cnode": pin_entry(&addr(c.fed_port), &c_creds.pin, &["send", "reply"]),
+        }
+    })
+    .to_string();
+    let h = start(
+        NodeSpec {
+            creds: Some(h_creds.clone()),
+            peers: Some(h_peers),
+            fed: true,
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    c.reload_peers(
+        &json!({
             "peers": {
-                "laptop": pin_entry(&addr(l.fed_port), &l_creds.pin, &["send", "reply", "forward"]),
-                "cnode": pin_entry(&addr(c.fed_port), &c_creds.pin, &["send", "reply"]),
+                "hub": pin_entry(&addr(h.fed_port), &h_creds.pin, &["send", "reply", "relayed"])
             }
         })
-        .to_string();
-        let mut h_spec = NodeSpec {
-            creds: Some(h_creds),
-            peers: Some(h_peers),
-            ..Default::default()
-        };
-        // H must listen on the port L and C were told.
-        h_spec
-            .extra_args
-            .extend(["--fed-listen".to_string(), addr(h_fed)]);
-        let _h = start(h_spec, None).await;
-
-        let bob = claude_session(&c.sessions_dir, "bob", "Bob");
-
-        // L -> H -> C, the destination typed by its canonical name.
-        let (status, body) = http_send(&l, &format!("Bob@{c_name}"), "via the hub").await;
-        assert_eq!(status, 202, "relay through the hub: {body}");
-        let line = wait_line(&bob).await.expect("bob on C receives the relay");
-        assert!(
-            line.contains(&format!("ci · anon@{l_name}")),
-            "C has no nickname for L, so it sees L's canonical name {l_name}: {line}"
-        );
-        assert!(
-            !line.contains("laptop"),
-            "H's nickname for L must not cross the wire: {line}"
-        );
-
-        // L types its own nickname for C in a hop destination: the hub, which has no
-        // `cee`, receives C's canonical name (verifier P1).
-        let (status, body) = http_send(&l, "Bob@cee", "by L's nickname").await;
-        assert_eq!(status, 202, "L's nickname for C goes on the wire canonical: {body}");
-        let mut got = false;
-        for _ in 0..100 {
-            if bob.lock().unwrap().iter().any(|l| l.contains("by L's nickname")) {
-                got = true;
-                break;
+        .to_string(),
+    );
+    l.reload_peers(
+        &json!({
+            "peers": {
+                "hub": json!({
+                    "address": addr(h.fed_port),
+                    "pin": normalize_pin(&h_creds.pin),
+                    "allow": ["send", "reply"],
+                    "default_route": true
+                }),
+                "cee": pin_entry("", &c_creds.pin, &["send", "reply"])
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        })
+        .to_string(),
+    );
+
+    let bob = claude_session(&c.sessions_dir, "bob", "Bob");
+
+    // L -> H -> C, the destination typed by its canonical name.
+    let (status, body) = http_send(&l, &format!("Bob@{c_name}"), "via the hub").await;
+    assert_eq!(status, 202, "relay through the hub: {body}");
+    let line = wait_line(&bob).await.expect("bob on C receives the relay");
+    assert!(
+        line.contains(&format!("ci · anon@{l_name}")),
+        "C has no nickname for L, so it sees L's canonical name {l_name}: {line}"
+    );
+    assert!(
+        !line.contains("laptop"),
+        "H's nickname for L must not cross the wire: {line}"
+    );
+
+    // L types its own nickname for C in a hop destination: the hub, which has no
+    // `cee`, receives C's canonical name (verifier P1).
+    let (status, body) = http_send(&l, "Bob@cee", "by L's nickname").await;
+    assert_eq!(
+        status, 202,
+        "L's nickname for C goes on the wire canonical: {body}"
+    );
+    let mut got = false;
+    for _ in 0..100 {
+        if bob
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("by L's nickname"))
+        {
+            got = true;
+            break;
         }
-        assert!(got, "bob on C receives the send addressed by L's nickname");
-    })
-    .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(got, "bob on C receives the send addressed by L's nickname");
 }
 
 // =============================================================================
@@ -699,62 +710,63 @@ async fn test_oracle_3_pinned_names_cross_the_wire_canonical() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_3a_hub_forwards_canonical_origin() {
-    run_with_port_retry(|| async {
-        let (l_cert, l_key, l_pin) = generate_self_signed_ed25519("laptop-host").unwrap();
-        let c_creds = pinned_creds("c-host");
-        let h_creds = pinned_creds("hub-host");
-        let l_name = node_name_from_pin(&l_pin).unwrap();
-        let c_name = node_name_from_pin(&c_creds.pin).unwrap();
-        let h_name = node_name_from_pin(&h_creds.pin).unwrap();
-        let h_fed = get_free_port();
-        let c = start(
-            NodeSpec {
-                creds: Some(c_creds.clone()),
-                peers: Some(
-                    json!({ "hub": pin_entry(&addr(h_fed), &h_creds.pin, &["send", "reply", "relayed"]) })
-                        .to_string(),
-                ),
-                fed: true,
-                ..Default::default()
-            },
-            None,
-        )
-        .await;
-        let h_peers = json!({
-            "laptop": pin_entry(&addr(get_free_port()), &l_pin, &["send", "reply", "forward"]),
-            "cnode": pin_entry(&addr(c.fed_port), &c_creds.pin, &["send", "reply"]),
-        })
-        .to_string();
-        let h_pin = h_creds.pin.clone();
-        let mut h_spec = NodeSpec {
+    let (l_cert, l_key, l_pin) = generate_self_signed_ed25519("laptop-host").unwrap();
+    let c_creds = pinned_creds("c-host");
+    let h_creds = pinned_creds("hub-host");
+    let l_name = node_name_from_pin(&l_pin).unwrap();
+    let c_name = node_name_from_pin(&c_creds.pin).unwrap();
+    let h_name = node_name_from_pin(&h_creds.pin).unwrap();
+    let c = start(
+        NodeSpec {
+            creds: Some(c_creds.clone()),
+            peers: Some(
+                json!({ "hub": pin_entry(&addr(9), &h_creds.pin, &["send", "reply", "relayed"]) })
+                    .to_string(),
+            ),
+            fed: true,
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    let h_peers = json!({
+        "laptop": pin_entry(&addr(9), &l_pin, &["send", "reply", "forward"]),
+        "cnode": pin_entry(&addr(c.fed_port), &c_creds.pin, &["send", "reply"]),
+    })
+    .to_string();
+    let h_pin = h_creds.pin.clone();
+    let h = start(
+        NodeSpec {
             creds: Some(h_creds),
             peers: Some(h_peers),
+            fed: true,
             ..Default::default()
-        };
-        h_spec
-            .extra_args
-            .extend(["--fed-listen".to_string(), addr(h_fed)]);
-        let _h = start(h_spec, None).await;
-        let bob = claude_session(&c.sessions_dir, "baa3a12f-e06d-59f5-90c8-2eda9a54dd91", "Bob");
-
-        let origin = Origin {
-            cert_der: &l_cert,
-            key_der: &l_key,
-        };
-        let r = format!("baa3a12f-e06d-59f5-90c8-2eda9a54dd91@{c_name}");
-        let (status, body) = hop_send(&origin, &h_pin, h_fed, &r, "via the hub").await;
-        assert_eq!(status, 202, "{r} through the hub: {body}");
-        let line = wait_line(&bob).await.expect("bob on C receives the relay");
-        assert!(
-            line.contains(&format!("alice@{l_name}")),
-            "C has no nickname for L, so it sees L's canonical name {l_name}: {line}"
-        );
-        assert!(
-            !line.contains("laptop") && !line.contains("@hub") && !line.contains(&h_name),
-            "neither H's nickname for L nor H's own name stands for the origin: {line}"
-        );
-    })
+        },
+        None,
+    )
     .await;
+    let bob = claude_session(
+        &c.sessions_dir,
+        "baa3a12f-e06d-59f5-90c8-2eda9a54dd91",
+        "Bob",
+    );
+
+    let origin = Origin {
+        cert_der: &l_cert,
+        key_der: &l_key,
+    };
+    let r = format!("baa3a12f-e06d-59f5-90c8-2eda9a54dd91@{c_name}");
+    let (status, body) = hop_send(&origin, &h_pin, h.fed_port, &r, "via the hub").await;
+    assert_eq!(status, 202, "{r} through the hub: {body}");
+    let line = wait_line(&bob).await.expect("bob on C receives the relay");
+    assert!(
+        line.contains(&format!("alice@{l_name}")),
+        "C has no nickname for L, so it sees L's canonical name {l_name}: {line}"
+    );
+    assert!(
+        !line.contains("laptop") && !line.contains("@hub") && !line.contains(&h_name),
+        "neither H's nickname for L nor H's own name stands for the origin: {line}"
+    );
 }
 
 // =============================================================================
@@ -763,56 +775,52 @@ async fn test_oracle_3a_hub_forwards_canonical_origin() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_3b_direct_send_by_nickname() {
-    run_with_port_retry(|| async {
-        let l_creds = pinned_creds("laptop-host");
-        let h_creds = pinned_creds("hub-host");
-        let h_fed = get_free_port();
-        let l = start(
-            NodeSpec {
-                creds: Some(l_creds.clone()),
-                peers: Some(
-                    json!({ "hub": pin_entry(&addr(h_fed), &h_creds.pin, &["send", "reply"]) })
-                        .to_string(),
-                ),
-                fed: true,
-                ..Default::default()
-            },
-            None,
-        )
-        .await;
-        let mut h_spec = NodeSpec {
+    let l_creds = pinned_creds("laptop-host");
+    let h_creds = pinned_creds("hub-host");
+    let l = start(
+        NodeSpec {
+            creds: Some(l_creds.clone()),
+            peers: Some(
+                json!({ "hub": pin_entry(&addr(9), &h_creds.pin, &["send", "reply"]) }).to_string(),
+            ),
+            fed: true,
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    let h = start(
+        NodeSpec {
             creds: Some(h_creds),
             peers: Some(
                 json!({ "laptop": pin_entry(&addr(l.fed_port), &l_creds.pin, &["send", "reply"]) })
                     .to_string(),
             ),
+            fed: true,
             ..Default::default()
-        };
-        h_spec
-            .extra_args
-            .extend(["--fed-listen".to_string(), addr(h_fed)]);
-        let h = start(h_spec, None).await;
-        let alice = claude_session(
-            &l.sessions_dir,
-            "135aa23d-60a6-5595-a42a-c0296722252e",
-            "Alice",
-        );
-
-        // H types L's nickname.
-        let (status, body) = http_send(
-            &h,
-            "135aa23d-60a6-5595-a42a-c0296722252e@laptop",
-            "by nickname",
-        )
-        .await;
-        assert_eq!(
-            status, 202,
-            "x@laptop resolves through H's peers file: {body}"
-        );
-        let line = wait_line(&alice).await.expect("alice on L receives it");
-        assert!(line.contains("by nickname"), "{line}");
-    })
+        },
+        None,
+    )
     .await;
+    let alice = claude_session(
+        &l.sessions_dir,
+        "135aa23d-60a6-5595-a42a-c0296722252e",
+        "Alice",
+    );
+
+    // H types L's nickname.
+    let (status, body) = http_send(
+        &h,
+        "135aa23d-60a6-5595-a42a-c0296722252e@laptop",
+        "by nickname",
+    )
+    .await;
+    assert_eq!(
+        status, 202,
+        "x@laptop resolves through H's peers file: {body}"
+    );
+    let line = wait_line(&alice).await.expect("alice on L receives it");
+    assert!(line.contains("by nickname"), "{line}");
 }
 
 // =============================================================================
@@ -899,7 +907,7 @@ async fn test_oracle_5_name_shaped_nicknames_refused() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_6_one_node_one_canonical_name() {
-    run_with_port_retry(|| async {
+    {
         let ca = Ca::new();
         let x_creds = ca.issue(SINI_BITSTREAM);
         let n_creds = ca.issue(SINI_CORTEX);
@@ -908,11 +916,24 @@ async fn test_oracle_6_one_node_one_canonical_name() {
         let n_dir = node_dir();
         fs::write(&n_dir.1, &ca.pem).unwrap();
 
-        let x_fed = get_free_port();
+        let x_ca_file = x_dir.1.clone();
+        let x = start(
+            NodeSpec {
+                creds: Some(x_creds.clone()),
+                peers: Some(
+                    json!({ "sini.cortex": ca_entry(&addr(9), &x_ca_file, SINI_CORTEX, &["send", "reply"]) })
+                        .to_string(),
+                ),
+                fed: true,
+                ..Default::default()
+            },
+            Some(x_dir),
+        )
+        .await;
         // N knows X twice: by CA identity, and pinned as `laptop`.
         let n_peers = json!({
-            "sini.bitstream": ca_entry(&addr(x_fed), &n_dir.1, SINI_BITSTREAM, &["send", "reply"]),
-            "laptop": pin_entry(&addr(x_fed), &x_creds.pin, &["send", "reply"]),
+            "sini.bitstream": ca_entry(&addr(x.fed_port), &n_dir.1, SINI_BITSTREAM, &["send", "reply"]),
+            "laptop": pin_entry(&addr(x.fed_port), &x_creds.pin, &["send", "reply"]),
         })
         .to_string();
         let n = start(
@@ -925,18 +946,10 @@ async fn test_oracle_6_one_node_one_canonical_name() {
             Some(n_dir),
         )
         .await;
-        let mut x_spec = NodeSpec {
-            creds: Some(x_creds),
-            peers: Some(
-                json!({ "sini.cortex": ca_entry(&addr(n.fed_port), &x_dir.1, SINI_CORTEX, &["send", "reply"]) })
-                    .to_string(),
-            ),
-            ..Default::default()
-        };
-        x_spec
-            .extra_args
-            .extend(["--fed-listen".to_string(), addr(x_fed)]);
-        let x = start(x_spec, Some(x_dir)).await;
+        x.reload_peers(
+            &json!({ "sini.cortex": ca_entry(&addr(n.fed_port), &x_ca_file, SINI_CORTEX, &["send", "reply"]) })
+                .to_string(),
+        );
 
         let bob = claude_session(&n.sessions_dir, "bob", "Bob");
         let alice = claude_session(&x.sessions_dir, "alice", "Alice");
@@ -962,15 +975,19 @@ async fn test_oracle_6_one_node_one_canonical_name() {
 
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(bob.lock().unwrap().is_empty(), "nothing reaches bob on N");
-        assert!(alice.lock().unwrap().is_empty(), "nothing reaches alice on X");
+        assert!(
+            alice.lock().unwrap().is_empty(),
+            "nothing reaches alice on X"
+        );
         drop(x);
         let n_log = n.stop_and_log().await;
         assert!(
-            n_log.contains("key pinned for peer 'laptop' and the CA identity of peer 'sini.bitstream'"),
+            n_log.contains(
+                "key pinned for peer 'laptop' and the CA identity of peer 'sini.bitstream'"
+            ),
             "N's inbound refusal must name both entries: {n_log}"
         );
-    })
-    .await;
+    }
 
     // The loader refuses where it can know: an entry pinning this node's own key.
     let ca = Ca::new();
@@ -1009,67 +1026,64 @@ async fn test_oracle_7_filters_match_names_and_ids() {
         );
     }
 
-    run_with_port_retry(|| async {
-        let r_creds = pinned_creds("r");
-        let s_creds = pinned_creds("s");
-        let s_dir = node_dir();
-        let r_fed = get_free_port();
-        let s = start(
-            NodeSpec {
-                creds: Some(s_creds.clone()),
-                peers: Some(
-                    json!({ "r": pin_entry(&addr(r_fed), &r_creds.pin, &["send", "reply"]) })
-                        .to_string(),
-                ),
-                fed: true,
-                ..Default::default()
-            },
-            Some(s_dir),
-        )
-        .await;
-        let mut s_on_r = pin_entry(&addr(s.fed_port), &s_creds.pin, &["send", "reply"]);
-        s_on_r["targets"] = json!(["genie-guard"]);
-        s_on_r["principals"] = json!(["anon:ci"]);
-        let r_peers = json!({ "s": s_on_r }).to_string();
-        let (ok, out) = check_peers(&r_peers, Some(&r_creds.cert));
-        assert!(ok, "principals = [\"anon:ci\"] must load: {out}");
-        let mut r_spec = NodeSpec {
-            creds: Some(r_creds),
+    let r_creds = pinned_creds("r");
+    let s_creds = pinned_creds("s");
+    let s_dir = node_dir();
+    let mut s_on_r = pin_entry(&addr(9), &s_creds.pin, &["send", "reply"]);
+    s_on_r["targets"] = json!(["genie-guard"]);
+    s_on_r["principals"] = json!(["anon:ci"]);
+    let r_peers = json!({ "s": s_on_r }).to_string();
+    let (ok, out) = check_peers(&r_peers, Some(&r_creds.cert));
+    assert!(ok, "principals = [\"anon:ci\"] must load: {out}");
+    let r = start(
+        NodeSpec {
+            creds: Some(r_creds.clone()),
             peers: Some(r_peers),
+            fed: true,
             svc_exe: Some(svc_exe("genie-guard")),
             ..Default::default()
-        };
-        r_spec
-            .extra_args
-            .extend(["--fed-listen".to_string(), addr(r_fed)]);
-        let r = start(r_spec, None).await;
-
-        let (mut sr, mut sw) = register_svc(&r, "genie-guard").await;
-        let impostor = claude_session(
-            &r.sessions_dir,
-            "0199cecf-0007-7000-8000-000000000007",
-            "genie-guard",
-        );
-
-        let (status, body) = http_send(&s, "genie-guard@r", "to the service").await;
-        assert_eq!(status, 202, "the service is admitted: {body}");
-        let d = svc_poll(&mut sr, &mut sw).await;
-        assert_eq!(d["text"], "to the service", "{d}");
-
-        let (status, body) = http_send(
-            &s,
-            "0199cecf-0007-7000-8000-000000000007@r",
-            "to the labelled instance",
-        )
-        .await;
-        assert_eq!(
-            status, 403,
-            "an instance labelled genie-guard is not the service genie-guard: {body}"
-        );
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(impostor.lock().unwrap().is_empty());
-    })
+        },
+        None,
+    )
     .await;
+    let s = start(
+        NodeSpec {
+            creds: Some(s_creds),
+            peers: Some(
+                json!({ "r": pin_entry(&addr(r.fed_port), &r_creds.pin, &["send", "reply"]) })
+                    .to_string(),
+            ),
+            fed: true,
+            ..Default::default()
+        },
+        Some(s_dir),
+    )
+    .await;
+
+    let (mut sr, mut sw) = register_svc(&r, "genie-guard").await;
+    let impostor = claude_session(
+        &r.sessions_dir,
+        "0199cecf-0007-7000-8000-000000000007",
+        "genie-guard",
+    );
+
+    let (status, body) = http_send(&s, "genie-guard@r", "to the service").await;
+    assert_eq!(status, 202, "the service is admitted: {body}");
+    let d = svc_poll(&mut sr, &mut sw).await;
+    assert_eq!(d["text"], "to the service", "{d}");
+
+    let (status, body) = http_send(
+        &s,
+        "0199cecf-0007-7000-8000-000000000007@r",
+        "to the labelled instance",
+    )
+    .await;
+    assert_eq!(
+        status, 403,
+        "an instance labelled genie-guard is not the service genie-guard: {body}"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(impostor.lock().unwrap().is_empty());
 }
 
 // =============================================================================
@@ -1080,46 +1094,42 @@ async fn test_oracle_7_filters_match_names_and_ids() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oracle_8_no_hand_assigned_name() {
-    run_with_port_retry(|| async {
-        let stderr = refused(NodeSpec {
-            extra_args: vec!["--host-label".into(), "x".into()],
-            ..Default::default()
-        })
-        .await;
-        assert!(
-            stderr.contains("--host-label"),
-            "serve must refuse the flag, naming it: {stderr}"
-        );
-
-        let stderr = refused(NodeSpec {
-            extra_env: vec![("XMSG_HOST_LABEL".into(), "x".into())],
-            ..Default::default()
-        })
-        .await;
-        assert!(stderr.contains("XMSG_HOST_LABEL"), "{stderr}");
-
-        let node = start(NodeSpec::default(), None).await;
-        let inbox = claude_session(
-            &node.sessions_dir,
-            "d1529eb1-d8e5-59fd-921c-181abc745c4e",
-            "local",
-        );
-        let (status, body) =
-            http_send(&node, "d1529eb1-d8e5-59fd-921c-181abc745c4e", "hello").await;
-        assert_eq!(status, 202, "{body}");
-        let line = wait_line(&inbox).await.expect("local delivery");
-        let expected = xmsg::node::local_node_name();
-        assert!(
-            line.contains(&format!("ci · anon@{expected}")),
-            "a node with no certificate is {expected}: {line}"
-        );
-        // D4: `<user>.<host>`, the host cut at its first `.`; the user name may contain `.`.
-        let host = gethostname::gethostname().to_string_lossy().to_string();
-        let host = host.split('.').next().unwrap();
-        let user = expected.strip_suffix(&format!(".{host}"));
-        assert!(user.is_some_and(|u| !u.is_empty()), "{expected}");
+    let stderr = refused(NodeSpec {
+        extra_args: vec!["--host-label".into(), "x".into()],
+        ..Default::default()
     })
     .await;
+    assert!(
+        stderr.contains("--host-label"),
+        "serve must refuse the flag, naming it: {stderr}"
+    );
+
+    let stderr = refused(NodeSpec {
+        extra_env: vec![("XMSG_HOST_LABEL".into(), "x".into())],
+        ..Default::default()
+    })
+    .await;
+    assert!(stderr.contains("XMSG_HOST_LABEL"), "{stderr}");
+
+    let node = start(NodeSpec::default(), None).await;
+    let inbox = claude_session(
+        &node.sessions_dir,
+        "d1529eb1-d8e5-59fd-921c-181abc745c4e",
+        "local",
+    );
+    let (status, body) = http_send(&node, "d1529eb1-d8e5-59fd-921c-181abc745c4e", "hello").await;
+    assert_eq!(status, 202, "{body}");
+    let line = wait_line(&inbox).await.expect("local delivery");
+    let expected = xmsg::node::local_node_name();
+    assert!(
+        line.contains(&format!("ci · anon@{expected}")),
+        "a node with no certificate is {expected}: {line}"
+    );
+    // D4: `<user>.<host>`, the host cut at its first `.`; the user name may contain `.`.
+    let host = gethostname::gethostname().to_string_lossy().to_string();
+    let host = host.split('.').next().unwrap();
+    let user = expected.strip_suffix(&format!(".{host}"));
+    assert!(user.is_some_and(|u| !u.is_empty()), "{expected}");
 }
 
 // =============================================================================
@@ -1136,85 +1146,82 @@ async fn test_oracle_8_no_hand_assigned_name() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_7b_hub_targets_refuse_harness_kind_refs() {
-    run_with_port_retry(|| async {
-        let (a_cert, a_key, a_pin) = generate_self_signed_ed25519("a").unwrap();
-        let d_creds = pinned_creds("d");
-        let h_creds = pinned_creds("h");
-        let h_fed = get_free_port();
-        let to_hub = |allow: &[&str]| {
-            Some(json!({ "hub": pin_entry(&addr(h_fed), &h_creds.pin, allow) }).to_string())
-        };
-        let d = start(
-            NodeSpec {
-                creds: Some(d_creds.clone()),
-                peers: to_hub(&["send", "reply", "relayed"]),
-                fed: true,
-                ..Default::default()
-            },
-            None,
-        )
-        .await;
-        let mut d_on_h = pin_entry(&addr(d.fed_port), &d_creds.pin, &["send", "reply"]);
-        d_on_h["targets"] = json!(["genie-guard", "095f428d-a387-543a-a82b-e21452c783f6"]);
-        let h_peers = json!({
-            "anode": pin_entry(&addr(get_free_port()), &a_pin, &["send", "reply", "forward"]),
-            "dnode": d_on_h,
-        })
-        .to_string();
-        let h_pin = h_creds.pin.clone();
-        let mut h_spec = NodeSpec {
+    let (a_cert, a_key, a_pin) = generate_self_signed_ed25519("a").unwrap();
+    let d_creds = pinned_creds("d");
+    let h_creds = pinned_creds("h");
+    let to_hub = |allow: &[&str]| {
+        Some(json!({ "hub": pin_entry(&addr(9), &h_creds.pin, allow) }).to_string())
+    };
+    let d = start(
+        NodeSpec {
+            creds: Some(d_creds.clone()),
+            peers: to_hub(&["send", "reply", "relayed"]),
+            fed: true,
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    let mut d_on_h = pin_entry(&addr(d.fed_port), &d_creds.pin, &["send", "reply"]);
+    d_on_h["targets"] = json!(["genie-guard", "095f428d-a387-543a-a82b-e21452c783f6"]);
+    let h_peers = json!({
+        "anode": pin_entry(&addr(9), &a_pin, &["send", "reply", "forward"]),
+        "dnode": d_on_h,
+    })
+    .to_string();
+    let h_pin = h_creds.pin.clone();
+    let h = start(
+        NodeSpec {
             creds: Some(h_creds),
             peers: Some(h_peers),
+            fed: true,
             ..Default::default()
-        };
-        h_spec
-            .extra_args
-            .extend(["--fed-listen".to_string(), addr(h_fed)]);
-        let _h = start(h_spec, None).await;
-        let d_name = node_name_from_pin(&d_creds.pin).unwrap();
-        let inbox = claude_session(
-            &d.sessions_dir,
-            "095f428d-a387-543a-a82b-e21452c783f6",
-            "genie-guard",
-        );
-
-        for (r, want) in [
-            (
-                format!("095f428d-a387-543a-a82b-e21452c783f6@{d_name}"),
-                202,
-            ),
-            (
-                format!("session:095f428d-a387-543a-a82b-e21452c783f6@{d_name}"),
-                403,
-            ),
-            (format!("claude:genie-guard@{d_name}"), 403),
-            (
-                format!("claude:095f428d-a387-543a-a82b-e21452c783f6@{d_name}"),
-                403,
-            ),
-        ] {
-            let origin = Origin {
-                cert_der: &a_cert,
-                key_der: &a_key,
-            };
-            let (status, body) = hop_send(&origin, &h_pin, h_fed, &r, &format!("to {r}")).await;
-            assert_eq!(status, want, "{r} through the hub: {body}");
-            if want == 403 {
-                assert_eq!(
-                    body["detail"], "target not allowed for peer",
-                    "{r}: refused by H's targets filter: {body}"
-                );
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let got = inbox.lock().unwrap().clone();
-        assert!(
-            got.len() == 1
-                && got
-                    .iter()
-                    .all(|l| !l.contains("to session:") && !l.contains("to claude:")),
-            "only the bare-ID send reaches the labelled instance: {got:?}"
-        );
-    })
+        },
+        None,
+    )
     .await;
+    let d_name = node_name_from_pin(&d_creds.pin).unwrap();
+    let inbox = claude_session(
+        &d.sessions_dir,
+        "095f428d-a387-543a-a82b-e21452c783f6",
+        "genie-guard",
+    );
+
+    for (r, want) in [
+        (
+            format!("095f428d-a387-543a-a82b-e21452c783f6@{d_name}"),
+            202,
+        ),
+        (
+            format!("session:095f428d-a387-543a-a82b-e21452c783f6@{d_name}"),
+            403,
+        ),
+        (format!("claude:genie-guard@{d_name}"), 403),
+        (
+            format!("claude:095f428d-a387-543a-a82b-e21452c783f6@{d_name}"),
+            403,
+        ),
+    ] {
+        let origin = Origin {
+            cert_der: &a_cert,
+            key_der: &a_key,
+        };
+        let (status, body) = hop_send(&origin, &h_pin, h.fed_port, &r, &format!("to {r}")).await;
+        assert_eq!(status, want, "{r} through the hub: {body}");
+        if want == 403 {
+            assert_eq!(
+                body["detail"], "target not allowed for peer",
+                "{r}: refused by H's targets filter: {body}"
+            );
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let got = inbox.lock().unwrap().clone();
+    assert!(
+        got.len() == 1
+            && got
+                .iter()
+                .all(|l| !l.contains("to session:") && !l.contains("to claude:")),
+        "only the bare-ID send reaches the labelled instance: {got:?}"
+    );
 }

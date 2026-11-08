@@ -4102,23 +4102,17 @@ async fn test_n7_f6_unspecified_address_binds() {
     std::fs::write(&key_file, key_pem).unwrap();
     std::fs::write(&peers_file, "{}").unwrap();
 
-    // ponytail: the port is free when picked but could be taken before the child binds it; nothing
-    // else in this file binds a fixed port, so a collision is unlikely.
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
     let bin = env!("CARGO_BIN_EXE_xmsg");
     let mut child = std::process::Command::new(bin)
         .env("XDG_RUNTIME_DIR", tmp.path())
         .env("HOME", tmp.path())
+        .env("RUST_LOG", "info")
         .args([
             "serve",
             "--listen",
             "127.0.0.1:0",
             "--fed-listen",
-            &format!("0.0.0.0:{port}"),
+            "0.0.0.0:0",
             "--peers-file",
             peers_file.to_str().unwrap(),
             "--fed-cert",
@@ -4130,10 +4124,12 @@ async fn test_n7_f6_unspecified_address_binds() {
             "--sessions-dir",
             tmp.path().join("sessions").to_str().unwrap(),
         ])
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
+    let stdout = short_sock::StdoutCapture::from_std(child.stdout.take().unwrap());
+    let port = stdout.wait_for_port("bound federation mTLS listener", Duration::from_secs(15));
 
     // A listener on 0.0.0.0 accepts on loopback too.
     let mut bound = false;

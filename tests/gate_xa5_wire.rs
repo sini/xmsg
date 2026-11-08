@@ -49,11 +49,6 @@ impl Drop for ChildGuard {
     }
 }
 
-fn get_free_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    l.local_addr().unwrap().port()
-}
-
 /// A certificate authority issuing SPIFFE leaves.
 struct Ca {
     params: rcgen::CertificateParams,
@@ -111,22 +106,16 @@ impl Ca {
     }
 }
 
-/// A node's files, written before it starts so peers can name its port.
+/// A node's files, written before it starts.
 struct Prepared {
     tmp: TempDir,
-    fed_port: u16,
-    http_port: u16,
 }
 
 fn prepare(ca: &Ca) -> Prepared {
     let tmp = tempdir().unwrap();
     fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(tmp.path().join("ca.pem"), &ca.pem).unwrap();
-    Prepared {
-        tmp,
-        fed_port: get_free_port(),
-        http_port: get_free_port(),
-    }
+    Prepared { tmp }
 }
 
 impl Prepared {
@@ -143,6 +132,7 @@ struct Node {
     agent_sock: PathBuf,
     register_sock: PathBuf,
     sessions_dir: PathBuf,
+    stdout: short_sock::StdoutCapture,
     child: ChildGuard,
 }
 
@@ -156,11 +146,7 @@ async fn start(
     leaf: Option<&str>,
     svc: Option<&str>,
 ) -> Node {
-    let Prepared {
-        tmp,
-        fed_port,
-        http_port,
-    } = p;
+    let Prepared { tmp } = p;
     let run_dir = tmp.path().join("run");
     let sessions_dir = tmp.path().join("sessions");
     for d in [&run_dir, &sessions_dir] {
@@ -179,7 +165,7 @@ async fn start(
     let mut args: Vec<String> = vec![
         "serve".into(),
         "--listen".into(),
-        format!("127.0.0.1:{http_port}"),
+        "127.0.0.1:0".into(),
         "--db-path".into(),
         tmp.path().join("node.db").display().to_string(),
         "--sessions-dir".into(),
@@ -199,7 +185,7 @@ async fn start(
         }
         None => args.extend([
             "--fed-listen".into(),
-            format!("127.0.0.1:{fed_port}"),
+            "127.0.0.1:0".into(),
             "--agent-sock".into(),
             agent_sock.display().to_string(),
             "--http-sock".into(),
@@ -216,12 +202,23 @@ async fn start(
     let mut child = tokio::process::Command::new(BIN)
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
-        .env("RUST_LOG", "warn")
+        .env("RUST_LOG", "info")
         .args(&args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("spawn xmsg serve");
+    let stdout = short_sock::StdoutCapture::from_tokio(child.stdout.take().expect("stdout"));
+    let http_marker = if leaf.is_some() {
+        "starting leaf tcp http server"
+    } else {
+        "bound tcp http server"
+    };
+    let http_port = stdout.wait_for_port(http_marker, Duration::from_secs(10));
+    let fed_port = match leaf {
+        Some(_) => 0,
+        None => stdout.wait_for_port("bound federation mTLS listener", Duration::from_secs(10)),
+    };
 
     for _ in 0..600 {
         if let Ok(Some(_)) = child.try_wait() {
@@ -229,7 +226,7 @@ async fn start(
             if let Some(mut e) = child.stderr.take() {
                 let _ = e.read_to_string(&mut err).await;
             }
-            panic!("node exited at start (failed to bind?): {err}");
+            panic!("node exited at start: {err}");
         }
         let http_up = tokio::net::TcpStream::connect(("127.0.0.1", http_port))
             .await
@@ -253,6 +250,7 @@ async fn start(
                 agent_sock,
                 register_sock,
                 sessions_dir,
+                stdout,
                 child: ChildGuard(Some(child)),
             };
         }
@@ -263,39 +261,30 @@ async fn start(
 }
 
 impl Node {
+    fn ca_file(&self) -> PathBuf {
+        self.tmp.path().join("ca.pem")
+    }
+
+    fn reload_peers(&self, peers: Value) {
+        let prev = self
+            .stdout
+            .line_count_containing("successfully reloaded federation TLS credentials and peers");
+        fs::write(self.tmp.path().join("peers.json"), peers.to_string()).unwrap();
+        let pid = self.child.0.as_ref().unwrap().id().expect("child pid") as i32;
+        unsafe {
+            libc::kill(pid, libc::SIGHUP);
+        }
+        self.stdout.wait_for_line_count(
+            "successfully reloaded federation TLS credentials and peers",
+            prev + 1,
+            Duration::from_secs(5),
+        );
+    }
+
     async fn stop(&mut self) {
         if let Some(mut c) = self.child.0.take() {
             let _ = c.start_kill();
             let _ = c.wait().await;
-        }
-    }
-}
-
-async fn run_with_port_retry<F, Fut>(f: F)
-where
-    F: Fn() -> Fut + Send + Sync + 'static,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
-{
-    for attempt in 1..=5 {
-        match tokio::task::spawn(f()).await {
-            Ok(()) => return,
-            Err(e) if e.is_panic() => {
-                let p = e.into_panic();
-                let msg = p
-                    .downcast_ref::<String>()
-                    .cloned()
-                    .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
-                    .unwrap_or_default();
-                let port_race = msg.contains("failed to bind")
-                    || msg.contains("AddrInUse")
-                    || msg.contains("ddress already in use");
-                if port_race && attempt < 5 {
-                    tokio::time::sleep(Duration::from_millis(150)).await;
-                    continue;
-                }
-                std::panic::resume_unwind(p);
-            }
-            Err(e) => panic!("join error: {e}"),
         }
     }
 }
@@ -310,7 +299,7 @@ fn ca_entry(port: u16, ca_file: &Path, uri: &str, allow: &[&str]) -> Value {
 }
 
 fn leaf_entry(ca_file: &Path, uri: &str, allow: &[&str]) -> Value {
-    let mut e = ca_entry(get_free_port(), ca_file, uri, allow);
+    let mut e = ca_entry(9, ca_file, uri, allow);
     e["leaf"] = json!(true);
     e
 }
@@ -504,25 +493,27 @@ async fn mesh(b_allows_list: bool, l_allows_list: bool) -> Mesh {
     let (ca_a, ca_b, ca_l) = (ca.issue(URI_A), ca.issue(URI_B), ca.issue(URI_L));
     let (pa, pb, pl) = (prepare(&ca), prepare(&ca), prepare(&ca));
 
-    let peers_a = json!({
-        "eve.b": ca_entry(pb.fed_port, &pa.ca_file(), URI_B, &["send", "reply", "list"]),
-        "guard.genie": leaf_entry(&pa.ca_file(), URI_L, &["send", "reply", "inbox"]),
-    });
     let b_allow: &[&str] = if b_allows_list {
         &["send", "reply", "list"]
     } else {
         &["send", "reply"]
     };
-    let peers_b = json!({ "sini.a": ca_entry(pa.fed_port, &pb.ca_file(), URI_A, b_allow) });
+    let peers_b = json!({ "sini.a": ca_entry(9, &pb.ca_file(), URI_A, b_allow) });
+    let b = start(pb, &ca_b, peers_b, None, None).await;
+
+    let peers_a = json!({
+        "eve.b": ca_entry(b.fed_port, &pa.ca_file(), URI_B, &["send", "reply", "list"]),
+        "guard.genie": leaf_entry(&pa.ca_file(), URI_L, &["send", "reply", "inbox"]),
+    });
+    let a = start(pa, &ca_a, peers_a, None, None).await;
+    b.reload_peers(json!({ "sini.a": ca_entry(a.fed_port, &b.ca_file(), URI_A, b_allow) }));
+
     let l_allow: &[&str] = if l_allows_list {
         &["send", "reply", "inbox", "list"]
     } else {
         &["send", "reply", "inbox"]
     };
-    let peers_l = json!({ "sini.a": ca_entry(pa.fed_port, &pl.ca_file(), URI_A, l_allow) });
-
-    let b = start(pb, &ca_b, peers_b, None, None).await;
-    let a = start(pa, &ca_a, peers_a, None, None).await;
+    let peers_l = json!({ "sini.a": ca_entry(a.fed_port, &pl.ca_file(), URI_A, l_allow) });
     let l = start(pl, &ca_l, peers_l, Some("guard"), None).await;
     let alice = claude_session(
         &a.sessions_dir,
@@ -655,60 +646,57 @@ fn lying_lister(method: &str, path: &str) -> (u16, Option<Value>) {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_1_mesh_list_and_send_to_each() {
-    run_with_port_retry(|| async {
-        let mut m = mesh(true, true).await;
-        let listed = list(&m.a, Duration::from_secs(15)).await;
-        let addrs = addresses(&listed);
-        for (addr, user) in [
-            ("135aa23d-60a6-5595-a42a-c0296722252e@sini.a", "sini"),
-            ("baa3a12f-e06d-59f5-90c8-2eda9a54dd91@eve.b", "eve"),
-            ("guard@guard.genie", "guard.genie"),
-        ] {
-            let r = listed["recipients"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|r| r["address"] == addr)
-                .unwrap_or_else(|| panic!("{addr} not listed: {listed}"));
-            assert_eq!(r["user"], user, "{listed}");
-            assert_eq!(r["status"], "live", "{listed}");
-        }
-        for n in ["sini.a", "eve.b", "guard.genie"] {
-            assert_eq!(node_status(&listed, n), "ok", "{listed}");
-        }
-        // Exactly the fixtures: each node runs with HOME in its tempdir, so nothing of the
-        // host's (an agy conversation on the machine running the test) is listed (§1a).
-        let mut sorted = addrs.clone();
-        sorted.sort();
-        assert_eq!(
-            sorted,
-            [
-                "135aa23d-60a6-5595-a42a-c0296722252e@sini.a",
-                "baa3a12f-e06d-59f5-90c8-2eda9a54dd91@eve.b",
-                "guard@guard.genie"
-            ],
-            "{listed}"
-        );
-        for addr in &addrs {
-            let (status, sent) = http_send(&m.a, addr, &format!("to {addr}")).await;
-            assert_eq!(status, 202, "send to {addr}: {sent}");
-        }
-        assert!(
-            wait_line(&m.alice, "to 135aa23d-60a6-5595-a42a-c0296722252e@sini.a")
-                .await
-                .is_some()
-        );
-        assert!(
-            wait_line(&m.bob, "to baa3a12f-e06d-59f5-90c8-2eda9a54dd91@eve.b")
-                .await
-                .is_some()
-        );
-        let (r, w) = &mut m.guard;
-        let got = svc_poll(r, w).await;
-        assert_eq!(got["action"], "deliver", "{got}");
-        assert_eq!(got["text"], "to guard@guard.genie", "{got}");
-    })
-    .await;
+    let mut m = mesh(true, true).await;
+    let listed = list(&m.a, Duration::from_secs(15)).await;
+    let addrs = addresses(&listed);
+    for (addr, user) in [
+        ("135aa23d-60a6-5595-a42a-c0296722252e@sini.a", "sini"),
+        ("baa3a12f-e06d-59f5-90c8-2eda9a54dd91@eve.b", "eve"),
+        ("guard@guard.genie", "guard.genie"),
+    ] {
+        let r = listed["recipients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["address"] == addr)
+            .unwrap_or_else(|| panic!("{addr} not listed: {listed}"));
+        assert_eq!(r["user"], user, "{listed}");
+        assert_eq!(r["status"], "live", "{listed}");
+    }
+    for n in ["sini.a", "eve.b", "guard.genie"] {
+        assert_eq!(node_status(&listed, n), "ok", "{listed}");
+    }
+    // Exactly the fixtures: each node runs with HOME in its tempdir, so nothing of the
+    // host's (an agy conversation on the machine running the test) is listed (§1a).
+    let mut sorted = addrs.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        [
+            "135aa23d-60a6-5595-a42a-c0296722252e@sini.a",
+            "baa3a12f-e06d-59f5-90c8-2eda9a54dd91@eve.b",
+            "guard@guard.genie"
+        ],
+        "{listed}"
+    );
+    for addr in &addrs {
+        let (status, sent) = http_send(&m.a, addr, &format!("to {addr}")).await;
+        assert_eq!(status, 202, "send to {addr}: {sent}");
+    }
+    assert!(
+        wait_line(&m.alice, "to 135aa23d-60a6-5595-a42a-c0296722252e@sini.a")
+            .await
+            .is_some()
+    );
+    assert!(
+        wait_line(&m.bob, "to baa3a12f-e06d-59f5-90c8-2eda9a54dd91@eve.b")
+            .await
+            .is_some()
+    );
+    let (r, w) = &mut m.guard;
+    let got = svc_poll(r, w).await;
+    assert_eq!(got["action"], "deliver", "{got}");
+    assert_eq!(got["text"], "to guard@guard.genie", "{got}");
 }
 
 // =============================================================================
@@ -719,37 +707,34 @@ async fn test_oracle_1_mesh_list_and_send_to_each() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_2_disconnected_dial_out_client_is_bounded() {
-    run_with_port_retry(|| async {
-        let mut m = mesh(true, true).await;
-        m.l.stop().await;
-        let t = Instant::now();
-        let listed = list(&m.a, Duration::from_secs(15)).await;
-        let took = t.elapsed();
-        assert!(
-            took < xmsg::fed::LIST_TIMEOUT + Duration::from_secs(3),
-            "list took {took:?}: {listed}"
-        );
-        assert_eq!(
-            node_status(&listed, "guard.genie"),
-            "unreachable",
-            "{listed}"
-        );
-        assert_eq!(node_status(&listed, "eve.b"), "ok", "{listed}");
-        let addrs = addresses(&listed);
-        assert!(
-            addrs.contains(&"135aa23d-60a6-5595-a42a-c0296722252e@sini.a".to_string()),
-            "{listed}"
-        );
-        assert!(
-            addrs.contains(&"baa3a12f-e06d-59f5-90c8-2eda9a54dd91@eve.b".to_string()),
-            "{listed}"
-        );
-        assert!(
-            !addrs.iter().any(|a| a.ends_with("@guard.genie")),
-            "{listed}"
-        );
-    })
-    .await;
+    let mut m = mesh(true, true).await;
+    m.l.stop().await;
+    let t = Instant::now();
+    let listed = list(&m.a, Duration::from_secs(15)).await;
+    let took = t.elapsed();
+    assert!(
+        took < xmsg::fed::LIST_TIMEOUT + Duration::from_secs(3),
+        "list took {took:?}: {listed}"
+    );
+    assert_eq!(
+        node_status(&listed, "guard.genie"),
+        "unreachable",
+        "{listed}"
+    );
+    assert_eq!(node_status(&listed, "eve.b"), "ok", "{listed}");
+    let addrs = addresses(&listed);
+    assert!(
+        addrs.contains(&"135aa23d-60a6-5595-a42a-c0296722252e@sini.a".to_string()),
+        "{listed}"
+    );
+    assert!(
+        addrs.contains(&"baa3a12f-e06d-59f5-90c8-2eda9a54dd91@eve.b".to_string()),
+        "{listed}"
+    );
+    assert!(
+        !addrs.iter().any(|a| a.ends_with("@guard.genie")),
+        "{listed}"
+    );
 }
 
 // =============================================================================
@@ -760,23 +745,20 @@ async fn test_oracle_2_disconnected_dial_out_client_is_bounded() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_3_withheld_list_is_reported() {
-    run_with_port_retry(|| async {
-        let m = mesh(false, true).await;
-        let listed = list(&m.a, Duration::from_secs(15)).await;
-        assert_eq!(node_status(&listed, "eve.b"), "unreachable", "{listed}");
-        assert!(
-            node_detail(&listed, "eve.b").starts_with("withholds list"),
-            "{listed}"
-        );
-        let addrs = addresses(&listed);
-        assert!(!addrs.iter().any(|a| a.ends_with("@eve.b")), "{listed}");
-        assert!(
-            addrs.contains(&"135aa23d-60a6-5595-a42a-c0296722252e@sini.a".to_string()),
-            "{listed}"
-        );
-        assert!(addrs.contains(&"guard@guard.genie".to_string()), "{listed}");
-    })
-    .await;
+    let m = mesh(false, true).await;
+    let listed = list(&m.a, Duration::from_secs(15)).await;
+    assert_eq!(node_status(&listed, "eve.b"), "unreachable", "{listed}");
+    assert!(
+        node_detail(&listed, "eve.b").starts_with("withholds list"),
+        "{listed}"
+    );
+    let addrs = addresses(&listed);
+    assert!(!addrs.iter().any(|a| a.ends_with("@eve.b")), "{listed}");
+    assert!(
+        addrs.contains(&"135aa23d-60a6-5595-a42a-c0296722252e@sini.a".to_string()),
+        "{listed}"
+    );
+    assert!(addrs.contains(&"guard@guard.genie".to_string()), "{listed}");
 }
 
 // =============================================================================
@@ -786,28 +768,25 @@ async fn test_oracle_3_withheld_list_is_reported() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_4_entry_of_another_user_is_dropped() {
-    run_with_port_retry(|| async {
-        let ca = Ca::new();
-        let (ca_a, ca_s) = (ca.issue(URI_A), ca.issue(URI_S));
-        let pa = prepare(&ca);
-        let (s_port, _) = stub_peer(&ca_s, &ca_a.pin, lying_lister).await;
-        let peers_a = json!({
-            "eve.s": ca_entry(s_port, &pa.ca_file(), URI_S, &["send", "reply", "list"]),
-        });
-        let a = start(pa, &ca_a, peers_a, None, None).await;
-        let listed = list(&a, Duration::from_secs(15)).await;
-        assert_eq!(node_status(&listed, "eve.s"), "ok", "{listed}");
-        let addrs = addresses(&listed);
-        assert!(
-            addrs.contains(&"22222222-2222-4222-8222-222222222222@eve.s".to_string()),
-            "eve's own entry is kept: {listed}"
-        );
-        assert!(
-            !addrs.contains(&"11111111-1111-4111-8111-111111111111@eve.s".to_string()),
-            "an entry of user sini from eve's node is dropped: {listed}"
-        );
-    })
-    .await;
+    let ca = Ca::new();
+    let (ca_a, ca_s) = (ca.issue(URI_A), ca.issue(URI_S));
+    let pa = prepare(&ca);
+    let (s_port, _) = stub_peer(&ca_s, &ca_a.pin, lying_lister).await;
+    let peers_a = json!({
+        "eve.s": ca_entry(s_port, &pa.ca_file(), URI_S, &["send", "reply", "list"]),
+    });
+    let a = start(pa, &ca_a, peers_a, None, None).await;
+    let listed = list(&a, Duration::from_secs(15)).await;
+    assert_eq!(node_status(&listed, "eve.s"), "ok", "{listed}");
+    let addrs = addresses(&listed);
+    assert!(
+        addrs.contains(&"22222222-2222-4222-8222-222222222222@eve.s".to_string()),
+        "eve's own entry is kept: {listed}"
+    );
+    assert!(
+        !addrs.contains(&"11111111-1111-4111-8111-111111111111@eve.s".to_string()),
+        "an entry of user sini from eve's node is dropped: {listed}"
+    );
 }
 
 // =============================================================================
@@ -818,75 +797,74 @@ async fn test_oracle_4_entry_of_another_user_is_dropped() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_5_reply_returns_to_the_origin() {
-    run_with_port_retry(|| async {
-        let ca = Ca::new();
-        let (ca_a, ca_b) = (ca.issue(URI_A), ca.issue(URI_B));
-        let (pa, pb) = (prepare(&ca), prepare(&ca));
-        let peers_a =
-            json!({ "eve.b": ca_entry(pb.fed_port, &pa.ca_file(), URI_B, &["send", "reply"]) });
-        let peers_b =
-            json!({ "sini.a": ca_entry(pa.fed_port, &pb.ca_file(), URI_A, &["send", "reply"]) });
-        let mut b = start(pb, &ca_b, peers_b, None, Some("answerer")).await;
-        let a = start(pa, &ca_a, peers_a, None, None).await;
-        let alice = claude_session(
-            &a.sessions_dir,
-            "135aa23d-60a6-5595-a42a-c0296722252e",
-            "Alice",
-        );
-        let (mut r, mut w) = register_svc(&b.register_sock, "answerer").await;
+    let ca = Ca::new();
+    let (ca_a, ca_b) = (ca.issue(URI_A), ca.issue(URI_B));
+    let (pa, pb) = (prepare(&ca), prepare(&ca));
+    let peers_b = json!({ "sini.a": ca_entry(9, &pb.ca_file(), URI_A, &["send", "reply"]) });
+    let mut b = start(pb, &ca_b, peers_b, None, Some("answerer")).await;
+    let peers_a =
+        json!({ "eve.b": ca_entry(b.fed_port, &pa.ca_file(), URI_B, &["send", "reply"]) });
+    let a = start(pa, &ca_a, peers_a, None, None).await;
+    b.reload_peers(
+        json!({ "sini.a": ca_entry(a.fed_port, &b.ca_file(), URI_A, &["send", "reply"]) }),
+    );
+    let alice = claude_session(
+        &a.sessions_dir,
+        "135aa23d-60a6-5595-a42a-c0296722252e",
+        "Alice",
+    );
+    let (mut r, mut w) = register_svc(&b.register_sock, "answerer").await;
 
-        // The Claude fake's send: the reply is pushed into its session.
-        let sent = agent_send(&a, "answerer@eve.b", "from alice").await;
-        assert_eq!(sent["status"], "ok", "{sent}");
-        let got = svc_poll(&mut r, &mut w).await;
-        assert_eq!(got["text"], "from alice", "{got}");
-        let replied = svc_reply(
-            &mut r,
-            &mut w,
-            got["messageId"].as_str().unwrap(),
-            "to alice",
-        )
-        .await;
-        assert_eq!(replied["status"], "ok", "{replied}");
-        let pushed = wait_line(&alice, "to alice")
-            .await
-            .expect("B's reply is pushed into the Claude session on A");
-        assert!(pushed.contains("answerer@eve.b"), "{pushed}");
-
-        // The anonymous send: the reply is stored at A, and read there with B gone.
-        let (status, sent) = http_send(&a, "answerer@eve.b", "from ci").await;
-        assert_eq!(status, 202, "{sent}");
-        let id = sent["message_id"].as_str().unwrap().to_string();
-        let got = svc_poll(&mut r, &mut w).await;
-        assert_eq!(got["text"], "from ci", "{got}");
-        svc_reply(&mut r, &mut w, got["messageId"].as_str().unwrap(), "to ci").await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        b.stop().await;
-        let url = format!(
-            "http://127.0.0.1:{}/v1/messages/{id}/replies?wait=2",
-            a.http_port
-        );
-        let resp = reqwest::Client::new().get(url).send().await.unwrap();
-        let status = resp.status().as_u16();
-        let body: Value = resp.json().await.unwrap_or(Value::Null);
-        assert_eq!(status, 200, "replies on A with B stopped: {body}");
-        assert!(
-            body.as_array()
-                .is_some_and(|rs| rs.iter().any(|r| r["text"] == "to ci")),
-            "the reply to the anonymous send is held at the origin: {body}"
-        );
-        assert_eq!(
-            alice
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|l| l.contains("to ci"))
-                .count(),
-            0,
-            "nothing for the anonymous sender is pushed to a session"
-        );
-    })
+    // The Claude fake's send: the reply is pushed into its session.
+    let sent = agent_send(&a, "answerer@eve.b", "from alice").await;
+    assert_eq!(sent["status"], "ok", "{sent}");
+    let got = svc_poll(&mut r, &mut w).await;
+    assert_eq!(got["text"], "from alice", "{got}");
+    let replied = svc_reply(
+        &mut r,
+        &mut w,
+        got["messageId"].as_str().unwrap(),
+        "to alice",
+    )
     .await;
+    assert_eq!(replied["status"], "ok", "{replied}");
+    let pushed = wait_line(&alice, "to alice")
+        .await
+        .expect("B's reply is pushed into the Claude session on A");
+    assert!(pushed.contains("answerer@eve.b"), "{pushed}");
+
+    // The anonymous send: the reply is stored at A, and read there with B gone.
+    let (status, sent) = http_send(&a, "answerer@eve.b", "from ci").await;
+    assert_eq!(status, 202, "{sent}");
+    let id = sent["message_id"].as_str().unwrap().to_string();
+    let got = svc_poll(&mut r, &mut w).await;
+    assert_eq!(got["text"], "from ci", "{got}");
+    svc_reply(&mut r, &mut w, got["messageId"].as_str().unwrap(), "to ci").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    b.stop().await;
+    let url = format!(
+        "http://127.0.0.1:{}/v1/messages/{id}/replies?wait=2",
+        a.http_port
+    );
+    let resp = reqwest::Client::new().get(url).send().await.unwrap();
+    let status = resp.status().as_u16();
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    assert_eq!(status, 200, "replies on A with B stopped: {body}");
+    assert!(
+        body.as_array()
+            .is_some_and(|rs| rs.iter().any(|r| r["text"] == "to ci")),
+        "the reply to the anonymous send is held at the origin: {body}"
+    );
+    assert_eq!(
+        alice
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains("to ci"))
+            .count(),
+        0,
+        "nothing for the anonymous sender is pushed to a session"
+    );
 }
 
 // =============================================================================
@@ -896,38 +874,34 @@ async fn test_oracle_5_reply_returns_to_the_origin() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_6_receiver_attests_the_node() {
-    run_with_port_retry(|| async {
-        let ca = Ca::new();
-        let (ca_b, ca_o) = (ca.issue(URI_B), ca.issue(URI_O));
-        let pb = prepare(&ca);
-        let peers_b =
-            json!({ "sini.o": ca_entry(get_free_port(), &pb.ca_file(), URI_O, &["send"]) });
-        let b = start(pb, &ca_b, peers_b, None, None).await;
-        let bob = claude_session(
-            &b.sessions_dir,
-            "baa3a12f-e06d-59f5-90c8-2eda9a54dd91",
-            "Bob",
-        );
-        let o = Origin {
-            cert_der: &ca_o.cert_der,
-            key_der: &ca_o.key_der,
-        };
-        let mut env = hop_client::envelope(
-            "alice",
-            "Alice",
-            "baa3a12f-e06d-59f5-90c8-2eda9a54dd91",
-            "claims cortex",
-        );
-        env["origin"]["node"] = json!("sini.cortex");
-        let (status, res) = hop_client::send_envelope(&o, &ca_b.pin, b.fed_port, env).await;
-        assert_eq!(status, 202, "{res}");
-        let line = wait_line(&bob, "claims cortex")
-            .await
-            .expect("delivered to bob");
-        assert!(line.contains("Alice · alice@sini.o"), "{line}");
-        assert!(!line.contains("sini.cortex"), "{line}");
-    })
-    .await;
+    let ca = Ca::new();
+    let (ca_b, ca_o) = (ca.issue(URI_B), ca.issue(URI_O));
+    let pb = prepare(&ca);
+    let peers_b = json!({ "sini.o": ca_entry(9, &pb.ca_file(), URI_O, &["send"]) });
+    let b = start(pb, &ca_b, peers_b, None, None).await;
+    let bob = claude_session(
+        &b.sessions_dir,
+        "baa3a12f-e06d-59f5-90c8-2eda9a54dd91",
+        "Bob",
+    );
+    let o = Origin {
+        cert_der: &ca_o.cert_der,
+        key_der: &ca_o.key_der,
+    };
+    let mut env = hop_client::envelope(
+        "alice",
+        "Alice",
+        "baa3a12f-e06d-59f5-90c8-2eda9a54dd91",
+        "claims cortex",
+    );
+    env["origin"]["node"] = json!("sini.cortex");
+    let (status, res) = hop_client::send_envelope(&o, &ca_b.pin, b.fed_port, env).await;
+    assert_eq!(status, 202, "{res}");
+    let line = wait_line(&bob, "claims cortex")
+        .await
+        .expect("delivered to bob");
+    assert!(line.contains("Alice · alice@sini.o"), "{line}");
+    assert!(!line.contains("sini.cortex"), "{line}");
 }
 
 // =============================================================================
@@ -937,72 +911,65 @@ async fn test_oracle_6_receiver_attests_the_node() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_7_v1_is_refused_both_ways() {
-    run_with_port_retry(|| async {
-        let ca = Ca::new();
-        let (ca_b, ca_o) = (ca.issue(URI_B), ca.issue(URI_O));
-        let pb = prepare(&ca);
-        let peers_b =
-            json!({ "sini.o": ca_entry(get_free_port(), &pb.ca_file(), URI_O, &["send"]) });
-        let b = start(pb, &ca_b, peers_b, None, None).await;
-        let bob = claude_session(&b.sessions_dir, "bob", "Bob");
-        let o = Origin {
-            cert_der: &ca_o.cert_der,
-            key_der: &ca_o.key_der,
-        };
-        let env = hop_client::envelope("alice", "Alice", "bob", "over v1");
-        let (status, res) = hop_client::request(
-            &o,
-            &ca_b.pin,
-            b.fed_port,
-            "POST",
-            "/fed/v1/messages",
-            Some(env),
-        )
-        .await;
-        assert_eq!(status, 404, "an old node's route is not served: {res}");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(
-            bob.lock().unwrap().is_empty(),
-            "nothing is delivered over v1"
-        );
-    })
+    let ca = Ca::new();
+    let (ca_b, ca_o) = (ca.issue(URI_B), ca.issue(URI_O));
+    let pb = prepare(&ca);
+    let peers_b = json!({ "sini.o": ca_entry(9, &pb.ca_file(), URI_O, &["send"]) });
+    let b = start(pb, &ca_b, peers_b, None, None).await;
+    let bob = claude_session(&b.sessions_dir, "bob", "Bob");
+    let o = Origin {
+        cert_der: &ca_o.cert_der,
+        key_der: &ca_o.key_der,
+    };
+    let env = hop_client::envelope("alice", "Alice", "bob", "over v1");
+    let (status, res) = hop_client::request(
+        &o,
+        &ca_b.pin,
+        b.fed_port,
+        "POST",
+        "/fed/v1/messages",
+        Some(env),
+    )
     .await;
+    assert_eq!(status, 404, "an old node's route is not served: {res}");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        bob.lock().unwrap().is_empty(),
+        "nothing is delivered over v1"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_7b_send_to_a_v1_node_is_refused() {
-    run_with_port_retry(|| async {
-        let ca = Ca::new();
-        let ca_a = ca.issue(URI_A);
-        let (old_cert, old_key, old_pin) = xmsg::fed::generate_self_signed_ed25519("old").unwrap();
-        let old = Creds {
-            cert: String::new(),
-            key: String::new(),
-            cert_der: old_cert,
-            key_der: old_key,
-            pin: old_pin.clone(),
-        };
-        let (old_port, seen) = stub_peer(&old, &ca_a.pin, ee1b6ca_node).await;
-        let pa = prepare(&ca);
-        let peers_a = json!({
-            "old": { "address": format!("127.0.0.1:{old_port}"), "pin": normalize_pin(&old_pin),
-                     "allow": ["send", "reply"] },
-        });
-        let a = start(pa, &ca_a, peers_a, None, None).await;
-        let (status, res) = http_send(&a, "x@old", "to an old node").await;
-        assert_ne!(status / 100, 2, "a send to a v1 node is refused: {res}");
-        assert_ne!(res["outcome"], "delivered", "{res}");
-        let seen = seen.lock().unwrap().clone();
-        assert!(
-            seen.iter().all(|l| !l.contains("/fed/v1/")),
-            "nothing is posted to v1: {seen:?}"
-        );
-        assert!(
-            seen.iter().any(|l| l == "POST /fed/v2/messages"),
-            "the send reached the old node on v2: {seen:?}"
-        );
-    })
-    .await;
+    let ca = Ca::new();
+    let ca_a = ca.issue(URI_A);
+    let (old_cert, old_key, old_pin) = xmsg::fed::generate_self_signed_ed25519("old").unwrap();
+    let old = Creds {
+        cert: String::new(),
+        key: String::new(),
+        cert_der: old_cert,
+        key_der: old_key,
+        pin: old_pin.clone(),
+    };
+    let (old_port, seen) = stub_peer(&old, &ca_a.pin, ee1b6ca_node).await;
+    let pa = prepare(&ca);
+    let peers_a = json!({
+        "old": { "address": format!("127.0.0.1:{old_port}"), "pin": normalize_pin(&old_pin),
+                 "allow": ["send", "reply"] },
+    });
+    let a = start(pa, &ca_a, peers_a, None, None).await;
+    let (status, res) = http_send(&a, "x@old", "to an old node").await;
+    assert_ne!(status / 100, 2, "a send to a v1 node is refused: {res}");
+    assert_ne!(res["outcome"], "delivered", "{res}");
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        seen.iter().all(|l| !l.contains("/fed/v1/")),
+        "nothing is posted to v1: {seen:?}"
+    );
+    assert!(
+        seen.iter().any(|l| l == "POST /fed/v2/messages"),
+        "the send reached the old node on v2: {seen:?}"
+    );
 }
 
 // =============================================================================
@@ -1012,83 +979,87 @@ async fn test_oracle_7b_send_to_a_v1_node_is_refused() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_8_relay_carries_the_origin_and_one_hop() {
-    run_with_port_retry(|| async {
-        let ca = Ca::new();
-        let (ca_a, ca_b, ca_h, ca_o) = (
-            ca.issue(URI_A),
-            ca.issue(URI_B),
-            ca.issue(URI_H),
-            ca.issue(URI_O),
-        );
-        let (pa, pb, ph) = (prepare(&ca), prepare(&ca), prepare(&ca));
-        let peers_h = json!({
-            "sini.o": ca_entry(get_free_port(), &ph.ca_file(), URI_O, &["send", "forward"]),
-            "eve.b": ca_entry(pb.fed_port, &ph.ca_file(), URI_B, &["send", "reply"]),
-        });
-        // B would forward an unmarked envelope from H (it has the right), so only the hop
-        // mark stops a second forward.
-        let peers_b = json!({
-            "sini.h": ca_entry(ph.fed_port, &pb.ca_file(), URI_H,
-                               &["send", "reply", "relayed", "forward"]),
-            "sini.a": ca_entry(pa.fed_port, &pb.ca_file(), URI_A, &["send", "reply"]),
-        });
-        let peers_a =
-            json!({ "eve.b": ca_entry(pb.fed_port, &pa.ca_file(), URI_B, &["send", "reply"]) });
-        let b = start(pb, &ca_b, peers_b, None, None).await;
-        let _h = start(ph, &ca_h, peers_h, None, None).await;
-        let a = start(pa, &ca_a, peers_a, None, None).await;
-        let bob = claude_session(
-            &b.sessions_dir,
-            "baa3a12f-e06d-59f5-90c8-2eda9a54dd91",
-            "Bob",
-        );
-        let bob_on_a = claude_session(
-            &a.sessions_dir,
-            "baa3a12f-e06d-59f5-90c8-2eda9a54dd91",
-            "Bob",
-        );
-        let o = Origin {
-            cert_der: &ca_o.cert_der,
-            key_der: &ca_o.key_der,
-        };
+    let ca = Ca::new();
+    let (ca_a, ca_b, ca_h, ca_o) = (
+        ca.issue(URI_A),
+        ca.issue(URI_B),
+        ca.issue(URI_H),
+        ca.issue(URI_O),
+    );
+    let (pa, pb, ph) = (prepare(&ca), prepare(&ca), prepare(&ca));
+    let peers_a = json!({ "eve.b": ca_entry(9, &pa.ca_file(), URI_B, &["send", "reply"]) });
+    let a = start(pa, &ca_a, peers_a, None, None).await;
+    // B would forward an unmarked envelope from H (it has the right), so only the hop
+    // mark stops a second forward.
+    let peers_b = json!({
+        "sini.h": ca_entry(9, &pb.ca_file(), URI_H,
+                           &["send", "reply", "relayed", "forward"]),
+        "sini.a": ca_entry(a.fed_port, &pb.ca_file(), URI_A, &["send", "reply"]),
+    });
+    let b = start(pb, &ca_b, peers_b, None, None).await;
+    let peers_h = json!({
+        "sini.o": ca_entry(9, &ph.ca_file(), URI_O, &["send", "forward"]),
+        "eve.b": ca_entry(b.fed_port, &ph.ca_file(), URI_B, &["send", "reply"]),
+    });
+    let _h = start(ph, &ca_h, peers_h, None, None).await;
+    a.reload_peers(
+        json!({ "eve.b": ca_entry(b.fed_port, &a.ca_file(), URI_B, &["send", "reply"]) }),
+    );
+    b.reload_peers(json!({
+        "sini.h": ca_entry(_h.fed_port, &b.ca_file(), URI_H,
+                           &["send", "reply", "relayed", "forward"]),
+        "sini.a": ca_entry(a.fed_port, &b.ca_file(), URI_A, &["send", "reply"]),
+    }));
+    let bob = claude_session(
+        &b.sessions_dir,
+        "baa3a12f-e06d-59f5-90c8-2eda9a54dd91",
+        "Bob",
+    );
+    let bob_on_a = claude_session(
+        &a.sessions_dir,
+        "baa3a12f-e06d-59f5-90c8-2eda9a54dd91",
+        "Bob",
+    );
+    let o = Origin {
+        cert_der: &ca_o.cert_der,
+        key_der: &ca_o.key_der,
+    };
 
-        let (status, res) = hop_client::hop_send(
-            &o,
-            &ca_h.pin,
-            _h.fed_port,
-            "baa3a12f-e06d-59f5-90c8-2eda9a54dd91@eve.b",
-            "relayed",
-        )
-        .await;
-        assert_eq!(status, 202, "{res}");
-        let line = wait_line(&bob, "relayed")
-            .await
-            .expect("relayed to bob on B");
-        assert!(
-            line.contains("Alice · alice@sini.o"),
-            "the forwarded origin: {line}"
-        );
-
-        let (status, res) = hop_client::hop_send(
-            &o,
-            &ca_h.pin,
-            _h.fed_port,
-            "baa3a12f-e06d-59f5-90c8-2eda9a54dd91@sini.a@eve.b",
-            "twice",
-        )
-        .await;
-        assert_eq!(status, 403, "{res}");
-        assert_eq!(
-            res["detail"], "message has already been forwarded (one hop maximum)",
-            "{res}"
-        );
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(
-            bob_on_a.lock().unwrap().is_empty(),
-            "nothing is forwarded a second time"
-        );
-    })
+    let (status, res) = hop_client::hop_send(
+        &o,
+        &ca_h.pin,
+        _h.fed_port,
+        "baa3a12f-e06d-59f5-90c8-2eda9a54dd91@eve.b",
+        "relayed",
+    )
     .await;
+    assert_eq!(status, 202, "{res}");
+    let line = wait_line(&bob, "relayed")
+        .await
+        .expect("relayed to bob on B");
+    assert!(
+        line.contains("Alice · alice@sini.o"),
+        "the forwarded origin: {line}"
+    );
+
+    let (status, res) = hop_client::hop_send(
+        &o,
+        &ca_h.pin,
+        _h.fed_port,
+        "baa3a12f-e06d-59f5-90c8-2eda9a54dd91@sini.a@eve.b",
+        "twice",
+    )
+    .await;
+    assert_eq!(status, 403, "{res}");
+    assert_eq!(
+        res["detail"], "message has already been forwarded (one hop maximum)",
+        "{res}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        bob_on_a.lock().unwrap().is_empty(),
+        "nothing is forwarded a second time"
+    );
 }
 
 // =============================================================================
@@ -1099,30 +1070,27 @@ async fn test_oracle_8_relay_carries_the_origin_and_one_hop() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_3b_dial_out_client_withholding_list_is_reported() {
-    run_with_port_retry(|| async {
-        let m = mesh(true, false).await;
-        let listed = list(&m.a, Duration::from_secs(15)).await;
-        assert_eq!(
-            node_status(&listed, "guard.genie"),
-            "unreachable",
-            "{listed}"
-        );
-        assert_eq!(
-            node_detail(&listed, "guard.genie"),
-            "withholds list",
-            "{listed}"
-        );
-        let addrs = addresses(&listed);
-        assert!(
-            !addrs.iter().any(|a| a.ends_with("@guard.genie")),
-            "{listed}"
-        );
-        assert!(
-            addrs.contains(&"baa3a12f-e06d-59f5-90c8-2eda9a54dd91@eve.b".to_string()),
-            "{listed}"
-        );
-    })
-    .await;
+    let m = mesh(true, false).await;
+    let listed = list(&m.a, Duration::from_secs(15)).await;
+    assert_eq!(
+        node_status(&listed, "guard.genie"),
+        "unreachable",
+        "{listed}"
+    );
+    assert_eq!(
+        node_detail(&listed, "guard.genie"),
+        "withholds list",
+        "{listed}"
+    );
+    let addrs = addresses(&listed);
+    assert!(
+        !addrs.iter().any(|a| a.ends_with("@guard.genie")),
+        "{listed}"
+    );
+    assert!(
+        addrs.contains(&"baa3a12f-e06d-59f5-90c8-2eda9a54dd91@eve.b".to_string()),
+        "{listed}"
+    );
 }
 
 const URI_W: &str = "spiffe://xa5.test/host/w/user/sini";
@@ -1136,53 +1104,68 @@ const URI_X: &str = "spiffe://xa5.test/host/x/user/sini";
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_9_list_answer_from_another_peer_is_refused() {
-    run_with_port_retry(|| async {
-        let ca = Ca::new();
-        let (ca_a, ca_w, ca_x) = (ca.issue(URI_A), ca.issue(URI_W), ca.issue(URI_X));
-        let pa = prepare(&ca);
-        let allow = &["send", "reply", "inbox", "list"];
-        let peers_a = json!({
-            "sini.w": leaf_entry(&pa.ca_file(), URI_W, allow),
-            "sini.x": leaf_entry(&pa.ca_file(), URI_X, allow),
-        });
-        let a = Arc::new(start(pa, &ca_a, peers_a, None, None).await);
-        let asker = {
-            let a = a.clone();
-            tokio::spawn(async move { list(&a, Duration::from_secs(15)).await })
-        };
-        let w = Origin {
-            cert_der: &ca_w.cert_der,
-            key_der: &ca_w.key_der,
-        };
-        let x = Origin {
-            cert_der: &ca_x.cert_der,
-            key_der: &ca_x.key_der,
-        };
-        let (status, item) =
-            hop_client::request(&w, &ca_a.pin, a.fed_port, "GET", "/fed/v2/inbox?wait=5", None)
-                .await;
-        assert_eq!(status, 200, "{item}");
-        assert_eq!(item["kind"], "list", "{item}");
-        let uri = format!("/fed/v2/list/{}", item["query"].as_str().unwrap());
-        let answer = |id: &str| {
-            json!({ "status": "ok",
-                    "entries": [{ "id": id, "kind": "service", "status": "live", "user": "sini" }] })
-        };
-        let (status, res) =
-            hop_client::request(&x, &ca_a.pin, a.fed_port, "POST", &uri, Some(answer("forged")))
-                .await;
-        assert_eq!(status, 404, "X answers W's query: {res}");
-        let (status, res) =
-            hop_client::request(&w, &ca_a.pin, a.fed_port, "POST", &uri, Some(answer("wsvc")))
-                .await;
-        assert_eq!(status, 200, "W answers its own query: {res}");
-        let listed = asker.await.unwrap();
-        assert_eq!(node_status(&listed, "sini.w"), "ok", "{listed}");
-        let addrs = addresses(&listed);
-        assert!(addrs.contains(&"wsvc@sini.w".to_string()), "{listed}");
-        assert!(!addrs.iter().any(|a| a.starts_with("forged@")), "{listed}");
-    })
+    let ca = Ca::new();
+    let (ca_a, ca_w, ca_x) = (ca.issue(URI_A), ca.issue(URI_W), ca.issue(URI_X));
+    let pa = prepare(&ca);
+    let allow = &["send", "reply", "inbox", "list"];
+    let peers_a = json!({
+        "sini.w": leaf_entry(&pa.ca_file(), URI_W, allow),
+        "sini.x": leaf_entry(&pa.ca_file(), URI_X, allow),
+    });
+    let a = Arc::new(start(pa, &ca_a, peers_a, None, None).await);
+    let asker = {
+        let a = a.clone();
+        tokio::spawn(async move { list(&a, Duration::from_secs(15)).await })
+    };
+    let w = Origin {
+        cert_der: &ca_w.cert_der,
+        key_der: &ca_w.key_der,
+    };
+    let x = Origin {
+        cert_der: &ca_x.cert_der,
+        key_der: &ca_x.key_der,
+    };
+    let (status, item) = hop_client::request(
+        &w,
+        &ca_a.pin,
+        a.fed_port,
+        "GET",
+        "/fed/v2/inbox?wait=5",
+        None,
+    )
     .await;
+    assert_eq!(status, 200, "{item}");
+    assert_eq!(item["kind"], "list", "{item}");
+    let uri = format!("/fed/v2/list/{}", item["query"].as_str().unwrap());
+    let answer = |id: &str| {
+        json!({ "status": "ok",
+                "entries": [{ "id": id, "kind": "service", "status": "live", "user": "sini" }] })
+    };
+    let (status, res) = hop_client::request(
+        &x,
+        &ca_a.pin,
+        a.fed_port,
+        "POST",
+        &uri,
+        Some(answer("forged")),
+    )
+    .await;
+    assert_eq!(status, 404, "X answers W's query: {res}");
+    let (status, res) = hop_client::request(
+        &w,
+        &ca_a.pin,
+        a.fed_port,
+        "POST",
+        &uri,
+        Some(answer("wsvc")),
+    )
+    .await;
+    assert_eq!(status, 200, "W answers its own query: {res}");
+    let listed = asker.await.unwrap();
+    assert_eq!(node_status(&listed, "sini.w"), "ok", "{listed}");
+    let addrs = addresses(&listed);
+    assert!(addrs.contains(&"wsvc@sini.w".to_string()), "{listed}");
+    assert!(!addrs.iter().any(|a| a.starts_with("forged@")), "{listed}");
 }
 
 // =============================================================================
@@ -1193,51 +1176,46 @@ async fn test_oracle_9_list_answer_from_another_peer_is_refused() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_10_forward_mark_names_the_authenticated_peer() {
-    run_with_port_retry(|| async {
-        let ca = Ca::new();
-        let (ca_b, ca_o) = (ca.issue(URI_B), ca.issue(URI_O));
-        let pb = prepare(&ca);
-        let peers_b = json!({
-            "sini.o": ca_entry(get_free_port(), &pb.ca_file(), URI_O, &["send", "relayed"]),
-        });
-        let b = start(pb, &ca_b, peers_b, None, None).await;
-        let bob = claude_session(
-            &b.sessions_dir,
+    let ca = Ca::new();
+    let (ca_b, ca_o) = (ca.issue(URI_B), ca.issue(URI_O));
+    let pb = prepare(&ca);
+    let peers_b = json!({
+        "sini.o": ca_entry(9, &pb.ca_file(), URI_O, &["send", "relayed"]),
+    });
+    let b = start(pb, &ca_b, peers_b, None, None).await;
+    let bob = claude_session(
+        &b.sessions_dir,
+        "baa3a12f-e06d-59f5-90c8-2eda9a54dd91",
+        "Bob",
+    );
+    let o = Origin {
+        cert_der: &ca_o.cert_der,
+        key_der: &ca_o.key_der,
+    };
+    let marked = |forwarder: &str, body: &str| {
+        let mut env = hop_client::envelope(
+            "alice",
+            "Alice",
             "baa3a12f-e06d-59f5-90c8-2eda9a54dd91",
-            "Bob",
+            body,
         );
-        let o = Origin {
-            cert_der: &ca_o.cert_der,
-            key_der: &ca_o.key_der,
-        };
-        let marked = |forwarder: &str, body: &str| {
-            let mut env = hop_client::envelope(
-                "alice",
-                "Alice",
-                "baa3a12f-e06d-59f5-90c8-2eda9a54dd91",
-                body,
-            );
-            env["forwarded"] = json!({ "forwarder": forwarder });
-            env
-        };
-        let (status, res) =
-            hop_client::send_envelope(&o, &ca_b.pin, b.fed_port, marked("sini.h", "marked by h"))
-                .await;
-        assert_eq!(status, 400, "{res}");
-        let (status, res) =
-            hop_client::send_envelope(&o, &ca_b.pin, b.fed_port, marked("sini.o", "marked by o"))
-                .await;
-        assert_eq!(status, 202, "{res}");
-        assert!(wait_line(&bob, "marked by o").await.is_some());
-        assert!(
-            !bob.lock()
-                .unwrap()
-                .iter()
-                .any(|l| l.contains("marked by h")),
-            "nothing marked by another forwarder is delivered"
-        );
-    })
-    .await;
+        env["forwarded"] = json!({ "forwarder": forwarder });
+        env
+    };
+    let (status, res) =
+        hop_client::send_envelope(&o, &ca_b.pin, b.fed_port, marked("sini.h", "marked by h")).await;
+    assert_eq!(status, 400, "{res}");
+    let (status, res) =
+        hop_client::send_envelope(&o, &ca_b.pin, b.fed_port, marked("sini.o", "marked by o")).await;
+    assert_eq!(status, 202, "{res}");
+    assert!(wait_line(&bob, "marked by o").await.is_some());
+    assert!(
+        !bob.lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("marked by h")),
+        "nothing marked by another forwarder is delivered"
+    );
 }
 
 /// A node that takes every send and reports it delivered to `bob`.
@@ -1286,71 +1264,68 @@ async fn fed_reply(
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_11_reply_only_from_the_recorded_recipient() {
-    run_with_port_retry(|| async {
-        let ca = Ca::new();
-        let (ca_a, ca_s, ca_w) = (ca.issue(URI_A), ca.issue(URI_S), ca.issue(URI_W));
-        let pa = prepare(&ca);
-        let (s_port, _) = stub_peer(&ca_s, &ca_a.pin, delivering_peer).await;
-        let peers_a = json!({
-            "eve.s": ca_entry(s_port, &pa.ca_file(), URI_S, &["send", "reply"]),
-            "sini.w": leaf_entry(&pa.ca_file(), URI_W, &["send", "reply", "inbox"]),
-        });
-        let a = start(pa, &ca_a, peers_a, None, None).await;
-        let s = Origin {
-            cert_der: &ca_s.cert_der,
-            key_der: &ca_s.key_der,
-        };
-        let w = Origin {
-            cert_der: &ca_w.cert_der,
-            key_der: &ca_w.key_der,
-        };
-        let pin = ca_a.pin.as_str();
-        let mallory = json!({ "id": "mallory", "node": "x", "label": "Mallory" });
-        let system = json!({ "service": "system", "node": "x" });
+    let ca = Ca::new();
+    let (ca_a, ca_s, ca_w) = (ca.issue(URI_A), ca.issue(URI_S), ca.issue(URI_W));
+    let pa = prepare(&ca);
+    let (s_port, _) = stub_peer(&ca_s, &ca_a.pin, delivering_peer).await;
+    let peers_a = json!({
+        "eve.s": ca_entry(s_port, &pa.ca_file(), URI_S, &["send", "reply"]),
+        "sini.w": leaf_entry(&pa.ca_file(), URI_W, &["send", "reply", "inbox"]),
+    });
+    let a = start(pa, &ca_a, peers_a, None, None).await;
+    let s = Origin {
+        cert_der: &ca_s.cert_der,
+        key_der: &ca_s.key_der,
+    };
+    let w = Origin {
+        cert_der: &ca_w.cert_der,
+        key_der: &ca_w.key_der,
+    };
+    let pin = ca_a.pin.as_str();
+    let mallory = json!({ "id": "mallory", "node": "x", "label": "Mallory" });
+    let system = json!({ "service": "system", "node": "x" });
 
-        // Resolved by the peer that answered.
-        let (status, sent) = http_send(&a, "bob@eve.s", "for bob").await;
-        assert_eq!(status, 202, "{sent}");
-        let id = sent["message_id"].as_str().unwrap();
-        let bob = json!({ "id": "bob", "node": "x" });
-        assert_eq!(
-            fed_reply(&s, pin, a.fed_port, id, mallory.clone(), "forged").await,
-            403
-        );
-        assert_eq!(
-            fed_reply(&s, pin, a.fed_port, id, bob, "from bob").await,
-            200
-        );
+    // Resolved by the peer that answered.
+    let (status, sent) = http_send(&a, "bob@eve.s", "for bob").await;
+    assert_eq!(status, 202, "{sent}");
+    let id = sent["message_id"].as_str().unwrap();
+    let bob = json!({ "id": "bob", "node": "x" });
+    assert_eq!(
+        fed_reply(&s, pin, a.fed_port, id, mallory.clone(), "forged").await,
+        403
+    );
+    assert_eq!(
+        fed_reply(&s, pin, a.fed_port, id, bob, "from bob").await,
+        200
+    );
 
-        // Queued for a dial-out client, resolved there by label.
-        let (status, sent) = http_send(&a, "Bobby@sini.w", "for bobby").await;
-        assert_eq!(status, 202, "{sent}");
-        assert_eq!(sent["outcome"], "queued", "{sent}");
-        let id = sent["message_id"].as_str().unwrap();
-        let bobby = json!({ "id": "b0b", "node": "x", "label": "Bobby" });
-        assert_eq!(
-            fed_reply(&w, pin, a.fed_port, id, mallory.clone(), "forged").await,
-            403
-        );
-        assert_eq!(
-            fed_reply(&w, pin, a.fed_port, id, system.clone(), "forged").await,
-            403
-        );
-        assert_eq!(
-            fed_reply(&w, pin, a.fed_port, id, bobby, "from bobby").await,
-            200
-        );
+    // Queued for a dial-out client, resolved there by label.
+    let (status, sent) = http_send(&a, "Bobby@sini.w", "for bobby").await;
+    assert_eq!(status, 202, "{sent}");
+    assert_eq!(sent["outcome"], "queued", "{sent}");
+    let id = sent["message_id"].as_str().unwrap();
+    let bobby = json!({ "id": "b0b", "node": "x", "label": "Bobby" });
+    assert_eq!(
+        fed_reply(&w, pin, a.fed_port, id, mallory.clone(), "forged").await,
+        403
+    );
+    assert_eq!(
+        fed_reply(&w, pin, a.fed_port, id, system.clone(), "forged").await,
+        403
+    );
+    assert_eq!(
+        fed_reply(&w, pin, a.fed_port, id, bobby, "from bobby").await,
+        200
+    );
 
-        // The dial-out client's own error reply.
-        let (status, sent) = http_send(&a, "nobody@sini.w", "for nobody").await;
-        assert_eq!(status, 202, "{sent}");
-        let id = sent["message_id"].as_str().unwrap();
-        let err = json!({ "error": "not_found", "detail": "no live session matches 'nobody'" })
-            .to_string();
-        assert_eq!(fed_reply(&w, pin, a.fed_port, id, mallory, &err).await, 403);
-        assert_eq!(fed_reply(&w, pin, a.fed_port, id, system, &err).await, 200);
-    })
-    .await;
+    // The dial-out client's own error reply.
+    let (status, sent) = http_send(&a, "nobody@sini.w", "for nobody").await;
+    assert_eq!(status, 202, "{sent}");
+    let id = sent["message_id"].as_str().unwrap();
+    let err =
+        json!({ "error": "not_found", "detail": "no live session matches 'nobody'" }).to_string();
+    assert_eq!(fed_reply(&w, pin, a.fed_port, id, mallory, &err).await, 403);
+    assert_eq!(fed_reply(&w, pin, a.fed_port, id, system, &err).await, 200);
 }
 
 // =============================================================================
@@ -1429,41 +1404,44 @@ async fn keyed_send(node: &Node, to: &str, text: &str, key: Option<&str>) -> (u1
 /// unkeyed (a fresh ID), the control that the recipient is deliverable again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_idem_keyed_retry_after_peer_delivery_failure_delivers() {
-    run_with_port_retry(|| async {
-        let m = mesh(true, true).await;
-        let kid = "dd0d0d0d-0000-4000-8000-0000000000d1";
-        let uid = "dd0d0d0d-0000-4000-8000-0000000000d2";
-        let ksock = late_session(&m._b.sessions_dir, kid, "Kay");
-        let usock = short_sock::sock_path(&m._b.sessions_dir, "late2");
-        {
-            let pid = std::process::id();
-            let proc_start =
-                xmsg::process::starttime(Path::new(xmsg::process::LIVE_PROC_ROOT), pid).unwrap();
-            let session = json!({
-                "pid": pid, "sessionId": uid, "name": "Uma", "cwd": "/workspace",
-                "status": "idle", "kind": "interactive", "startedAt": 1000, "updatedAt": 2000,
-                "procStart": proc_start, "messagingSocketPath": usock.display().to_string(),
-            });
-            fs::write(m._b.sessions_dir.join(format!("{pid}-{uid}.json")), session.to_string()).unwrap();
-        }
-        let kto = format!("{kid}@eve.b");
-        let uto = format!("{uid}@eve.b");
-        let k1 = keyed_send(&m.a, &kto, "fed-k", Some("k-fed")).await;
-        let u1 = keyed_send(&m.a, &uto, "fed-u", None).await;
-        let krx = bind_inbox(&ksock);
-        let urx = bind_inbox(&usock);
-        let k2 = keyed_send(&m.a, &kto, "fed-k", Some("k-fed")).await;
-        let u2 = keyed_send(&m.a, &uto, "fed-u", None).await;
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        let kn = krx.lock().unwrap().len();
-        let un = urx.lock().unwrap().len();
-        eprintln!("K first={k1:?} retry={k2:?} delivered={kn} | U first={u1:?} retry={u2:?} delivered={un}");
-        assert_ne!(k1.0, 202, "the inbox is down: {k1:?}");
-        assert_eq!(k2.0, 202, "{k2:?}");
-        assert_eq!(un, 1, "control: the recipient is deliverable again");
-        assert_eq!(kn, 1, "a keyed retry after a peer-side failure delivers");
-    })
-    .await;
+    let m = mesh(true, true).await;
+    let kid = "dd0d0d0d-0000-4000-8000-0000000000d1";
+    let uid = "dd0d0d0d-0000-4000-8000-0000000000d2";
+    let ksock = late_session(&m._b.sessions_dir, kid, "Kay");
+    let usock = short_sock::sock_path(&m._b.sessions_dir, "late2");
+    {
+        let pid = std::process::id();
+        let proc_start =
+            xmsg::process::starttime(Path::new(xmsg::process::LIVE_PROC_ROOT), pid).unwrap();
+        let session = json!({
+            "pid": pid, "sessionId": uid, "name": "Uma", "cwd": "/workspace",
+            "status": "idle", "kind": "interactive", "startedAt": 1000, "updatedAt": 2000,
+            "procStart": proc_start, "messagingSocketPath": usock.display().to_string(),
+        });
+        fs::write(
+            m._b.sessions_dir.join(format!("{pid}-{uid}.json")),
+            session.to_string(),
+        )
+        .unwrap();
+    }
+    let kto = format!("{kid}@eve.b");
+    let uto = format!("{uid}@eve.b");
+    let k1 = keyed_send(&m.a, &kto, "fed-k", Some("k-fed")).await;
+    let u1 = keyed_send(&m.a, &uto, "fed-u", None).await;
+    let krx = bind_inbox(&ksock);
+    let urx = bind_inbox(&usock);
+    let k2 = keyed_send(&m.a, &kto, "fed-k", Some("k-fed")).await;
+    let u2 = keyed_send(&m.a, &uto, "fed-u", None).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let kn = krx.lock().unwrap().len();
+    let un = urx.lock().unwrap().len();
+    eprintln!(
+        "K first={k1:?} retry={k2:?} delivered={kn} | U first={u1:?} retry={u2:?} delivered={un}"
+    );
+    assert_ne!(k1.0, 202, "the inbox is down: {k1:?}");
+    assert_eq!(k2.0, 202, "{k2:?}");
+    assert_eq!(un, 1, "control: the recipient is deliverable again");
+    assert_eq!(kn, 1, "a keyed retry after a peer-side failure delivers");
 }
 
 // =============================================================================
@@ -1503,12 +1481,14 @@ async fn replied_pair() -> Pair {
     let ca = Ca::new();
     let (ca_a, ca_b) = (ca.issue(URI_A), ca.issue(URI_B));
     let (pa, pb) = (prepare(&ca), prepare(&ca));
-    let peers_a =
-        json!({ "eve.b": ca_entry(pb.fed_port, &pa.ca_file(), URI_B, &["send", "reply"]) });
-    let peers_b =
-        json!({ "sini.a": ca_entry(pa.fed_port, &pb.ca_file(), URI_A, &["send", "reply"]) });
+    let peers_b = json!({ "sini.a": ca_entry(9, &pb.ca_file(), URI_A, &["send", "reply"]) });
     let b = start(pb, &ca_b, peers_b, None, Some("answerer")).await;
+    let peers_a =
+        json!({ "eve.b": ca_entry(b.fed_port, &pa.ca_file(), URI_B, &["send", "reply"]) });
     let a = start(pa, &ca_a, peers_a, None, None).await;
+    b.reload_peers(
+        json!({ "sini.a": ca_entry(a.fed_port, &b.ca_file(), URI_A, &["send", "reply"]) }),
+    );
     let alice = claude_session(
         &a.sessions_dir,
         "135aa23d-60a6-5595-a42a-c0296722252e",
@@ -1565,91 +1545,84 @@ async fn agent_reply(node: &Node, message_id: &str, text: &str) -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_12_a_federated_reply_is_answerable() {
-    run_with_port_retry(|| async {
-        let Pair {
-            a,
-            _b,
-            alice,
-            mut r,
-            mut w,
-            reply,
-            ..
-        } = replied_pair().await;
+    let Pair {
+        a,
+        _b,
+        alice,
+        mut r,
+        mut w,
+        reply,
+        ..
+    } = replied_pair().await;
 
-        // Alice answers R: it reaches `answerer` on B, from Alice, in reply to R.
-        let answered = agent_reply(&a, &reply, "a2 to answerer").await;
-        assert_eq!(answered["status"], "ok", "Alice answers R: {answered}");
-        assert_eq!(answered["reply"]["pushOutcome"], "pushed", "{answered}");
-        let got = svc_poll(&mut r, &mut w).await;
-        assert_eq!(got["action"], "deliver", "{got}");
-        assert_eq!(got["text"], "a2 to answerer", "{got}");
-        assert_eq!(got["inReplyTo"], reply.as_str(), "{got}");
-        assert_eq!(
-            got["origin"]["id"], "135aa23d-60a6-5595-a42a-c0296722252e",
-            "attributed to Alice: {got}"
-        );
-        assert_eq!(got["origin"]["node"], "sini.a", "attested to A: {got}");
+    // Alice answers R: it reaches `answerer` on B, from Alice, in reply to R.
+    let answered = agent_reply(&a, &reply, "a2 to answerer").await;
+    assert_eq!(answered["status"], "ok", "Alice answers R: {answered}");
+    assert_eq!(answered["reply"]["pushOutcome"], "pushed", "{answered}");
+    let got = svc_poll(&mut r, &mut w).await;
+    assert_eq!(got["action"], "deliver", "{got}");
+    assert_eq!(got["text"], "a2 to answerer", "{got}");
+    assert_eq!(got["inReplyTo"], reply.as_str(), "{got}");
+    assert_eq!(
+        got["origin"]["id"], "135aa23d-60a6-5595-a42a-c0296722252e",
+        "attributed to Alice: {got}"
+    );
+    assert_eq!(got["origin"]["node"], "sini.a", "attested to A: {got}");
 
-        // `answerer` answers Alice's reply: it reaches Alice on A.
-        let a2 = got["messageId"].as_str().unwrap().to_string();
-        let replied = svc_reply(&mut r, &mut w, &a2, "b3 to alice").await;
-        assert_eq!(replied["status"], "ok", "answerer answers A2: {replied}");
-        let line = wait_line(&alice, "b3 to alice")
-            .await
-            .expect("the third hop is pushed into the Claude session on A");
-        assert!(line.contains(&format!("message_id={a2}")), "{line}");
-    })
-    .await;
+    // `answerer` answers Alice's reply: it reaches Alice on A.
+    let a2 = got["messageId"].as_str().unwrap().to_string();
+    let replied = svc_reply(&mut r, &mut w, &a2, "b3 to alice").await;
+    assert_eq!(replied["status"], "ok", "answerer answers A2: {replied}");
+    let line = wait_line(&alice, "b3 to alice")
+        .await
+        .expect("the third hop is pushed into the Claude session on A");
+    assert!(line.contains(&format!("message_id={a2}")), "{line}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_12b_a_redelivered_federated_reply_is_recorded_once() {
-    run_with_port_retry(|| async {
-        let p = replied_pair().await;
-        // B delivers R again: the same envelope, as a retry after a lost answer would.
-        let b = Origin {
-            cert_der: &p.ca_b.cert_der,
-            key_der: &p.ca_b.key_der,
-        };
-        let env = json!({
-            "v": 2, "id": p.reply, "in_reply_to": p.x,
-            "replier": { "service": "answerer", "node": "x" },
-            "text": "r to alice", "created_at": 1000,
-        });
-        let (status, body) = hop_client::request(
-            &b,
-            &p.pin_a,
-            p.a.fed_port,
-            "POST",
-            "/fed/v2/replies",
-            Some(env),
-        )
-        .await;
-        assert_eq!(status, 200, "{body}");
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
-        {
-            let db = rusqlite::Connection::open(p.a.tmp.path().join("node.db")).unwrap();
-            let count =
-                |sql: &str| -> i64 { db.query_row(sql, [&p.reply], |row| row.get(0)).unwrap() };
-            assert_eq!(count("SELECT COUNT(*) FROM messages WHERE id = ?1"), 1);
-            assert_eq!(
-                count("SELECT COUNT(*) FROM replies WHERE pushed_message_id = ?1"),
-                1
-            );
-            let pushes = p
-                .alice
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|l| l.contains("r to alice"))
-                .count();
-            assert_eq!(pushes, 1, "R is pushed to Alice once");
-        }
-
-        // And it is still answerable.
-        let answered = agent_reply(&p.a, &p.reply, "after redelivery").await;
-        assert_eq!(answered["status"], "ok", "{answered}");
-    })
+    let p = replied_pair().await;
+    // B delivers R again: the same envelope, as a retry after a lost answer would.
+    let b = Origin {
+        cert_der: &p.ca_b.cert_der,
+        key_der: &p.ca_b.key_der,
+    };
+    let env = json!({
+        "v": 2, "id": p.reply, "in_reply_to": p.x,
+        "replier": { "service": "answerer", "node": "x" },
+        "text": "r to alice", "created_at": 1000,
+    });
+    let (status, body) = hop_client::request(
+        &b,
+        &p.pin_a,
+        p.a.fed_port,
+        "POST",
+        "/fed/v2/replies",
+        Some(env),
+    )
     .await;
+    assert_eq!(status, 200, "{body}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    {
+        let db = rusqlite::Connection::open(p.a.tmp.path().join("node.db")).unwrap();
+        let count = |sql: &str| -> i64 { db.query_row(sql, [&p.reply], |row| row.get(0)).unwrap() };
+        assert_eq!(count("SELECT COUNT(*) FROM messages WHERE id = ?1"), 1);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM replies WHERE pushed_message_id = ?1"),
+            1
+        );
+        let pushes = p
+            .alice
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains("r to alice"))
+            .count();
+        assert_eq!(pushes, 1, "R is pushed to Alice once");
+    }
+
+    // And it is still answerable.
+    let answered = agent_reply(&p.a, &p.reply, "after redelivery").await;
+    assert_eq!(answered["status"], "ok", "{answered}");
 }
