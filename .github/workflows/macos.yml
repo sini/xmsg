@@ -95,7 +95,7 @@ jobs:
             exit 0
           fi
           nix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev "$ATTIC_TOKEN"
-          nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci
+          nix shell --inputs-from . nixpkgs#attic-client -c sh -c 'xargs attic push ci < /tmp/attic-paths'
 
   lock-probe:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.lock_probe }}
