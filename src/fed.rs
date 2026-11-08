@@ -5459,9 +5459,9 @@ pub struct CredentialReloader {
     pub own: Option<OwnNode>,
     pub ca_paths: Mutex<HashMap<String, PathBuf>>,
     pub file_hashes: Mutex<HashMap<PathBuf, Vec<u8>>>,
-    pub dynamic_tls: Arc<std::sync::RwLock<Option<DynamicTls>>>,
+    dynamic_tls: Arc<std::sync::RwLock<Option<DynamicTls>>>,
     pub peers: Mutex<Arc<PeersMap>>,
-    pub fed_state: Option<Arc<FedState>>,
+    fed_state: Option<Arc<FedState>>,
     pub active_pull_loops: Arc<Mutex<std::collections::HashSet<String>>>,
     pub initialized: std::sync::atomic::AtomicBool,
 }
@@ -5473,7 +5473,7 @@ impl CredentialReloader {
         peers: Arc<PeersMap>,
         dynamic_tls: Arc<std::sync::RwLock<Option<DynamicTls>>>,
     ) -> Result<Self, AppError> {
-        Self::new_full(
+        Self::init(
             cert_path,
             key_path,
             None,
@@ -5485,8 +5485,33 @@ impl CredentialReloader {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn new_full(
+        cert_path: PathBuf,
+        key_path: PathBuf,
+        peers_path: Option<PathBuf>,
+        own: Option<OwnNode>,
+        peers: Arc<PeersMap>,
+        fed_state: Option<Arc<FedState>>,
+        active_pull_loops: Arc<Mutex<std::collections::HashSet<String>>>,
+    ) -> Result<Self, AppError> {
+        let dynamic_tls = fed_state
+            .as_ref()
+            .map(|fs| fs.dynamic_tls.clone())
+            .unwrap_or_default();
+        Self::init(
+            cert_path,
+            key_path,
+            peers_path,
+            own,
+            peers,
+            dynamic_tls,
+            fed_state,
+            active_pull_loops,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn init(
         cert_path: PathBuf,
         key_path: PathBuf,
         peers_path: Option<PathBuf>,

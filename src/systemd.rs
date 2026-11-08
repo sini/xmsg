@@ -383,6 +383,10 @@ pub fn notify_ready() {
     sd_notify("READY=1");
 }
 
+pub fn notify_ready_with_status(status: &str) {
+    sd_notify(&format!("READY=1\nSTATUS={status}"));
+}
+
 pub fn notify_reloading() {
     let usec = monotonic_usec();
     sd_notify(&format!("RELOADING=1\nMONOTONIC_USEC={usec}"));

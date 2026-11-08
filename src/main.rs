@@ -1237,7 +1237,6 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                     Some(peers_file.clone()),
                     own.clone(),
                     peers_arc.clone(),
-                    fs.dynamic_tls.clone(),
                     Some(fs.clone()),
                     active_pull_loops.clone(),
                 )
@@ -1287,7 +1286,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 } else {
                     xmsg::systemd::notify_reloading();
-                    xmsg::systemd::notify_ready();
+                    xmsg::systemd::notify_ready_with_status("nothing to reload");
                 }
             }
         }));

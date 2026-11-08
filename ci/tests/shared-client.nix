@@ -60,7 +60,7 @@
               set -o pipefail
               cargoWithProfile test --locked --no-default-features --features client --test shared_client \
                 2>&1 | tee client-completion.log
-              grep -F 'test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' client-completion.log
+              grep -F 'test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' client-completion.log
               cargoWithProfile test --locked --no-default-features --features client --lib \
                 client::health::tests -- --nocapture 2>&1 | tee health.log
               grep -F 'test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured;' health.log
@@ -68,8 +68,8 @@
                 client::feature_tests::no_daemon -- --ignored --exact 2>&1 | tee feature.log
               grep -F '1 passed; 0 failed; 0 ignored' feature.log
               python3 scripts/client-mutants.py | tee client-mutants.log
-              grep -Fx '25/25 shared-client mutants killed' client-mutants.log
-              python3 -c 'import runpy; runpy.run_path("scripts/client-mutants.py")["require_cached_builds"]("client-mutants.log", 46)'
+              grep -Fx '27/27 shared-client mutants killed' client-mutants.log
+              python3 -c 'import runpy; runpy.run_path("scripts/client-mutants.py")["require_cached_builds"]("client-mutants.log", 50)'
             '';
           }
         );

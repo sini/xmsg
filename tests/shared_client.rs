@@ -230,7 +230,7 @@ async fn registration_health_distinguishes_refusal_from_disconnect_after_request
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn registration_health_can_race_a_split_response_reader() {
     let (_temp, options, register, _agent) = fixture();
     let (split_tx, split_rx) = tokio::sync::oneshot::channel();
@@ -269,9 +269,25 @@ async fn registration_health_can_race_a_split_response_reader() {
         client
     });
     split_rx.await.unwrap();
-    for _ in 0..100 {
-        snapshot.health().unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let probe_snapshot = snapshot.clone();
+    let probe = tokio::time::timeout(
+        Duration::from_millis(500),
+        tokio::task::spawn_blocking(move || {
+            for _ in 0..100 {
+                probe_snapshot.health().unwrap();
+            }
+        }),
+    )
+    .await;
+    if probe.is_err() {
+        reader.abort();
+        server.abort();
+        let _ = reader.await;
+        let _ = server.await;
+        panic!("health lock held across I/O");
     }
+    probe.unwrap().unwrap();
     finish_tx.send(()).unwrap();
     let client = reader.await.unwrap();
     snapshot.health().unwrap();
@@ -279,6 +295,74 @@ async fn registration_health_can_race_a_split_response_reader() {
     assert!(matches!(snapshot.health(), Err(ClientError::Disconnected)));
     release_tx.send(()).unwrap();
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn registration_health_probe_io_error_does_not_mask_agent_error() {
+    let (_temp, options, register, agent) = fixture();
+    let (write_probe_tx, write_probe_rx) = tokio::sync::oneshot::channel();
+    let (reg_ready_tx, reg_ready_rx) = tokio::sync::oneshot::channel();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let registrar = tokio::spawn(async move {
+        let mut stream = BufReader::new(register.accept().await.unwrap().0);
+        request(&mut stream, registration()).await;
+        write_probe_rx.await.unwrap();
+        stream.get_mut().write_all(b"XF8PROBE").await.unwrap();
+        reg_ready_tx.send(()).unwrap();
+        done_rx.await.unwrap();
+    });
+    let client = RegisteredService::register(options).await.unwrap();
+    write_probe_tx.send(()).unwrap();
+    reg_ready_rx.await.unwrap();
+
+    let reg_fd = (3..512)
+        .find(|&fd| {
+            let mut buf = [0_u8; 8];
+            let n = unsafe {
+                libc::recv(
+                    fd,
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                    libc::MSG_PEEK | libc::MSG_DONTWAIT,
+                )
+            };
+            n == 8 && &buf == b"XF8PROBE"
+        })
+        .expect("locate client registration socket fd via MSG_PEEK");
+
+    let mut pipe_fds = [0; 2];
+    assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+    let saved_fd = unsafe { libc::dup(reg_fd) };
+    assert!(saved_fd >= 0);
+
+    let server = tokio::spawn(async move {
+        let mut stream = BufReader::new(agent.accept().await.unwrap().0);
+        let mut line = String::new();
+        stream.read_line(&mut line).await.unwrap();
+        // After pre-flight health() succeeded, swap reg_fd onto the pipe write end so the
+        // post-failure health() probe returns Err(ClientError::Io(_)) instead of Ok or Disconnected.
+        assert_eq!(unsafe { libc::dup2(pipe_fds[1], reg_fd) }, reg_fd);
+        stream
+            .get_mut()
+            .write_all(b"{\"status\":\"error\",\"error\":\"denied\"}\n")
+            .await
+            .unwrap();
+    });
+
+    let result = client.send("target@fixture", "body", None).await;
+    assert_eq!(unsafe { libc::dup2(saved_fd, reg_fd) }, reg_fd);
+    unsafe {
+        libc::close(saved_fd);
+        libc::close(pipe_fds[0]);
+        libc::close(pipe_fds[1]);
+    }
+    assert!(
+        matches!(result, Err(ClientError::Refused { ref code }) if code == "denied"),
+        "post-failure health I/O error must not mask original agent error, got: {result:?}"
+    );
+    server.await.unwrap();
+    done_tx.send(()).unwrap();
+    registrar.await.unwrap();
 }
 
 #[tokio::test]

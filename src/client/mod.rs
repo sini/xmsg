@@ -472,7 +472,9 @@ impl AgentClient {
         .map_err(|_| ClientError::Timeout)
         .and_then(|result| result);
         if result.is_err() {
-            self.health()?;
+            if let Err(ClientError::Disconnected) = self.health() {
+                return Err(ClientError::Disconnected);
+            }
         }
         result
     }

@@ -6,7 +6,7 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::Mutex;
 
 pub(super) struct RegistrationHealth {
-    descriptor: Mutex<Option<RawFd>>,
+    pub(super) descriptor: Mutex<Option<RawFd>>,
 }
 
 impl RegistrationHealth {

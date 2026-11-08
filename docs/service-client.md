@@ -121,7 +121,17 @@ service reader can still consume a buffered response after health reports EOF.
 
 Agent operations check health before submission and recheck it after an error,
 including timeout. A genuine refusal on a healthy registration remains Refused;
-an accepted successful receipt remains successful even if EOF follows it.
+an accepted successful receipt remains successful even if EOF follows it. If the
+post-failure health probe itself encounters a non-disconnect OS error
+(`ClientError::Io`), the original agent error is preserved unless the probe
+proves `ClientError::Disconnected`. When a post-failure recheck returns
+`ClientError::Disconnected` after an `agent.sock` I/O error or `Timeout`,
+request submission remains unknown (not proven unsubmitted), so callers retrying
+a mutation after reconnecting must reuse their stored `idempotency_key`. Each
+`health()` call performs only nonblocking syscalls under the descriptor mutex:
+2 syscalls on Linux (zero-timeout `poll` plus a 1-byte `recv(MSG_PEEK | MSG_DONTWAIT)`)
+and 4 syscalls on macOS (`kqueue`, zero-timeout `kevent`, `close` on the kqueue
+descriptor, plus a 1-byte `recv(MSG_PEEK | MSG_DONTWAIT)`).
 Health is point-in-time and provides neither delivery guarantees nor automatic
 re-registration. Consumers implement recovery through the same validated
 registration API and must invalidate their old snapshots.

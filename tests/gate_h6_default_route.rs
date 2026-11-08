@@ -981,7 +981,6 @@ async fn test_oracle_7_removed_pull_loop_exits_on_reload() {
             Some(peers_file.clone()),
             None,
             peers_arc.clone(),
-            fs.dynamic_tls.clone(),
             Some(fs.clone()),
             active_pull_loops.clone(),
         )
@@ -1102,7 +1101,6 @@ async fn test_oracle_8_reload_adds_pull_loop() {
             Some(peers_file.clone()),
             None,
             peers_arc.clone(),
-            fs.dynamic_tls.clone(),
             Some(fs.clone()),
             active_pull_loops.clone(),
         )
@@ -1164,7 +1162,6 @@ async fn test_oracle_9_admitted_clients_preserved_across_reload() {
     let peers_arc = Arc::new(peers);
 
     let active_pull_loops = Arc::new(Mutex::new(HashSet::new()));
-    let dyn_tls_slot = Arc::new(std::sync::RwLock::new(None));
 
     let reloader = Arc::new(
         CredentialReloader::new_full(
@@ -1173,7 +1170,6 @@ async fn test_oracle_9_admitted_clients_preserved_across_reload() {
             Some(peers_file.clone()),
             None,
             peers_arc.clone(),
-            dyn_tls_slot.clone(),
             None,
             active_pull_loops.clone(),
         )
@@ -1276,7 +1272,6 @@ async fn test_oracle_10_invalid_peers_file_keeps_old_config_and_logs_error() {
             Some(peers_file.clone()),
             None,
             peers_arc.clone(),
-            Arc::new(std::sync::RwLock::new(None)),
             None,
             Arc::new(Mutex::new(HashSet::new())),
         )
