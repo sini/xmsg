@@ -458,7 +458,11 @@
             runHook postCheck
           '';
           installPhase = ''
-            printf '%s\n%s\n%s\n' "${xmsgPreXl1}" "${xmsgPreDeploy}" "${xmsgPreCodex}" > $out
+            printf '%s\n' \
+              "${xmsgPreXl1}" "${xmsgPreXl1Src}" "${xmsgPreXl1.cargoDeps}" \
+              "${xmsgPreDeploy}" "${xmsgPreDeploySrc}" "${xmsgPreDeploy.cargoDeps}" \
+              "${xmsgPreCodex}" "${xmsgPreCodexSrc}" "${xmsgPreCodex.cargoDeps}" \
+              > $out
           '';
         };
       }

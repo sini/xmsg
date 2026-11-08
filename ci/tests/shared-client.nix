@@ -80,7 +80,7 @@
           dontBuild = true;
           preCheck = "";
           installPhase = ''
-            touch "$out"
+            printf '%s\n' "${baseline}" "${baselineSrc}" "${baseline.cargoDeps}" > "$out"
           '';
           XMSG_SHARED_BASELINE_BIN = lib.getExe baseline;
           nativeBuildInputs = (package.nativeBuildInputs or [ ]) ++ [ pkgs.python3 ];

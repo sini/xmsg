@@ -69,17 +69,33 @@ jobs:
           nix --version
           echo "sandbox = $(nix config show sandbox)"
           sys=$(nix eval --impure --raw --expr builtins.currentSystem)
-          nix build "./ci#checks.$sys.package" "./ci#checks.$sys.shared-client" -L --no-link
+          nix build "./ci#checks.$sys.package" "./ci#checks.$sys.shared-client" -L --no-link --print-out-paths | tee -a /tmp/attic-paths
 
       - name: checks.codex-hook
         run: |
           sys=$(nix eval --impure --raw --expr builtins.currentSystem)
-          nix build "./ci#checks.$sys.codex-hook" -L --no-link
+          nix build "./ci#checks.$sys.codex-hook" -L --no-link --print-out-paths | tee -a /tmp/attic-paths
 
       - name: checks.pre-xl1-compat
         run: |
           sys=$(nix eval --impure --raw --expr builtins.currentSystem)
-          nix build "./ci#checks.$sys.pre-xl1-compat" -L --no-link
+          nix build "./ci#checks.$sys.pre-xl1-compat" -L --no-link --print-out-paths | tee -a /tmp/attic-paths
+
+      - name: Push to Attic cache
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          if [ -z "${ATTIC_TOKEN:-}" ]; then
+            echo "ATTIC_TOKEN is not set; skipping Attic cache push"
+            exit 0
+          fi
+          if [ ! -s /tmp/attic-paths ]; then
+            echo "No paths to push; skipping Attic cache push"
+            exit 0
+          fi
+          nix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev "$ATTIC_TOKEN"
+          nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci
 
   lock-probe:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.lock_probe }}
