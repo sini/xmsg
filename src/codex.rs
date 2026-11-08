@@ -1356,7 +1356,7 @@ pub struct CodexRootSnapshot {
 }
 
 /// In-memory store of admitted Codex roots, retry candidates, parked (`StaleAfterResume`)
-/// roots, active child turns, and deliberately/security-revoked (`RevokedByOperator`) roots (§6.2).
+/// roots, active child turns, and explicitly operator-revoked (`RevokedByOperator`) roots (§6.2).
 #[derive(Debug)]
 pub struct CodexStore {
     next_generation: u64,
@@ -1364,7 +1364,6 @@ pub struct CodexStore {
     candidates: HashMap<String, CodexRetryCandidate>,
     stale_roots: HashMap<String, StaleCodexRoot>,
     children: HashMap<(String, String), CodexChildState>,
-    child_rollouts: HashMap<(String, String), (u64, u64)>,
     revoked_by_operator: HashSet<String>,
     noted_unavailable_roots: HashSet<String>,
 }
@@ -1401,7 +1400,6 @@ impl CodexStore {
             candidates: HashMap::new(),
             stale_roots: initially_stale,
             children: HashMap::new(),
-            child_rollouts: HashMap::new(),
             revoked_by_operator: initially_revoked,
             noted_unavailable_roots: HashSet::new(),
         }
@@ -1428,7 +1426,7 @@ impl CodexStore {
     /// Park an admitted root `P` into `StaleAfterResume` (`active = 0, revoked = 0`) on normal
     /// `SessionEnd`, thread unload (`thread/unsubscribe`), owner exit, or lease close (§6.2.1).
     /// While parked, `P` is not in `self.roots` (MCP calls fail closed), but `P` can re-attest
-    /// via `rebind_resumed_root` when a trusted owner holds `<P>.lock` and matching `(rollout_dev, rollout_ino)`.
+    /// via `rebind_resumed_root` when a trusted owner holds `<P>.lock` and valid rollout metadata.
     pub fn park_root_for_resume(&mut self, root_id: &str) -> Option<(u32, u64)> {
         self.candidates.remove(root_id);
         self.children.retain(|(p, _), _| p != root_id);
@@ -1467,11 +1465,6 @@ impl CodexStore {
     pub fn unrevoke_by_operator(&mut self, root_id: &str) -> bool {
         self.noted_unavailable_roots.remove(root_id);
         self.revoked_by_operator.remove(root_id)
-    }
-
-    /// Alias for `revoke_by_operator` for security/integrity or operator revocations.
-    pub fn revoke_root(&mut self, root_id: &str) -> Option<(u32, u64)> {
-        self.revoke_by_operator(root_id)
     }
 
     /// Transition a root on normal `SessionEnd` to `StaleAfterResume` (`park_root_for_resume`)
@@ -1572,23 +1565,10 @@ impl CodexStore {
                 .is_some_and(|r| r.owner_pid == owner_pid && r.owner_starttime == owner_starttime);
             if same_owner && continuity.is_ok() {
                 let canon_home = self.roots.get(root_id).unwrap().codex_home.clone();
-                let prev_dev = self.roots.get(root_id).unwrap().rollout_dev;
-                let prev_ino = self.roots.get(root_id).unwrap().rollout_ino;
-                let meta =
-                    verify_codex_rollout(&canon_home, root_id, root_id, None).map_err(|e| {
-                        if matches!(e, RolloutLookupError::Invalid(_)) {
-                            self.revoke_by_operator(root_id);
-                        } else {
-                            self.park_root_for_resume(root_id);
-                        }
-                        format!("codex root {root_id} rollout revalidation failed: {e}")
-                    })?;
-                if prev_ino != 0 && (meta.rollout_dev != prev_dev || meta.rollout_ino != prev_ino) {
-                    self.revoke_by_operator(root_id);
-                    return Err(format!(
-                        "codex root {root_id} rollout inode changed during revalidation"
-                    ));
-                }
+                verify_codex_rollout(&canon_home, root_id, root_id, None).map_err(|e| {
+                    self.park_root_for_resume(root_id);
+                    format!("codex root {root_id} rollout revalidation failed: {e}")
+                })?;
                 if let Err(e) = self.roots.get(root_id).unwrap().watch.verify_continuity(
                     &config.proc_root,
                     owner_pid,
@@ -1720,7 +1700,7 @@ impl CodexStore {
             }
             Err(e) => {
                 if matches!(e, RolloutLookupError::Invalid(_)) {
-                    self.revoke_by_operator(root_id);
+                    self.park_root_for_resume(root_id);
                 }
                 Err(format!("codex root {root_id} admission refused: {e}"))
             }
@@ -1750,7 +1730,7 @@ impl CodexStore {
 
         // 3. Incumbent live-writer check (two-process race protection, §6.2.2 step 3).
         if self.roots.contains_key(root_id) {
-            let (inc_pid, inc_start, inc_home, inc_dev, inc_ino, inc_alive) = {
+            let (inc_pid, inc_start, inc_home, inc_alive) = {
                 let inc = self.roots.get(root_id).unwrap();
                 let alive = inc
                     .watch
@@ -1760,8 +1740,6 @@ impl CodexStore {
                     inc.owner_pid,
                     inc.owner_starttime.clone(),
                     inc.codex_home.clone(),
-                    inc.rollout_dev,
-                    inc.rollout_ino,
                     alive,
                 )
             };
@@ -1771,21 +1749,10 @@ impl CodexStore {
                         "codex root {root_id} already has a live writer pid={inc_pid}"
                     ));
                 }
-                let meta =
-                    verify_codex_rollout(&inc_home, root_id, root_id, None).map_err(|e| {
-                        if matches!(e, RolloutLookupError::Invalid(_)) {
-                            self.revoke_by_operator(root_id);
-                        } else {
-                            self.park_root_for_resume(root_id);
-                        }
-                        format!("codex root {root_id} rollout verification failed on resume: {e}")
-                    })?;
-                if inc_ino != 0 && (meta.rollout_dev != inc_dev || meta.rollout_ino != inc_ino) {
-                    self.revoke_by_operator(root_id);
-                    return Err(format!(
-                        "codex root {root_id} rollout inode changed across resume"
-                    ));
-                }
+                verify_codex_rollout(&inc_home, root_id, root_id, None).map_err(|e| {
+                    self.park_root_for_resume(root_id);
+                    format!("codex root {root_id} rollout verification failed on resume: {e}")
+                })?;
                 if self
                     .roots
                     .get(root_id)
@@ -1804,11 +1771,12 @@ impl CodexStore {
         let (canon_home, watch) =
             Self::locate_lock_home_and_watch(config, owner_pid, owner_starttime, root_id)?;
 
-        // 5. Rollout (st_dev, st_ino) continuity and XB2 verification (§6.2.2 step 5).
+        // XR8 / GT3: file history is not an admission key; re-attest metadata and the live lease.
+        // See den-ag-design@871a194cf, xmsg/ha9-codex-subaddress-spec.md §6.2 amendment.
         let rollout_meta = match verify_codex_rollout(&canon_home, root_id, root_id, None) {
             Ok(meta) => meta,
             Err(RolloutLookupError::Invalid(e)) => {
-                self.revoke_by_operator(root_id);
+                self.park_root_for_resume(root_id);
                 return Err(format!(
                     "codex root {root_id} resume refused due to rollout integrity error: {e}"
                 ));
@@ -1821,22 +1789,6 @@ impl CodexStore {
         };
 
         let prior = self.stale_roots.get(root_id).cloned();
-        if let Some(ref p) = prior {
-            if p.rollout_ino != 0 {
-                let prior_canon_home =
-                    std::fs::canonicalize(&p.codex_home).unwrap_or_else(|_| p.codex_home.clone());
-                if canon_home != prior_canon_home
-                    || rollout_meta.rollout_dev != p.rollout_dev
-                    || rollout_meta.rollout_ino != p.rollout_ino
-                {
-                    self.revoke_by_operator(root_id);
-                    return Err(format!(
-                        "codex root {root_id} rollout inode changed across resume"
-                    ));
-                }
-            }
-        }
-
         // 6. Post-rollout lease re-check and atomic rebind (§6.2.2 step 6).
         if let Err(e) = watch.verify_continuity(&config.proc_root, owner_pid, owner_starttime) {
             return Err(format!(
@@ -1958,23 +1910,10 @@ impl CodexStore {
         }
 
         let canon_home = entry.codex_home.clone();
-        let prev_dev = entry.rollout_dev;
-        let prev_ino = entry.rollout_ino;
         match verify_codex_rollout(&canon_home, root_id, root_id, None) {
-            Ok(meta) => {
-                if prev_ino != 0 && (meta.rollout_dev != prev_dev || meta.rollout_ino != prev_ino) {
-                    self.revoke_by_operator(root_id);
-                    return Err(format!(
-                        "codex root {root_id} rollout inode changed during validation"
-                    ));
-                }
-            }
+            Ok(_) => {}
             Err(e) => {
-                if matches!(e, RolloutLookupError::Invalid(_)) {
-                    self.revoke_by_operator(root_id);
-                } else {
-                    self.park_root_for_resume(root_id);
-                }
+                self.park_root_for_resume(root_id);
                 return Err(format!(
                     "codex root {root_id} rollout verification failed: {e}"
                 ));
@@ -2158,20 +2097,6 @@ impl CodexStore {
             .map_err(|e| format!("admit_codex({root_id}, {child_id}) refused: {e}"))?;
 
         let key = (root_id.to_string(), child_id.to_string());
-        if let Some(&(prev_dev, prev_ino)) = self.child_rollouts.get(&key) {
-            if prev_ino != 0
-                && (child_meta.rollout_dev != prev_dev || child_meta.rollout_ino != prev_ino)
-            {
-                return Err(format!(
-                    "admit_codex({root_id}, {child_id}) refused: child rollout inode changed across resume"
-                ));
-            }
-        }
-        self.child_rollouts.insert(
-            key.clone(),
-            (child_meta.rollout_dev, child_meta.rollout_ino),
-        );
-
         let root_snap = self.validate_root_by_id(config, root_id, Some(root_generation))?;
 
         let state = self.children.entry(key).or_insert_with(|| CodexChildState {

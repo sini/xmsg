@@ -223,12 +223,20 @@ fn xf6_close_only_handover_before_new_watch() {
         // Other tests deliberately retain inherited descriptors across fork. Measure
         // the close-only lifecycle in its own exec'd process, as in the standalone probe.
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "xf6_close_only_handover_before_new_watch", "--nocapture"])
+            .args([
+                "--exact",
+                "xf6_close_only_handover_before_new_watch",
+                "--nocapture",
+            ])
             .env(CHILD, "1")
             .output()
             .unwrap();
-        assert!(output.status.success(), "close-only child failed: {} {}",
-            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "close-only child failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         return;
     }
     let env = CodexTestEnv::new();
@@ -3124,12 +3132,12 @@ async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() 
 
 /// C17: Resume re-attestation across all 7 cases in spec v4 §6.3:
 /// 1. Same-daemon `thread/unsubscribe` (`StaleAfterResume`) + `thread/resume` rebinds `P` under `(O1, start_1, g2)` and drains pending messages.
-/// 2. New-daemon resume (`O1` dead -> `O2` holds `<P>.lock` and same rollout `(dev, ino)`) atomically rebinds `P` from `StaleAfterResume` to `(O2, start_2, g3)`, drops `O1`'s stale row, and accepts MCP calls from `O2` while refusing `O1`.
+/// 2. New-daemon resume (`O1` dead -> `O2` holds `<P>.lock` and valid rollout metadata) atomically rebinds `P` from `StaleAfterResume` to `(O2, start_2, g3)`, drops `O1`'s stale row, and accepts MCP calls from `O2` while refusing `O1`.
 /// 3. `--no-daemon` (`codex --no-daemon exec resume <P>`) rebinds `P` to embedded owner `O3` and drains/sends.
 /// 4. First hook (`UserPromptSubmit`) after bus restart re-attests and rebinds `P` from `StaleAfterResume` without requiring a new `SessionStart`.
-/// 5. Resumed child `P/X` re-attests `parent_thread_id == Some(P)` and `(child_dev, child_ino)` under `g'`; grandchild (`parent_thread_id == X`) or replaced child rollout inode refuses.
+/// 5. Resumed child `P/X` re-attests `parent_thread_id == Some(P)` under `g'`; grandchild (`parent_thread_id == X`) refuses.
 /// 6. Two processes `(O1, O2)` racing to resume `P`: while `O1` holds live lease, `O2` is refused; after `O1` releases, only the holder of on-disk `<P>.lock` succeeds.
-/// 7. `RevokedByOperator` with a VALID witness (`<P>.lock` held by live trusted `O2` + valid original rollout `(dev, ino)`): deliberately revoking `P` keeps `P` refused across `SessionStart(source="resume")`, `SessionStart(source="startup")`, and `UserPromptSubmit` until explicit operator `--unrevoke`.
+/// 7. `RevokedByOperator` with a VALID witness (`<P>.lock` held by live trusted `O2` + valid rollout metadata): deliberately revoking `P` keeps `P` refused across `SessionStart(source="resume")`, `SessionStart(source="startup")`, and `UserPromptSubmit` until explicit operator `--unrevoke`.
 #[tokio::test]
 async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_witness() {
     let env = CodexTestEnv::new();
@@ -3249,7 +3257,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
         c1_resume.stdout
     );
 
-    // Case 2 & Case 6b: O1 dies/releases `<P>.lock`, O2 acquires `<P>.lock` on the same rollout `(dev, ino)`:
+    // Case 2 & Case 6b: O1 dies/releases `<P>.lock`, O2 acquires `<P>.lock` on the valid rollout metadata:
     // First verify that if O3 does NOT hold `<P>.lock`, O3 is refused when trying to resume `root_p`:
     let _ = fs::remove_file(env.proc_root.join(pid_o1.to_string()).join("fd/3"));
     env.recreate_writer_lock(&env.codex_home, pid_o2, root_p, 4);
@@ -3266,7 +3274,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
         "O3 without <P>.lock must be refused when racing to resume root_p"
     );
 
-    // O2 holds `<P>.lock` and same rollout `(dev, ino)` -> rebinds atomically to O2:
+    // O2 holds `<P>.lock` and valid rollout metadata -> rebinds atomically to O2:
     let c2_resume = handle_codex_hook_frame(
         &env.state,
         &peer_o2,
@@ -3323,8 +3331,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
         "new owner O2 must be accepted for MCP calls after rebind"
     );
 
-    // Also verify rollout inode continuity check on resume (`M_rebind_no_rollout_ino`):
-    // If the rollout file at `root_rollout_path` is replaced with a different inode while in `StaleAfterResume`, resume MUST refuse!
+    // XR8 amendment: invalid session metadata refuses recoverably; file identity is irrelevant.
     handle_codex_hook_frame(
         &env.state,
         &peer_o2,
@@ -3336,12 +3343,12 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
     .unwrap();
     let orig_rollout_backup = env.base_dir.join("orig_root_rollout.bak");
     fs::rename(&root_rollout_path, &orig_rollout_backup).unwrap();
-    // Create a dummy file first so the new rollout gets a distinct inode from `orig_rollout_backup`:
+    // Publish a rollout with mismatched session metadata.
     fs::write(
     &root_rollout_path,
     format!(
         "{}\n",
-        json!({"timestamp": "2026-11-04T12:00:00Z", "type": "session_meta", "payload": {"id": root_p, "session_id": root_p, "cwd": "/workspace"}})
+        json!({"timestamp": "2026-11-04T12:00:00Z", "type": "session_meta", "payload": {"id": root_p, "session_id": "019a0000-0000-7000-8000-000000000999", "cwd": "/workspace"}})
     ),
 )
 .unwrap();
@@ -3355,25 +3362,19 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
     .await;
     assert!(
         replaced_ino_res.is_err(),
-        "resume with a replaced rollout inode must be refused"
+        "resume with mismatched session metadata must be refused"
     );
     assert!(
-        xmsg::codex::for_state(&env.state)
+        !xmsg::codex::for_state(&env.state)
             .lock()
             .unwrap()
             .store
             .is_revoked(root_p),
-        "P8: rollout inode replacement on resume must transition root_p to RevokedByOperator (is_revoked == true)"
+        "XR8: metadata failure must not become operator revocation"
     );
-    // Restore original rollout inode and clear the security revocation caused by the inode-mismatch probe:
+    // Repair metadata without an operator unrevoke.
     fs::remove_file(&root_rollout_path).unwrap();
     fs::rename(&orig_rollout_backup, &root_rollout_path).unwrap();
-    {
-        let rt_arc = xmsg::codex::for_state(&env.state);
-        rt_arc.lock().unwrap().store.unrevoke_by_operator(root_p);
-        let db = env.state.db.lock().unwrap();
-        storage::unrevoke_codex_root_by_operator(&db, root_p).unwrap();
-    }
 
     // C2: While `root_p` is parked (`StaleAfterResume`), an MCP tool call from `root_p` is refused,
     // `xmsg serve` restarts (`init_for_state`), and a valid-witness resume follows and returns `Ok`
@@ -3495,7 +3496,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
     .await;
     assert!(
         c5_child.is_ok(),
-        "Case 5 resumed child P/X with matching parent_thread_id and rollout inode must succeed: {c5_child:?}"
+        "Case 5 resumed child P/X with matching parent_thread_id and session metadata must succeed: {c5_child:?}"
     );
     let _ = child_rollout_path;
     env.write_child_rollout(&env.codex_home, grandchild_z, root_p, Some(child_x));
@@ -3512,7 +3513,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
         "Case 5 grandchild (parent_thread_id == X != P) must be refused on SubagentStart"
     );
 
-    // Case 7: `RevokedByOperator` with a VALID witness (`<P>.lock` held by live trusted O3 + valid original rollout `(dev, ino)`):
+    // Case 7: `RevokedByOperator` with a VALID witness (`<P>.lock` held by live trusted O3 + valid rollout metadata):
     // Deliberately revoking `P` via `CodexRevoke` (`revoked: true`) keeps `P` refused across `SessionStart(source="resume")`,
     // `SessionStart(source="startup")`, and `UserPromptSubmit` even when O3 holds a valid witness, until explicit `--unrevoke`.
     handle_agent_frame(
@@ -3567,7 +3568,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
     );
 
     // Explicit operator `--unrevoke` (`revoked: false`) clears `RevokedByOperator` back to `StaleAfterResume`
-    // while preserving the `(rollout_dev, rollout_ino)` pin both before and after a bus restart (C3):
+    // with fresh metadata and lease attestation before and after a bus restart (C3):
     handle_agent_frame(
         &env.state,
         &peer_o3,
@@ -3593,9 +3594,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
     );
 
     // C3: Now revoke `root_p`, restart the bus (`init_for_state`), run `--unrevoke` AFTER the restart,
-    // and verify that `root_p`'s `(rollout_dev, rollout_ino)` pin was preserved across the restart
-    // (replacing the rollout inode after `--unrevoke` fails closed and re-revokes `root_p`, whereas the
-    // original rollout inode succeeds):
+    // then verify malformed metadata refuses recoverably, and repair re-attests.
     handle_agent_frame(
         &env.state,
         &peer_o3,
@@ -3644,7 +3643,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
         &root_rollout_path,
         format!(
             "{}\n",
-            json!({"timestamp": "2026-11-04T12:00:00Z", "type": "session_meta", "payload": {"id": root_p, "session_id": root_p, "cwd": "/workspace"}})
+            json!({"timestamp": "2026-11-04T12:00:00Z", "type": "session_meta", "payload": {"id": root_p, "session_id": "019a0000-0000-7000-8000-000000000999", "cwd": "/workspace"}})
         ),
     )
     .unwrap();
@@ -3658,29 +3657,18 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
     .await;
     assert!(
         c3_swapped_res.is_err(),
-        "C3: rollout inode pin must survive revoke -> bus restart -> unrevoke and refuse a swapped rollout inode"
+        "XR8: malformed metadata after restart and unrevoke must refuse"
     );
     assert!(
-        xmsg::codex::for_state(&env.state)
+        !xmsg::codex::for_state(&env.state)
             .lock()
             .unwrap()
             .store
             .is_revoked(root_p),
-        "C3: swapped rollout inode after restart + unrevoke must re-revoke root_p"
+        "XR8: automatic metadata failure after unrevoke must not re-revoke"
     );
     fs::remove_file(&root_rollout_path).unwrap();
     fs::rename(&c3_rollout_bak, &root_rollout_path).unwrap();
-    handle_agent_frame(
-        &env.state,
-        &peer_o3,
-        AgentFrame::CodexRevoke {
-            schema_version: None,
-            session_id: root_p.to_string(),
-            revoked: false,
-        },
-    )
-    .await
-    .unwrap();
     let c3_ok_res = handle_codex_hook_frame(
         &env.state,
         &peer_o3,
@@ -3691,7 +3679,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
     .await;
     assert!(
         c3_ok_res.is_ok(),
-        "C3: after restoring original rollout inode and --unrevoke across restart, resume must succeed: {c3_ok_res:?}"
+        "XR8: repaired metadata must resume without another unrevoke: {c3_ok_res:?}"
     );
 
     // C1: Build a real pre-resume v3-shaped SQLite database (`codex_roots` with `revoked = 1` and NO `active` column),
@@ -5436,4 +5424,382 @@ async fn c3_live_distinct_child_same_inode_flock_reopen_and_mutants() {
 
     let _ = writeln!(child_in, "QUIT");
     let _ = child.wait();
+}
+
+/// XR8: old mount/inode observations cannot prevent a valid resume, including after unrevoke.
+#[tokio::test]
+async fn xr8_resume_ignores_historical_file_identity_after_unrevoke() {
+    let env = CodexTestEnv::new();
+    let root = "019a0000-0000-7000-8000-000000000801";
+    let pid = 8801;
+    env.write_fake_proc(pid, 1, "8801", &env.codex_exe);
+    env.create_writer_lock(&env.codex_home, pid, root, 3);
+    env.write_root_rollout(&env.codex_home, root, "/workspace");
+    let peer = env.peer(pid);
+    handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id": root, "source": "startup"}),
+    )
+    .await
+    .unwrap();
+    let rt = xmsg::codex::for_state(&env.state);
+    let cfg = rt.lock().unwrap().config.clone();
+    rt.lock().unwrap().store.revoke_by_operator(root);
+    {
+        let db = env.state.db.lock().unwrap();
+        storage::invalidate_codex_root(&db, root).unwrap();
+        // Simulate the historical observation made before reboot and/or file restoration.
+        db.execute(
+            "UPDATE codex_roots SET rollout_dev = 1, rollout_ino = 1 WHERE root_id = ?1",
+            [root],
+        )
+        .unwrap();
+    }
+    init_for_state(&env.state, cfg.clone());
+    assert!(handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id": root, "source": "resume"})
+    )
+    .await
+    .unwrap_err()
+    .to_string()
+    .contains("revoked by operator"));
+    xmsg::codex::for_state(&env.state)
+        .lock()
+        .unwrap()
+        .store
+        .unrevoke_by_operator(root);
+    storage::unrevoke_codex_root_by_operator(&env.state.db.lock().unwrap(), root).unwrap();
+    let resumed = handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id": root, "source": "resume"}),
+    )
+    .await;
+    assert!(
+        resumed.is_ok(),
+        "XR8: valid lease/metadata must resume after unrevoke despite old dev/ino: {resumed:?}"
+    );
+    let revoked: i64 = env
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT revoked FROM codex_roots WHERE root_id = ?1",
+            [root],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(revoked, 0, "automatic re-attestation must not re-revoke");
+    init_for_state(&env.state, cfg);
+    handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "UserPromptSubmit",
+        None,
+        &json!({"session_id": root}),
+    )
+    .await
+    .unwrap();
+}
+
+/// XR8: corrupt metadata refuses the current call, then repaired metadata can re-attest.
+#[tokio::test]
+async fn xr8_metadata_failure_is_recoverable_without_operator_unrevoke() {
+    let env = CodexTestEnv::new();
+    let root = "019a0000-0000-7000-8000-000000000802";
+    let pid = 8802;
+    env.write_fake_proc(pid, 1, "8802", &env.codex_exe);
+    env.create_writer_lock(&env.codex_home, pid, root, 3);
+    let rollout = env.write_root_rollout(&env.codex_home, root, "/workspace");
+    let peer = env.peer(pid);
+    handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id": root, "source": "startup"}),
+    )
+    .await
+    .unwrap();
+    fs::write(&rollout, "invalid JSON\n").unwrap();
+    let error = handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "UserPromptSubmit",
+        None,
+        &json!({"session_id": root}),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("rollout"),
+        "must name validation failure: {error}"
+    );
+    assert!(
+        !error.contains("operator"),
+        "automatic refusal must not claim operator action"
+    );
+    assert!(
+        !xmsg::codex::for_state(&env.state)
+            .lock()
+            .unwrap()
+            .store
+            .is_revoked(root),
+        "XR8: malformed rollout must not become operator revocation"
+    );
+    let revoked: i64 = env
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT revoked FROM codex_roots WHERE root_id = ?1",
+            [root],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(revoked, 0);
+    env.write_root_rollout(&env.codex_home, root, "/workspace");
+    let rt = xmsg::codex::for_state(&env.state);
+    let cfg = rt.lock().unwrap().config.clone();
+    init_for_state(&env.state, cfg);
+    handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id": root, "source": "resume"}),
+    )
+    .await
+    .unwrap();
+}
+
+/// XR8: a valid copied rollout remains usable, both live and after parking, for root and child.
+#[tokio::test]
+async fn xr8_valid_rollout_replacement_keeps_root_and_child_usable() {
+    let env = CodexTestEnv::new();
+    let root = "019a0000-0000-7000-8000-000000000803";
+    let child = "019a0000-0000-7000-8000-000000000804";
+    let pid = 8803;
+    env.write_fake_proc(pid, 1, "8803", &env.codex_exe);
+    env.create_writer_lock(&env.codex_home, pid, root, 3);
+    let rollout = env.write_root_rollout(&env.codex_home, root, "/workspace");
+    let peer = env.peer(pid);
+    handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id": root, "source": "startup"}),
+    )
+    .await
+    .unwrap();
+    let child_rollout = env.write_child_rollout(&env.codex_home, child, root, Some(root));
+    handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SubagentStart",
+        None,
+        &json!({"session_id": root, "agent_id": child}),
+    )
+    .await
+    .unwrap();
+    for file in [&rollout, &child_rollout] {
+        let restored = file.with_extension("restored");
+        fs::copy(file, &restored).unwrap();
+        // Allocate while the original exists so file replacement is real even with inode reuse.
+        use std::os::unix::fs::MetadataExt;
+        assert_ne!(
+            fs::metadata(file).unwrap().ino(),
+            fs::metadata(&restored).unwrap().ino()
+        );
+        fs::rename(&restored, file).unwrap();
+    }
+    handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "UserPromptSubmit",
+        None,
+        &json!({"session_id": root}),
+    )
+    .await
+    .unwrap();
+    handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id": root, "source": "startup"}),
+    )
+    .await
+    .unwrap();
+    handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id": root, "source": "resume"}),
+    )
+    .await
+    .unwrap();
+    handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SubagentStart",
+        None,
+        &json!({"session_id": root, "agent_id": child}),
+    )
+    .await
+    .unwrap();
+    handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionEnd",
+        None,
+        &json!({"session_id": root}),
+    )
+    .await
+    .unwrap();
+    handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id": root, "source": "resume"}),
+    )
+    .await
+    .unwrap();
+}
+
+/// XR8: no automatic admission error may silently acquire operator-revocation semantics.
+#[tokio::test]
+async fn xr8_automatic_admission_errors_recover_on_next_attestation() {
+    for source in [
+        "startup",
+        "resume",
+        "unsupported",
+        "live-startup",
+        "live-resume",
+    ] {
+        let env = CodexTestEnv::new();
+        let root = "019a0000-0000-7000-8000-000000000805";
+        let pid = 8805;
+        env.write_fake_proc(pid, 1, "8805", &env.codex_exe);
+        env.create_writer_lock(&env.codex_home, pid, root, 3);
+        let rollout = env.write_root_rollout(&env.codex_home, root, "/workspace");
+        let peer = env.peer(pid);
+        if source != "startup" {
+            handle_codex_hook_frame(
+                &env.state,
+                &peer,
+                "SessionStart",
+                None,
+                &json!({"session_id": root, "source": "startup"}),
+            )
+            .await
+            .unwrap();
+            if !source.starts_with("live-") {
+                handle_codex_hook_frame(
+                    &env.state,
+                    &peer,
+                    "SessionEnd",
+                    None,
+                    &json!({"session_id": root}),
+                )
+                .await
+                .unwrap();
+            }
+        }
+        let source = source.strip_prefix("live-").unwrap_or(source);
+        fs::write(rollout, "invalid JSON\n").unwrap();
+        let error = handle_codex_hook_frame(
+            &env.state,
+            &peer,
+            "SessionStart",
+            None,
+            &json!({"session_id": root, "source": source}),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains("operator"), "{source}: {error}");
+        assert!(
+            !xmsg::codex::for_state(&env.state)
+                .lock()
+                .unwrap()
+                .store
+                .is_revoked(root),
+            "{source}: automatic failure must be recoverable"
+        );
+        env.write_root_rollout(&env.codex_home, root, "/workspace");
+        handle_codex_hook_frame(
+            &env.state,
+            &peer,
+            "SessionStart",
+            None,
+            &json!({"session_id": root, "source": "resume"}),
+        )
+        .await
+        .unwrap();
+    }
+}
+
+/// XR8: another live writer is refused, but a later lease handover needs no unrevoke.
+#[tokio::test]
+async fn xr8_live_writer_conflict_is_recoverable_after_handover() {
+    let env = CodexTestEnv::new();
+    let root = "019a0000-0000-7000-8000-000000000806";
+    env.write_fake_proc(8806, 1, "8806", &env.codex_exe);
+    env.write_fake_proc(8807, 1, "8807", &env.codex_exe);
+    env.create_writer_lock(&env.codex_home, 8806, root, 3);
+    env.write_root_rollout(&env.codex_home, root, "/workspace");
+    handle_codex_hook_frame(
+        &env.state,
+        &env.peer(8806),
+        "SessionStart",
+        None,
+        &json!({"session_id": root, "source": "startup"}),
+    )
+    .await
+    .unwrap();
+    let error = handle_codex_hook_frame(
+        &env.state,
+        &env.peer(8807),
+        "SessionStart",
+        None,
+        &json!({"session_id": root, "source": "resume"}),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("live writer"),
+        "must preserve incumbent lease: {error}"
+    );
+    assert!(!xmsg::codex::for_state(&env.state)
+        .lock()
+        .unwrap()
+        .store
+        .is_revoked(root));
+    env.recreate_writer_lock(&env.codex_home, 8807, root, 4);
+    handle_codex_hook_frame(
+        &env.state,
+        &env.peer(8807),
+        "SessionStart",
+        None,
+        &json!({"session_id": root, "source": "resume"}),
+    )
+    .await
+    .unwrap();
 }

@@ -2411,10 +2411,10 @@ pub async fn handle_codex_hook_frame(
                 other => {
                     {
                         let mut rt = rt_arc.lock().unwrap();
-                        let _ = rt.store.revoke_by_operator(session_id);
+                        let _ = rt.store.park_root_for_resume(session_id);
                     }
                     if let Ok(db) = state.db.lock() {
-                        let _ = crate::storage::invalidate_codex_root(&db, session_id);
+                        let _ = crate::storage::park_codex_root(&db, session_id);
                     }
                     Err(AppError::NotRecipient(format!(
                         "unsupported or missing SessionStart source '{other}' for session '{session_id}'"
