@@ -241,9 +241,11 @@ fn create_fake_agy_bin(dir: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
          echo \"ANTIGRAVITY_LS_ADDRESS=$ANTIGRAVITY_LS_ADDRESS\" >> \"{}\"\n\
          echo \"ANTIGRAVITY_CSRF_TOKEN=$ANTIGRAVITY_CSRF_TOKEN\" >> \"{}\"\n\
          if [ -f \"{}\" ]; then\n\
-             echo \"Error: Unauthenticated\" >&2\n\
+             printf '{{\\n  \"response\": {{}},\\n  \"error\": \"rpc error: code = Unauthenticated desc = unauthenticated: invalid CSRF token\"\\n}}\\n'\n\
              exit 1\n\
          fi\n\
+         escaped=$(printf '%s' \"$7\" | awk 'BEGIN {{ ORS=\"\" }} {{ gsub(/\\\\/, \"\\\\\\\\\"); gsub(/\"/, \"\\\\\\\"\"); gsub(/\\r/, \"\\\\r\"); if (NR > 1) printf \"\\\\n\"; printf \"%s\", $0 }}')\n\
+         printf '{{\\n  \"response\": {{\\n    \"sendMessage\": {{\\n      \"recipientId\": \"%s\",\\n      \"content\": \"%s\"\\n    }}\\n  }}\\n}}\\n' \"$6\" \"$escaped\"\n\
          exit 0\n",
         argv_log.display(),
         env_log.display(),
@@ -841,9 +843,11 @@ async fn c4_stale_credentials_clear_escrow_on_both_ends() {
         .unwrap();
     assert_eq!(
         fail_resp.status(),
-        reqwest::StatusCode::SERVICE_UNAVAILABLE,
-        "delivery with failing agy must return 503"
+        reqwest::StatusCode::ACCEPTED,
+        "delivery with failing agy must fall through to agy_pending_messages (202 queued)"
     );
+    let fail_body: Value = fail_resp.json().await.unwrap();
+    assert_eq!(fail_body["outcome"], "queued");
 
     // Wait until xmsg mcp reads agy_escrow_clear from agent.sock
     wait_for_mcp_socket_read(child_pid, csw_before_clear).await;

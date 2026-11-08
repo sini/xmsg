@@ -74,7 +74,7 @@ impl AgySessionInfo {
     }
 
     pub fn has_credentials(&self) -> bool {
-        self.credentials.is_some()
+        self.credentials.as_ref().is_some_and(|c| !c.is_stale)
     }
 }
 
@@ -1643,14 +1643,21 @@ pub async fn deliver_agy_envelope(
         Err(_) => return Err(AppError::InboxTimeout),
     };
 
-    let stdout_str = String::from_utf8_lossy(&output.stdout);
-    let stderr_str = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{stdout_str} {stderr_str}");
+    if output.status.success() {
+        return Ok(());
+    }
 
-    if combined.contains("Unauthenticated")
-        || combined.contains("connection refused")
-        || combined.contains("Connection refused")
-    {
+    let stderr_excerpt: String = String::from_utf8_lossy(&output.stderr)
+        .chars()
+        .take(200)
+        .collect();
+    let parsed_error: Option<String> = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string));
+    let error_str = parsed_error.as_deref().unwrap_or("");
+    let error_excerpt: String = error_str.chars().take(200).collect();
+
+    if error_str.contains("code = Unauthenticated") || error_str.contains("code = Unavailable") {
         {
             let mut store_lock = store.write().unwrap();
             if let Some(entry) = store_lock.get_mut(&session.session_id) {
@@ -1667,23 +1674,23 @@ pub async fn deliver_agy_envelope(
             }
         }
         notify_agy_escrow();
-        let excerpt: String = combined.chars().take(200).collect();
-        tracing::warn!("agy delivery auth failure: {excerpt}");
+        tracing::warn!(
+            error = %error_excerpt,
+            stderr = %stderr_excerpt,
+            "agy delivery auth failure"
+        );
         return Err(AppError::CredentialsStale(
             "authentication failed".to_string(),
         ));
     }
 
-    if !output.status.success() {
-        let excerpt: String = combined.chars().take(200).collect();
-        tracing::warn!(
-            "agy delivery failure (code {:?}): {excerpt}",
-            output.status.code()
-        );
-        return Err(AppError::InboxUnavailable("delivery failed".to_string()));
-    }
-
-    Ok(())
+    tracing::warn!(
+        code = ?output.status.code(),
+        error = %error_excerpt,
+        stderr = %stderr_excerpt,
+        "agy delivery failure"
+    );
+    Err(AppError::InboxUnavailable("delivery failed".to_string()))
 }
 
 /// Returns current process UID.
@@ -1792,8 +1799,7 @@ fn eligible_holder(
         return None;
     }
     let already_registered = store.read().unwrap().values().any(|info| {
-        (info.conversation_id == conv_id || info.session_key == conv_id)
-            && info.credentials.as_ref().is_some_and(|c| !c.is_stale)
+        (info.conversation_id == conv_id || info.session_key == conv_id) && info.has_credentials()
     });
     if already_registered {
         return None;
@@ -1840,6 +1846,19 @@ pub fn eligible_agy_conversations(config: &AgyConfig, store: &AgyStore) -> Vec<S
             let conv_id = path.file_stem()?.to_str()?.to_string();
             eligible_holder(config, &canons, store, &conv_id).map(|_| conv_id)
         })
+        .collect()
+}
+
+/// Conversations in `store` whose credentials have been marked stale (`is_stale == true`).
+/// Used by [`run_agy_proc_watcher`] on an escrow notification to re-arm only conversations that
+/// transitioned to stale without arming unrelated unarmed conversations in `presence_dir`.
+fn stale_agy_conversations(store: &AgyStore) -> Vec<String> {
+    store
+        .read()
+        .unwrap()
+        .values()
+        .filter(|info| info.credentials.as_ref().is_some_and(|c| c.is_stale))
+        .map(|info| info.conversation_id.clone())
         .collect()
 }
 
@@ -1971,54 +1990,63 @@ async fn register_from_subtree(
         }
 
         if let Some((ls_address, csrf_token)) = creds {
-            let req = AgyRegisterRequest {
-                conversation_id: conv_id.to_string(),
-                ls_address,
-                csrf_token,
-            };
-            // The same verification `xmsg register agy` gets, with the process that supplied the
-            // credentials as the peer: its ancestry must reach the lock-holding agy.
-            match verify_registration(
-                proc_root,
-                &config.proc_locks_path,
-                &config.presence_dir,
-                &config.trusted_agy_exes,
-                my_uid,
-                my_uid,
-                p,
-                &req,
-            ) {
-                Ok(reg) => {
-                    let mut session_info = AgySessionInfo::new_with_credentials(
-                        conv_id.to_string(),
-                        reg.pid,
-                        reg.starttime,
-                        AgyCredentials {
-                            ls_address: req.ls_address,
-                            csrf_token: req.csrf_token,
-                            is_stale: false,
-                        },
-                    );
-                    if let Some(ref raw) = env_label {
-                        session_info = session_info.with_label(Some(raw));
-                    } else if let Some(lbl) = watch.labels.get(conv_id) {
-                        session_info.label = lbl.clone();
-                    } else if let Some(existing) = store.read().unwrap().get(&reg.session_key) {
-                        session_info.label = existing.label.clone();
+            let matches_stale = store.read().unwrap().values().any(|info| {
+                (info.conversation_id == conv_id || info.session_key == conv_id)
+                    && info.credentials.as_ref().is_some_and(|c| {
+                        c.is_stale && c.ls_address == ls_address && c.csrf_token == csrf_token
+                    })
+            });
+            if !matches_stale {
+                let req = AgyRegisterRequest {
+                    conversation_id: conv_id.to_string(),
+                    ls_address,
+                    csrf_token,
+                };
+                // The same verification `xmsg register agy` gets, with the process that supplied the
+                // credentials as the peer: its ancestry must reach the lock-holding agy.
+                match verify_registration(
+                    proc_root,
+                    &config.proc_locks_path,
+                    &config.presence_dir,
+                    &config.trusted_agy_exes,
+                    my_uid,
+                    my_uid,
+                    p,
+                    &req,
+                ) {
+                    Ok(reg) => {
+                        let mut session_info = AgySessionInfo::new_with_credentials(
+                            conv_id.to_string(),
+                            reg.pid,
+                            reg.starttime,
+                            AgyCredentials {
+                                ls_address: req.ls_address,
+                                csrf_token: req.csrf_token,
+                                is_stale: false,
+                            },
+                        );
+                        if let Some(ref raw) = env_label {
+                            session_info = session_info.with_label(Some(raw));
+                        } else if let Some(lbl) = watch.labels.get(conv_id) {
+                            session_info.label = lbl.clone();
+                        } else if let Some(existing) = store.read().unwrap().get(&reg.session_key) {
+                            session_info.label = existing.label.clone();
+                        }
+                        store
+                            .write()
+                            .unwrap()
+                            .insert(reg.session_key.clone(), session_info);
+                        notify_agy_escrow();
+                        flush_agy_queue(config, store, db, &reg.session_key, conv_id, reply_ttl)
+                            .await;
+                        return Ok(true);
                     }
-                    store
-                        .write()
-                        .unwrap()
-                        .insert(reg.session_key.clone(), session_info);
-                    notify_agy_escrow();
-                    flush_agy_queue(config, store, db, &reg.session_key, conv_id, reply_ttl).await;
-                    return Ok(true);
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        conversation_id = %conv_id,
-                        "verify_registration failed during proc scan: {e}"
-                    );
+                    Err(e) => {
+                        tracing::debug!(
+                            conversation_id = %conv_id,
+                            "verify_registration failed during proc scan: {e}"
+                        );
+                    }
                 }
             }
         }
@@ -2085,22 +2113,40 @@ pub async fn run_agy_proc_watcher(
         return;
     }
     let mut watch = AgyProcWatch::default();
+    let mut escrow_rx = subscribe_agy_escrow();
     let mut armed: HashSet<String> = eligible_agy_conversations(&config, &store)
         .into_iter()
         .collect();
     loop {
         if armed.is_empty() {
-            let Some((conv_id, label)) = arm_rx.recv().await else {
-                return;
-            };
-            if let Some(raw) = label {
-                watch
-                    .labels
-                    .insert(conv_id.clone(), crate::inbox::clean_label(&raw));
+            tokio::select! {
+                maybe_arm = arm_rx.recv() => {
+                    let Some((conv_id, label)) = maybe_arm else {
+                        return;
+                    };
+                    if let Some(raw) = label {
+                        watch
+                            .labels
+                            .insert(conv_id.clone(), crate::inbox::clean_label(&raw));
+                    }
+                    armed.insert(conv_id);
+                }
+                res = escrow_rx.changed() => {
+                    if res.is_err() {
+                        return;
+                    }
+                    armed.extend(stale_agy_conversations(&store));
+                    if armed.is_empty() {
+                        continue;
+                    }
+                }
             }
-            armed.insert(conv_id);
         } else {
             tokio::time::sleep(AGY_PROC_WATCH_INTERVAL).await;
+        }
+        if escrow_rx.has_changed().unwrap_or(false) {
+            let _ = escrow_rx.borrow_and_update();
+            armed.extend(stale_agy_conversations(&store));
         }
         while let Ok((conv_id, label)) = arm_rx.try_recv() {
             if let Some(raw) = label {

@@ -1077,7 +1077,7 @@ pub async fn deliver(
         }
         ResolvedTarget::Agy(session) => {
             if agy_has_creds(local.agy_store, session) {
-                crate::agy::deliver_agy(
+                match crate::agy::deliver_agy(
                     local.agy_config,
                     local.agy_store,
                     session,
@@ -1086,8 +1086,12 @@ pub async fn deliver(
                     message_id,
                     body,
                 )
-                .await?;
-                return Ok((session.session_id.clone(), "agy", "delivered"));
+                .await
+                {
+                    Ok(_) => return Ok((session.session_id.clone(), "agy", "delivered")),
+                    Err(AppError::CredentialsStale(_)) => {}
+                    Err(e) => return Err(e),
+                }
             }
             let agy_msg = storage::AgyPendingMessage {
                 id: message_id.to_string(),
@@ -1389,24 +1393,23 @@ pub async fn push_reply(
         "agy" => {
             match crate::agy::resolve_agy_session(local.agy_config, local.agy_store, ret_session_id)
             {
-                Ok(Some(session)) if agy_has_creds(local.agy_store, &session) => {
-                    match crate::agy::deliver_agy_envelope(
-                        local.agy_config,
-                        local.agy_store,
-                        &session,
-                        replier_label,
-                        &envelope,
-                    )
-                    .await
-                    {
-                        Ok(()) => "pushed",
-                        Err(AppError::Gone { .. }) | Err(AppError::CredentialsStale(_)) => {
-                            "sender_gone"
-                        }
-                        Err(_) => "push_failed",
-                    }
-                }
                 Ok(Some(session)) => {
+                    if agy_has_creds(local.agy_store, &session) {
+                        match crate::agy::deliver_agy_envelope(
+                            local.agy_config,
+                            local.agy_store,
+                            &session,
+                            replier_label,
+                            &envelope,
+                        )
+                        .await
+                        {
+                            Ok(()) => return "pushed",
+                            Err(AppError::CredentialsStale(_)) => {}
+                            Err(AppError::Gone { .. }) => return "sender_gone",
+                            Err(_) => return "push_failed",
+                        }
+                    }
                     let agy_msg = storage::AgyPendingMessage {
                         id: reply_id.to_string(),
                         session_id: session.session_id.clone(),
