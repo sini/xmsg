@@ -1068,7 +1068,11 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     };
     let agent_sock_path = match args.agent_sock {
         Some(p) => p,
-        None => xmsg::agent::default_agent_sock_path()
+        None => leaf_reg_sock_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|d| d.join("agent.sock")))
+            .map(Ok)
+            .unwrap_or_else(xmsg::agent::default_agent_sock_path)
             .map_err(|e| format!("cannot determine agent socket path: {e}"))?,
     };
 
@@ -1106,11 +1110,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut activated = xmsg::systemd::take_activated_sockets(&xmsg::systemd::ActivatedConfig {
         fed_listen: fed_listen_addr,
         listen: args.listen.as_deref(),
-        agent_sock: if args.leaf {
-            None
-        } else {
-            Some(agent_sock_path.as_path())
-        },
+        agent_sock: Some(agent_sock_path.as_path()),
         register_sock: if args.leaf {
             leaf_reg_sock_path.as_deref().unwrap_or(&register_sock_path)
         } else {
@@ -1346,21 +1346,20 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         let _ = xmsg::codex::init_for_state(&state, codex_config);
     }
 
-    if !args.leaf {
-        let agent_listener = match activated.agent.take() {
-            Some(listener) => listener,
-            None => xmsg::agent::bind_agent_listener(&agent_sock_path, my_uid).await?,
-        };
-        let agent_state = state.clone();
-        bg_tasks.push(tokio::spawn(async move {
-            if let Err(e) =
-                xmsg::agent::run_agent_server_with_listener(agent_listener, agent_state, my_uid)
-                    .await
-            {
-                tracing::error!("agent server error: {e}");
-            }
-        }));
+    let agent_listener = match activated.agent.take() {
+        Some(listener) => listener,
+        None => xmsg::agent::bind_agent_listener(&agent_sock_path, my_uid).await?,
+    };
+    let agent_state = state.clone();
+    bg_tasks.push(tokio::spawn(async move {
+        if let Err(e) =
+            xmsg::agent::run_agent_server_with_listener(agent_listener, agent_state, my_uid).await
+        {
+            tracing::error!("agent server error: {e}");
+        }
+    }));
 
+    if !args.leaf {
         let reg_listener = match activated.register.take() {
             Some(listener) => listener,
             None => xmsg::agy::bind_register_listener(&register_sock_path, my_uid).await?,

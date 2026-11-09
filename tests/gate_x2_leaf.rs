@@ -27,8 +27,8 @@ use xmsg::surface::SendResult as DeliveryResponse;
 use xmsg::svc::new_svc_store;
 
 // -----------------------------------------------------------------------------
-// Oracle 1: --leaf binds no agent.sock/register.sock and no fed listener
-// Mutant: bind register.sock => RED
+// Oracle 1: --leaf binds register.sock and agent.sock (mode 0600), no http.sock and no fed listener
+// Mutant: bind http.sock => RED
 // -----------------------------------------------------------------------------
 #[tokio::test]
 async fn test_oracle_1_leaf_binds_no_harness_sockets_or_fed_listener() {
@@ -114,10 +114,12 @@ async fn test_oracle_1_leaf_binds_no_harness_sockets_or_fed_listener() {
         panic!("Leaf HTTP server should respond on --listen (exit: {exited:?}): {stderr}");
     }
 
-    // In X19, leaf mode additionally serves register.sock (mode 0600) for its svc daemon. Its
-    // bind and chmod run in a spawned task, so they can trail the HTTP listener.
+    // In X19 and P1 arm B, leaf mode additionally serves register.sock and agent.sock (mode 0600)
+    // for its svc daemon. Their bind and chmod run in spawned tasks, so they can trail the HTTP listener.
     for _ in 0..600 {
-        if fs::metadata(&register_sock).is_ok_and(|m| m.permissions().mode() & 0o777 == 0o600) {
+        if fs::metadata(&register_sock).is_ok_and(|m| m.permissions().mode() & 0o777 == 0o600)
+            && fs::metadata(&agent_sock).is_ok_and(|m| m.permissions().mode() & 0o777 == 0o600)
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -134,9 +136,15 @@ async fn test_oracle_1_leaf_binds_no_harness_sockets_or_fed_listener() {
         "register.sock must have mode 0600"
     );
     assert!(
-        !agent_sock.exists(),
-        "Oracle 1 violation: leaf mode must NOT bind agent.sock (found: {})",
+        std::os::unix::net::UnixStream::connect(&agent_sock).is_ok(),
+        "P1 arm B: leaf mode additionally serves agent.sock (expected: {})",
         agent_sock.display()
+    );
+    let agent_meta = fs::metadata(&agent_sock).unwrap();
+    assert_eq!(
+        agent_meta.permissions().mode() & 0o777,
+        0o600,
+        "agent.sock must have mode 0600"
     );
     assert!(
         !http_sock.exists(),

@@ -152,8 +152,7 @@ pub fn take_activated_sockets(cfg: &ActivatedConfig<'_>) -> Result<ActivatedSock
             }
             "agent" => {
                 let expected = cfg.agent_sock.ok_or_else(|| {
-                    "LISTEN_FDS provided slot 'agent', but agent.sock is not used in --leaf mode"
-                        .to_string()
+                    "LISTEN_FDS provided slot 'agent', but agent.sock is not configured".to_string()
                 })?;
                 let listener = adopt_unix_listener(fd, family, "agent", expected)?;
                 out.agent = Some(listener);

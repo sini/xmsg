@@ -289,6 +289,7 @@ async fn create_hub_test_node(
 struct LeafTestNode {
     name: String,
     reg_sock: PathBuf,
+    agent_sock: PathBuf,
     leaf_principal: String,
     fed_state: Arc<FedState>,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -308,6 +309,7 @@ async fn create_leaf_test_node(
     fs::create_dir_all(&sock_dir).unwrap();
     fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700)).unwrap();
     let reg_sock = sock_dir.join("register.sock");
+    let agent_sock = sock_dir.join("agent.sock");
 
     let sessions_dir = temp.path().join("sessions");
     fs::create_dir_all(&sessions_dir).unwrap();
@@ -403,6 +405,12 @@ async fn create_leaf_test_node(
         fed_state: Some(fed_state.clone()),
     });
 
+    let a_sock = agent_sock.clone();
+    let a_state = r_state.clone();
+    tokio::spawn(async move {
+        let _ = run_agent_server(a_sock, a_state, my_uid).await;
+    });
+
     tokio::spawn(async move {
         let _ = run_leaf_register_server(r_sock, r_state, my_uid, r_p).await;
     });
@@ -419,7 +427,9 @@ async fn create_leaf_test_node(
     }
 
     for _ in 0..1500 {
-        if std::os::unix::net::UnixStream::connect(&reg_sock).is_ok() {
+        if std::os::unix::net::UnixStream::connect(&reg_sock).is_ok()
+            && std::os::unix::net::UnixStream::connect(&agent_sock).is_ok()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -428,6 +438,7 @@ async fn create_leaf_test_node(
     LeafTestNode {
         name: name.to_string(),
         reg_sock,
+        agent_sock,
         leaf_principal: leaf_principal.to_string(),
         fed_state,
         db,
@@ -1537,4 +1548,300 @@ async fn test_oracle_9_storage_error_does_not_ack_and_recovers() {
     assert_eq!(deliver_resp["action"], "deliver");
     assert_eq!(deliver_resp["messageId"], msg_id);
     assert_eq!(deliver_resp["text"], "Message during failure");
+}
+
+// =============================================================================
+// Oracle 10 (G1): Leaf admission refuses a caller whose peer UID != server UID
+// Mutant: disable `if peer_uid != my_uid` in `src/svc.rs` => RED
+// =============================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_oracle_10_leaf_admission_refuses_mismatched_uid() {
+    let creds_leaf = generate_self_signed_ed25519("leaf").unwrap();
+    let leaf = create_leaf_test_node("leaf", Vec::new(), creds_leaf, "svc:gateway").await;
+
+    let actual_uid = current_uid();
+    let mismatched_uid = actual_uid.wrapping_add(1);
+    let bad_sock = leaf.reg_sock.with_file_name("register-mismatch.sock");
+    let bad_listener = xmsg::svc::bind_leaf_register_listener(&bad_sock, actual_uid).unwrap();
+
+    let state = Arc::new(xmsg::http::AppState {
+        sessions_dirs: leaf.fed_state.sessions_dirs.clone(),
+        agy_config: leaf.fed_state.agy_config.clone(),
+        agy_store: leaf.fed_state.agy_store.clone(),
+        pi_store: leaf.fed_state.pi_store.clone(),
+        pi_notify_tx: leaf.fed_state.pi_notify_tx.clone(),
+        svc_store: leaf.fed_state.svc_store.clone(),
+        svc_notify_tx: leaf.fed_state.svc_notify_tx.clone(),
+        node_name: leaf.name.clone(),
+        max_body: 65536,
+        request_counter: AtomicU64::new(1),
+        db: leaf.db.clone(),
+        notify_tx: leaf.fed_state.notify_tx.clone(),
+        reply_ttl: Duration::from_secs(3600),
+        idempotency_ttl: Duration::from_secs(3600),
+        long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
+        fed_state: Some(leaf.fed_state.clone()),
+    });
+
+    tokio::spawn(async move {
+        let _ = xmsg::svc::run_leaf_register_server_with_listener(
+            bad_listener,
+            state,
+            mismatched_uid,
+            "svc:gateway".to_string(),
+        )
+        .await;
+    });
+
+    // 1. Mismatched server UID refuses the registration even when the principal name matches
+    let (mut reader, mut writer) = connect_svc(&bad_sock).await;
+    let reg_frame = serde_json::json!({
+        "harness": "svc",
+        "name": "gateway",
+    });
+    writer
+        .write_all(format!("{reg_frame}\n").as_bytes())
+        .await
+        .unwrap();
+    let resp = read_json_line(&mut reader).await;
+    assert_eq!(resp["status"], "error", "UID mismatch must fail: {resp}");
+    assert_eq!(resp["error"], "denied", "{resp}");
+    let detail = resp["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains(&format!(
+            "peer UID {actual_uid} does not match server UID {mismatched_uid}"
+        )),
+        "Unexpected refusal detail: {detail}"
+    );
+    assert!(
+        leaf.fed_state.svc_store.read().unwrap().is_empty(),
+        "Refused caller must not populate svc_store"
+    );
+
+    // 2. Positive control: matching server UID on the leaf's register.sock admits "gateway"
+    let (mut ok_reader, mut ok_writer) = connect_svc(&leaf.reg_sock).await;
+    ok_writer
+        .write_all(format!("{reg_frame}\n").as_bytes())
+        .await
+        .unwrap();
+    let ok_resp = read_json_line(&mut ok_reader).await;
+    assert_eq!(ok_resp["status"], "ok", "{ok_resp}");
+    assert_eq!(ok_resp["address"], "gateway@leaf", "{ok_resp}");
+}
+
+// =============================================================================
+// Oracle 11 (G2): Leaf-pod `svc` sends, replies, and lists end-to-end over P1 arm B
+// Mutant: drop `idempotency_key` on `agent.sock` send in `src/agent.rs` => RED
+// =============================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_oracle_11_leaf_svc_send_and_reply() {
+    use xmsg::client::{ClientError, ClientOptions, ListQuery, RegisteredService};
+
+    let creds_hub = generate_self_signed_ed25519("hub").unwrap();
+    let creds_leaf = generate_self_signed_ed25519("leaf").unwrap();
+
+    let hub = create_hub_test_node(
+        "hub",
+        vec![PeerConfig {
+            name: "leaf".to_string(),
+            address: "127.0.0.1:54321".to_string(),
+            pin: Some(creds_leaf.2.clone()),
+            ca: None,
+            identities: None,
+            allow: vec!["list".to_string(), "send".to_string(), "reply".to_string()],
+            from: None,
+            leaf: true,
+            principals: Vec::new(),
+            targets: None,
+            dial: None,
+        }],
+        creds_hub.clone(),
+    )
+    .await;
+
+    let leaf = create_leaf_test_node(
+        "leaf",
+        vec![PeerConfig {
+            name: "hub".to_string(),
+            address: hub.fed_addr.to_string(),
+            pin: Some(creds_hub.2.clone()),
+            ca: None,
+            identities: None,
+            allow: vec!["list".to_string(), "send".to_string(), "reply".to_string()],
+            from: None,
+            leaf: false,
+            principals: Vec::new(),
+            targets: None,
+            dial: None,
+        }],
+        creds_leaf.clone(),
+        "svc:guard",
+    )
+    .await;
+
+    let (_sock, claude_rx) =
+        create_claude_session_fixture(&hub.proc_root, &hub.sessions_dir, "sess-alice", "alice");
+
+    let make_opts = |service: &str| ClientOptions {
+        register_socket: leaf.reg_sock.clone(),
+        agent_socket: leaf.agent_sock.clone(),
+        max_frame_bytes: 65536,
+        operation_timeout: Duration::from_secs(5),
+        service: service.to_string(),
+        expected_node: Some("leaf".to_string()),
+        daemon_uid: current_uid(),
+    };
+
+    // 1. Name mismatch on leaf registration is refused
+    let mismatch = RegisteredService::register(make_opts("other")).await;
+    assert!(
+        matches!(
+            mismatch,
+            Err(ClientError::Refused { ref code }) if code == "denied"
+        ),
+        "Expected denied refusal for wrong service name, got: {}",
+        mismatch.err().unwrap()
+    );
+
+    // 2. Register as the leaf principal ("guard") via RegisteredService
+    let mut service = RegisteredService::register(make_opts("guard"))
+        .await
+        .expect("leaf registration should succeed");
+    assert_eq!(service.address(), Some("guard@leaf"));
+    let agent = service.agent_client();
+
+    // 3. Discovery over leaf agent.sock sees alice@hub
+    let listed = agent
+        .list(ListQuery {
+            name: Some("alice".to_string()),
+            node: Some("hub".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("leaf list should succeed");
+    assert!(
+        listed
+            .recipients
+            .iter()
+            .any(|r| r.label.as_deref() == Some("alice") && r.node == "hub"),
+        "Expected alice@hub in list response: {listed:?}"
+    );
+
+    // 4. Leaf `svc` sends to alice@hub via leaf agent.sock with idempotency key
+    let sent1 = agent
+        .send(
+            "alice@hub",
+            "Alert from leaf guard",
+            Some("idem-leaf-send-1"),
+        )
+        .await
+        .expect("leaf send 1 should succeed");
+    assert_eq!(sent1.outcome, "delivered");
+
+    // 5. Resend with the same idempotency key is deduplicated
+    let sent2 = agent
+        .send(
+            "alice@hub",
+            "Alert from leaf guard",
+            Some("idem-leaf-send-1"),
+        )
+        .await
+        .expect("leaf send 2 (dedup) should succeed");
+    assert_eq!(
+        sent2.message_id, sent1.message_id,
+        "Resend with same idempotency key must return the same message_id"
+    );
+
+    // Verify leaf recorded sender as local service ("svc", "guard") and hub received as guard@leaf
+    {
+        let leaf_conn = leaf.db.lock().unwrap();
+        let leaf_stored = xmsg::storage::get_message(&leaf_conn, &sent1.message_id)
+            .unwrap()
+            .expect("leaf must store outbound message");
+        assert_eq!(leaf_stored.return_harness.as_deref(), Some("svc"));
+        assert_eq!(leaf_stored.return_session_id.as_deref(), Some("guard"));
+
+        let conn = hub.db.lock().unwrap();
+        let stored = xmsg::storage::get_message(&conn, &sent1.message_id)
+            .unwrap()
+            .expect("hub must store federated message from leaf");
+        assert_eq!(stored.from_name, "guard@leaf");
+        assert_eq!(stored.return_harness.as_deref(), Some("fed"));
+        assert_eq!(stored.return_session_id.as_deref(), Some("guard"));
+        assert_eq!(stored.return_host.as_deref(), Some("leaf"));
+    }
+    let delivered_alerts: Vec<String> = claude_rx
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|l| l.contains("Alert from leaf guard"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        delivered_alerts.len(),
+        1,
+        "Deduplicated send must deliver only once: {delivered_alerts:?}"
+    );
+    assert!(
+        delivered_alerts[0].contains("from-name=\\\"guard@leaf\\\"")
+            && delivered_alerts[0].contains("ref=guard@"),
+        "Hub must observe sender as guard@leaf: {}",
+        delivered_alerts[0]
+    );
+
+    // 7. Hub sends a message to guard@leaf; leaf polls, acks, and replies over SvcFrame::Reply
+    let hub_send =
+        send_via_agent_sock(&hub.agent_sock, "guard@leaf", "Question for leaf guard").await;
+    assert_eq!(hub_send["status"], "ok", "{hub_send}");
+    let inbound_id = hub_send["message_id"].as_str().unwrap().to_string();
+
+    let delivery = service
+        .poll(10)
+        .await
+        .expect("leaf poll should succeed")
+        .expect("leaf should receive queued message from hub");
+    assert_eq!(delivery.message_id(), inbound_id);
+    assert_eq!(delivery.text(), "Question for leaf guard");
+    service
+        .ack(delivery.message_id())
+        .await
+        .expect("leaf ack should succeed");
+
+    let reply1 = agent
+        .reply(
+            delivery.message_id(),
+            "Answer from leaf guard",
+            Some("idem-leaf-reply-1"),
+        )
+        .await
+        .expect("leaf reply over svc stream should succeed");
+    assert_eq!(reply1.replier_session_id, "guard");
+    assert_eq!(reply1.text, "Answer from leaf guard");
+
+    let reply2 = agent
+        .reply(
+            delivery.message_id(),
+            "Answer from leaf guard",
+            Some("idem-leaf-reply-1"),
+        )
+        .await
+        .expect("idempotent leaf reply should succeed");
+    assert_eq!(reply2.seq, reply1.seq);
+    assert_eq!(reply2.pushed_message_id, reply1.pushed_message_id);
+
+    let mut got_reply = false;
+    for _ in 0..50 {
+        let lines = claude_rx.lock().unwrap().clone();
+        if let Some(line) = lines.iter().find(|l| l.contains("Answer from leaf guard")) {
+            assert!(line.contains(&format!("reply to message_id={inbound_id}")));
+            assert!(line.contains("guard@leaf"), "{line}");
+            got_reply = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        got_reply,
+        "Claude session on hub must receive federated reply from leaf svc"
+    );
 }

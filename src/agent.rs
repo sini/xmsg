@@ -240,6 +240,12 @@ pub fn trace_caller_or_codex_owner(
     state: &AppState,
     peer: &crate::process::PeerCred,
 ) -> Result<CallerTrace, AppError> {
+    // In leaf mode the caller's identity is the leaf principal plus the existing uid check, matching http_sender.
+    if let Some(p) = state.leaf_principal().filter(|_| state.is_leaf()) {
+        return Ok(CallerTrace::Session(surface::service_session(
+            surface::leaf_service_name(p),
+        )));
+    }
     let codex_cfg = {
         let rt_arc = crate::codex::for_state(state);
         let mut cfg = rt_arc.lock().unwrap().config.clone();
@@ -518,7 +524,8 @@ pub async fn run_agent_server_with_listener(
             continue;
         }
 
-        let initial_starttime = if peer.is_unmapped() && peer.is_pin_alive() {
+        // In leaf mode the caller's identity is the leaf principal plus the uid check above, without /proc.
+        let initial_starttime = if state.is_leaf() || (peer.is_unmapped() && peer.is_pin_alive()) {
             "0".to_string()
         } else {
             match peer.starttime(&state.agy_config.proc_root) {
@@ -633,7 +640,9 @@ pub async fn run_agent_server_with_listener(
                 }
 
                 // Verify peer PID is still live and starttime has not changed
-                if !peer.is_alive(&state_clone.agy_config.proc_root, &initial_starttime) {
+                if !state_clone.is_leaf()
+                    && !peer.is_alive(&state_clone.agy_config.proc_root, &initial_starttime)
+                {
                     tracing::warn!("peer PID {peer_pid} died or starttime changed");
                     break;
                 }
