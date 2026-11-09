@@ -88,7 +88,7 @@ The implementation spec fails 7 critical construction and protocol checks across
   - In `gen-harness`, `checks.root-surface` checks all consumers. If `default.nix` exists, `mkCi` mandates that it must be an exported Nix library surface that can be evaluated as `(import ./default.nix) { }` and traversed. A Rust package derivation or an uncallable function will fail evaluation.
   - Furthermore, `gen-harness` explicitly throws if a repository attempts to set `gen.ci.rootSurface.entry = "not-owed"` while `default.nix` exists:
     `"root-surface: declared not-owed but the root has a default.nix; drop the declaration, or remove the root entry"`.
-  - Parent Design §6 specifies `flake.nix`, never `default.nix`. `default.nix` must be deleted from the root layout, and `ci/flake.nix` must declare `{ gen.ci.rootSurface.entry = "not-owed"; }` (as done in `den-ag-design/ci/flake.nix`).
+  - Parent Design §6 specifies `flake.nix`, never `default.nix`. `default.nix` must be deleted from the root layout, and `ci/flake.nix` must declare `{ gen.ci.rootSurface.entry = "not-owed"; }`.
 - **Defect 5B (Nix Subflake Scope Error in CI Surfacing):**
   - Section 5 (line 253) states: *"In `ci/flake.nix`, a check builds `self.packages.${system}.default`"*.
   - In a standard subflake layout (`ci/flake.nix`), `self` refers to `ci/`, which does not expose `packages.${system}.default`. The package belongs to the parent flake. Calling `self.packages` in `ci/flake.nix` is an immediate evaluation error.

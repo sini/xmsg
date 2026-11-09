@@ -1,7 +1,7 @@
 # Adversarial Gate Review: Unit U9 Identity Proof & Pi Verification
 
 - **Artifact Under Review:** `docs/specs/2026-10-07-xmsg-u9-impl.md`
-- **Parent Design:** Owner Dispatch U9 (`den-ag-design-d7`)
+- **Parent Design:** Owner Dispatch U9
 - **Reviewer Posture:** Adversarial (Default REJECT until proven sound)
 - **Verdict:** ACCEPT
 

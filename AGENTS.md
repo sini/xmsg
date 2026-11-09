@@ -33,7 +33,7 @@ This document records internal engineering invariants, security boundaries, and 
 
 ## XR8 admission amendment (owner steering 2026-11-07)
 
-Authority: `den-ag-design@871a194cf` (XR8 amendment).
+Authority: amendment XR8 to the HA9-A.codex spec, §6.2 (re-attestation protocol).
 
 Rollout file identity is not an admission key. Under GT3, a same-UID writer can
 also edit the SQLite database; another UID cannot bypass ownership and live
