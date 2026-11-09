@@ -95,7 +95,7 @@ jobs:
             exit 0
           fi
           nix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev "$ATTIC_TOKEN"
-          nix shell --inputs-from . nixpkgs#attic-client -c sh -c 'xargs attic push ci < /tmp/attic-paths'
+          for i in 1 2 3; do nix shell --inputs-from . nixpkgs#attic-client -c sh -c 'xargs attic push ci < /tmp/attic-paths' && exit 0; echo "attic push ci failed (attempt $i)" >&2; sleep $((i * 10)); done; exit 1
 
   lock-probe:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.lock_probe }}

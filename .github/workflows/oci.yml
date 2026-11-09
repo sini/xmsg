@@ -72,7 +72,7 @@ jobs:
             exit 0
           fi
           nix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev "$ATTIC_TOKEN"
-          nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci
+          for i in 1 2 3; do nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci && exit 0; echo "attic push ci failed (attempt $i)" >&2; sleep $((i * 10)); done; exit 1
 
       - name: Push image to GHCR
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
