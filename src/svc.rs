@@ -54,7 +54,7 @@ pub fn next_svc_token() -> u64 {
 pub fn is_svc_session_alive(proc_root: &Path, info: &SvcSessionInfo) -> bool {
     match crate::process::starttime(proc_root, info.pid) {
         Ok(st) => st == info.starttime,
-        Err(_) => false,
+        Err(_) => info.starttime == "0",
     }
 }
 
@@ -774,7 +774,17 @@ pub async fn run_leaf_inbox_task(
                     .render(fed_state.current_peers().display_name(&msg.origin.node));
                 // A sender with an inbox gets its reply pushed back through the hub.
                 let (return_harness, return_session_id) = match msg.origin.key() {
-                    Some(key) => (Some("fed".to_string()), Some(key.to_string())),
+                    Some(key) => (
+                        Some(
+                            (if msg.origin.service.is_some() {
+                                "svc"
+                            } else {
+                                "fed"
+                            })
+                            .to_string(),
+                        ),
+                        Some(key.to_string()),
+                    ),
                     None => (None, None),
                 };
 
@@ -782,12 +792,19 @@ pub async fn run_leaf_inbox_task(
                     Some(r) => format!(" ref={r}"),
                     None => String::new(),
                 };
-                let envelope = format!(
-                    "[xmsg] from={}{ref_part} message_id={} — reply with the xmsg reply tool (tools: send, reply, list, replies)\n\n{}",
-                    from_name, msg.id, msg.body
-                );
+                let envelope = if msg.in_reply_to.is_some() {
+                    format!(
+                        "[xmsg] reply from={}{ref_part} message_id={} — to continue, reply to {} (tools: send, reply, list, replies)\n\n{}",
+                        from_name, msg.id, msg.id, msg.body
+                    )
+                } else {
+                    format!(
+                        "[xmsg] from={}{ref_part} message_id={} — reply with the xmsg reply tool (tools: send, reply, list, replies)\n\n{}",
+                        from_name, msg.id, msg.body
+                    )
+                };
 
-                let msg_record = storage::MessageRecord {
+                let mut msg_record = storage::MessageRecord {
                     id: msg.id.clone(),
                     created_at: storage::now_epoch_secs(),
                     session_id: target_session_id.clone(),
@@ -812,15 +829,24 @@ pub async fn run_leaf_inbox_task(
                     envelope,
                     delivered_at: None,
                     origin: msg.origin.clone(),
-                    in_reply_to: None,
+                    in_reply_to: msg.in_reply_to.clone(),
                 };
 
                 // F2 (no silent loss or spin): propagate storage errors, do not ack hub, back off and repoll
-                let store_res = (|| -> Result<bool, AppError> {
+                let store_res = (|| -> Result<(bool, bool), AppError> {
                     let cap = storage::svc_queue_cap_for_db(&db);
                     let mut conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+                    if let Some(ref irt) = msg.in_reply_to {
+                        if let Ok(Some(orig)) = storage::get_message(&conn, irt) {
+                            msg_record.thread_id = orig.thread_id;
+                        } else {
+                            msg_record.thread_id = irt.clone();
+                        }
+                    }
                     let tx = conn
                         .transaction()
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                    let existed_before = storage::has_svc_message(&tx, &msg.id)
                         .map_err(|e| AppError::Internal(e.to_string()))?;
                     storage::insert_message(&tx, &msg_record)
                         .map_err(|e| AppError::Internal(e.to_string()))?;
@@ -831,14 +857,29 @@ pub async fn run_leaf_inbox_task(
                             "svc message queue is full".to_string(),
                         ));
                     }
+                    if let Some(ref irt) = msg.in_reply_to {
+                        if storage::get_reply_by_pushed_id(&tx, &msg.id)
+                            .map_err(|e| AppError::Internal(e.to_string()))?
+                            .is_none()
+                        {
+                            let _ = storage::insert_reply(
+                                &tx,
+                                irt,
+                                &target_session_id,
+                                &msg.body,
+                                Some("pushed"),
+                                Some(&msg.id),
+                            );
+                        }
+                    }
                     let is_acked = storage::is_svc_message_acked(&tx, &msg.id)
                         .map_err(|e| AppError::Internal(e.to_string()))?;
                     tx.commit().map_err(|e| AppError::Internal(e.to_string()))?;
-                    Ok(is_acked)
+                    Ok((is_acked, !existed_before))
                 })();
 
-                let already_acked = match store_res {
-                    Ok(acked) => acked,
+                let (already_acked, newly_queued) = match store_res {
+                    Ok(res) => res,
                     Err(e) => {
                         tracing::error!(
                             "Failed to store message {} locally: {e}; backing off without acking hub",
@@ -850,7 +891,9 @@ pub async fn run_leaf_inbox_task(
                     }
                 };
 
-                let _ = svc_notify_tx.send(target_session_id.clone());
+                if newly_queued {
+                    let _ = svc_notify_tx.send(target_session_id.clone());
+                }
 
                 if !already_acked {
                     loop {

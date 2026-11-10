@@ -132,6 +132,7 @@ struct HubTestNode {
     agent_sock: PathBuf,
     http_sock: PathBuf,
     proc_root: PathBuf,
+    app_state: Arc<AppState>,
     fed_state: Arc<FedState>,
     db: Arc<Mutex<rusqlite::Connection>>,
     sessions_dir: PathBuf,
@@ -142,6 +143,16 @@ async fn create_hub_test_node(
     name: &str,
     peers: Vec<PeerConfig>,
     creds: (Vec<u8>, Vec<u8>, String),
+) -> HubTestNode {
+    let fed_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    create_hub_test_node_with_listener(name, peers, creds, fed_listener).await
+}
+
+async fn create_hub_test_node_with_listener(
+    name: &str,
+    peers: Vec<PeerConfig>,
+    creds: (Vec<u8>, Vec<u8>, String),
+    fed_listener: TcpListener,
 ) -> HubTestNode {
     let temp = tempdir().unwrap();
     fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -225,7 +236,6 @@ async fn create_hub_test_node(
         list_queries: Default::default(),
     });
 
-    let fed_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let fed_addr = fed_listener.local_addr().unwrap();
     let fs_clone = fed_state.clone();
     tokio::spawn(async move {
@@ -257,10 +267,14 @@ async fn create_hub_test_node(
         let _ = run_agent_server(s_path, s_state, my_uid).await;
     });
 
-    let http_router = build_router(app_state);
+    let http_router = build_router(app_state.clone());
     let ucred_listener = bind_ucred_unix_listener(&http_sock, my_uid, None).unwrap();
     tokio::spawn(async move {
-        let _ = axum::serve(ucred_listener, http_router).await;
+        let _ = axum::serve(
+            ucred_listener,
+            http_router.into_make_service_with_connect_info::<xmsg::http::HttpPeer>(),
+        )
+        .await;
     });
 
     for _ in 0..1500 {
@@ -278,6 +292,7 @@ async fn create_hub_test_node(
         agent_sock,
         http_sock,
         proc_root,
+        app_state,
         fed_state,
         db,
         sessions_dir,
@@ -301,6 +316,16 @@ async fn create_leaf_test_node(
     peers: Vec<PeerConfig>,
     creds: (Vec<u8>, Vec<u8>, String),
     leaf_principal: &str,
+) -> LeafTestNode {
+    create_leaf_test_node_opts(name, peers, creds, leaf_principal, true).await
+}
+
+async fn create_leaf_test_node_opts(
+    name: &str,
+    peers: Vec<PeerConfig>,
+    creds: (Vec<u8>, Vec<u8>, String),
+    leaf_principal: &str,
+    spawn_inbox_task: bool,
 ) -> LeafTestNode {
     let temp = tempdir().unwrap();
     fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -415,15 +440,17 @@ async fn create_leaf_test_node(
         let _ = run_leaf_register_server(r_sock, r_state, my_uid, r_p).await;
     });
 
-    for peer_name in peers_arc.keys() {
-        let fs_clone = fed_state.clone();
-        let peer_clone = peer_name.clone();
-        let p_clone = leaf_principal.to_string();
-        let db_clone = db.clone();
-        let notify_clone = svc_notify_tx.clone();
-        tokio::spawn(async move {
-            run_leaf_inbox_task(fs_clone, peer_clone, p_clone, db_clone, notify_clone).await;
-        });
+    if spawn_inbox_task {
+        for peer_name in peers_arc.keys() {
+            let fs_clone = fed_state.clone();
+            let peer_clone = peer_name.clone();
+            let p_clone = leaf_principal.to_string();
+            let db_clone = db.clone();
+            let notify_clone = svc_notify_tx.clone();
+            tokio::spawn(async move {
+                run_leaf_inbox_task(fs_clone, peer_clone, p_clone, db_clone, notify_clone).await;
+            });
+        }
     }
 
     for _ in 0..1500 {
@@ -2048,4 +2075,1012 @@ async fn test_oracle_12_leaf_agent_sock_refuses_mismatched_uid() {
             .any(|l| l.contains("Hello from same-UID leaf without /proc")),
         "Hub session must receive positive-control leaf message"
     );
+}
+
+async fn register_hub_service(
+    hub: &HubTestNode,
+    service_name: &str,
+) -> xmsg::client::RegisteredService {
+    use xmsg::client::{ClientOptions, RegisteredService};
+
+    let my_pid = std::process::id();
+    let live_proc = PathBuf::from(xmsg::process::LIVE_PROC_ROOT);
+    let my_proc_start =
+        xmsg::process::starttime(&live_proc, my_pid).unwrap_or_else(|_| "1000".to_string());
+    let pid_dir = hub.proc_root.join(my_pid.to_string());
+    fs::create_dir_all(&pid_dir).unwrap();
+    let stat_content =
+        format!("{my_pid} (svc_test) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {my_proc_start} 0 0\n");
+    fs::write(pid_dir.join("stat"), stat_content).unwrap();
+
+    let reg_sock = hub
+        .agent_sock
+        .parent()
+        .unwrap()
+        .join(format!("register-{service_name}.sock"));
+    let my_uid = current_uid();
+    let listener = xmsg::svc::bind_leaf_register_listener(&reg_sock, my_uid).unwrap();
+    let state_clone = hub.app_state.clone();
+    let principal = format!("svc:{service_name}");
+    tokio::spawn(async move {
+        let _ = xmsg::svc::run_leaf_register_server_with_listener(
+            listener,
+            state_clone,
+            my_uid,
+            principal,
+        )
+        .await;
+    });
+
+    RegisteredService::register(ClientOptions {
+        register_socket: reg_sock,
+        agent_socket: hub.agent_sock.clone(),
+        max_frame_bytes: 65536,
+        operation_timeout: Duration::from_secs(5),
+        service: service_name.to_string(),
+        expected_node: Some(hub.name.clone()),
+        daemon_uid: my_uid,
+    })
+    .await
+    .expect("hub service registration should succeed")
+}
+
+// =============================================================================
+// Leaf reply Oracle (1): Two-node hub + leaf: leaf svc sends to a hub agent,
+// the agent replies, and the leaf svc receives it through normal service
+// delivery (in_reply_to = original message id, plus the replier's attested
+// origin), and acks it while keeping the stored reply row in `replies`.
+// =============================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_leaf_reply_oracle_1_hub_agent_replies_to_leaf_svc() {
+    use xmsg::client::{ClientOptions, RegisteredService};
+
+    let creds_hub = generate_self_signed_ed25519("hub").unwrap();
+    let creds_leaf = generate_self_signed_ed25519("leaf").unwrap();
+
+    let hub = create_hub_test_node(
+        "hub",
+        vec![PeerConfig {
+            name: "leaf".to_string(),
+            address: "127.0.0.1:54321".to_string(),
+            pin: Some(creds_leaf.2.clone()),
+            ca: None,
+            identities: None,
+            allow: vec!["list".to_string(), "send".to_string(), "reply".to_string()],
+            from: None,
+            leaf: true,
+            principals: Vec::new(),
+            targets: None,
+            dial: None,
+        }],
+        creds_hub.clone(),
+    )
+    .await;
+
+    let leaf = create_leaf_test_node(
+        "leaf",
+        vec![PeerConfig {
+            name: "hub".to_string(),
+            address: hub.fed_addr.to_string(),
+            pin: Some(creds_hub.2.clone()),
+            ca: None,
+            identities: None,
+            allow: vec!["list".to_string(), "send".to_string(), "reply".to_string()],
+            from: None,
+            leaf: false,
+            principals: Vec::new(),
+            targets: None,
+            dial: None,
+        }],
+        creds_leaf.clone(),
+        "svc:guard",
+    )
+    .await;
+
+    let (_sock, claude_rx) =
+        create_claude_session_fixture(&hub.proc_root, &hub.sessions_dir, "sess-alice", "alice");
+
+    let mut leaf_svc = RegisteredService::register(ClientOptions {
+        register_socket: leaf.reg_sock.clone(),
+        agent_socket: leaf.agent_sock.clone(),
+        max_frame_bytes: 65536,
+        operation_timeout: Duration::from_secs(5),
+        service: "guard".to_string(),
+        expected_node: Some("leaf".to_string()),
+        daemon_uid: current_uid(),
+    })
+    .await
+    .expect("leaf svc registration should succeed");
+
+    // 1. Leaf svc sends to alice@hub
+    let sent = leaf_svc
+        .send("alice@hub", "Ping from leaf guard", Some("idem-leaf-r1"))
+        .await
+        .expect("leaf send to hub agent should succeed");
+    assert_eq!(sent.outcome, "delivered");
+    assert!(
+        claude_rx
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("Ping from leaf guard")),
+        "alice@hub must receive message from guard@leaf"
+    );
+
+    // 2. Hub agent (alice) replies to the leaf message
+    let reply_body = serde_json::json!({
+        "text": "Pong from alice on hub",
+    })
+    .to_string();
+    let reply_path = format!("/v1/messages/{}/replies", sent.message_id);
+    let (status, resp_body) = tokio::task::spawn_blocking({
+        let http_sock = hub.http_sock.clone();
+        move || {
+            http_request_unix_within(
+                &http_sock,
+                "POST",
+                &reply_path,
+                Some(&reply_body),
+                Duration::from_secs(10),
+            )
+            .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(status, StatusCode::OK, "hub reply failed: {resp_body}");
+    let reply_json: Value = serde_json::from_str(&resp_body).unwrap();
+    assert_eq!(reply_json["pushOutcome"], "stored");
+    let reply_id = reply_json["pushedMessageId"]
+        .as_str()
+        .expect("stored leaf reply must have pushedMessageId")
+        .to_string();
+
+    // 3. Leaf svc receives the reply through normal service delivery (`poll`)
+    let delivery = leaf_svc
+        .poll(2)
+        .await
+        .expect("leaf poll should succeed")
+        .expect("leaf svc must receive reply queued in hub peer_mailbox");
+    assert_eq!(delivery.message_id(), reply_id);
+    assert_eq!(delivery.text(), "Pong from alice on hub");
+    assert_eq!(
+        delivery.in_reply_to(),
+        Some(sent.message_id.as_str()),
+        "delivered reply must carry in_reply_to = original message id"
+    );
+    assert_eq!(delivery.origin().node, "hub");
+    assert_eq!(delivery.origin().service, None);
+    assert_eq!(delivery.origin().label.as_deref(), Some("alice"));
+    assert!(
+        delivery.origin().id.is_some(),
+        "agent replier origin must carry attested instance id: {:?}",
+        delivery.origin()
+    );
+    assert!(
+        delivery
+            .envelope()
+            .starts_with("[xmsg] reply from=alice · "),
+        "unexpected reply envelope: {}",
+        delivery.envelope()
+    );
+
+    // 4. Ack the delivered reply on the leaf and verify hub peer_mailbox drains while
+    //    the stored reply row remains in hub `replies`.
+    leaf_svc
+        .ack(delivery.message_id())
+        .await
+        .expect("leaf ack of reply should succeed");
+
+    let mut mailbox_drained = false;
+    for _ in 0..50 {
+        let count = {
+            let conn = hub.db.lock().unwrap();
+            xmsg::storage::count_peer_mailbox_messages(&conn, "leaf").unwrap()
+        };
+        if count == 0 {
+            mailbox_drained = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        mailbox_drained,
+        "hub peer_mailbox for leaf must drain after leaf svc acks the reply"
+    );
+
+    {
+        let conn = hub.db.lock().unwrap();
+        let stored_replies = xmsg::storage::get_replies_after(&conn, &sent.message_id, 0).unwrap();
+        assert_eq!(
+            stored_replies.len(),
+            1,
+            "stored reply row in `replies` must remain after mailbox ack"
+        );
+        assert_eq!(stored_replies[0].push_outcome.as_deref(), Some("stored"));
+        assert_eq!(
+            stored_replies[0].pushed_message_id.as_deref(),
+            Some(reply_id.as_str())
+        );
+    }
+}
+
+// =============================================================================
+// Leaf reply Oracle (2): No duplicate delivery on a redelivered or retried reply
+// =============================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_leaf_reply_oracle_2_idempotent_redelivered_or_retried_reply() {
+    use xmsg::client::{ClientOptions, RegisteredService};
+    use xmsg::fed::FedEnvelope;
+    use xmsg::storage::Origin;
+
+    let creds_hub = generate_self_signed_ed25519("hub").unwrap();
+    let creds_leaf = generate_self_signed_ed25519("leaf").unwrap();
+
+    let hub = create_hub_test_node(
+        "hub",
+        vec![PeerConfig {
+            name: "leaf".to_string(),
+            address: "127.0.0.1:54321".to_string(),
+            pin: Some(creds_leaf.2.clone()),
+            ca: None,
+            identities: None,
+            allow: vec!["list".to_string(), "send".to_string(), "reply".to_string()],
+            from: None,
+            leaf: true,
+            principals: Vec::new(),
+            targets: None,
+            dial: None,
+        }],
+        creds_hub.clone(),
+    )
+    .await;
+
+    let leaf = create_leaf_test_node(
+        "leaf",
+        vec![PeerConfig {
+            name: "hub".to_string(),
+            address: hub.fed_addr.to_string(),
+            pin: Some(creds_hub.2.clone()),
+            ca: None,
+            identities: None,
+            allow: vec!["list".to_string(), "send".to_string(), "reply".to_string()],
+            from: None,
+            leaf: false,
+            principals: Vec::new(),
+            targets: None,
+            dial: None,
+        }],
+        creds_leaf.clone(),
+        "svc:guard",
+    )
+    .await;
+
+    let (_sock, _claude_rx) =
+        create_claude_session_fixture(&hub.proc_root, &hub.sessions_dir, "sess-alice", "alice");
+
+    let mut leaf_svc = RegisteredService::register(ClientOptions {
+        register_socket: leaf.reg_sock.clone(),
+        agent_socket: leaf.agent_sock.clone(),
+        max_frame_bytes: 65536,
+        operation_timeout: Duration::from_secs(5),
+        service: "guard".to_string(),
+        expected_node: Some("leaf".to_string()),
+        daemon_uid: current_uid(),
+    })
+    .await
+    .unwrap();
+
+    let sent = leaf_svc
+        .send("alice@hub", "Request from leaf", Some("idem-leaf-r2"))
+        .await
+        .unwrap();
+
+    // 1. Retried reply with the same idempotency_key on hub + explicit duplicate
+    //    `queue_leaf_mailbox_reply` call with the same `reply_id` before leaf pulls.
+    let reply_body = serde_json::json!({
+        "text": "Idempotent reply from alice",
+        "idempotency_key": "idem-alice-reply-r2",
+    })
+    .to_string();
+    let reply_path = format!("/v1/messages/{}/replies", sent.message_id);
+    for _ in 0..2 {
+        let (status, _) = tokio::task::spawn_blocking({
+            let http_sock = hub.http_sock.clone();
+            let path = reply_path.clone();
+            let body = reply_body.clone();
+            move || {
+                http_request_unix_within(
+                    &http_sock,
+                    "POST",
+                    &path,
+                    Some(&body),
+                    Duration::from_secs(10),
+                )
+                .unwrap()
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    let first_delivery = leaf_svc
+        .poll(10)
+        .await
+        .unwrap()
+        .expect("leaf svc must receive first delivery");
+    let reply_id = first_delivery.message_id().to_string();
+    assert_eq!(first_delivery.in_reply_to(), Some(sent.message_id.as_str()));
+
+    // Re-queue the exact same reply envelope on the hub after ack to simulate a
+    // redelivered/retried reply with the same `reply_id`.
+    leaf_svc.ack(&reply_id).await.unwrap();
+
+    let dup_env = FedEnvelope {
+        v: xmsg::fed::WIRE_VERSION,
+        id: reply_id.clone(),
+        origin: Origin::service("genie", "hub"),
+        to: xmsg::fed::FedTarget {
+            r#ref: "guard".to_string(),
+        },
+        body: "Idempotent reply from alice".to_string(),
+        thread_id: sent.message_id.clone(),
+        created_at: xmsg::storage::now_epoch_secs(),
+        forwarded: None,
+    };
+    xmsg::fed::queue_leaf_mailbox_reply(
+        &hub.fed_state,
+        "leaf",
+        "guard",
+        &dup_env,
+        "genie@hub",
+        &sent.message_id,
+    )
+    .unwrap();
+    // Calling queue_leaf_mailbox_reply twice while unpulled must keep at most 1 row in peer_mailbox
+    xmsg::fed::queue_leaf_mailbox_reply(
+        &hub.fed_state,
+        "leaf",
+        "guard",
+        &dup_env,
+        "genie@hub",
+        &sent.message_id,
+    )
+    .unwrap();
+
+    // Wait for the leaf inbox task to pull and auto-ack the already-acked `reply_id`
+    // without delivering a duplicate to `leaf_svc`.
+    let second_poll = leaf_svc.poll(1).await.expect("second poll should succeed");
+    assert!(
+        second_poll.is_none(),
+        "already-acked reply_id must not be delivered a second time: {second_poll:?}"
+    );
+}
+
+// =============================================================================
+// Leaf reply Oracle (3): A non-leaf origin behaves unchanged (push path)
+// =============================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_leaf_reply_oracle_3_non_leaf_origin_uses_push_path() {
+    let creds_hub = generate_self_signed_ed25519("hub").unwrap();
+    let creds_peer = generate_self_signed_ed25519("peer-b").unwrap();
+
+    let peer_b_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer_b_addr = peer_b_listener.local_addr().unwrap();
+
+    let hub = create_hub_test_node(
+        "hub",
+        vec![PeerConfig {
+            name: "peer-b".to_string(),
+            address: peer_b_addr.to_string(),
+            pin: Some(creds_peer.2.clone()),
+            ca: None,
+            identities: None,
+            allow: vec!["list".to_string(), "send".to_string(), "reply".to_string()],
+            from: None,
+            leaf: false,
+            principals: Vec::new(),
+            targets: None,
+            dial: None,
+        }],
+        creds_hub.clone(),
+    )
+    .await;
+
+    let peer_b = create_hub_test_node_with_listener(
+        "peer-b",
+        vec![PeerConfig {
+            name: "hub".to_string(),
+            address: hub.fed_addr.to_string(),
+            pin: Some(creds_hub.2.clone()),
+            ca: None,
+            identities: None,
+            allow: vec!["list".to_string(), "send".to_string(), "reply".to_string()],
+            from: None,
+            leaf: false,
+            principals: Vec::new(),
+            targets: None,
+            dial: None,
+        }],
+        creds_peer.clone(),
+        peer_b_listener,
+    )
+    .await;
+
+    let (_alice_sock, _alice_rx) =
+        create_claude_session_fixture(&hub.proc_root, &hub.sessions_dir, "sess-alice", "alice");
+    let (_bob_sock, bob_rx) =
+        create_claude_session_fixture(&peer_b.proc_root, &peer_b.sessions_dir, "sess-bob", "bob");
+
+    // 1. bob@peer-b sends to alice@hub
+    let send_body = serde_json::json!({
+        "to": "alice@hub",
+        "from": "bob",
+        "text": "Hello from non-leaf peer-b",
+    })
+    .to_string();
+    let (status, resp_body) = tokio::task::spawn_blocking({
+        let http_sock = peer_b.http_sock.clone();
+        move || {
+            http_request_unix_within(
+                &http_sock,
+                "POST",
+                "/v1/messages",
+                Some(&send_body),
+                Duration::from_secs(10),
+            )
+            .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(status, StatusCode::ACCEPTED, "{resp_body}");
+    let sent_json: Value = serde_json::from_str(&resp_body).unwrap();
+    let msg_id = sent_json["message_id"].as_str().unwrap().to_string();
+
+    // 2. alice@hub replies -> non-leaf origin must use push path (`push_outcome == "pushed"`)
+    //    and queue 0 messages in `peer_mailbox`.
+    let reply_body = serde_json::json!({
+        "text": "Direct pushed reply to non-leaf peer-b",
+    })
+    .to_string();
+    let reply_path = format!("/v1/messages/{msg_id}/replies");
+    let (r_status, r_body) = tokio::task::spawn_blocking({
+        let http_sock = hub.http_sock.clone();
+        move || {
+            http_request_unix_within(
+                &http_sock,
+                "POST",
+                &reply_path,
+                Some(&reply_body),
+                Duration::from_secs(10),
+            )
+            .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(r_status, StatusCode::OK, "{r_body}");
+    let reply_json: Value = serde_json::from_str(&r_body).unwrap();
+    assert_eq!(
+        reply_json["pushOutcome"], "pushed",
+        "non-leaf origin must use push path: {reply_json}"
+    );
+
+    {
+        let conn = hub.db.lock().unwrap();
+        let mailbox_count = xmsg::storage::count_peer_mailbox_messages(&conn, "peer-b").unwrap();
+        assert_eq!(
+            mailbox_count, 0,
+            "non-leaf reply must not be queued into peer_mailbox"
+        );
+    }
+
+    let mut bob_got_reply = false;
+    for _ in 0..50 {
+        if bob_rx
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("Direct pushed reply to non-leaf peer-b"))
+        {
+            bob_got_reply = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        bob_got_reply,
+        "bob@peer-b must receive pushed reply over /fed/v2/replies"
+    );
+}
+
+// =============================================================================
+// Leaf reply Oracle (4): The leaf peer's `targets` ceiling still applies to
+// queued replies
+// =============================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_leaf_reply_oracle_4_targets_ceiling_applies_to_queued_replies() {
+    use xmsg::fed::FedEnvelope;
+    use xmsg::storage::Origin;
+
+    let creds_hub = generate_self_signed_ed25519("hub").unwrap();
+    let creds_leaf = generate_self_signed_ed25519("leaf").unwrap();
+
+    let hub = create_hub_test_node(
+        "hub",
+        vec![PeerConfig {
+            name: "leaf".to_string(),
+            address: "127.0.0.1:54321".to_string(),
+            pin: Some(creds_leaf.2.clone()),
+            ca: None,
+            identities: None,
+            allow: vec!["list".to_string(), "send".to_string(), "reply".to_string()],
+            from: None,
+            leaf: true,
+            principals: Vec::new(),
+            targets: Some(vec!["guard".to_string()]),
+            dial: None,
+        }],
+        creds_hub,
+    )
+    .await;
+
+    let env_disallowed = FedEnvelope {
+        v: xmsg::fed::WIRE_VERSION,
+        id: "01M72555555555555555555501".to_string(),
+        origin: Origin::service("genie", "hub"),
+        to: xmsg::fed::FedTarget {
+            r#ref: "other".to_string(),
+        },
+        body: "Reply to disallowed target".to_string(),
+        thread_id: "01M72555555555555555555500".to_string(),
+        created_at: xmsg::storage::now_epoch_secs(),
+        forwarded: None,
+    };
+    let disallowed_res = xmsg::fed::queue_leaf_mailbox_reply(
+        &hub.fed_state,
+        "leaf",
+        "other",
+        &env_disallowed,
+        "genie@hub",
+        "01M72555555555555555555500",
+    );
+    assert!(
+        matches!(disallowed_res, Err(AppError::OpDenied(_))),
+        "reply to target outside peer targets ceiling must be refused: {disallowed_res:?}"
+    );
+    {
+        let conn = hub.db.lock().unwrap();
+        assert_eq!(
+            xmsg::storage::count_peer_mailbox_messages(&conn, "leaf").unwrap(),
+            0,
+            "refused reply must not be queued in peer_mailbox"
+        );
+    }
+
+    let env_allowed = FedEnvelope {
+        v: xmsg::fed::WIRE_VERSION,
+        id: "01M72555555555555555555502".to_string(),
+        origin: Origin::service("genie", "hub"),
+        to: xmsg::fed::FedTarget {
+            r#ref: "guard".to_string(),
+        },
+        body: "Reply to allowed target".to_string(),
+        thread_id: "01M72555555555555555555500".to_string(),
+        created_at: xmsg::storage::now_epoch_secs(),
+        forwarded: None,
+    };
+    let allowed_res = xmsg::fed::queue_leaf_mailbox_reply(
+        &hub.fed_state,
+        "leaf",
+        "guard",
+        &env_allowed,
+        "genie@hub",
+        "01M72555555555555555555500",
+    );
+    assert!(
+        allowed_res.is_ok(),
+        "reply to target inside peer targets ceiling must succeed: {allowed_res:?}"
+    );
+    {
+        let conn = hub.db.lock().unwrap();
+        assert_eq!(
+            xmsg::storage::count_peer_mailbox_messages(&conn, "leaf").unwrap(),
+            1,
+            "allowed reply must be queued in peer_mailbox"
+        );
+    }
+}
+
+// =============================================================================
+// Leaf reply Oracle (5): A service reply arrives at the leaf `svc` with
+// `origin.service` = the replier's service, by EITHER path (mailbox pull or
+// outbound reply poller).
+// =============================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_leaf_reply_oracle_5_service_reply_preserves_service_origin_either_path() {
+    use xmsg::client::{ClientOptions, RegisteredService};
+    use xmsg::storage::Origin;
+
+    // --- Path 5a: Leaf mailbox pull path (no outbound reply poller) ---
+    {
+        let creds_hub = generate_self_signed_ed25519("hub").unwrap();
+        let creds_leaf = generate_self_signed_ed25519("leaf").unwrap();
+
+        let hub = create_hub_test_node(
+            "hub",
+            vec![PeerConfig {
+                name: "leaf".to_string(),
+                address: "127.0.0.1:54321".to_string(),
+                pin: Some(creds_leaf.2.clone()),
+                ca: None,
+                identities: None,
+                allow: vec!["list".to_string(), "send".to_string(), "reply".to_string()],
+                from: None,
+                leaf: true,
+                principals: Vec::new(),
+                targets: None,
+                dial: None,
+            }],
+            creds_hub.clone(),
+        )
+        .await;
+
+        let leaf = create_leaf_test_node(
+            "leaf",
+            vec![PeerConfig {
+                name: "hub".to_string(),
+                address: hub.fed_addr.to_string(),
+                pin: Some(creds_hub.2.clone()),
+                ca: None,
+                identities: None,
+                allow: vec!["list".to_string(), "send".to_string(), "reply".to_string()],
+                from: None,
+                leaf: false,
+                principals: Vec::new(),
+                targets: None,
+                dial: None,
+            }],
+            creds_leaf,
+            "svc:guard",
+        )
+        .await;
+
+        let mut genie_hub = register_hub_service(&hub, "genie").await;
+        let mut guard_leaf = RegisteredService::register(ClientOptions {
+            register_socket: leaf.reg_sock.clone(),
+            agent_socket: leaf.agent_sock.clone(),
+            max_frame_bytes: 65536,
+            operation_timeout: Duration::from_secs(5),
+            service: "guard".to_string(),
+            expected_node: Some("leaf".to_string()),
+            daemon_uid: current_uid(),
+        })
+        .await
+        .unwrap();
+
+        let sent = guard_leaf
+            .send("genie@hub", "Hello genie via mailbox path", Some("idem-5a"))
+            .await
+            .unwrap();
+        let hub_delivery = genie_hub
+            .poll(10)
+            .await
+            .unwrap()
+            .expect("genie@hub must receive message from guard@leaf");
+        assert_eq!(hub_delivery.message_id(), sent.message_id);
+        genie_hub.ack(hub_delivery.message_id()).await.unwrap();
+
+        let reply_rec = genie_hub
+            .reply(
+                hub_delivery.message_id(),
+                "Service reply via mailbox pull",
+                Some("idem-5a-reply"),
+            )
+            .await
+            .expect("genie@hub reply should succeed");
+        let reply_id = reply_rec
+            .pushed_message_id
+            .expect("reply must carry pushed_message_id");
+
+        let leaf_delivery = guard_leaf
+            .poll(10)
+            .await
+            .unwrap()
+            .expect("guard@leaf must receive service reply via mailbox pull");
+        assert_eq!(leaf_delivery.message_id(), reply_id);
+        assert_eq!(leaf_delivery.in_reply_to(), Some(sent.message_id.as_str()));
+        assert_eq!(
+            leaf_delivery.origin(),
+            &Origin::service("genie", "hub"),
+            "mailbox pull path must preserve service attestation on reply origin"
+        );
+        guard_leaf.ack(leaf_delivery.message_id()).await.unwrap();
+    }
+
+    // --- Path 5b: Outbound reply poller path (`spawn_outbound_reply_poller` without mailbox pull) ---
+    {
+        let creds_hub = generate_self_signed_ed25519("hub").unwrap();
+        let creds_leaf = generate_self_signed_ed25519("leaf").unwrap();
+
+        let hub = create_hub_test_node(
+            "hub",
+            vec![PeerConfig {
+                name: "leaf".to_string(),
+                address: "127.0.0.1:54321".to_string(),
+                pin: Some(creds_leaf.2.clone()),
+                ca: None,
+                identities: None,
+                allow: vec!["list".to_string(), "send".to_string(), "reply".to_string()],
+                from: None,
+                leaf: true,
+                principals: Vec::new(),
+                targets: None,
+                dial: None,
+            }],
+            creds_hub.clone(),
+        )
+        .await;
+
+        // Create leaf with `spawn_inbox_task = false` so `run_leaf_inbox_task` is NOT
+        // spawned, and spawn ONLY `spawn_outbound_reply_poller`.
+        let leaf = create_leaf_test_node_opts(
+            "leaf",
+            vec![PeerConfig {
+                name: "hub".to_string(),
+                address: hub.fed_addr.to_string(),
+                pin: Some(creds_hub.2.clone()),
+                ca: None,
+                identities: None,
+                allow: vec!["list".to_string(), "send".to_string(), "reply".to_string()],
+                from: None,
+                leaf: false,
+                principals: Vec::new(),
+                targets: None,
+                dial: None,
+            }],
+            creds_leaf,
+            "svc:guard",
+            false,
+        )
+        .await;
+
+        let mut genie_hub = register_hub_service(&hub, "genie").await;
+        let mut guard_leaf = RegisteredService::register(ClientOptions {
+            register_socket: leaf.reg_sock.clone(),
+            agent_socket: leaf.agent_sock.clone(),
+            max_frame_bytes: 65536,
+            operation_timeout: Duration::from_secs(5),
+            service: "guard".to_string(),
+            expected_node: Some("leaf".to_string()),
+            daemon_uid: current_uid(),
+        })
+        .await
+        .unwrap();
+
+        let sent = guard_leaf
+            .send("genie@hub", "Hello genie via reply poller", Some("idem-5b"))
+            .await
+            .unwrap();
+        xmsg::fed::spawn_outbound_reply_poller(
+            leaf.fed_state.clone(),
+            "hub".to_string(),
+            sent.message_id.clone(),
+        );
+
+        let hub_delivery = genie_hub
+            .poll(10)
+            .await
+            .unwrap()
+            .expect("genie@hub must receive message from guard@leaf");
+        assert_eq!(hub_delivery.message_id(), sent.message_id);
+        genie_hub.ack(hub_delivery.message_id()).await.unwrap();
+
+        let reply_rec = genie_hub
+            .reply(
+                hub_delivery.message_id(),
+                "Service reply via outbound reply poller",
+                Some("idem-5b-reply"),
+            )
+            .await
+            .expect("genie@hub reply should succeed");
+        let reply_id = reply_rec
+            .pushed_message_id
+            .expect("reply must carry pushed_message_id");
+
+        let leaf_delivery = guard_leaf
+            .poll(10)
+            .await
+            .unwrap()
+            .expect("guard@leaf must receive service reply via outbound reply poller");
+        assert_eq!(leaf_delivery.message_id(), reply_id);
+        assert_eq!(leaf_delivery.in_reply_to(), Some(sent.message_id.as_str()));
+        assert_eq!(
+            leaf_delivery.origin(),
+            &Origin::service("genie", "hub"),
+            "outbound reply poller must preserve service attestation (never synthesize Origin::instance for a service)"
+        );
+        guard_leaf.ack(leaf_delivery.message_id()).await.unwrap();
+    }
+}
+
+// =============================================================================
+// Leaf reply Oracle (6): Both paths active => exactly one delivery per reply_id,
+// with the attested service origin (and the attested-service copy wins over any
+// reconstructed one).
+// =============================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_leaf_reply_oracle_6_both_paths_deliver_once_with_attested_service_origin() {
+    use xmsg::client::{ClientOptions, RegisteredService};
+    use xmsg::storage::{Origin, SvcPendingMessage};
+
+    let creds_hub = generate_self_signed_ed25519("hub").unwrap();
+    let creds_leaf = generate_self_signed_ed25519("leaf").unwrap();
+
+    let hub = create_hub_test_node(
+        "hub",
+        vec![PeerConfig {
+            name: "leaf".to_string(),
+            address: "127.0.0.1:54321".to_string(),
+            pin: Some(creds_leaf.2.clone()),
+            ca: None,
+            identities: None,
+            allow: vec!["list".to_string(), "send".to_string(), "reply".to_string()],
+            from: None,
+            leaf: true,
+            principals: Vec::new(),
+            targets: None,
+            dial: None,
+        }],
+        creds_hub.clone(),
+    )
+    .await;
+
+    // Leaf has `dial: Some("outbound")` AND `run_leaf_inbox_task` running concurrently,
+    // so sending from the leaf also spawns `spawn_outbound_reply_poller`!
+    let leaf = create_leaf_test_node(
+        "leaf",
+        vec![PeerConfig {
+            name: "hub".to_string(),
+            address: hub.fed_addr.to_string(),
+            pin: Some(creds_hub.2.clone()),
+            ca: None,
+            identities: None,
+            allow: vec!["list".to_string(), "send".to_string(), "reply".to_string()],
+            from: None,
+            leaf: false,
+            principals: Vec::new(),
+            targets: None,
+            dial: Some("outbound".to_string()),
+        }],
+        creds_leaf,
+        "svc:guard",
+    )
+    .await;
+
+    let mut genie_hub = register_hub_service(&hub, "genie").await;
+    let mut guard_leaf = RegisteredService::register(ClientOptions {
+        register_socket: leaf.reg_sock.clone(),
+        agent_socket: leaf.agent_sock.clone(),
+        max_frame_bytes: 65536,
+        operation_timeout: Duration::from_secs(5),
+        service: "guard".to_string(),
+        expected_node: Some("leaf".to_string()),
+        daemon_uid: current_uid(),
+    })
+    .await
+    .unwrap();
+
+    // 1. Live race: both `run_leaf_inbox_task` and `spawn_outbound_reply_poller` active
+    let sent = guard_leaf
+        .send(
+            "genie@hub",
+            "Hello genie with both paths active",
+            Some("idem-6a"),
+        )
+        .await
+        .unwrap();
+
+    let hub_delivery = genie_hub
+        .poll(10)
+        .await
+        .unwrap()
+        .expect("genie@hub must receive message");
+    genie_hub.ack(hub_delivery.message_id()).await.unwrap();
+
+    let reply_rec = genie_hub
+        .reply(
+            hub_delivery.message_id(),
+            "Reply delivered with both paths active",
+            Some("idem-6a-reply"),
+        )
+        .await
+        .unwrap();
+    let reply_id = reply_rec.pushed_message_id.unwrap();
+
+    // Let both `run_leaf_inbox_task` and `spawn_outbound_reply_poller` run before polling
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    let delivery = guard_leaf
+        .poll(5)
+        .await
+        .unwrap()
+        .expect("guard@leaf must receive reply");
+    assert_eq!(delivery.message_id(), reply_id);
+    assert_eq!(delivery.in_reply_to(), Some(sent.message_id.as_str()));
+    assert_eq!(
+        delivery.origin(),
+        &Origin::service("genie", "hub"),
+        "attested service origin must be delivered when both paths are active"
+    );
+    guard_leaf.ack(delivery.message_id()).await.unwrap();
+
+    // Verify no second copy is delivered on subsequent poll
+    let extra = guard_leaf.poll(1).await.unwrap();
+    assert!(
+        extra.is_none(),
+        "same reply_id must be delivered exactly once when both paths are active, got extra: {extra:?}"
+    );
+
+    // 2. Forced-order verification for both arrival orders of a reconstructed instance
+    //    origin vs an attested service origin for the same `reply_id`:
+    //    Order A: reconstructed `Origin::instance("genie", "hub", None)` arrives FIRST,
+    //             attested `Origin::service("genie", "hub")` arrives SECOND -> service wins, 1 delivery.
+    //    Order B: attested `Origin::service("genie", "hub")` arrives FIRST,
+    //             reconstructed `Origin::instance("genie", "hub", None)` arrives SECOND -> service wins, 1 delivery.
+    for (idx, first_is_service) in [(1_u32, false), (2_u32, true)] {
+        let race_id = format!("01M7266666666666666666660{idx}");
+        let reconstructed = SvcPendingMessage {
+            id: race_id.clone(),
+            session_id: "guard".to_string(),
+            created_at: xmsg::storage::now_epoch_secs(),
+            from_name: "genie@hub".to_string(),
+            bytes: 11,
+            text: "race-check".to_string(),
+            envelope: format!("[xmsg] reply from=genie@hub message_id={race_id}\n\nrace-check"),
+            delivered_at: None,
+            origin: Origin::instance("genie", "hub", None),
+            in_reply_to: Some(sent.message_id.clone()),
+        };
+        let attested = SvcPendingMessage {
+            origin: Origin::service("genie", "hub"),
+            ..reconstructed.clone()
+        };
+
+        {
+            let conn = leaf.db.lock().unwrap();
+            if first_is_service {
+                assert!(xmsg::storage::insert_svc_message_with_cap(&conn, &attested, 64).unwrap());
+                assert!(
+                    xmsg::storage::insert_svc_message_with_cap(&conn, &reconstructed, 64).unwrap()
+                );
+            } else {
+                assert!(
+                    xmsg::storage::insert_svc_message_with_cap(&conn, &reconstructed, 64).unwrap()
+                );
+                assert!(xmsg::storage::insert_svc_message_with_cap(&conn, &attested, 64).unwrap());
+            }
+        }
+
+        let d = guard_leaf
+            .poll(5)
+            .await
+            .unwrap()
+            .expect("forced-race reply must be delivered once");
+        assert_eq!(d.message_id(), race_id);
+        assert_eq!(
+            d.origin(),
+            &Origin::service("genie", "hub"),
+            "attested service origin must win in arrival order first_is_service={first_is_service}"
+        );
+        guard_leaf.ack(d.message_id()).await.unwrap();
+
+        let dup = guard_leaf.poll(0).await.unwrap();
+        assert!(
+            dup.is_none(),
+            "forced-race reply {race_id} must not be delivered twice: {dup:?}"
+        );
+    }
 }

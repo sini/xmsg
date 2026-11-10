@@ -706,6 +706,7 @@ pub fn insert_reply(
         text: text.to_string(),
         push_outcome: push_outcome.map(|s| s.to_string()),
         pushed_message_id: pushed_message_id.map(|s| s.to_string()),
+        replier: None,
     })
 }
 
@@ -726,6 +727,7 @@ pub fn get_replies_after(
             text: row.get(4)?,
             push_outcome: row.get(5)?,
             pushed_message_id: row.get(6)?,
+            replier: None,
         })
     })?;
 
@@ -757,6 +759,7 @@ pub fn get_reply_by_pushed_id(
             text: row.get(4)?,
             push_outcome: row.get(5)?,
             pushed_message_id: row.get(6)?,
+            replier: None,
         }))
     } else {
         Ok(None)
@@ -1000,6 +1003,16 @@ pub fn insert_svc_message_with_cap(
     msg: &SvcPendingMessage,
     cap: usize,
 ) -> Result<bool> {
+    if has_svc_message(conn, &msg.id)? {
+        let _ = upgrade_svc_message_origin(
+            conn,
+            &msg.id,
+            &msg.from_name,
+            &msg.origin,
+            msg.in_reply_to.as_deref(),
+        )?;
+        return Ok(true);
+    }
     let pending = count_pending_svc_messages(conn, &msg.session_id)?;
     if pending >= cap {
         return Ok(false);
@@ -1022,6 +1035,47 @@ pub fn insert_svc_message_with_cap(
         ],
     )?;
     Ok(true)
+}
+
+pub fn has_svc_message(conn: &Connection, id: &str) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT 1 FROM svc_pending_messages WHERE id = ?1 LIMIT 1")?;
+    let mut rows = stmt.query(params![id])?;
+    Ok(rows.next()?.is_some())
+}
+
+/// If `id` is already in `svc_pending_messages` with a non-service `origin` and `origin`
+/// carries a service attestation (`origin.service.is_some()`), upgrades the row's `origin`
+/// and `from_name` in place so the attested-service copy wins without duplicating delivery.
+pub fn upgrade_svc_message_origin(
+    conn: &Connection,
+    id: &str,
+    from_name: &str,
+    origin: &Origin,
+    in_reply_to: Option<&str>,
+) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT origin FROM svc_pending_messages WHERE id = ?1 LIMIT 1")?;
+    let mut rows = stmt.query(params![id])?;
+    let Some(row) = rows.next()? else {
+        return Ok(false);
+    };
+    let existing = origin_from_sql(row.get(0)?)?;
+    if origin.service.is_some() && existing.service.is_none() {
+        let origin_json = serde_json::to_string(origin)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let updated = conn.execute(
+            "UPDATE svc_pending_messages SET from_name = ?2, origin = ?3, in_reply_to = COALESCE(in_reply_to, ?4) WHERE id = ?1",
+            params![id, from_name, origin_json, in_reply_to],
+        )?;
+        Ok(updated > 0)
+    } else if in_reply_to.is_some() {
+        let updated = conn.execute(
+            "UPDATE svc_pending_messages SET in_reply_to = COALESCE(in_reply_to, ?2) WHERE id = ?1",
+            params![id, in_reply_to],
+        )?;
+        Ok(updated > 0)
+    } else {
+        Ok(false)
+    }
 }
 
 pub fn get_next_pending_svc_message(
@@ -1375,6 +1429,7 @@ pub fn get_reply_by_seq(conn: &Connection, seq: i64) -> Result<Option<ReplyRecor
             text: row.get(4)?,
             push_outcome: row.get(5)?,
             pushed_message_id: row.get(6)?,
+            replier: None,
         }))
     } else {
         Ok(None)
@@ -1398,8 +1453,8 @@ pub struct PeerMailboxMessage {
 pub fn insert_peer_mailbox(conn: &Connection, msg: &PeerMailboxMessage) -> Result<bool> {
     let origin_json = serde_json::to_string(&msg.origin)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-    conn.execute(
-        "INSERT INTO peer_mailbox (id, peer, target_ref, created_at, from_name, bytes, body, envelope, origin)
+    let count = conn.execute(
+        "INSERT OR IGNORE INTO peer_mailbox (id, peer, target_ref, created_at, from_name, bytes, body, envelope, origin)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             msg.id,
@@ -1413,7 +1468,7 @@ pub fn insert_peer_mailbox(conn: &Connection, msg: &PeerMailboxMessage) -> Resul
             origin_json,
         ],
     )?;
-    Ok(true)
+    Ok(count > 0)
 }
 
 pub fn get_next_peer_mailbox_message(

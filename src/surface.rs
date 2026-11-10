@@ -894,6 +894,20 @@ pub async fn deliver(
     body: &str,
     origin: Origin,
 ) -> Result<(String, &'static str, &'static str), AppError> {
+    deliver_with_in_reply_to(local, target, from_name, message_id, body, origin, None).await
+}
+
+/// Delivers a message or a pulled leaf-mailbox reply (`in_reply_to = Some(...)`) to a
+/// resolved local target.
+pub async fn deliver_with_in_reply_to(
+    local: &Local<'_>,
+    target: &ResolvedTarget,
+    from_name: &str,
+    message_id: &str,
+    body: &str,
+    origin: Origin,
+    in_reply_to: Option<&str>,
+) -> Result<(String, &'static str, &'static str), AppError> {
     crate::fed::check_origin(&origin)?;
     crate::fed::validate_no_control_chars("from_name", from_name)?;
     crate::fed::validate_no_control_chars("message_id", message_id)?;
@@ -902,9 +916,14 @@ pub async fn deliver(
         None => String::new(),
     };
     let envelope_text = || {
-        format!(
+        match in_reply_to {
+        Some(irt) => format!(
+            "[xmsg] reply to message_id={irt} — message_id={message_id}; reply with the xmsg reply tool (tools: send, reply, list, replies)\n\n{body}"
+        ),
+        None => format!(
             "[xmsg] from={from_name}{ref_part} message_id={message_id} — reply with the xmsg reply tool (tools: send, reply, list, replies)\n\n{body}"
-        )
+        ),
+    }
     };
     // A queued message shows when it was sent (A14).
     let sent = storage::utc_rfc3339(storage::now_epoch_secs());
@@ -1175,7 +1194,7 @@ pub async fn deliver(
                 envelope: envelope_text(),
                 delivered_at: None,
                 origin,
-                in_reply_to: None,
+                in_reply_to: in_reply_to.map(str::to_string),
             };
             {
                 let cap = storage::svc_queue_cap_for_db(local.db);
@@ -1544,39 +1563,37 @@ pub async fn push_reply(
             }
         }
         "svc" => {
-            match crate::svc::resolve_svc_session(
+            let target_session_id = match crate::svc::resolve_svc_session(
                 &local.agy_config.proc_root,
                 local.svc_store,
                 ret_session_id,
             ) {
-                Ok(Some(session)) => {
-                    let svc_msg = storage::SvcPendingMessage {
-                        id: reply_id.to_string(),
-                        session_id: session.session_id.clone(),
-                        created_at: storage::now_epoch_secs(),
-                        from_name: replier_label.to_string(),
-                        bytes: text.len(),
-                        text: text.to_string(),
-                        envelope,
-                        delivered_at: None,
-                        origin: replier_origin,
-                        in_reply_to: Some(in_reply_to.to_string()),
-                    };
-                    let cap = storage::svc_queue_cap_for_db(local.db);
-                    let inserted = match local.db.lock() {
-                        Ok(db) => storage::insert_svc_message_with_cap(&db, &svc_msg, cap)
-                            .unwrap_or(false),
-                        Err(_) => false,
-                    };
-                    if inserted {
-                        let _ = local.svc_notify_tx.send(session.session_id);
-                        "pushed"
-                    } else {
-                        "push_failed"
-                    }
-                }
-                Ok(None) => "sender_gone",
-                Err(_) => "push_failed",
+                Ok(Some(session)) => session.session_id,
+                Ok(None) => return "sender_gone",
+                Err(_) => return "push_failed",
+            };
+            let svc_msg = storage::SvcPendingMessage {
+                id: reply_id.to_string(),
+                session_id: target_session_id.clone(),
+                created_at: storage::now_epoch_secs(),
+                from_name: replier_label.to_string(),
+                bytes: text.len(),
+                text: text.to_string(),
+                envelope,
+                delivered_at: None,
+                origin: replier_origin,
+                in_reply_to: Some(in_reply_to.to_string()),
+            };
+            let cap = storage::svc_queue_cap_for_db(local.db);
+            let inserted = match local.db.lock() {
+                Ok(db) => storage::insert_svc_message_with_cap(&db, &svc_msg, cap).unwrap_or(false),
+                Err(_) => false,
+            };
+            if inserted {
+                let _ = local.svc_notify_tx.send(target_session_id);
+                "pushed"
+            } else {
+                "push_failed"
             }
         }
         _ => "sender_gone",
@@ -2150,6 +2167,7 @@ pub async fn reply(
                             text: text.to_string(),
                             push_outcome: Some(storage::KEY_PENDING.to_string()),
                             pushed_message_id: Some(r.reply_id),
+                            replier: None,
                         }),
                     };
                 }
@@ -2362,6 +2380,35 @@ async fn deliver_reply(
                 }
             }
             let outcome = if to_leaf {
+                if let (Some(fed_state), Some(to)) =
+                    (state.fed_state.as_ref(), dest_session_id.as_deref())
+                {
+                    let replier_origin = Sender::Session(caller.clone()).origin(&state.node_name);
+                    let envelope = crate::fed::FedEnvelope {
+                        v: crate::fed::WIRE_VERSION,
+                        id: reply_id.clone(),
+                        origin: replier_origin,
+                        to: crate::fed::FedTarget {
+                            r#ref: to.to_string(),
+                        },
+                        body: text.to_string(),
+                        thread_id: if msg.thread_id.is_empty() {
+                            msg.id.clone()
+                        } else {
+                            msg.thread_id.clone()
+                        },
+                        created_at: storage::now_epoch_secs(),
+                        forwarded: None,
+                    };
+                    let _ = crate::fed::queue_leaf_mailbox_reply(
+                        fed_state,
+                        host,
+                        to,
+                        &envelope,
+                        &replier_label,
+                        message_id,
+                    );
+                }
                 "stored"
             } else {
                 push_federated_reply(state, caller, host, message_id, &reply_id, text).await

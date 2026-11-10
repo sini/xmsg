@@ -237,6 +237,8 @@ pub struct ReplyRecord {
     pub push_outcome: Option<String>,
     #[serde(default)]
     pub pushed_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replier: Option<Origin>,
 }
 
 /// One entry of `list` (A13, A-12, A16, XL1, XF3): its address, kind, harness, label and

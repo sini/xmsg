@@ -2256,6 +2256,17 @@ pub fn validate_pulled_message(msg: &FedInboxMessage) -> Result<(), AppError> {
     if let Some(ref to) = msg.to {
         validate_no_control_chars("to", to)?;
     }
+    if let Some(ref in_reply_to) = msg.in_reply_to {
+        if in_reply_to.is_empty()
+            || in_reply_to.len() > 128
+            || in_reply_to.contains(char::is_whitespace)
+        {
+            return Err(AppError::BadRequest(format!(
+                "invalid pulled message in_reply_to '{in_reply_to}'"
+            )));
+        }
+        validate_no_control_chars("in_reply_to", in_reply_to)?;
+    }
     Ok(())
 }
 
@@ -2307,6 +2318,8 @@ pub struct FedInboxMessage {
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<String>,
 }
 
 /// One item of a dial-out client's mailbox: a message, or a `list` query it answers on its
@@ -3021,31 +3034,42 @@ pub async fn deliver_federated_reply_locally(
     ret_session_id: &str,
 ) -> Result<&'static str, AppError> {
     let _ = peer_name;
-    // Check if reply already inserted (idempotency)
-    let already_inserted = {
+    // Check if reply already inserted or delivered (idempotency across poller and mailbox pull).
+    let already_pushed = {
         let db = fed_state
             .db
             .lock()
             .map_err(|e| AppError::Internal(e.to_string()))?;
-        storage::get_reply_by_pushed_id(&db, reply_id)
+        let _ = storage::upgrade_svc_message_origin(
+            &db,
+            reply_id,
+            replier_badge,
+            &replier_origin,
+            Some(in_reply_to),
+        );
+        if let Some(existing) = storage::get_reply_by_pushed_id(&db, reply_id)
             .map_err(|e| AppError::Internal(e.to_string()))?
-            .is_some()
+        {
+            matches!(
+                existing.push_outcome.as_deref(),
+                Some("accepted" | "pushed")
+            )
+        } else {
+            storage::insert_reply(
+                &db,
+                in_reply_to,
+                ret_session_id,
+                text,
+                Some("accepted"),
+                Some(reply_id),
+            )
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+            false
+        }
     };
 
-    if !already_inserted {
-        let db = fed_state
-            .db
-            .lock()
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-        storage::insert_reply(
-            &db,
-            in_reply_to,
-            ret_session_id,
-            text,
-            Some("accepted"),
-            Some(reply_id),
-        )
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    if already_pushed {
+        return Ok("pushed");
     }
 
     let push_res = crate::surface::push_reply(
@@ -3276,8 +3300,10 @@ async fn fed_reply_handler(
             )
                 .into_response());
         } else {
-            // Undialable origin (leaf / outbound link): store reply for polling
+            // Undialable origin (leaf / outbound link): store reply for polling, and if
+            // the origin is a leaf peer, also queue into its mailbox.
             let replier_session_id = replier_key.clone();
+            let replier_badge = replier.render(&peer.name);
 
             let push_outcome = "stored";
             {
@@ -3307,17 +3333,49 @@ async fn fed_reply_handler(
                 let fwd_reply_record = storage::MessageRecord {
                     id: reply.id.clone(),
                     created_at: reply.created_at,
-                    session_id: origin_target_ref,
-                    from_name: replier.render(&peer.name),
+                    session_id: origin_target_ref.clone(),
+                    from_name: replier_badge.clone(),
                     bytes: reply.text.len(),
                     outcome: "stored".to_string(),
                     recipient_harness: "fed".to_string(),
-                    return_harness: None,
+                    return_harness: Some(
+                        if replier.service.is_some() {
+                            "svc"
+                        } else {
+                            "fed"
+                        }
+                        .to_string(),
+                    ),
                     return_session_id: Some(replier_key.clone()),
                     return_host: Some(peer.name.clone()),
                     thread_id: reply.in_reply_to.clone(),
                 };
                 let _ = storage::insert_message(&db, &fwd_reply_record);
+            }
+            if origin_peer_cfg.leaf && !origin_target_ref.is_empty() {
+                let envelope = FedEnvelope {
+                    v: WIRE_VERSION,
+                    id: reply.id.clone(),
+                    origin: replier.clone(),
+                    to: FedTarget {
+                        r#ref: origin_target_ref,
+                    },
+                    body: reply.text.clone(),
+                    thread_id: reply.in_reply_to.clone(),
+                    created_at: reply.created_at,
+                    forwarded: Some(FedForwarded {
+                        forwarder: fed_state.node_name.clone(),
+                        targets: None,
+                    }),
+                };
+                let _ = queue_leaf_mailbox_reply(
+                    &fed_state,
+                    &fwd.origin_peer,
+                    &envelope.to.r#ref,
+                    &envelope,
+                    &replier_badge,
+                    &reply.in_reply_to,
+                );
             }
             let _ = fed_state.notify_tx.send(reply.in_reply_to.clone());
 
@@ -3463,6 +3521,96 @@ async fn fed_reply_handler(
         .into_response())
 }
 
+fn replier_origin_for_stored_reply(
+    db: &rusqlite::Connection,
+    fed_state: &FedState,
+    r: &storage::ReplyRecord,
+) -> storage::Origin {
+    if let Some(ref reply_id) = r.pushed_message_id {
+        if let Ok(Some(msg)) = storage::get_message(db, reply_id) {
+            let origin_node = if msg.recipient_harness == "fed" {
+                msg.return_host
+                    .as_deref()
+                    .filter(|h| !h.is_empty())
+                    .unwrap_or(&fed_state.node_name)
+            } else {
+                &fed_state.node_name
+            };
+            if msg.return_harness.as_deref() == Some("svc") {
+                return storage::Origin::service(&r.replier_session_id, origin_node);
+            }
+            if msg.return_harness.as_deref().is_some_and(|h| h != "fed") {
+                let label = msg
+                    .from_name
+                    .split_once(" · ")
+                    .map(|(l, _)| l)
+                    .filter(|l| !l.is_empty());
+                return storage::Origin::instance(&r.replier_session_id, origin_node, label);
+            }
+        }
+    }
+    if crate::svc::resolve_svc_session(
+        &fed_state.agy_config.proc_root,
+        &fed_state.svc_store,
+        &r.replier_session_id,
+    )
+    .ok()
+    .flatten()
+    .is_some()
+    {
+        return storage::Origin::service(&r.replier_session_id, &fed_state.node_name);
+    }
+    let is_known_claude = crate::registry::read_session_entries(&fed_state.sessions_dirs)
+        .iter()
+        .any(|e| {
+            e.session_id == r.replier_session_id
+                || e.name.as_deref() == Some(r.replier_session_id.as_str())
+        });
+    let is_seen_instance = storage::seen_instance(
+        db,
+        &r.replier_session_id,
+        storage::now_epoch_secs(),
+        fed_state.reply_ttl.as_secs() as i64,
+    )
+    .ok()
+    .flatten()
+    .is_some();
+    if !is_known_claude
+        && !is_seen_instance
+        && crate::client::validate_service_name(&r.replier_session_id).is_ok()
+    {
+        storage::Origin::service(&r.replier_session_id, &fed_state.node_name)
+    } else {
+        storage::Origin::instance(&r.replier_session_id, &fed_state.node_name, None)
+    }
+}
+
+pub(crate) fn polled_replier_origin(
+    r: &storage::ReplyRecord,
+    node: &str,
+) -> Result<storage::Origin, AppError> {
+    if let Some(ref origin) = r.replier {
+        let resolved = if origin.node.is_empty() {
+            storage::Origin {
+                node: node.to_string(),
+                ..origin.clone()
+            }
+        } else {
+            origin.clone()
+        };
+        check_origin(&resolved)?;
+        return Ok(resolved);
+    }
+    if crate::client::validate_service_name(&r.replier_session_id).is_ok() {
+        let origin = storage::Origin::service(&r.replier_session_id, node);
+        check_origin(&origin)?;
+        return Ok(origin);
+    }
+    let origin = storage::Origin::instance(&r.replier_session_id, node, None);
+    check_origin(&origin)?;
+    Ok(origin)
+}
+
 async fn fed_get_replies_handler(
     State(fed_state): State<Arc<FedState>>,
     Extension(peer): Extension<Arc<AuthenticatedPeer>>,
@@ -3520,17 +3668,21 @@ async fn fed_get_replies_handler(
         None
     };
 
-    let existing = {
+    let mut existing = {
         let db = fed_state
             .db
             .lock()
             .map_err(|e| AppError::Internal(e.to_string()))?;
-        storage::get_replies_after(&db, &id, after_seq)
-            .map_err(|e| AppError::Internal(e.to_string()))?
+        let mut rows = storage::get_replies_after(&db, &id, after_seq)
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        for r in &mut rows {
+            r.replier = Some(replier_origin_for_stored_reply(&db, &fed_state, r));
+        }
+        rows
     };
 
     if !existing.is_empty() || wait_secs == 0 {
-        return Ok((StatusCode::OK, Json(existing)).into_response());
+        return Ok((StatusCode::OK, Json(std::mem::take(&mut existing))).into_response());
     }
 
     let mut receiver = rx.unwrap();
@@ -3551,8 +3703,12 @@ async fn fed_get_replies_handler(
             .db
             .lock()
             .map_err(|e| AppError::Internal(e.to_string()))?;
-        storage::get_replies_after(&db, &id, after_seq)
-            .map_err(|e| AppError::Internal(e.to_string()))?
+        let mut rows = storage::get_replies_after(&db, &id, after_seq)
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        for r in &mut rows {
+            r.replier = Some(replier_origin_for_stored_reply(&db, &fed_state, r));
+        }
+        rows
     };
 
     Ok((StatusCode::OK, Json(replies)).into_response())
@@ -3701,11 +3857,21 @@ async fn fed_get_inbox_handler(
         Ok(storage::get_next_peer_mailbox_message(&db, &peer.name)
             .map_err(|e| AppError::Internal(e.to_string()))?
             .map(|msg| {
+                let in_reply_to = serde_json::from_str::<serde_json::Value>(&msg.envelope)
+                    .ok()
+                    .and_then(|v| v.get("in_reply_to")?.as_str().map(str::to_string))
+                    .or_else(|| {
+                        storage::get_reply_by_pushed_id(&db, &msg.id)
+                            .ok()
+                            .flatten()
+                            .map(|r| r.message_id)
+                    });
                 FedInboxItem::Message(FedInboxMessage {
                     id: msg.id,
                     origin: msg.origin,
                     body: msg.body,
                     to: Some(msg.target_ref),
+                    in_reply_to,
                 })
             }))
     };
@@ -3775,6 +3941,35 @@ pub fn queue_leaf_mailbox_message(
     envelope: &FedEnvelope,
     from_name: &str,
 ) -> Result<DeliveryResponse, AppError> {
+    queue_leaf_mailbox_message_inner(fed_state, peer_name, target_ref, envelope, from_name, None)
+}
+
+pub fn queue_leaf_mailbox_reply(
+    fed_state: &FedState,
+    peer_name: &str,
+    target_ref: &str,
+    envelope: &FedEnvelope,
+    from_name: &str,
+    in_reply_to: &str,
+) -> Result<DeliveryResponse, AppError> {
+    queue_leaf_mailbox_message_inner(
+        fed_state,
+        peer_name,
+        target_ref,
+        envelope,
+        from_name,
+        Some(in_reply_to),
+    )
+}
+
+fn queue_leaf_mailbox_message_inner(
+    fed_state: &FedState,
+    peer_name: &str,
+    target_ref: &str,
+    envelope: &FedEnvelope,
+    from_name: &str,
+    in_reply_to: Option<&str>,
+) -> Result<DeliveryResponse, AppError> {
     let current_peers = fed_state.current_peers();
     let peer_cfg = current_peers
         .get(peer_name)
@@ -3798,8 +3993,20 @@ pub fn queue_leaf_mailbox_message(
         },
     };
 
-    let envelope_json =
-        serde_json::to_string(envelope).map_err(|e| AppError::Internal(e.to_string()))?;
+    let envelope_json = match in_reply_to {
+        Some(irt) => {
+            let mut val =
+                serde_json::to_value(envelope).map_err(|e| AppError::Internal(e.to_string()))?;
+            if let Some(obj) = val.as_object_mut() {
+                obj.insert(
+                    "in_reply_to".to_string(),
+                    serde_json::Value::String(irt.to_string()),
+                );
+            }
+            serde_json::to_string(&val).map_err(|e| AppError::Internal(e.to_string()))?
+        }
+        None => serde_json::to_string(envelope).map_err(|e| AppError::Internal(e.to_string()))?,
+    };
 
     let mailbox_msg = storage::PeerMailboxMessage {
         id: envelope.id.clone(),
@@ -4580,18 +4787,31 @@ pub fn spawn_outbound_reply_poller(
                                     );
                                     continue;
                                 };
-                                let replier_badge = inbox::sender_label(
-                                    &peer_name,
-                                    "",
-                                    &r.replier_session_id,
-                                    None,
-                                );
-
                                 let node = fed_state
                                     .current_peers()
                                     .canonical_name(&peer_name)
                                     .unwrap_or(&peer_name)
                                     .to_string();
+                                let replier_origin = match polled_replier_origin(&r, &node) {
+                                    Ok(origin) => origin,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            message_id = %message_id,
+                                            seq = r.seq,
+                                            peer = %peer_name,
+                                            "refusing pulled reply with invalid replier origin: {e}"
+                                        );
+                                        continue;
+                                    }
+                                };
+                                let replier_badge = replier_origin.render(
+                                    fed_state.current_peers().display_name(&replier_origin.node),
+                                );
+                                let replier_ret_harness = if replier_origin.service.is_some() {
+                                    "svc"
+                                } else {
+                                    "fed"
+                                };
                                 if let Ok(db) = fed_state.db.lock() {
                                     crate::surface::record_pushed_reply(
                                         &db,
@@ -4599,7 +4819,7 @@ pub fn spawn_outbound_reply_poller(
                                         &reply_id,
                                         &replier_badge,
                                         &r.text,
-                                        ("fed", &r.replier_session_id),
+                                        (replier_ret_harness, &r.replier_session_id),
                                         Some(&peer_name),
                                     );
                                 }
@@ -4609,7 +4829,7 @@ pub fn spawn_outbound_reply_poller(
                                     &message_id,
                                     &reply_id,
                                     &replier_badge,
-                                    storage::Origin::instance(&r.replier_session_id, &node, None),
+                                    replier_origin,
                                     &r.text,
                                     ret_harness,
                                     ret_session_id,
@@ -4689,13 +4909,34 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                     continue;
                 }
 
+                let target_ref = msg.to.as_deref().unwrap_or("");
+                // A12: one render, from the origin the hub attests.
+                let ret_host = peer_name.clone();
+                let from_name = msg
+                    .origin
+                    .render(fed_state.current_peers().display_name(&msg.origin.node));
+
                 // Idempotency (X1): a message already delivered or queued here is acked
                 // and skipped; one recorded as a failure is delivered again.
                 let already_processed = {
                     if let Ok(db) = fed_state.db.lock() {
-                        storage::get_message(&db, &msg.id)
+                        let _ = storage::upgrade_svc_message_origin(
+                            &db,
+                            &msg.id,
+                            &from_name,
+                            &msg.origin,
+                            msg.in_reply_to.as_deref(),
+                        );
+                        let msg_done = storage::get_message(&db, &msg.id)
                             .unwrap_or(None)
-                            .is_some_and(|m| storage::outcome_reached(&m.outcome))
+                            .is_some_and(|m| storage::outcome_reached(&m.outcome));
+                        let reply_done = msg.in_reply_to.is_some()
+                            && storage::get_reply_by_pushed_id(&db, &msg.id)
+                                .unwrap_or(None)
+                                .is_some_and(|r| {
+                                    matches!(r.push_outcome.as_deref(), Some("accepted" | "pushed"))
+                                });
+                        msg_done || reply_done
                     } else {
                         false
                     }
@@ -4720,13 +4961,6 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                     continue;
                 }
 
-                let target_ref = msg.to.as_deref().unwrap_or("");
-                // A12: one render, from the origin the hub attests.
-                let ret_host = peer_name.clone();
-                let from_name = msg
-                    .origin
-                    .render(fed_state.current_peers().display_name(&msg.origin.node));
-
                 let resolved = resolve_target_session_fed(&fed_state, target_ref).await;
 
                 match resolved {
@@ -4748,6 +4982,19 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                             None => (None, None),
                         };
 
+                        let thread_id = if let Some(ref irt) = msg.in_reply_to {
+                            fed_state
+                                .db
+                                .lock()
+                                .ok()
+                                .and_then(|db| storage::get_message(&db, irt).ok().flatten())
+                                .map(|m| m.thread_id)
+                                .filter(|t| !t.is_empty())
+                                .unwrap_or_else(|| irt.clone())
+                        } else {
+                            msg.id.clone()
+                        };
+
                         // The record is written before the message is delivered, as the
                         // federation receive path writes it: an ack or reply that lands
                         // before delivery returns finds it, and `queued` never replaces the
@@ -4763,20 +5010,74 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                             recipient_harness: target.recipient_harness().to_string(),
                             return_harness,
                             return_session_id,
-                            thread_id: msg.id.clone(),
+                            thread_id,
                             return_host: Some(ret_host.clone()),
                         };
-                        if let Ok(db) = fed_state.db.lock() {
-                            let _ = storage::upsert_message(&db, &pre_record);
+                        let raced_by_poller = if let Ok(db) = fed_state.db.lock() {
+                            let raced = msg.in_reply_to.is_some()
+                                && storage::get_reply_by_pushed_id(&db, &msg.id)
+                                    .unwrap_or(None)
+                                    .is_some_and(|r| {
+                                        matches!(
+                                            r.push_outcome.as_deref(),
+                                            Some("accepted" | "pushed")
+                                        )
+                                    });
+                            if raced {
+                                let _ = storage::upgrade_svc_message_origin(
+                                    &db,
+                                    &msg.id,
+                                    &from_name,
+                                    &msg.origin,
+                                    msg.in_reply_to.as_deref(),
+                                );
+                                true
+                            } else {
+                                let _ = storage::upsert_message(&db, &pre_record);
+                                if let Some(ref irt) = msg.in_reply_to {
+                                    let _ = storage::insert_reply(
+                                        &db,
+                                        irt,
+                                        &target.session().session_id,
+                                        &msg.body,
+                                        Some("accepted"),
+                                        Some(&msg.id),
+                                    );
+                                }
+                                false
+                            }
+                        } else {
+                            false
+                        };
+
+                        if raced_by_poller {
+                            let mut ack_backoff = 100u64;
+                            loop {
+                                match ack_federated_inbox(&fed_state, &peer_name, &msg.id).await {
+                                    Ok(()) => break,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Failed to ack duplicate message {} to hub {}: {e}, retrying",
+                                            msg.id,
+                                            peer_name
+                                        );
+                                        tokio::time::sleep(Duration::from_millis(ack_backoff))
+                                            .await;
+                                        ack_backoff = (ack_backoff * 2).min(5000);
+                                    }
+                                }
+                            }
+                            continue;
                         }
 
-                        let deliver_res = crate::surface::deliver(
+                        let deliver_res = crate::surface::deliver_with_in_reply_to(
                             &fed_state.local(),
                             &target,
                             &from_name,
                             &msg.id,
                             &msg.body,
                             msg.origin.clone(),
+                            msg.in_reply_to.as_deref(),
                         )
                         .await;
 
@@ -4806,6 +5107,17 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                                 outcome_str,
                                 Some(&ret_host),
                             );
+                            if let Some(ref irt) = msg.in_reply_to {
+                                let push_outcome = if matches!(outcome_str, "delivered" | "queued")
+                                {
+                                    "pushed"
+                                } else {
+                                    "push_failed"
+                                };
+                                let _ =
+                                    storage::update_reply_push_outcome(&db, &msg.id, push_outcome);
+                                let _ = fed_state.notify_tx.send(irt.clone());
+                            }
                         }
 
                         let mut ack_backoff = 100u64;

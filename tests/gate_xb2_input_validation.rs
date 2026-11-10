@@ -470,6 +470,7 @@ async fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
         origin: Origin::instance(VALID_UUID_1, "sini.hub", Some("worker")),
         body: "hello".to_string(),
         to: Some(VALID_UUID_2.to_string()),
+        in_reply_to: None,
     };
     assert!(
         xmsg::fed::validate_pulled_message(&valid_pulled).is_ok(),
