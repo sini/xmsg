@@ -272,6 +272,11 @@ path = "tests/gate_x19_leaf_svc.rs"
 required-features = ["daemon"]
 
 [[test]]
+name = "gate_x19_no_proc_leaf"
+path = "tests/gate_x19_no_proc_leaf.rs"
+required-features = ["daemon"]
+
+[[test]]
 name = "gate_x20_agy_queue"
 path = "tests/gate_x20_agy_queue.rs"
 required-features = ["daemon"]

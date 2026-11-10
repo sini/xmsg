@@ -102,8 +102,12 @@ enum PeerPin {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PidfdState {
-    /// Exited / reaped process (`Pid: -1` in `/proc/self/fdinfo/<pidfd>`).
+    /// Exited / reaped process (`Pid: -1` in `/proc/self/fdinfo/<pidfd>`), or malformed /
+    /// missing `Pid:` in a readable `fdinfo`.
     Dead,
+    /// `/proc/self/fdinfo/<pidfd>` could not be read (e.g. `/proc` unmounted, sandbox without
+    /// procfs, or hardened host): cannot pin via `pidfd`.
+    Unreadable,
     /// Live process in a PID namespace not visible to the reader (`Pid: 0`).
     Unmapped,
     /// Live process visible in the reader's PID namespace (`Pid: > 0`).
@@ -135,6 +139,10 @@ static FORCE_PEERPIDFD_ERRNO: std::sync::atomic::AtomicI32 = std::sync::atomic::
 
 #[cfg(target_os = "linux")]
 static FORCE_PIDFD_PID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(i64::MIN);
+
+#[cfg(target_os = "linux")]
+static FORCE_PIDFD_FDINFO_FILE: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
 
 /// Test seam: forces `getsockopt(SO_PEERPIDFD)` to fail with `errno` (or `0` to use the kernel).
 pub fn set_force_peerpidfd_errno_for_test(errno: i32) {
@@ -172,6 +180,21 @@ pub fn peerpidfd_fallback_warned_for_test() -> bool {
     }
 }
 
+/// Test seam: redirects `pidfd_state`'s fdinfo read from `/proc/self/fdinfo/<pidfd>` to `file`
+/// (e.g. a nonexistent path for no-`/proc` tests, or a synthetic fdinfo file for `Pid: -1` and
+/// malformed-line tests). Pass `None` to restore `/proc/self/fdinfo/<pidfd>`.
+pub fn set_force_pidfd_fdinfo_file_for_test(file: Option<std::path::PathBuf>) {
+    #[cfg(target_os = "linux")]
+    {
+        if file.is_some() {
+            PEERPIDFD_FALLBACK_WARNED.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+        *FORCE_PIDFD_FDINFO_FILE.lock().unwrap() = file;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = file;
+}
+
 #[cfg(target_os = "linux")]
 fn pidfd_state(fd: &std::os::fd::OwnedFd) -> PidfdState {
     use std::os::fd::AsRawFd;
@@ -185,8 +208,15 @@ fn pidfd_state(fd: &std::os::fd::OwnedFd) -> PidfdState {
             _ => PidfdState::Dead,
         };
     }
-    let Ok(content) = fs::read_to_string(format!("/proc/self/fdinfo/{}", fd.as_raw_fd())) else {
-        return PidfdState::Dead;
+    let fdinfo_path = FORCE_PIDFD_FDINFO_FILE
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(format!("/proc/self/fdinfo/{}", fd.as_raw_fd()))
+        });
+    let Ok(content) = fs::read_to_string(fdinfo_path) else {
+        return PidfdState::Unreadable;
     };
     for line in content.lines() {
         if let Some(rest) = line.strip_prefix("Pid:") {
@@ -239,7 +269,8 @@ fn getsockopt_peerpidfd(stream: &tokio::net::UnixStream) -> io::Result<std::os::
 
 /// Reads the peer's UID and pins its PID via `SO_PEERPIDFD` on Linux, falling back to
 /// `SO_PEERCRED` (with a one-time warning log) only when the kernel does not support
-/// `SO_PEERPIDFD` (`ENOPROTOOPT` / `ENOSYS` / `EOPNOTSUPP`) or on non-Linux targets.
+/// `SO_PEERPIDFD` (`ENOPROTOOPT` / `ENOSYS` / `EOPNOTSUPP`), when `/proc/self/fdinfo/<pidfd>`
+/// cannot be read, or on non-Linux targets.
 pub fn peer_cred(stream: &tokio::net::UnixStream) -> io::Result<PeerCred> {
     let ucred = stream.peer_cred()?;
     let uid = ucred.uid();
@@ -262,6 +293,18 @@ pub fn peer_cred(stream: &tokio::net::UnixStream) -> io::Result<PeerCred> {
                     pid: None,
                     pin: PeerPin::Unmapped(std::sync::Arc::new(fd)),
                 }),
+                PidfdState::Unreadable => {
+                    if !PEERPIDFD_FALLBACK_WARNED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        tracing::warn!(
+                            "/proc/self/fdinfo/<pidfd> unreadable; falling back to SO_PEERCRED for peer PID resolution"
+                        );
+                    }
+                    Ok(PeerCred {
+                        uid,
+                        pid: fallback_pid,
+                        pin: PeerPin::Unpinned,
+                    })
+                }
                 PidfdState::Dead => Ok(PeerCred {
                     uid,
                     pid: fallback_pid,
