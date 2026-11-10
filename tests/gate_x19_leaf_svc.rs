@@ -1845,3 +1845,207 @@ async fn test_oracle_11_leaf_svc_send_and_reply() {
         "Claude session on hub must receive federated reply from leaf svc"
     );
 }
+
+// =============================================================================
+// Oracle 12: Leaf `agent.sock` refuses a caller whose peer UID != daemon UID
+// (and succeeds without `/proc` when peer UID == daemon UID)
+// Mutant: `if !state.is_leaf() && peer_uid != my_uid` in `src/agent.rs` => RED
+// =============================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_oracle_12_leaf_agent_sock_refuses_mismatched_uid() {
+    use xmsg::client::{ClientOptions, ListQuery, RegisteredService};
+
+    let creds_hub = generate_self_signed_ed25519("hub").unwrap();
+    let creds_leaf = generate_self_signed_ed25519("leaf").unwrap();
+
+    let hub = create_hub_test_node(
+        "hub",
+        vec![PeerConfig {
+            name: "leaf".to_string(),
+            address: "127.0.0.1:54321".to_string(),
+            pin: Some(creds_leaf.2.clone()),
+            ca: None,
+            identities: None,
+            allow: vec!["list".to_string(), "send".to_string(), "reply".to_string()],
+            from: None,
+            leaf: true,
+            principals: Vec::new(),
+            targets: None,
+            dial: None,
+        }],
+        creds_hub.clone(),
+    )
+    .await;
+
+    let leaf = create_leaf_test_node(
+        "leaf",
+        vec![PeerConfig {
+            name: "hub".to_string(),
+            address: hub.fed_addr.to_string(),
+            pin: Some(creds_hub.2.clone()),
+            ca: None,
+            identities: None,
+            allow: vec!["list".to_string(), "send".to_string(), "reply".to_string()],
+            from: None,
+            leaf: false,
+            principals: Vec::new(),
+            targets: None,
+            dial: None,
+        }],
+        creds_leaf.clone(),
+        "svc:gateway",
+    )
+    .await;
+
+    let (_sock, claude_rx) =
+        create_claude_session_fixture(&hub.proc_root, &hub.sessions_dir, "sess-bob", "bob");
+
+    // Verify the leaf node's proc_root is completely empty (no /proc/<pid> entries)
+    assert_eq!(
+        std::fs::read_dir(&leaf.fed_state.agy_config.proc_root)
+            .unwrap()
+            .count(),
+        0,
+        "leaf proc_root must be empty to prove /proc-free leaf agent.sock operation"
+    );
+
+    let actual_uid = current_uid();
+    let mismatched_uid = actual_uid.wrapping_add(1);
+    let bad_agent_sock = leaf.agent_sock.with_file_name("agent-mismatch.sock");
+    let bad_listener = xmsg::agent::bind_agent_listener(&bad_agent_sock, actual_uid)
+        .await
+        .unwrap();
+
+    let state = Arc::new(xmsg::http::AppState {
+        sessions_dirs: leaf.fed_state.sessions_dirs.clone(),
+        agy_config: leaf.fed_state.agy_config.clone(),
+        agy_store: leaf.fed_state.agy_store.clone(),
+        pi_store: leaf.fed_state.pi_store.clone(),
+        pi_notify_tx: leaf.fed_state.pi_notify_tx.clone(),
+        svc_store: leaf.fed_state.svc_store.clone(),
+        svc_notify_tx: leaf.fed_state.svc_notify_tx.clone(),
+        node_name: leaf.name.clone(),
+        max_body: 65536,
+        request_counter: AtomicU64::new(1),
+        db: leaf.db.clone(),
+        notify_tx: leaf.fed_state.notify_tx.clone(),
+        reply_ttl: Duration::from_secs(3600),
+        idempotency_ttl: Duration::from_secs(3600),
+        long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
+        fed_state: Some(leaf.fed_state.clone()),
+    });
+    assert!(state.is_leaf(), "AppState under test must be in leaf mode");
+
+    tokio::spawn(async move {
+        let _ =
+            xmsg::agent::run_agent_server_with_listener(bad_listener, state, mismatched_uid).await;
+    });
+
+    // 1. Negative control (raw frame + RegisteredService): caller with peer_uid != my_uid is refused.
+    // Exercise both immediate write after connect and forced-race write after the server has
+    // already accepted, rejected `peer_uid != my_uid`, and closed its socket (`BrokenPipe`).
+    for delay_ms in [0_u64, 25_u64] {
+        let (mut raw_reader, mut raw_writer) = connect_svc(&bad_agent_sock).await;
+        if delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+        let _ = raw_writer.write_all(b"{\"action\":\"list\"}\n").await;
+        let mut line = String::new();
+        let n = tokio::time::timeout(Duration::from_secs(2), raw_reader.read_line(&mut line))
+            .await
+            .expect("raw read must not hang on UID-rejected leaf agent.sock")
+            .unwrap_or(0);
+        assert_eq!(
+            n, 0,
+            "mismatched peer UID on leaf agent.sock (delay_ms={delay_ms}) accepted raw frame: {line}"
+        );
+    }
+
+    let bad_service = RegisteredService::register(ClientOptions {
+        register_socket: leaf.reg_sock.clone(),
+        agent_socket: bad_agent_sock.clone(),
+        max_frame_bytes: 65536,
+        operation_timeout: Duration::from_secs(3),
+        service: "gateway".to_string(),
+        expected_node: Some("leaf".to_string()),
+        daemon_uid: actual_uid,
+    })
+    .await
+    .expect("registration on valid leaf register.sock should succeed");
+    let bad_agent = bad_service.agent_client();
+
+    let bad_list = bad_agent.list(ListQuery::default()).await;
+    assert!(
+        bad_list.is_err(),
+        "mismatched peer UID on leaf agent.sock accepted list: {bad_list:?}"
+    );
+    let bad_send = bad_agent
+        .send("bob@hub", "Forged from wrong UID", Some("idem-bad-uid-1"))
+        .await;
+    assert!(
+        bad_send.is_err(),
+        "mismatched peer UID on leaf agent.sock accepted send: {bad_send:?}"
+    );
+    drop(bad_service);
+
+    assert!(
+        claude_rx.lock().unwrap().is_empty(),
+        "Refused leaf agent.sock send must not deliver any message to hub"
+    );
+
+    // Wait briefly for the dropped registration socket to clear svc_store before positive control
+    for _ in 0..50 {
+        if leaf.fed_state.svc_store.read().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 2. Positive control: matching UID on leaf.agent_sock (still with empty proc_root) succeeds
+    let ok_service = RegisteredService::register(ClientOptions {
+        register_socket: leaf.reg_sock.clone(),
+        agent_socket: leaf.agent_sock.clone(),
+        max_frame_bytes: 65536,
+        operation_timeout: Duration::from_secs(5),
+        service: "gateway".to_string(),
+        expected_node: Some("leaf".to_string()),
+        daemon_uid: actual_uid,
+    })
+    .await
+    .expect("positive-control leaf registration should succeed");
+    let ok_agent = ok_service.agent_client();
+
+    let ok_listed = ok_agent
+        .list(ListQuery {
+            name: Some("bob".to_string()),
+            node: Some("hub".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("same-UID leaf list without /proc should succeed");
+    assert!(
+        ok_listed
+            .recipients
+            .iter()
+            .any(|r| r.label.as_deref() == Some("bob") && r.node == "hub"),
+        "Expected bob@hub in positive-control list: {ok_listed:?}"
+    );
+
+    let ok_sent = ok_agent
+        .send(
+            "bob@hub",
+            "Hello from same-UID leaf without /proc",
+            Some("idem-ok-uid-1"),
+        )
+        .await
+        .expect("same-UID leaf send without /proc should succeed");
+    assert_eq!(ok_sent.outcome, "delivered");
+    assert!(
+        claude_rx
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("Hello from same-UID leaf without /proc")),
+        "Hub session must receive positive-control leaf message"
+    );
+}
