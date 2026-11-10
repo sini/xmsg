@@ -938,18 +938,24 @@ pub async fn deliver_with_in_reply_to(
                 created_at: storage::now_epoch_secs(),
                 expires_at: *expires_at,
                 from_name: from_name.to_string(),
-                body: format!(
-                    "{body}\n\n[xmsg]{ref_part} message_id={message_id} sent={sent} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
-                ),
+                body: match in_reply_to {
+                    Some(_) => envelope_text(),
+                    None => format!(
+                        "{body}\n\n[xmsg]{ref_part} message_id={message_id} sent={sent} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
+                    ),
+                },
             };
             let db = local.db.lock().map_err(db_err)?;
             storage::insert_queued(&db, &queued).map_err(db_err)?;
             Ok((session.session_id.clone(), "claude", "queued"))
         }
         ResolvedTarget::Claude(session, socket_path) => {
-            let body_with_footer = format!(
-                "{body}\n\n[xmsg]{ref_part} message_id={message_id} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
-            );
+            let body_with_footer = match in_reply_to {
+                Some(_) => envelope_text(),
+                None => format!(
+                    "{body}\n\n[xmsg]{ref_part} message_id={message_id} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
+                ),
+            };
             let line = inbox::encode_transport_line(from_name, &body_with_footer)?;
             inbox::deliver_to_socket(socket_path, &line).await?;
             Ok((session.session_id.clone(), "claude", "delivered"))
@@ -971,9 +977,12 @@ pub async fn deliver_with_in_reply_to(
                 created_at: storage::now_epoch_secs(),
                 expires_at: *expires_at,
                 from_name: from_name.to_string(),
-                body: format!(
-                    "{body}\n\n[xmsg]{ref_part} message_id={message_id} sent={sent} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
-                ),
+                body: match in_reply_to {
+                    Some(_) => envelope_text(),
+                    None => format!(
+                        "{body}\n\n[xmsg]{ref_part} message_id={message_id} sent={sent} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
+                    ),
+                },
             };
             {
                 let db = local.db.lock().map_err(db_err)?;
@@ -990,6 +999,16 @@ pub async fn deliver_with_in_reply_to(
         } => {
             let harness = parent.recipient_harness();
             let body_with_header = format!("{subagent_header}\n{body}");
+            let subagent_envelope = || {
+                match in_reply_to {
+                Some(irt) => format!(
+                    "[xmsg] reply to message_id={irt} — message_id={message_id}; reply with the xmsg reply tool (tools: send, reply, list, replies)\n{subagent_header}\n\n{body}"
+                ),
+                None => format!(
+                    "[xmsg] from={from_name}{ref_part} message_id={message_id} — reply with the xmsg reply tool (tools: send, reply, list, replies)\n{subagent_header}\n\n{body}"
+                ),
+            }
+            };
             let queue_for_retry = |local: &Local<'_>| -> Result<(), AppError> {
                 let queued = storage::QueuedMessage {
                     id: message_id.to_string(),
@@ -997,9 +1016,12 @@ pub async fn deliver_with_in_reply_to(
                     created_at: storage::now_epoch_secs(),
                     expires_at: *expires_at,
                     from_name: from_name.to_string(),
-                    body: format!(
-                        "{body}\n\n[xmsg]{ref_part} message_id={message_id} sent={sent} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
-                    ),
+                    body: match in_reply_to {
+                        Some(_) => envelope_text(),
+                        None => format!(
+                            "{body}\n\n[xmsg]{ref_part} message_id={message_id} sent={sent} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
+                        ),
+                    },
                 };
                 let db = local.db.lock().map_err(db_err)?;
                 storage::insert_queued(&db, &queued).map_err(db_err)?;
@@ -1007,9 +1029,12 @@ pub async fn deliver_with_in_reply_to(
             };
             match parent.as_ref() {
                 ResolvedTarget::Claude(_, socket_path) => {
-                    let body_with_footer = format!(
-                        "{subagent_header}\n{body}\n\n[xmsg]{ref_part} message_id={message_id} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
-                    );
+                    let body_with_footer = match in_reply_to {
+                        Some(_) => format!("{subagent_header}\n{}", envelope_text()),
+                        None => format!(
+                            "{subagent_header}\n{body}\n\n[xmsg]{ref_part} message_id={message_id} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
+                        ),
+                    };
                     let line = inbox::encode_transport_line(from_name, &body_with_footer)?;
                     match inbox::deliver_to_socket(socket_path, &line).await {
                         Ok(()) => Ok((session.session_id.clone(), "claude", "delivered")),
@@ -1027,9 +1052,7 @@ pub async fn deliver_with_in_reply_to(
                         from_name: from_name.to_string(),
                         bytes: body.len(),
                         text: body_with_header,
-                        envelope: format!(
-                            "[xmsg] from={from_name}{ref_part} message_id={message_id} — reply with the xmsg reply tool (tools: send, reply, list, replies)\n{subagent_header}\n\n{body}"
-                        ),
+                        envelope: subagent_envelope(),
                         delivered_at: None,
                     };
                     let inserted = {
@@ -1064,9 +1087,7 @@ pub async fn deliver_with_in_reply_to(
                         from_name: from_name.to_string(),
                         bytes: body.len(),
                         text: body_with_header,
-                        envelope: format!(
-                            "[xmsg] from={from_name}{ref_part} message_id={message_id} — reply with the xmsg reply tool (tools: send, reply, list, replies)\n{subagent_header}\n\n{body}"
-                        ),
+                        envelope: subagent_envelope(),
                         delivered_at: None,
                     };
                     let inserted = {
@@ -1081,13 +1102,14 @@ pub async fn deliver_with_in_reply_to(
                     Ok((session.session_id.clone(), harness, "queued"))
                 }
                 other => {
-                    let (_, h, outcome) = Box::pin(deliver(
+                    let (_, h, outcome) = Box::pin(deliver_with_in_reply_to(
                         local,
                         other,
                         from_name,
                         message_id,
                         &body_with_header,
                         origin,
+                        in_reply_to,
                     ))
                     .await?;
                     Ok((session.session_id.clone(), h, outcome))
@@ -1096,17 +1118,31 @@ pub async fn deliver_with_in_reply_to(
         }
         ResolvedTarget::Agy(session) => {
             if agy_has_creds(local.agy_store, session) {
-                match crate::agy::deliver_agy(
-                    local.agy_config,
-                    local.agy_store,
-                    session,
-                    from_name,
-                    origin.machine_ref().as_deref(),
-                    message_id,
-                    body,
-                )
-                .await
-                {
+                let res = match in_reply_to {
+                    Some(_) => {
+                        let env = envelope_text();
+                        crate::agy::deliver_agy_envelope(
+                            local.agy_config,
+                            local.agy_store,
+                            session,
+                            from_name,
+                            &env,
+                        )
+                        .await
+                    }
+                    None => crate::agy::deliver_agy(
+                        local.agy_config,
+                        local.agy_store,
+                        session,
+                        from_name,
+                        origin.machine_ref().as_deref(),
+                        message_id,
+                        body,
+                    )
+                    .await
+                    .map(|_| ()),
+                };
+                match res {
                     Ok(_) => return Ok((session.session_id.clone(), "agy", "delivered")),
                     Err(AppError::CredentialsStale(_)) => {}
                     Err(e) => return Err(e),
@@ -1119,9 +1155,12 @@ pub async fn deliver_with_in_reply_to(
                 from_name: from_name.to_string(),
                 bytes: body.len(),
                 text: body.to_string(),
-                envelope: format!(
-                    "[xmsg] from={from_name}{ref_part} message_id={message_id} sent={sent} — reply with the xmsg reply tool (tools: send, reply, list, replies)\n\n{body}"
-                ),
+                envelope: match in_reply_to {
+                    Some(_) => envelope_text(),
+                    None => format!(
+                        "[xmsg] from={from_name}{ref_part} message_id={message_id} sent={sent} — reply with the xmsg reply tool (tools: send, reply, list, replies)\n\n{body}"
+                    ),
+                },
                 delivered_at: None,
             };
             let db = local.db.lock().map_err(db_err)?;
