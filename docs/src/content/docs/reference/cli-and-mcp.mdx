@@ -1,14 +1,14 @@
 ---
 title: CLI & MCP Server
-description: Operator commands for listing recipients and sending, inspecting, and reading messages, daemon and harness commands, and MCP tool schemas.
+description: Operator commands, optional command-backed services, daemon and harness commands, and MCP tool schemas.
 ---
 
 ## Command-line interface (`src/main.rs`)
 
-The `xmsg` binary exposes `list`, `send`, `replies`, `show`, `serve`, `mcp`,
+The `xmsg` binary exposes `list`, `send`, `replies`, `show`, `service`, `serve`, `mcp`,
 `register`, `unregister`, and `check-peers`.
 
-```rust file=<rootDir>/src/main.rs#L18-L60
+```rust file=<rootDir>/src/main.rs#L19-L64
 ```
 
 ### Operator commands
@@ -29,6 +29,8 @@ xmsg show MESSAGE_ID [--json]
 - `send` prints the message ID, outcome, and resolved recipient address. `-` or omitted
   text reads stdin through EOF, preserving newlines. An idempotency key reuses the same
   send for identical sender, recipient, and text; requests are not automatically retried.
+  Outcomes are `delivered`, `queued`, or `pending`;
+  `pending` means the daemon has not reported a final delivery outcome.
 - `replies` prints stored reply records, optionally waiting `0..60` seconds for the first
   reply. `show` prints message metadata and replies. Both use formatted JSON by default.
 
@@ -43,18 +45,66 @@ Writing a reply from an anonymous
 shell is not an operator CLI command; agents and registered services use their existing
 reply interfaces.
 
+
+### `xmsg service exec`
+
+Runs an optional ordinary service over the daemon's existing registration and agent
+sockets. Nothing starts automatically or changes the daemon's normal behavior.
+
+```bash
+xmsg service exec --name agent-quota -- agent-quota --json
+xmsg service exec --name snapshot --timeout-ms 2000 --max-output-bytes 65536 -- /path/to/producer --json
+```
+
+`--register-sock` or `XMSG_REGISTER_SOCK` selects the registration socket, otherwise
+the daemon's runtime-directory default is used. `--agent-sock` or `XMSG_AGENT_SOCK`
+selects the agent socket, otherwise it is beside the registration socket.
+Explicit socket paths must be absolute.
+The daemon applies its ordinary service registration, executable and peer-access rules.
+
+Each delivered request runs the fixed program and literal arguments after `--`.
+Request text is ignored, the program receives no stdin, and stderr is discarded.
+Successful UTF-8 stdout is the reply, unchanged, including whitespace. Configure a
+command whose stdout is intended for its requesters; the runner adds no environment
+dump or child diagnostics to responses.
+
+The default runtime bound is `75000` milliseconds. The default stdout limit is
+`65536` bytes; `--max-output-bytes` accepts `64` through `1048576` and is also capped by the
+daemon's reported message limit. Timeout or output overflow kills and waits for the
+owned child. Spawn, I/O or nonzero-exit failure, empty stdout, and invalid UTF-8 produce
+one static JSON response instead:
+
+```json
+{"status":"unknown","error":"timeout"}
+```
+
+Other error codes are `output_limit`, `command_failed`, `empty_output`, and
+`invalid_utf8`. No quota or other producer value is guessed on failure.
+
+The runner replies with a stable per-message idempotency key, then ACKs the request.
+It retains one pending response across transport reconnects and retries an uncertain
+reply with the same key and bytes. Commands must tolerate re-execution after a process
+crash; pending responses are retained in memory. Interrupt and termination signals
+stop the runner and reap an active owned command.
+Permanent daemon refusals and configuration/trust failures exit non-zero with a
+content-free diagnostic instead of retrying the same rejected response indefinitely.
+
+For quota service use, the producer owns account hashes, measurement age, missing/stale
+readings and the JSON schema. The transport relays that output as supplied; per-user
+installation and enabling remain deployment configuration.
+
 ### `xmsg serve`
 
 Starts the local IPC and optional mTLS federation daemon:
 
-```rust file=<rootDir>/src/main.rs#L175-L275
+```rust file=<rootDir>/src/main.rs#L178-L279
 ```
 
 ### `xmsg mcp`
 
 Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
 
-```rust file=<rootDir>/src/main.rs#L278-L302
+```rust file=<rootDir>/src/main.rs#L281-L306
 ```
 
 ### `xmsg register`
@@ -62,7 +112,7 @@ Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
 Registers credentials or handles lifecycle hooks for [Antigravity](/harnesses/antigravity/),
 [Claude Code](/harnesses/claude-code/), and [Codex](/harnesses/codex/):
 
-```rust file=<rootDir>/src/main.rs#L85-L172
+```rust file=<rootDir>/src/main.rs#L88-L176
 ```
 
 ### `xmsg check-peers`
@@ -103,7 +153,7 @@ Sends a message to `<id or name>[@<node>]` (at most one `@`):
   name, or a unique live instance label, optionally followed by `@node`. Passing `ref`, `from`, or a
   label containing `' · '` is refused with a migration hint.
 - **`as_agent`:** Set automatically by the harness `PreToolUse` hook when called by a subagent.
-- **Returns:** `{ message_id, address, outcome }` where `outcome` is `"delivered"` or `"queued"`.
+- **Returns:** `{ message_id, address, outcome }` where `outcome` is `"delivered"`, `"queued"`, or `"pending"`.
   Use the returned `address` for follow-ups.
 
 ### `reply(message_id, text, as_agent?)`

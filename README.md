@@ -50,6 +50,12 @@ xmsg replies MESSAGE_ID --wait 10
 xmsg show MESSAGE_ID --json
 ```
 
+Run an optional command-backed service explicitly:
+
+```bash
+xmsg service exec --name agent-quota -- agent-quota --json
+```
+
 ---
 
 ## Documentation
