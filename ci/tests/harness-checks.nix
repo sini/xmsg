@@ -299,6 +299,14 @@
         ' > /dev/null \
           || { echo "agy-hook: unexpected PreToolUse output: $stamp_out" >&2; exit 1; }
 
+        # While child X is running (before Stop), default GET /v1/recipients (status=live) lists conv/kid as live.
+        live_during=$(${pkgs.curl}/bin/curl -sf --unix-socket "$XDG_RUNTIME_DIR/xmsg/http.sock" http://localhost/v1/recipients) \
+          || { echo "agy-hook: GET /v1/recipients during child turn failed" >&2; exit 1; }
+        echo "agy-hook: recipients during child turn: $live_during"
+        printf '%s' "$live_during" | ${pkgs.jq}/bin/jq -e --arg sub "$conv/kid" \
+          'any(.recipients[]; .kind == "subagent" and .harness == "agy" and .status == "live" and .address == "\($sub)@\(.node)")' > /dev/null \
+          || { echo "agy-hook: running child $conv/kid is not listed as live subagent: $live_during" >&2; exit 1; }
+
         stop_out=$(printf '{"conversationId":"%s"}' "$child" | sh -c "$stop_hook")
         echo "agy-hook: child Stop: $stop_out"
         printf '%s' "$stop_out" | ${pkgs.jq}/bin/jq -e '. == {}' > /dev/null \
@@ -595,8 +603,15 @@
                 'any(.recipients[]; .kind == "instance" and .address == "\($c)@\(.node)")' > /dev/null \
                 || fail "conversation $conv is not addressed as $conv: $listed"
               printf '%s' "$listed" | jq -e --arg sub "$conv/kid" \
-                'any(.recipients[]; .kind == "subagent" and .harness == "agy" and .address == "\($sub)@\(.node)")' > /dev/null \
-                || fail "child $conv/kid is not listed as subagent: $listed"
+                'all(.recipients[]; .address != "\($sub)@\(.node)")' > /dev/null \
+                || fail "stopped child $conv/kid should not be in live /v1/recipients: $listed"
+
+              listed_inactive=$(curl -sf --unix-socket "$sock/http.sock" "http://localhost/v1/recipients?status=inactive") \
+                || fail "GET /v1/recipients?status=inactive failed"
+              echo "agy-hook: recipients (status=inactive): $listed_inactive"
+              printf '%s' "$listed_inactive" | jq -e --arg sub "$conv/kid" \
+                'any(.recipients[]; .kind == "subagent" and .harness == "agy" and .status == "parked" and .address == "\($sub)@\(.node)")' > /dev/null \
+                || fail "stopped child $conv/kid is not listed as parked subagent: $listed_inactive"
 
               kill "$agy" "$serve"
               echo "agy-hook: the rendered hook registered $conv, addressed as $conv"

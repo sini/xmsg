@@ -534,9 +534,9 @@ where
                         params![address, conn_id, harness, session, now, peer_pid],
                     )
                     .map_err(db_err)?;
-                    // HA9-A.oc §2.2, C7: a register of P (fresh or reclaimed) clears the turn
-                    // columns of every subagent row under P in the same batch.
-                    storage::subagent_clear_turns_for_parent(&c, &address).map_err(db_err)?;
+                    // HA9-A.oc §2.2, C6, C7: a register of P (fresh or reclaimed) clears the turn
+                    // columns and unparks every subagent row under P in the same batch.
+                    storage::subagent_unpark_for_parent(&c, &address).map_err(db_err)?;
                     let _ = crate::claim::take_queued_for(&c, &state.agy_config.proc_root, &[]);
                     let _ = state.pi_notify_tx.send(address.clone());
                     Ok(json!({
@@ -873,7 +873,8 @@ where
                                 None => held_addresses(&c, &conn_id).map_err(db_err)?,
                             };
                             for p in &parents {
-                                storage::subagent_stop_turn(&c, p, agent_id).map_err(db_err)?;
+                                storage::subagent_clear_turn_only(&c, p, agent_id)
+                                    .map_err(db_err)?;
                             }
                             let _ =
                                 crate::claim::take_queued_for(&c, &state.agy_config.proc_root, &[]);
@@ -893,7 +894,8 @@ where
                                 None => held_addresses(&c, &conn_id).map_err(db_err)?,
                             };
                             for p in &parents {
-                                storage::subagent_stop_turn(&c, p, agent_id).map_err(db_err)?;
+                                storage::subagent_clear_turn_only(&c, p, agent_id)
+                                    .map_err(db_err)?;
                             }
                             let _ =
                                 crate::claim::take_queued_for(&c, &state.agy_config.proc_root, &[]);

@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -10,6 +11,92 @@ impl Drop for Node {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+    }
+}
+
+fn socket_listening(path: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(path).is_ok()
+}
+
+async fn wait_for_daemon_sockets(
+    node: &mut Node,
+    register_socket: &Path,
+    agent_socket: &Path,
+    label: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !socket_listening(agent_socket) || !socket_listening(register_socket) {
+        assert!(Instant::now() < deadline, "{label}");
+        assert!(
+            node.0.try_wait().unwrap().is_none(),
+            "real-xmsg exited during startup"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn bind_without_listen_race_control() {
+    let temp = tempfile::tempdir().unwrap();
+    let sock_path = temp.path().join("unlistening.sock");
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    assert!(fd >= 0, "socket() failed");
+
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    let bytes = sock_path.as_os_str().as_bytes();
+    assert!(bytes.len() < addr.sun_path.len());
+    for (dst, &src) in addr.sun_path.iter_mut().zip(bytes.iter()) {
+        *dst = src as libc::c_char;
+    }
+    let bind_rc = unsafe {
+        libc::bind(
+            fd,
+            (&raw const addr).cast::<libc::sockaddr>(),
+            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        )
+    };
+    assert_eq!(bind_rc, 0, "bind() failed");
+
+    // Forced-race control: after bind() and before listen(), .exists() is true while
+    // UnixStream::connect fails with ConnectionRefused, so socket_listening() is false.
+    assert!(
+        sock_path.exists(),
+        "bound AF_UNIX path must exist on disk before listen()"
+    );
+    let err = std::os::unix::net::UnixStream::connect(&sock_path)
+        .expect_err("connect before listen() must fail");
+    assert_eq!(
+        err.kind(),
+        std::io::ErrorKind::ConnectionRefused,
+        "connect between bind() and listen() must produce ConnectionRefused, got {err:?}"
+    );
+    assert!(
+        !socket_listening(&sock_path),
+        "socket_listening must be false between bind() and listen()"
+    );
+
+    let waiter_path = sock_path.clone();
+    let waiter = tokio::spawn(async move {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket_listening(&waiter_path) {
+            assert!(Instant::now() < deadline, "waiter timed out before listen()");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !waiter.is_finished(),
+        "waiter must not complete before listen() is called"
+    );
+
+    let listen_rc = unsafe { libc::listen(fd, 8) };
+    assert_eq!(listen_rc, 0, "listen() failed");
+    waiter.await.unwrap();
+    assert!(socket_listening(&sock_path));
+    unsafe {
+        libc::close(fd);
     }
 }
 
@@ -56,15 +143,13 @@ async fn exercise(binary: &Path, expects_effective_limits: bool) {
         .spawn()
         .unwrap();
     let mut node = Node(child);
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !options.agent_socket.exists() || !options.register_socket.exists() {
-        assert!(Instant::now() < deadline, "real-xmsg readiness deadline");
-        assert!(
-            node.0.try_wait().unwrap().is_none(),
-            "real-xmsg exited during startup"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    wait_for_daemon_sockets(
+        &mut node,
+        &options.register_socket,
+        &options.agent_socket,
+        "real-xmsg readiness deadline",
+    )
+    .await;
     let mut client = RegisteredService::register(options.clone()).await.unwrap();
     if expects_effective_limits {
         assert_eq!(client.reply_ttl_secs(), Some(604_800));
@@ -143,12 +228,13 @@ async fn exercise(binary: &Path, expects_effective_limits: bool) {
         }
     }
     node.0 = command.spawn().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !options.register_socket.exists() || !options.agent_socket.exists() {
-        assert!(Instant::now() < deadline, "restarted daemon readiness");
-        assert!(node.0.try_wait().unwrap().is_none());
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    wait_for_daemon_sockets(
+        &mut node,
+        &options.register_socket,
+        &options.agent_socket,
+        "restarted daemon readiness",
+    )
+    .await;
     let mut recovered = RegisteredService::register(options).await.unwrap();
     let sent = recovered
         .send(&address, "after restart", None)
@@ -264,15 +350,13 @@ async fn exercise_candidate_service_name_validation(binary: &Path) {
         .spawn()
         .unwrap();
     let mut node = Node(child);
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !agent_socket.exists() || !register_socket.exists() {
-        assert!(Instant::now() < deadline, "real-xmsg readiness deadline");
-        assert!(
-            node.0.try_wait().unwrap().is_none(),
-            "real-xmsg exited during startup"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    wait_for_daemon_sockets(
+        &mut node,
+        &register_socket,
+        &agent_socket,
+        "real-xmsg readiness deadline",
+    )
+    .await;
 
     for bad in refused_names {
         assert!(
@@ -533,15 +617,13 @@ async fn exercise_candidate_effective_limits(binary: &Path) {
             .spawn()
             .unwrap();
         let mut node = Node(child);
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !agent_socket.exists() || !register_socket.exists() {
-            assert!(Instant::now() < deadline, "real-xmsg readiness deadline");
-            assert!(
-                node.0.try_wait().unwrap().is_none(),
-                "real-xmsg exited during startup"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        wait_for_daemon_sockets(
+            &mut node,
+            &register_socket,
+            &agent_socket,
+            "real-xmsg readiness deadline",
+        )
+        .await;
 
         // First: verify 4f4a4df's client shape (status, address, node only) decodes the
         // new daemon's registration frame and ignores the additive XR5 fields.
