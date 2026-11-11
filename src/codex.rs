@@ -2558,8 +2558,13 @@ pub fn admit_codex_subagent(
                     now,
                 )
                 .map_err(|e| AppError::Internal(e.to_string()))?;
-                crate::storage::subagent_stop_turn(&conn, root_id, child_id)
-                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                if child_state.stopped_all || !child_state.stopped_turns.is_empty() {
+                    crate::storage::subagent_stop_turn(&conn, root_id, child_id)
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                } else {
+                    crate::storage::subagent_clear_turn_only(&conn, root_id, child_id)
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                }
             }
             let binding = crate::storage::get_subagent(&conn, root_id, child_id)
                 .map_err(|e| AppError::Internal(e.to_string()))?

@@ -1409,6 +1409,9 @@ pub fn sweep_agy_subagent_queues(
         if crate::claim::is_subagent_in_turn(proc_root, &sub) {
             continue;
         }
+        if sub.turn_pid.is_some() {
+            let _ = crate::storage::subagent_stop_turn(conn, &sub.parent, &sub.agent_id);
+        }
         if !live_parents.contains(&sub.parent) {
             continue;
         }

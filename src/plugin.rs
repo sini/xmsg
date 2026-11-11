@@ -246,11 +246,13 @@ pub fn is_plugin_process(conn: &Connection, pid: u32, starttime: &str) -> rusqli
 /// Detaches `address` from live `plugin_sessions` while keeping `reclaim_hash` intact
 /// so the session remains parked and reclaimable inside the `reply_ttl` window (HA8).
 fn detach(conn: &Connection, address: &str, harness: &str) -> rusqlite::Result<()> {
+    let now = now_epoch_secs();
     conn.execute(
         "DELETE FROM plugin_sessions WHERE address = ?1",
         params![address],
     )?;
-    storage::mark_live(conn, address, harness, now_epoch_secs())
+    storage::subagent_park_for_parent(conn, address, now)?;
+    storage::mark_live(conn, address, harness, now)
 }
 
 /// Permanently releases `address`: clears `reclaim_hash` so it answers `gone` from now on

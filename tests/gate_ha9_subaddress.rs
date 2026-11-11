@@ -2176,3 +2176,198 @@ async fn test_xh1_d1_d2_mcp_strips_empty_as_agent_and_unregistered_child_never_a
         );
     }
 }
+
+// =============================================================================
+// xmsg-ng1.38: Subagent liveness follows SubagentStop, SUBAGENT_IDLE_TTL_SECS,
+// and parent parking; list(status=live) omits finished/idle-expired subagents.
+// =============================================================================
+#[tokio::test]
+async fn test_ng1_38_subagent_liveness_stop_idle_ttl_and_parent_park() {
+    let h = Ha9Harness::start(3600).await;
+    let p_sock = SocketListener::start("p_inbox_ng1_38").await;
+
+    let p_id = h
+        .register_claude(4000, "claude-p", "parent-p", &p_sock.sock_path)
+        .await;
+    h.set_caller_parent(4000);
+
+    let child_live = "11111111111111111";
+    let child_stopped = "22222222222222222";
+    let child_idle = "33333333333333333";
+
+    // Start all three subagents.
+    for (cid, name) in [
+        (child_live, "runner"),
+        (child_stopped, "finisher"),
+        (child_idle, "stalled"),
+    ] {
+        let r = h
+            .agent_frame(json!({
+                "action": "subagent",
+                "event": "start",
+                "agent_id": cid,
+                "name": name,
+            }))
+            .await;
+        assert_eq!(r["status"], "ok", "{r}");
+    }
+
+    // While all three are active, `list(status=live)` includes all three with `status == "live"`.
+    let live0 = h.http_list("status=live&kind=subagent").await;
+    for name in ["runner", "finisher", "stalled"] {
+        let addr = format!("{p_id}/{name}@{}", h.node_name);
+        assert!(
+            live0
+                .iter()
+                .any(|r| r["address"] == addr && r["status"] == "live"),
+            "expected active subagent {addr} in live list: {live0:?}"
+        );
+    }
+
+    // 1. Stop `child_stopped` (`SubagentStop`), followed by `PostToolUse(Agent)` (`bind_spawn`).
+    let stop_r = h
+        .agent_frame(json!({
+            "action": "subagent",
+            "event": "stop",
+            "agent_id": child_stopped,
+        }))
+        .await;
+    assert_eq!(stop_r["status"], "ok", "{stop_r}");
+    let bind_r = h
+        .agent_frame(json!({
+            "action": "subagent",
+            "event": "bind_spawn",
+            "agent_id": child_stopped,
+            "name": "finisher",
+        }))
+        .await;
+    assert_eq!(bind_r["status"], "ok", "{bind_r}");
+
+    // `finisher` leaves `list(status=live)` and appears in `list(status=inactive)` as `parked`,
+    // while `runner` stays `live`.
+    let live1 = h.http_list("status=live&kind=subagent").await;
+    let finisher_addr = format!("{p_id}/finisher@{}", h.node_name);
+    let runner_addr = format!("{p_id}/runner@{}", h.node_name);
+    let stalled_addr = format!("{p_id}/stalled@{}", h.node_name);
+    assert!(
+        !live1.iter().any(|r| r["address"] == finisher_addr),
+        "finished subagent must leave list(status=live): {live1:?}"
+    );
+    assert!(
+        live1
+            .iter()
+            .any(|r| r["address"] == runner_addr && r["status"] == "live"),
+        "running subagent must stay live: {live1:?}"
+    );
+    let inactive1 = h.http_list("status=inactive&kind=subagent").await;
+    assert!(
+        inactive1.iter().any(|r| r["address"] == finisher_addr
+            && r["status"] == "parked"
+            && r["last_seen"].is_i64()),
+        "finished subagent must appear as parked in list(status=inactive): {inactive1:?}"
+    );
+
+    // Sending to the finished subagent falls back immediately to live parent P.
+    let (st_fin, body_fin) = h
+        .http_send(&format!("{p_id}/finisher"), "msg-for-finished-subagent")
+        .await;
+    assert_eq!(st_fin, 202, "{body_fin}");
+    assert_eq!(body_fin["outcome"], "delivered", "{body_fin}");
+    let p_lines = p_sock.wait_for_lines(1).await;
+    assert!(
+        p_lines[0].contains(&format!("to={p_id}/finisher agent_id={child_stopped}"))
+            && p_lines[0].contains("msg-for-finished-subagent"),
+        "expected fallback delivery to P for finished subagent, got: {:?}",
+        p_lines[0]
+    );
+
+    // 2. Age `child_idle` past `SUBAGENT_IDLE_TTL_SECS` without sending `SubagentStop`
+    // (simulating a subagent whose stop hook never fired while P's process stays alive).
+    {
+        let db = h.state.db.lock().unwrap();
+        let expired_ts =
+            xmsg::storage::now_epoch_secs() - xmsg::storage::SUBAGENT_IDLE_TTL_SECS - 10;
+        db.execute(
+            "UPDATE subagents SET last_active = ?1, bound_at = ?1 WHERE parent = ?2 AND agent_id = ?3",
+            rusqlite::params![expired_ts, p_id, child_idle],
+        )
+        .unwrap();
+    }
+
+    let live2 = h.http_list("status=live&kind=subagent").await;
+    assert!(
+        !live2.iter().any(|r| r["address"] == stalled_addr),
+        "idle-expired subagent must leave list(status=live): {live2:?}"
+    );
+    assert!(
+        live2
+            .iter()
+            .any(|r| r["address"] == runner_addr && r["status"] == "live"),
+        "running subagent within idle TTL must stay live: {live2:?}"
+    );
+    let inactive2 = h.http_list("status=inactive&kind=subagent").await;
+    assert!(
+        inactive2
+            .iter()
+            .any(|r| r["address"] == stalled_addr && r["status"] == "parked"),
+        "idle-expired subagent must appear as parked in list(status=inactive): {inactive2:?}"
+    );
+
+    // Sending to the idle-expired subagent falls back to live parent P (not stranded in turn queue).
+    let (st_idle, body_idle) = h
+        .http_send(&format!("{p_id}/stalled"), "msg-for-idle-expired-subagent")
+        .await;
+    assert_eq!(st_idle, 202, "{body_idle}");
+    assert_eq!(body_idle["outcome"], "delivered", "{body_idle}");
+    let p_lines_idle = p_sock.wait_for_lines(2).await;
+    assert!(
+        p_lines_idle[1].contains(&format!("to={p_id}/stalled agent_id={child_idle}"))
+            && p_lines_idle[1].contains("msg-for-idle-expired-subagent"),
+        "expected fallback delivery to P for idle-expired subagent, got: {:?}",
+        p_lines_idle[1]
+    );
+
+    // 3. Park parent P (its process 4000 exits): all its children must park too.
+    fs::remove_dir_all(h.proc_root.join("4000")).unwrap();
+    let live3 = h.http_list("status=live").await;
+    assert!(
+        !live3
+            .iter()
+            .any(|r| r["address"].as_str().unwrap_or("").starts_with(&p_id)),
+        "parking parent P must remove P and all its subagents from list(status=live): {live3:?}"
+    );
+    let inactive3 = h.http_list("status=inactive").await;
+    for expected in [
+        format!("{p_id}@{}", h.node_name),
+        runner_addr.clone(),
+        finisher_addr.clone(),
+        stalled_addr.clone(),
+    ] {
+        assert!(
+            inactive3
+                .iter()
+                .any(|r| r["address"] == expected && r["status"] == "parked"),
+            "expected {expected} to be parked in list(status=inactive): {inactive3:?}"
+        );
+    }
+    {
+        let db = h.state.db.lock().unwrap();
+        let b = xmsg::storage::get_subagent(&db, &p_id, child_live)
+            .unwrap()
+            .unwrap();
+        assert!(
+            b.stopped_at.is_some() && b.turn_pid.is_none(),
+            "parking parent P must park child_live in subagents table: {b:?}"
+        );
+    }
+
+    // Sending to `<P>/runner` while P is parked queues (`outcome: "queued"`).
+    let (st_parked, body_parked) = h
+        .http_send(
+            &format!("{p_id}/runner"),
+            "msg-while-parent-and-child-parked",
+        )
+        .await;
+    assert_eq!(st_parked, 202, "{body_parked}");
+    assert_eq!(body_parked["outcome"], "queued", "{body_parked}");
+}
