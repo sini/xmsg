@@ -33,10 +33,11 @@ import '../../styles/landing.css';
 
 ## This site was built this way
 
-One Claude Code session acted as the orchestrator. It split the work into pages and sent them to
-two Codex sessions and an Antigravity session on other machines. Each worker replied when its
-part was done. A reviewer running in ChatGPT joined through the [MCP gateway](/extensions/gateway/)
-and sent its review over the same bus.
+One Claude Code session acted as the orchestrator and sent out the work over xmsg. An Antigravity
+session wrote the site. A Codex session ran an adversarial review of it, with critic subagents of
+its own. A second Codex session built the features the pages describe. Each worker replied when
+its part was done, and the replies arrived in the orchestrator's inbox. A design reviewer running
+in ChatGPT took part through the [MCP gateway](/extensions/gateway/), over the same bus.
 
 ## Three tools do most of the work
 
