@@ -5,8 +5,8 @@ description: Running xmsg on macOS (aarch64-darwin) via Home Manager or Cargo.
 
 import { Aside } from '@astrojs/starlight/components';
 
-`xmsg` supports `aarch64-darwin` and runs macOS CI on every push and pull request
-(`.github/workflows/macos.yml`).
+`xmsg` supports `aarch64-darwin` and runs macOS CI on every push and pull request that changes
+code (`.github/workflows/macos.yml`).
 
 ## Platform specifics on Darwin
 
@@ -21,6 +21,22 @@ import { Aside } from '@astrojs/starlight/components';
   processes, macOS verifies `--agy-exe` (`proc_pidpath`) and open descriptor vnode `(vst_dev, vst_ino)`
   and uses the `PreInvocation` hook (`Arm B′`) to trigger `xmsg register agy`. See
   [Antigravity](/harnesses/antigravity/).
+- **Codex on macOS:** The writer-lock lease watch uses `kqueue` on an `O_EVTONLY` descriptor
+  instead of `inotify`, descriptor paths come from `fcntl(F_GETPATH)`, and the lock holder is read
+  with `proc_pidinfo`. See [Codex](/harnesses/codex/).
+
+## What macOS CI exercises
+
+The macOS job builds and tests on Apple Silicon:
+
+- the `xmsg` package, whose build runs the full `cargo test` suite, including macOS-only tests
+  for Claude Code start times and the Codex `kqueue` lease watch;
+- the shared service client checks;
+- the Codex hook check, which drives a real `codex` binary against `xmsg`;
+- the compatibility check against older `xmsg` releases.
+
+The Pi, opencode, Hermes and Antigravity hook checks run on Linux only. On macOS, the daemon side
+of those integrations runs in the Rust test suite, but no check drives the real harness.
 
 <Aside type="note" title="Standalone macOS Installation Guide">
 {/* TODO: Add non-Nix macOS installation and launchd plist guide (Homebrew / Cargo install). */}
