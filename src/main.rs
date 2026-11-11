@@ -13,6 +13,8 @@ use xmsg::mcp::{run_mcp_loop, McpConfig};
 use xmsg::registry::resolve_sessions_dirs;
 use xmsg::storage;
 
+mod operator;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "xmsg",
@@ -26,6 +28,18 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// List mesh recipients and node status
+    List(operator::ListArgs),
+
+    /// Send a message through the local daemon
+    Send(operator::SendArgs),
+
+    /// Read replies to a message
+    Replies(operator::RepliesArgs),
+
+    /// Show stored message metadata and replies
+    Show(operator::ShowArgs),
+
     /// Start the HTTP bridge server
     Serve(Box<ServeArgs>),
 
@@ -39,6 +53,9 @@ enum Commands {
     Unregister(UnregisterArgs),
 
     /// Load a peers file with every rule `serve` applies, and exit 0 or name the failure
+    #[command(
+        long_about = "Validate a peers file (the same rules `serve` applies at startup); exit 0 if valid, otherwise print the failing rule. Use it in CI or before a deploy."
+    )]
     CheckPeers(CheckPeersArgs),
 }
 
@@ -313,6 +330,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::List(args) => operator::list(args)?,
+        Commands::Send(args) => operator::send(args)?,
+        Commands::Replies(args) => operator::replies(args)?,
+        Commands::Show(args) => operator::show(args)?,
         Commands::Serve(args) => {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
