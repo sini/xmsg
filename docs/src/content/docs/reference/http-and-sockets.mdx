@@ -1,0 +1,123 @@
+---
+title: HTTP API & Unix Sockets
+description: Wire reference for http.sock, agent.sock, register.sock, /fed/v2 routes, and the unified error vocabulary.
+---
+
+`xmsg serve` exposes three local Unix domain sockets in `$XDG_RUNTIME_DIR/xmsg/` (mode `0600` inside
+a `0700` directory) and, when federation is enabled, an mTLS listener serving `/fed/v2/*`. Every
+JSON request body or socket frame refuses unknown fields with `bad_request` naming the unknown
+fields.
+
+## `http.sock` & HTTP API routes
+
+By default, HTTP is served exclusively over `$XDG_RUNTIME_DIR/xmsg/http.sock`. Callers whose
+process ancestry traces to a registered session or service act as that sender; untraced callers are
+**anonymous** (`<from> · anon@<node>`), may send and read replies by `message_id`, and cannot call
+`reply` (`403 denied`).
+
+```bash
+sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/xmsg/http.sock"
+
+# Health check
+curl -s --unix-socket "$sock" http://localhost/healthz
+
+# List live recipients
+curl -s --unix-socket "$sock" http://localhost/v1/recipients
+
+# Send a message
+curl -s --unix-socket "$sock" http://localhost/v1/messages \
+  -H 'content-type: application/json' \
+  -d '{"to": "genie-guard", "text": "Please review.", "from": "ci", "idempotency_key": "run-42"}'
+
+# Long-poll replies for up to 30s
+curl -s --unix-socket "$sock" "http://localhost/v1/messages/<message_id>/replies?wait=30"
+```
+
+| Method & Route | Description |
+|---|---|
+| `GET /healthz` | Server health check (`200 OK`). |
+| `GET /v1/recipients?name=&node=&kind=&status=&within=` | Lists recipients across this node and reachable peers (`{"recipients": [...], "nodes": [...]}`). |
+| `POST /v1/messages` | Sends `{ "to", "text", "from"?, "idempotency_key"? }`. Returns `202 Accepted` with `{ "message_id", "address", "outcome" }`. |
+| `POST /v1/messages/{id}/replies` | Replies to `{id}` with `{ "text", "idempotency_key"? }`. Requires traced session/service caller (or leaf principal). Returns `200 OK` with `{ "seq", "messageId", "createdAt", "replierSessionId", "text", "pushOutcome", "pushedMessageId" }`. |
+| `GET /v1/messages/{id}/replies?after={seq}&wait={seconds}` | Reads stored replies to `{id}`, waiting up to `wait` seconds (max `60`, max `128` concurrent waiters). |
+| `GET /v1/messages/{id}` | Returns the stored message record and its replies. |
+
+---
+
+## `agent.sock` frames
+
+Line-delimited JSON protocol used by `xmsg mcp`, hook handlers, the Pi extension, and the Rust
+service client's `AgentClient`:
+
+| Request Frame | Response Frame |
+|---|---|
+| `{"action":"list","name"?,"node"?,"kind"?,"status"?,"within"?}` | `{"status":"ok","recipients":[…],"nodes":[…]}` |
+| `{"action":"send","to","text","idempotency_key"?,"as_agent"?}` | `{"status":"ok","message_id","address","outcome"}` |
+| `{"action":"reply","message_id","text","idempotency_key"?,"as_agent"?}` | `{"status":"ok","reply":{…}}` |
+| `{"action":"replies","message_id","wait"?,"after"?}` | `{"status":"ok","replies":[…]}` |
+| `{"action":"inbox","wait"?,"as_agent"?}` | `{"status":"ok","address":"<P>/<child>@<node>","messages":[…]}` |
+| `{"action":"subagent","event","agent_id",…}` | `{"status":"ok",…}` |
+| `{"action":"codex_hook","event","payload",…}` | `{"status":"ok","stdout",…}` followed by client `{"ack":"accepted"\|"abort"}` |
+
+---
+
+## `register.sock` frames
+
+Used by Antigravity credential registration, Pi long-polling, headless `svc` daemons (see
+[Daemon Protocol & Rust Client](/reference/service-client/)), and multiplexed plugin harnesses
+([opencode](/harnesses/opencode/) and [Hermes](/harnesses/hermes/)).
+
+### Multiplexed plugin protocol (`opencode`, `hermes`)
+
+The plugin opens `register.sock` with `{"harness":"opencode"}` or `{"harness":"hermes"}` (answered
+`{"status":"ok","node":"<node>"}`). Subsequent frames carry a `request_id` echoed in the response,
+allowing tool calls to be answered while a `poll` is pending on the same connection:
+
+| Frame | Response |
+|---|---|
+| `{"action":"register","session":S,"reclaim"?:{…}}` | `{"status":"ok","address":"<id>@<node>","reclaim":{…}}` |
+| `{"action":"release","session":S}` | `{"status":"ok"}` (`S` answers `gone` thereafter) |
+| `{"action":"continues","from":S1,"to":S2}` | `{"status":"ok","address":…}` (moves `S1`'s address to `S2`) |
+| `{"action":"subagent","event":"start"\|"stop"\|"end","session"?:S,"agent_id":C,…}` | `{"status":"ok",…}` (binds/updates `<P>/<C>@<node>`) |
+| `{"action":"list"\|"send"\|"reply"\|"replies"\|"inbox","session":S,"as_agent"?:C,…}` | Same response shape as `agent.sock`, acting as `S` (or `<P>/<C>@<node>`) |
+| `{"action":"poll","wait":N}` | `{"action":"deliver","session":S,"address":…,"message_id":…,"from_name":…,"text":…,"envelope":…}` or `{"action":"timeout"}` |
+| `{"action":"ack","session":S,"message_id":M}` | `{"status":"ok"}` |
+
+---
+
+## Federated `/fed/v2` wire routes
+
+Served only on the mTLS `--fed-listen` listener (isolated from local loopback routes):
+
+| Route | Method | Description |
+|---|---|---|
+| `/fed/v2/messages` | `POST` | Delivers a federated message (or relays a single-hop forward when the peer has `"forward"`). |
+| `/fed/v2/replies` | `POST` | Delivers a reply back to the originating node. |
+| `/fed/v2/messages/{id}/replies` | `GET` | Pulls stored replies for a message sent by an outbound-linked or leaf node. |
+| `/fed/v2/sessions` | `GET` | Returns this node's filtered recipient list for mesh `list`. |
+| `/fed/v2/inbox`, `/fed/v2/inbox/{id}/ack` | `GET`, `POST` | Long-polls and acknowledges items in a leaf or outbound-linked peer's hub mailbox. |
+| `/fed/v2/list/{query}` | `POST` | Posts a leaf or outbound-linked node's answer to a mailbox `list` query. |
+| `/fed/v2/handoff`, `/fed/v2/handoff/ack` | `POST` | Transfers and acknowledges a parked Claude conversation queue across a user's machines. |
+
+---
+
+## Error vocabulary
+
+Every surface reports errors using the same codes (`{"error": <code>, "detail": …}` on HTTP,
+`{"status":"error","error": <code>,"detail": …}` on sockets):
+
+- **Addressing:**
+  - `not_found` (`404`): No such recipient, message, or node.
+  - `ambiguous` (`409`): Multiple recipients match; `detail` lists every candidate address.
+  - `denied` (`403`): Refused by peer rights (`allow`, `principals`, `targets`, `from`), non-party
+    `reply`, or unauthorized hub forward.
+  - `gone` (`410`): Process-bound session (`pi`, released `opencode`/`hermes`, or exited `X~n` fork)
+    has exited.
+  - `unavailable` (`503`): A node in the federated view could not be reached during bare-reference
+    resolution (`detail` names the node).
+  - `not_live` (`409`, node-to-node): A cache-routed send reached a node where the instance is now
+    only `parked`.
+- **Transport & Validation:**
+  - `bad_request` (`400`, including unknown JSON fields or malformed addresses), `bad_sender`
+    (`400`), `conflict` (`409`), `payload_too_large` (`413`), `rate_limited` (`429`),
+    `service_unavailable` (`503`), `peer_unreachable`, `inbox_timeout`, `credentials_stale`.

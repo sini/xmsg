@@ -1,0 +1,96 @@
+---
+title: Sessions, Services & Subagents
+description: How interactive instances, long-polling daemon services, and delegated child subagents work on xmsg.
+---
+
+`xmsg` routes messages between three kinds of recipients: **instances** (interactive AI agent
+sessions), **services** (headless daemons and bridges), and **subagents** (delegated child turns
+spawned under a parent conversation).
+
+## Instances and fork claims (`X~n`)
+
+An instance is a live or parked conversation in an agent harness:
+
+- **Persistent conversation IDs (`claude`, `agy`, `codex`):** The instance ID is the harness's own
+  conversation UUID. When a conversation closes or pauses between turns, its ID remains `parked` in
+  SQLite for the reply TTL (`--reply-ttl`, 7 days by default) so inbound messages queue for its next
+  turn.
+- **Process-bound session IDs (`pi`, `opencode`, `hermes`):** `xmsg` mints a fresh UUID v4 on
+  registration. When a Pi process exits or an `opencode`/`hermes` session is deleted/finalized, its
+  address transitions to `gone` (`410`).
+
+### Concurrent processes and fork suffixes (`instance_claims`)
+
+When multiple live processes present the same Claude conversation ID `X` (either in the same
+`~/.claude/sessions` directory or across multiple `--sessions-dir` tenant directories), `xmsg`
+manages them in the persistent SQLite `instance_claims` table:
+
+- The first observed live process presenting `X` claims plain `X` (suffix 1).
+- Subsequent live processes presenting `X` receive monotonic fork suffixes `X~2`, `X~3`, … in
+  observation order (ties broken by `(procStart, pid)` within a scan).
+- Suffixes persist across `xmsg serve` restarts and are never promoted while live.
+- When a node observes a second live process for an already-live ID, it sends a one-time fork
+  notice to each process informing them of both addresses (`X@node` and `X~2@node`).
+- Once an `X~n` fork process exits, its claim is released and sends to `X~n` return `410 gone`. If
+  plain `X` is released, the next process presenting `X` claims plain `X`; numeric suffixes `~2`,
+  `~3`, … are never reused while records exist.
+
+## Services (`<name>@<node>`)
+
+Headless daemons, bots, guards, and bridges register bare service names (such as `genie-guard`,
+`matrix-xmsg`, or `xmsg-gateway`) over `register.sock`:
+
+```rust file=<rootDir>/src/client/mod.rs#L63-L105
+```
+
+- **Executable attestation (`--svc-exe`):** On normal host nodes, `xmsg serve` requires
+  `--svc-exe <NAME>=<PATH>` (or `XMSG_SVC_EXE`). When a process connects to `register.sock` and
+  sends `{"harness":"svc","name":"<NAME>"}`, `xmsg` checks `SO_PEERCRED` (`peer_uid == server_uid`)
+  and verifies that canonical `/proc/<pid>/exe` matches `<PATH>`. Only one live process may hold a
+  service name at a time.
+- **At-least-once long-poll and `ack`:** Services pull messages with `{"action":"poll","waitSecs":30}`
+  on `register.sock` and acknowledge each delivery with `{"action":"ack","messageId":"..."}` after
+  committing it to their own durable store. Unacknowledged messages remain `queued` (tracked in the
+  connection's `in_flight` set) and redeliver in FIFO order if the service disconnects before
+  acknowledging.
+- **Structured `origin` attestation:** Every delivered frame includes an attested `origin` struct
+  (`id`, `service`, `node`, `label`) so services make authorization decisions from structured fields
+  rather than parsing display headers:
+
+```rust file=<rootDir>/src/client/origin.rs#L3-L16
+```
+
+See [Daemon Protocol & Rust Client](/reference/service-client/) for the wire frames and the
+`xmsg::client` library.
+
+## Delegated subagents (`<P>/<child>@<node>`)
+
+When a parent conversation `P` spawns child subagents, each bound child gets a delegated
+sub-address `<P>/<child>@<node>` where `<child>` is either the subagent's bound name or its harness
+`agent_id` / child session ID. Both `<P>/<name>` and `<P>/<agent_id>` resolve to the same bound
+subagent, and `list` includes live bound subagents with `kind: "subagent"`.
+
+### Turn mailbox (`inbox`) and parent fallback
+
+- **Active turn (`inbox`):** While a subagent's turn is active (`turn_pid` live with matching start
+  time), messages and replies addressed to `<P>/<child>@<node>` queue in its turn mailbox
+  (`outcome: "queued"`). The subagent drains them during its turn by calling **`inbox(wait?)`**,
+  which returns `{address, messages: [{id, from, body, created_at}]}` and marks each drained
+  message `delivered`.
+- **Parent fallback (`to=<P>/<child> agent_id=<id>`):** When the subagent's turn is not active
+  (between turns or after `SubagentStop` / `Stop`), messages and replies addressed to
+  `<P>/<child>@<node>` fall back to the parent session `P` with a
+  `to=<P>/<child> agent_id=<agent_id>` header prepended to the message body. If `P` is currently
+  parked, the message stays queued on `<P>/<agent_id>` and is either drained by the subagent on its
+  next `inbox` call or delivered to `P` with the fallback header when `P` returns.
+
+### Per-harness subagent support
+
+| Harness | Sub-address Form | Attribution & Lifecycle |
+|---|---|---|
+| [Claude Code](/harnesses/claude-code/) | `<P>/<name>@<node>` and `<P>/<agent_id>@<node>` | `xmsg register claude --hook` on `SubagentStart`, `PostToolUse` (`Agent`/`SendMessage`), `SubagentStop`, and `PreToolUse` (stamping `as_agent`). |
+| [Codex](/harnesses/codex/) (Linux) | `<P>/<X>@<node>` (direct children where `parent_thread_id == P`) | Attributed from runtime `params._meta` (`sessionId`, `threadId`); turn state tracked by `SubagentStart`, `PreModelRequest`, and `SubagentStop` hooks. |
+| [Antigravity](/harnesses/antigravity/) | `<P>/<child_uuid>@<node>` | Admitted from `P`'s `transcript.jsonl` (`invoke_subagent`) and tracked by `xmsg register agy --hook` (`pre-invocation`, `pre-tool-use`, `stop`). |
+| [opencode](/harnesses/opencode/) (1.x & 2.x) | `<P>/<child_ses>@<node>` | Child sessions walk `parentID` to root `P`, bind via `subagent` (`start`/`stop`/`end`) on `register.sock`, and pass `as_agent` on `xmsg_send`, `xmsg_reply`, and `xmsg_inbox`. |
+| [Hermes](/harnesses/hermes/) | Root `<P>@<node>` | `delegate_task` subagents act as their root conversation `P` and do not bind separate sub-addresses. |
+| [Pi](/harnesses/pi/) | None | Single-session process; no subagent sub-addresses. |

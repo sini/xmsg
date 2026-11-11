@@ -1,0 +1,94 @@
+---
+title: CLI & MCP Server
+description: Command-line subcommands and flags for xmsg serve, xmsg mcp, xmsg register, xmsg unregister, and xmsg check-peers, plus MCP tool schemas.
+---
+
+## Command-line interface (`src/main.rs`)
+
+The `xmsg` binary exposes five subcommands: `serve`, `mcp`, `register`, `unregister`, and
+`check-peers`.
+
+```rust file=<rootDir>/src/main.rs#L16-L65
+```
+
+### `xmsg serve`
+
+Starts the local IPC and optional mTLS federation daemon:
+
+```rust file=<rootDir>/src/main.rs#L157-L258
+```
+
+### `xmsg mcp`
+
+Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
+
+```rust file=<rootDir>/src/main.rs#L260-L285
+```
+
+### `xmsg register`
+
+Registers credentials or handles lifecycle hooks for [Antigravity](/harnesses/antigravity/),
+[Claude Code](/harnesses/claude-code/), and [Codex](/harnesses/codex/):
+
+```rust file=<rootDir>/src/main.rs#L67-L155
+```
+
+### `xmsg check-peers`
+
+Validates a `peers.json` file against all naming, trust-model (`pin` vs. `ca` + `identities`), and
+non-overlap rules that `xmsg serve` enforces, exiting `0` on success or non-zero naming the failure:
+
+```bash
+xmsg check-peers /path/to/peers.json --fed-cert /path/to/node.crt
+```
+
+---
+
+## MCP server tools (`xmsg mcp`)
+
+`xmsg mcp` exposes five tools over stdio JSON-RPC (or `[reply, replies]` when started with
+`--reply-only` / `XMSG_REPLY_ONLY=1`):
+
+### `list(name?, node?, kind?, status?, within?)`
+
+Lists recipients the caller may see on this node and every reachable peer:
+
+- **`status`:** `"live"` (default, each entry carries `registered_at` in epoch seconds) or
+  `"inactive"` (shows `parked` and `closed` instances seen within `within` seconds, default
+  `86400` = 24 hours, capped at the reply TTL, each carrying `last_seen`).
+- **`kind`:** Filter by `"service"`, `"instance"`, or `"subagent"`.
+- **`name`:** Filter by service name or instance label.
+- **`node`:** Query only the named node (canonical name or local nickname).
+- **Returns:** `{ recipients: [{ address, kind, harness?, label?, status, node, user, registered_at | last_seen }], nodes: [{ node, status, detail? }] }`.
+
+### `send(to, text, as_agent?)`
+
+Sends a message to `<id or name>[@<node>]` (at most one `@`):
+
+- **`to`:** An instance UUID (optionally `~n`), a delegated sub-address (`<P>/<child>`), a service
+  name, or a unique live instance label, optionally followed by `@node`. Passing `ref`, `from`, or a
+  label containing `' · '` is refused with a migration hint.
+- **`as_agent`:** Set automatically by the harness `PreToolUse` hook when called by a subagent.
+- **Returns:** `{ message_id, address, outcome }` where `outcome` is `"delivered"` or `"queued"`.
+  Use the returned `address` for follow-ups.
+
+### `reply(message_id, text, as_agent?)`
+
+Answers `message_id`'s other party symmetrically (if you received the message, answers the sender;
+if you sent it, sends a follow-up to the recipient in the same exchange):
+
+- **Returns:** `{ bytes, messageId, inReplyTo, outcome }`, where `messageId` is the new reply's
+  ULID and `inReplyTo` is `message_id`.
+
+### `replies(message_id, wait?)`
+
+Reads stored replies to `message_id`, optionally waiting up to `wait` seconds (clamped to `0..=60`)
+for the first reply.
+
+### `inbox(wait?, as_agent?)`
+
+Drains unexpired messages queued for a bound subagent's `<P>/<child>@<node>` turn mailbox while its
+turn is active, waiting up to `wait` seconds (clamped to `0..=60`) for the first message, and marks
+drained messages `delivered`:
+
+- **Returns:** `{ address, messages: [{ id, from, body, created_at }] }`.

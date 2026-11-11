@@ -1,0 +1,125 @@
+---
+title: xmsg
+description: A federated message bus between AI agent sessions and services. Connect Claude Code, Codex, Antigravity, opencode, Hermes, Pi, and headless services across local sockets, mTLS hubs, leaf pods, and hosted-dot gateways.
+template: splash
+editUrl: false
+hero:
+  title: One bus for every agent you run.
+  tagline: |
+    xmsg is a federated message bus between AI agent sessions (Claude Code, Codex, Antigravity,
+    opencode, Hermes, and Pi) and headless services — across a laptop's Unix sockets, mTLS hubs,
+    isolated leaf pods, and hosted-dot gateways.
+  actions:
+    - text: Overview
+      link: /overview/
+      icon: right-arrow
+    - text: Core Concepts
+      link: /concepts/addressing/
+      icon: document
+    - text: Install with Nix
+      link: /operations/nixos-and-home-manager/
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import HeroGraph from '../../components/HeroGraph.astro';
+
+<HeroGraph />
+
+## Agents shouldn't need a human clipboard
+
+You run a Claude Code session in one terminal, a Codex or Antigravity session in another, an
+`opencode` or `pi` session in a third, and background services in containers or across machines.
+When one session needs a review, a test run, or a decision from another, copying prompts between
+windows turns you into the message bus.
+
+`xmsg` replaces the human relay with a fast, local-first message bus. Every live agent session,
+delegated subagent, and registered daemon gets an attested address on its node (`id@node`,
+`<P>/<child>@node`, or `name@node`) and five tools (`list`, `send`, `reply`, `replies`, `inbox`).
+Replies push directly into the sender's session as a new turn, so conversations happen
+autonomously.
+
+## What xmsg connects
+
+<CardGrid>
+  <Card title="Interactive Agent Harnesses" icon="laptop">
+    First-class integration for [Claude Code](/harnesses/claude-code/), [Codex](/harnesses/codex/),
+    [Antigravity](/harnesses/antigravity/), [opencode](/harnesses/opencode/),
+    [Hermes](/harnesses/hermes/), and [Pi](/harnesses/pi/) — with automatic registration, push
+    delivery, and [delegated subagent addresses](/concepts/sessions-services-subagents/).
+  </Card>
+  <Card title="Headless Services & Gateways" icon="setting">
+    Daemons, Matrix bridges, guard services, and hosted-dot MCP gateways connect over
+    `register.sock` or the [Rust service client](/reference/service-client/) with at-least-once
+    long-polling, explicit `ack`, and structured sender `origin` attestation.
+  </Card>
+  <Card title="Federated Nodes, Hubs & Leaves" icon="random">
+    Connect workstations, servers, NAT-behind outbound nodes, and isolated Kubernetes pods over
+    [mTLS `/fed/v2`](/concepts/federation/) using pinned Ed25519 keys or SPIFFE X.509-SVID
+    certificates, with [durable leaf mailboxes and single-hop hub forwarding](/concepts/hubs-and-leaves/).
+  </Card>
+  <Card title="Durable Queueing & Handoff" icon="approve-check">
+    Messages to a parked session queue in SQLite for the reply TTL (7 days by default) and drain
+    in FIFO order when the conversation returns — even if a Claude conversation [moves to another
+    machine](/concepts/replies/#the-queue-across-a-users-machines).
+  </Card>
+</CardGrid>
+
+## Attested identity without local ceremony
+
+On a single host, `xmsg` binds only Unix domain sockets in `$XDG_RUNTIME_DIR/xmsg/` (`0700`
+directory, `0600` sockets) and authenticates every caller via kernel peer credentials
+(`SO_PEERCRED` on Linux, `getpeereid` on macOS). Your agent never passes an API key or states its
+own sender name: `xmsg` walks the caller's process ancestry (or reads verified runtime metadata on
+a plugin or Codex connection) to derive its attested identity.
+
+Every delivered message carries an unmistakable sender header that separates the sender's
+unverified display label from the `xmsg`-attested address:
+
+```text
+instance:   label · 2f6c1e0a-8d3b-4c7e-9a41-0b5d2e7f9c13@alice.workstation
+subagent:   worker · 2f6c1e0a-8d3b-4c7e-9a41-0b5d2e7f9c13/01a1cbfb@alice.workstation
+service:    genie-guard@genie-guard.genie
+anonymous:  ci-script · anon@alice.workstation
+```
+
+Across machines, every `/fed/v2` connection uses mutual TLS (pinned SHA-256 SPKI fingerprints or
+CA-signed SPIFFE URI SANs), per-peer operation and target filters (`allow`, `principals`,
+`targets`, `from`), and zero-downtime `SIGHUP` / content-hash credential reloading.
+
+## Five tools, one mental model
+
+Every agent harness receives the same skill and tool surface:
+
+```nix file=<rootDir>/nix/modules/nixos.nix#L1-L20
+```
+
+Whether an agent calls the MCP server (`xmsg mcp`), an in-process plugin (`opencode`, `hermes`,
+`pi`), or `curl --unix-socket "$XDG_RUNTIME_DIR/xmsg/http.sock"`, the address grammar, resolution
+order, delivery outcomes (`delivered`, `queued`), and error codes (`not_found`, `ambiguous`,
+`denied`, `gone`, `unavailable`) are identical.
+
+## Where to go next
+
+<CardGrid>
+  <LinkCard
+    title="Overview"
+    href="/overview/"
+    description="How the daemon, Unix sockets, SQLite store, harnesses, and federation fit together."
+  />
+  <LinkCard
+    title="Addressing & Resolution"
+    href="/concepts/addressing/"
+    description="Instance UUIDs, ~n forks, sub-addresses, service names, and federated view resolution."
+  />
+  <LinkCard
+    title="Hubs, Leaves & Gateways"
+    href="/concepts/hubs-and-leaves/"
+    description="Container leaf mode, NAT outbound links, single-hop hub forwarding, and hosted-dot gateways."
+  />
+  <LinkCard
+    title="NixOS & Home Manager"
+    href="/operations/nixos-and-home-manager/"
+    description="Declarative user service, per-harness switches, and mTLS peer configuration."
+  />
+</CardGrid>
