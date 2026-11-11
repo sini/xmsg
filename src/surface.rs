@@ -578,13 +578,10 @@ pub(crate) async fn listing_live(
     )
     .await?;
     let mut out: Vec<FedListEntry> = Vec::new();
+    let now = storage::now_epoch_secs();
     {
         let db = local.db.lock().map_err(db_err)?;
-        let _ = storage::purge_instance_seen(
-            &db,
-            storage::now_epoch_secs(),
-            reply_ttl.as_secs() as i64,
-        );
+        let _ = storage::purge_instance_seen(&db, now, reply_ttl.as_secs() as i64);
         for (claim, e) in pairs {
             let parent_addr = claim.address();
             out.push(live_entry(
@@ -596,6 +593,9 @@ pub(crate) async fn listing_live(
                 claim.created_at,
             ));
             for sub in storage::list_subagents_for_parent(&db, &parent_addr).map_err(db_err)? {
+                if !sub.is_live(now) {
+                    continue;
+                }
                 let child_part = sub.name.as_deref().unwrap_or(&sub.agent_id);
                 let sub_id = format!("{}/{child_part}", sub.parent);
                 out.push(FedListEntry {
@@ -628,6 +628,9 @@ pub(crate) async fn listing_live(
             ));
             if is_registered {
                 for sub in storage::list_subagents_for_parent(&db, &parent_id).map_err(db_err)? {
+                    if !sub.is_live(now) {
+                        continue;
+                    }
                     let child_part = sub.name.as_deref().unwrap_or(&sub.agent_id);
                     let sub_id = format!("{}/{child_part}", sub.parent);
                     out.push(FedListEntry {
@@ -670,6 +673,9 @@ pub(crate) async fn listing_live(
                 s.started_at as i64,
             ));
             for sub in storage::list_subagents_for_parent(&db, &parent_id).map_err(db_err)? {
+                if !sub.is_live(now) {
+                    continue;
+                }
                 let child_part = sub.name.as_deref().unwrap_or(&sub.agent_id);
                 let sub_id = format!("{}/{child_part}", sub.parent);
                 out.push(FedListEntry {
@@ -707,6 +713,9 @@ pub(crate) async fn listing_live(
                     &sub.agent_id,
                     sub.agent_type.as_deref(),
                 ) {
+                    if !verified_sub.is_live(now) {
+                        continue;
+                    }
                     let child_part = verified_sub
                         .name
                         .as_deref()
@@ -740,7 +749,8 @@ pub(crate) async fn listing_live(
 }
 
 /// This node's inactive recipients within `within_secs` (capped at `reply_ttl`, XL1):
-/// parked Claude/agy instances and closed pi/plugin sessions, each carrying `last_seen`.
+/// parked Claude/agy instances, closed pi/plugin sessions, and finished or idle-expired
+/// subagents of live or inactive parents, each carrying `last_seen`.
 pub(crate) async fn listing_inactive(
     local: &Local<'_>,
     reply_ttl: Duration,
@@ -751,12 +761,39 @@ pub(crate) async fn listing_inactive(
     let now = storage::now_epoch_secs();
     let ttl_secs = reply_ttl.as_secs() as i64;
     let capped_within = (within_secs as i64).min(ttl_secs);
+    let cutoff = now.saturating_sub(capped_within);
     let inactive = {
         let db = local.db.lock().map_err(db_err)?;
         storage::inactive_instances(&db, now, ttl_secs, capped_within).map_err(db_err)?
     };
-    let mut out = Vec::new();
+    let mut out: Vec<FedListEntry> = Vec::new();
     let db = local.db.lock().map_err(db_err)?;
+    for e in live.iter().filter(|e| e.kind == "instance") {
+        for sub in storage::list_subagents_for_parent(&db, &e.id).map_err(db_err)? {
+            if sub.is_live(now) {
+                continue;
+            }
+            let seen_at = sub.last_seen();
+            if seen_at < cutoff {
+                continue;
+            }
+            let child_part = sub.name.as_deref().unwrap_or(&sub.agent_id);
+            let sub_id = format!("{}/{child_part}", sub.parent);
+            if out.iter().any(|x| x.id == sub_id) || live.iter().any(|x| x.id == sub_id) {
+                continue;
+            }
+            out.push(FedListEntry {
+                id: sub_id,
+                kind: "subagent".to_string(),
+                harness: e.harness.clone(),
+                label: sub.display_label().and_then(inbox::clean_label),
+                status: "parked".to_string(),
+                user: user.to_string(),
+                registered_at: None,
+                last_seen: Some(seen_at),
+            });
+        }
+    }
     for item in inactive {
         if !live.iter().any(|e| e.id == item.id) {
             out.push(inactive_entry(
@@ -786,18 +823,50 @@ pub(crate) async fn listing_inactive(
 }
 
 /// This node's full recipient set for federation and mesh/handoff resolution (A4, A-12,
-/// A16, A14, XL1): live recipients with `registered_at`, plus parked instances within their
-/// parked lifetime with `last_seen`. A pi or plugin session is never parked (AM-9).
+/// A16, A14, XL1): live recipients with `registered_at`, plus parked instances and parked
+/// subagents within their parked lifetime with `last_seen`. A pi or plugin session is never
+/// parked (AM-9).
 pub(crate) async fn listing(
     local: &Local<'_>,
     reply_ttl: Duration,
     user: &str,
 ) -> Result<Vec<FedListEntry>, AppError> {
     let mut out = listing_live(local, reply_ttl, user).await?;
+    let now = storage::now_epoch_secs();
+    let ttl_secs = reply_ttl.as_secs() as i64;
     let db = local.db.lock().map_err(db_err)?;
-    let parked =
-        storage::parked_instances(&db, storage::now_epoch_secs(), reply_ttl.as_secs() as i64)
-            .map_err(db_err)?;
+    let live_parents: Vec<(String, Option<String>)> = out
+        .iter()
+        .filter(|e| e.kind == "instance")
+        .map(|e| (e.id.clone(), e.harness.clone()))
+        .collect();
+    for (parent_id, parent_harness) in live_parents {
+        for sub in storage::list_subagents_for_parent(&db, &parent_id).map_err(db_err)? {
+            if sub.is_live(now) {
+                continue;
+            }
+            let seen_at = sub.last_seen();
+            if seen_at + ttl_secs <= now {
+                continue;
+            }
+            let child_part = sub.name.as_deref().unwrap_or(&sub.agent_id);
+            let sub_id = format!("{}/{child_part}", sub.parent);
+            if out.iter().any(|x| x.id == sub_id) {
+                continue;
+            }
+            out.push(FedListEntry {
+                id: sub_id,
+                kind: "subagent".to_string(),
+                harness: parent_harness.clone(),
+                label: sub.display_label().and_then(inbox::clean_label),
+                status: "parked".to_string(),
+                user: user.to_string(),
+                registered_at: None,
+                last_seen: Some(seen_at),
+            });
+        }
+    }
+    let parked = storage::parked_instances(&db, now, ttl_secs).map_err(db_err)?;
     for (id, harness, last_live) in parked {
         if !out.iter().any(|e| e.id == id) {
             out.push(inactive_entry(&id, &harness, "parked", user, last_live));

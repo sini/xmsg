@@ -1473,6 +1473,12 @@ pub fn resolve_as_agent(
             parent.session_id
         ))
     })?;
+    let _ = crate::storage::subagent_touch_activity(
+        &db,
+        &binding.parent,
+        &binding.agent_id,
+        crate::storage::now_epoch_secs(),
+    );
     Ok(Session {
         session_id: format!("{}/{}", binding.parent, binding.agent_id),
         name: binding.display_label().map(str::to_string),
@@ -2141,6 +2147,14 @@ pub fn resolve_codex_mcp_caller(
 
     let (root_snap, _child_state, binding) =
         crate::codex::admit_codex_subagent(&state.db, session_id, thread_id, None)?;
+    if let Ok(db) = state.db.lock() {
+        let _ = crate::storage::subagent_touch_activity(
+            &db,
+            session_id,
+            thread_id,
+            crate::storage::now_epoch_secs(),
+        );
+    }
 
     if let Some(turn_id) = codex_turn.map(str::trim).filter(|s| !s.is_empty()) {
         let repaired = {

@@ -146,8 +146,12 @@ pub fn validate_subagent_id(agent_id: &str) -> Result<&str, AppError> {
 }
 
 /// HA9-A §2.4: whether a bound subagent is currently in an active turn (`turn_pid` and
-/// `turn_start` match a live parent process in `proc_root`).
+/// `turn_start` match a live parent process in `proc_root`, and the subagent is still live
+/// within its idle TTL).
 pub fn is_subagent_in_turn(proc_root: &Path, row: &storage::SubagentBinding) -> bool {
+    if !row.is_live(now_epoch_secs()) {
+        return false;
+    }
     let (Some(pid), Some(start)) = (row.turn_pid, row.turn_start.as_deref()) else {
         return false;
     };
@@ -343,6 +347,9 @@ pub fn sync_claims_entries(
                 params![claim.id, claim.pid, claim.proc_start],
             )
             .map_err(|e| AppError::Internal(e.to_string()))?;
+            let claim_addr = claim.address();
+            storage::subagent_park_for_parent(conn, &claim_addr, now)
+                .map_err(|e| AppError::Internal(e.to_string()))?;
             // Discovery is on demand, so the release is the latest moment X is known to
             // have been live: its parked lifetime runs from here (A14, D-1).
             if !is_non_claude_instance(conn, &claim.id)
@@ -624,6 +631,9 @@ pub fn take_queued_for(
     for sub in all_subagents {
         if is_subagent_in_turn(proc_root, &sub) {
             continue;
+        }
+        if sub.turn_pid.is_some() {
+            let _ = storage::subagent_stop_turn(conn, &sub.parent, &sub.agent_id);
         }
         let sub_queue_id = format!("{}/{}", sub.parent, sub.agent_id);
         let child_part = sub.name.as_deref().unwrap_or(&sub.agent_id);
