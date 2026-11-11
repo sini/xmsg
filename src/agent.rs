@@ -1164,9 +1164,110 @@ pub async fn handle_agent_frame(
                 Err(e) => Err(e),
             }
         }
+        AgentFrame::Attach {
+            name,
+            media_type,
+            data,
+            path,
+            upload,
+            offset,
+            sha256,
+            as_agent,
+            codex_session,
+            codex_thread,
+            codex_turn,
+            ..
+        } => {
+            let effective_res = match caller_trace {
+                Ok(CallerTrace::CodexOwner {
+                    owner_pid,
+                    ref owner_starttime,
+                }) => resolve_codex_mcp_caller(
+                    state,
+                    owner_pid,
+                    owner_starttime,
+                    codex_session.as_deref(),
+                    codex_thread.as_deref(),
+                    codex_turn.as_deref(),
+                    false,
+                ),
+                _ if codex_session.is_some() || codex_thread.is_some() => {
+                    Err(AppError::NotRecipient(
+                        "codex runtime metadata rejected: caller does not descend from a trusted --codex-exe process"
+                            .to_string(),
+                    ))
+                }
+                Ok(CallerTrace::Session(parent)) => {
+                    resolve_as_agent(state, parent, as_agent.as_deref(), false)
+                }
+                Err(e) => Err(e),
+            };
+            let caller = effective_res?;
+            surface::attach(
+                state,
+                &surface::Sender::Session(caller),
+                crate::client::AttachRequest {
+                    name,
+                    media_type,
+                    data,
+                    path,
+                    upload,
+                    offset,
+                    sha256,
+                },
+            )
+            .await
+        }
+        AgentFrame::ReadAttachment {
+            message_id,
+            index,
+            offset,
+            length,
+            as_agent,
+            codex_session,
+            codex_thread,
+            codex_turn,
+            ..
+        } => {
+            let effective_res = match caller_trace {
+                Ok(CallerTrace::CodexOwner {
+                    owner_pid,
+                    ref owner_starttime,
+                }) => resolve_codex_mcp_caller(
+                    state,
+                    owner_pid,
+                    owner_starttime,
+                    codex_session.as_deref(),
+                    codex_thread.as_deref(),
+                    codex_turn.as_deref(),
+                    false,
+                ),
+                _ if codex_session.is_some() || codex_thread.is_some() => {
+                    Err(AppError::NotRecipient(
+                        "codex runtime metadata rejected: caller does not descend from a trusted --codex-exe process"
+                            .to_string(),
+                    ))
+                }
+                Ok(CallerTrace::Session(parent)) => {
+                    resolve_as_agent(state, parent, as_agent.as_deref(), false)
+                }
+                Err(e) => Err(e),
+            };
+            let caller = effective_res?;
+            surface::read_attachment(
+                state,
+                Some(&caller),
+                &message_id,
+                index,
+                offset.unwrap_or(0),
+                length,
+            )
+            .await
+        }
         AgentFrame::Send {
             to,
             text,
+            attachments,
             idempotency_key,
             as_agent,
             codex_session,
@@ -1201,16 +1302,23 @@ pub async fn handle_agent_frame(
             match effective_res {
                 Ok(effective_caller) => {
                     let sender = surface::Sender::Session(effective_caller);
-                    surface::send(state, &sender, &to, &text, idempotency_key.as_deref())
-                        .await
-                        .map(|r| {
-                            serde_json::json!({
-                                "status": "ok",
-                                "message_id": r.message_id,
-                                "address": r.address,
-                                "outcome": r.outcome,
-                            })
+                    surface::send_with_attachments(
+                        state,
+                        &sender,
+                        &to,
+                        &text,
+                        idempotency_key.as_deref(),
+                        &attachments,
+                    )
+                    .await
+                    .map(|r| {
+                        serde_json::json!({
+                            "status": "ok",
+                            "message_id": r.message_id,
+                            "address": r.address,
+                            "outcome": r.outcome,
                         })
+                    })
                 }
                 Err(e) => Err(e),
             }
@@ -1218,6 +1326,7 @@ pub async fn handle_agent_frame(
         AgentFrame::Reply {
             message_id,
             text,
+            attachments,
             idempotency_key,
             as_agent,
             codex_session,
@@ -1250,12 +1359,13 @@ pub async fn handle_agent_frame(
                 Err(e) => Err(e),
             };
             match effective_res {
-                Ok(effective_caller) => surface::reply(
+                Ok(effective_caller) => surface::reply_with_attachments(
                     state,
                     &effective_caller,
                     &message_id,
                     &text,
                     idempotency_key.as_deref(),
+                    &attachments,
                 )
                 .await
                 .map(|r| serde_json::json!({ "status": "ok", "reply": r })),

@@ -10,9 +10,10 @@
 
 - **Local-first, zero-ceremony IPC:** Binds Unix domain sockets (`http.sock`, `agent.sock`, `register.sock`) in `$XDG_RUNTIME_DIR/xmsg/` (`0700` dir, `0600` sockets) and authenticates callers via kernel peer credentials (`SO_PEERCRED` on Linux, `getpeereid` on macOS).
 - **Attested sender identity:** Every message carries `label · id@node`, `label · <P>/<child>@node`, `name@node`, or `<from> · anon@node`, separating the sender's unverified display label from the `xmsg`-attested address.
-- **Five tools across every harness:** `list`, `send`, `reply`, `replies`, and `inbox` (for [delegated subagents](https://xmsg.dev/concepts/sessions-services-subagents/#delegated-subagents-pchildnode)).
+- **MCP tools for messaging and file reads:** `list`, `send`, `reply`, `replies`, `inbox` (for [delegated subagents](https://xmsg.dev/concepts/sessions-services-subagents/#delegated-subagents-pchildnode)), and `read_attachment`.
 - **Durable queueing & cross-machine handoff:** Sends to parked conversations queue in SQLite (`7 days` default reply TTL) and drain in FIFO order when the conversation returns — or follow a Claude conversation across a user's machines over `/fed/v2/handoff`.
 - **Cross-host mTLS federation (`/fed/v2`):** Authenticate peers with pinned Ed25519 keys (`pin`) or CA-signed SPIFFE X.509-SVIDs (`ca` + `identities`), with [durable leaf mailboxes, NAT outbound links, and single-hop hub forwarding](https://xmsg.dev/concepts/hubs-and-leaves/).
+- **Local file attachments:** Stage content-addressed bytes and deliver references, then read bounded UTF-8 or binary ranges. See the [local attachment protocol](docs/attachments.md); cross-node file transfer follows separately.
 - **Validated Rust service client (`xmsg::client`):** Lightweight 23-package client feature (`--no-default-features --features client`) for external Rust services (`matrix-xmsg`, `genie-guard`, `xmsg-mcp-gateway`).
 
 ---

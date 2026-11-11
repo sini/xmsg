@@ -212,6 +212,7 @@ async fn create_fed_test_node(
         let _ = run_register_server(
             r_sock,
             std::sync::Arc::new(xmsg::http::AppState {
+                max_attachment_bytes: 8 * 1024 * 1024,
                 sessions_dirs: vec![],
                 agy_config: reg_config,
                 agy_store: reg_store,
@@ -236,6 +237,7 @@ async fn create_fed_test_node(
     });
 
     let app_state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir.clone()],
         agy_config,
         agy_store,

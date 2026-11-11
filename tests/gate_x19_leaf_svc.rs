@@ -243,6 +243,7 @@ async fn create_hub_test_node_with_listener(
     });
 
     let app_state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir.clone()],
         agy_config,
         agy_store,
@@ -412,6 +413,7 @@ async fn create_leaf_test_node_opts(
     let r_sock = reg_sock.clone();
     let r_p = leaf_principal.to_string();
     let r_state = Arc::new(xmsg::http::AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir.clone()],
         agy_config: agy_config.clone(),
         agy_store: agy_store.clone(),
@@ -1592,6 +1594,7 @@ async fn test_oracle_10_leaf_admission_refuses_mismatched_uid() {
     let bad_listener = xmsg::svc::bind_leaf_register_listener(&bad_sock, actual_uid).unwrap();
 
     let state = Arc::new(xmsg::http::AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: leaf.fed_state.sessions_dirs.clone(),
         agy_config: leaf.fed_state.agy_config.clone(),
         agy_store: leaf.fed_state.agy_store.clone(),
@@ -1944,6 +1947,7 @@ async fn test_oracle_12_leaf_agent_sock_refuses_mismatched_uid() {
         .unwrap();
 
     let state = Arc::new(xmsg::http::AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: leaf.fed_state.sessions_dirs.clone(),
         agy_config: leaf.fed_state.agy_config.clone(),
         agy_store: leaf.fed_state.agy_store.clone(),

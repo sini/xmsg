@@ -17,6 +17,7 @@ fn test_app_state() -> Arc<AppState> {
     let (pi_notify_tx, _) = tokio::sync::broadcast::channel(16);
 
     Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![PathBuf::from("/tmp/nonexistent-sessions")],
         agy_config: xmsg::agy::AgyConfig {
             presence_dir: PathBuf::from("/tmp/nonexistent-presence"),
@@ -412,5 +413,15 @@ async fn test_oracle_3_reply_only_mcp() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, vec!["list", "send", "reply", "replies", "inbox"]);
+    assert_eq!(
+        names,
+        vec![
+            "read_attachment",
+            "list",
+            "send",
+            "reply",
+            "replies",
+            "inbox"
+        ]
+    );
 }

@@ -83,6 +83,8 @@ pub struct SvcPendingMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct IdempotencyRecord {
+    #[serde(default)]
+    pub refs_digest: Option<String>,
     pub principal: String,
     pub key: String,
     pub body: String,
@@ -112,6 +114,10 @@ pub const SCHEMA_VERSION: i64 = 3;
 /// `replies` references `messages`, so it is dropped first: with foreign keys on, dropping
 /// a parent that still has child rows fails.
 const MESSAGE_STATE_TABLES: &[&str] = &[
+    "attachments",
+    "staged_blobs",
+    "blob_chunks",
+    "blobs",
     "replies",
     "messages",
     "outbound",
@@ -130,6 +136,27 @@ const MESSAGE_STATE_TABLES: &[&str] = &[
 ];
 
 const SCHEMA_N: &str = r#"
+        CREATE TABLE IF NOT EXISTS blobs (
+            sha256 TEXT PRIMARY KEY, size INTEGER NOT NULL, utf8 INTEGER NOT NULL,
+            data BLOB NOT NULL, created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS attachments (
+            item_id TEXT NOT NULL, idx INTEGER NOT NULL, sha256 TEXT NOT NULL,
+            name TEXT NOT NULL, size INTEGER NOT NULL, media_type TEXT NOT NULL,
+            expires_at INTEGER NOT NULL, upstream TEXT NOT NULL DEFAULT '',
+            downstream TEXT NOT NULL DEFAULT '', PRIMARY KEY (item_id, idx)
+        );
+        CREATE INDEX IF NOT EXISTS idx_attachments_sha256 ON attachments(sha256);
+        CREATE TABLE IF NOT EXISTS staged_blobs (
+            principal TEXT NOT NULL, sha256 TEXT NOT NULL, expires_at INTEGER NOT NULL,
+            PRIMARY KEY (principal, sha256)
+        );
+        CREATE TABLE IF NOT EXISTS blob_chunks (
+            owner TEXT NOT NULL, upload TEXT NOT NULL, offset INTEGER NOT NULL,
+            data BLOB NOT NULL, created_at INTEGER NOT NULL,
+            PRIMARY KEY (owner, upload, offset)
+        );
+
         CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY,
             created_at INTEGER NOT NULL,
@@ -211,6 +238,7 @@ const SCHEMA_N: &str = r#"
             outcome TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             to_ref TEXT NOT NULL DEFAULT '',
+            refs_digest TEXT,
             PRIMARY KEY (principal, key)
         );
 
@@ -233,6 +261,7 @@ const SCHEMA_N: &str = r#"
             state TEXT NOT NULL,
             seq INTEGER,
             created_at INTEGER NOT NULL,
+            refs_digest TEXT,
             PRIMARY KEY (principal, key)
         );
 
@@ -374,6 +403,16 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             conn.execute_batch(
                 "ALTER TABLE idempotency_keys ADD COLUMN to_ref TEXT NOT NULL DEFAULT ''",
             )?;
+        }
+        for table in ["idempotency_keys", "reply_idempotency_keys"] {
+            let has_refs_digest: bool = conn.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info(?1) WHERE name = 'refs_digest'",
+                [table],
+                |r| r.get(0),
+            )?;
+            if !has_refs_digest {
+                conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN refs_digest TEXT"))?;
+            }
         }
         // A send recorded before it is not known to be in a dial-out mailbox, so it takes
         // replies strictly (fail closed).
@@ -727,6 +766,7 @@ pub fn insert_reply(
         push_outcome: push_outcome.map(|s| s.to_string()),
         pushed_message_id: pushed_message_id.map(|s| s.to_string()),
         replier: None,
+        attachments: Vec::new(),
     })
 }
 
@@ -748,6 +788,7 @@ pub fn get_replies_after(
             push_outcome: row.get(5)?,
             pushed_message_id: row.get(6)?,
             replier: None,
+            attachments: Vec::new(),
         })
     })?;
 
@@ -780,6 +821,7 @@ pub fn get_reply_by_pushed_id(
             push_outcome: row.get(5)?,
             pushed_message_id: row.get(6)?,
             replier: None,
+            attachments: Vec::new(),
         }))
     } else {
         Ok(None)
@@ -1168,7 +1210,7 @@ pub fn get_idempotency_record(
     let now = now_epoch_secs();
     let cutoff = now.saturating_sub(ttl_secs as i64);
     let mut stmt = conn.prepare(
-        "SELECT principal, key, body, message_id, session_id, from_name, bytes, outcome, created_at, to_ref
+        "SELECT principal, key, body, message_id, session_id, from_name, bytes, outcome, created_at, to_ref, refs_digest
          FROM idempotency_keys
          WHERE principal = ?1 AND key = ?2 AND created_at >= ?3",
     )?;
@@ -1186,6 +1228,7 @@ pub fn get_idempotency_record(
             outcome: row.get(7)?,
             created_at: row.get(8)?,
             to_ref: row.get(9)?,
+            refs_digest: row.get(10)?,
         }))
     } else {
         Ok(None)
@@ -1222,6 +1265,23 @@ pub fn reserve_idempotency_key(
     fresh_id: &str,
     ttl_secs: u64,
 ) -> Result<Reservation<IdempotencyRecord>> {
+    reserve_idempotency_key_with_refs(
+        conn, principal, key, body, None, to, from_name, fresh_id, ttl_secs,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn reserve_idempotency_key_with_refs(
+    conn: &Connection,
+    principal: &str,
+    key: &str,
+    body: &str,
+    refs_digest: Option<&str>,
+    to: &str,
+    from_name: &str,
+    fresh_id: &str,
+    ttl_secs: u64,
+) -> Result<Reservation<IdempotencyRecord>> {
     let now = now_epoch_secs();
     let cutoff = now.saturating_sub(ttl_secs as i64);
     let tx = conn.unchecked_transaction()?;
@@ -1231,8 +1291,8 @@ pub fn reserve_idempotency_key(
     )?;
     let inserted = tx.execute(
         "INSERT INTO idempotency_keys
-         (principal, key, body, message_id, session_id, from_name, bytes, outcome, created_at, to_ref)
-         VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?7, ?8, ?9)
+         (principal, key, body, message_id, session_id, from_name, bytes, outcome, created_at, to_ref, refs_digest)
+         VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT (principal, key) DO NOTHING",
         params![
             principal,
@@ -1243,14 +1303,15 @@ pub fn reserve_idempotency_key(
             body.len() as i64,
             KEY_PENDING,
             now,
-            to
+            to,
+            refs_digest
         ],
     )?;
     let taken_over = inserted == 0
         && tx.execute(
             "UPDATE idempotency_keys SET outcome = ?4, created_at = ?5
-             WHERE principal = ?1 AND key = ?2 AND body = ?3 AND outcome = ?6 AND to_ref = ?7",
-            params![principal, key, body, KEY_PENDING, now, KEY_FAILED, to],
+             WHERE principal = ?1 AND key = ?2 AND body = ?3 AND outcome = ?6 AND to_ref = ?7 AND refs_digest IS ?8",
+            params![principal, key, body, KEY_PENDING, now, KEY_FAILED, to, refs_digest],
         )? == 1;
     let record = get_idempotency_record(&tx, principal, key, ttl_secs)?;
     tx.commit()?;
@@ -1340,8 +1401,10 @@ pub fn purge_idempotency_keys(conn: &Connection, ttl_secs: u64) -> Result<usize>
 }
 
 /// A reply's idempotency record: its reply ID, and the stored reply's `seq` once settled.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReplyKeyRecord {
+    #[serde(default)]
+    pub refs_digest: Option<String>,
     pub in_reply_to: String,
     pub body: String,
     pub reply_id: String,
@@ -1361,6 +1424,29 @@ pub fn reserve_reply_key(
     fresh_id: &str,
     ttl_secs: u64,
 ) -> Result<Reservation<ReplyKeyRecord>> {
+    reserve_reply_key_with_refs(
+        conn,
+        principal,
+        key,
+        in_reply_to,
+        body,
+        None,
+        fresh_id,
+        ttl_secs,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn reserve_reply_key_with_refs(
+    conn: &Connection,
+    principal: &str,
+    key: &str,
+    in_reply_to: &str,
+    body: &str,
+    refs_digest: Option<&str>,
+    fresh_id: &str,
+    ttl_secs: u64,
+) -> Result<Reservation<ReplyKeyRecord>> {
     let now = now_epoch_secs();
     let cutoff = now.saturating_sub(ttl_secs as i64);
     let tx = conn.unchecked_transaction()?;
@@ -1370,8 +1456,8 @@ pub fn reserve_reply_key(
     )?;
     let inserted = tx.execute(
         "INSERT INTO reply_idempotency_keys
-         (principal, key, in_reply_to, body, reply_id, state, seq, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7)
+         (principal, key, in_reply_to, body, reply_id, state, seq, created_at, refs_digest)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8)
          ON CONFLICT (principal, key) DO NOTHING",
         params![
             principal,
@@ -1380,13 +1466,14 @@ pub fn reserve_reply_key(
             body,
             fresh_id,
             KEY_PENDING,
-            now
+            now,
+            refs_digest
         ],
     )?;
     let taken_over = inserted == 0
         && tx.execute(
             "UPDATE reply_idempotency_keys SET state = ?5, created_at = ?6
-             WHERE principal = ?1 AND key = ?2 AND in_reply_to = ?3 AND body = ?4 AND state = ?7",
+             WHERE principal = ?1 AND key = ?2 AND in_reply_to = ?3 AND body = ?4 AND state = ?7 AND refs_digest IS ?8",
             params![
                 principal,
                 key,
@@ -1394,11 +1481,12 @@ pub fn reserve_reply_key(
                 body,
                 KEY_PENDING,
                 now,
-                KEY_FAILED
+                KEY_FAILED,
+                refs_digest
             ],
         )? == 1;
     let record = tx.query_row(
-        "SELECT in_reply_to, body, reply_id, state, seq, created_at
+        "SELECT in_reply_to, body, reply_id, state, seq, created_at, refs_digest
          FROM reply_idempotency_keys WHERE principal = ?1 AND key = ?2",
         params![principal, key],
         |row| {
@@ -1409,6 +1497,7 @@ pub fn reserve_reply_key(
                 state: row.get(3)?,
                 seq: row.get(4)?,
                 created_at: row.get(5)?,
+                refs_digest: row.get(6)?,
             })
         },
     )?;
@@ -1450,6 +1539,7 @@ pub fn get_reply_by_seq(conn: &Connection, seq: i64) -> Result<Option<ReplyRecor
             push_outcome: row.get(5)?,
             pushed_message_id: row.get(6)?,
             replier: None,
+            attachments: Vec::new(),
         }))
     } else {
         Ok(None)
@@ -3298,6 +3388,74 @@ mod queue_tests {
             reconcile_pending_keys(&c, "n").unwrap(),
             0,
             "nothing left pending"
+        );
+    }
+
+    #[test]
+    fn failed_send_key_requires_matching_attachment_digest() {
+        let c = Connection::open_in_memory().unwrap();
+        init_db(&c).unwrap();
+        assert!(
+            matches!(reserve_idempotency_key_with_refs(&c, "p", "k", "text", Some("refs-a"), "to", "from", "M1", 60).unwrap(), Reservation::Mine(id) if id == "M1")
+        );
+        settle_idempotency_key(&c, "p", "k", "", KEY_FAILED).unwrap();
+        for digest in [None, Some("refs-b")] {
+            let held = reserve_idempotency_key_with_refs(
+                &c, "p", "k", "text", digest, "to", "from", "M2", 60,
+            )
+            .unwrap();
+            assert!(
+                matches!(held, Reservation::Held(r) if r.refs_digest.as_deref() == Some("refs-a") && r.outcome == KEY_FAILED)
+            );
+        }
+        assert!(
+            matches!(reserve_idempotency_key_with_refs(&c, "p", "k", "text", Some("refs-a"), "to", "from", "M2", 60).unwrap(), Reservation::Mine(id) if id == "M1")
+        );
+    }
+
+    #[test]
+    fn failed_reply_key_requires_matching_attachment_digest() {
+        let c = Connection::open_in_memory().unwrap();
+        init_db(&c).unwrap();
+        assert!(
+            matches!(reserve_reply_key_with_refs(&c, "p", "k", "message", "text", Some("refs-a"), "R1", 60).unwrap(), Reservation::Mine(id) if id == "R1")
+        );
+        settle_reply_key(&c, "p", "k", KEY_FAILED, None).unwrap();
+        for digest in [None, Some("refs-b")] {
+            let held =
+                reserve_reply_key_with_refs(&c, "p", "k", "message", "text", digest, "R2", 60)
+                    .unwrap();
+            assert!(
+                matches!(held, Reservation::Held(r) if r.refs_digest.as_deref() == Some("refs-a") && r.state == KEY_FAILED)
+            );
+        }
+        assert!(
+            matches!(reserve_reply_key_with_refs(&c, "p", "k", "message", "text", Some("refs-a"), "R2", 60).unwrap(), Reservation::Mine(id) if id == "R1")
+        );
+    }
+
+    #[test]
+    fn legacy_key_upgrade_preserves_null_digest_and_arbitrary_text() {
+        let c = Connection::open_in_memory().unwrap();
+        init_db(&c).unwrap();
+        let body = "text\0[{\"sha256\":\"hash\"}]";
+        reserve_idempotency_key(&c, "p", "send", body, "to", "from", "M1", 60).unwrap();
+        reserve_reply_key(&c, "p", "reply", "message", body, "R1", 60).unwrap();
+        c.execute_batch("ALTER TABLE idempotency_keys DROP COLUMN refs_digest; ALTER TABLE reply_idempotency_keys DROP COLUMN refs_digest;").unwrap();
+        init_db(&c).unwrap();
+        init_db(&c).unwrap();
+        let send = get_idempotency_record(&c, "p", "send", 60)
+            .unwrap()
+            .unwrap();
+        assert_eq!((send.body.as_str(), send.refs_digest), (body, None));
+        assert!(
+            matches!(reserve_reply_key(&c, "p", "reply", "message", body, "R2", 60).unwrap(), Reservation::Held(r) if r.body == body && r.refs_digest.is_none())
+        );
+        assert!(
+            matches!(reserve_idempotency_key_with_refs(&c, "p", "send", body, Some("digest"), "to", "from", "M2", 60).unwrap(), Reservation::Held(r) if r.refs_digest.is_none())
+        );
+        assert!(
+            matches!(reserve_reply_key_with_refs(&c, "p", "reply", "message", body, Some("digest"), "R2", 60).unwrap(), Reservation::Held(r) if r.refs_digest.is_none())
         );
     }
 

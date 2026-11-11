@@ -171,6 +171,7 @@ async fn setup(max_body: usize) -> Env {
             let _ = run_register_server(
                 a,
                 std::sync::Arc::new(xmsg::http::AppState {
+                    max_attachment_bytes: 8 * 1024 * 1024,
                     sessions_dirs: vec![],
                     agy_config: b,
                     agy_store: c,
@@ -196,6 +197,7 @@ async fn setup(max_body: usize) -> Env {
     }
 
     let state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions.clone()],
         agy_config: cfg,
         agy_store,

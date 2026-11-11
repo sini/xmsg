@@ -71,6 +71,7 @@ async fn start(caller_name: &str) -> Node {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     xmsg::storage::init_db(&conn).unwrap();
     let state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sess_dir.path().to_path_buf()],
         agy_config: xmsg::agy::AgyConfig {
             presence_dir: sess_dir.path().join("presence"),

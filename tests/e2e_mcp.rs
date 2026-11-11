@@ -139,6 +139,7 @@ async fn start_mcp_harness() -> McpHarness {
 
     let (pi_notify_tx, _) = tokio::sync::broadcast::channel(16);
     let app_state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sess_dir.path().to_path_buf()],
         agy_config: xmsg::agy::AgyConfig {
             presence_dir: sess_dir.path().join("presence"),
@@ -306,14 +307,21 @@ async fn test_mcp_initialize_and_tools_list() {
         .expect("tools array");
     assert_eq!(
         tools.len(),
-        5,
-        "Exactly 5 tools listed: list, send, reply, replies, inbox"
+        6,
+        "Exactly 6 tools listed, including read_attachment"
     );
 
     let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(
         tool_names,
-        vec!["list", "send", "reply", "replies", "inbox"]
+        vec![
+            "read_attachment",
+            "list",
+            "send",
+            "reply",
+            "replies",
+            "inbox"
+        ]
     );
 
     // Invariant: None of the tools may have requiresUserInteraction set
