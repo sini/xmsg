@@ -2370,4 +2370,105 @@ async fn test_ng1_38_subagent_liveness_stop_idle_ttl_and_parent_park() {
         .await;
     assert_eq!(st_parked, 202, "{body_parked}");
     assert_eq!(body_parked["outcome"], "queued", "{body_parked}");
+
+    // 4. OpenCode plugin child session (`register.sock` `Frame::Subagent`):
+    //    - `event: "stop"` clears the turn (`turn_pid = None`) so post-turn sends fall back to P,
+    //      while keeping the child session `live` across turns within `SUBAGENT_IDLE_TTL_SECS`.
+    //    - Detaching P parks the child (`status == "parked"`), and reclaiming P unparks it (`status == "live"`).
+    //    - `event: "end"` deletes the child session row.
+    let my_pid = std::process::id();
+    write_proc_stat(&h.proc_root, my_pid, 1, "2000");
+    let mut oc = PluginConn::open(&h.register_sock, "opencode").await;
+    let reg_oc = oc
+        .call(json!({ "action": "register", "session": "ses_parent_oc" }))
+        .await;
+    assert_eq!(reg_oc["status"], "ok", "{reg_oc}");
+    let oc_addr = reg_oc["address"].as_str().unwrap().to_string();
+    let oc_id = oc_addr.split('@').next().unwrap().to_string();
+    let oc_secret = reg_oc["reclaim"].as_str().unwrap().to_string();
+    let oc_child = "ses_child_oc";
+
+    let start_oc = oc
+        .call(json!({
+            "action": "subagent",
+            "event": "start",
+            "session": "ses_parent_oc",
+            "agent_id": oc_child,
+            "agent_type": "coder",
+        }))
+        .await;
+    assert_eq!(start_oc["status"], "ok", "{start_oc}");
+
+    let stop_oc = oc
+        .call(json!({
+            "action": "subagent",
+            "event": "stop",
+            "session": "ses_parent_oc",
+            "agent_id": oc_child,
+        }))
+        .await;
+    assert_eq!(stop_oc["status"], "ok", "{stop_oc}");
+
+    let oc_child_addr = format!("{oc_id}/{oc_child}@{}", h.node_name);
+    let live_oc = h.http_list("status=live&kind=subagent").await;
+    assert!(
+        live_oc
+            .iter()
+            .any(|r| r["address"] == oc_child_addr && r["status"] == "live"),
+        "OpenCode child session between prompt turns must stay live within SUBAGENT_IDLE_TTL_SECS: {live_oc:?}"
+    );
+
+    let detach_oc = oc
+        .call(json!({ "action": "detach", "session": "ses_parent_oc" }))
+        .await;
+    assert_eq!(detach_oc["status"], "ok", "{detach_oc}");
+    let live_oc_detached = h.http_list("status=live&kind=subagent").await;
+    assert!(
+        !live_oc_detached
+            .iter()
+            .any(|r| r["address"] == oc_child_addr),
+        "detaching OpenCode parent must park its child session: {live_oc_detached:?}"
+    );
+    let inactive_oc_detached = h.http_list("status=inactive&kind=subagent").await;
+    assert!(
+        inactive_oc_detached
+            .iter()
+            .any(|r| r["address"] == oc_child_addr && r["status"] == "parked"),
+        "detached OpenCode child session must appear as parked in list(status=inactive): {inactive_oc_detached:?}"
+    );
+
+    let reclaim_oc = oc
+        .call(json!({
+            "action": "register",
+            "session": "ses_parent_oc",
+            "reclaim": { "id": oc_id, "secret": oc_secret },
+        }))
+        .await;
+    assert_eq!(reclaim_oc["status"], "ok", "{reclaim_oc}");
+    let live_oc_reclaimed = h.http_list("status=live&kind=subagent").await;
+    assert!(
+        live_oc_reclaimed
+            .iter()
+            .any(|r| r["address"] == oc_child_addr && r["status"] == "live"),
+        "reclaiming OpenCode parent must unpark its child session: {live_oc_reclaimed:?}"
+    );
+
+    let end_oc = oc
+        .call(json!({
+            "action": "subagent",
+            "event": "end",
+            "session": "ses_parent_oc",
+            "agent_id": oc_child,
+        }))
+        .await;
+    assert_eq!(end_oc["status"], "ok", "{end_oc}");
+    let live_after_end = h.http_list("status=live&kind=subagent").await;
+    let inactive_after_end = h.http_list("status=inactive&kind=subagent").await;
+    assert!(
+        !live_after_end.iter().any(|r| r["address"] == oc_child_addr)
+            && !inactive_after_end
+                .iter()
+                .any(|r| r["address"] == oc_child_addr),
+        "event=end must remove OpenCode child session from live and inactive recipient lists: live={live_after_end:?} inactive={inactive_after_end:?}"
+    );
 }

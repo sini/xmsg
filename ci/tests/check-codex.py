@@ -1736,13 +1736,19 @@ sys.exit(proc.wait())
             f"C9 failed: active child did not receive private inbox message: {joined_child_out}"
         )
 
-        # Verify after SubagentStop, child_x remains addressable in D8 recipients while root_p is live
+        # Verify after SubagentStop, child_x leaves status=live (omitted from default /v1/recipients)
+        # while remaining visible as status=parked in /v1/recipients?status=inactive and addressable for fallback.
         time.sleep(0.2)
         _, recips_after = unix_http_request(http_sock, "GET", "/v1/recipients")
-        assert any(
+        assert not any(
             r.get("address", "").startswith(f"{root_p}/{child_x}@")
             for r in recips_after.get("recipients", [])
-        ), f"C9 failed: child {root_p}/{child_x} missing from D8 recipients while root live: {recips_after}"
+        ), f"C9 failed: stopped child {root_p}/{child_x} must not remain in live D8 recipients: {recips_after}"
+        _, recips_after_inactive = unix_http_request(http_sock, "GET", "/v1/recipients?status=inactive")
+        assert any(
+            r.get("address", "").startswith(f"{root_p}/{child_x}@") and r.get("status") == "parked"
+            for r in recips_after_inactive.get("recipients", [])
+        ), f"C9 failed: stopped child {root_p}/{child_x} missing as parked from status=inactive D8 recipients: {recips_after_inactive}"
 
         # Check peer's inbox for ROOT_DAEMON_MSG_1 and CHILD_DAEMON_MSG_1
         root_msg = recv.wait_for_text("ROOT_DAEMON_MSG_1")

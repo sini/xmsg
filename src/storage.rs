@@ -2398,6 +2398,16 @@ pub fn subagent_park_for_parent(conn: &Connection, parent: &str, now: i64) -> Re
     Ok(())
 }
 
+/// Clears `turn_pid`, `turn_start`, and `stopped_at` for every subagent row under `parent`
+/// when an OpenCode parent session registers or reclaims `parent` (HA9-A.oc §2.2, C6, C7).
+pub fn subagent_unpark_for_parent(conn: &Connection, parent: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE subagents SET turn_pid = NULL, turn_start = NULL, stopped_at = NULL WHERE parent = ?1",
+        params![parent],
+    )?;
+    Ok(())
+}
+
 /// Clears `turn_pid` and `turn_start` for every subagent row under `parent` (HA9-A.oc §2.2, C7,
 /// HA9-A.agy D9: re-attestation of `parent` clears stale turn columns in the same batch).
 pub fn subagent_clear_turns_for_parent(conn: &Connection, parent: &str) -> Result<()> {
