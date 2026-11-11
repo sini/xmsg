@@ -85,6 +85,7 @@ export default defineConfig({
 				{
 					label: 'xmsg',
 					items: [
+						{ label: 'Get Started', slug: 'getting-started' },
 						{ label: 'Overview', slug: 'overview' },
 					],
 				},
@@ -97,6 +98,15 @@ export default defineConfig({
 						{ label: 'Federation', slug: 'concepts/federation' },
 						{ label: 'Hubs, Leaves & Gateways', slug: 'concepts/hubs-and-leaves' },
 						{ label: 'Security & Trust Model', slug: 'concepts/trust-model' },
+						{ label: 'File Attachments (Planned)', slug: 'concepts/attachments' },
+					],
+				},
+				{
+					label: 'Bridges & Services',
+					items: [
+						{ label: 'Hosted MCP Gateway', slug: 'extensions/gateway' },
+						{ label: 'Matrix Bridge', slug: 'extensions/matrix' },
+						{ label: 'agent-quota', slug: 'extensions/agent-quota' },
 					],
 				},
 				{

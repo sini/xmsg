@@ -31,7 +31,11 @@ Envelopes on `/fed/v2` carry canonical node names, and the receiving node attrib
 message to the canonical name of the peer entry that authenticated the TLS connection (unless
 [relayed by an authorized forwarding hub](/concepts/hubs-and-leaves/#forwarding-through-a-hub)).
 When typing `@node` locally, you may use either the peer's canonical name or your local nickname
-for a pinned peer (the key in your `peers.json`).
+for a pinned peer (the key in your `peers.json`). Exact canonical names and nicknames take precedence
+over a bare-host selector such as `workstation`. With that selector, `list(node="workstation")` queries
+all matching nodes in the current view. A `send(to="guard@workstation", text="...")` selects a
+single match; multiple matches return `ambiguous`. With no match, the explicit destination follows
+a configured default route or is unknown. Use a canonical name to select one user on a shared host. See [node selectors](/concepts/addressing/#node-selectors).
 
 ## Trust models: pinned vs. CA-signed
 
@@ -90,8 +94,9 @@ enforce:
 | `from` | `list[string]` (optional) | Permitted source IP addresses or CIDR blocks for inbound connections. Empty `[]` is refused. |
 | `leaf` | `bool` (optional) | When `true`, messages and `list` queries for this peer queue in the hub's durable `peer_mailbox` for long-polling instead of dialing out. Default `false`. |
 | `dial` | `"outbound"` (optional) | Spawns a background pull loop on this node that dials out to `address` to pull messages, answer `list` queries, and poll replies. Mutually exclusive with `leaf: true`. |
-| `principals` | `list[string]` (optional) | Permitted inbound senders from this peer: a service name, an instance ID, or `anon:<from>`. |
-| `targets` | `list[string]` (optional) | Permitted local recipient targets this peer may message or see in `list`: a service name or an instance ID (never an instance label). |
+| `principals` | `list[string]` (optional) | Inbound sender filter: service name, instance ID, or `anon:<from>`. **Absent or `[]` permits every principal**; a nonempty list restricts senders to its entries. |
+| `targets` | `list[string]` (optional) | Local recipient filter for messages and `list`: service name or instance ID, never an instance label. **Absent permits all; `[]` permits none.** |
+| `default_route` | `bool` (optional) | Use this peer for an explicit `ref@node` destination that is not a direct peer. At most one entry may set it to `true`; direct routes take precedence. See [hub forwarding](/concepts/hubs-and-leaves/#forwarding-through-a-hub). |
 
 ## Mesh `list` across peers
 
@@ -106,3 +111,15 @@ When a caller runs `list` without a `node` filter, `xmsg` queries this node and 
   asker reports that node in `nodes` as `status: "unreachable", detail: "withholds list"`.
 - Host-internal details (`pid`, `cwd`, harness, local paths) never cross `/fed/v2`; the asker drops
   any entry whose reported `user` does not match the peer certificate's user.
+
+### Policy defaults matter
+
+Clearing `principals` to `[]` removes the sender restriction; it does not revoke every sender.
+To stop an operation, remove it from `allow`. To expose no local recipients, use `targets: []`.
+A network connection still needs to pass the peer's TLS identity, operation rights and any `from`
+filter. `allow`, `principals` and `from` gate traffic this node accepts from that peer.
+A hub also applies a destination peer's `targets` filter when forwarding or queueing for it,
+and carries that bound into the forwarded message.
+
+The empty-list rules are implemented in
+[`PeerConfig` parsing and inbound checks](https://github.com/sini/xmsg/blob/76f8f1e8249777cfb63c4d0287431cbbf6b2ce76/src/fed.rs).

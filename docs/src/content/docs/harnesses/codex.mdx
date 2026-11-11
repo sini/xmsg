@@ -49,6 +49,16 @@ xmsg serve \
   preamble outside the escaped message body so peer messages are framed as colleague data rather
   than system or developer instructions.
 
+## After a daemon restart
+
+A previously known, nonrevoked root remains queueable while waiting for fresh writer-lease
+attestation. Its next attributed MCP call can re-attest that root and start a bounded relay
+drain; an unknown root still needs registration, and explicit revocation stays in force.
+See [Codex restart custody](/concepts/replies/#replies-stored-always-pushed-by-sender-kind) for
+stable message IDs, FIFO ordering and the distinction between accepted, pending and unknown
+handoffs. The [re-attestation path](https://github.com/sini/xmsg/blob/f0abf583cb9394da4b08be7b717c3436919a7669/src/agent.rs)
+uses the normal writer-lease and rollout checks.
+
 ## Operator revocation (`--revoke` / `--unrevoke`)
 
 To park a Codex root session so it refuses automatic re-admission until explicitly cleared:

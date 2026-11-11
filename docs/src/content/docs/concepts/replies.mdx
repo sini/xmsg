@@ -86,7 +86,9 @@ Every envelope delivered to a recipient carries a reply instruction footer:
 
 Providing `idempotency_key` (1 to 128 characters) on a `send` or `reply` over HTTP, `agent.sock`,
 or `register.sock` (where service frames spell it `idempotencyKey`) guarantees at-most-once
-delivery across retries:
+delivery across matching retries **within the configured retention window**. The default is
+`86400` seconds (24 hours), set by `--idempotency-ttl` / `XMSG_IDEMPOTENCY_TTL`. After expiry,
+reusing the key can create a new message and deliver again:
 
 - **Reservation before delivery:** The key and minted `message_id` are committed to SQLite before
   delivery starts.
@@ -103,3 +105,20 @@ delivery across retries:
   is refused with `409 conflict`.
 - **Principal scoping:** Keys are partitioned by attested caller (`id[~n]`, `<P>/<child>`, or
   service `name`), or `anon:<from>` for anonymous HTTP callers.
+
+## How a reply reaches you
+
+```mermaid
+flowchart TD
+  R["Recipient replies with message ID"] --> S["xmsg stores reply"]
+  S --> L["Local sender with an inbox: push"]
+  S --> D["Dialable remote origin: mTLS reply"]
+  S --> P["Leaf or outbound origin: pull stored replies"]
+  S --> A["Anonymous HTTP sender: read replies by ID"]
+```
+
+Push is an additional delivery attempt, not a replacement for the stored reply. Check the
+reported outcome and use `replies` when the sender has no inbox or a push did not reach it.
+The [shared reply surface](https://github.com/sini/xmsg/blob/76f8f1e8249777cfb63c4d0287431cbbf6b2ce76/src/surface.rs)
+and [key retention](https://github.com/sini/xmsg/blob/76f8f1e8249777cfb63c4d0287431cbbf6b2ce76/src/storage.rs)
+define these paths and the retry window.

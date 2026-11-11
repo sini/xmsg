@@ -58,7 +58,7 @@ Lists recipients the caller may see on this node and every reachable peer:
   `86400` = 24 hours, capped at the reply TTL, each carrying `last_seen`).
 - **`kind`:** Filter by `"service"`, `"instance"`, or `"subagent"`.
 - **`name`:** Filter by service name or instance label.
-- **`node`:** Query only the named node (canonical name or local nickname).
+- **`node`:** An exact canonical name or local nickname queries one node. A bare-host selector queries all matching nodes in the current view; see [node selectors](/concepts/addressing/#node-selectors).
 - **Returns:** `{ recipients: [{ address, kind, harness?, label?, status, node, user, registered_at | last_seen }], nodes: [{ node, status, detail? }] }`.
 
 ### `send(to, text, as_agent?)`

@@ -66,6 +66,22 @@ federated send arriving at this node) resolves `to` in the same five-step order:
    `410 gone` and is never queued.
 5. **Otherwise `404 not_found`.**
 
+## Node selectors
+
+The part after `@` may be a canonical node name, a local peer nickname, or a bare host.
+Exact canonical names and nicknames win first. Otherwise a bare selector such as `workstation`
+matches the host component of nodes in the local view:
+
+- `list(node="workstation")` lists every matching node, including the local node when it matches.
+- `send(to="guard@workstation", text="review this")` selects a single matching node. If both
+  `alice.workstation` and `bob.workstation` match, the result is `ambiguous`, with the candidates.
+  With no match, the explicit destination follows a configured default route; without one it is unknown.
+- `send(to="guard@alice.workstation", text="review this")` selects that specific node.
+
+A bare recipient such as `guard` still uses the view-resolution rules below; it is different
+from a recipient with a bare-host suffix. Node names and peer nicknames are
+[defined by federation identity](/concepts/federation/#canonical-names-and-local-nicknames).
+
 ## How a bare reference resolves over the federated view
 
 A `to` with `@node` is resolved by that node alone. A bare `to` (without `@node`) on a node with

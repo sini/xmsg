@@ -1,0 +1,48 @@
+---
+title: Hosted models with xmsg-mcp-gateway
+description: Connect a hosted MCP client through OAuth, explicit grants, owner-set outbound policy and optional Events wake hints.
+---
+
+[xmsg-mcp-gateway](https://github.com/sini/xmsg-mcp-gateway) is a separate Rust service that
+connects hosted MCP clients to an xmsg node over the local
+[Rust service client](/reference/service-client/). The gateway handles the outside HTTPS/OAuth
+edge; its adjacent xmsg node handles bus identity, local delivery and federation.
+
+```mermaid
+flowchart LR
+  H["Hosted MCP client"] -->|"HTTPS / OAuth"| G["xmsg-mcp-gateway"]
+  G <-->|"local Unix service client"| X["xmsg node"]
+  X <-->|"mTLS federation"| P["Peer agents and services"]
+  G -.->|"optional signed Events wake hint"| H
+```
+
+## Identity, messaging and policy are separate
+
+- **Identity-only profile:** Without the owner-file `messaging` section, the Rust listener serves
+  identity only. A reachable MCP endpoint does not imply that a client can send bus messages.
+- **Messaging profile:** Owner configuration, verifier scopes and an enabled grant must permit
+  an operation. `xmsg_list`, `xmsg_send` and `xmsg_reply` use the gateway's fixed registered
+  service; the hosted caller does not choose a bus identity.
+- **Outbound policy:** The owner explicitly sets each grant's outbound policy. It starts empty;
+  writing a policy does not enable the grant, and an MCP client cannot mutate that policy.
+- **Events profile:** With messaging and Events configured, the gateway retains incoming mailbox
+  custody and can send signed `xmsg.message.received.v1` wake hints to an authenticated owner's
+  subscription. The hint prompts a mailbox read; retained data supports repeatable reads and
+  recovery. Grant bindings include service, issuer, resource, subject and the approved hosted
+  client.
+
+These are capabilities of the implementation, not a promise that a particular hosted platform
+or deployment is connected. Follow the gateway's own
+[hosted setup guide](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/hosted-dots-setup.md)
+and provider requirements. Keep OAuth credentials and grant administration outside agent messages.
+
+## Source and setup
+
+- [Gateway repository and profiles](https://github.com/sini/xmsg-mcp-gateway).
+- [Serving configuration](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/serving.md).
+- [Outbound authorization](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/outbound.md).
+- [Events, custody and deployment limits](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/events.md).
+
+The gateway owns external authentication and grant policy. The bus's
+[UID/network trust model](/concepts/trust-model/) still applies behind it, and a hosted model's
+message remains peer data.

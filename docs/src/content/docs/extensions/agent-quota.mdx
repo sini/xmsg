@@ -1,0 +1,29 @@
+---
+title: Usage with agent-quota
+description: The existing read-only weekly quota command, with an xmsg service integration planned.
+---
+
+[`agent-quota`](https://github.com/sini/nix-config/tree/main/pkgs/by-name/agent-quota) is currently
+a separate command that reports remaining weekly usage for Antigravity, Codex and Claude Code.
+It is packaged in the public `nix-config` repository. It is not an xmsg service yet.
+
+```sh
+agent-quota
+agent-quota --json
+```
+
+The current command reads locally available usage information: Antigravity's local `/quota`
+command (its Gemini Models bucket), Codex rollout `rate_limits`, and Claude Code's cached weekly
+utilization. Missing or unparseable data is reported as `unknown`; a cached figure is not a live
+provider guarantee. The implementation describes these reads as credential-free and performs no
+model call.
+
+## Planned service integration
+
+An optional per-user xmsg service is planned so agents can request quota information through the
+bus. Service registration, message schemas and quota-based dispatch are **not available in the
+current command**. Do not assume `send(to="agent-quota", ...)` has a recipient unless an operator
+has independently implemented and registered one.
+
+Source: [command implementation](https://github.com/sini/nix-config/blob/7cbbe3374341d7fc981b09de58c454cade460cf2/pkgs/by-name/agent-quota/agent-quota.py)
+and [package and checks](https://github.com/sini/nix-config/tree/7cbbe3374341d7fc981b09de58c454cade460cf2/pkgs/by-name/agent-quota).

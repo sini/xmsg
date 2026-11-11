@@ -27,13 +27,32 @@ flowchart LR
   end
 
   subgraph Edge["External Gateway Pod"]
+    Client["Hosted MCP client"]
     Gw["xmsg-mcp-gateway<br/>(OAuth / MCP HTTP)"]
+    EdgeNode["xmsg leaf node"]
+    Client -->|"HTTPS / OAuth"| Gw
+    Gw -->|"local Unix service client"| EdgeNode
   end
 
   FullA -- "mTLS pull & send (/fed/v2/inbox)" --> Hub
   Leaf -- "mTLS pull (/fed/v2/inbox)" --> Hub
-  Gw -- "mTLS / service client" --> Hub
+  EdgeNode -- "mTLS /fed/v2" --> Hub
 ```
+
+## Choose a topology
+
+| Setup | Use it for | Connection pattern |
+|---|---|---|
+| Single node | Harnesses and services under one OS user | Local Unix sockets; no federation certificate needed. |
+| Direct peers | Nodes that can accept mTLS connections | Pinned keys or CA-signed identities in each node's peers file. |
+| Leaf sidecar | One service in a pod | Local same-UID sockets, required loopback listener, outbound polling to a hub. |
+| Full node with an outbound link | Interactive harnesses behind NAT | Keep normal harness registration; dial the hub and pull its mailbox. |
+| Forwarding hub | A knows H, H knows B, A does not dial B | Set H as A's default route and grant forwarding at both receiving hops. |
+
+Different users on the same host can run separate nodes such as `alice.workstation` and
+`bob.workstation`; the same user can have nodes on several hosts. Their explicit node names
+distinguish them. [Bare recipient resolution](/concepts/addressing/#how-a-bare-reference-resolves-over-the-federated-view)
+prefers the sender's own user's nodes for an instance ID before consulting other users.
 
 ## Leaf node mode (`--leaf`)
 
@@ -41,7 +60,8 @@ For single-service workloads running inside containers or Kubernetes pods (such 
 a Matrix bridge sidecar), `xmsg serve --leaf` runs as an outbound-only sidecar:
 
 - **Local sockets:** Binds `$XDG_RUNTIME_DIR/xmsg/register.sock` (or `--leaf-register-sock`),
-  `agent.sock`, and optional loopback HTTP (`--listen`).
+  `agent.sock`, and a **required** HTTP listener (`--listen`, or `XMSG_LISTEN`). Keep it on
+  loopback inside the pod's isolated network namespace, even when the worker uses Unix sockets.
 - **Principal admission (`--leaf-principal`):** Daemons registering on `register.sock` must match
   the configured `--leaf-principal` (for example, `svc:genie-guard`) and the server's UID
   (`SO_PEERCRED`). Because containers in a pod may not share a PID namespace, `/proc/<pid>/exe`
@@ -104,12 +124,94 @@ Client surfaces (`send` over HTTP, `agent.sock`, MCP, and plugins) accept at mos
 `/fed/v2` hop envelope is strictly a node-to-node mechanism.
 </Aside>
 
-## Hosted-dot gateways
+### Complete three-node forwarding example
 
-External hosted agents (such as remote MCP clients connecting over HTTPS/OAuth) connect to the
-`xmsg` bus through a dedicated edge gateway (`xmsg-mcp-gateway`) speaking the
-[Rust service client protocol](/reference/service-client/) to an `xmsg` leaf or hub node. The
-gateway owns external authentication, per-grant authorization, and rate limiting at the outside
-edge, while appearing on the `xmsg` bus as an attested service (`xmsg-gateway@xmsg-gateway.xmsg-gateway`).
+Assume A, H and B have CA-signed certificates with the single URI SANs below, and each daemon
+uses its own certificate/key plus the shared CA bundle. B has a registered service named `worker`.
+The certificate identities derive the node names in the configuration.
 
-{/* TODO: Add dedicated end-to-end deployment guide for xmsg-mcp-gateway once the hosted-dot gateway release is pinned. */}
+| Node | Certificate URI SAN | Federation listener |
+|---|---|---|
+| A | `spiffe://example.org/host/a/user/alice` | `a.example:7788` |
+| H | `spiffe://example.org/host/hub/user/alice` | `hub.example:7788` |
+| B | `spiffe://example.org/host/b/user/alice` | `b.example:7788` |
+
+A's `peers.json` names only H and selects it for unknown explicit destinations:
+
+```json
+{
+  "peers": {
+    "alice.hub": {
+      "address": "hub.example:7788",
+      "ca": "/etc/xmsg/ca.pem",
+      "identities": ["spiffe://example.org/host/hub/user/alice"],
+      "allow": ["send", "reply"],
+      "default_route": true
+    }
+  }
+}
+```
+
+H knows both peers and permits A to request forwarding:
+
+```json
+{
+  "peers": {
+    "alice.a": {
+      "address": "a.example:7788",
+      "ca": "/etc/xmsg/ca.pem",
+      "identities": ["spiffe://example.org/host/a/user/alice"],
+      "allow": ["send", "reply", "forward"]
+    },
+    "alice.b": {
+      "address": "b.example:7788",
+      "ca": "/etc/xmsg/ca.pem",
+      "identities": ["spiffe://example.org/host/b/user/alice"],
+      "allow": ["send", "reply"]
+    }
+  }
+}
+```
+
+B accepts relayed sends from H:
+
+```json
+{
+  "peers": {
+    "alice.hub": {
+      "address": "hub.example:7788",
+      "ca": "/etc/xmsg/ca.pem",
+      "identities": ["spiffe://example.org/host/hub/user/alice"],
+      "allow": ["send", "reply", "relayed"]
+    }
+  }
+}
+```
+
+From A, call `send(to="worker@alice.b", text="review this")`. Direct peer routes take
+precedence over `default_route`; at most one default route is allowed. The explicit destination
+is important here: a bare name needs a complete list view, which this example does not grant.
+
+```mermaid
+sequenceDiagram
+  participant A as alice.a
+  participant H as alice.hub
+  participant B as worker at alice.b
+  A->>H: Send worker@alice.b via default route
+  H->>B: Forward with attested origin and hop mark
+  H-->>A: Delivery receipt
+  B->>H: Reply by original message ID
+  H->>A: Route reply to origin
+```
+
+The receipt reports delivery or queueing; it is separate from the recipient's answer. The
+[three-node source oracle](https://github.com/sini/xmsg/blob/76f8f1e8249777cfb63c4d0287431cbbf6b2ce76/tests/gate_x26_hub_forwarding.rs)
+exercises this permission placement and reply route.
+
+## Bridges and hosted clients
+
+[xmsg-mcp-gateway](/extensions/gateway/) connects hosted MCP clients through a local xmsg
+service, [matrix-xmsg](/extensions/matrix/) bridges Matrix, and
+[agent-quota](/extensions/agent-quota/) currently reports usage as a separate command.
+Each extension owns the behavior outside the bus; xmsg does not authenticate a Matrix user or
+an OAuth caller itself.

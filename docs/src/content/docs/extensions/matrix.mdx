@@ -1,0 +1,35 @@
+---
+title: Matrix with matrix-xmsg
+description: Bridge Matrix support conversations to an expert agent while keeping public-room admission and trust at the bridge.
+---
+
+[matrix-xmsg](https://github.com/sini/matrix-xmsg) connects Matrix support rooms to a dedicated
+expert agent session behind xmsg. It registers with the bus as the `matrix-xmsg` service and
+uses xmsg messages and replies to carry the conversation.
+
+```mermaid
+flowchart LR
+  M["Matrix room"] --> B["matrix-xmsg: admission and context"]
+  B --> X["xmsg service connection"]
+  X --> A["Expert agent session"]
+  A -->|"reply"| X
+  X --> B
+  B -->|"Matrix thread response"| M
+```
+
+## A bridge, with its own admission policy
+
+The bridge handles room and sender admission, mention and thread triggers, size/rate limits,
+context assembly and response placement. It can operate in trusted or public admission modes.
+Public-room content carries sender and tier provenance; a Matrix user's text does not become an
+authorized local instruction merely because the bridge delivered it.
+
+The attested bus sender identifies the bridge service. The bridge's envelope identifies the
+Matrix participants and context inside that message. Configure the bridge's outside-facing
+security and the expert's permissions deliberately; xmsg does not authenticate individual
+Matrix accounts.
+
+For supported triggers, admission modes, guard integration, encryption and deployment, use the
+[Matrix bridge README](https://github.com/sini/matrix-xmsg#readme) and its
+[configuration sources](https://github.com/sini/matrix-xmsg/tree/main/src).
+See also [provenance versus authority](/concepts/trust-model/#provenance-is-not-instruction-authority).

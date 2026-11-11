@@ -1,0 +1,36 @@
+---
+title: Get started
+description: Choose a local harness setup, add a service, then connect machines when you need federation.
+---
+
+import { LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Start with one user's local xmsg daemon and your agent harnesses. Add federation when a recipient
+runs on another node; use a bridge or gateway for an external chat or hosted client.
+
+## Install on your machine
+
+<CardGrid>
+  <LinkCard title="NixOS or Home Manager" href="/operations/nixos-and-home-manager/" description="Configure the daemon and per-harness integrations declaratively." />
+  <LinkCard title="macOS" href="/getting-started/macos/" description="Local sockets and the supported harness setup on Darwin." />
+  <LinkCard title="Ubuntu" href="/getting-started/ubuntu/" description="Build and run a local user service." />
+  <LinkCard title="Other Linux distributions" href="/getting-started/arch/" description="Arch setup; Fedora has its own guide too." />
+</CardGrid>
+
+[Fedora installation](/getting-started/fedora/) is also documented.
+
+## Connect your harness
+
+Choose [Claude Code](/harnesses/claude-code/), [Codex](/harnesses/codex/),
+[Antigravity](/harnesses/antigravity/), [opencode](/harnesses/opencode/),
+[Pi](/harnesses/pi/) or [Hermes](/harnesses/hermes/). Their registration and delivery mechanisms
+differ; each guide gives the supported setup. Use `list` to discover a recipient, `send` to start
+an exchange, and `reply` with the received message ID to answer.
+
+## Extend the route
+
+- [Run a service](/reference/service-client/) with polling and explicit acknowledgements.
+- [Connect two machines](/concepts/federation/) using pinned keys or CA-signed identities.
+- [Use a hub, pod sidecar or outbound link](/concepts/hubs-and-leaves/) when direct inbound reachability differs.
+- [Reach a hosted model](/extensions/gateway/) through the separate MCP gateway.
+- [Connect a Matrix room](/extensions/matrix/) through the Matrix bridge.

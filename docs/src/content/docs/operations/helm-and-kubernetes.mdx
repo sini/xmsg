@@ -13,9 +13,10 @@ hub or as an in-pod `--leaf` sidecar alongside a service worker (`genie-guard`, 
   `spiffe://<trust-domain>/ns/<ns>/sa/<sa>` derives the canonical node name `<sa>.<ns>` (see
   [Federation](/concepts/federation/#self-authenticating-node-names)).
 - **Leaf sidecar mode (`--leaf`):** Share an `emptyDir` volume mounted at `$XDG_RUNTIME_DIR/xmsg`
-  between the `xmsg serve --leaf --leaf-principal svc:<name>` container and the service container
-  running under the same UID (`10001`). If the pod uses loopback HTTP within its isolated network
-  namespace, pass `--listen 127.0.0.1:7787` (`XMSG_LISTEN`). See
+  between the service container and an `xmsg` container running under the same UID (`10001`).
+  **Leaf mode requires `--listen`**, even when the service uses the shared Unix sockets:
+  `xmsg serve --leaf --leaf-principal svc:<name> --listen 127.0.0.1:7787`
+  (or set `XMSG_LISTEN`). Keep the listener inside the pod's isolated loopback namespace. See
   [Hubs, Leaves & Gateways](/concepts/hubs-and-leaves/#leaf-node-mode---leaf).
 - **Secret rotation:** `xmsg serve` polls `--fed-cert`, `--fed-key`, `--peers-file`, and `ca`
   bundles by SHA-256 content hash every 30 seconds (`--fed-reload-interval-secs`), picking up

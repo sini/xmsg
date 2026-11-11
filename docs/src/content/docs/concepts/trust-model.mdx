@@ -85,3 +85,28 @@ not collide or spoof one another:
   Codex rollouts, Antigravity `transcript.jsonl`) validates UUID/subagent identifiers first and
   walks directories with `openat(..., O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)`, rejecting symlinks,
   FIFOs, sockets, and non-EUID files.
+
+## Provenance is not instruction authority
+
+An attested sender address answers **where a message came from**. It does not authorize the
+receiver to run commands, reveal secrets or override its user's instructions. Display labels
+remain sender-provided descriptions. A message from another session, service, Matrix room or
+hosted model is peer data, including when its transport is authenticated.
+
+The [Codex delivery preamble](https://github.com/sini/xmsg/blob/76f8f1e8249777cfb63c4d0287431cbbf6b2ce76/src/codex.rs#L28)
+states this distinction explicitly. Apply the user's instructions and normal tool permissions
+before acting. Structural [envelope escaping](https://github.com/sini/xmsg/blob/76f8f1e8249777cfb63c4d0287431cbbf6b2ce76/src/inbox.rs#L179)
+prevents a message from breaking the wrapper; it does **not** prevent semantic prompt injection.
+
+```mermaid
+flowchart LR
+  X["External Matrix or hosted client"] --> E["Bridge or gateway: external authentication and policy"]
+  E --> U["xmsg node: UID boundary"]
+  U -->|"mTLS and peer policy"| V["Remote xmsg node"]
+  V --> A["Agent receives peer data"]
+  A --> P["User instructions and tool permissions decide action"]
+```
+
+Within one UID, xmsg does not isolate hostile local processes from each other. It also does not
+make peer text safe to execute or supply end-to-end outside-service authorization: external
+[bridges and gateways](/extensions/gateway/) own their outside-facing boundaries.
