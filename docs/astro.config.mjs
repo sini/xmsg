@@ -34,10 +34,10 @@ export default defineConfig({
 	fonts: [
 		{
 			provider: fontProviders.google(),
-			name: "Victor Mono",
-			cssVariable: "--font-victor-mono",
-			weights: [400, 600, 700],
-			styles: ["normal", "italic"],
+			name: "Space Grotesk",
+			cssVariable: "--font-display",
+			weights: [400, 500, 600, 700],
+			styles: ["normal"],
 		},
 		{
 			provider: fontProviders.google(),
@@ -164,6 +164,7 @@ export default defineConfig({
 			components: {
 				Head: './src/components/Head.astro',
 				Footer: './src/components/Footer.astro',
+				SiteTitle: './src/components/SiteTitle.astro',
 				ThemeProvider: './src/components/ThemeProvider.astro',
 				ThemeSelect: './src/components/ThemeSelect.astro',
 			},
