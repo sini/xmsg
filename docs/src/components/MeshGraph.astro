@@ -1,0 +1,251 @@
+---
+/*
+ * The landing hero's graph: what an xmsg mesh is made of.
+ *
+ * Machines are the outlined regions; tinted bands inside a machine are its
+ * users, so one workstation carries two people's nodes. Square tiles are xmsg
+ * nodes (the mark, small), circles are agent sessions, small squares are
+ * services. Solid lines are mTLS federation between nodes, the accent line
+ * joins two people's nodes, thin lines are local sockets, dashed lines are
+ * leaf links that poll a hub, and the dotted line is a hosted model's OAuth
+ * edge to the gateway.
+ *
+ * Two layouts from one data set: a wide one, and a tall, simpler one for
+ * phones (sessions trimmed) so the labels stay legible. Only one is displayed.
+ * Everything is static; packets travel the node-to-node lines only when
+ * motion is welcome, and the graph is complete without them.
+ */
+type Kind = 'node' | 'hub' | 'session' | 'service' | 'hosted';
+type Pt = { x: number; y: number };
+type Layout = 'wide' | 'tall';
+type Item = { id: string; kind: Kind; label: string; wide: Pt; tall?: Pt };
+type Edge = { a: string; b: string; kind: 'local' | 'fed' | 'cross' | 'leaf' | 'oauth'; label?: string };
+type Box = { label: string; wide: number[]; tall: number[]; user?: boolean };
+
+const boxes: Box[] = [
+  { label: 'workstation · one machine, two users', wide: [10, 24, 310, 326], tall: [10, 26, 340, 196] },
+  { label: 'alice', user: true, wide: [22, 54, 286, 136], tall: [20, 56, 155, 156] },
+  { label: 'bob', user: true, wide: [22, 202, 286, 136], tall: [185, 56, 155, 156] },
+  { label: 'buildbox', wide: [360, 24, 200, 150], tall: [10, 352, 108, 150] },
+  { label: 'k8s pod', wide: [590, 196, 180, 140], tall: [126, 352, 108, 150] },
+  { label: 'gateway pod', wide: [590, 24, 180, 140], tall: [242, 352, 108, 150] },
+];
+
+const items: Item[] = [
+  { id: 'aws', kind: 'node', label: 'alice.workstation', wide: { x: 240, y: 120 }, tall: { x: 97, y: 168 } },
+  { id: 'a1', kind: 'session', label: 'claude', wide: { x: 70, y: 120 }, tall: { x: 60, y: 102 } },
+  { id: 'a2', kind: 'session', label: 'codex', wide: { x: 150, y: 120 }, tall: { x: 134, y: 102 } },
+  { id: 'bws', kind: 'node', label: 'bob.workstation', wide: { x: 240, y: 268 }, tall: { x: 262, y: 168 } },
+  { id: 'b1', kind: 'session', label: 'agy', wide: { x: 70, y: 268 }, tall: { x: 225, y: 102 } },
+  { id: 'b2', kind: 'session', label: 'pi', wide: { x: 150, y: 268 }, tall: { x: 300, y: 102 } },
+  { id: 'abb', kind: 'node', label: 'alice.buildbox', wide: { x: 420, y: 95 }, tall: { x: 64, y: 400 } },
+  { id: 'bb1', kind: 'session', label: 'codex', wide: { x: 510, y: 70 } },
+  { id: 'bb2', kind: 'service', label: 'tests', wide: { x: 510, y: 128 }, tall: { x: 64, y: 462 } },
+  { id: 'hub', kind: 'hub', label: 'team.hub', wide: { x: 430, y: 268 }, tall: { x: 180, y: 284 } },
+  { id: 'pl', kind: 'node', label: 'leaf', wide: { x: 630, y: 268 }, tall: { x: 180, y: 400 } },
+  { id: 'ps', kind: 'service', label: 'genie-guard', wide: { x: 712, y: 268 }, tall: { x: 180, y: 462 } },
+  { id: 'gl', kind: 'node', label: 'leaf', wide: { x: 630, y: 95 }, tall: { x: 296, y: 400 } },
+  { id: 'gs', kind: 'service', label: 'gateway', wide: { x: 712, y: 95 }, tall: { x: 296, y: 462 } },
+  { id: 'gpt', kind: 'hosted', label: 'ChatGPT', wide: { x: 810, y: 95 }, tall: { x: 296, y: 560 } },
+];
+
+const edges: Edge[] = [
+  { a: 'a1', b: 'aws', kind: 'local' },
+  { a: 'a2', b: 'aws', kind: 'local' },
+  { a: 'b1', b: 'bws', kind: 'local' },
+  { a: 'b2', b: 'bws', kind: 'local' },
+  { a: 'bb1', b: 'abb', kind: 'local' },
+  { a: 'bb2', b: 'abb', kind: 'local' },
+  { a: 'ps', b: 'pl', kind: 'local' },
+  { a: 'gs', b: 'gl', kind: 'local' },
+  { a: 'aws', b: 'bws', kind: 'cross', label: 'cross-user' },
+  { a: 'aws', b: 'abb', kind: 'fed', label: 'mTLS' },
+  { a: 'bws', b: 'hub', kind: 'fed' },
+  { a: 'abb', b: 'hub', kind: 'fed' },
+  { a: 'pl', b: 'hub', kind: 'leaf' },
+  { a: 'gl', b: 'hub', kind: 'leaf' },
+  { a: 'gpt', b: 'gs', kind: 'oauth', label: 'OAuth' },
+];
+
+const layouts: { name: Layout; view: string }[] = [
+  { name: 'wide', view: '0 0 850 360' },
+  { name: 'tall', view: '0 0 360 600' },
+];
+
+const at = (id: string, l: Layout): Pt | undefined => {
+  const it = items.find((i) => i.id === id)!;
+  return l === 'wide' ? it.wide : it.tall;
+};
+const line = (e: Edge, l: Layout) => {
+  const p = at(e.a, l);
+  const q = at(e.b, l);
+  return p && q ? `M${p.x} ${p.y} L${q.x} ${q.y}` : null;
+};
+const mid = (e: Edge, l: Layout) => {
+  const p = at(e.a, l)!;
+  const q = at(e.b, l)!;
+  return { x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 };
+};
+const moving = new Set(['fed', 'cross', 'leaf']);
+---
+
+<figure class="xm-mesh">
+  {
+    layouts.map(({ name, view }) => (
+      <svg class={`xm-mesh-${name}`} viewBox={view} role="img" aria-labelledby={`xm-mesh-t-${name}`}>
+        <title id={`xm-mesh-t-${name}`}>
+          An xmsg mesh: alice and bob each run a node on the same workstation and message each
+          other's sessions; alice also has a node on a build box; a team hub links them to a leaf
+          service in a Kubernetes pod and to a gateway that a hosted ChatGPT client reaches over
+          OAuth.
+        </title>
+        {boxes.map((b) => {
+          const [x, y, w, h] = b[name];
+          return (
+            <g class:list={['box', { user: b.user }]}>
+              <rect x={x} y={y} width={w} height={h} rx={b.user ? 8 : 12} />
+              <text x={x + 12} y={y + 18}>{name === 'tall' && !b.user ? b.label.split(' · ')[0] : b.label}</text>
+            </g>
+          );
+        })}
+        {edges.map((e) => {
+          const d = line(e, name);
+          return d && <path class={`edge ${e.kind}`} d={d} />;
+        })}
+        {items.map((it) => {
+          const p = name === 'wide' ? it.wide : it.tall;
+          if (!p) return null;
+          const s = it.kind === 'hub' ? 30 : 22;
+          const k = s / 5;
+          return (
+            <g class={`item ${it.kind}`}>
+              {it.kind === 'node' || it.kind === 'hub' ? (
+                <>
+                  <rect x={p.x - s / 2} y={p.y - s / 2} width={s} height={s} rx={s / 4} />
+                  <path d={`M${p.x - k} ${p.y - k}L${p.x + k} ${p.y + k}M${p.x + k} ${p.y - k}L${p.x - k} ${p.y + k}`} />
+                </>
+              ) : it.kind === 'service' ? (
+                <rect x={p.x - 8} y={p.y - 8} width="16" height="16" rx="3" />
+              ) : (
+                <circle cx={p.x} cy={p.y} r={it.kind === 'hosted' ? 11 : 8} />
+              )}
+              <text x={p.x} y={p.y + (it.kind === 'hub' ? 32 : 26)} text-anchor="middle">{it.label}</text>
+            </g>
+          );
+        })}
+        {edges.map((e) => {
+          const d = line(e, name);
+          if (!d || !e.label) return null;
+          const m = mid(e, name);
+          const cross = e.kind === 'cross';
+          return (
+            <text class="elabel" x={m.x + (cross ? -10 : 0)} y={m.y - 8} text-anchor={cross ? 'end' : 'middle'}>
+              {e.label}
+            </text>
+          );
+        })}
+        {edges.filter((e) => moving.has(e.kind)).map((e, i) => {
+          const d = line(e, name);
+          return d && <circle class="packet" r="3.5" style={`offset-path: path('${d}'); --i:${i}`} />;
+        })}
+      </svg>
+    ))
+  }
+  <figcaption>
+    <span><i class="g-node" aria-hidden="true"></i>xmsg node</span>
+    <span><i class="g-session" aria-hidden="true"></i>agent session</span>
+    <span><i class="g-service" aria-hidden="true"></i>service</span>
+    <span><i class="g-fed" aria-hidden="true"></i>mTLS federation</span>
+    <span><i class="g-cross" aria-hidden="true"></i>between two people's nodes</span>
+    <span><i class="g-leaf" aria-hidden="true"></i>leaf link to a hub</span>
+    <span><i class="g-oauth" aria-hidden="true"></i>hosted model over OAuth</span>
+  </figcaption>
+</figure>
+
+<style>
+  .xm-mesh { margin: 0; }
+  .xm-mesh svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .xm-mesh-tall { display: none !important; }
+
+  @media (max-width: 40rem) {
+    .xm-mesh-wide { display: none !important; }
+    .xm-mesh-tall { display: block !important; }
+  }
+
+  /* A halo in the page colour keeps a label legible where a line runs under it. */
+  text {
+    font-family: var(--sl-font-mono);
+    font-size: 11.5px;
+    fill: var(--sl-color-gray-2);
+    paint-order: stroke;
+    stroke: var(--sl-color-bg);
+    stroke-width: 4px;
+    stroke-linejoin: round;
+  }
+
+  .box rect {
+    fill: color-mix(in srgb, var(--sl-color-bg-nav) 60%, transparent);
+    stroke: var(--sl-color-gray-4);
+    stroke-dasharray: 5 4;
+  }
+  .box text { fill: var(--sl-color-gray-2); font-family: var(--font-display); font-size: 12.5px; font-weight: 600; }
+  .box.user rect {
+    fill: color-mix(in srgb, var(--sl-color-accent) 7%, transparent);
+    stroke: color-mix(in srgb, var(--sl-color-accent) 35%, transparent);
+    stroke-dasharray: none;
+  }
+  .box.user text { fill: var(--sl-color-text-accent); }
+
+  .edge { fill: none; stroke-linecap: round; }
+  .edge.local { stroke: var(--sl-color-gray-4); stroke-width: 1.2; }
+  .edge.fed { stroke: var(--sl-color-gray-2); stroke-width: 2; }
+  .edge.cross { stroke: var(--sl-color-accent); stroke-width: 2.4; }
+  .edge.leaf { stroke: var(--sl-color-gray-3); stroke-width: 1.6; stroke-dasharray: 6 5; }
+  .edge.oauth { stroke: var(--sl-color-purple); stroke-width: 1.6; stroke-dasharray: 1.5 4; }
+
+  .elabel { font-size: 11px; fill: var(--sl-color-gray-2); }
+
+  .item.node rect, .item.hub rect { fill: var(--sl-color-accent); }
+  .item.node path, .item.hub path { stroke: var(--sl-color-black); stroke-width: 2; stroke-linecap: round; }
+  .item.hub text { font-weight: 600; }
+  .item.session circle { fill: var(--sl-color-bg); stroke: var(--sl-color-blue); stroke-width: 2.2; }
+  .item.service rect { fill: var(--sl-color-bg); stroke: var(--sl-color-green); stroke-width: 2.2; }
+  .item.hosted circle { fill: var(--sl-color-bg); stroke: var(--sl-color-purple); stroke-width: 2.2; stroke-dasharray: 3 2.5; }
+  .item text { fill: var(--sl-color-white); }
+
+  .packet { display: none; fill: var(--sl-color-accent-high); }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .packet {
+      display: inline;
+      animation: xm-travel 4s ease-in-out infinite;
+      animation-delay: calc(var(--i) * 0.7s);
+    }
+
+    @keyframes xm-travel {
+      0% { offset-distance: 0%; opacity: 0; }
+      12% { opacity: 1; }
+      85% { opacity: 1; }
+      100% { offset-distance: 100%; opacity: 0; }
+    }
+  }
+
+  figcaption {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.2rem;
+    margin-top: 0.6rem;
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-2);
+  }
+
+  figcaption span { display: inline-flex; align-items: center; gap: 0.4rem; }
+  figcaption i { display: inline-block; flex: none; }
+  .g-node { width: 0.8rem; height: 0.8rem; border-radius: 3px; background: var(--sl-color-accent); }
+  .g-session { width: 0.75rem; height: 0.75rem; border-radius: 50%; border: 2px solid var(--sl-color-blue); }
+  .g-service { width: 0.7rem; height: 0.7rem; border-radius: 2px; border: 2px solid var(--sl-color-green); }
+  .g-fed { width: 1.4rem; height: 2px; background: var(--sl-color-gray-2); }
+  .g-cross { width: 1.4rem; height: 3px; background: var(--sl-color-accent); }
+  .g-leaf { width: 1.4rem; border-top: 2px dashed var(--sl-color-gray-3); }
+  .g-oauth { width: 1.4rem; border-top: 2px dotted var(--sl-color-purple); }
+</style>

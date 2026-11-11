@@ -19,6 +19,7 @@ message, and get replies pushed into their live inbox. Headless programs join th
 - You have more than one machine, such as a laptop, a build server, a GPU box or a Kubernetes
   cluster, and want agents on each to work together.
 - You pay for more than one model or subscription and want to use them together.
+- You work in a team and want your agents to ask each other for reviews and help.
 - You are building a bot or service that agents should be able to talk to.
 
 ## What you can do with it
@@ -31,6 +32,67 @@ talk over [mTLS federation](/concepts/federation/). A machine behind NAT can dia
 accepting connections, and a Kubernetes pod can join as a small leaf node next to its worker. See
 [hubs, leaves and gateways](/concepts/hubs-and-leaves/). The reply comes back to the session that
 asked, on whichever machine it runs.
+
+### Work with other people's agents
+
+Each person runs their own xmsg node, so their sessions stay theirs. Their agents can still talk.
+Two OS users on one machine run two nodes, such as `alice.workstation` and `bob.workstation`.
+Teammates on different machines do the same, and a [shared hub](/case-studies/team-hub/) can
+connect laptops that cannot reach each other directly. The nodes federate over mTLS, and each side
+has to opt in.
+
+Here alice's peers file names bob's node. bob's file has the mirror entry, naming alice's node. On
+one machine, the two nodes listen on different ports (`--fed-listen`). The names come from
+certificates signed by a shared CA (`spiffe://example.org/host/workstation/user/bob` gives
+`bob.workstation`; see [federation](/concepts/federation/#self-authenticating-node-names)).
+
+```json title="alice's peers.json"
+{
+  "bob.workstation": {
+    "address": "127.0.0.1:7789",
+    "ca": "/etc/xmsg/team-ca.pem",
+    "identities": ["spiffe://example.org/host/workstation/user/bob"],
+    "allow": ["send", "reply", "list"]
+  }
+}
+```
+
+Then alice's Claude Code session asks bob's Codex session for a review, and the answer comes back
+to her inbox:
+
+```text
+alice's session, on alice.workstation
+  › send(to="9e41b7d2-…@bob.workstation", text="Could you review the lexer fix on branch fix-lexer?")
+    outcome: delivered · message_id 01JD3K…
+
+bob's session, on bob.workstation, receives
+  [xmsg] ref=2f6c1e0a-…@alice.workstation message_id=01JD3K… — reply with the xmsg reply tool
+  Could you review the lexer fix on branch fix-lexer?
+  › reply(message_id="01JD3K…", text="Looks right. One edge case: an empty input.")
+
+alice's session, pushed into its inbox
+  [xmsg] reply to message_id=01JD3K… — message_id=01JD3M…; reply with the xmsg reply tool
+  Looks right. One edge case: an empty input.
+```
+
+What applies along the way:
+
+- **Consent is in both peers files.** A node accepts a peer only if its peers file names it, and
+  only for the operations in that entry's `allow` list: `send`, `reply`, `list` and others. To
+  stop an operation, remove it from `allow`. `targets` limits which of your recipients that peer
+  can reach, and `principals` limits which of its senders you accept.
+- **Address the other person's node by name.** `@bob.workstation` picks one node. A bare host,
+  `@workstation`, matches both people's nodes and returns `ambiguous`. A bare session ID checks
+  your own user's nodes first.
+- **Every message carries its sender's address.** bob sees `id@alice.workstation`, attested by
+  the node that authenticated the connection, not taken from the message text.
+- **Replies go back to the origin.** bob's reply travels to alice's node, which pushes it into her
+  session's inbox.
+- **Messages are data, not orders.** bob's agent still follows bob's instructions and tool
+  permissions. Read the [trust model](/concepts/trust-model/).
+
+The [team hub case study](/case-studies/team-hub/) walks through three developers, their laptops
+and a shared hub.
 
 ### Use several models, subscriptions and harnesses together
 

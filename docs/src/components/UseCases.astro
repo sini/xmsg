@@ -1,6 +1,6 @@
 ---
 /*
- * The landing's short use-case grid. The overview carries the fuller version
+ * The landing's short use-case grid (seven cards; the teammate case is featured). The overview carries the fuller version
  * of each case; keep the two in step when a case is added or reworded.
  */
 const cases = [
@@ -9,6 +9,13 @@ const cases = [
     route: 'laptop → build box, GPU box, k8s pod',
     body: 'Send a build, a test run or a training job to the machine that should do it. The reply comes back to the session that asked.',
     href: '/concepts/federation/',
+  },
+  {
+    title: "Work with a teammate's agents",
+    route: 'alice.laptop → team.hub → bob.laptop',
+    body: "Ask a colleague's session for a review or a hand with a problem, across users and machines. Each side opts in through its peers file, and every message carries its sender's address.",
+    href: '/case-studies/team-hub/',
+    wide: true,
   },
   {
     title: 'Mix models, subscriptions and harnesses',
@@ -46,7 +53,7 @@ const cases = [
 <ul class="xm-uses not-content">
   {
     cases.map((c) => (
-      <li>
+      <li class:list={{ wide: c.wide }}>
         <a href={c.href}>
           <span class="xm-route">{c.route}</span>
           <span class="xm-title">{c.title}</span>
@@ -60,7 +67,7 @@ const cases = [
 <style>
   .xm-uses {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
     gap: 0.9rem;
     margin: 1.25rem 0 0;
     padding: 0;
@@ -82,6 +89,14 @@ const cases = [
   }
 
   .xm-uses li:nth-child(even) a { border-top-color: var(--sl-color-blue); }
+
+  /* The featured card spans two columns, so seven cards fill two rows of four. */
+  .xm-uses li.wide { grid-column: span 2; }
+  .xm-uses li.wide a { border-top-color: var(--sl-color-purple); }
+
+  @media (max-width: 34rem) {
+    .xm-uses li.wide { grid-column: auto; }
+  }
 
   .xm-uses a:hover,
   .xm-uses a:focus-visible {
