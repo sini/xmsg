@@ -71,8 +71,33 @@ xmsg register codex --revoke <session-uuid>
 xmsg register codex --unrevoke <session-uuid>
 ```
 
-Set `XMSG_CODEX_LABEL=<label>` (or pass `--label <label>` to `xmsg register codex`) at launch to
-assign a human-readable label to the Codex session.
+## Labels with a shared daemon
+
+Use one real, named worktree per concurrent worker. When no explicit label reaches the hook,
+xmsg uses the basename of the session rollout's cwd as its display label. Run each Codex launch
+in a separate terminal:
+
+```sh
+git -C /path/to/project worktree add -b worker-a ../worker-a HEAD
+git -C /path/to/project worktree add -b worker-b ../worker-b HEAD
+codex -C /path/to/worker-a
+codex -C /path/to/worker-b
+```
+
+Do not rely on a per-client `XMSG_CODEX_LABEL` to name sessions that share an already-running
+per-home daemon. The hook sees the server process's startup environment, not each later CLI
+client's launch environment. The variable applies to a Codex process's own embedded execution
+or a freshly started daemon. `xmsg register codex --label <label>` remains an explicit hook
+argument; it does not make a launch variable cross that daemon boundary.
+
+A running daemon may retain an older explicit environment label and mask the cwd fallback.
+The owner can arrange a clean start when idle; workers should not restart live services for
+labeling. Use the full instance address from `list` while labels collide. Labels are descriptions,
+not authorization or identity boundaries, and no authentication/profile changes are needed for
+this worktree workflow.
+
+This behavior was measured with Codex 0.167.0 and matches its
+[server-side hook environment snapshot](https://github.com/openai/codex/blob/086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a/codex-rs/hooks/src/registry.rs#L83).
 
 ## Home Manager switch
 
