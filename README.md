@@ -40,6 +40,16 @@
 
 See [NixOS & Home Manager](https://xmsg.dev/operations/nixos-and-home-manager/) for server options and mTLS peer configuration.
 
+With the daemon running, use the [operator CLI](https://xmsg.dev/reference/cli-and-mcp/):
+
+```bash
+xmsg list
+xmsg send worker "Build status?" --from operator
+printf '%s\n' "Build status?" | xmsg send worker - --json
+xmsg replies MESSAGE_ID --wait 10
+xmsg show MESSAGE_ID --json
+```
+
 ---
 
 ## Documentation

@@ -1,28 +1,60 @@
 ---
 title: CLI & MCP Server
-description: Command-line subcommands and flags for xmsg serve, xmsg mcp, xmsg register, xmsg unregister, and xmsg check-peers, plus MCP tool schemas.
+description: Operator commands for listing recipients and sending, inspecting, and reading messages, daemon and harness commands, and MCP tool schemas.
 ---
 
 ## Command-line interface (`src/main.rs`)
 
-The `xmsg` binary exposes five subcommands: `serve`, `mcp`, `register`, `unregister`, and
-`check-peers`.
+The `xmsg` binary exposes `list`, `send`, `replies`, `show`, `serve`, `mcp`,
+`register`, `unregister`, and `check-peers`.
 
-```rust file=<rootDir>/src/main.rs#L16-L65
+```rust file=<rootDir>/src/main.rs#L18-L60
 ```
+
+### Operator commands
+
+These commands use the daemon's existing HTTP Unix socket, on Linux and macOS.
+Pass `--http-sock PATH` to any operator command or set `XMSG_HTTP_SOCK`; otherwise
+the CLI uses the daemon's runtime-directory default, including the macOS fallback.
+
+```bash
+xmsg list [--node NODE] [--kind service|instance|subagent] [--status live|inactive] [--json]
+xmsg send RECIPIENT [TEXT|-] [--from LABEL] [--idempotency-key KEY] [--json]
+xmsg replies MESSAGE_ID [--wait SECONDS] [--json]
+xmsg show MESSAGE_ID [--json]
+```
+
+- `list` prints a recipient table with address, kind, label, status, and node, followed
+  by the nodes' status. The default is live recipients; filters narrow the daemon's view.
+- `send` prints the message ID, outcome, and resolved recipient address. `-` or omitted
+  text reads stdin through EOF, preserving newlines. An idempotency key reuses the same
+  send for identical sender, recipient, and text; requests are not automatically retried.
+- `replies` prints stored reply records, optionally waiting `0..60` seconds for the first
+  reply. `show` prints message metadata and replies. Both use formatted JSON by default.
+
+`--json` emits the server's response as compact JSON on one line, preserving its field
+names and object/array shape. Refusals exit non-zero and retain the server error code;
+JSON mode also writes the server's error object to stdout.
+
+`--from` is a plain display label, defaulting to `cli`; values containing `@` or `/` are
+rejected. An ordinary shell caller is anonymous and appears as `cli · anon@node`.
+The daemon's existing attribution and authorization rules apply to traced callers.
+Writing a reply from an anonymous
+shell is not an operator CLI command; agents and registered services use their existing
+reply interfaces.
 
 ### `xmsg serve`
 
 Starts the local IPC and optional mTLS federation daemon:
 
-```rust file=<rootDir>/src/main.rs#L157-L258
+```rust file=<rootDir>/src/main.rs#L175-L275
 ```
 
 ### `xmsg mcp`
 
 Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
 
-```rust file=<rootDir>/src/main.rs#L260-L285
+```rust file=<rootDir>/src/main.rs#L278-L302
 ```
 
 ### `xmsg register`
@@ -30,13 +62,15 @@ Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
 Registers credentials or handles lifecycle hooks for [Antigravity](/harnesses/antigravity/),
 [Claude Code](/harnesses/claude-code/), and [Codex](/harnesses/codex/):
 
-```rust file=<rootDir>/src/main.rs#L67-L155
+```rust file=<rootDir>/src/main.rs#L85-L172
 ```
 
 ### `xmsg check-peers`
 
 Validates a `peers.json` file against all naming, trust-model (`pin` vs. `ca` + `identities`), and
 non-overlap rules that `xmsg serve` enforces, exiting `0` on success or non-zero naming the failure:
+
+Use it in CI or before a deploy.
 
 ```bash
 xmsg check-peers /path/to/peers.json --fed-cert /path/to/node.crt

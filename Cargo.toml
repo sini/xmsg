@@ -455,3 +455,8 @@ required-features = ["client"]
 name = "shared_client_live"
 path = "tests/shared_client_live.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "operator_cli"
+path = "tests/operator_cli.rs"
+required-features = ["daemon"]
