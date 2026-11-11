@@ -1359,8 +1359,8 @@ async fn c3_registration_xb2_and_continuous_lease_watch() {
         "continuously held sibling root must stay live: {sibling_ok:?}"
     );
 
-    // 5. Bus restart invalidates persisted `codex_roots` rows (`startup_invalidate_codex`)
-    // and marks any persisted root generation revoked until a fresh SessionStart.
+    // Restart parks every root without automatically restoring admission. A subsequent
+    // attributed tool call must establish a fresh continuous writer witness.
     xmsg::codex::init_for_state(
         &env.state,
         CodexConfig {
@@ -1401,8 +1401,8 @@ async fn c3_registration_xb2_and_continuous_lease_watch() {
     )
     .await;
     assert!(
-        after_restart.is_err(),
-        "persisted root generation must not be restored across bus restart without continuous lease watch"
+        after_restart.is_ok(),
+        "known root must establish a fresh writer witness on its attributed MCP call: {after_restart:?}"
     );
 }
 
@@ -2562,9 +2562,18 @@ async fn c15_delivery_races_unknown_state_and_batch_limits() {
                 envelope: format!("[xmsg] {body}"),
                 delivered_at: None,
             };
-        storage::insert_message(&db, &make_msg(m1, root_p, "msg 1", 1000)).unwrap();
-        storage::enqueue_codex_root_message(&db, root_p, 1, &make_pi(m1, root_p, "msg 1", 1000))
-            .unwrap();
+        storage::insert_message(
+            &db,
+            &make_msg(m1, root_p, "msg 1", storage::now_epoch_secs()),
+        )
+        .unwrap();
+        storage::enqueue_codex_root_message(
+            &db,
+            root_p,
+            1,
+            &make_pi(m1, root_p, "msg 1", storage::now_epoch_secs()),
+        )
+        .unwrap();
 
         // Push reserves M1 first:
         let push_reserved = storage::reserve_codex_single_for_push(&db, root_p, 1, m1).unwrap();
@@ -2575,7 +2584,7 @@ async fn c15_delivery_races_unknown_state_and_batch_limits() {
         );
 
         // Concurrent Stop hook drain while M1 is `inflight` must NOT reserve M1!
-        let hook_reserved = storage::reserve_codex_hook_batch(&db, root_p, 1).unwrap();
+        let hook_reserved = storage::reserve_codex_hook_batch(&db, root_p, 1, 3600).unwrap();
         assert!(
             hook_reserved.is_none(),
             "hook drain must not consume a message already reserved inflight by push"
@@ -2585,7 +2594,7 @@ async fn c15_delivery_races_unknown_state_and_batch_limits() {
         storage::release_codex_handoff_to_pending(&db, &[m1.to_string()]).unwrap();
 
         // Now hook drain reserves M1, and simulating a partial hook reply / socket drop transitions M1 to `unknown`!
-        let (ids, _) = storage::reserve_codex_hook_batch(&db, root_p, 1)
+        let (ids, _) = storage::reserve_codex_hook_batch(&db, root_p, 1, 3600)
             .unwrap()
             .expect("M1 should be pending again");
         assert_eq!(ids, vec![m1.to_string()]);
@@ -2598,7 +2607,7 @@ async fn c15_delivery_races_unknown_state_and_batch_limits() {
 
         // Subsequent hook drain must NEVER auto-replay `unknown` M1!
         assert!(
-            storage::reserve_codex_hook_batch(&db, root_p, 1)
+            storage::reserve_codex_hook_batch(&db, root_p, 1, 3600)
                 .unwrap()
                 .is_none(),
             "unknown handoff must never be auto-replayed"
@@ -2676,7 +2685,7 @@ async fn c15_delivery_races_unknown_state_and_batch_limits() {
             &db,
             &storage::MessageRecord {
                 id: m_drop.to_string(),
-                created_at: 1001,
+                created_at: storage::now_epoch_secs(),
                 session_id: root_live.to_string(),
                 from_name: "sender@test.node".to_string(),
                 bytes: 13,
@@ -2696,7 +2705,7 @@ async fn c15_delivery_races_unknown_state_and_batch_limits() {
             &storage::PiPendingMessage {
                 id: m_drop.to_string(),
                 session_id: root_live.to_string(),
-                created_at: 1001,
+                created_at: storage::now_epoch_secs(),
                 from_name: "sender@test.node".to_string(),
                 bytes: 13,
                 text: "dropped reply".to_string(),
@@ -2757,7 +2766,7 @@ async fn c15_delivery_races_unknown_state_and_batch_limits() {
             &db,
             &storage::MessageRecord {
                 id: m_fresh.to_string(),
-                created_at: 1002,
+                created_at: storage::now_epoch_secs(),
                 session_id: root_live.to_string(),
                 from_name: "sender@test.node".to_string(),
                 bytes: 8,
@@ -2777,7 +2786,7 @@ async fn c15_delivery_races_unknown_state_and_batch_limits() {
             &storage::PiPendingMessage {
                 id: m_fresh.to_string(),
                 session_id: root_live.to_string(),
-                created_at: 1002,
+                created_at: storage::now_epoch_secs(),
                 from_name: "sender@test.node".to_string(),
                 bytes: 8,
                 text: "FRESH_OK".to_string(),
@@ -3398,9 +3407,8 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
     fs::remove_file(&root_rollout_path).unwrap();
     fs::rename(&orig_rollout_backup, &root_rollout_path).unwrap();
 
-    // C2: While `root_p` is parked (`StaleAfterResume`), an MCP tool call from `root_p` is refused,
-    // `xmsg serve` restarts (`init_for_state`), and a valid-witness resume follows and returns `Ok`
-    // (proving `resolve_codex_mcp_caller` did NOT flip `codex_roots.revoked = 1` on a parked root).
+    // A known parked root now re-attests on an attributed MCP call using the full
+    // live writer witness, without an extra SessionStart hook or operator unrevoke.
     let parked_mcp_res = handle_agent_frame(
         &env.state,
         &peer_o2,
@@ -3419,8 +3427,8 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
     )
     .await;
     assert!(
-        parked_mcp_res.is_err(),
-        "C2: MCP call from parked root must be refused"
+        parked_mcp_res.is_ok(),
+        "known parked root with a valid witness must re-attest on MCP call: {parked_mcp_res:?}"
     );
     xmsg::codex::init_for_state(
         &env.state,
@@ -6157,7 +6165,10 @@ async fn xr7_codex_unrevoke_cli_and_sqlite_first_persistence() {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(revoked, 1, "SQLite row must still have revoked=1 after read-only write refusal");
+        assert_eq!(
+            revoked, 1,
+            "SQLite row must still have revoked=1 after read-only write refusal"
+        );
         db.execute_batch("PRAGMA query_only = OFF;").unwrap();
     }
 
@@ -6274,4 +6285,649 @@ async fn xr7_codex_unrevoke_cli_and_sqlite_first_persistence() {
     }
 
     srv_handle.abort();
+}
+
+fn restart_codex_fixture(env: &CodexTestEnv) {
+    init_for_state(
+        &env.state,
+        CodexConfig {
+            trusted_codex_exes: vec![env.codex_exe.clone()],
+            codex_homes: vec![env.codex_home.clone()],
+            proc_root: env.proc_root.clone(),
+        },
+    );
+}
+
+#[tokio::test]
+async fn restart_root_queues_before_tool_call_and_explicit_revoke_stays_gone() {
+    let env = CodexTestEnv::new();
+    let root = "019a0000-0000-7000-8000-000000000461";
+    let pid = 7461;
+    env.write_fake_proc(pid, 1, "7461", &env.codex_exe);
+    env.create_writer_lock(&env.codex_home, pid, root, 3);
+    env.write_root_rollout(&env.codex_home, root, "/workspace");
+    let peer = env.peer(pid);
+    handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id":root,"source":"startup"}),
+    )
+    .await
+    .unwrap();
+    restart_codex_fixture(&env);
+    let sent = xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        root,
+        "RESTART_QUEUED",
+        None,
+    )
+    .await;
+    assert!(
+        sent.is_ok(),
+        "known nonrevoked root must queue before any tool call: {sent:?}"
+    );
+    assert_eq!(sent.unwrap().outcome, "queued");
+    let resumed = handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id":root,"source":"resume"}),
+    )
+    .await
+    .unwrap();
+    assert!(resumed.stdout.contains("RESTART_QUEUED"));
+    storage::complete_codex_handoff_accepted(
+        &env.state.db.lock().unwrap(),
+        root,
+        &resumed.handoff_ids,
+    )
+    .unwrap();
+    let again = handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "UserPromptSubmit",
+        None,
+        &json!({"session_id":root}),
+    )
+    .await
+    .unwrap();
+    assert!(again.handoff_ids.is_empty());
+    xmsg::codex::for_state(&env.state)
+        .lock()
+        .unwrap()
+        .store
+        .revoke_by_operator(root);
+    storage::invalidate_codex_root(&env.state.db.lock().unwrap(), root).unwrap();
+    assert!(matches!(
+        xmsg::surface::send(
+            &env.state,
+            &xmsg::surface::Sender::Anonymous("fixture".into()),
+            root,
+            "REVOKED",
+            None
+        )
+        .await,
+        Err(xmsg::error::AppError::Gone { .. })
+    ));
+}
+
+#[tokio::test]
+async fn gone_codex_reply_reregisters_fifo_once_with_stable_id_and_ttl() {
+    let env = CodexTestEnv::new();
+    let root = "019a0000-0000-7000-8000-000000000462";
+    let pid = 7462;
+    env.write_fake_proc(pid, 1, "7462", &env.codex_exe);
+    env.create_writer_lock(&env.codex_home, pid, root, 3);
+    env.write_root_rollout(&env.codex_home, root, "/workspace");
+    let peer = env.peer(pid);
+    handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id":root,"source":"startup"}),
+    )
+    .await
+    .unwrap();
+    let mut recipient = xmsg::codex::codex_root_to_session(
+        &xmsg::codex::resolve_codex_root(&env.state.db, root).unwrap(),
+    );
+    recipient.session_id = "019a0000-0000-7000-8000-000000000463".into();
+    recipient.harness = "claude".into();
+    let msg = storage::MessageRecord {
+        id: "ORIGINAL".into(),
+        created_at: storage::now_epoch_secs(),
+        session_id: recipient.session_id.clone(),
+        from_name: "sender".into(),
+        bytes: 1,
+        outcome: "delivered".into(),
+        recipient_harness: "claude".into(),
+        return_harness: Some("codex".into()),
+        return_session_id: Some(root.into()),
+        thread_id: "ORIGINAL".into(),
+        return_host: None,
+    };
+    storage::insert_message(&env.state.db.lock().unwrap(), &msg).unwrap();
+    restart_codex_fixture(&env);
+    let first = xmsg::surface::reply(&env.state, &recipient, "ORIGINAL", "FIRST_REPLY", None)
+        .await
+        .unwrap();
+    let second = xmsg::surface::reply(&env.state, &recipient, "ORIGINAL", "SECOND_REPLY", None)
+        .await
+        .unwrap();
+    assert_eq!(first.push_outcome.as_deref(), Some("sender_gone"));
+    let expired = xmsg::surface::reply(&env.state, &recipient, "ORIGINAL", "EXPIRED_REPLY", None)
+        .await
+        .unwrap();
+    let unknown = xmsg::surface::reply(&env.state, &recipient, "ORIGINAL", "UNKNOWN_REPLY", None)
+        .await
+        .unwrap();
+    let inflight = xmsg::surface::reply(&env.state, &recipient, "ORIGINAL", "INFLIGHT_REPLY", None)
+        .await
+        .unwrap();
+    {
+        let db = env.state.db.lock().unwrap();
+        db.execute(
+            "UPDATE pi_pending_messages SET created_at=?1 WHERE id=?2",
+            rusqlite::params![storage::now_epoch_secs() - 3601, expired.pushed_message_id],
+        )
+        .unwrap();
+        storage::insert_reply(
+            &db,
+            "ORIGINAL",
+            &recipient.session_id,
+            "LEGACY_PULL_ONLY",
+            Some("sender_gone"),
+            None,
+        )
+        .unwrap();
+        storage::mark_codex_handoff_unknown(&db, &[unknown.pushed_message_id.clone().unwrap()])
+            .unwrap();
+        assert!(storage::reserve_codex_single_for_push(
+            &db,
+            root,
+            storage::get_codex_handoff_state(&db, inflight.pushed_message_id.as_ref().unwrap())
+                .unwrap()
+                .unwrap()
+                .2,
+            inflight.pushed_message_id.as_ref().unwrap()
+        )
+        .unwrap());
+        db.execute_batch("CREATE TRIGGER refuse_reply BEFORE INSERT ON replies WHEN NEW.text='ATOMIC_REFUSAL' BEGIN SELECT RAISE(ABORT,'forced refusal'); END;").unwrap();
+    }
+    assert!(
+        xmsg::surface::reply(&env.state, &recipient, "ORIGINAL", "ATOMIC_REFUSAL", None)
+            .await
+            .is_err()
+    );
+    {
+        let db = env.state.db.lock().unwrap();
+        let staged: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM pi_pending_messages WHERE text='ATOMIC_REFUSAL'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(staged, 0, "reply transaction failure must roll back queue");
+        db.execute_batch("DROP TRIGGER refuse_reply;").unwrap();
+    }
+    restart_codex_fixture(&env);
+    // A different attested root cannot claim the original root's staged replies.
+    let other = "019a0000-0000-7000-8000-000000000464";
+    env.create_writer_lock(&env.codex_home, pid, other, 4);
+    env.write_root_rollout(&env.codex_home, other, "/workspace");
+    let other_registration = handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id":other,"source":"startup"}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        other_registration.handoff_ids.is_empty(),
+        "different root must receive no replies"
+    );
+    let resumed = handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id":root,"source":"resume"}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        resumed.stdout.contains("FIRST_REPLY"),
+        "definitely unhanded reply must drain on same-ID reattestation"
+    );
+    assert!(resumed.stdout.find("FIRST_REPLY") < resumed.stdout.find("SECOND_REPLY"));
+    for excluded in [
+        "EXPIRED_REPLY",
+        "UNKNOWN_REPLY",
+        "INFLIGHT_REPLY",
+        "LEGACY_PULL_ONLY",
+    ] {
+        assert!(
+            !resumed.stdout.contains(excluded),
+            "unsafe or expired reply replayed: {excluded}"
+        );
+    }
+    assert!(resumed
+        .handoff_ids
+        .contains(first.pushed_message_id.as_ref().unwrap()));
+    assert!(resumed
+        .handoff_ids
+        .contains(second.pushed_message_id.as_ref().unwrap()));
+    storage::complete_codex_handoff_accepted(
+        &env.state.db.lock().unwrap(),
+        root,
+        &resumed.handoff_ids,
+    )
+    .unwrap();
+    let stored = storage::get_all_replies(&env.state.db.lock().unwrap(), "ORIGINAL").unwrap();
+    assert!(
+        stored
+            .iter()
+            .filter(|r| r.text == "FIRST_REPLY" || r.text == "SECOND_REPLY")
+            .all(|r| r.push_outcome.as_deref() == Some("pushed")),
+        "accepted replay must update reply outcome"
+    );
+    let again = handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id":root,"source":"resume"}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        again.handoff_ids.is_empty(),
+        "second registration must not replay"
+    );
+}
+
+#[tokio::test]
+async fn federated_gone_reply_preserves_attested_return_path_and_stages_once() {
+    let env = CodexTestEnv::new();
+    let root = "019a0000-0000-7000-8000-000000000465";
+    let pid = 7465;
+    env.write_fake_proc(pid, 1, "7465", &env.codex_exe);
+    env.create_writer_lock(&env.codex_home, pid, root, 3);
+    env.write_root_rollout(&env.codex_home, root, "/workspace");
+    let peer = env.peer(pid);
+    handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id":root,"source":"startup"}),
+    )
+    .await
+    .unwrap();
+    let original = storage::MessageRecord {
+        id: "REMOTE_ORIGINAL".into(),
+        created_at: storage::now_epoch_secs(),
+        session_id: "remote-peer".into(),
+        from_name: "sender".into(),
+        bytes: 1,
+        outcome: "delivered".into(),
+        recipient_harness: "fed".into(),
+        return_harness: Some("codex".into()),
+        return_session_id: Some(root.into()),
+        thread_id: "REMOTE_ORIGINAL".into(),
+        return_host: None,
+    };
+    storage::insert_message(&env.state.db.lock().unwrap(), &original).unwrap();
+    let fed = xmsg::fed::FedState {
+        node_name: env.state.node_name.clone(),
+        peers: Arc::new(xmsg::fed::PeersMap::new(HashMap::new())).into(),
+        cert_der: vec![],
+        cert_chain_der: vec![],
+        key_der: vec![],
+        rate_limiter: Arc::new(xmsg::fed::RateLimiter::new(60, 60)),
+        db: env.state.db.clone(),
+        sessions_dirs: env.state.sessions_dirs.clone(),
+        agy_config: env.state.agy_config.clone(),
+        agy_store: env.state.agy_store.clone(),
+        pi_store: env.state.pi_store.clone(),
+        pi_notify_tx: env.state.pi_notify_tx.clone(),
+        svc_store: env.state.svc_store.clone(),
+        svc_notify_tx: env.state.svc_notify_tx.clone(),
+        notify_tx: env.state.notify_tx.clone(),
+        max_body: env.state.max_body,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+        dynamic_tls: Arc::new(RwLock::new(None)),
+        reply_ttl: env.state.reply_ttl,
+        list_queries: Default::default(),
+    };
+    restart_codex_fixture(&env);
+    // Match the HTTP receiver's existing pre-recorded reply-rights path.
+    let remote = "019a0000-0000-7000-8000-000000000466";
+    let mut remote_session = xmsg::codex::codex_root_to_session(&xmsg::codex::CodexRootSnapshot {
+        root_id: remote.into(),
+        codex_home: env.codex_home.clone(),
+        owner_pid: 1,
+        owner_starttime: "1".into(),
+        generation: 1,
+        label: "peer".into(),
+        cwd: None,
+        registered_at: 0,
+        rollout_dev: 0,
+        rollout_ino: 0,
+    });
+    remote_session.harness = "claude".into();
+    let origin = xmsg::surface::Sender::Session(remote_session).origin("remote.node");
+    let id = "REMOTE_STABLE_REPLY";
+    storage::insert_message(
+        &env.state.db.lock().unwrap(),
+        &storage::MessageRecord {
+            id: id.into(),
+            created_at: storage::now_epoch_secs(),
+            session_id: root.into(),
+            from_name: "remote".into(),
+            bytes: 5,
+            outcome: "delivered".into(),
+            recipient_harness: "codex".into(),
+            return_harness: Some("fed".into()),
+            return_session_id: Some(remote.into()),
+            thread_id: original.id.clone(),
+            return_host: Some("remote.node".into()),
+        },
+    )
+    .unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            xmsg::fed::deliver_federated_reply_locally(
+                &fed,
+                "remote.node",
+                &original.id,
+                id,
+                "remote",
+                origin.clone(),
+                "REMOTE_REPLY_BODY",
+                "codex",
+                root
+            )
+            .await
+            .unwrap(),
+            "sender_gone"
+        );
+    }
+    assert_eq!(
+        storage::get_all_replies(&env.state.db.lock().unwrap(), &original.id)
+            .unwrap()
+            .len(),
+        1
+    );
+    let resumed = handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id":root,"source":"resume"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resumed.handoff_ids, [id]);
+    assert!(resumed.stdout.contains("REMOTE_REPLY_BODY"));
+    storage::complete_codex_handoff_accepted(
+        &env.state.db.lock().unwrap(),
+        root,
+        &resumed.handoff_ids,
+    )
+    .unwrap();
+    let rights = storage::get_message(&env.state.db.lock().unwrap(), id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(rights.return_session_id.as_deref(), Some(remote));
+    assert_eq!(rights.return_host.as_deref(), Some("remote.node"));
+    assert_eq!(rights.thread_id, original.id);
+    storage::insert_reply(
+        &env.state.db.lock().unwrap(),
+        &original.id,
+        remote,
+        "LEGACY_ACCEPTED",
+        Some("accepted"),
+        Some("LEGACY_ACCEPTED_ID"),
+    )
+    .unwrap();
+    assert_eq!(
+        xmsg::fed::deliver_federated_reply_locally(
+            &fed,
+            "remote.node",
+            &original.id,
+            "LEGACY_ACCEPTED_ID",
+            "remote",
+            origin,
+            "LEGACY_ACCEPTED",
+            "codex",
+            root
+        )
+        .await
+        .unwrap(),
+        "pushed"
+    );
+    assert!(
+        storage::get_codex_handoff_state(&env.state.db.lock().unwrap(), "LEGACY_ACCEPTED_ID")
+            .unwrap()
+            .is_none(),
+        "legacy accepted record must not acquire fabricated replay custody"
+    );
+}
+
+#[tokio::test]
+async fn bare_mcp_reattestation_pushes_queued_reply_once_against_racing_hook() {
+    let env = CodexTestEnv::new();
+    let pid = std::process::id();
+    let start = xmsg::process::starttime(Path::new(xmsg::process::LIVE_PROC_ROOT), pid).unwrap();
+    let root = "019a0000-0000-7000-8000-000000000467";
+    env.write_fake_proc(pid, 1, &start, &env.codex_exe);
+    env.create_writer_lock(&env.codex_home, pid, root, 3);
+    env.write_root_rollout(&env.codex_home, root, "/workspace");
+    let peer = env.peer(pid);
+    handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id":root,"source":"startup"}),
+    )
+    .await
+    .unwrap();
+    let mut recipient = xmsg::codex::codex_root_to_session(
+        &xmsg::codex::resolve_codex_root(&env.state.db, root).unwrap(),
+    );
+    recipient.session_id = "019a0000-0000-7000-8000-000000000468".into();
+    recipient.harness = "claude".into();
+    storage::insert_message(
+        &env.state.db.lock().unwrap(),
+        &storage::MessageRecord {
+            id: "MCP_ORIGINAL".into(),
+            created_at: storage::now_epoch_secs(),
+            session_id: recipient.session_id.clone(),
+            from_name: "sender".into(),
+            bytes: 1,
+            outcome: "delivered".into(),
+            recipient_harness: "claude".into(),
+            return_harness: Some("codex".into()),
+            return_session_id: Some(root.into()),
+            thread_id: "MCP_ORIGINAL".into(),
+            return_host: None,
+        },
+    )
+    .unwrap();
+    restart_codex_fixture(&env);
+    let reply = xmsg::surface::reply(
+        &env.state,
+        &recipient,
+        "MCP_ORIGINAL",
+        "BARE_MCP_QUEUED_REPLY",
+        None,
+    )
+    .await
+    .unwrap();
+    let list = |session: Option<&str>, thread: Option<&str>| AgentFrame::List {
+        schema_version: None,
+        name: None,
+        node: None,
+        kind: None,
+        status: None,
+        within: None,
+        as_agent: None,
+        codex_session: session.map(str::to_string),
+        codex_thread: thread.map(str::to_string),
+        codex_turn: None,
+    };
+    assert!(
+        handle_agent_frame(&env.state, &peer, list(Some(root), None))
+            .await
+            .is_err(),
+        "missing runtime metadata must refuse"
+    );
+    let unknown = "019a0000-0000-7000-8000-000000000469";
+    env.create_writer_lock(&env.codex_home, pid, unknown, 4);
+    env.write_root_rollout(&env.codex_home, unknown, "/workspace");
+    assert!(
+        handle_agent_frame(&env.state, &peer, list(Some(unknown), Some(unknown)))
+            .await
+            .is_err(),
+        "unknown root must not auto-admit"
+    );
+    let rollout = env.write_root_rollout(&env.codex_home, root, "/workspace");
+    let valid = fs::read(&rollout).unwrap();
+    fs::write(&rollout, b"invalid metadata\n").unwrap();
+    assert!(
+        handle_agent_frame(&env.state, &peer, list(Some(root), Some(root)))
+            .await
+            .is_err(),
+        "invalid metadata witness must refuse"
+    );
+    fs::write(&rollout, valid).unwrap();
+    let lock = env
+        .codex_home
+        .join("thread-writer-locks")
+        .join(format!("{root}.lock"));
+    env.set_writer_lock_fdinfo(pid, 3, &lock, false);
+    assert!(
+        handle_agent_frame(&env.state, &peer, list(Some(root), Some(root)))
+            .await
+            .is_err(),
+        "missing live writer witness must refuse"
+    );
+    env.set_writer_lock_fdinfo(pid, 3, &lock, true);
+    let ctrl = env.codex_home.join("app-server-control");
+    fs::create_dir_all(&ctrl).unwrap();
+    fs::set_permissions(&ctrl, fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = ctrl.join("app-server-control.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        mock_ws_accept(&mut stream).await;
+        let mut reached = Some(reached_tx);
+        let mut release = Some(release_rx);
+        let mut turns = 0;
+        while let Some(message) = mock_ws_read_client_text(&mut stream).await {
+            let id = message["id"].as_str().unwrap_or("");
+            let result = match message["method"].as_str().unwrap_or("") {
+                "initialize" => json!({"userAgent":"fixture"}),
+                "thread/loaded/list" => json!({"data":[root]}),
+                "turn/start" => {
+                    turns += 1;
+                    assert!(message["params"]["input"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("BARE_MCP_QUEUED_REPLY"));
+                    reached.take().unwrap().send(()).unwrap();
+                    release.take().unwrap().await.unwrap();
+                    json!({"turn":{"id":"fixture-turn"}})
+                }
+                _ => continue,
+            };
+            mock_ws_write_server_text(
+                &mut stream,
+                &json!({"jsonrpc":"2.0","id":id,"result":result}).to_string(),
+            )
+            .await;
+            if turns == 1 {
+                break;
+            }
+        }
+        turns
+    });
+    let state = env.state.clone();
+    let peer_for_call = env.peer(pid);
+    let mut call = tokio::spawn(async move {
+        handle_agent_frame(
+            &state,
+            &peer_for_call,
+            AgentFrame::List {
+                schema_version: None,
+                name: None,
+                node: None,
+                kind: None,
+                status: None,
+                within: None,
+                as_agent: None,
+                codex_session: Some(root.into()),
+                codex_thread: Some(root.into()),
+                codex_turn: None,
+            },
+        )
+        .await
+    });
+    tokio::select! {
+        reached = tokio::time::timeout(Duration::from_secs(3), reached_rx) => reached.unwrap().unwrap(),
+        result = &mut call => panic!("MCP stopped before relay: {result:?}"),
+    }
+    let hook = handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "UserPromptSubmit",
+        None,
+        &json!({"session_id":root}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        hook.handoff_ids.is_empty(),
+        "racing hook must not duplicate reserved relay handoff"
+    );
+    release_tx.send(()).unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(3), call)
+        .await
+        .unwrap()
+        .unwrap()
+        .is_ok());
+    assert_eq!(server.await.unwrap(), 1);
+    let record = storage::get_reply_by_pushed_id(
+        &env.state.db.lock().unwrap(),
+        reply.pushed_message_id.as_ref().unwrap(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(record.push_outcome.as_deref(), Some("pushed"));
+    let generation = xmsg::codex::resolve_codex_root(&env.state.db, root)
+        .unwrap()
+        .generation;
+    assert!(storage::next_codex_relay_pending(
+        &env.state.db.lock().unwrap(),
+        root,
+        generation,
+        3600
+    )
+    .unwrap()
+    .is_none());
 }

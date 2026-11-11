@@ -1129,7 +1129,7 @@ pub async fn handle_agent_frame(
                 Ok(CallerTrace::CodexOwner {
                     owner_pid,
                     owner_starttime,
-                }) => resolve_codex_mcp_caller(
+                }) => resolve_codex_mcp_caller_and_drain(
                     state,
                     *owner_pid,
                     owner_starttime,
@@ -1137,7 +1137,7 @@ pub async fn handle_agent_frame(
                     codex_thread.as_deref(),
                     codex_turn.as_deref(),
                     false,
-                )
+                ).await
                 .map(|_| ()),
                 _ if codex_session.is_some() || codex_thread.is_some() => {
                     Err(AppError::NotRecipient(
@@ -1178,7 +1178,7 @@ pub async fn handle_agent_frame(
                 Ok(CallerTrace::CodexOwner {
                     owner_pid,
                     ref owner_starttime,
-                }) => resolve_codex_mcp_caller(
+                }) => resolve_codex_mcp_caller_and_drain(
                     state,
                     owner_pid,
                     owner_starttime,
@@ -1186,7 +1186,7 @@ pub async fn handle_agent_frame(
                     codex_thread.as_deref(),
                     codex_turn.as_deref(),
                     false,
-                ),
+                ).await,
                 _ if codex_session.is_some() || codex_thread.is_some() => {
                     Err(AppError::NotRecipient(
                         "codex runtime metadata rejected: caller does not descend from a trusted --codex-exe process"
@@ -1229,7 +1229,7 @@ pub async fn handle_agent_frame(
                 Ok(CallerTrace::CodexOwner {
                     owner_pid,
                     ref owner_starttime,
-                }) => resolve_codex_mcp_caller(
+                }) => resolve_codex_mcp_caller_and_drain(
                     state,
                     owner_pid,
                     owner_starttime,
@@ -1237,7 +1237,7 @@ pub async fn handle_agent_frame(
                     codex_thread.as_deref(),
                     codex_turn.as_deref(),
                     false,
-                ),
+                ).await,
                 _ if codex_session.is_some() || codex_thread.is_some() => {
                     Err(AppError::NotRecipient(
                         "codex runtime metadata rejected: caller does not descend from a trusted --codex-exe process"
@@ -1275,7 +1275,7 @@ pub async fn handle_agent_frame(
                 Ok(CallerTrace::CodexOwner {
                     owner_pid,
                     owner_starttime,
-                }) => resolve_codex_mcp_caller(
+                }) => resolve_codex_mcp_caller_and_drain(
                     state,
                     *owner_pid,
                     owner_starttime,
@@ -1283,7 +1283,7 @@ pub async fn handle_agent_frame(
                     codex_thread.as_deref(),
                     codex_turn.as_deref(),
                     false,
-                )
+                ).await
                 .map(|_| ()),
                 _ if codex_session.is_some() || codex_thread.is_some() => {
                     Err(AppError::NotRecipient(
@@ -1314,7 +1314,7 @@ pub async fn handle_agent_frame(
                 Ok(CallerTrace::CodexOwner {
                     owner_pid,
                     ref owner_starttime,
-                }) => resolve_codex_mcp_caller(
+                }) => resolve_codex_mcp_caller_and_drain(
                     state,
                     owner_pid,
                     owner_starttime,
@@ -1322,7 +1322,7 @@ pub async fn handle_agent_frame(
                     codex_thread.as_deref(),
                     codex_turn.as_deref(),
                     true,
-                ),
+                ).await,
                 _ if codex_session.is_some() || codex_thread.is_some() => {
                     Err(AppError::NotRecipient(
                         "codex runtime metadata rejected: caller does not descend from a trusted --codex-exe process"
@@ -2074,6 +2074,106 @@ pub fn run_claude_hook(input: &str, agent_sock: Option<&Path>) -> Result<String,
     }
 }
 
+async fn resolve_codex_mcp_caller_and_drain(
+    state: &AppState,
+    owner_pid: u32,
+    owner_starttime: &str,
+    codex_session: Option<&str>,
+    codex_thread: Option<&str>,
+    codex_turn: Option<&str>,
+    require_subagent: bool,
+) -> Result<Session, AppError> {
+    let codex_session = codex_session.map(str::trim);
+    let codex_thread = codex_thread.map(str::trim);
+    let caller = match resolve_codex_mcp_caller(
+        state,
+        owner_pid,
+        owner_starttime,
+        codex_session,
+        codex_thread,
+        codex_turn,
+        require_subagent,
+    ) {
+        Ok(caller) => caller,
+        Err(initial) => {
+            let (Some(root_id), Some(thread_id)) = (codex_session, codex_thread) else {
+                return Err(initial);
+            };
+            if !crate::claim::is_uuid_shaped(root_id)
+                || !crate::claim::is_uuid_shaped(thread_id)
+                || (require_subagent && root_id == thread_id)
+            {
+                return Err(initial);
+            }
+            let snapshot = {
+                let runtime = crate::codex::for_state(state);
+                let mut rt = runtime.lock().unwrap();
+                if !rt.store.is_stale(root_id) || rt.store.is_revoked(root_id) {
+                    return Err(initial);
+                }
+                let mut config = rt.config.clone();
+                config.proc_root = state.agy_config.proc_root.clone();
+                rt.store
+                    .rebind_resumed_root(&config, owner_pid, owner_starttime, root_id, None, None)
+                    .map_err(AppError::NotRecipient)?
+            };
+            {
+                let db = state
+                    .db
+                    .lock()
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                crate::storage::rebind_codex_root(&db, &snapshot)
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+            }
+            resolve_codex_mcp_caller(
+                state,
+                owner_pid,
+                owner_starttime,
+                codex_session,
+                codex_thread,
+                codex_turn,
+                require_subagent,
+            )?
+        }
+    };
+    // Attestation precedes queue inspection. The existing relay bounds each handoff
+    // to two seconds; use the same eight-envelope bound as the hook drain.
+    if let Some(root_id) = codex_session {
+        if let Some(snap) = crate::codex::resolve_codex_root(&state.db, root_id) {
+            let drain_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+            for _ in 0..8 {
+                if tokio::time::Instant::now() >= drain_deadline {
+                    break;
+                }
+                let next = {
+                    let db = state
+                        .db
+                        .lock()
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                    crate::storage::next_codex_relay_pending(
+                        &db,
+                        root_id,
+                        snap.generation,
+                        state.reply_ttl.as_secs(),
+                    )
+                    .map_err(|e| AppError::Internal(e.to_string()))?
+                };
+                let Some((id, envelope)) = next else {
+                    break;
+                };
+                if !matches!(
+                    surface::try_push_codex_queued_message(&state.local(), &snap, &id, &envelope)
+                        .await,
+                    Ok("delivered")
+                ) {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(caller)
+}
+
 /// Resolves a Codex MCP caller under trusted owner `(owner_pid, owner_starttime)` using
 /// `params._meta` (`codex_session`, `codex_thread`, `codex_turn`) (HA9-A.codex §2.2).
 pub fn resolve_codex_mcp_caller(
@@ -2299,6 +2399,7 @@ pub async fn handle_codex_hook_frame(
                                     &db,
                                     session_id,
                                     root_snap.generation,
+                                    state.reply_ttl.as_secs(),
                                 )
                                 .map_err(|e| AppError::Internal(e.to_string()))?
                             };
@@ -2387,6 +2488,7 @@ pub async fn handle_codex_hook_frame(
                                     &db,
                                     session_id,
                                     root_snap.generation,
+                                    state.reply_ttl.as_secs(),
                                 )
                                 .map_err(|e| AppError::Internal(e.to_string()))?
                             };
@@ -2551,6 +2653,7 @@ pub async fn handle_codex_hook_frame(
                             &db,
                             session_id,
                             root_snap.generation,
+                            state.reply_ttl.as_secs(),
                         )
                         .map_err(|e| AppError::Internal(e.to_string()))?
                     };
@@ -2843,6 +2946,7 @@ pub async fn handle_codex_hook_frame(
                             &db,
                             session_id,
                             root_snap.generation,
+                            state.reply_ttl.as_secs(),
                         )
                         .map_err(|e| AppError::Internal(e.to_string()))?
                     };

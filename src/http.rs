@@ -149,6 +149,11 @@ pub enum ResolvedTarget {
     Claude(registry::Session, PathBuf),
     Agy(registry::Session),
     Codex(crate::codex::CodexRootSnapshot, registry::Session),
+    /// Durable identity awaiting fresh writer-lease attestation; never a live carrier.
+    ParkedCodex {
+        session: registry::Session,
+        generation: u64,
+    },
     /// A session served from a `register.sock` poll queue: a pi, or a plugin session
     /// (opencode), whose `harness` names which.
     Pi(registry::Session),
@@ -179,7 +184,7 @@ impl ResolvedTarget {
     /// Not running now: a parked Claude conversation, or an agy one between turns.
     pub(crate) fn is_parked(&self) -> bool {
         match self {
-            ResolvedTarget::Parked { .. } => true,
+            ResolvedTarget::Parked { .. } | ResolvedTarget::ParkedCodex { .. } => true,
             ResolvedTarget::SubagentInTurn { session: s, .. } => s.status == "parked",
             ResolvedTarget::SubagentFallback { parent, .. } => parent.is_parked(),
             ResolvedTarget::Agy(s) => s.status == "parked",
@@ -194,6 +199,7 @@ impl ResolvedTarget {
             | ResolvedTarget::Agy(s)
             | ResolvedTarget::Pi(s)
             | ResolvedTarget::Svc(s)
+            | ResolvedTarget::ParkedCodex { session: s, .. }
             | ResolvedTarget::Parked { session: s, .. }
             | ResolvedTarget::SubagentInTurn { session: s, .. }
             | ResolvedTarget::SubagentFallback { session: s, .. } => s,
@@ -212,7 +218,7 @@ impl ResolvedTarget {
             },
             ResolvedTarget::SubagentFallback { parent, .. } => parent.recipient_harness(),
             ResolvedTarget::Agy(_) => "agy",
-            ResolvedTarget::Codex(_, _) => "codex",
+            ResolvedTarget::Codex(_, _) | ResolvedTarget::ParkedCodex { .. } => "codex",
             ResolvedTarget::Pi(s) => crate::plugin::harness(&s.harness).unwrap_or("pi"),
             ResolvedTarget::Svc(_) => "svc",
         }
@@ -449,10 +455,29 @@ pub(crate) async fn resolve_target(
         };
         return match seen.harness.as_str() {
             _ if !parked => Err(AppError::NotFound(ref_str.to_string())),
+            "codex" => {
+                let generation = storage::parked_codex_generation(
+                    &*db.lock().map_err(|e| AppError::Internal(e.to_string()))?,
+                    ref_str,
+                    now,
+                    ttl.as_secs() as i64,
+                )
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+                match generation {
+                    Some(generation) => Ok(ResolvedTarget::ParkedCodex {
+                        session: parked_session("codex"),
+                        generation,
+                    }),
+                    None => Err(AppError::Gone {
+                        session_id: ref_str.to_string(),
+                        pid: 0,
+                    }),
+                }
+            }
             // HA8 / HA9-A.codex: a detached or exited pi/plugin session with `reclaim_hash`
             // set is parked and queues into `pi_pending_messages`; an explicitly released or
             // expired one, or a revoked/ended Codex root, answers `gone`.
-            h if h == "pi" || h == "codex" || crate::plugin::harness(h).is_some() => {
+            h if h == "pi" || crate::plugin::harness(h).is_some() => {
                 if seen.reclaimable && now < seen.last_live + ttl.as_secs() as i64 {
                     Ok(ResolvedTarget::Pi(parked_session(h)))
                 } else {

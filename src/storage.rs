@@ -2642,6 +2642,7 @@ pub fn startup_invalidate_codex(
             "UPDATE messages SET outcome = 'delivery_unknown' WHERE id = ?1",
             params![msg_id],
         )?;
+        update_reply_push_outcome(&tx, &msg_id, "push_failed")?;
     }
 
     tx.commit()?;
@@ -2650,8 +2651,9 @@ pub fn startup_invalidate_codex(
 
 /// Persist an admitted Codex root generation in `codex_roots` and `instance_seen` (§2.1, §6.2.1).
 pub fn upsert_codex_root(conn: &Connection, snap: &crate::codex::CodexRootSnapshot) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
     let now = now_epoch_secs();
-    conn.execute(
+    tx.execute(
         "INSERT INTO codex_roots (root_id, codex_home, owner_pid, owner_starttime, generation, label, cwd, registered_at, rollout_dev, rollout_ino, active, revoked) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, 0) \
          ON CONFLICT(root_id) DO UPDATE SET \
@@ -2679,7 +2681,21 @@ pub fn upsert_codex_root(conn: &Connection, snap: &crate::codex::CodexRootSnapsh
             snap.rollout_ino as i64,
         ],
     )?;
-    mark_live(conn, &snap.root_id, "codex", now)?;
+    mark_live(&tx, &snap.root_id, "codex", now)?;
+    rebind_pending_codex_handoffs(&tx, snap, now)?;
+    tx.commit()
+}
+
+fn rebind_pending_codex_handoffs(
+    conn: &Connection,
+    snap: &crate::codex::CodexRootSnapshot,
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE codex_handoff SET root_generation = ?2, updated_at = ?3 \
+         WHERE root_id = ?1 AND state = 'pending'",
+        params![snap.root_id, snap.generation as i64, now],
+    )?;
     Ok(())
 }
 
@@ -2719,11 +2735,7 @@ pub fn rebind_codex_root(conn: &Connection, snap: &crate::codex::CodexRootSnapsh
         ],
     )?;
     mark_live(&tx, &snap.root_id, "codex", now)?;
-    tx.execute(
-        "UPDATE codex_handoff SET root_generation = ?2, updated_at = ?3 \
-         WHERE root_id = ?1 AND state = 'pending'",
-        params![snap.root_id, snap.generation as i64, now],
-    )?;
+    rebind_pending_codex_handoffs(&tx, snap, now)?;
     let child_ids: Vec<String> = {
         let mut stmt = tx.prepare("SELECT agent_id FROM subagents WHERE parent = ?1")?;
         let rows = stmt.query_map(params![snap.root_id], |r| r.get::<_, String>(0))?;
@@ -2804,6 +2816,40 @@ pub fn unrevoke_codex_root_by_operator(conn: &Connection, root_id: &str) -> Resu
     Ok(())
 }
 
+/// A known, nonrevoked root may receive queue custody while awaiting re-attestation.
+/// This is not admission and does not make the root a live delivery carrier.
+pub fn parked_codex_generation(
+    conn: &Connection,
+    root_id: &str,
+    now: i64,
+    ttl: i64,
+) -> Result<Option<u64>> {
+    conn.query_row(
+        "SELECT r.generation FROM codex_roots r JOIN instance_seen s ON s.id = r.root_id \
+         WHERE r.root_id = ?1 AND r.revoked = 0 AND r.active = 0 AND s.harness = 'codex' AND s.last_live > ?2",
+        params![root_id, now.saturating_sub(ttl)],
+        |row| row.get::<_, i64>(0),
+    ).optional().map(|generation| generation.map(|g| g.max(0) as u64))
+}
+
+pub fn enqueue_parked_codex_message(
+    conn: &Connection,
+    root_id: &str,
+    generation: u64,
+    msg: &PiPendingMessage,
+    ttl: i64,
+) -> Result<bool> {
+    let tx = conn.unchecked_transaction()?;
+    if parked_codex_generation(&tx, root_id, now_epoch_secs(), ttl)? != Some(generation) {
+        return Ok(false);
+    }
+    if !enqueue_codex_root_message_in(&tx, root_id, generation, msg)? {
+        return Ok(false);
+    }
+    tx.commit()?;
+    Ok(true)
+}
+
 /// Insert a root delivery into `pi_pending_messages` accompanied by a `codex_handoff` row
 /// in state `pending` (§2.5).
 pub fn enqueue_codex_root_message(
@@ -2813,15 +2859,27 @@ pub fn enqueue_codex_root_message(
     msg: &PiPendingMessage,
 ) -> Result<bool> {
     let tx = conn.unchecked_transaction()?;
-    if !insert_pi_message(&tx, msg)? {
+    if !enqueue_codex_root_message_in(&tx, root_id, root_generation, msg)? {
         return Ok(false);
     }
-    tx.execute(
+    tx.commit()?;
+    Ok(true)
+}
+
+pub(crate) fn enqueue_codex_root_message_in(
+    conn: &Connection,
+    root_id: &str,
+    root_generation: u64,
+    msg: &PiPendingMessage,
+) -> Result<bool> {
+    if !insert_pi_message(conn, msg)? {
+        return Ok(false);
+    }
+    conn.execute(
         "INSERT OR REPLACE INTO codex_handoff (message_id, root_id, root_generation, carrier, state, updated_at) \
          VALUES (?1, ?2, ?3, 'none', 'pending', ?4)",
         params![msg.id, root_id, root_generation as i64, msg.created_at],
     )?;
-    tx.commit()?;
     Ok(true)
 }
 
@@ -2844,6 +2902,24 @@ pub fn reserve_codex_single_for_push(
     Ok(count > 0)
 }
 
+/// Select the oldest eligible head without reserving it. An in-flight head blocks
+/// another MCP drain; the existing push CAS arbitrates with hook and relay carriers.
+pub fn next_codex_relay_pending(
+    conn: &Connection,
+    root_id: &str,
+    generation: u64,
+    ttl_secs: u64,
+) -> Result<Option<(String, String)>> {
+    let head = conn.query_row(
+        "SELECT p.id, p.envelope, h.state FROM pi_pending_messages p JOIN codex_handoff h ON h.message_id=p.id \
+         WHERE p.session_id=?1 AND h.root_id=?1 AND h.root_generation=?2 AND p.delivered_at IS NULL \
+         AND p.created_at>?3 AND h.state IN ('pending','inflight') ORDER BY p.created_at,p.rowid LIMIT 1",
+        params![root_id,generation as i64,now_epoch_secs().saturating_sub(ttl_secs.min(i64::MAX as u64) as i64)],
+        |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)),
+    ).optional()?;
+    Ok(head.and_then(|(id, body, state)| (state == "pending").then_some((id, body))))
+}
+
 /// Atomically select and reserve up to 8 envelopes / 6,000 UTF-8 bytes (or a single oversized
 /// head envelope) in creation order for a hook drain on `(root_id, root_generation)` (§2.5).
 /// Transitions the selected rows to `state = 'inflight'`, `carrier = 'hook'`.
@@ -2851,6 +2927,7 @@ pub fn reserve_codex_hook_batch(
     conn: &Connection,
     root_id: &str,
     root_generation: u64,
+    ttl_secs: u64,
 ) -> Result<Option<(Vec<String>, String)>> {
     let tx = conn.unchecked_transaction()?;
     let candidates: Vec<(String, String)> = {
@@ -2862,12 +2939,17 @@ pub fn reserve_codex_hook_batch(
                AND p.delivered_at IS NULL \
                AND h.root_id = ?1 \
                AND h.root_generation = ?2 \
-               AND h.state = 'pending' \
+               AND h.state = 'pending' AND p.created_at > ?3 \
              ORDER BY p.created_at ASC, p.rowid ASC",
         )?;
-        let rows = stmt.query_map(params![root_id, root_generation as i64], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
+        let rows = stmt.query_map(
+            params![
+                root_id,
+                root_generation as i64,
+                now_epoch_secs().saturating_sub(ttl_secs.min(i64::MAX as u64) as i64)
+            ],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )?;
         rows.collect::<Result<Vec<_>>>()?
     };
 
@@ -2978,6 +3060,7 @@ pub fn complete_codex_handoff_accepted(
             params![now, msg_id, root_id],
         )?;
         update_message_outcome(&tx, msg_id, "delivered")?;
+        update_reply_push_outcome(&tx, msg_id, "pushed")?;
     }
     tx.commit()
 }
@@ -3012,6 +3095,7 @@ pub fn mark_codex_handoff_unknown(conn: &Connection, message_ids: &[String]) -> 
             "UPDATE messages SET outcome = 'delivery_unknown' WHERE id = ?1",
             params![msg_id],
         )?;
+        update_reply_push_outcome(&tx, msg_id, "push_failed")?;
     }
     tx.commit()
 }

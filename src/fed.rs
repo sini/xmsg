@@ -108,6 +108,7 @@ fn target_filter_key(target: &crate::http::ResolvedTarget) -> &str {
         crate::http::ResolvedTarget::Claude(s, _)
         | crate::http::ResolvedTarget::Agy(s)
         | crate::http::ResolvedTarget::Pi(s)
+        | crate::http::ResolvedTarget::ParkedCodex { session: s, .. }
         | crate::http::ResolvedTarget::Parked { session: s, .. }
         | crate::http::ResolvedTarget::SubagentInTurn { session: s, .. }
         | crate::http::ResolvedTarget::SubagentFallback { session: s, .. } => &s.session_id,
@@ -3033,7 +3034,35 @@ pub async fn deliver_federated_reply_locally(
     ret_harness: &str,
     ret_session_id: &str,
 ) -> Result<&'static str, AppError> {
-    let _ = peer_name;
+    if ret_harness == "codex" && !ret_session_id.contains('/') {
+        let original = {
+            let db = fed_state
+                .db
+                .lock()
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            storage::get_message(&db, in_reply_to).map_err(|e| AppError::Internal(e.to_string()))?
+        };
+        if let (Some(original), Some(replier_id)) = (original, replier_origin.key()) {
+            if let Some(record) = crate::surface::stage_codex_reply(
+                &fed_state.local(),
+                &original,
+                ret_session_id,
+                reply_id,
+                replier_badge,
+                text,
+                ("fed", replier_id),
+                Some(peer_name),
+            )
+            .await?
+            {
+                return Ok(match record.push_outcome.as_deref() {
+                    Some("pushed" | "accepted") => "pushed",
+                    Some("push_failed") => "push_failed",
+                    _ => "sender_gone",
+                });
+            }
+        }
+    }
     // Check if reply already inserted or delivered (idempotency across poller and mailbox pull).
     let already_pushed = {
         let db = fed_state
@@ -3469,14 +3498,18 @@ async fn fed_reply_handler(
             Ok(res) => {
                 if res != "pushed" {
                     if let Ok(db) = fed_state.db.lock() {
-                        let _ = storage::delete_message(&db, &reply.id);
+                        if matches!(storage::get_codex_handoff_state(&db, &reply.id), Ok(None)) {
+                            let _ = storage::delete_message(&db, &reply.id);
+                        }
                     }
                 }
                 res
             }
             Err(e) => {
                 if let Ok(db) = fed_state.db.lock() {
-                    let _ = storage::delete_message(&db, &reply.id);
+                    if matches!(storage::get_codex_handoff_state(&db, &reply.id), Ok(None)) {
+                        let _ = storage::delete_message(&db, &reply.id);
+                    }
                 }
                 return Err(e);
             }
@@ -4839,13 +4872,23 @@ pub fn spawn_outbound_reply_poller(
                                     Ok("pushed") => {}
                                     Ok("sender_gone") => {
                                         if let Ok(db) = fed_state.db.lock() {
-                                            let _ = storage::delete_message(&db, &reply_id);
+                                            if matches!(
+                                                storage::get_codex_handoff_state(&db, &reply_id),
+                                                Ok(None)
+                                            ) {
+                                                let _ = storage::delete_message(&db, &reply_id);
+                                            }
                                         }
                                         should_stop = true;
                                     }
                                     _ => {
                                         if let Ok(db) = fed_state.db.lock() {
-                                            let _ = storage::delete_message(&db, &reply_id);
+                                            if matches!(
+                                                storage::get_codex_handoff_state(&db, &reply_id),
+                                                Ok(None)
+                                            ) {
+                                                let _ = storage::delete_message(&db, &reply_id);
+                                            }
                                         }
                                     }
                                 }

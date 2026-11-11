@@ -1295,6 +1295,36 @@ pub async fn deliver_with_in_reply_to(
             storage::insert_agy_message(&db, &agy_msg).map_err(db_err)?;
             Ok((session.session_id.clone(), "agy", "queued"))
         }
+        ResolvedTarget::ParkedCodex {
+            session,
+            generation,
+        } => {
+            let queued = storage::PiPendingMessage {
+                id: message_id.to_string(),
+                session_id: session.session_id.clone(),
+                created_at: storage::now_epoch_secs(),
+                from_name: from_name.to_string(),
+                bytes: body.len(),
+                text: body.to_string(),
+                envelope: envelope_text(),
+                delivered_at: None,
+            };
+            let db = local.db.lock().map_err(db_err)?;
+            if !storage::enqueue_parked_codex_message(
+                &db,
+                &session.session_id,
+                *generation,
+                &queued,
+                local.reply_ttl.as_secs() as i64,
+            )
+            .map_err(db_err)?
+            {
+                return Err(AppError::ServiceUnavailable(
+                    "codex session queue unavailable".into(),
+                ));
+            }
+            Ok((session.session_id.clone(), "codex", "queued"))
+        }
         ResolvedTarget::Codex(root_snap, session) => {
             let pi_msg = storage::PiPendingMessage {
                 id: message_id.to_string(),
@@ -2462,6 +2492,157 @@ struct ReplyDelivery<'a> {
     reply_id: String,
 }
 
+/// Commit reply recovery and definite non-handoff custody together before any relay.
+/// Historical reply rows without a matching handoff remain pull-only.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn stage_codex_reply(
+    local: &Local<'_>,
+    msg: &MessageRecord,
+    recipient: &str,
+    id: &str,
+    label: &str,
+    text: &str,
+    replier: (&str, &str),
+    return_host: Option<&str>,
+) -> Result<Option<ReplyRecord>, AppError> {
+    let ret_session_id = recipient.to_string();
+    let reply_id = id.to_string();
+    let replier_label = label.to_string();
+    let message_id = msg.id.as_str();
+    {
+        let db = local.db.lock().map_err(db_err)?;
+        if let Some(existing) = storage::get_reply_by_pushed_id(&db, id).map_err(db_err)? {
+            return Ok(Some(existing));
+        }
+    }
+    let live = crate::codex::resolve_codex_root(local.db, &ret_session_id);
+    let now = storage::now_epoch_secs();
+    let parked_generation = {
+        let db = local.db.lock().map_err(db_err)?;
+        storage::parked_codex_generation(
+            &db,
+            &ret_session_id,
+            now,
+            local.reply_ttl.as_secs() as i64,
+        )
+        .map_err(db_err)?
+    };
+    if let Some(generation) = live.as_ref().map(|s| s.generation).or(parked_generation) {
+        let envelope = format!("[xmsg] reply to message_id={message_id} — message_id={reply_id}; reply with the xmsg reply tool (tools: send, reply, list, replies)\n\n{text}");
+        let queued = storage::PiPendingMessage {
+            id: reply_id.clone(),
+            session_id: ret_session_id.clone(),
+            created_at: now,
+            from_name: replier_label.clone(),
+            bytes: text.len(),
+            text: text.to_string(),
+            envelope,
+            delivered_at: None,
+        };
+        let mut record = {
+            let db = local.db.lock().map_err(db_err)?;
+            let tx = db.unchecked_transaction().map_err(db_err)?;
+            if live.is_some() {
+                let allowed: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM codex_roots WHERE root_id=?1 AND generation=?2 AND active=1 AND revoked=0)", rusqlite::params![ret_session_id, generation as i64], |r| r.get(0)).map_err(db_err)?;
+                if !allowed {
+                    return Err(AppError::Gone {
+                        session_id: ret_session_id,
+                        pid: 0,
+                    });
+                }
+            }
+            // Repeat the parked check inside the queue/reply transaction to fence revocation.
+            if live.is_none()
+                && storage::parked_codex_generation(
+                    &tx,
+                    &ret_session_id,
+                    now,
+                    local.reply_ttl.as_secs() as i64,
+                )
+                .map_err(db_err)?
+                    != Some(generation)
+            {
+                return Err(AppError::Gone {
+                    session_id: ret_session_id,
+                    pid: 0,
+                });
+            }
+            let pushed = MessageRecord {
+                id: reply_id.clone(),
+                created_at: now,
+                session_id: ret_session_id.clone(),
+                from_name: replier_label.clone(),
+                bytes: text.len(),
+                outcome: "queued".into(),
+                recipient_harness: "codex".into(),
+                return_harness: Some(replier.0.to_string()),
+                return_session_id: Some(replier.1.to_string()),
+                thread_id: if msg.thread_id.is_empty() {
+                    msg.id.clone()
+                } else {
+                    msg.thread_id.clone()
+                },
+                return_host: return_host.map(str::to_string),
+            };
+            if let Some(existing) = storage::get_message(&tx, &reply_id).map_err(db_err)? {
+                if existing.session_id != pushed.session_id
+                    || existing.return_harness != pushed.return_harness
+                    || existing.return_session_id != pushed.return_session_id
+                    || existing.return_host.as_deref().unwrap_or("")
+                        != pushed.return_host.as_deref().unwrap_or("")
+                {
+                    return Err(AppError::Conflict("reply return provenance differs".into()));
+                }
+            } else {
+                storage::insert_message(&tx, &pushed).map_err(db_err)?;
+            }
+            storage::purge_pi_messages(&tx, local.reply_ttl.as_secs()).map_err(db_err)?;
+            if !storage::enqueue_codex_root_message_in(&tx, &ret_session_id, generation, &queued)
+                .map_err(db_err)?
+            {
+                return Err(AppError::ServiceUnavailable(
+                    "codex session message queue is full".into(),
+                ));
+            }
+            let record = storage::insert_reply(
+                &tx,
+                message_id,
+                replier.1,
+                text,
+                Some("sender_gone"),
+                Some(&reply_id),
+            )
+            .map_err(db_err)?;
+            tx.commit().map_err(db_err)?;
+            record
+        };
+        if let Some(snap) = live {
+            let outcome =
+                try_push_codex_queued_message(local, &snap, &reply_id, &queued.envelope).await;
+            // Queue-only is durable but not a handoff. Only accepted updates to `pushed`.
+            if matches!(outcome, Ok("delivered")) {
+                record.push_outcome = Some("pushed".into());
+            } else if matches!(outcome, Ok("delivery_unknown")) {
+                record.push_outcome = Some("push_failed".into());
+                storage::update_reply_push_outcome(
+                    &*local.db.lock().map_err(db_err)?,
+                    &reply_id,
+                    "push_failed",
+                )
+                .map_err(db_err)?;
+            }
+        }
+        {
+            let db = local.db.lock().map_err(db_err)?;
+            let _ = storage::purge_replies(&db, local.reply_ttl.as_secs());
+            let _ = storage::purge_messages(&db, local.reply_ttl.as_secs());
+        }
+        let _ = local.notify_tx.send(message_id.to_string());
+        return Ok(Some(record));
+    }
+    Ok(None)
+}
+
 /// `reply`'s push and record, under its reserved `reply_id`.
 async fn deliver_reply(
     state: &AppState,
@@ -2533,6 +2714,27 @@ async fn deliver_reply(
     // The pushed reply's `messages` (and `outbound`) row is recorded before the push
     // (XF2), so a recipient that replies the instant it is woken finds the row before
     // `deliver_reply` returns; if the push fails, the row is deleted below.
+    if remote_host.is_none()
+        && !is_forwarded
+        && has_inbox
+        && ret_harness == "codex"
+        && !ret_session_id.contains('/')
+    {
+        if let Some(record) = stage_codex_reply(
+            &state.local(),
+            &msg,
+            &ret_session_id,
+            &reply_id,
+            &replier_label,
+            text,
+            (&caller.harness, &caller.session_id),
+            None,
+        )
+        .await?
+        {
+            return Ok(record);
+        }
+    }
     let push_outcome = match remote_host.as_deref() {
         Some(host) => {
             if let Some(to) = dest_session_id.as_deref() {

@@ -171,6 +171,7 @@ anonymous.
   [xmsg] reply to message_id=<orig_id> — message_id=<new_id>; reply with the xmsg reply tool
   ```
 - **Push Outcomes**, recorded with the reply: `pushed`, `sender_gone`, `push_failed`, or `stored` (the origin is a leaf that pulls its replies). A reply to a sender with no inbox records none.
+- **Codex restart custody:** a known, nonrevoked root remains queueable within the reply TTL while awaiting fresh writer-lease attestation. It is not automatically live after a daemon restart. An attributed MCP tool call can re-attest only a previously known, nonrevoked root, using the same full writer-lease and rollout checks as resume; unknown roots still require registration. After successful attestation, the call kicks a bounded FIFO relay drain (at most eight envelopes, starting no new attempt after two seconds; each existing relay attempt has its own two-second deadline). Explicit operator revocation still refuses delivery. New replies with definite non-handoff custody retain their stable message ID, return provenance and original queue timestamp; the same root drains them in FIFO order on re-registration. Accepted handoffs are marked `pushed`. Unknown or inflight handoffs are never automatically replayed. Historical `sender_gone` or `push_failed` rows without the matching durable handoff are pull-only through `replies`; no replacement identity or provenance is inferred.
 - A reply to a message from another node always travels back to that node, which decides how it reaches the sender (A-2).
 
 ---
