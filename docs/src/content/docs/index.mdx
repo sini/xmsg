@@ -22,12 +22,29 @@ import '../../styles/landing.css';
     </p>
     <p class="xm-actions">
       <a class="xm-btn xm-primary" href="/getting-started/">Get started</a>
-      <a class="xm-btn" href="/overview/">What you can do with it</a>
+      <a class="xm-btn" href="/use-cases/">What you can do with it</a>
       <a class="xm-link" href="/reference/cli-and-mcp/">Tool reference →</a>
     </p>
   </div>
   <MeshGraph />
 </div>
+
+
+## Agents shouldn't need a human clipboard
+
+You run a Claude Code session in one terminal, a Codex or Antigravity session in another, an
+`opencode` or `pi` session in a third, and services in containers or on other machines. When one
+session needs a review, a test run or a decision from another, you copy prompts between windows.
+You have become the message bus.
+
+xmsg takes that job. Every live agent session, delegated subagent and registered service gets an
+attested address on its node (`id@node`, `<P>/<child>@node` or `name@node`) and five tools:
+`list`, `send`, `reply`, `replies` and `inbox`. Replies are pushed straight into the sender's live
+inbox, so the conversation carries on without you in the middle.
+
+## One exchange, step by step
+
+<Exchange />
 
 <aside class="xm-story not-content" aria-labelledby="xm-story-h">
   <p class="xm-story-kicker">Worked example</p>
@@ -50,10 +67,6 @@ import '../../styles/landing.css';
   <p><a class="xm-btn" href="/how-this-site-was-built/">Read how it was built →</a></p>
 </aside>
 
-## One exchange, step by step
-
-<Exchange />
-
 ## What you can do with it
 
 <UseCases />
@@ -70,14 +83,36 @@ An **address** names one recipient, such as `id@node` for a session or `name@nod
 A **node** is one running xmsg daemon, usually one per user per machine. Read
 [addressing](/concepts/addressing/) and [delivery and replies](/concepts/replies/) for the details.
 
-## Who sent this?
+## Built to be trusted
 
-On one machine, xmsg works out the sender from the operating system: only your own user can
-connect, and the calling process decides which session a message is from. The message text
-cannot change that. Between machines, nodes prove who they are with mTLS certificates, and each node accepts only
-the peers you configure. So an address tells the receiver where a message came from. The receiving
-agent still follows its own user's instructions and tool permissions before it acts. Read the
-[trust model](/concepts/trust-model/) before you connect a new boundary.
+<ul class="xm-trust not-content">
+  <li>
+    <b>The OS says who is sending.</b> Only your own user can connect, and each harness is
+    attested, so one session cannot pose as another. <a href="/concepts/trust-model/#per-harness-attestation--identity-derivation">Attestation</a>
+  </li>
+  <li>
+    <b>Machines prove who they are.</b> Nodes use mTLS with pinned keys or a CA, and accept only
+    the peers and rights you list. <a href="/concepts/federation/#peer-configuration-reference---peers-file">Peer policy</a>
+  </li>
+  <li>
+    <b>Messages are data, not orders.</b> Each agent still follows its own user's instructions and
+    tool permissions. <a href="/concepts/trust-model/#provenance-is-not-instruction-authority">Provenance</a>
+  </li>
+  <li>
+    <b>Hosted models come in through a gate.</b> The gateway adds OAuth, explicit grants and an
+    owner-set outbound policy. <a href="/extensions/gateway/">Gateway</a>
+  </li>
+  <li>
+    <b>Public bots screen both ways.</b> genie runs separate guard models on what comes in and
+    what goes out. <a href="/genie/guard-model/">Guard model</a>
+  </li>
+</ul>
+
+<p class="xm-trust-limit">
+  xmsg is a trusted bus for your own agents. Its boundaries are the OS user and the network: it
+  does not isolate hostile processes under one user, and it cannot make a message safe to obey.
+  <a href="/concepts/trust-model/">Read the trust model</a>.
+</p>
 
 ## Start here
 
