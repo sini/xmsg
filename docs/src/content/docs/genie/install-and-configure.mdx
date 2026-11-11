@@ -1,0 +1,161 @@
+---
+title: Install & configure
+description: genie-agent's packages and images, the NixOS module, the root configuration, and how to wire it to xmsg and the Matrix bot.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Genie needs four things around it:
+
+- an **xmsg daemon**, for the bus every part registers on (see
+  [NixOS & Home Manager](/operations/nixos-and-home-manager/));
+- an **OpenAI-compatible model endpoint** for tier 1 and the guards, ending in `/v1`;
+- the **Matrix bot**, [`matrix-xmsg`](https://github.com/sini/matrix-xmsg), for the room;
+- optionally, **Claude Code** and a Claude subscription token per expert tier, and a SearXNG
+  instance for web search.
+
+## Packages and images
+
+The [genie-agent flake](https://github.com/sini/genie-agent) builds:
+
+| Output | What it is |
+|---|---|
+| `packages.<system>.genie-root-node` (the default package) | Root as a portable Node launcher, for Linux and macOS. It puts pi, Nix, Git and coreutils on `PATH`. |
+| `packages.<linux>.genie-root` | Root as a Node single executable (SEA), so xmsg can pin its exact binary. |
+| `packages.<linux>.genie-guard` | The inbound guard service, as a single executable with its prompts bundled. |
+| `packages.<linux>.genie-dispatcher` | The expert dispatcher, as a single executable. |
+| `packages.<linux>.root-image` | OCI image `ghcr.io/sini/genie-root`. Runs as `65532:65532`, ships the operating memory read-only at `/memory`, and no credentials. |
+| `packages.<linux>.image` | OCI image `ghcr.io/sini/genie-guard`. |
+| `nixosModules.default` | The NixOS module, `services.genie-agent`. |
+
+Each service is its own single executable because xmsg attests a
+[service](/concepts/sessions-services-subagents/#services-namenode) by its executable. Pinning a
+shared `node` binary would let any Node program claim the name.
+
+## Try the portable launcher
+
+```sh
+nix build github:sini/genie-agent#genie-root-node
+./result/bin/genie-root-node --config ./genie.json
+```
+
+The configuration is JSON, given by `--config <path>` or `GENIE_CONFIG`. Without bwrap, root logs
+`baseline: credential custody, no OS isolation` and runs anyway; see
+[Credentials & isolation](/genie/credentials-and-isolation/#the-portable-baseline).
+
+## The NixOS module
+
+Import `nixosModules.default` and enable `services.genie-agent`:
+
+```nix
+{ inputs, lib, pkgs, ... }:
+let
+  genie = inputs.genie-agent.packages.${pkgs.system};
+in
+{
+  imports = [ inputs.genie-agent.nixosModules.default ];
+
+  services.genie-agent = {
+    enable = true;
+    xmsgSocket = "/run/user/1000/xmsg";   # the xmsg runtime directory of `user`
+    user = "alice";                       # must own that xmsg socket
+
+    model = {
+      baseUrl = "http://model.example.org:8080/v1";
+      id = "qwen3.6-35b-a3b";
+      keyFile = "/run/secrets/genie-model-key";
+    };
+    tier1.searxngUrl = "http://search.example.org:8080";
+  };
+
+  # Attest each genie service by its own binary.
+  programs.xmsg.server.svcExe = {
+    genie = lib.getExe genie.genie-root;
+    genie-guard = lib.getExe genie.genie-guard;
+  };
+}
+```
+
+`genie-agent.service` runs root. With the default `guard.enable = true`, the module also runs
+`genie-guard.service` against `guard.ninferUrl` (by default the same endpoint as `model.baseUrl`).
+
+Root registers on xmsg as the service `genie`. Point the Matrix bot at it:
+
+```toml
+# matrix-xmsg config.toml
+expert_ref = "genie"
+guard_ref = "genie-guard"
+```
+
+### Enabling the expert tiers
+
+```nix
+services.genie-agent.experts = {
+  enable = true;
+  herdrPackage = herdr;                   # a source-built herdr; the module applies a patch to it
+  xmsgPackage = xmsg;                     # the xmsg CLI, for each session's MCP server
+  claudePackage = pkgs.claude-code;       # optional: Claude Code on the sessions' PATH
+  public.tokenEnvironmentFile = "/run/secrets/genie-expert-public-token";
+  trusted.tokenEnvironmentFile = "/run/secrets/genie-expert-trusted-token";
+};
+
+programs.xmsg.server.svcExe = {
+  genie-expert-public = lib.getExe genie.genie-dispatcher;
+  genie-expert-trusted = lib.getExe genie.genie-dispatcher;
+};
+```
+
+`herdr` and `xmsg` stand for packages you supply; `xmsgPackage` defaults to `pkgs.xmsg` when your
+package set has one. This adds `genie-herdr@<tier>` and `genie-dispatcher@<tier>` for `public` and `trusted`. Each
+token file holds `CLAUDE_CODE_OAUTH_TOKEN=<token>`, or just the token, from `claude setup-token`.
+Enabling the experts requires `xmsgSocket` to be set, and sets
+`kernel.yama.ptrace_scope` to at least 1.
+
+<Aside type="caution" title="Single user">
+The module runs every tier as `services.genie-agent.user`. Read
+[One host, or one pod per tier](/genie/credentials-and-isolation/#one-host-or-one-pod-per-tier)
+before serving public rooms.
+</Aside>
+
+## Settings that matter
+
+| Option | Default | What it does |
+|---|---|---|
+| `model.baseUrl`, `model.id`, `model.keyFile` | key from `credentialsDir` | Tier 1's model endpoint. |
+| `guard.enable` | `true` | Inbound screening, and the local `genie-guard` service. |
+| `guard.scopeProducer` | `null` | The exact `service@node` allowed to request scoped review. See [Guard model](/genie/guard-model/#scoped-review-for-trusted-triggers). |
+| `guard.timeoutMs` | `120000` | Time limit for each guard review. |
+| `broker.guardOut.enable` | `true` | Outbound model review. The redactor always runs. |
+| `broker.tokenFile` | `null` | GitHub token for gist and PR writes. `null` keeps writes off; anonymous gist reads still work. |
+| `broker.botLogin` | `genie-bot` | The GitHub account the token must belong to, checked against the API's `/user`. |
+| `broker.maxProposalsPerThreadPerDay` | `null` | Optional cap on acted proposals per thread. |
+| `tier1.maxConcurrentTurns` | `2` | Tier-1 turns that may run at once. Others queue in arrival order. |
+| `tier1.maxQueueWaitSecs` | `180` | How long a queued turn waits before it goes straight to the expert. |
+| `tier1.executor` | `null` | Run tier 1 in a separate container. |
+| `eval.backend` | `local` | `local` or `kubernetes`. |
+| `eval.memoryMax` | 4 GiB | Memory budget per evaluation. |
+| `eval.builders` | `null` | Remote builders for trusted IFD evaluations. |
+| `gitScreen.enable`, `ghScreen.enable` | `false` | Screen `git` and GitHub read output through `guard-in` during the turn. |
+| `s3` | `null` | Archive transcripts to an S3 bucket. `null` keeps local mode. |
+| `loadCredential` | `true` | Stage credential files through systemd `LoadCredential=`. Set `false` to read the paths directly. |
+| `credentialsDir` | `null` | A directory of plain credential files (`model-key`, `s3-secret-key`, `expert-public-token`, `expert-trusted-token`), used when no explicit `*File` is set. |
+
+Every credential path must be outside the Nix store; the module checks.
+
+## Running in Kubernetes
+
+The images contain no credentials and configure no bus or deployment. A pod pairs a genie
+container with an xmsg container in [leaf mode](/concepts/hubs-and-leaves/#leaf-node-mode---leaf),
+sharing a runtime directory. `genie-guard` already runs this way. See
+[Kubernetes & Helm](/operations/helm-and-kubernetes/) for the xmsg side.
+
+For root in a pod:
+
+- supply the configuration with `--config` or `GENIE_CONFIG`;
+- set `tier1.memoryRoot` to `/memory`, and mount nothing writable over it;
+- for evaluations as Kubernetes Jobs, set `eval.backend = "kubernetes"` with the API, namespace,
+  image, storage claims and a root-only `tokenFile`. See
+  [configured executors](https://github.com/sini/genie-agent/blob/main/docs/executors.md).
+
+Network policy, the runtime class (for example gVisor), namespace permissions and storage are the
+deployment's to provide. Genie creates none of them.

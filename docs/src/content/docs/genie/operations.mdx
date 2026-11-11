@@ -1,0 +1,96 @@
+---
+title: Operations
+description: Thread lifecycle and retention, load limits, failure behaviour, memory admission and testing for genie-agent.
+---
+
+## Thread lifecycle
+
+Genie keeps one state per Matrix thread: the transcript, the thread tier, and a cache of
+evaluation results.
+
+| Event | What happens |
+|---|---|
+| First message in a thread | Root creates the thread state and starts a tier-1 process. |
+| ✅ from the asker | The thread closes. Its transcript is archived and its tier-1 process ends. |
+| 24 hours with no activity | The thread closes, as on ✅. |
+| A message to a closed thread within 96 hours | The thread resumes from its stored transcript. Evaluations already in the cache are not re-run. |
+| 96 hours idle | The thread's state and store are collected. |
+| A message after collection | With S3 archiving on, the transcript is replayed into a new session, after `guard-in` screens it. Otherwise the thread starts fresh. |
+
+On the expert side, each dispatcher parks an idle session and collects it after 96 hours idle, on
+its own clock. See [Tiers & experts](/genie/tiers-and-experts/#the-expert-dispatcher).
+
+### The archive
+
+With `s3` set, root writes each transcript to the bucket on close and on collection, together
+with its guard verdicts, escalation packages and broker actions. A blocked expert reply is
+recorded only as a tier label, never as text. With `s3 = null`, nothing leaves the host.
+
+## Load and limits
+
+- **Turn slots.** At most `tier1.maxConcurrentTurns` (default 2) tier-1 turns run at once. Other
+  turns wait in arrival order.
+- **Queue timeout.** A turn that waits longer than `tier1.maxQueueWaitSecs` (default 180) skips
+  tier 1 and goes straight to the expert.
+- **Question deadline.** With `tier1.questionTimeoutMs` set, a turn that runs out of time posts
+  "I couldn't complete an answer for this; it has been escalated for a closer look." and
+  escalates. `tier1.checkinMs` sends tier 1 a reminder partway through.
+- **Guard concurrency.** Root sends at most `guardMaxConcurrency` (default 1) reviews to
+  `genie-guard` at once, each bounded by `guardTimeoutMs` (default 120 s).
+- **Evaluations.** One evaluation runs at a time per thread. Each has a timeout and a memory
+  budget (`eval.memoryMax`, default 4 GiB).
+- **Git mirrors.** Root keeps bare mirrors of the repositories tier 1 clones. A fetch larger than
+  the per-repository cap (default 2 GiB) is aborted and removed. The mirror total is held under a
+  quota (default 32 GiB) by evicting the least recently used mirror.
+- **Broker.** `broker.maxProposalsPerThreadPerDay` caps gists and PRs per thread.
+
+The Matrix bot has its own per-user rate limit, size cap and history window. See the
+[matrix-xmsg README](https://github.com/sini/matrix-xmsg).
+
+## When something is down
+
+| Failure | What the asker sees |
+|---|---|
+| The guard is unreachable (fail-closed default) | Nothing is forwarded. The Matrix bot retries, then reacts ⚠️ and messages the owner. If root's own guard call fails, root posts "I can't help with that message." |
+| `guard-out` is unreachable | Nothing is posted. The draft is withheld. |
+| The expert tier is unreachable, its token is out of quota, or its turn times out | "expert unavailable". Tier 1's answer stays posted. Nothing falls back to another token or tier. |
+| The dispatcher restarts | No loss. The journal holds every message and reply in flight, and live sessions survive in the herdr unit. |
+| xmsg restarts | Root registers again, with backoff. |
+| An evaluation hits a limit | Tier 1 reports which limit (`oom`, `timeout`, `egress`) as a finding. |
+
+## Memory admission
+
+Genie reads two kinds of curated memory. Nothing is written into either one without a human
+approving it.
+
+- **The genie memory bank.** After a ✅, the distiller proposes a summary of the accepted answer
+  and puts it in a review queue on disk. Root can only add to the queue, and holds no write
+  credential for the bank. The owner approves entries with the separate `genie-bank-review`
+  command, which alone holds the write token. Deterministic checks (credential shapes, private
+  memory markers) run when an entry is queued and again when it is approved. They can refuse an
+  entry; they can never admit one.
+- **The public support memory.** `support-memory/` in the genie-agent repository is what the
+  `@public` expert reads. An entry is admitted only by a human merging a pull request. CI refuses
+  credential shapes, private repository names, home paths and entries without frontmatter. A
+  green check admits nothing.
+
+Because of this human step, recall from the memory banks is treated as trusted and is not
+screened by `guard-in`. The memory API must require the write token for this to hold. If it
+accepts unauthenticated writes, the boundary is gone.
+
+## Testing
+
+From a genie-agent checkout:
+
+```sh
+nix develop ./ci --command ci
+nix develop ./ci --command ci --tests-error
+nix run .#portable-baseline
+```
+
+The first two run every unit and integration check. The third runs the compiled root and pi
+launch and a native Nix evaluation against local fixtures, without bwrap.
+
+The guards are scored live against corpora under `corpus/`: attacks and clean controls for
+`guard-in`, and leaks, secret requests and clean answers for `guard-out`. A model change should be
+re-scored before it is deployed.
