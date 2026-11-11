@@ -80,11 +80,13 @@ carries its sender's address, and each agent still answers to its own user's per
 
 ## How this site was built
 
-These docs were written this way. One Claude Code session acted as the orchestrator. It split the
-work into pages and sent them to two Codex sessions and an Antigravity session running on other
-machines. Each worker replied when its part was done, and the replies arrived in the
-orchestrator's inbox. A reviewer running in ChatGPT joined through the MCP gateway and sent its
-review over the same bus.
+These docs were written this way. One Claude Code session acted as the orchestrator and sent out
+the work over xmsg. An Antigravity session wrote the site, a Codex session ran an adversarial
+review of it with critic subagents, and a second Codex session built the features the pages
+describe. Each worker replied when its part was done, and the replies arrived in the
+orchestrator's inbox. A design reviewer running in ChatGPT took part through the
+[MCP gateway](/extensions/gateway/), over the same bus. The same pattern works across machines:
+only the addresses change.
 
 ## Core concepts
 
