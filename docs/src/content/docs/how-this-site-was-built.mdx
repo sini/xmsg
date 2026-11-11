@@ -22,8 +22,9 @@ in the first session's inbox. It uses most of the [use cases](/use-cases/) at on
 - **The infrastructure agent**, a Claude Code session working in the infrastructure repository,
   provisioned the domain's DNS records, the redirects from the other domains, and the GitHub Pages
   integration, all as infrastructure code. It also deployed the [MCP gateway](/extensions/gateway/).
-- **The design reviewer**, a model running in ChatGPT, took part through that gateway. It read the
-  pages and sent its review over the same bus.
+- **The design reviewer**, a model running in ChatGPT, took part through that gateway. It reviewed
+  design proposals and incident analyses for the gateway and the bus, and sent its findings over
+  the same bus. One review reshaped how the gateway renews event subscriptions.
 
 ```mermaid
 flowchart LR
@@ -41,7 +42,7 @@ flowchart LR
   O <-->|"build this"| B
   O <-->|"DNS, Pages, deploy"| N
   D <-->|"HTTPS + OAuth"| G
-  G <-->|"review"| O
+  G <-->|"design findings"| O
 ```
 
 ## Where everything ran
@@ -102,7 +103,8 @@ again.
   as a pushed reply. See [run an orchestrator with a fleet](/use-cases/#run-an-orchestrator-with-a-fleet-of-workers).
 - **Several harnesses and models.** Claude Code, Codex and Antigravity, plus a hosted model, each
   on the part it suited. See [use several models](/use-cases/#use-several-models-subscriptions-and-harnesses-together).
-- **A hosted model on the bus.** The design reviewer used the gateway, not a copy and paste. See
+- **A hosted model on the bus.** The design reviewer sent its findings on the gateway's and the
+  bus's designs through the gateway, not by copy and paste. See
   [let a hosted model talk to your local agents](/use-cases/#let-a-hosted-model-talk-to-your-local-agents).
 - **Real work, not only chat.** The infrastructure agent changed DNS and deployed a service, as
   code, because it was asked to over the bus.
