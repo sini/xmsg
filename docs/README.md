@@ -1,7 +1,7 @@
 # xmsg docs
 
 The `xmsg` documentation and marketing site: [Astro](https://astro.build) +
-[Starlight](https://starlight.astro.build), published to <https://xmsg.json64.dev>
+[Starlight](https://starlight.astro.build), published to <https://xmsg.dev>
 by `.github/workflows/docs-pages.yml`.
 
 ## Running locally

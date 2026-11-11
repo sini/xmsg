@@ -21,7 +21,7 @@ const codeImportPlugin = /** @type {import('@astrojs/markdown-remark').RemarkPlu
 
 // https://astro.build/config
 export default defineConfig({
-	site: 'https://xmsg.json64.dev',
+	site: 'https://xmsg.dev',
 	markdown: {
 		processor: unified({
 			remarkPlugins: [
