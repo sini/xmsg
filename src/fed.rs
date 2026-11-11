@@ -2271,6 +2271,30 @@ pub fn validate_pulled_message(msg: &FedInboxMessage) -> Result<(), AppError> {
     Ok(())
 }
 
+fn authorize_pulled_relay(
+    peers: &PeersMap,
+    peer_name: &str,
+    msg: &FedInboxMessage,
+) -> Result<(), AppError> {
+    let peer = peers
+        .get(peer_name)
+        .ok_or_else(|| AppError::UnknownPeer(peer_name.to_owned()))?;
+    let hub_node = peers
+        .canonical_name(&peer.name)
+        .ok_or_else(|| AppError::UnknownPeer(peer_name.to_owned()))?;
+    if msg.origin.node != hub_node
+        && !peer
+            .allow
+            .iter()
+            .any(|right| right == "relayed" || right == "relay")
+    {
+        return Err(AppError::OpDenied(
+            "relayed messages not allowed for peer".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Validates a `Transfer` received in `handoff::step` using `check_origin` and
 /// control-character validation (XB2 F5).
 pub fn validate_handoff_transfer(
@@ -3132,7 +3156,7 @@ pub async fn deliver_federated_reply_locally(
 ///   reference resolves to by the resolver's own steps: its ID, its service name, or its
 ///   label.
 /// - A send queued in a dial-out client's mailbox may instead get the client's own
-///   `not_found` error reply, which a service sends (the leaf principal, or `system`),
+///   `not_found` or `denied` error reply, which a service sends (the leaf principal, or `system`),
 ///   never the recipient. Only a reply that is exactly that error object is admitted on
 ///   that ground.
 /// - A send the peer resolved and holds for its recipient's ack also reads `queued`, but
@@ -3146,15 +3170,16 @@ fn replier_is_recipient(
     if replier.key() == Some(typed) {
         return true;
     }
-    o.outcome == "queued"
-        && o.via_mailbox
-        && ((!o.resolved && replier.id.is_some() && replier.label.as_deref() == Some(typed))
-            || (replier.service.is_some() && is_not_found_reply(text)))
+    o.via_mailbox
+        && ((o.outcome == "queued" && !o.resolved && replier.id.is_some()
+            && replier.label.as_deref() == Some(typed))
+            // Mailbox insertion can commit before the forwarding RPC leaves pending.
+            || (matches!(o.outcome.as_str(), "pending" | "queued")
+                && replier.service.is_some() && is_mailbox_rejection(text)))
 }
 
-/// `{"error": "not_found", "detail": …}` and nothing else: a dial-out client's answer
-/// that a queued message has no recipient there.
-fn is_not_found_reply(text: &str) -> bool {
+/// A mailbox client's exact `not_found` or `denied` rejection object.
+fn is_mailbox_rejection(text: &str) -> bool {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct ErrorReply {
@@ -3162,7 +3187,8 @@ fn is_not_found_reply(text: &str) -> bool {
         #[allow(dead_code)]
         detail: String,
     }
-    serde_json::from_str::<ErrorReply>(text).is_ok_and(|e| e.error == "not_found")
+    serde_json::from_str::<ErrorReply>(text)
+        .is_ok_and(|e| matches!(e.error.as_str(), "not_found" | "denied"))
 }
 
 async fn fed_reply_handler(
@@ -4070,9 +4096,9 @@ fn queue_leaf_mailbox_message_inner(
         envelope.created_at,
     );
     // Marked whether this insert or a forwarder's earlier one wrote the record: only a
-    // mailbox send takes the client's own `not_found` reply (`replier_is_recipient`).
+    // mailbox send takes its client's typed rejection (`replier_is_recipient`).
     if let Err(e) = storage::mark_outbound_via_mailbox(&db, &envelope.id) {
-        tracing::warn!(message_id = %envelope.id, "mailbox send not marked; its client's not_found reply will be refused: {e}");
+        tracing::warn!(message_id = %envelope.id, "mailbox send not marked; its client's rejection reply will be refused: {e}");
     }
 
     // Notify any waiting long-pollers
@@ -4603,6 +4629,15 @@ pub async fn get_federated_inbox(
     wait_secs: u64,
 ) -> Result<Option<FedInboxItem>, AppError> {
     let current_peers = fed_state.current_peers();
+    get_federated_inbox_with_peers(fed_state, &current_peers, peer_name, wait_secs).await
+}
+
+async fn get_federated_inbox_with_peers(
+    fed_state: &FedState,
+    current_peers: &PeersMap,
+    peer_name: &str,
+    wait_secs: u64,
+) -> Result<Option<FedInboxItem>, AppError> {
     let peer = current_peers
         .get(peer_name)
         .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
@@ -4919,16 +4954,14 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
     let wait_secs = 30u64;
 
     loop {
-        if !fed_state
-            .current_peers()
-            .get(&peer_name)
-            .is_some_and(|p| p.is_outbound())
-        {
+        // Relay permission must use the same peer identity that authenticates this pull.
+        let pull_peers = fed_state.current_peers();
+        if !pull_peers.get(&peer_name).is_some_and(|p| p.is_outbound()) {
             info!(peer = %peer_name, "outbound peer removed or no longer outbound, exiting pull loop");
             break;
         }
 
-        match get_federated_inbox(&fed_state, &peer_name, wait_secs).await {
+        match get_federated_inbox_with_peers(&fed_state, &pull_peers, &peer_name, wait_secs).await {
             Ok(Some(FedInboxItem::List { query, v })) => {
                 backoff_millis = 100;
                 answer_list_query(&fed_state, &peer_name, &query, v.unwrap_or(1) >= 2).await;
@@ -4953,6 +4986,7 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                 }
 
                 let target_ref = msg.to.as_deref().unwrap_or("");
+                let authorization = authorize_pulled_relay(&pull_peers, &peer_name, &msg);
                 // A12: one render, from the origin the hub attests.
                 let ret_host = peer_name.clone();
                 let from_name = msg
@@ -4961,7 +4995,7 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
 
                 // Idempotency (X1): a message already delivered or queued here is acked
                 // and skipped; one recorded as a failure is delivered again.
-                let already_processed = {
+                let already_processed = authorization.is_ok() && {
                     if let Ok(db) = fed_state.db.lock() {
                         let _ = storage::upgrade_svc_message_origin(
                             &db,
@@ -5004,7 +5038,10 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                     continue;
                 }
 
-                let resolved = resolve_target_session_fed(&fed_state, target_ref).await;
+                let resolved = match authorization {
+                    Ok(()) => resolve_target_session_fed(&fed_state, target_ref).await,
+                    Err(error) => Err(error),
+                };
 
                 match resolved {
                     Ok(target) => {
@@ -5181,7 +5218,7 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                     }
                     Err(err) => {
                         tracing::warn!(
-                            "message {} target '{target_ref}' unresolvable ({err}); sending error reply and acking at hub",
+                            "message {} target '{target_ref}' rejected ({err}); sending error reply and acking at hub",
                             msg.id
                         );
 
@@ -5191,11 +5228,17 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                                 format!("session {session_id} process {pid} exited")
                             }
                             AppError::Ambiguous(d) => d.clone(),
+                            AppError::OpDenied(detail) => detail.clone(),
                             _ => format!("no live session matches '{target_ref}'"),
                         };
 
+                        let error_code = if matches!(&err, AppError::OpDenied(_)) {
+                            "denied"
+                        } else {
+                            "not_found"
+                        };
                         let reply_text = serde_json::json!({
-                            "error": "not_found",
+                            "error": error_code,
                             "detail": detail,
                         })
                         .to_string();
@@ -5219,7 +5262,7 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                             session_id: target_ref.to_string(),
                             from_name: from_name.clone(),
                             bytes: msg.body.len(),
-                            outcome: "not_found".to_string(),
+                            outcome: error_code.to_string(),
                             recipient_harness: "system".to_string(),
                             return_harness: None,
                             return_session_id: None,

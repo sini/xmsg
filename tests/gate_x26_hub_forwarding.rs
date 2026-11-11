@@ -213,6 +213,8 @@ async fn spawn_test_node(name: &str, cert_pem: &str, key_pem: &str, peers_json: 
     fs::create_dir_all(&sessions_dir).unwrap();
     fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o700)).unwrap();
 
+    let codex_home = tmp.path().join("codex");
+    fs::create_dir(&codex_home).unwrap();
     let agent_sock = run_dir.join("agent.sock");
     let register_sock = run_dir.join("register.sock");
     let http_sock = run_dir.join("http.sock");
@@ -221,9 +223,13 @@ async fn spawn_test_node(name: &str, cert_pem: &str, key_pem: &str, peers_json: 
     let mut child = tokio::process::Command::new(bin)
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
+        .env("CODEX_HOME", &codex_home)
+        .env_remove("XMSG_CODEX_HOME")
         .env("RUST_LOG", "xmsg=info")
         .args([
             "serve",
+            "--codex-home",
+            codex_home.to_str().unwrap(),
             "--listen",
             "127.0.0.1:0",
             "--fed-listen",
@@ -1394,4 +1400,164 @@ async fn test_oracle_3a_hub_stores_reply_for_undialable_origin() {
         ["Bob answers leaf A"],
         "H holds the reply for node-a: {replies}"
     );
+}
+
+struct PausedChild(i32);
+
+impl PausedChild {
+    async fn new(node: &TestNode) -> Self {
+        let pid = node.child.0.as_ref().unwrap().id().unwrap() as i32;
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
+        let guard = Self(pid);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let mut status = 0;
+                let result =
+                    unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED | libc::WNOHANG) };
+                assert!(result >= 0, "waitpid for owned daemon");
+                if result == pid {
+                    assert!(libc::WIFSTOPPED(status), "owned daemon exited before stop");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("owned daemon must stop within deadline");
+        guard
+    }
+}
+
+impl Drop for PausedChild {
+    fn drop(&mut self) {
+        unsafe {
+            libc::kill(self.0, libc::SIGCONT);
+        }
+    }
+}
+
+async fn mailbox(
+    hub: &TestNode,
+    peer: &str,
+    present: bool,
+) -> Option<xmsg::storage::PeerMailboxMessage> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let conn = rusqlite::Connection::open(&hub.db_path).unwrap();
+            let row = xmsg::storage::get_next_peer_mailbox_message(&conn, peer).unwrap();
+            if row.is_some() == present {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("hub mailbox queue or ACK must reach expected state")
+}
+
+async fn outbound_pair(relayed: Option<&str>) -> (TestNode, TestNode, TestNode) {
+    let (cert_a, key_a, pin_a) = generate_self_signed_ed25519_pem("node-a").unwrap();
+    let (cert_h, key_h, pin_h) = generate_self_signed_ed25519_pem("hub").unwrap();
+    let (cert_b, key_b, pin_b) = generate_self_signed_ed25519_pem("node-b").unwrap();
+    let hub = spawn_test_node(
+        "hub",
+        &cert_h,
+        &key_h,
+        serde_json::json!({"peers": {
+            "node-a": {"address":"127.0.0.1:9", "pin":normalize_pin(&pin_a), "leaf":true,
+                "allow":["send","reply","inbox","forward"]},
+            "node-b": {"address":"127.0.0.1:9", "pin":normalize_pin(&pin_b), "leaf":true,
+                "allow":["send","reply","inbox","forward"]}
+        }}),
+    )
+    .await;
+    let config = |grant: Option<&str>| {
+        let mut allow = vec!["send", "reply", "inbox"];
+        if let Some(grant) = grant {
+            allow.push(grant);
+        }
+        serde_json::json!({"peers":{"hub":{
+            "address":format!("127.0.0.1:{}",hub.fed_port), "pin":normalize_pin(&pin_h),
+            "dial":"outbound", "default_route":true, "allow":allow
+        }}})
+    };
+    let a = spawn_test_node("node-a", &cert_a, &key_a, config(Some("relayed"))).await;
+    let b = spawn_test_node("node-b", &cert_b, &key_b, config(relayed)).await;
+    (a, hub, b)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_outbound_leaf_forward_and_reply_mailboxes() {
+    for grant in ["relayed", "relay"] {
+        let (a, hub, b) = outbound_pair(Some(grant)).await;
+        let (_, alice) = create_claude_session_fixture(&a.sessions_dir, "alice", "Alice");
+        let (_, bob) = create_claude_session_fixture(&b.sessions_dir, "bob", "Bob");
+        let paused_b = PausedChild::new(&b).await;
+        let sent =
+            send_via_agent_sock(&a.agent_sock, "Bob@node-b", "outbound mailbox forward").await;
+        assert_eq!(sent["status"], "ok", "{sent}");
+        let queued = mailbox(&hub, "node-b", true).await.unwrap();
+        assert!(queued.body.contains("outbound mailbox forward"));
+        assert_eq!(queued.id, sent["message_id"].as_str().unwrap());
+        drop(paused_b);
+        let delivered = wait_for_inbox_message(&bob, Duration::from_secs(10))
+            .await
+            .expect("Bob mailbox delivery");
+        assert!(delivered.contains("outbound mailbox forward"));
+        mailbox(&hub, "node-b", false).await;
+        let paused_a = PausedChild::new(&a).await;
+        let id = extract_message_id(&delivered).unwrap();
+        let replied = reply_via_agent_sock(&b.agent_sock, &id, "outbound mailbox return").await;
+        assert_eq!(replied["status"], "ok", "{replied}");
+        let queued = mailbox(&hub, "node-a", true).await.unwrap();
+        assert!(queued.body.contains("outbound mailbox return"));
+        let envelope: Value = serde_json::from_str(&queued.envelope).unwrap();
+        assert_eq!(envelope["in_reply_to"], id, "reply envelope must correlate");
+        drop(paused_a);
+        let reply = wait_for_inbox_message(&alice, Duration::from_secs(10))
+            .await
+            .expect("Alice reply delivery");
+        assert!(reply.contains("outbound mailbox return"));
+        mailbox(&hub, "node-a", false).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_outbound_leaf_requires_relayed_grant() {
+    let (a, hub, b) = outbound_pair(None).await;
+    let (_, alice) = create_claude_session_fixture(&a.sessions_dir, "alice", "Alice");
+    let (_, bob) = create_claude_session_fixture(&b.sessions_dir, "bob", "Bob");
+    let (_, _hub_inbox) = create_claude_session_fixture(&hub.sessions_dir, "hub-local", "HubLocal");
+    let direct = send_via_agent_sock(&hub.agent_sock, "Bob@node-b", "direct hub control").await;
+    assert_eq!(direct["status"], "ok", "{direct}");
+    let control = wait_for_inbox_message(&bob, Duration::from_secs(10))
+        .await
+        .expect("direct hub origin must remain allowed without relayed grant");
+    assert!(control.contains("direct hub control"));
+    mailbox(&hub, "node-b", false).await;
+    bob.lock().unwrap().clear();
+    let sent = send_via_agent_sock(&a.agent_sock, "Bob@node-b", "forbidden foreign origin").await;
+    assert_eq!(sent["status"], "ok", "{sent}");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            assert!(
+                bob.lock().unwrap().is_empty(),
+                "relayed grant bypassed on outbound mailbox pull"
+            );
+            if alice.lock().unwrap().iter().any(|s| s.contains("denied")) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("foreign origin must receive denied reply");
+    mailbox(&hub, "node-b", false).await;
+    let direct = send_via_agent_sock(&hub.agent_sock, "Bob@node-b", "queue progress control").await;
+    assert_eq!(direct["status"], "ok", "{direct}");
+    let control = wait_for_inbox_message(&bob, Duration::from_secs(10))
+        .await
+        .expect("mailbox must progress after denied ACK");
+    assert!(control.contains("queue progress control"));
+    mailbox(&hub, "node-b", false).await;
 }

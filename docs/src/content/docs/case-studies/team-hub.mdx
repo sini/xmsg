@@ -71,7 +71,7 @@ same.
       "ca": "/etc/xmsg/team-ca.pem",
       "identities": ["spiffe://example.org/host/hub/user/team"],
       "dial": "outbound",
-      "allow": ["send", "reply", "inbox", "relayed"],
+      "allow": ["send", "reply", "relayed"],
       "default_route": true
     }
   }
@@ -81,9 +81,12 @@ same.
 - `"dial": "outbound"` makes this node dial the hub and pull its mailbox.
 - `"default_route": true` sends any explicit destination that is not a direct peer, such as
   `bob.laptop`, to the hub. At most one entry may set it.
-- `allow` lists what this node accepts from the hub. `send`, `reply` and `inbox` are what an
-  outbound link needs. `relayed` accepts messages the hub forwards from other nodes; without it,
-  teammates' messages are refused.
+- `allow` lists operations accepted from the hub. The examples grant `relayed` for
+  forwarded messages. Planned (unreleased): full-node mailbox pulls enforce this grant
+  before local delivery; without it, third-party items receive a `denied` reply and are
+  ACKed without delivery. Direct hub-origin messages still work without it.
+- Mailbox access is gated by the authenticated peer plus `leaf: true` on the hub.
+  `inbox` in `allow` is accepted and ignored; old configurations listing it still load.
 
 ### The hub
 
@@ -96,19 +99,19 @@ The hub names every laptop and the build box. This is `team.hub`'s peers file:
       "ca": "/etc/xmsg/team-ca.pem",
       "identities": ["spiffe://example.org/host/laptop/user/alice"],
       "leaf": true,
-      "allow": ["send", "reply", "inbox", "list", "forward"]
+      "allow": ["send", "reply", "list", "forward"]
     },
     "bob.laptop": {
       "ca": "/etc/xmsg/team-ca.pem",
       "identities": ["spiffe://example.org/host/laptop/user/bob"],
       "leaf": true,
-      "allow": ["send", "reply", "inbox", "list", "forward"]
+      "allow": ["send", "reply", "list", "forward"]
     },
     "carol.laptop": {
       "ca": "/etc/xmsg/team-ca.pem",
       "identities": ["spiffe://example.org/host/laptop/user/carol"],
       "leaf": true,
-      "allow": ["send", "reply", "inbox", "list", "forward"]
+      "allow": ["send", "reply", "list", "forward"]
     },
     "build.gpubox": {
       "address": "gpubox.example.org:7788",
@@ -173,8 +176,10 @@ alice's Claude Code session, pushed into its inbox
 The send's `outcome` reports what happened to the message, not the answer. Here it is `queued`:
 the hub holds it in bob's mailbox until bob's node pulls it. The reply is separate. bob's node
 sends it to the hub, which recorded the forwarded message, and the hub stores the reply for alice's
-node. alice's node cannot be dialled either, so it polls the hub for replies to the messages it sent
-and pushes each one into her session's inbox. bob's session sees `id@alice.laptop` as the sender:
+node. alice's node cannot be dialled either, so it pulls its hub mailbox and also polls
+replies to its sent messages, pushing the answer into her session's inbox. The queued
+forward and queued return are both covered by the outbound-link gate. bob's session sees
+`id@alice.laptop` as the sender:
 the hub attests which node the message came from, from that node's certificate.
 
 ## Flow 2: borrow more resources

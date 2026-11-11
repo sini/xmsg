@@ -662,6 +662,7 @@ async fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
     .unwrap();
 
     let leaf_peers_path = tmp.path().join("leaf-peers.json");
+    // The synthetic origin is foreign to the test hub's pinned canonical identity.
     fs::write(
         &leaf_peers_path,
         serde_json::json!({
@@ -669,7 +670,7 @@ async fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
                 "address": format!("127.0.0.1:{hub_port}"),
                 "pin": normalize_pin(&hub_pin),
                 "dial": "outbound",
-                "allow": ["send", "reply", "inbox"]
+                "allow": ["send", "reply", "inbox", "relayed"]
             }
         })
         .to_string(),

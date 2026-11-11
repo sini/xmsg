@@ -101,6 +101,16 @@ Served only on the mTLS `--fed-listen` listener (isolated from local loopback ro
 | `/fed/v2/list/{query}` | `POST` | Posts a leaf or outbound-linked node's answer to a mailbox `list` query. |
 | `/fed/v2/handoff`, `/fed/v2/handoff/ack` | `POST` | Transfers and acknowledges a parked Claude conversation queue across a user's machines. |
 
+Mailbox pulls and ACKs require the authenticated peer to have `leaf: true` on the hub;
+each peer can access only its own mailbox. The `inbox` string in `allow` is accepted
+and ignored; old configurations listing it still load.
+
+Planned (unreleased): full nodes with outbound links require `relayed` (or `relay`)
+when a pulled message's origin differs from the hub's canonical node name. A refused
+item produces a strict `{"error":"denied","detail":"..."}` reply and is ACKed at the
+hub, so it cannot block later mailbox items. Direct hub-origin mail remains deliverable
+without this grant. This uses existing origin fields and changes no wire shape.
+
 ---
 
 ## Error vocabulary

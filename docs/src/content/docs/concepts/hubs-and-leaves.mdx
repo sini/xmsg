@@ -81,11 +81,14 @@ A full `xmsg` node running interactive agent harnesses (`claude`, `codex`, `agy`
 `hermes`, `pi`, and `svc`) behind NAT or a stateful firewall can connect to a dialable hub without
 opening an inbound port:
 
-- **On the undialable node:** Set `"dial": "outbound"` and `"allow": ["send", "reply", "inbox"]` on
+- **On the undialable node:** Set `"dial": "outbound"` and `"allow": ["send", "reply"]` on
   the hub's entry in `peers.json`. (`"leaf": true` and `"dial": "outbound"` on the same entry are
   mutually exclusive.)
 - **On the hub:** Mark the undialable node's entry with `"leaf": true` so messages and `list`
   queries addressed to it queue in the hub's `peer_mailbox`.
+- **Mailbox authorization:** The hub authenticates the peer and requires `leaf: true`
+  for that peer's own mailbox. `inbox` in `allow` is accepted and ignored; old
+  configurations listing it still load.
 - **Background pull loop:** At startup, the full node spawns an outbound pull loop that long-polls
   `GET /fed/v2/inbox` on the hub, answers `list` queries on `POST /fed/v2/list/{query}`, resolves
   local targets across all harnesses, delivers messages locally, and acknowledges them at the hub.
@@ -104,16 +107,25 @@ Forwarding is strictly opt-in and bounded to a **single hop**:
 - **Permission on the hub (`"forward"`):** The sending peer's entry in the hub's `peers.json` must
   include `"forward"` in `allow`.
 - **Permission on the recipient (`"relayed"`):** The hub's entry in the recipient node's
-  `peers.json` must include `"relayed"` (or `"relay"`) in `allow`.
+  `peers.json` must include `"relayed"` (or `"relay"`) in `allow` for direct forwarded
+  sends. Planned (unreleased): full-node outbound pulls apply this same grant to
+  third-party origins, comparing canonical node names rather than local nicknames.
+  Denied items get an error reply and an ACK; direct hub-origin mail still works
+  without `relayed`.
 - **Single-hop envelope mark (`forwarded`):** The hub attests the sender's `origin.node` from the
   TLS identity of the sending peer and attaches
-  `forwarded: { "forwarder": "<hub-node>", "targets"?: [...] }`. The recipient verifies that
+  `forwarded: { "forwarder": "<hub-node>", "targets"?: [...] }`. On dialable delivery, the recipient verifies that
   `forwarder` matches the authenticated hub connection and refuses to re-forward any message that
   already carries `forwarded`.
-- **Dual target filtering:** If the hub configures `targets` for the destination peer, the hub
+  Mailbox pull items carry the canonical origin and local target without this mark;
+  the full-node consumer delivers locally rather than forwarding the item again.
+- **Dual target filtering on dialable forwarding:** If the hub configures `targets` for the destination peer, the hub
   checks the unresolved `ref` before relaying and also passes `targets` inside the `forwarded` mark
   so the destination enforces that a service name in `targets` resolves to a service (never an
   instance merely carrying that label).
+  Mailbox pull items retain the origin but omit `forwarded.targets`; only the hub's
+  pre-filter applies to that bound on the mailbox route. Recipient-side semantic
+  enforcement of the forwarded target bound remains a follow-up.
 - **Reply routing:** The hub records forwarded messages in `forwarded_messages` and relays replies
   from the recipient back to the origin peer (either via direct push or by storing them for the
   origin's outbound reply poller).
