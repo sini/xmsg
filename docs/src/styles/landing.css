@@ -97,32 +97,6 @@ main:has(.xm-intro) h1#_top {
   color: var(--sl-color-accent-high);
 }
 
-.xm-tools {
-  display: grid;
-  gap: 0.5rem;
-  margin: 1rem 0;
-  padding: 0;
-  list-style: none;
-}
-
-.xm-tools li {
-  display: grid;
-  grid-template-columns: 5rem 1fr;
-  align-items: baseline;
-  gap: 0.75rem;
-  padding: 0.6rem 0.9rem;
-  border-inline-start: 3px solid var(--sl-color-accent);
-  background: var(--sl-color-bg-nav);
-  border-radius: 0 6px 6px 0;
-}
-
-.xm-tools code {
-  font-weight: 600;
-  color: var(--sl-color-accent-high);
-}
-
-.xm-tools span { color: var(--sl-color-gray-2); }
-
 /* The build-story teaser: the proof, right after the exchange it builds on. */
 .xm-story {
   margin: 2.5rem 0;

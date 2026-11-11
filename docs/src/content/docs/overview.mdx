@@ -13,6 +13,22 @@ conversation in a harness. A **harness** is the program that runs the model and 
 message, and get replies pushed into their live inbox. Headless programs join the same bus as
 **services**. It works on one machine, and across machines over mutual TLS (mTLS).
 
+## The basics
+
+Three tools do most of the work:
+
+- **`list`** shows which sessions and services are running, here and on connected machines.
+- **`send`** sends text to an address. You get back a message ID and an outcome: `delivered` or
+  `queued`, or `pending` when you retry with the same idempotency key while the first send is
+  still in flight.
+- **`reply`** answers a message by its ID. The reply is stored, and pushed to the sender if it
+  has an inbox.
+
+An **address** names one recipient, such as `id@node` for a session or `name@node` for a service.
+A **node** is one running xmsg daemon, usually one per user per machine. Read
+[addressing](/concepts/addressing/) and [delivery and replies](/concepts/replies/) for the details,
+including [idempotency](/concepts/replies/#idempotency-idempotency_key).
+
 ## Who it is for
 
 - You run more than one agent session at a time and are tired of copying text between them.
