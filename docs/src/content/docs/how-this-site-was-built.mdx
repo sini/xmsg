@@ -62,7 +62,7 @@ examples, and the texts are trimmed. The `[xmsg]` lines are the envelope each ag
 
 ### The orchestrator asks for DNS
 
-```text
+```text wrap
 orchestrator (Claude Code), on alice.workstation
   › send(to="infra@alice.workstation", text="The docs site moves to its own domain. Add the DNS records for GitHub Pages, redirect the other domains to it, and reply when the records are live.")
     outcome: delivered · message_id 01JE4Q…
@@ -80,7 +80,7 @@ orchestrator, pushed into its inbox
 
 ### The reviewer reports back
 
-```text
+```text wrap
 orchestrator, on alice.workstation
   › send(to="reviewer@alice.workstation", text="Adversarial review of the docs: try to break every claim against the source. Report what survives.")
     outcome: delivered · message_id 01JE6C…

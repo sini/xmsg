@@ -141,7 +141,7 @@ main:has(.xm-intro) h1#_top {
   color: var(--sl-color-text-accent);
 }
 
-.xm-story h2 {
+.sl-markdown-content .xm-story h2 {
   margin: 0 0 0.6rem;
   font-family: var(--font-display);
   font-size: var(--sl-text-h3);
