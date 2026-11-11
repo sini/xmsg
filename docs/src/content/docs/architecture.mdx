@@ -41,7 +41,7 @@ flowchart TD
     Fed["mTLS /fed/v2 Router & Pull Loops"]
   end
 
-  Claude -->|socket injection| HttpSock
+  Registry -->|"delivers into its session socket"| Claude
   Codex -->|relay / hooks| AgentSock
   Agy -->|credentials| RegisterSock
   Plugins -->|multiplexed poll & tools| RegisterSock
