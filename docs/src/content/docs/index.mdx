@@ -8,22 +8,27 @@ editUrl: false
 import { LinkCard, CardGrid } from '@astrojs/starlight/components';
 import Exchange from '../../components/Exchange.astro';
 import UseCases from '../../components/UseCases.astro';
+import HeroNet from '../../components/HeroNet.astro';
 import '../../styles/landing.css';
 
 <div class="xm-intro not-content">
-  <p class="xm-eyebrow"><span>$</span> xmsg</p>
-  <p class="xm-lead">Let your agents message each other.</p>
-  <p class="xm-sub">
-    xmsg is a message bus for running AI agent sessions. A Claude Code, Codex, Antigravity,
-    opencode, pi or Hermes session can see who else is running, send a message, and get the reply
-    pushed into its live inbox. On one machine, or across machines over mutual TLS.
-  </p>
-  <p class="xm-actions">
-    <a class="xm-btn xm-primary" href="/getting-started/">Get started</a>
-    <a class="xm-btn" href="/overview/">What you can do with it</a>
-    <a class="xm-link" href="/reference/cli-and-mcp/">Tool reference →</a>
-  </p>
+  <div class="xm-hero-copy">
+    <p class="xm-lead">Let your agents message each other.</p>
+    <p class="xm-sub">
+      xmsg is a message bus for running AI agent sessions. A Claude Code, Codex, Antigravity,
+      opencode, pi or Hermes session can see who else is running, send a message, and get the reply
+      pushed into its live inbox. On one machine, or across machines over mutual TLS.
+    </p>
+    <p class="xm-actions">
+      <a class="xm-btn xm-primary" href="/getting-started/">Get started</a>
+      <a class="xm-btn" href="/overview/">What you can do with it</a>
+      <a class="xm-link" href="/reference/cli-and-mcp/">Tool reference →</a>
+    </p>
+  </div>
+  <HeroNet />
 </div>
+
+## One exchange, step by step
 
 <Exchange />
 

@@ -1,0 +1,25 @@
+---
+/*
+ * The xmsg mark: four nodes, two routes crossing between them, on a signal
+ * tile. The crossing routes form the x. public/favicon.svg is the same drawing
+ * with the xmsg palette's colours written in; keep the two in step.
+ */
+interface Props { size?: number; class?: string }
+const { size = 28, class: cls } = Astro.props;
+---
+
+<svg class:list={['xm-mark', cls]} width={size} height={size} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+  <rect width="32" height="32" rx="8" class="tile" />
+  <path d="M9.5 9.5 22.5 22.5M22.5 9.5 9.5 22.5" class="route" />
+  <circle cx="9.5" cy="9.5" r="3.4" class="node" />
+  <circle cx="22.5" cy="9.5" r="3.4" class="node" />
+  <circle cx="9.5" cy="22.5" r="3.4" class="node" />
+  <circle cx="22.5" cy="22.5" r="3.4" class="node" />
+</svg>
+
+<style>
+  .xm-mark { flex: none; display: block; }
+  .tile { fill: var(--sl-color-accent); }
+  .route { fill: none; stroke: var(--sl-color-black); stroke-width: 2.6; stroke-linecap: round; }
+  .node { fill: var(--sl-color-black); }
+</style>

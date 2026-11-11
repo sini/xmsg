@@ -4,10 +4,9 @@
  * Every colour here resolves through `--sl-color-*`, so the whole layer follows
  * whichever palette is active. Nothing in this file may hardcode a hex value.
  *
- * Den sets headings and UI chrome in Victor Mono. Monospace runs roughly 15%
- * wider than sans at the same size, so Starlight's default type scale — tuned
- * for a sans stack — overshoots badly here. The heading rules below pull the
- * scale back and tighten tracking to compensate.
+ * Headings and UI chrome are set in Space Grotesk (custom.css). Its wide
+ * letterforms read large at Starlight's default scale, so the heading tokens
+ * below pull the scale back and tighten tracking.
  */
 
 :root {
@@ -36,7 +35,7 @@
 
 .sl-markdown-content :is(h1, h2, h3, h4),
 .hero h1 {
-  font-weight: 400;
+  font-weight: 600;
 }
 
 .sl-markdown-content h1,
@@ -69,14 +68,12 @@
   color: var(--sl-color-accent-high);
 }
 
-/* Victor Mono's italic is a cursive script face, so any `em` that inherits it
-   reads as a different typeface and is hard to scan. Emphasis is carried by the
-   accent colour and a soft rule instead — legible, still stylised, and it
-   follows the active palette.
+/* Space Grotesk has no italic, so an `em` in the display face would be a
+   synthesised slant. Emphasis is carried by the accent colour and a soft rule
+   instead, and it follows the active palette.
 
-   The selector list mirrors the Victor Mono assignment in custom.css: the
-   problem is not "em in a heading" but "em anywhere Victor Mono applies", which
-   also covers `strong`, `th` and aside titles. Keep the two lists in step. */
+   The selector list mirrors the Space Grotesk assignment in custom.css, plus
+   `strong`. Keep the two lists in step. */
 :is(
     .site-title,
     .tab-link,

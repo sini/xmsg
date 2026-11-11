@@ -25,24 +25,24 @@ main:has(.xm-intro) h1#_top {
   white-space: nowrap;
 }
 
-.xm-eyebrow {
-  margin: 0 0 0.6rem;
-  font-family: var(--sl-font-mono);
-  font-size: var(--sl-text-sm);
-  color: var(--sl-color-accent-high);
+/* Copy on the left, the network on the right; stacked on narrow screens. */
+.xm-intro {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+  align-items: center;
+  gap: 2rem 3rem;
+  margin: 1rem 0 2.5rem;
 }
 
-.xm-eyebrow span { color: var(--sl-color-gray-3); }
-
-.xm-intro {
-  margin-bottom: 2rem;
+@media (max-width: 56rem) {
+  .xm-intro { grid-template-columns: 1fr; }
 }
 
 .xm-lead {
-  margin: 0 0 0.75rem;
-  font-family: var(--__sl-font);
-  font-size: clamp(2rem, 5.5vw, 3.4rem);
-  font-weight: 750;
+  margin: 0 0 1rem;
+  font-family: var(--font-display);
+  font-size: clamp(2.2rem, 4.6vw, 3.3rem);
+  font-weight: 700;
   line-height: 1.05;
   letter-spacing: -0.035em;
   color: var(--sl-color-white);
@@ -69,7 +69,7 @@ main:has(.xm-intro) h1#_top {
   padding: 0.55rem 1.1rem;
   border: 1px solid var(--sl-color-gray-4);
   border-radius: 6px;
-  font-family: var(--__sl-font);
+  font-family: var(--font-display);
   font-weight: 600;
   color: var(--sl-color-white);
   text-decoration: none;
@@ -88,13 +88,6 @@ main:has(.xm-intro) h1#_top {
 .xm-link {
   font-family: var(--__sl-font);
   color: var(--sl-color-accent-high);
-}
-
-/* Headings on this page are plain sans, set bold, unlike the docs' light mono. */
-main:has(.xm-intro) .sl-markdown-content h2 {
-  font-family: var(--__sl-font);
-  font-weight: 700;
-  letter-spacing: -0.02em;
 }
 
 .xm-tools {
@@ -122,3 +115,9 @@ main:has(.xm-intro) .sl-markdown-content h2 {
 }
 
 .xm-tools span { color: var(--sl-color-gray-2); }
+
+/* On a phone the network's labels fall below a legible size, and the exchange
+   right below it shows the same idea at full size, so the picture steps aside. */
+@media (max-width: 40rem) {
+  .xm-intro .xm-net { display: none; }
+}

@@ -1,0 +1,28 @@
+---
+/*
+ * Header wordmark: the mark plus the name, inline so both follow the active
+ * palette. Replaces Starlight's SiteTitle, which only knows image logos.
+ */
+import Mark from './Mark.astro';
+const { siteTitle, siteTitleHref } = Astro.locals.starlightRoute;
+---
+
+<a href={siteTitleHref} class="site-title sl-flex">
+  <Mark size={28} />
+  <span translate="no">{siteTitle}</span>
+</a>
+
+<style>
+  .site-title {
+    align-items: center;
+    gap: 0.55rem;
+    font-family: var(--font-display);
+    font-size: 1.35rem;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    color: var(--sl-color-white);
+    text-decoration: none;
+    white-space: nowrap;
+    min-width: 0;
+  }
+</style>

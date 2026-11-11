@@ -34,28 +34,50 @@
 /** @type {Palette[]} */
 export const palettes = [
   {
-    // The project's own palette. The neutral ramp is the shared house scale;
-    // the three accent tokens are the knob to turn if the hue should move.
-    // `accent` is the one colour the reader meets on every page, so `accentLow`
-    // (a background tint) and `accentHigh` (a foreground) are re-derived alongside it.
+    // The project's own palettes. Warm graphite neutrals and a signal-coral
+    // accent: the colour of a message in flight. `accent` is the one colour the
+    // reader meets on every page, so `accentLow` (a background tint) and
+    // `accentHigh` (a foreground) are re-derived alongside it. Contrast is
+    // checked against WCAG AA for every text pair the site uses.
     id: 'xmsg',
     label: 'xmsg',
     mode: 'dark',
     origin: { kind: 'original' },
-    semantic: { blue: '#7ebae4', purple: '#b3a0e8', orange: '#e8b174', green: '#86c9a0', red: '#e08585' },
+    semantic: { blue: '#7db4f5', purple: '#c3a6f7', orange: '#f2b35e', green: '#7fd19b', red: '#f57f7f' },
     tokens: {
-      white: '#f2f5fa',
-      gray1: '#d7dde7',
-      gray2: '#b4bccb',
-      gray3: '#8892a6',
-      gray4: '#5b6478',
-      gray5: '#333947',
-      gray6: '#22262f',
-      gray7: '#191c23',
-      black: '#14161c',
-      accentLow: '#173a36',
-      accent: '#5fbfae',
-      accentHigh: '#a9e0d6',
+      white: '#f7f2eb',
+      gray1: '#e0d9cf',
+      gray2: '#c2b9ad',
+      gray3: '#988f84',
+      gray4: '#655e56',
+      gray5: '#3d3833',
+      gray6: '#282521',
+      gray7: '#1d1b18',
+      black: '#151311',
+      accentLow: '#40211a',
+      accent: '#ff7a59',
+      accentHigh: '#ffbfae',
+    },
+  },
+  {
+    id: 'xmsg-light',
+    label: 'xmsg light',
+    mode: 'light',
+    origin: { kind: 'original' },
+    semantic: { blue: '#1f5fbf', purple: '#7445c9', orange: '#a35200', green: '#24753f', red: '#bf2a2a' },
+    tokens: {
+      white: '#1e1a16',
+      gray1: '#3a342e',
+      gray2: '#4f4840',
+      gray3: '#6b6359',
+      gray4: '#a39a8f',
+      gray5: '#d4cbc0',
+      gray6: '#e6dfd6',
+      gray7: '#f2ede6',
+      black: '#fcfaf7',
+      accentLow: '#fde4dc',
+      accent: '#b8371a',
+      accentHigh: '#8f2a0d',
     },
   },
   {
@@ -198,13 +220,12 @@ export const palettes = [
 /**
  * Palette applied when the reader has expressed no preference.
  *
- * The dark default is the project's own palette — it is the one a first-time
- * reader sees. There is no original light palette, so light falls to an
- * upstream one.
+ * Both defaults are the project's own palettes, so a first-time reader sees
+ * the xmsg identity whichever colour scheme their system asks for.
  */
 export const defaults = {
   dark: 'xmsg',
-  light: 'catppuccin-latte',
+  light: 'xmsg-light',
 };
 
 /** `localStorage` key holding the reader's chosen palette id. */
