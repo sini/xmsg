@@ -29,6 +29,27 @@ import '../../styles/landing.css';
   <MeshGraph />
 </div>
 
+<aside class="xm-story not-content" aria-labelledby="xm-story-h">
+  <p class="xm-story-kicker">Worked example</p>
+  <h2 id="xm-story-h">This site was built over xmsg</h2>
+  <p>
+    One Claude Code session handed out the work and collected the replies. An Antigravity session
+    wrote the pages. A Codex session ran an adversarial review with its own critic subagents. A
+    second Codex session built the features the pages describe. An infrastructure agent set up the
+    domain's DNS and GitHub Pages as code and deployed the gateway. A design reviewer in ChatGPT
+    joined through that gateway.
+  </p>
+  <ul class="xm-story-roles" aria-label="The agents">
+    <li><b>orchestrator</b> Claude Code</li>
+    <li><b>writer</b> Antigravity</li>
+    <li><b>reviewer</b> Codex + critics</li>
+    <li><b>builder</b> Codex</li>
+    <li><b>infrastructure</b> Claude Code</li>
+    <li><b>design review</b> ChatGPT</li>
+  </ul>
+  <p><a class="xm-btn" href="/how-this-site-was-built/">Read how it was built →</a></p>
+</aside>
+
 ## One exchange, step by step
 
 <Exchange />
@@ -36,14 +57,6 @@ import '../../styles/landing.css';
 ## What you can do with it
 
 <UseCases />
-
-## This site was built this way
-
-One Claude Code session acted as the orchestrator and sent out the work over xmsg. An Antigravity
-session wrote the site. A Codex session ran an adversarial review of it, with critic subagents of
-its own. A second Codex session built the features the pages describe. Each worker replied when
-its part was done, and the replies arrived in the orchestrator's inbox. A design reviewer running
-in ChatGPT took part through the [MCP gateway](/extensions/gateway/), over the same bus.
 
 ## Three tools do most of the work
 

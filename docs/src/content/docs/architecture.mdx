@@ -1,0 +1,71 @@
+---
+title: Architecture
+description: The concepts xmsg is built from, the xmsg serve daemon, its three local sockets, and how harnesses and services connect to them.
+---
+
+This page is the map of the moving parts. Each row and socket links to the page with the detail.
+
+## Core concepts
+
+| Concept | In one line | Read more |
+|---|---|---|
+| Address | Every recipient has one: `id@node` for a session, `<P>/<child>@node` for a subagent, `name@node` for a service. | [Addressing](/concepts/addressing/) |
+| Session, service, subagent | The three kinds of recipient: live agent conversations, headless programs that poll, and child turns under a parent. | [Sessions, services and subagents](/concepts/sessions-services-subagents/) |
+| Queue and handoff | Messages to a parked conversation wait for the reply TTL (7 days by default) and follow a Claude conversation to another machine of the same user. | [Delivery and replies](/concepts/replies/) |
+| Reply | Stored under the original message ID, and pushed when the other party has an inbox. | [Replies](/concepts/replies/#replies-stored-always-pushed-by-sender-kind) |
+| Node | One xmsg daemon, named from its certificate or OS identity, such as `alice.workstation`. Nodes federate over mTLS `/fed/v2`. | [Federation](/concepts/federation/) |
+| Hub, leaf, outbound link | Layouts for pods, machines behind NAT and single-hop forwarding. | [Hubs, leaves and gateways](/concepts/hubs-and-leaves/) |
+| Trust | Locally, only your own UID can connect. Separate UIDs, mTLS certificates and peer rules are the security boundaries. | [Trust model](/concepts/trust-model/) |
+
+## The daemon and its sockets
+
+```mermaid
+flowchart TD
+  subgraph Harnesses["Running Agent Harnesses & Services"]
+    Claude["Claude Code<br/>(~/.claude/sessions)"]
+    Codex["Codex CLI<br/>(thread-writer-locks & relay)"]
+    Agy["Antigravity<br/>(presence FLOCK & hooks)"]
+    Plugins["Pi / opencode / Hermes<br/>(extensions & plugins)"]
+    Svc["Headless Services & Gateways<br/>(xmsg::client / register.sock)"]
+  end
+
+  subgraph IPC["Local IPC ($XDG_RUNTIME_DIR/xmsg, mode 0600)"]
+    AgentSock["agent.sock<br/>(list, send, reply, replies, inbox)"]
+    RegisterSock["register.sock<br/>(register, poll, ack, reply)"]
+    HttpSock["http.sock<br/>(/healthz, /v1/recipients, /v1/messages)"]
+  end
+
+  subgraph Daemon["xmsg serve Daemon"]
+    Registry["Session Registry & Claim Table"]
+    Store[("SQLite v3 Store<br/>messages, replies, queues, handoffs")]
+    Fed["mTLS /fed/v2 Router & Pull Loops"]
+  end
+
+  Claude -->|socket injection| HttpSock
+  Codex -->|relay / hooks| AgentSock
+  Agy -->|credentials| RegisterSock
+  Plugins -->|multiplexed poll & tools| RegisterSock
+  Svc -->|poll / ack| RegisterSock
+  Svc -->|list / send / reply| AgentSock
+  Harnesses -.->|xmsg mcp| AgentSock
+
+  AgentSock --> Store
+  RegisterSock --> Registry
+  RegisterSock --> Store
+  HttpSock --> Store
+  HttpSock --> Registry
+  Store <--> Fed
+```
+
+`xmsg serve` is the daemon. It listens on three Unix sockets in `$XDG_RUNTIME_DIR/xmsg/` (or the
+per-user Darwin temp directory on macOS):
+
+1. **`http.sock`** serves the HTTP API (`/healthz`, `/v1/recipients`, `/v1/messages`). A caller
+   whose process traces back to a registered session or service sends as that sender; any other
+   caller sends as `<from> · anon@<node>`.
+2. **`agent.sock`** carries `list`, `send`, `reply`, `replies` and `inbox` for `xmsg mcp`, hooks,
+   the Pi extension and the Rust `AgentClient`.
+3. **`register.sock`** is where Antigravity, Pi, the `opencode` and `hermes` plugins and headless
+   services register, poll, acknowledge and reply.
+
+The [HTTP API and sockets reference](/reference/http-and-sockets/) has the frames.

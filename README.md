@@ -46,7 +46,8 @@ See [NixOS & Home Manager](https://xmsg.dev/operations/nixos-and-home-manager/) 
 
 Full documentation lives at **<https://xmsg.dev>** (source under [`docs/src/content/docs/`](docs/src/content/docs/)):
 
-- **[Overview](https://xmsg.dev/overview/)** — Architecture, sockets, and how the pieces fit together.
+- **[Overview](https://xmsg.dev/overview/)** — What xmsg is, who it is for, and where to go next.
+- **[Architecture](https://xmsg.dev/architecture/)** — The daemon, its sockets, and how the pieces fit together.
 - **Concepts**
   - **[Addressing & Resolution](https://xmsg.dev/concepts/addressing/)** — `id@node`, `id~n@node`, `<P>/<child>@node`, `name@node`, local 5-step resolution, and federated view resolution.
   - **[Sessions, Services & Subagents](https://xmsg.dev/concepts/sessions-services-subagents/)** — Instance claims, headless `svc` daemons, and delegated subagent turn mailboxes (`inbox`) with parent fallback.

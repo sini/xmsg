@@ -87,6 +87,9 @@ export default defineConfig({
 					items: [
 						{ label: 'Get Started', slug: 'getting-started' },
 						{ label: 'Overview', slug: 'overview' },
+						{ label: 'Use Cases', slug: 'use-cases' },
+						{ label: 'How This Site Was Built', slug: 'how-this-site-was-built' },
+						{ label: 'Architecture', slug: 'architecture' },
 					],
 				},
 				{
