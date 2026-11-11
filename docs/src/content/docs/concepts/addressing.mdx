@@ -1,0 +1,100 @@
+---
+title: Addressing & Resolution
+description: Recipient addresses, sender labels, local target resolution order, and federated view resolution.
+---
+
+Every recipient on `xmsg` has an address of the form `<id or name>[@<node>]`, with at most one `@`.
+
+- **Instances (`id@node` or `id~n@node`):** A 36-character UUID, optionally followed by a monotonic
+  fork suffix `~2`, `~3`, … when multiple live processes present the same conversation ID.
+- **Delegated subagents (`<P>/<child>@node`):** `<P>` is the parent instance ID (UUID or `X~n`) and
+  `<child>` is the subagent's bound name or harness `agent_id` / child session ID.
+- **Services (`name@node`):** A bare service name (`1..=32` ASCII `[A-Za-z0-9_-]`, not `"xmsg"`,
+  and not UUID-shaped).
+
+There are no kind prefixes (`svc:`, `claude:`, `session:`) and no PID references. Passing more than
+one `@` (such as `x@dest@hub`) is refused with `bad_request`.
+
+## Sender labels
+
+Every delivered message shows its sender in one canonical format:
+
+```text
+instance:   label · id@node            (id@node alone when it has no label)
+subagent:   label · <P>/<child>@node
+service:    name@node                  (all of it attested)
+anonymous:  from · anon@node           (an unattested HTTP sender)
+```
+
+`id@node` (or `<P>/<child>@node` or `name@node`) is attested by `xmsg`: `id` includes any fork
+suffix `~n` (so the `X~2` fork of a conversation sends as `X~2`, never as plain `X`), and `node` is
+the node's canonical name or the reader's local nickname for that peer.
+
+The `label` is the sender's own description (such as a Claude or Pi session name) and is shown
+apart from the attested identifier. A label containing `@` or `·` is dropped whole so it can never
+imitate the attested part; the session remains listed and addressable by its ID without a label.
+Labels are stripped of quotes, angle brackets, control characters, and newlines, non-ASCII
+characters become `_`, and the label is capped at 64 characters. The attested `id@node` suffix is
+always emitted whole.
+
+## Local resolution order
+
+Every surface that takes a target (`POST /v1/messages`, `agent.sock` `send`, MCP `send`, and a
+federated send arriving at this node) resolves `to` in the same five-step order:
+
+1. **An instance ID or delegated sub-address (`<P>/<child>`).**
+   Matches a Claude conversation's `X~n` or bare `X`, then an Antigravity, plugin (`opencode`,
+   `hermes`), Codex, or Pi session's ID, or a sub-address `<P>/<child>` bound under `P` (where
+   `<child>` matches either the subagent's bound `name` or its `agent_id`).
+   - While a subagent is in an active turn, the message queues in its turn mailbox
+     (`outcome: "queued"`) for `inbox`.
+   - When its turn is not active, the message falls back to parent `P` with a
+     `to=<P>/<child> agent_id=<agent_id>` header prepended.
+   - A bare `X` while the plain ID is free and only `X~n` forks are live returns `409 ambiguous`,
+     listing each fork as `X~n@<node>`; it is never treated as parked.
+2. **A name, among services first.**
+   If a registered service has the name, the send goes to that service regardless of how any
+   instance is labelled. A session labelled `genie-guard` can never shadow or block the service
+   `genie-guard`.
+3. **Instance labels, only when unique.**
+   Only when no service has the name are live instance labels considered. The send resolves only
+   when exactly one live instance carries the label; two or more return `409 ambiguous` listing
+   each candidate as `id@<node>`.
+4. **An instance observed here before and not running now.**
+   A parked Claude, Codex, or Antigravity conversation is accepted and queued (`outcome: "queued"`).
+   A Pi ID, a released or closed plugin session (`opencode`, `hermes`), or an exited `X~n` fork is
+   `410 gone` and is never queued.
+5. **Otherwise `404 not_found`.**
+
+## How a bare reference resolves over the federated view
+
+A `to` with `@node` is resolved by that node alone. A bare `to` (without `@node`) on a node with
+peers resolves over the send's **view**: this node and every node in its peers file (direct peers
+and dial-out clients alike). Each peer is queried concurrently within the 5-second list timeout:
+
+- **The sender's user** is this node's own user: its certificate's user (`<user>` of
+  `<user>.<host>`), `<sa>.<ns>` for a Kubernetes pod, the key-derived name for a pinned node, or
+  the OS username when federation is not configured.
+- **Over the view, an instance ID is UUID-shaped:** a 36-character UUID, optionally followed by
+  `~n`. Any other `to` is treated as a name so another node's listing can never capture a name.
+- **A bare instance ID checks the sender's own user first.** This node first awaits the answers of
+  the sender's user's nodes in view (this node plus peers whose entry names an identity of that
+  user). One live listing of the ID is the destination; two or more return `ambiguous`; with none
+  live, a parked listing is the destination (`queued`). Other users' nodes are not consulted when
+  the sender's own user lists the ID.
+- **Otherwise, the full view is checked:**
+  - **Fail closed (`503 unavailable`).** If any node in the view could not be asked (unreachable,
+    timed out, disconnected dial-out client, or withholds `list`), a bare name or a bare ID not
+    found on the sender's user's nodes fails with `503 unavailable` naming the unreachable node.
+    Specify `@node` to bypass view fan-out and send directly to a known node.
+  - **Bare ID across users:** An ID listed under two different users is `ambiguous`. Within one
+    user, a live listing beats a parked one, two live listings are `ambiguous`, and parked-only
+    listings resolve to one queued destination.
+  - **Bare name across the view:** Services anywhere in view win over instance labels. The name
+    resolves only when exactly one recipient in view carries it; otherwise `ambiguous` lists every
+    candidate (`name@node` or `id@node`).
+- **60-second location cache:** When a bare instance ID resolves to a live session on a peer and is
+  delivered or queued there, this node caches `ID -> peer` for 60 seconds. Subsequent bare sends to
+  that ID within 60 seconds route directly to that peer marked **live-only**: if the session is now
+  parked (`not_live`) or delivery fails, the cache entry is evicted and the send re-resolves over
+  the full view.

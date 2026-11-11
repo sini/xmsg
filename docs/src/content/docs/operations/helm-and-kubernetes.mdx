@@ -1,0 +1,28 @@
+---
+title: Kubernetes & Helm
+description: Running xmsg leaf sidecars and federated hub pods in Kubernetes with SPIFFE X.509-SVIDs.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+In Kubernetes clusters (including gVisor-sandboxed pods), `xmsg` runs either as a central federated
+hub or as an in-pod `--leaf` sidecar alongside a service worker (`genie-guard`, `matrix-xmsg`, or
+`xmsg-mcp-gateway`):
+
+- **Pod node identity:** A pod certificate carrying SPIFFE URI SAN
+  `spiffe://<trust-domain>/ns/<ns>/sa/<sa>` derives the canonical node name `<sa>.<ns>` (see
+  [Federation](/concepts/federation/#self-authenticating-node-names)).
+- **Leaf sidecar mode (`--leaf`):** Share an `emptyDir` volume mounted at `$XDG_RUNTIME_DIR/xmsg`
+  between the `xmsg serve --leaf --leaf-principal svc:<name>` container and the service container
+  running under the same UID (`10001`). If the pod uses loopback HTTP within its isolated network
+  namespace, pass `--listen 127.0.0.1:7787` (`XMSG_LISTEN`). See
+  [Hubs, Leaves & Gateways](/concepts/hubs-and-leaves/#leaf-node-mode---leaf).
+- **Secret rotation:** `xmsg serve` polls `--fed-cert`, `--fed-key`, `--peers-file`, and `ca`
+  bundles by SHA-256 content hash every 30 seconds (`--fed-reload-interval-secs`), picking up
+  Kubernetes `Secret` symlink (`..data`) rotations automatically without restarting the pod.
+
+<Aside type="note" title="Helm Chart & Manifests">
+{/* TODO: Add Helm chart values reference and Kubernetes Deployment/StatefulSet manifests. */}
+**TODO:** Helm chart installation and full Kubernetes manifest templates are tracked for a
+follow-up release.
+</Aside>

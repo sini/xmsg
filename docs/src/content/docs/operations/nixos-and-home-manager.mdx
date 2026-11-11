@@ -1,0 +1,96 @@
+---
+title: NixOS & Home Manager
+description: Installing and configuring xmsg, agent harness switches, and mTLS federation with the flake's Home Manager and NixOS modules.
+---
+
+The `github:sini/xmsg` flake provides two declarative modules:
+
+- **`homeManagerModules.xmsg`** (also `homeManagerModules.default`): Installs `xmsg`, runs
+  `xmsg serve` as a user service (`systemd.user.services.xmsg` on Linux, `launchd.agents.xmsg` on
+  macOS), and wires per-harness MCP servers, plugins, extensions, skills, and hooks.
+- **`nixosModules.xmsg`** (also `nixosModules.default`): Opens the federation TCP port in the
+  system firewall when federation is enabled.
+
+## Minimal Home Manager import
+
+```nix
+{
+  inputs.xmsg.url = "github:sini/xmsg";
+
+  # In a Home Manager configuration:
+  imports = [ inputs.xmsg.homeManagerModules.xmsg ];
+  programs.xmsg.enable = true;
+}
+```
+
+Set `programs.xmsg.server.enable = false` to install the CLI and harness integrations on a host
+without running a local `xmsg serve` daemon.
+
+| Option | CLI Flag | Default |
+|---|---|---|
+| `programs.xmsg.package` | — | `inputs.xmsg.packages.${system}.default` |
+| `programs.xmsg.server.httpSocket` | `--http-sock` | `$XDG_RUNTIME_DIR/xmsg/http.sock` |
+| `programs.xmsg.server.agyExe` | `--agy-exe` (repeated) | `programs.antigravity-cli.package`'s `bin/agy` when `harnesses.agy.enable = true` |
+| `programs.xmsg.server.codexExe` | `--codex-exe` (repeated) | `programs.codex.package`'s `bin/codex` when `harnesses.codex.enable = true` |
+| `programs.xmsg.server.codexHome` | `--codex-home` (repeated) | `[ "${config.home.homeDirectory}/.codex" ]` |
+| `programs.xmsg.server.svcExe` | `--svc-exe NAME=PATH` | `{ }` |
+
+## Per-harness switches
+
+Each switch under `programs.xmsg.harnesses.<name>.enable` installs the shared skill
+(`nix/modules/skills/xmsg/SKILL.md`) and that harness's integration:
+
+- **`programs.xmsg.harnesses.claude.enable`:** Adds `xmsg mcp` to
+  `programs.claude-code.mcpServers`, installs the `xmsg` skill, adds `list`, `send`, `reply`,
+  `replies`, and `inbox` permissions under `mcp__plugin_hm_xmsg__` and `mcp__xmsg__`
+  (`permissionPrefixes`), and configures `xmsg register claude --hook` (`PreToolUse`,
+  `PostToolUse`, `SubagentStart`, `SubagentStop`). Requires `programs.claude-code.enable = true`.
+- **`programs.xmsg.harnesses.codex.enable` (Linux):** Links `${xdg.dataHome}/xmsg/bin/xmsg`,
+  configures `programs.codex.skills.xmsg` and `programs.codex.settings.mcp_servers.xmsg`, enables
+  `--codex-exe` and `--codex-home` on `xmsg serve`, and exposes read-only
+  `programs.xmsg.harnesses.codex.{hooks,trustState,mcpServer}`. Requires
+  `programs.codex.enable = true` on Linux.
+- **`programs.xmsg.harnesses.agy.enable`:** Adds `xmsg mcp` to
+  `programs.antigravity-cli.mcpServers`, installs the `xmsg` skill, and writes
+  `~/.gemini/config/hooks.json` (`PreInvocation`, `PreToolUse`, `Stop`). Requires
+  `programs.antigravity-cli.enable = true`.
+- **`programs.xmsg.harnesses.opencode.enable`:** Writes `$XDG_CONFIG_HOME/opencode/plugin/xmsg.ts`
+  and `opencode/skills/xmsg/SKILL.md` directly (no `opencode` module required).
+- **`programs.xmsg.harnesses.hermes.enable`:** Links `extensions/hermes/` into
+  `services.hermes-agent.extraPlugins`, appends `"xmsg"` to `settings.plugins.enabled` via
+  `lib.mkAfter`, sets `settings.plugins.entries.xmsg.allow_gateway_injection = true`, and installs
+  `hermesHomeFiles."skills/xmsg/SKILL.md"`. Requires `services.hermes-agent` enabled.
+- **`programs.xmsg.harnesses.pi.enable`:** Writes `~/.pi/agent/extensions/xmsg-pi.ts` and
+  `~/.pi/agent/skills/xmsg/SKILL.md`.
+
+## Federation and peers configuration
+
+```nix
+programs.xmsg.server.federation = {
+  enable = true;
+  port = 7788;                        # --fed-listen 0.0.0.0:7788 (listenAddress)
+  cert = ./xmsg-node.crt;             # --fed-cert (copied to the Nix store)
+  key = "/run/secrets/xmsg-node.key"; # --fed-key (runtime path, never in the Nix store)
+  reloadInterval = 30;                # --fed-reload-interval-secs
+  peers = {
+    # Pinned peer: set `pin = "sha256:..."` or `pinFromCert` to compute it at build time
+    cortex = {
+      address = "cortex.example.org:7788";
+      pinFromCert = ./cortex.crt;
+      allow = [ "send" "reply" "list" ];
+    };
+    # CA-signed peer: keyed by the node name derived from its single SPIFFE URI SAN
+    "alice.bitstream" = {
+      address = "bitstream.example.org:7788";
+      ca = ./xmsg-root.crt;
+      identities = [ "spiffe://example.org/host/bitstream/user/alice" ];
+      allow = [ "send" "reply" "list" ];
+    };
+  };
+};
+```
+
+On NixOS, open the federation port in the firewall with `nixosModules.xmsg`:
+
+```nix file=<rootDir>/nix/modules/nixos.nix#L1-L20
+```

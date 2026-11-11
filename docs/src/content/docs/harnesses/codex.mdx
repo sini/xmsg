@@ -1,0 +1,75 @@
+---
+title: Codex
+description: Integrating OpenAI Codex CLI on Linux with xmsg — writer-lock lease attestation, runtime _meta attribution, live push relay, and subagents.
+---
+
+On Linux, `xmsg` integrates with the OpenAI Codex CLI (`codex`) using writer-lock lease
+attestation, runtime JSON-RPC `_meta` caller attribution, a restricted live push relay for
+daemon-backed sessions, and hook-driven handoff for embedded (`--no-daemon`) sessions.
+
+## Attestation and admission (`--codex-exe`, `--codex-home`)
+
+To admit Codex root sessions and direct child subagents, configure `xmsg serve` with trusted Codex
+executables and home directories:
+
+```bash
+xmsg serve \
+  --codex-exe /path/to/bin/codex \
+  --codex-home "$HOME/.codex"
+```
+
+- **Writer-lock & rollout verification:** A Codex root session `P` is admitted when an ancestor
+  process matching `--codex-exe` holds an open file descriptor to
+  `<H>/thread-writer-locks/<P>.lock` under a configured `--codex-home` `<H>` (monitored via a
+  continuous Linux `inotify` lease watch), and the rollout file under `<H>/sessions` passes bounded
+  `O_NOFOLLOW` verification (`session_meta.payload.id == P` and `payload.session_id == P`).
+- **Runtime MCP `_meta` attribution:** `xmsg mcp` extracts `codex_session`
+  (`params._meta.sessionId`), `codex_thread` (`params._meta.threadId`), and `codex_turn`
+  (`params._meta["x-codex-turn-metadata"].turn_id`) strictly from the JSON-RPC `params._meta`
+  envelope — never from model-controlled `arguments` — and strips any model-supplied `as_agent`.
+- **Direct child subagents (`<P>/<X>@<node>`):** Direct children with a verified rollout under
+  `<H>/sessions` (`payload.id == X`, `payload.session_id == P`, `payload.parent_thread_id == P`)
+  bind `<P>/<X>@<node>`. Turn state is tracked by `SubagentStart`, `PreModelRequest`, and
+  `SubagentStop` hooks (`xmsg register codex --hook --event <event>`). While a child turn is
+  active, messages to `<P>/<X>@<node>` queue for `inbox`; out-of-turn messages fall back to parent
+  `P` with a `to=<P>/<X> agent_id=<X>` header.
+
+## Delivery: live push relay and hook drain
+
+- **Daemon-backed roots (live push relay):** When a Codex root runs on the per-home app-server
+  daemon (`<H>/app-server-control/app-server-control.sock`), `xmsg` connects to the control socket
+  (verifying `0700` directory, `0600` socket, and pinning peer `(pid, starttime)` to the admitted
+  owner), verifies `P` in `thread/loaded/list`, and emits a restricted text-only `turn/start`
+  request.
+- **Embedded (`--no-daemon`) roots (hook drain):** Sessions without an app-server socket drain
+  queued messages through `SessionStart`, `UserPromptSubmit`, and `Stop` hooks using transactional
+  `codex_handoff` state (`pending → inflight → accepted | unknown`) so messages are handed off at
+  most once.
+- **Untrusted-peer-data preamble:** Every Codex delivery carrier prepends a fixed untrusted-peer
+  preamble outside the escaped message body so peer messages are framed as colleague data rather
+  than system or developer instructions.
+
+## Operator revocation (`--revoke` / `--unrevoke`)
+
+To park a Codex root session so it refuses automatic re-admission until explicitly cleared:
+
+```bash
+# Revoke a Codex root session ID (sets RevokedByOperator)
+xmsg register codex --revoke <session-uuid>
+
+# Clear RevokedByOperator so the session can re-attest on resume
+xmsg register codex --unrevoke <session-uuid>
+```
+
+Set `XMSG_CODEX_LABEL=<label>` (or pass `--label <label>` to `xmsg register codex`) at launch to
+assign a human-readable label to the Codex session.
+
+## Home Manager switch
+
+On Linux, `programs.xmsg.harnesses.codex.enable = true` installs `${xdg.dataHome}/xmsg/bin/xmsg`,
+configures `programs.codex.skills.xmsg` and `programs.codex.settings.mcp_servers.xmsg`, wires
+`--codex-exe` and `--codex-home` into `xmsg serve`, and exposes
+`programs.xmsg.harnesses.codex.hooks`:
+
+```nix file=<rootDir>/nix/modules/home-manager.nix#L41-L120
+```

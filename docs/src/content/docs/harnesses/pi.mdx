@@ -1,0 +1,32 @@
+---
+title: Pi
+description: Integrating the Pi coding agent with xmsg via extensions/pi/index.ts.
+---
+
+`xmsg` ships a TypeScript extension (`extensions/pi/index.ts`) for the Pi coding agent
+(`@earendil-works/pi-coding-agent`).
+
+## How the Pi extension works
+
+- **Registration & long-poll:** On startup, the extension connects to
+  `$XDG_RUNTIME_DIR/xmsg/register.sock`. `xmsg serve` verifies the peer UID (`SO_PEERCRED` /
+  `getpeereid`), records the process start time, and mints a fresh UUID v4 for the session. The
+  session's display label defaults to the basename of its working directory.
+- **Safe prompt injection:** Inbound messages arrive over the `register.sock` long-poll loop (`poll`
+  $\rightarrow$ `ack`) and are delivered into Pi with `expandPromptTemplates: false` to prevent
+  remote command or prompt-template expansion.
+- **Tools (`list`, `send`, `reply`):**
+  - `list`: Queries active recipients over `$XDG_RUNTIME_DIR/xmsg/http.sock` (or `XMSG_URL` when
+    explicitly configured).
+  - `send`: Sends messages over `$XDG_RUNTIME_DIR/xmsg/agent.sock` with kernel PID attestation.
+  - `reply`: Sends replies over `$XDG_RUNTIME_DIR/xmsg/agent.sock`.
+- **Lifecycle:** Because a Pi session's UUID is bound to its process, exiting Pi releases the
+  session and subsequent sends to its UUID return `410 gone` (Pi sessions are never `parked`). Pi is
+  a single-session process and does not use subagent sub-addresses or `inbox`.
+
+## Home Manager switch
+
+Set `programs.xmsg.harnesses.pi.enable = true` in Home Manager to install
+`~/.pi/agent/extensions/xmsg-pi.ts` and `~/.pi/agent/skills/xmsg/SKILL.md`. Pi automatically loads
+all extensions under `~/.pi/agent/extensions/`. See
+[NixOS & Home Manager](/operations/nixos-and-home-manager/#per-harness-switches).

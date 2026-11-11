@@ -1,0 +1,30 @@
+---
+title: macOS
+description: Running xmsg on macOS (aarch64-darwin) via Home Manager or Cargo.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`xmsg` supports `aarch64-darwin` and runs macOS CI on every push and pull request
+(`.github/workflows/macos.yml`).
+
+## Platform specifics on Darwin
+
+- **Runtime directory:** When `XDG_RUNTIME_DIR` is unset on macOS, `xmsg` resolves its `0700`
+  runtime directory via `getconf DARWIN_USER_TEMP_DIR`.
+- **Peer credentials:** Unix sockets (`http.sock`, `agent.sock`, `register.sock`) verify peer UID
+  via `getpeereid` and peer PID via `LOCAL_PEEREPID`, and process start times via `proc_pidinfo`.
+- **Home Manager (`launchd`):** Importing `inputs.xmsg.homeManagerModules.xmsg` on Darwin configures
+  `launchd.agents.xmsg` to run `xmsg serve`. See
+  [NixOS & Home Manager](/operations/nixos-and-home-manager/).
+- **Antigravity on macOS:** Because XNU does not expose `flock(2)` owner PIDs to unprivileged
+  processes, macOS verifies `--agy-exe` (`proc_pidpath`) and open descriptor vnode `(vst_dev, vst_ino)`
+  and uses the `PreInvocation` hook (`Arm B′`) to trigger `xmsg register agy`. See
+  [Antigravity](/harnesses/antigravity/).
+
+<Aside type="note" title="Standalone macOS Installation Guide">
+{/* TODO: Add non-Nix macOS installation and launchd plist guide (Homebrew / Cargo install). */}
+**TODO:** Step-by-step non-Nix installation instructions for macOS (`cargo install`, manual
+`~/Library/LaunchAgents` plist setup, and per-harness configuration without Home Manager) will be
+added in a follow-up.
+</Aside>
