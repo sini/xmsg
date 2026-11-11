@@ -13,6 +13,8 @@ use xmsg::mcp::{run_mcp_loop, McpConfig};
 use xmsg::registry::resolve_sessions_dirs;
 use xmsg::storage;
 
+mod service_exec;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "xmsg",
@@ -26,6 +28,9 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Run an ordinary command-backed service
+    Service(service_exec::ServiceArgs),
+
     /// Start the HTTP bridge server
     Serve(Box<ServeArgs>),
 
@@ -313,6 +318,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Service(args) => {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(service_exec::run(args))?;
+        }
         Commands::Serve(args) => {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()

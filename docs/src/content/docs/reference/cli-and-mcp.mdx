@@ -1,28 +1,75 @@
 ---
 title: CLI & MCP Server
-description: Command-line subcommands and flags for xmsg serve, xmsg mcp, xmsg register, xmsg unregister, and xmsg check-peers, plus MCP tool schemas.
+description: Command-line subcommands, optional command-backed services, and MCP tool schemas.
 ---
 
 ## Command-line interface (`src/main.rs`)
 
-The `xmsg` binary exposes five subcommands: `serve`, `mcp`, `register`, `unregister`, and
+The `xmsg` binary exposes `service`, `serve`, `mcp`, `register`, `unregister`, and
 `check-peers`.
 
-```rust file=<rootDir>/src/main.rs#L16-L65
+```rust file=<rootDir>/src/main.rs#L18-L48
 ```
+
+### `xmsg service exec`
+
+Runs an optional ordinary service over the daemon's existing registration and agent
+sockets. Nothing starts automatically or changes the daemon's normal behavior.
+
+```bash
+xmsg service exec --name agent-quota -- agent-quota --json
+xmsg service exec --name snapshot --timeout-ms 2000 --max-output-bytes 65536 -- /path/to/producer --json
+```
+
+`--register-sock` or `XMSG_REGISTER_SOCK` selects the registration socket, otherwise
+the daemon's runtime-directory default is used. `--agent-sock` or `XMSG_AGENT_SOCK`
+selects the agent socket, otherwise it is beside the registration socket.
+Explicit socket paths must be absolute.
+The daemon applies its ordinary service registration, executable and peer-access rules.
+
+Each delivered request runs the fixed program and literal arguments after `--`.
+Request text is ignored, the program receives no stdin, and stderr is discarded.
+Successful UTF-8 stdout is the reply, unchanged, including whitespace. Configure a
+command whose stdout is intended for its requesters; the runner adds no environment
+dump or child diagnostics to responses.
+
+The default runtime bound is `75000` milliseconds. The default stdout limit is
+`65536` bytes; `--max-output-bytes` accepts `64` through `1048576` and is also capped by the
+daemon's reported message limit. Timeout or output overflow kills and waits for the
+owned child. Spawn, I/O or nonzero-exit failure, empty stdout, and invalid UTF-8 produce
+one static JSON response instead:
+
+```json
+{"status":"unknown","error":"timeout"}
+```
+
+Other error codes are `output_limit`, `command_failed`, `empty_output`, and
+`invalid_utf8`. No quota or other producer value is guessed on failure.
+
+The runner replies with a stable per-message idempotency key, then ACKs the request.
+It retains one pending response across transport reconnects and retries an uncertain
+reply with the same key and bytes. Commands must tolerate re-execution after a process
+crash; pending responses are retained in memory. Interrupt and termination signals
+stop the runner and reap an active owned command.
+Permanent daemon refusals and configuration/trust failures exit non-zero with a
+content-free diagnostic instead of retrying the same rejected response indefinitely.
+
+For quota service use, the producer owns account hashes, measurement age, missing/stale
+readings and the JSON schema. The transport relays that output as supplied; per-user
+installation and enabling remain deployment configuration.
 
 ### `xmsg serve`
 
 Starts the local IPC and optional mTLS federation daemon:
 
-```rust file=<rootDir>/src/main.rs#L157-L258
+```rust file=<rootDir>/src/main.rs#L163-L263
 ```
 
 ### `xmsg mcp`
 
 Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
 
-```rust file=<rootDir>/src/main.rs#L260-L285
+```rust file=<rootDir>/src/main.rs#L266-L290
 ```
 
 ### `xmsg register`
@@ -30,7 +77,7 @@ Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
 Registers credentials or handles lifecycle hooks for [Antigravity](/harnesses/antigravity/),
 [Claude Code](/harnesses/claude-code/), and [Codex](/harnesses/codex/):
 
-```rust file=<rootDir>/src/main.rs#L67-L155
+```rust file=<rootDir>/src/main.rs#L73-L160
 ```
 
 ### `xmsg check-peers`

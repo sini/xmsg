@@ -40,6 +40,12 @@
 
 See [NixOS & Home Manager](https://xmsg.dev/operations/nixos-and-home-manager/) for server options and mTLS peer configuration.
 
+Run an optional command-backed service explicitly:
+
+```bash
+xmsg service exec --name agent-quota -- agent-quota --json
+```
+
 ---
 
 ## Documentation
