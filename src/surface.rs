@@ -391,11 +391,59 @@ fn recipient(e: FedListEntry, node: &str) -> Recipient {
     }
 }
 
+fn host_part(node_name: &str) -> Option<&str> {
+    node_name.rsplit_once('.').map(|(_, host)| host)
+}
+
+fn nodes_in_view(state: &AppState) -> Vec<String> {
+    let mut set = std::collections::BTreeSet::new();
+    set.insert(state.node_name.clone());
+    if let Some(fs) = state.fed_state.as_ref() {
+        let peers = fs.current_peers();
+        for k in peers.keys() {
+            set.insert(k.clone());
+        }
+        if let Ok(adm) = peers.admitted_clients.read() {
+            for k in adm.keys() {
+                set.insert(k.clone());
+            }
+        };
+    }
+    set.into_iter().collect()
+}
+
+fn unknown_node_in_view(state: &AppState, n: &str) -> AppError {
+    let known = nodes_in_view(state);
+    AppError::NotFoundDetail(format!(
+        "unknown node '{n}' (known: {}; omit 'node' to list all nodes)",
+        known.join(", ")
+    ))
+}
+
+/// Peers in `peers` whose canonical name or entry key has host part `host` (sorted).
+fn peer_keys_for_host(peers: &crate::fed::PeersMap, host: &str) -> Vec<String> {
+    let mut matched = std::collections::BTreeSet::new();
+    for (key, _) in peers.iter() {
+        let canon = peers.canonical_name(key).unwrap_or(key.as_str());
+        if host_part(canon) == Some(host) || host_part(key) == Some(host) {
+            matched.insert(key.clone());
+        }
+    }
+    if let Ok(adm) = peers.admitted_clients.read() {
+        for (key, client) in adm.iter() {
+            if host_part(&client.canonical_name) == Some(host) || host_part(key) == Some(host) {
+                matched.insert(key.clone());
+            }
+        }
+    }
+    matched.into_iter().collect()
+}
+
 /// The recipients the caller may see (A4, XL1): this node's and every peer's, each peer
 /// asked concurrently and bounded by the list timeout (A-1, D14). `node` asks only that
-/// node. Default `list` (`status` omitted or `"live"`) returns only live recipients;
-/// `status: "inactive"` returns parked and closed instances seen within `within` seconds
-/// (default 24h, capped at `reply_ttl`).
+/// node (or, for a bare host without `.`, every node in view on that host). Default `list`
+/// (`status` omitted or `"live"`) returns only live recipients; `status: "inactive"` returns
+/// parked and closed instances seen within `within` seconds (default 24h, capped at `reply_ttl`).
 pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, AppError> {
     if query.host.is_some() {
         return Err(AppError::BadRequest(
@@ -438,7 +486,18 @@ pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, App
             false,
             vec![fs.current_peers().key_for(n).unwrap_or(n).to_string()],
         ),
-        (Some(n), _) => return Err(AppError::UnknownPeer(n.to_string())),
+        (Some(n), _) if !n.contains('.') => {
+            let local_match = host_part(node) == Some(n);
+            let peer_matches = fed_state
+                .map(|fs| peer_keys_for_host(&fs.current_peers(), n))
+                .unwrap_or_default();
+            if local_match || !peer_matches.is_empty() {
+                (local_match, peer_matches)
+            } else {
+                return Err(unknown_node_in_view(state, n));
+            }
+        }
+        (Some(n), _) => return Err(unknown_node_in_view(state, n)),
         (None, Some(fs)) => (true, fs.current_peers().keys().cloned().collect()),
         (None, None) => (true, Vec::new()),
     };
@@ -1796,7 +1855,40 @@ async fn deliver_send(
     let now = storage::now_epoch_secs();
 
     // `@node` scopes resolution to that node; a bare reference resolves over the view (XA6).
-    let mut dest = match (node, state.fed_state.as_ref()) {
+    // A bare host (no '.') in `@node` resolves when exactly one node in view has that host;
+    // matching more than one is `ambiguous`, naming the candidates.
+    let resolved_node: Option<String> = match (node, state.fed_state.as_ref()) {
+        (Some(n), _) if n == state.node_name => Some(state.node_name.clone()),
+        (Some(n), Some(fs)) if fs.current_peers().contains_name(n) => Some(n.to_string()),
+        (Some(n), fed_opt) if !n.contains('.') => {
+            let mut candidates = std::collections::BTreeSet::new();
+            if host_part(&state.node_name) == Some(n) {
+                candidates.insert(state.node_name.clone());
+            }
+            if let Some(fs) = fed_opt {
+                for k in peer_keys_for_host(&fs.current_peers(), n) {
+                    candidates.insert(k);
+                }
+            }
+            let candidates: Vec<String> = candidates.into_iter().collect();
+            if candidates.len() > 1 {
+                return Err(AppError::Ambiguous(format!(
+                    "ambiguous node '{n}': {}",
+                    candidates.join(", ")
+                )));
+            }
+            Some(
+                candidates
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| n.to_string()),
+            )
+        }
+        (Some(n), _) => Some(n.to_string()),
+        (None, _) => None,
+    };
+
+    let mut dest = match (resolved_node.as_deref(), state.fed_state.as_ref()) {
         (Some(n), _) if n == state.node_name => Dest::Local,
         (Some(n), Some(fs)) => {
             let peers = fs.current_peers();
@@ -1829,10 +1921,10 @@ async fn deliver_send(
                     id: false,
                 }
             } else {
-                return Err(AppError::UnknownPeer(n.to_string()));
+                return Err(unknown_node_in_view(state, node.unwrap_or(n)));
             }
         }
-        (Some(n), _) => return Err(AppError::UnknownPeer(n.to_string())),
+        (Some(n), _) => return Err(unknown_node_in_view(state, node.unwrap_or(n))),
         (None, Some(fs)) => crate::mesh::resolve(state, fs, target_ref).await?,
         (None, None) => Dest::Local,
     };
@@ -1986,7 +2078,7 @@ async fn deliver_send(
             if id && !cached && !leaf {
                 crate::mesh::remember(state, &key, &peer_key);
             }
-            let address = match node {
+            let address = match resolved_node.as_deref() {
                 Some(n) => format!("{}@{n}", resp.session_id),
                 None => format!("{}@{peer_key}", resp.session_id),
             };

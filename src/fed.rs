@@ -5234,7 +5234,7 @@ pub use crate::client::wire::NodeStatus;
 /// direct peer over `/fed/v2/sessions`, a dial-out client through its mailbox. Returns the
 /// entries its certificate user may list (P-3) and its status.
 pub async fn list_peer(fed_state: &FedState, peer_key: &str) -> (Vec<FedListEntry>, NodeStatus) {
-    let Some(peer) = fed_state.current_peers().get(peer_key).cloned() else {
+    let Some(peer) = fed_state.current_peers().get_peer_config(peer_key) else {
         return (
             Vec::new(),
             NodeStatus::failed(peer_key, "unreachable", "not a peer".to_string()),

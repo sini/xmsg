@@ -1213,3 +1213,314 @@ async fn test_xh1_1_stale_mcp_client_refusal() {
         "expected retired /v1/sessions 404 diagnostic, got: {sessions_body}"
     );
 }
+
+// =============================================================================
+// Gate 6 (xmsg-ng1.37): Bare host, nickname, ambiguity, and known ids on 404
+// =============================================================================
+#[tokio::test]
+async fn test_ng1_37_bare_host_nickname_and_unknown_node_candidates() {
+    let creds_sini = generate_self_signed_ed25519("sini.cortex").unwrap();
+    let creds_vic = generate_self_signed_ed25519("vic.cortex").unwrap();
+    let creds_nick = generate_self_signed_ed25519("uplink").unwrap();
+    let nick_canonical = xmsg::node::node_name_from_pin(&creds_nick.2).unwrap();
+
+    // 1. Single node on host `cortex` in view (`sini.cortex`):
+    //    `list(node="cortex")` lists `sini.cortex`, and `send(to="alice@cortex")` resolves.
+    let single_node = create_node("sini.cortex", Vec::new(), Some(creds_sini.clone()), None).await;
+    let my_pid = std::process::id();
+    let alice_pid = 7900;
+    write_proc_stat(&single_node.proc_root, my_pid, alice_pid, "200");
+    write_proc_stat(&single_node.proc_root, alice_pid, 1, "100");
+    let alice_sock = single_node.proc_root.join("alice.sock");
+    let alice_listener = UnixListener::bind(&alice_sock).unwrap();
+    let alice_rx = Arc::new(Mutex::new(Vec::new()));
+    let alice_rx_clone = alice_rx.clone();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = alice_listener.accept().await {
+            let mut buf = Vec::new();
+            let _ = stream.read_to_end(&mut buf).await;
+            if let Ok(s) = String::from_utf8(buf) {
+                alice_rx_clone.lock().unwrap().push(s);
+            }
+        }
+    });
+    write_session_file(
+        &single_node.sessions_dir,
+        alice_pid,
+        SESS_ALICE,
+        "alice",
+        "100",
+        &alice_sock,
+    );
+
+    let list_single = call_agent_sock(
+        &single_node.agent_sock,
+        &serde_json::json!({
+            "action": "list",
+            "node": "cortex",
+        }),
+    )
+    .await;
+    assert_eq!(list_single["status"], "ok", "{list_single}");
+    let single_recs = list_single["recipients"].as_array().unwrap();
+    assert_eq!(single_recs.len(), 1, "{list_single}");
+    assert_eq!(single_recs[0]["node"], "sini.cortex");
+    assert_eq!(
+        single_recs[0]["address"],
+        format!("{SESS_ALICE}@sini.cortex")
+    );
+
+    let send_single = call_agent_sock(
+        &single_node.agent_sock,
+        &serde_json::json!({
+            "action": "send",
+            "to": "alice@cortex",
+            "text": "hello single host",
+        }),
+    )
+    .await;
+    assert_eq!(send_single["status"], "ok", "{send_single}");
+    assert_eq!(send_single["address"], format!("{SESS_ALICE}@sini.cortex"));
+
+    // 2. Both `sini.cortex` and `vic.cortex` in view, plus nickname peer `uplink`:
+    //    - `list(node="cortex")` returns BOTH nodes' recipients (Owner Ruling).
+    //    - `send(to="...@cortex")` returns `ambiguous` naming both `sini.cortex` and `vic.cortex`.
+    //    - `list(node="uplink")` and `list(node=nick_canonical)` both resolve to `uplink`.
+    //    - `send(to="charlie@uplink")` and `send(to="charlie@<nick_canonical>")` both resolve to `uplink`.
+    //    - Unknown node/host returns `not_found` listing the node ids in view.
+    let listener_vic = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_vic = listener_vic.local_addr().unwrap();
+    let listener_nick = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_nick = listener_nick.local_addr().unwrap();
+    let listener_sini2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_sini2 = listener_sini2.local_addr().unwrap();
+
+    let node_vic = create_node(
+        "vic.cortex",
+        vec![PeerConfig {
+            name: "sini.cortex".to_string(),
+            address: addr_sini2.to_string(),
+            pin: Some(creds_sini.2.clone()),
+            ca: None,
+            identities: None,
+            allow: vec!["send".to_string(), "reply".to_string(), "list".to_string()],
+            from: None,
+            leaf: false,
+            principals: Vec::new(),
+            targets: None,
+            dial: None,
+        }],
+        Some(creds_vic.clone()),
+        Some(listener_vic),
+    )
+    .await;
+    let bob_pid = 7901;
+    write_proc_stat(&node_vic.proc_root, bob_pid, 1, "100");
+    let bob_sock = node_vic.proc_root.join("bob.sock");
+    let _bob_listener = UnixListener::bind(&bob_sock).unwrap();
+    write_session_file(
+        &node_vic.sessions_dir,
+        bob_pid,
+        SESS_BOB,
+        "bob",
+        "100",
+        &bob_sock,
+    );
+
+    let node_nick = create_node(
+        &nick_canonical,
+        vec![PeerConfig {
+            name: "sini.cortex".to_string(),
+            address: addr_sini2.to_string(),
+            pin: Some(creds_sini.2.clone()),
+            ca: None,
+            identities: None,
+            allow: vec!["send".to_string(), "reply".to_string(), "list".to_string()],
+            from: None,
+            leaf: false,
+            principals: Vec::new(),
+            targets: None,
+            dial: None,
+        }],
+        Some(creds_nick.clone()),
+        Some(listener_nick),
+    )
+    .await;
+    let charlie_pid = 7902;
+    write_proc_stat(&node_nick.proc_root, charlie_pid, 1, "100");
+    let charlie_sock = node_nick.proc_root.join("charlie.sock");
+    let charlie_listener = UnixListener::bind(&charlie_sock).unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = charlie_listener.accept().await {
+            let mut buf = Vec::new();
+            let _ = stream.read_to_end(&mut buf).await;
+        }
+    });
+    write_session_file(
+        &node_nick.sessions_dir,
+        charlie_pid,
+        SESS_CHARLIE,
+        "charlie",
+        "100",
+        &charlie_sock,
+    );
+
+    let node_sini2 = create_node(
+        "sini.cortex",
+        vec![
+            PeerConfig {
+                name: "vic.cortex".to_string(),
+                address: addr_vic.to_string(),
+                pin: Some(creds_vic.2.clone()),
+                ca: None,
+                identities: None,
+                allow: vec!["send".to_string(), "reply".to_string(), "list".to_string()],
+                from: None,
+                leaf: false,
+                principals: Vec::new(),
+                targets: None,
+                dial: None,
+            },
+            PeerConfig {
+                name: "uplink".to_string(),
+                address: addr_nick.to_string(),
+                pin: Some(creds_nick.2.clone()),
+                ca: None,
+                identities: None,
+                allow: vec!["send".to_string(), "reply".to_string(), "list".to_string()],
+                from: None,
+                leaf: false,
+                principals: Vec::new(),
+                targets: None,
+                dial: None,
+            },
+        ],
+        Some(creds_sini),
+        Some(listener_sini2),
+    )
+    .await;
+    write_proc_stat(&node_sini2.proc_root, my_pid, alice_pid, "200");
+    write_proc_stat(&node_sini2.proc_root, alice_pid, 1, "100");
+    let alice2_sock = node_sini2.proc_root.join("alice2.sock");
+    let _alice2_listener = UnixListener::bind(&alice2_sock).unwrap();
+    write_session_file(
+        &node_sini2.sessions_dir,
+        alice_pid,
+        SESS_ALICE,
+        "alice",
+        "100",
+        &alice2_sock,
+    );
+
+    // 2a. `list(node="cortex")` returns recipients from both `sini.cortex` and `vic.cortex`
+    let list_both = call_agent_sock(
+        &node_sini2.agent_sock,
+        &serde_json::json!({
+            "action": "list",
+            "node": "cortex",
+        }),
+    )
+    .await;
+    assert_eq!(list_both["status"], "ok", "{list_both}");
+    let both_recs = list_both["recipients"].as_array().unwrap();
+    assert!(
+        both_recs
+            .iter()
+            .any(|r| r["node"] == "sini.cortex"
+                && r["address"] == format!("{SESS_ALICE}@sini.cortex")),
+        "expected sini.cortex recipient in host-filtered list: {list_both}"
+    );
+    assert!(
+        both_recs
+            .iter()
+            .any(|r| r["node"] == "vic.cortex" && r["address"] == format!("{SESS_BOB}@vic.cortex")),
+        "expected vic.cortex recipient in host-filtered list: {list_both}"
+    );
+    assert!(
+        !both_recs.iter().any(|r| r["node"] == "uplink"),
+        "uplink must not appear in node='cortex' list: {list_both}"
+    );
+
+    // 2b. `send(to="alice@cortex")` is ambiguous when both `sini.cortex` and `vic.cortex` are in view
+    let send_amb = call_agent_sock(
+        &node_sini2.agent_sock,
+        &serde_json::json!({
+            "action": "send",
+            "to": "alice@cortex",
+            "text": "should be ambiguous",
+        }),
+    )
+    .await;
+    assert_eq!(send_amb["status"], "error", "{send_amb}");
+    assert_eq!(send_amb["error"], "ambiguous", "{send_amb}");
+    let amb_detail = send_amb["detail"].as_str().unwrap();
+    assert!(
+        amb_detail.contains("sini.cortex") && amb_detail.contains("vic.cortex"),
+        "ambiguous bare-host send must name both sini.cortex and vic.cortex: {amb_detail}"
+    );
+
+    // 2c. Nickname (`uplink`) and canonical name (`nick_canonical`) both resolve in `list` and `send`
+    for node_arg in ["uplink", nick_canonical.as_str()] {
+        let list_nick = call_agent_sock(
+            &node_sini2.agent_sock,
+            &serde_json::json!({
+                "action": "list",
+                "node": node_arg,
+            }),
+        )
+        .await;
+        assert_eq!(list_nick["status"], "ok", "{list_nick}");
+        let nick_recs = list_nick["recipients"].as_array().unwrap();
+        assert_eq!(nick_recs.len(), 1, "{list_nick}");
+        assert_eq!(nick_recs[0]["node"], "uplink");
+
+        let send_nick = call_agent_sock(
+            &node_sini2.agent_sock,
+            &serde_json::json!({
+                "action": "send",
+                "to": format!("charlie@{node_arg}"),
+                "text": "hello nickname peer",
+            }),
+        )
+        .await;
+        assert_eq!(send_nick["status"], "ok", "{send_nick}");
+    }
+
+    // 2d. Unknown node/host returns 404 (`not_found`) listing the node ids in view
+    let list_unknown = call_agent_sock(
+        &node_sini2.agent_sock,
+        &serde_json::json!({
+            "action": "list",
+            "node": "mars",
+        }),
+    )
+    .await;
+    assert_eq!(list_unknown["status"], "error", "{list_unknown}");
+    assert_eq!(list_unknown["error"], "not_found", "{list_unknown}");
+    let unknown_detail = list_unknown["detail"].as_str().unwrap();
+    assert!(
+        unknown_detail.contains("sini.cortex")
+            && unknown_detail.contains("vic.cortex")
+            && unknown_detail.contains("uplink"),
+        "unknown node error must list known node ids in view: {unknown_detail}"
+    );
+
+    let send_unknown = call_agent_sock(
+        &node_sini2.agent_sock,
+        &serde_json::json!({
+            "action": "send",
+            "to": "alice@mars",
+            "text": "unknown host",
+        }),
+    )
+    .await;
+    assert_eq!(send_unknown["status"], "error", "{send_unknown}");
+    assert_eq!(send_unknown["error"], "not_found", "{send_unknown}");
+    let send_unknown_detail = send_unknown["detail"].as_str().unwrap();
+    assert!(
+        send_unknown_detail.contains("sini.cortex")
+            && send_unknown_detail.contains("vic.cortex")
+            && send_unknown_detail.contains("uplink"),
+        "unknown @node send error must list known node ids in view: {send_unknown_detail}"
+    );
+}
