@@ -25,18 +25,25 @@ main:has(.xm-intro) h1#_top {
   white-space: nowrap;
 }
 
-/* Copy on the left, the network on the right; stacked on narrow screens. */
+/* Headline on the left, the pitch and the calls to action on the right, then
+   the mesh across the full width; one column on narrow screens. */
 .xm-intro {
-  display: grid;
-  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
-  align-items: center;
-  gap: 2rem 3rem;
   margin: 1rem 0 2.5rem;
 }
 
-@media (max-width: 56rem) {
-  .xm-intro { grid-template-columns: 1fr; }
+.xm-hero-copy {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: end;
+  gap: 1rem 3rem;
+  margin-bottom: 2rem;
 }
+
+@media (max-width: 56rem) {
+  .xm-hero-copy { grid-template-columns: 1fr; }
+}
+
+.xm-hero-copy .xm-lead { grid-row: span 2; margin: 0; }
 
 .xm-lead {
   margin: 0 0 1rem;
@@ -115,9 +122,3 @@ main:has(.xm-intro) h1#_top {
 }
 
 .xm-tools span { color: var(--sl-color-gray-2); }
-
-/* On a phone the network's labels fall below a legible size, and the exchange
-   right below it shows the same idea at full size, so the picture steps aside. */
-@media (max-width: 40rem) {
-  .xm-intro .xm-net { display: none; }
-}

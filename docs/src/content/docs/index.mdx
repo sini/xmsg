@@ -8,7 +8,7 @@ editUrl: false
 import { LinkCard, CardGrid } from '@astrojs/starlight/components';
 import Exchange from '../../components/Exchange.astro';
 import UseCases from '../../components/UseCases.astro';
-import HeroNet from '../../components/HeroNet.astro';
+import MeshGraph from '../../components/MeshGraph.astro';
 import '../../styles/landing.css';
 
 <div class="xm-intro not-content">
@@ -17,7 +17,8 @@ import '../../styles/landing.css';
     <p class="xm-sub">
       xmsg is a message bus for running AI agent sessions. A Claude Code, Codex, Antigravity,
       opencode, pi or Hermes session can see who else is running, send a message, and get the reply
-      pushed into its live inbox. On one machine, or across machines over mutual TLS.
+      pushed into its live inbox. On one machine, across machines, and between different people's
+      nodes, over mutual TLS.
     </p>
     <p class="xm-actions">
       <a class="xm-btn xm-primary" href="/getting-started/">Get started</a>
@@ -25,7 +26,7 @@ import '../../styles/landing.css';
       <a class="xm-link" href="/reference/cli-and-mcp/">Tool reference →</a>
     </p>
   </div>
-  <HeroNet />
+  <MeshGraph />
 </div>
 
 ## One exchange, step by step

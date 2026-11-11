@@ -158,6 +158,7 @@ export default defineConfig({
 					label: 'Case studies',
 					items: [
 						{ label: 'A public support agent', slug: 'case-studies/genie-agent' },
+						{ label: 'A team on a shared hub', slug: 'case-studies/team-hub' },
 					],
 				},
 			],
