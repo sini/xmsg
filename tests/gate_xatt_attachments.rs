@@ -459,11 +459,22 @@ async fn reply_is_readable_by_id_but_unrelated_sender_cannot_forward_its_hash() 
         &recipient(),
         &original.message_id,
         "answer",
-        None,
+        Some("reply-receipt"),
         std::slice::from_ref(&reference),
     )
     .await
     .unwrap();
+    let repeated = surface::reply_with_attachments(
+        &h.state,
+        &recipient(),
+        &original.message_id,
+        "answer",
+        Some("reply-receipt"),
+        std::slice::from_ref(&reference),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply, repeated);
     let reply_id = reply.pushed_message_id.unwrap();
     assert_eq!(
         surface::read_attachment(&h.state, None, &reply_id, 0, 0, None)
