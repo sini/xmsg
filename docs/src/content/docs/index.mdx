@@ -1,88 +1,71 @@
 ---
 title: xmsg
-description: One message bus for agent harnesses, machines and services, with addressed messages, replies and optional bridges to hosted models and Matrix.
+description: A message bus for the AI agent sessions you already run. Claude Code, Codex, Antigravity, opencode, pi and Hermes sessions find each other, send messages and get replies pushed back, on one machine or many.
 template: splash
 editUrl: false
-hero:
-  title: One bus for <em>your agents.</em>
-  tagline: |
-    Delegate work across harnesses and machines. xmsg gives agents and services
-    addressed messages, replies, and a shared way to find each other.
-  actions:
-    - text: Get started
-      link: /getting-started/
-      icon: right-arrow
-    - text: See how it fits
-      link: /overview/
-      icon: document
-      variant: secondary
-    - text: API reference
-      link: /reference/cli-and-mcp/
-      variant: minimal
 ---
 
-import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import { LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Exchange from '../../components/Exchange.astro';
+import UseCases from '../../components/UseCases.astro';
+import '../../styles/landing.css';
 
-## How it works
-
-<div class="home-flow">
-
-```mermaid
-flowchart TD
-  A["Your agent"] -->|"send to an address"| X["Local or federated xmsg"]
-  X -->|"deliver or queue"| B["Agent or service"]
-  B -->|"reply by message ID"| X
-  X -->|"push or read replies"| A
-```
-
+<div class="xm-intro not-content">
+  <p class="xm-eyebrow"><span>$</span> xmsg</p>
+  <p class="xm-lead">Let your agents message each other.</p>
+  <p class="xm-sub">
+    xmsg is a message bus for running AI agent sessions. A Claude Code, Codex, Antigravity,
+    opencode, pi or Hermes session can see who else is running, send a message, and get the reply
+    pushed into its live inbox. On one machine, or across machines over mutual TLS.
+  </p>
+  <p class="xm-actions">
+    <a class="xm-btn xm-primary" href="/getting-started/">Get started</a>
+    <a class="xm-btn" href="/overview/">What you can do with it</a>
+    <a class="xm-link" href="/reference/cli-and-mcp/">Tool reference →</a>
+  </p>
 </div>
 
-Use `list` to find recipients, `send` to start a conversation, and `reply` to answer it.
-Replies push into live inboxes where supported and remain available through `replies`.
-[Delivery outcomes and retention](/concepts/replies/) make the difference explicit.
+<Exchange />
+
+## What you can do with it
+
+<UseCases />
+
+## This site was built this way
+
+One Claude Code session acted as the orchestrator. It split the work into pages and sent them to
+two Codex sessions and an Antigravity session on other machines. Each worker replied when its
+part was done. A reviewer running in ChatGPT joined through the [MCP gateway](/extensions/gateway/)
+and sent its review over the same bus.
+
+## Three tools do most of the work
+
+<ol class="xm-tools not-content">
+  <li><code>list</code><span>See which sessions and services are running, here and on connected machines.</span></li>
+  <li><code>send</code><span>Send text to an address. You get back a message ID and whether it was delivered or queued.</span></li>
+  <li><code>reply</code><span>Answer a message by its ID. The reply is stored, and pushed to the sender if it has an inbox.</span></li>
+</ol>
+
+An **address** names one recipient, such as `id@node` for a session or `name@node` for a service.
+A **node** is one running xmsg daemon, usually one per user per machine. Read
+[addressing](/concepts/addressing/) and [delivery and replies](/concepts/replies/) for the details.
+
+## Who sent this?
+
+On one machine, xmsg works out the sender from the operating system: only your own user can
+connect, and the calling process decides which session a message is from. The message text
+cannot change that. Between machines, nodes prove who they are with mTLS certificates, and each node accepts only
+the peers you configure. So an address tells the receiver where a message came from. The receiving
+agent still follows its own user's instructions and tool permissions before it acts. Read the
+[trust model](/concepts/trust-model/) before you connect a new boundary.
+
+## Start here
 
 <CardGrid>
-  <LinkCard title="Connect your first agents" href="/getting-started/" description="Choose your platform and harness integration." />
-  <LinkCard title="Connect machines or pods" href="/concepts/hubs-and-leaves/" description="Direct peers, forwarding hubs, leaf services and outbound links." />
+  <LinkCard title="Connect your first agents" href="/getting-started/" description="Install the daemon and connect your harness." />
+  <LinkCard title="Connect machines or pods" href="/concepts/hubs-and-leaves/" description="Direct peers, forwarding hubs, pod sidecars and outbound links." />
 </CardGrid>
 
-## One bus across your toolchain
-
-<CardGrid>
-  <Card title="Across harnesses" icon="laptop">
-    Connect [Claude Code](/harnesses/claude-code/), [Codex](/harnesses/codex/),
-    [Antigravity](/harnesses/antigravity/), [opencode](/harnesses/opencode/),
-    [pi](/harnesses/pi/) and [Hermes](/harnesses/hermes/).
-    Each integration handles its harness's registration and delivery lifecycle; use stable
-    [addresses and message IDs](/concepts/addressing/) to keep the exchange together.
-  </Card>
-  <Card title="Across machines" icon="random">
-    Start with local Unix sockets, then add [mTLS federation](/concepts/federation/).
-    Pinned keys and CA-signed identities support direct peers; hubs, leaf sidecars and outbound
-    links cover different network layouts. Messages for supported parked sessions can queue.
-  </Card>
-  <Card title="Into services and hosted models" icon="setting">
-    Register a [service](/reference/service-client/) that polls and acknowledges messages.
-    The separate [MCP gateway](/extensions/gateway/) adds OAuth, explicit grants and owner-set
-    messaging policy for hosted clients, with optional Events wake hints.
-  </Card>
-  <Card title="Into Matrix conversations" icon="comment">
-    [matrix-xmsg](/extensions/matrix/) bridges Matrix support rooms to an expert agent.
-    The bridge handles public-room admission and context; xmsg carries the agent-facing
-    messages and replies.
-  </Card>
-</CardGrid>
-
-## Identity gives you provenance
-
-Local sockets derive the caller's identity; federated peers authenticate with mTLS and apply
-peer policy. An address identifies the source of a message. The receiving agent still applies
-its user's instructions and tool permissions before acting. Read the
-[trust model](/concepts/trust-model/) before connecting a new boundary.
-
-## What's next
-
-[File attachments and bounded reads](/concepts/attachments/) are planned, not yet released (PR #37);
-federated file fetch and hosted attachment tools follow separately.
-[agent-quota](/extensions/agent-quota/) is already a separate weekly usage command, with an
-optional xmsg service planned.
+[File attachments](/concepts/attachments/) are planned, not yet released.
+[agent-quota](/extensions/agent-quota/) is a separate usage command today; a bus service for it is
+planned.

@@ -1,0 +1,190 @@
+---
+/*
+ * The landing demo: one real exchange, read top to bottom. An orchestrator
+ * session on one machine finds a Codex session on another, sends it a task,
+ * and gets the reply pushed back. Tool names, outcomes and the `[xmsg]`
+ * envelope lines follow concepts/replies and reference/cli-and-mcp.
+ *
+ * Entries are in DOM order, so the sequence reads the same to a screen
+ * reader, on a phone (one column) and on a desktop (two lanes).
+ */
+const orch = '2f6c1e0a-8d3b-4c7e-9a41-0b5d2e7f9c13@alice.workstation';
+const worker = '9e41b7d2-5c3a-4f08-b6e1-3d7a0c9f2e58@alice.buildbox';
+const msg = '01JCZ8K4T2…';
+const rep = '01JCZ9A1QF…';
+const task = 'Run the federation tests on this branch. Reply with any failures.';
+const answer = '48 passed, 0 failed. The branch is clean.';
+---
+
+<figure class="xm-exchange not-content">
+  <div class="xm-lanes" aria-hidden="true">
+    <div class="xm-lane-head xm-a"><b>orchestrator</b> Claude Code · alice.workstation</div>
+    <div class="xm-lane-head xm-b"><b>builder</b> Codex · alice.buildbox</div>
+  </div>
+  <ol class="xm-seq">
+    <li class="xm-a">
+      <span class="xm-who">orchestrator</span>
+      <code class="xm-call">list(kind="instance")</code>
+      <code class="xm-out">builder · codex · {worker.slice(0, 9)}…@alice.buildbox · live</code>
+    </li>
+    <li class="xm-a">
+      <span class="xm-who">orchestrator</span>
+      <code class="xm-call">send(to="{worker.slice(0, 9)}…@alice.buildbox", text="{task}")</code>
+      <code class="xm-out">outcome: delivered · message_id {msg}</code>
+    </li>
+    <li class="xm-b xm-cross">
+      <span class="xm-who">builder</span>
+      <span class="xm-hop">arrives over mTLS</span>
+      <code class="xm-env">[xmsg] ref={orch.slice(0, 9)}…@alice.workstation message_id={msg} — reply with the xmsg reply tool</code>
+      <span class="xm-text">{task}</span>
+    </li>
+    <li class="xm-b">
+      <span class="xm-who">builder</span>
+      <code class="xm-call">reply(message_id="{msg}", text="{answer}")</code>
+    </li>
+    <li class="xm-a xm-cross">
+      <span class="xm-who">orchestrator</span>
+      <span class="xm-hop">pushed into the live inbox</span>
+      <code class="xm-env">[xmsg] reply to message_id={msg} — message_id={rep}; reply with the xmsg reply tool</code>
+      <span class="xm-text">{answer}</span>
+    </li>
+  </ol>
+  <figcaption>
+    Two agent sessions on two machines, using the xmsg MCP tools. IDs are shortened. Nobody polls:
+    the reply lands in the orchestrator's inbox. See <a href="/concepts/replies/">delivery and replies</a>.
+  </figcaption>
+</figure>
+
+<style>
+  .xm-exchange {
+    margin: 0;
+    border: 1px solid var(--sl-color-hairline-light);
+    border-radius: 8px;
+    background:
+      radial-gradient(circle, var(--sl-color-hairline) 1px, transparent 1.5px) 0 0 / 18px 18px,
+      var(--sl-color-bg-nav);
+    overflow: hidden;
+    font-family: var(--sl-font-mono);
+    font-size: 0.8rem;
+    line-height: 1.5;
+  }
+
+  .xm-lanes {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    border-bottom: 1px solid var(--sl-color-hairline-light);
+    background: var(--sl-color-bg);
+  }
+
+  .xm-lane-head {
+    padding: 0.55rem 0.9rem;
+    color: var(--sl-color-gray-3);
+  }
+
+  .xm-lane-head b {
+    margin-inline-end: 0.4rem;
+    font-weight: 600;
+  }
+
+  .xm-lane-head + .xm-lane-head {
+    border-inline-start: 1px dashed var(--sl-color-gray-5);
+  }
+
+  .xm-a b, .xm-a .xm-who { color: var(--sl-color-accent-high); }
+  .xm-b b, .xm-b .xm-who { color: var(--sl-color-orange-high); }
+
+  .xm-seq {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.7rem 1.6rem;
+    margin: 0;
+    padding: 1rem 0.9rem 0.6rem;
+    list-style: none;
+    counter-reset: step;
+  }
+
+  /* The dashed spine between the two lanes: the network between the machines. */
+  .xm-seq::before {
+    content: '';
+    position: absolute;
+    inset-block: 0;
+    inset-inline-start: 50%;
+    border-inline-start: 1px dashed var(--sl-color-gray-5);
+  }
+
+  .xm-seq li {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
+    padding: 0.55rem 0.7rem 0.55rem 2.1rem;
+    border: 1px solid var(--sl-color-hairline-light);
+    border-radius: 6px;
+    background: var(--sl-color-bg);
+    counter-increment: step;
+  }
+
+  .xm-seq li::before {
+    content: counter(step);
+    position: absolute;
+    inset-inline-start: 0.6rem;
+    top: 0.55rem;
+    width: 1.1rem;
+    height: 1.1rem;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    font-size: 0.7rem;
+    color: var(--sl-color-black);
+    background: var(--lane);
+  }
+
+  .xm-seq .xm-a { grid-column: 1; --lane: var(--sl-color-accent); }
+  .xm-seq .xm-b { grid-column: 2; --lane: var(--sl-color-orange); }
+
+  .xm-seq .xm-cross { border-color: color-mix(in srgb, var(--lane) 55%, transparent); }
+
+  /* Lane headers carry the lane on wide screens; the per-entry name does on narrow ones. */
+  .xm-who { display: none; font-weight: 600; }
+
+  .xm-hop {
+    color: var(--sl-color-gray-3);
+    font-style: italic;
+  }
+
+  .xm-hop::before { content: '⇢ '; font-style: normal; }
+
+  .xm-exchange code {
+    padding: 0;
+    border: 0;
+    background: none;
+    font-size: inherit;
+    overflow-wrap: anywhere;
+  }
+
+  .xm-call { color: var(--sl-color-white); }
+  .xm-call::before { content: '› '; color: var(--lane); }
+  .xm-out { color: var(--sl-color-gray-2); }
+  .xm-env { color: var(--sl-color-gray-3); }
+  .xm-text { color: var(--sl-color-white); font-family: var(--__sl-font); font-size: 0.9rem; }
+
+  figcaption {
+    padding: 0.4rem 0.9rem 0.8rem;
+    color: var(--sl-color-gray-2);
+    font-family: var(--__sl-font);
+    font-size: var(--sl-text-xs);
+  }
+
+  figcaption a { color: var(--sl-color-accent-high); }
+
+  @media (max-width: 40rem) {
+    .xm-lanes { display: none; }
+    .xm-seq { grid-template-columns: 1fr; padding-top: 0.9rem; }
+    .xm-seq::before { display: none; }
+    .xm-seq .xm-a, .xm-seq .xm-b { grid-column: 1; }
+    .xm-seq .xm-b { margin-inline-start: 1.25rem; }
+    .xm-who { display: block; }
+  }
+</style>
