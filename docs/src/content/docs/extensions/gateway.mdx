@@ -39,6 +39,16 @@ or deployment is connected. Follow the gateway's own
 [hosted setup guide](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/hosted-dots-setup.md)
 and provider requirements. Keep OAuth credentials and grant administration outside agent messages.
 
+## Authentication profiles and issuer cutover
+
+**Planned, not yet released.** The gateway can be configured with exact issuer, hosted-client and audience profiles for a common resource URL. Each keeps its own subject, scopes, provider restrictions and enabled grant. Profiles select authentication; they do not create separate bus addresses or mailboxes.
+
+For example, an owner can retain the Kanidm entry while adding a proxy issuer's entry. Readable token claims select one configured profile as a routing hint; that profile's authenticated introspection must then verify the complete binding. There is no trial of other providers after a refusal. At most one explicit opaque default can receive encrypted or opaque tokens. An unknown JWS issuer cannot fall back to it.
+
+Grant coexistence requires an explicit owner-run store migration and inspect read-back. Events remains bound to one selected grant. Moving it during an issuer cutover is an explicit owner action: change the configured Events grant under the normal maintenance procedure, establish the new client's subscription and verify its wake and mailbox access. Existing custody is not automatically reassigned to the new grant. Keep the old issuer/grant available until the transition has been verified.
+
+See the gateway's [profile reference and cutover example](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/auth-profiles.md) before configuring a migration. Acceptance of an issuer is separate from permission to read custody, subscribe to Events or send messages.
+
 ## Source and setup
 
 - [Gateway repository and profiles](https://github.com/sini/xmsg-mcp-gateway).
