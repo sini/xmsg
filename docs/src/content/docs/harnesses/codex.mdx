@@ -1,9 +1,9 @@
 ---
 title: Codex
-description: Integrating OpenAI Codex CLI on Linux with xmsg — writer-lock lease attestation, runtime _meta attribution, live push relay, and subagents.
+description: Integrating OpenAI Codex CLI on Linux and macOS with xmsg — writer-lock lease attestation, runtime _meta attribution, live push relay, and subagents.
 ---
 
-On Linux, `xmsg` integrates with the OpenAI Codex CLI (`codex`) using writer-lock lease
+On Linux and macOS, `xmsg` integrates with the OpenAI Codex CLI (`codex`) using writer-lock lease
 attestation, runtime JSON-RPC `_meta` caller attribution, a restricted live push relay for
 daemon-backed sessions, and hook-driven handoff for embedded (`--no-daemon`) sessions.
 
@@ -20,9 +20,9 @@ xmsg serve \
 
 - **Writer-lock & rollout verification:** A Codex root session `P` is admitted when an ancestor
   process matching `--codex-exe` holds an open file descriptor to
-  `<H>/thread-writer-locks/<P>.lock` under a configured `--codex-home` `<H>` (monitored via a
-  continuous Linux `inotify` lease watch), and the rollout file under `<H>/sessions` passes bounded
-  `O_NOFOLLOW` verification (`session_meta.payload.id == P` and `payload.session_id == P`).
+  `<H>/thread-writer-locks/<P>.lock` under a configured `--codex-home` `<H>` (monitored by a
+  continuous lease watch: `inotify` on Linux, `kqueue` on an `O_EVTONLY` descriptor on macOS),
+  and the rollout file under `<H>/sessions` passes bounded `O_NOFOLLOW` verification (`session_meta.payload.id == P` and `payload.session_id == P`).
 - **Runtime MCP `_meta` attribution:** `xmsg mcp` extracts `codex_session`
   (`params._meta.sessionId`), `codex_thread` (`params._meta.threadId`), and `codex_turn`
   (`params._meta["x-codex-turn-metadata"].turn_id`) strictly from the JSON-RPC `params._meta`
@@ -101,7 +101,7 @@ This behavior was measured with Codex 0.167.0 and matches its
 
 ## Home Manager switch
 
-On Linux, `programs.xmsg.harnesses.codex.enable = true` installs `${xdg.dataHome}/xmsg/bin/xmsg`,
+`programs.xmsg.harnesses.codex.enable = true` installs `${xdg.dataHome}/xmsg/bin/xmsg`,
 configures `programs.codex.skills.xmsg` and `programs.codex.settings.mcp_servers.xmsg`, wires
 `--codex-exe` and `--codex-home` into `xmsg serve`, and exposes
 `programs.xmsg.harnesses.codex.hooks`:

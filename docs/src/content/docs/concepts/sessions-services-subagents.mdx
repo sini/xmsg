@@ -45,8 +45,9 @@ Headless daemons, bots, guards, and bridges register bare service names (such as
 
 - **Executable attestation (`--svc-exe`):** On normal host nodes, `xmsg serve` requires
   `--svc-exe <NAME>=<PATH>` (or `XMSG_SVC_EXE`). When a process connects to `register.sock` and
-  sends `{"harness":"svc","name":"<NAME>"}`, `xmsg` checks `SO_PEERCRED` (`peer_uid == server_uid`)
-  and verifies that canonical `/proc/<pid>/exe` matches `<PATH>`. Only one live process may hold a
+  sends `{"harness":"svc","name":"<NAME>"}`, `xmsg` checks the peer UID (`peer_uid == server_uid`)
+  and verifies that the canonical executable path (`/proc/<pid>/exe` on Linux, `proc_pidpath` on
+  macOS) matches `<PATH>`. Only one live process may hold a
   service name at a time.
 - **At-least-once long-poll and `ack`:** Services pull messages with `{"action":"poll","waitSecs":30}`
   on `register.sock` and acknowledge each delivery with `{"action":"ack","messageId":"..."}` after
@@ -89,7 +90,7 @@ subagent, and `list` includes live bound subagents with `kind: "subagent"`.
 | Harness | Sub-address Form | Attribution & Lifecycle |
 |---|---|---|
 | [Claude Code](/harnesses/claude-code/) | `<P>/<name>@<node>` and `<P>/<agent_id>@<node>` | `xmsg register claude --hook` on `SubagentStart`, `PostToolUse` (`Agent`/`SendMessage`), `SubagentStop`, and `PreToolUse` (stamping `as_agent`). |
-| [Codex](/harnesses/codex/) (Linux) | `<P>/<X>@<node>` (direct children where `parent_thread_id == P`) | Attributed from runtime `params._meta` (`sessionId`, `threadId`); turn state tracked by `SubagentStart`, `PreModelRequest`, and `SubagentStop` hooks. |
+| [Codex](/harnesses/codex/) | `<P>/<X>@<node>` (direct children where `parent_thread_id == P`) | Attributed from runtime `params._meta` (`sessionId`, `threadId`); turn state tracked by `SubagentStart`, `PreModelRequest`, and `SubagentStop` hooks. |
 | [Antigravity](/harnesses/antigravity/) | `<P>/<child_uuid>@<node>` | Admitted from `P`'s `transcript.jsonl` (`invoke_subagent`) and tracked by `xmsg register agy --hook` (`pre-invocation`, `pre-tool-use`, `stop`). |
 | [opencode](/harnesses/opencode/) (1.x & 2.x) | `<P>/<child_ses>@<node>` | Child sessions walk `parentID` to root `P`, bind via `subagent` (`start`/`stop`/`end`) on `register.sock`, and pass `as_agent` on `xmsg_send`, `xmsg_reply`, and `xmsg_inbox`. |
 | [Hermes](/harnesses/hermes/) | Root `<P>@<node>` | `delegate_task` subagents act as their root conversation `P` and do not bind separate sub-addresses. |

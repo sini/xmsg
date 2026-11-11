@@ -34,6 +34,8 @@ without running a local `xmsg serve` daemon.
 | `programs.xmsg.server.codexExe` | `--codex-exe` (repeated) | `programs.codex.package`'s `bin/codex` when `harnesses.codex.enable = true` |
 | `programs.xmsg.server.codexHome` | `--codex-home` (repeated) | `[ "${config.home.homeDirectory}/.codex" ]` |
 | `programs.xmsg.server.svcExe` | `--svc-exe NAME=PATH` | `{ }` |
+| `programs.xmsg.server.sessionsDirs` | `XMSG_SESSIONS_DIR` (colon-joined) | `[ "${config.home.homeDirectory}/.claude/sessions" ]` |
+| `programs.xmsg.server.extraSessionsDirs` | appended to `sessionsDirs` | `[ ]` |
 
 ## Per-harness switches
 
@@ -45,11 +47,11 @@ Each switch under `programs.xmsg.harnesses.<name>.enable` installs the shared sk
   `replies`, and `inbox` permissions under `mcp__plugin_hm_xmsg__` and `mcp__xmsg__`
   (`permissionPrefixes`), and configures `xmsg register claude --hook` (`PreToolUse`,
   `PostToolUse`, `SubagentStart`, `SubagentStop`). Requires `programs.claude-code.enable = true`.
-- **`programs.xmsg.harnesses.codex.enable` (Linux):** Links `${xdg.dataHome}/xmsg/bin/xmsg`,
+- **`programs.xmsg.harnesses.codex.enable`:** Links `${xdg.dataHome}/xmsg/bin/xmsg`,
   configures `programs.codex.skills.xmsg` and `programs.codex.settings.mcp_servers.xmsg`, enables
   `--codex-exe` and `--codex-home` on `xmsg serve`, and exposes read-only
   `programs.xmsg.harnesses.codex.{hooks,trustState,mcpServer}`. Requires
-  `programs.codex.enable = true` on Linux.
+  `programs.codex.enable = true`.
 - **`programs.xmsg.harnesses.agy.enable`:** Adds `xmsg mcp` to
   `programs.antigravity-cli.mcpServers`, installs the `xmsg` skill, and writes
   `~/.gemini/config/hooks.json` (`PreInvocation`, `PreToolUse`, `Stop`). Requires
@@ -74,16 +76,16 @@ programs.xmsg.server.federation = {
   reloadInterval = 30;                # --fed-reload-interval-secs
   peers = {
     # Pinned peer: set `pin = "sha256:..."` or `pinFromCert` to compute it at build time
-    cortex = {
-      address = "cortex.example.org:7788";
-      pinFromCert = ./cortex.crt;
+    laptop = {
+      address = "laptop.example.org:7788";
+      pinFromCert = ./laptop.crt;
       allow = [ "send" "reply" "list" ];
     };
     # CA-signed peer: keyed by the node name derived from its single SPIFFE URI SAN
-    "alice.bitstream" = {
-      address = "bitstream.example.org:7788";
+    "alice.workstation" = {
+      address = "workstation.example.org:7788";
       ca = ./xmsg-root.crt;
-      identities = [ "spiffe://example.org/host/bitstream/user/alice" ];
+      identities = [ "spiffe://example.org/host/workstation/user/alice" ];
       allow = [ "send" "reply" "list" ];
     };
   };

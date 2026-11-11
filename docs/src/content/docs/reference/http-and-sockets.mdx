@@ -58,6 +58,8 @@ service client's `AgentClient`:
 | `{"action":"inbox","wait"?,"as_agent"?}` | `{"status":"ok","address":"<P>/<child>@<node>","messages":[…]}` |
 | `{"action":"subagent","event","agent_id",…}` | `{"status":"ok",…}` |
 | `{"action":"codex_hook","event","payload",…}` | `{"status":"ok","stdout",…}` followed by client `{"ack":"accepted"\|"abort"}` |
+| `{"action":"codex_revoke","session_id","revoked"?}` | `{"status":"ok"}` (`xmsg register codex --revoke`/`--unrevoke` and `xmsg unregister --codex-session`; `revoked` defaults to `true`) |
+| `{"action":"mcp_start","schema_version"?,"label"?,…}` | Sent once by `xmsg mcp` at startup to register its session; not for other clients |
 
 ---
 
@@ -117,7 +119,13 @@ Every surface reports errors using the same codes (`{"error": <code>, "detail": 
     resolution (`detail` names the node).
   - `not_live` (`409`, node-to-node): A cache-routed send reached a node where the instance is now
     only `parked`.
+  - `live_elsewhere` (`409`): A reclaim names an instance ID that is live on another connection.
+- **Registration:**
+  - `process_already_registered` (`409`): The connecting process already holds a registration for
+    another service name.
 - **Transport & Validation:**
   - `bad_request` (`400`, including unknown JSON fields or malformed addresses), `bad_sender`
     (`400`), `conflict` (`409`), `payload_too_large` (`413`), `rate_limited` (`429`),
-    `service_unavailable` (`503`), `peer_unreachable`, `inbox_timeout`, `credentials_stale`.
+    `service_unavailable` (`503`), `peer_unreachable` (`503`), `credentials_stale` (`503`),
+    `inbox_unavailable` (`502`), `inbox_timeout` (`504`), `insecure_socket_dir` (`500`) and
+    `internal` (`500`).

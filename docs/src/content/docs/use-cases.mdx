@@ -93,7 +93,7 @@ Claude Code. Today it is a separate command, not a bus service; a service is pla
 
 An **orchestrator** is a session whose job is to plan and hand out work. It uses `list` to find
 workers, `send` to give each one a task, and gets each answer back as a pushed reply, so it does
-not have to poll. A worker that has closed is not lost: messages to a parked Claude Code or
+not have to poll. A worker that has closed is not lost: messages to a parked Claude Code, Codex or
 Antigravity conversation wait in a queue (seven days by default) and are delivered when it comes
 back. Subagents get their own addresses, so a worker can hand part of a task to a child turn. See
 [delivery, queueing and replies](/concepts/replies/) and

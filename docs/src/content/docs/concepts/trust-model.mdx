@@ -50,10 +50,10 @@ not collide or spoof one another:
   `--sessions-dir`). Process liveness and start time are verified against `/proc/<pid>/stat` (or
   `proc_pidinfo` on macOS, matching the UTC `ps -o lstart` timestamp recorded in `<pid>.json`).
   Duplicate conversation IDs receive deterministic `X~2`, `X~3` fork claims in `instance_claims`.
-- **[Codex](/harnesses/codex/) (Linux):** Verified via ancestor executable attestation
+- **[Codex](/harnesses/codex/):** Verified via ancestor executable attestation
   (`--codex-exe`), an open `<H>/thread-writer-locks/<P>.lock` descriptor under a configured
-  `--codex-home` `<H>` with a continuous `inotify` lease watch, and bounded `O_NOFOLLOW` rollout
-  header verification. Runtime MCP calls extract `sessionId`, `threadId`, and `turn_id` strictly
+  `--codex-home` `<H>` with a continuous lease watch (`inotify` on Linux; `kqueue` on an
+  `O_EVTONLY` descriptor on macOS), and bounded `O_NOFOLLOW` rollout header verification. Runtime MCP calls extract `sessionId`, `threadId`, and `turn_id` strictly
   from `params._meta`, never from model-controlled `arguments`.
   - *Shared app-server daemon note:* When multiple Codex root sessions share a single per-home
     app-server daemon under the same UID, they share that daemon's process ancestry and writer-lock
@@ -66,9 +66,9 @@ not collide or spoof one another:
   Admitted on `register.sock` via `SO_PEERCRED` / `getpeereid` UID verification; `xmsg` mints a
   fresh UUID v4 per registered session and scopes all tool calls and `continues`/`subagent` frames
   to the owning `register.sock` connection.
-- **Services (`svc`):** Admitted on `register.sock` by verifying `SO_PEERCRED` UID and matching
-  canonical `/proc/<pid>/exe` against `--svc-exe <NAME>=<PATH>` (or `--leaf-principal` in `--leaf`
-  mode). Executable resolution fails closed on deleted binaries (`(deleted)`) or changed profile
+- **Services (`svc`):** Admitted on `register.sock` by verifying the peer UID and matching the
+  canonical executable path (`/proc/<pid>/exe` on Linux, `proc_pidpath` on macOS) against
+  `--svc-exe <NAME>=<PATH>` (or `--leaf-principal` in `--leaf` mode). Executable resolution fails closed on deleted binaries (`(deleted)`) or changed profile
   symlinks.
 
 ## Envelope sanitization & breakout defense

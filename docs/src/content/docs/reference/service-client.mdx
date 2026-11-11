@@ -17,13 +17,14 @@ in container leaf mode.
    ```json
    { "harness": "svc", "name": "genie-expert", "cwd": "/optional/working/dir" }
    ```
-   `xmsg` verifies `SO_PEERCRED` (`peer_uid == server_uid`) and canonical `/proc/<pid>/exe`, then
+   `xmsg` verifies the peer UID (`peer_uid == server_uid`) and the canonical executable path
+   (`/proc/<pid>/exe` on Linux, `proc_pidpath` on macOS), then
    answers with the service address, node name, and effective server limits:
    ```json
    {
      "status": "ok",
-     "address": "genie-expert@sini.cortex",
-     "node": "sini.cortex",
+     "address": "genie-expert@alice.workstation",
+     "node": "alice.workstation",
      "reply_ttl_secs": 604800,
      "idempotency_ttl_secs": 86400,
      "svc_queue_cap": 100,
@@ -39,10 +40,10 @@ in container leaf mode.
    {
      "action": "deliver",
      "messageId": "01M4FG...",
-     "fromName": "sender · 6f1c2a7e-...@sini.cortex",
+     "fromName": "sender · 6f1c2a7e-...@alice.workstation",
      "origin": {
        "id": "6f1c2a7e-...",
-       "node": "sini.cortex",
+       "node": "alice.workstation",
        "label": "sender"
      },
      "text": "Task payload...",

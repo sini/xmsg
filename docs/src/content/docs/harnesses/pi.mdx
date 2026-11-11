@@ -11,15 +11,21 @@ description: Integrating the Pi coding agent with xmsg via extensions/pi/index.t
 - **Registration & long-poll:** On startup, the extension connects to
   `$XDG_RUNTIME_DIR/xmsg/register.sock`. `xmsg serve` verifies the peer UID (`SO_PEERCRED` /
   `getpeereid`), records the process start time, and mints a fresh UUID v4 for the session. The
-  session's display label defaults to the basename of its working directory.
+  session's display label is its Pi session name, or the basename of its working directory when it
+  has none.
 - **Safe prompt injection:** Inbound messages arrive over the `register.sock` long-poll loop (`poll`
   $\rightarrow$ `ack`) and are delivered into Pi with `expandPromptTemplates: false` to prevent
   remote command or prompt-template expansion.
-- **Tools (`list`, `send`, `reply`):**
+- **Tools (`list`, `send`, `reply`, `replies`):**
   - `list`: Queries active recipients over `$XDG_RUNTIME_DIR/xmsg/http.sock` (or `XMSG_URL` when
     explicitly configured).
   - `send`: Sends messages over `$XDG_RUNTIME_DIR/xmsg/agent.sock` with kernel PID attestation.
   - `reply`: Sends replies over `$XDG_RUNTIME_DIR/xmsg/agent.sock`.
+  - `replies`: Reads the stored replies to a sent message over `agent.sock`, waiting up to `wait`
+    seconds (at most 60) for the first.
+- **Socket paths:** `XMSG_REGISTER_SOCK`, `XMSG_AGENT_SOCK` and `XMSG_HTTP_SOCK` override the
+  defaults. On macOS without `XDG_RUNTIME_DIR`, the runtime directory is the Darwin user temporary
+  directory, as for `xmsg serve`.
 - **Lifecycle:** Because a Pi session's UUID is bound to its process, exiting Pi releases the
   session and subsequent sends to its UUID return `410 gone` (Pi sessions are never `parked`). Pi is
   a single-session process and does not use subagent sub-addresses or `inbox`.
