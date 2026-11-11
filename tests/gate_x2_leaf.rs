@@ -330,6 +330,7 @@ async fn test_oracle_2_body_from_ignored_and_attributed_to_leaf_principal() {
     });
 
     let leaf_app_state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sess_dir.clone()],
         agy_config: leaf_fed_state.agy_config.clone(),
         agy_store: leaf_fed_state.agy_store.clone(),
@@ -495,6 +496,7 @@ async fn test_oracle_3_leaf_pull_replies_node_zero_outbound_connections() {
     });
 
     let node_b_app_state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sess_dir.clone()],
         agy_config: node_b_fed_state.agy_config.clone(),
         agy_store: node_b_fed_state.agy_store.clone(),
@@ -627,6 +629,7 @@ async fn test_oracle_3_leaf_pull_replies_node_zero_outbound_connections() {
     });
 
     let leaf_app_state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sess_dir.clone()],
         agy_config: leaf_fed_state.agy_config.clone(),
         agy_store: leaf_fed_state.agy_store.clone(),

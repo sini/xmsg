@@ -171,6 +171,7 @@ async fn start_server_with(
     let (svc_notify_tx, _) = tokio::sync::broadcast::channel(1024);
 
     let state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir],
         agy_config,
         agy_store,
@@ -1595,6 +1596,7 @@ async fn test_oracle_9_service_name_validation_refusals() {
     }
 
     let state = std::sync::Arc::new(xmsg::http::AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![],
         agy_config: xmsg::agy::AgyConfig {
             proc_root: proc_root.clone(),
@@ -1993,6 +1995,7 @@ async fn test_xs3_sync_claims_refuses_claude_session_file_claiming_non_claude_uu
 
     let db = Arc::new(std::sync::Mutex::new(conn));
     let state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: dirs,
         agy_config,
         agy_store: new_agy_store(),

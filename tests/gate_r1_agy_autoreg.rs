@@ -111,6 +111,7 @@ async fn oracle_1_hook_credential_less_and_credentialed_and_malformed() {
         let _ = run_register_server(
             reg_sock_clone,
             std::sync::Arc::new(xmsg::http::AppState {
+                max_attachment_bytes: 8 * 1024 * 1024,
                 sessions_dirs: vec![],
                 agy_config,
                 agy_store: store_clone,
@@ -372,6 +373,7 @@ exit 0
         .insert(session_key.clone(), credless_session);
 
     let state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![tmp.path().join("claude_sessions")],
         agy_config: agy_config.clone(),
         agy_store: agy_store.clone(),
@@ -554,6 +556,7 @@ async fn oracle_3_live_unattested_pid_returns_unregistered_without_exited() {
     let (pi_notify_tx, _) = broadcast::channel(1024);
 
     let state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![tmp.path().join("claude_sessions")],
         agy_config: AgyConfig::default(),
         agy_store: new_agy_store(),

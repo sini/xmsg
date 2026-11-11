@@ -146,6 +146,7 @@ async fn start_server(
     let (pi_notify_tx, _) = tokio::sync::broadcast::channel(16);
 
     let app_state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sess_path.to_path_buf()],
         agy_config: xmsg::agy::AgyConfig {
             presence_dir: sess_path.join("presence"),

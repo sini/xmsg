@@ -6,6 +6,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
@@ -32,6 +33,7 @@ pub struct AppState {
     pub svc_notify_tx: broadcast::Sender<String>,
     pub node_name: String,
     pub max_body: usize,
+    pub max_attachment_bytes: usize,
     pub request_counter: AtomicU64,
     pub db: Arc<Mutex<rusqlite::Connection>>,
     pub notify_tx: broadcast::Sender<String>,
@@ -86,6 +88,8 @@ pub struct SendRequest {
     pub to: String,
     pub text: String,
     #[serde(default)]
+    pub attachments: Vec<crate::client::AttachmentRef>,
+    #[serde(default)]
     pub from: Option<String>,
     #[serde(default)]
     pub idempotency_key: Option<String>,
@@ -96,6 +100,8 @@ pub struct SendRequest {
 #[serde(deny_unknown_fields)]
 pub struct ReplyRequest {
     pub text: String,
+    #[serde(default)]
+    pub attachments: Vec<crate::client::AttachmentRef>,
     #[serde(default)]
     pub idempotency_key: Option<String>,
 }
@@ -109,6 +115,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/recipients", get(list_recipients_handler))
         .route("/v1/sessions", get(retired_sessions_handler))
         .route("/v1/messages", post(send_handler))
+        .route(
+            "/v1/attachments",
+            post(attach_handler).layer(DefaultBodyLimit::max(state.max_attachment_bytes)),
+        )
+        .route(
+            "/v1/messages/{id}/attachments/{index}",
+            get(read_attachment_handler),
+        )
         .route("/v1/messages/{id}", get(get_message_handler))
         .route(
             "/v1/messages/{id}/replies",
@@ -591,12 +605,13 @@ async fn send_handler(
     let req: SendRequest =
         serde_json::from_value(raw).map_err(|e| AppError::BadRequest(e.to_string()))?;
     let sender = http_sender(&state, &peer, req.from.as_deref()).await;
-    let res = surface::send(
+    let res = surface::send_with_attachments(
         &state,
         &sender,
         &req.to,
         &req.text,
         req.idempotency_key.as_deref(),
+        &req.attachments,
     )
     .await?;
     Ok((StatusCode::ACCEPTED, Json(res)).into_response())
@@ -617,15 +632,131 @@ async fn reply_handler(
             ))
         }
     };
-    let reply = surface::reply(
+    let reply = surface::reply_with_attachments(
         &state,
         &caller,
         &id,
         &req.text,
         req.idempotency_key.as_deref(),
+        &req.attachments,
     )
     .await?;
     Ok((StatusCode::OK, Json(reply)).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttachQuery {
+    name: String,
+    media_type: Option<String>,
+    from: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttachmentRangeQuery {
+    offset: Option<usize>,
+    length: Option<usize>,
+}
+
+async fn attach_handler(
+    State(state): State<Arc<AppState>>,
+    peer: PeerInfo,
+    query: Result<Query<AttachQuery>, QueryRejection>,
+    body: Result<Bytes, axum::extract::rejection::BytesRejection>,
+) -> Result<Response, AppError> {
+    let query = parse_query(query)?;
+    let body = body.map_err(|error| {
+        if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            AppError::PayloadTooLarge {
+                size: state.max_attachment_bytes.saturating_add(1),
+                limit: state.max_attachment_bytes,
+            }
+        } else {
+            AppError::BadRequest(error.body_text())
+        }
+    })?;
+    if body.len() > state.max_attachment_bytes {
+        return Err(AppError::PayloadTooLarge {
+            size: body.len(),
+            limit: state.max_attachment_bytes,
+        });
+    }
+    let sender = http_sender(&state, &peer, query.from.as_deref()).await;
+    let request = crate::client::AttachRequest {
+        name: Some(query.name),
+        media_type: query.media_type,
+        data: Some(base64::engine::general_purpose::STANDARD.encode(&body)),
+        ..Default::default()
+    };
+    let result = surface::attach(&state, &sender, request).await?;
+    let attachment = result
+        .get("attachment")
+        .cloned()
+        .ok_or_else(|| AppError::Internal("attach response missing reference".into()))?;
+    Ok(Json(attachment).into_response())
+}
+
+async fn read_attachment_handler(
+    State(state): State<Arc<AppState>>,
+    peer: PeerInfo,
+    AxumPath((id, index)): AxumPath<(String, usize)>,
+    query: Result<Query<AttachmentRangeQuery>, QueryRejection>,
+) -> Result<Response, AppError> {
+    let query = parse_query(query)?;
+    let sender = http_sender(&state, &peer, None).await;
+    let caller = match &sender {
+        Sender::Session(caller) => Some(caller),
+        Sender::Anonymous(_) => None,
+    };
+    let result = surface::read_attachment(
+        &state,
+        caller,
+        &id,
+        index,
+        query.offset.unwrap_or(0),
+        query.length,
+    )
+    .await?;
+    if result.get("state").and_then(serde_json::Value::as_str) == Some("pending") {
+        return Ok((StatusCode::ACCEPTED, Json(result)).into_response());
+    }
+    let data = result
+        .get("data")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| AppError::Internal("attachment response missing data".into()))?;
+    let bytes = if result.get("encoding").and_then(serde_json::Value::as_str) == Some("base64") {
+        base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+    } else {
+        data.as_bytes().to_vec()
+    };
+    let attachment = &result["attachment"];
+    let media_type = attachment["media_type"]
+        .as_str()
+        .unwrap_or("application/octet-stream");
+    let hash = attachment["sha256"].as_str().unwrap_or("");
+    let size = attachment["size"].as_u64().unwrap_or(0);
+    let offset = result["offset"].as_u64().unwrap_or(0);
+    let range = if bytes.is_empty() {
+        format!("bytes */{size}")
+    } else {
+        format!("bytes {offset}-{}/{size}", offset + bytes.len() as u64 - 1)
+    };
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, media_type.to_string()),
+            (
+                axum::http::HeaderName::from_static("x-xmsg-sha256"),
+                hash.to_string(),
+            ),
+            (axum::http::header::CONTENT_RANGE, range),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 async fn get_replies_handler(

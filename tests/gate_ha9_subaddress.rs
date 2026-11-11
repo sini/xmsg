@@ -206,6 +206,7 @@ impl Ha9Harness {
         let node_name = "test-node".to_string();
 
         let state = Arc::new(AppState {
+            max_attachment_bytes: 8 * 1024 * 1024,
             sessions_dirs: vec![sessions_dir.clone()],
             agy_config: xmsg::agy::AgyConfig {
                 presence_dir: tmp.path().join("presence"),

@@ -64,6 +64,7 @@ fn build_test_state(node_name: &str) -> (TempDir, Arc<AppState>) {
     let (svc_notify_tx, _) = tokio::sync::broadcast::channel(32);
 
     let state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir],
         max_body: 65536,
         request_counter: std::sync::atomic::AtomicU64::new(0),

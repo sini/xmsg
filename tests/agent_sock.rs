@@ -461,6 +461,7 @@ async fn test_agent_sock_reply_and_send_flow() {
     };
 
     let app_state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir.clone()],
         agy_config,
         agy_store: new_agy_store(),
@@ -799,6 +800,7 @@ async fn test_xs2_svc_store_admits_only_hop0_while_refusing_child_of_svc() {
     let (notify_tx, _) = tokio::sync::broadcast::channel(16);
     let (pi_notify_tx, _) = tokio::sync::broadcast::channel(16);
     let app_state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir],
         agy_config,
         agy_store: new_agy_store(),
@@ -1001,6 +1003,7 @@ async fn test_xr4_resolve_caller_session_refuses_ambiguous_multi_svc_pid() {
     let (notify_tx, _) = tokio::sync::broadcast::channel(16);
     let (pi_notify_tx, _) = tokio::sync::broadcast::channel(16);
     let app_state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir],
         agy_config,
         agy_store: new_agy_store(),

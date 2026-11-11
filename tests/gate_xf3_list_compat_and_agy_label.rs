@@ -1702,6 +1702,7 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
         let (inproc_pi_notify, _) = tokio::sync::broadcast::channel(64);
         let (inproc_svc_notify, _) = tokio::sync::broadcast::channel(64);
         let inproc_state = Arc::new(xmsg::http::AppState {
+            max_attachment_bytes: 8 * 1024 * 1024,
             db: Arc::new(Mutex::new(inproc_conn)),
             sessions_dirs: vec![node.sessions_dir.clone()],
             max_body: 65536,

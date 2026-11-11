@@ -271,9 +271,16 @@ def main():
             require(green.returncode == 0 and marker in green.stdout and (test != "@live" or "shared-client: verified baseline and candidate service contract completed" in green.stdout), (name, "invalid green", green.stdout, green.stderr))
             source = dest / filename
             text = source.read_text()
-            expected_count = 3 if name in ("forbidden-sender-field", "agent-version") else (2 if name == "live-health-eof" else 1)
-            require(text.count(old) == expected_count, (name, text.count(old)))
-            source.write_text(text.replace(old, new, 1))
+            if name in ("forbidden-sender-field", "agent-version"):
+                start = text.index("    pub async fn send_with_attachments(")
+                end = text.index("    pub async fn reply(", start)
+                send = text[start:end]
+                require(send.count(old) == 1, (name, send.count(old)))
+                source.write_text(text[:start] + send.replace(old, new, 1) + text[end:])
+            else:
+                expected_count = 2 if name == "live-health-eof" else 1
+                require(text.count(old) == expected_count, (name, text.count(old)))
+                source.write_text(text.replace(old, new, 1))
             red = run(dest, test, changed_source=filename, label=f"{name}:mutant")
             if test == "@graph":
                 reason = "test target inventory mismatch" if name == "missing-test-target" else "rusqlite"

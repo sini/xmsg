@@ -103,6 +103,7 @@ async fn start_test_server(
     let (svc_notify_tx, _) = broadcast::channel(1024);
 
     let state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir],
         agy_config,
         agy_store,

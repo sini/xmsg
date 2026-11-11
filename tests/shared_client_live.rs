@@ -80,7 +80,10 @@ async fn bind_without_listen_race_control() {
     let waiter = tokio::spawn(async move {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !socket_listening(&waiter_path) {
-            assert!(Instant::now() < deadline, "waiter timed out before listen()");
+            assert!(
+                Instant::now() < deadline,
+                "waiter timed out before listen()"
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     });

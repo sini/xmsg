@@ -261,6 +261,7 @@ async fn start_server(config: AgyConfig, store: AgyStore) -> (TempDir, PathBuf) 
     let s_path = sock.clone();
     tokio::spawn(async move {
         let state = Arc::new(xmsg::http::AppState {
+            max_attachment_bytes: 8 * 1024 * 1024,
             sessions_dirs: vec![],
             agy_config: config,
             agy_store: store,

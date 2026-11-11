@@ -175,6 +175,7 @@ async fn setup_gate_harness() -> GateHarness {
         let _ = run_register_server(
             reg_sock,
             std::sync::Arc::new(xmsg::http::AppState {
+                max_attachment_bytes: 8 * 1024 * 1024,
                 sessions_dirs: vec![],
                 agy_config: reg_config,
                 agy_store: reg_store,
@@ -199,6 +200,7 @@ async fn setup_gate_harness() -> GateHarness {
     });
 
     let app_state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir],
         agy_config,
         agy_store,

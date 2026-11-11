@@ -79,6 +79,7 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
         let _ = run_register_server(
             s_path,
             std::sync::Arc::new(xmsg::http::AppState {
+                max_attachment_bytes: 8 * 1024 * 1024,
                 sessions_dirs: vec![],
                 agy_config: s_cfg,
                 agy_store: s_store,
@@ -104,6 +105,7 @@ async fn test_e2e_pi_registration_delivery_and_reply_flow() {
 
     // 2. Start HTTP server
     let app_state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir.clone()],
         agy_config: agy_config.clone(),
         agy_store: agy_store.clone(),

@@ -188,6 +188,10 @@ pub struct ServeArgs {
     )]
     pub max_body: usize,
 
+    /// Maximum attachment size in bytes
+    #[arg(long, env = "XMSG_MAX_ATTACHMENT_BYTES", default_value_t = 8 * 1024 * 1024)]
+    pub max_attachment_bytes: usize,
+
     /// Path to SQLite database
     #[arg(long, env = "XMSG_DB_PATH")]
     pub db_path: Option<PathBuf>,
@@ -1301,6 +1305,7 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         svc_notify_tx: svc_notify_tx.clone(),
         node_name,
         max_body: args.max_body,
+        max_attachment_bytes: args.max_attachment_bytes,
         request_counter: AtomicU64::new(1),
         db: db.clone(),
         notify_tx,

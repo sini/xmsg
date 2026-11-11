@@ -108,6 +108,7 @@ async fn start_test_server(sessions_dirs: Vec<PathBuf>) -> TestHttpServer {
     let (pi_notify_tx, _) = tokio::sync::broadcast::channel(16);
 
     let state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: sessions_dirs.clone(),
         agy_config: xmsg::agy::AgyConfig {
             presence_dir: PathBuf::from("/tmp/nonexistent-presence"),

@@ -117,6 +117,7 @@ async fn test_shipped_binary_register_cli_with_server() {
         let _ = run_register_server(
             s_path,
             std::sync::Arc::new(xmsg::http::AppState {
+                max_attachment_bytes: 8 * 1024 * 1024,
                 sessions_dirs: vec![],
                 agy_config: s_cfg,
                 agy_store: s_store,

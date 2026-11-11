@@ -5,6 +5,8 @@ pub mod agent;
 #[cfg(feature = "daemon")]
 pub mod agy;
 #[cfg(feature = "daemon")]
+pub mod attachments;
+#[cfg(feature = "daemon")]
 pub mod claim;
 #[cfg(feature = "client")]
 pub mod client;

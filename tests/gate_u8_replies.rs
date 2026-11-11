@@ -195,6 +195,7 @@ exit 0
     };
 
     let state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir.clone()],
         agy_config,
         agy_store: new_agy_store(),

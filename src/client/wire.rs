@@ -1,6 +1,34 @@
 use super::Origin;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AttachmentRef {
+    pub name: String,
+    pub size: usize,
+    pub media_type: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
 /// A service's registration frame on `register.sock`. Unknown fields are refused (plan
 /// §6 D3); `harness` is the multiplexer's tag.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -30,6 +58,8 @@ pub enum SvcFrame {
         #[serde(rename = "messageId")]
         message_id: String,
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<AttachmentRef>,
         #[serde(default, rename = "idempotencyKey")]
         idempotency_key: Option<String>,
     },
@@ -41,6 +71,50 @@ pub enum SvcFrame {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentFrame {
+    Attach {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema_version: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_agent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_session: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_thread: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_turn: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_type: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        upload: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha256: Option<String>,
+    },
+    ReadAttachment {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema_version: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_agent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_session: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_thread: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_turn: Option<String>,
+        message_id: String,
+        index: usize,
+        #[serde(default)]
+        offset: Option<usize>,
+        #[serde(default)]
+        length: Option<usize>,
+    },
     McpStart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema_version: Option<u32>,
@@ -81,6 +155,8 @@ pub enum AgentFrame {
         schema_version: Option<u32>,
         to: String,
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<AttachmentRef>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         idempotency_key: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -97,6 +173,8 @@ pub enum AgentFrame {
         schema_version: Option<u32>,
         message_id: String,
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<AttachmentRef>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         idempotency_key: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -196,10 +274,14 @@ pub struct Registration {
     /// `None` when registering against an older daemon that omits `max_body_bytes`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_body_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attachment_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeliveryFrame {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentRef>,
     #[serde(rename = "messageId")]
     pub message_id: String,
     #[serde(rename = "fromName")]
@@ -228,6 +310,8 @@ impl DeliveryFrame {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ReplyRecord {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentRef>,
     pub seq: i64,
     pub message_id: String,
     pub created_at: i64,
@@ -303,5 +387,36 @@ impl NodeStatus {
             status: status.to_string(),
             detail: Some(detail),
         }
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+
+    #[test]
+    fn old_message_frames_keep_their_shape() {
+        let frame: AgentFrame =
+            serde_json::from_str(r#"{"action":"send","to":"target","text":"hi"}"#).unwrap();
+        let value = serde_json::to_value(frame).unwrap();
+        assert!(value.get("attachments").is_none());
+        let reply: SvcFrame =
+            serde_json::from_str(r#"{"action":"reply","messageId":"id","text":"hi"}"#).unwrap();
+        assert!(serde_json::to_value(reply)
+            .unwrap()
+            .get("attachments")
+            .is_none());
+    }
+
+    #[test]
+    fn attachment_frames_preserve_metadata_and_reject_unknown_fields() {
+        let value = serde_json::json!({"action":"attach","data":"YQ==","name":"a.txt","codex_session":"s","codex_thread":"t"});
+        let frame: AgentFrame = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(frame).unwrap(), value);
+        let mut extra = value;
+        extra["surprise"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<AgentFrame>(extra).is_err());
+        let unknown = serde_json::json!({"name":"a","size":1,"media_type":"text/plain","sha256":"a".repeat(64),"path":"/tmp/a"});
+        assert!(serde_json::from_value::<AttachmentRef>(unknown).is_err());
     }
 }

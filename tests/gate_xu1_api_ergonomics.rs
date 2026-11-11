@@ -198,6 +198,7 @@ async fn create_node(
     });
 
     let app_state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir.clone()],
         agy_config: agy_config.clone(),
         agy_store: agy_store.clone(),

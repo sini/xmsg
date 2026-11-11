@@ -156,6 +156,7 @@ async fn start_hub_with_svc_receiver(
     });
 
     let app_state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir],
         agy_config,
         agy_store,
@@ -287,6 +288,7 @@ async fn start_leaf_with_unavailable_proc(
     });
 
     let app_state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir],
         agy_config,
         agy_store,
@@ -594,6 +596,7 @@ async fn leaf_svc_without_proc_and_pidfd_dead_controls() {
     let (ntx, _) = tokio::sync::broadcast::channel(16);
 
     let nonleaf_state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![nonleaf_sessions.clone()],
         agy_config: nonleaf_agy_cfg.clone(),
         agy_store: new_agy_store(),

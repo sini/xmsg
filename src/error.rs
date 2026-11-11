@@ -50,6 +50,12 @@ pub enum AppError {
     #[error("session {session_id} process {pid} exited")]
     Gone { session_id: String, pid: u32 },
 
+    #[error("gone: {0}")]
+    GoneDetail(String),
+
+    #[error("integrity: {0}")]
+    Integrity(String),
+
     #[error("unregistered: process {0} has no attested agent session")]
     Unregistered(u32),
 
@@ -117,7 +123,8 @@ impl AppError {
                 (StatusCode::CONFLICT, "process_already_registered")
             }
             AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
-            AppError::Gone { .. } => (StatusCode::GONE, "gone"),
+            AppError::Gone { .. } | AppError::GoneDetail(_) => (StatusCode::GONE, "gone"),
+            AppError::Integrity(_) => (StatusCode::BAD_GATEWAY, "integrity"),
             AppError::PayloadTooLarge { .. } => {
                 (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large")
             }
@@ -159,6 +166,8 @@ impl AppError {
             }
             AppError::InboxTimeout => "inbox write timed out after 5s".to_string(),
             AppError::BadRequest(d)
+            | AppError::GoneDetail(d)
+            | AppError::Integrity(d)
             | AppError::NotFoundDetail(d)
             | AppError::BadSender(d)
             | AppError::Ambiguous(d)

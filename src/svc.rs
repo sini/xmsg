@@ -13,10 +13,18 @@ use crate::storage::{self, now_epoch_secs};
 use crate::client::wire::SvcFrame;
 pub use crate::client::wire::SvcRegisterRequest;
 
-fn deliver_frame(msg: &storage::SvcPendingMessage) -> serde_json::Value {
-    serde_json::to_value(
+fn deliver_frame(
+    db: &rusqlite::Connection,
+    msg: &storage::SvcPendingMessage,
+) -> Result<serde_json::Value, AppError> {
+    let attachments = crate::attachments::list_rows(db, &msg.id)?
+        .into_iter()
+        .map(|row| row.attachment)
+        .collect();
+    Ok(serde_json::to_value(
         crate::client::wire::DeliveryFrame {
             message_id: msg.id.clone(),
+            attachments,
             from_name: msg.from_name.clone(),
             text: msg.text.clone(),
             envelope: msg.envelope.clone(),
@@ -25,7 +33,7 @@ fn deliver_frame(msg: &storage::SvcPendingMessage) -> serde_json::Value {
         }
         .envelope(),
     )
-    .expect("serializable service delivery")
+    .expect("serializable service delivery"))
 }
 
 #[derive(Debug, Clone)]
@@ -348,6 +356,7 @@ pub async fn handle_svc_connection_peer<
         idempotency_ttl_secs: Some(idempotency_ttl_secs),
         svc_queue_cap: Some(svc_queue_cap),
         max_body_bytes: Some(max_body_bytes),
+        max_attachment_bytes: Some(state.max_attachment_bytes),
     })?;
     writer.write_all(format!("{ok_resp}\n").as_bytes()).await?;
 
@@ -416,7 +425,7 @@ pub async fn handle_svc_connection_peer<
                 };
 
                 if let Some(msg) = pending {
-                    let resp = deliver_frame(&msg);
+                    let resp = deliver_frame(&db.lock().unwrap(), &msg)?;
                     writer.write_all(format!("{resp}\n").as_bytes()).await?;
                     in_flight.insert(msg.id);
                 } else if wait_secs == 0 {
@@ -447,7 +456,7 @@ pub async fn handle_svc_connection_peer<
                     };
 
                     if let Some(msg) = pending_after {
-                        let resp = deliver_frame(&msg);
+                        let resp = deliver_frame(&db.lock().unwrap(), &msg)?;
                         writer.write_all(format!("{resp}\n").as_bytes()).await?;
                         in_flight.insert(msg.id);
                     } else {
@@ -469,14 +478,16 @@ pub async fn handle_svc_connection_peer<
                 message_id,
                 text,
                 idempotency_key,
+                attachments,
             } => {
                 let caller = crate::surface::service_session(&name);
-                let resp = match crate::surface::reply(
+                let resp = match crate::surface::reply_with_attachments(
                     &state,
                     &caller,
                     &message_id,
                     &text,
                     idempotency_key.as_deref(),
+                    &attachments,
                 )
                 .await
                 {
