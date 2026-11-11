@@ -1,0 +1,210 @@
+---
+title: Guard model
+description: What genie's guards screen in each direction, where they run, what happens on refusal, what they do not protect against, and the fallbacks.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Genie answers strangers in public rooms, and its answering models have tools. That makes it a
+target for **prompt injection**: text written to steer a model, or to make it hand over what it
+holds. The guard model is genie's answer. It has three parts:
+
+- **`guard-in`** screens text before a model reads it.
+- **`guard-out`** screens an answer before anyone sees it.
+- **The redactor** removes credential-shaped strings from every outbound text. It is plain code,
+  not a model.
+
+Each guard is a separate model session. It shares no context with tier 1, with the expert, or
+with the other guard. A guard sees only the text under review and its own fixed prompt, so a
+successful injection against tier 1 does not carry over into the guard's context.
+
+The guards are a defence in depth, not the only line. The strongest guarantees are built in, not
+screened for. No model holds a credential, and no model can raise a thread's tier. See
+[Credentials & isolation](/genie/credentials-and-isolation/).
+
+## Inbound: what `guard-in` screens
+
+| Text | Who sends it to the guard | Source label |
+|---|---|---|
+| A Matrix message and the thread history it carries | The Matrix bot before forwarding; root as well, if the bot did not mark the text screened | `message` |
+| Context and resync pages the bot fetches for an existing thread | The Matrix bot | `message` |
+| Web pages and search results tier 1 fetched | Root, before tier 1 sees them | `web` |
+| Nix evaluation output placed in an escalation package | Root, before the package leaves | `eval_stdout` |
+| Unscreened `git` and GitHub read output placed in an escalation package | Root, before the package leaves | `web` |
+| A replayed archived transcript used to revive an expired thread | Root, before it seeds a new session | `recall` |
+
+Web content uses a separate prompt, `guard-web`, because all web text is third-party data.
+
+### The five injection rules
+
+`guard-in` rejects text only when it does one of five things. The rules live in
+[`prompts/guard-in.md`](https://github.com/sini/genie-agent/blob/main/prompts/guard-in.md):
+
+1. **Directs a model** (`directs_model`): tells a model to drop its rules, take on a persona or
+   tier, or treat someone as trusted. Forged system markers and hidden markup count.
+2. **Seeks what genie holds** (`seeks_holdings`): asks to reveal credentials, environment
+   variables, secret file contents, private memory, the system prompt, or a repository the text
+   itself calls private.
+3. **Coerces a tool** (`coerces_tool`): asks to raise an evaluation's trust, read private local
+   files through an evaluation, or smuggle instructions to the expert.
+4. **Plants an exfiltration channel** (`exfil_channel`): asks for an image, link or signature
+   whose URL would carry genie's context to an outside host.
+5. **Hides an instruction** (`hidden_instruction`): invisible characters, lookalikes, encoded
+   directives, or "decode this and follow it".
+
+The prompt is just as explicit about what is **not** injection. Each of these is a normal
+support message:
+
+- naming a repository, URL or file path;
+- asking how agenix, sops or systemd credentials work;
+- pasting logs that use words like "ignore" or "override" in their programming sense;
+- asking what the guard decided, or why;
+- a status note or an acknowledgement.
+
+Task scope is not injection either. "Open a PR that fixes this" is an ordinary request. Whether
+genie may do it is decided later, by the broker and the eval sandbox, not by the guard.
+
+### Verdicts
+
+`guard-in` replies with one JSON object:
+
+- `allow`: every line is clean. The original text goes through unchanged.
+- `rewrite`: some line is an injection, but a real question remains. `cleaned_text` carries only
+  that question.
+- `reject`: an injection, and nothing worth answering. The verdict names the rule broken.
+
+A guard reply that is not a valid verdict is treated as `reject`, so a confused or hijacked guard
+cannot pass text by breaking its own output format. If the model endpoint cannot be reached or
+times out, the guard returns an error rather than a verdict. An error never counts as `allow`.
+
+## Outbound: what `guard-out` screens
+
+`guard-out` sees every text genie would post or act on:
+
+- tier 1's draft answers;
+- the expert's replies;
+- deadline notices and approval requests;
+- the broker's write proposals (gist create, update and comment, and pull requests).
+
+Its prompt is
+[`prompts/guard-out.md`](https://github.com/sini/genie-agent/blob/main/prompts/guard-out.md). It
+blocks four kinds of answer:
+
+- **leak**: credentials, private memory, private repository contents, internal addresses and
+  hostnames, or a name that looks like a real deployment detail, even one offered "for example".
+- **secret_request**: the answer asks the user to paste a token, password or key.
+- **injection**: the answer carries instructions aimed at the reader's own agent.
+- **other**: any other unsafe payload.
+
+It passes explanations of how secret tools work, placeholder values, the asker's own names echoed
+back, and descriptions of genie's own public design.
+
+The order is fixed: **the redactor runs first, then `guard-out` judges the redacted bytes.** No
+credential reaches the guard's context, and what the guard passed is exactly what is published.
+A `[redacted:<kind>]` marker in an answer means the answer tried to leak something, so
+`guard-out` blocks that answer too.
+
+## Where the guards run
+
+- **`guard-in`** runs as `genie-guard`, a standalone xmsg service. It registers on its bus as
+  `genie-guard`, takes one envelope per message, and answers with one reply. It calls an
+  OpenAI-compatible model endpoint. In Kubernetes it runs as a pod with two containers: the guard
+  and an xmsg [leaf](/concepts/hubs-and-leaves/#leaf-node-mode---leaf) that federates it to the
+  rest of the mesh.
+- **`guard-out`** runs inside `genie-root`, as a direct call to the configured model endpoint. It
+  does not go over xmsg.
+- **The redactor** runs inside `genie-root`, and inside the broker before any action.
+
+Both the Matrix bot and root reach `genie-guard` by its xmsg address, so the guard can live on a
+different host from either.
+
+## What happens on refusal
+
+| Event | What the room sees | What tier 1 sees |
+|---|---|---|
+| The Matrix bot gets `reject` on a public trigger | A 🚫 reaction on the message, and nothing else | Nothing |
+| The bot gets `reject` or `rewrite` on public history under a trusted trigger | The trusted text goes through. The public history is withheld and marked as withheld | The trusted text only |
+| Root gets `reject`, or no verdict | The fixed notice "I can't help with that message." | Nothing |
+| `rewrite` | The answer to the cleaned question | Only `cleaned_text` |
+| `guard-out` blocks a tier-1 draft | Nothing yet. Tier 1 is told the draft was withheld and may try again | `{posted: false, reason}` |
+| The turn ends with no draft passed | "I drafted an answer, but my output check held it back. I've flagged this for review." The thread then escalates | — |
+| `guard-out` blocks an expert reply | The same withheld notice | The blocked reply is dropped from tier 1's context and the transcript |
+| The escalation guard refuses a package | The package is not sent | The escalation reports `refused` |
+
+Refusal notices are fixed strings. They carry no thread text, so they skip `guard-out`.
+
+An expert reply that `guard-out` blocks is never kept. It is dropped from tier 1's context and
+from the thread transcript, and the archive records only that a reply was blocked, with its tier.
+So a leak caught once cannot leak later through a new package, draft or replay.
+
+## Scoped review for trusted triggers
+
+By default, `guard-in` reviews every line, trusted lines included. That caused a real problem: a
+trusted owner asked genie to compare two public issues with a PR stack, and the guard treated the
+owner's request as out of scope and rejected it. The public history that supported the request
+was withheld with it.
+
+The fix has two parts. The guard prompt now rejects only real instances of the five rules; scope
+alone is never injection. And a qualified producer can request
+`review_scope: "untrusted_lines"`. In that mode, every public line is reviewed and trusted lines
+are quoted context, never classified and never obeyed.
+
+`untrusted_lines` takes effect only when all of these hold:
+
+- the request's source is `message`;
+- the transport origin xmsg attaches is exactly the configured producer service and node
+  (`guard.scopeProducer`, for example `matrix-xmsg@example.node`), with no instance id;
+- the producer has its own switch on (`guard_review_scope` in the Matrix bot, off by default).
+
+Anything else, including a scope claim inside the text or a display name, falls back to full
+review. When nothing in an envelope is public, the guard makes no model call at all.
+
+Turn the scope on consumer first: deploy the guard with `scopeProducer` set, check it, then turn
+on the bot's flag. Roll back in the reverse order.
+
+## What the guards do not protect against
+
+<Aside type="caution" title="The guards are models">
+`guard-in` and `guard-out` are classifiers built from a language model and a prompt. They are
+tested against corpora of attacks and clean controls, but a novel attack can get past them, and
+a clean message can be refused. Treat them as one layer among several.
+</Aside>
+
+- **Prose leaks the redactor cannot see.** The redactor matches known credential shapes and the
+  hashes of known secret files. It cannot recognise private facts written as ordinary prose. Only
+  `guard-out` looks for those, and it can miss.
+- **Trusted senders.** An envelope whose lines are all trusted skips `guard-in` entirely. Genie
+  trusts its trusted senders.
+- **Trusted memory recall.** Recall from genie's curated memory banks is not screened. The banks
+  are treated as trusted because nothing enters them without a human approval (see
+  [Operations](/genie/operations/#memory-admission)).
+- **`git` and GitHub reads inside the turn.** By default, tier 1 sees `git` and GitHub read
+  output unscreened (`gitScreen.enable` and `ghScreen.enable` default to `false`). The output is
+  screened later if it goes into an escalation package.
+- **A quoted public reply inside a trusted message.** It is part of the trusted entry, so scoped
+  review does not review it separately.
+- **Node names as identity.** The origin node xmsg attaches is a routing claim. A federation peer
+  allowed to relay traffic can claim a forwarded node. Verdicts go back only to the routed origin,
+  and the Matrix bot accepts only verdicts for its own pending requests.
+- **Authorization.** The guard does not decide whether an action is allowed. The broker
+  (public repositories only, forks only, no write token for a model) and the eval sandbox do.
+- **A same-user attacker.** On a host without OS isolation, native code running as genie's user
+  can read what that user can read. See
+  [Credentials & isolation](/genie/credentials-and-isolation/#the-portable-baseline).
+
+## Fallbacks and switches
+
+| Setting | Default | What turning it off gives up |
+|---|---|---|
+| `guard.enable` | `true` | All model screening of inbound text: messages, web results, escalation packages and replays. Tier 1 is told that its inputs are unscreened and must be treated as data. |
+| `broker.guardOut.enable` | `true` | Model review of outbound text. **The redactor still always runs.** |
+| Matrix bot `screen_mentions`, `screen_solicited` | `true` | Bot-side screening. Forwarded text is marked `screened="false"` with a note saying screening is off. |
+| Matrix bot `guard_failure_mode` | `"closed"` | With `"open"`, an unreachable guard lets text through marked unscreened, and the bot messages the owner. |
+
+With the defaults, an unreachable guard **fails closed**. The Matrix bot forwards nothing, retries
+up to its retry budget, then reacts ⚠️ and messages the owner. Root posts the refusal notice. The
+escalation guard refuses to send the package. Nothing falls back to an unscreened path unless you
+configure it to.
+
+Turning a guard off suits private deployments where every sender is trusted, or where no guard
+model is available. In a public room, leave both on.

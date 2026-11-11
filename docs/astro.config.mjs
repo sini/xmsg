@@ -131,6 +131,25 @@ export default defineConfig({
 						{ label: 'Fedora', slug: 'getting-started/fedora' },
 					],
 				},
+
+				{
+					label: 'Genie agent',
+					items: [
+						{ label: 'Overview', slug: 'genie/overview' },
+						{ label: 'Install & Configure', slug: 'genie/install-and-configure' },
+						{ label: 'Guard Model', slug: 'genie/guard-model' },
+						{ label: 'Tiers & Experts', slug: 'genie/tiers-and-experts' },
+						{ label: 'Credentials & Isolation', slug: 'genie/credentials-and-isolation' },
+						{ label: 'Operations', slug: 'genie/operations' },
+					],
+				},
+
+				{
+					label: 'Case studies',
+					items: [
+						{ label: 'A public support agent', slug: 'case-studies/genie-agent' },
+					],
+				},
 			],
 			components: {
 				Head: './src/components/Head.astro',
