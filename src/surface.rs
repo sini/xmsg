@@ -3260,8 +3260,11 @@ async fn deliver_reply(
     let record = {
         let db = state.db.lock().map_err(db_err)?;
         let record = if let Some(mut record) = early_reply {
-            storage::update_reply_push_outcome(&db, &reply_id, push_outcome.unwrap_or("stored"))
-                .map_err(db_err)?;
+            db.execute(
+                "UPDATE replies SET push_outcome=?1 WHERE seq=?2",
+                rusqlite::params![push_outcome, record.seq],
+            )
+            .map_err(db_err)?;
             record.push_outcome = push_outcome.map(str::to_string);
             record
         } else {
