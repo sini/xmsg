@@ -86,7 +86,7 @@ enforce:
 
 | Field | Type | Description |
 |---|---|---|
-| `address` | `string` | Target `host:port` endpoint. Required. |
+| `address` | `string` | Target `host:port` endpoint. Required, except on a `leaf: true` entry (the hub never dials it) or when another entry sets `default_route`. |
 | `pin` | `string` (optional) | Expected SHA-256 certificate fingerprint (`sha256:...`). Mutually exclusive with `ca`. |
 | `ca` | `string` (optional) | Path to PEM trust anchor bundle. Mutually exclusive with `pin`; requires `identities`. |
 | `identities` | `list[string]` (optional) | Single concrete SPIFFE URI SAN (`["spiffe://..."]`). Required with `ca`. |
