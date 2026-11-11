@@ -100,6 +100,10 @@ enforce:
 
 ## Mesh `list` across peers
 
+Mailbox access is authorized by authenticated peer identity plus `leaf: true` on the
+hub's peer entry. `inbox` in `allow` is accepted and ignored; old configurations
+listing it still load. It is not an additional mailbox capability.
+
 When a caller runs `list` without a `node` filter, `xmsg` queries this node and every peer in
 `peers.json` concurrently (5-second timeout per peer):
 
@@ -118,8 +122,11 @@ Clearing `principals` to `[]` removes the sender restriction; it does not revoke
 To stop an operation, remove it from `allow`. To expose no local recipients, use `targets: []`.
 A network connection still needs to pass the peer's TLS identity, operation rights and any `from`
 filter. `allow`, `principals` and `from` gate traffic this node accepts from that peer.
-A hub also applies a destination peer's `targets` filter when forwarding or queueing for it,
-and carries that bound into the forwarded message.
+A hub also applies a destination peer's `targets` filter before forwarding or queueing.
+Dialable forwarding carries that bound to the recipient in `forwarded.targets` for
+semantic target checking. Mailbox pull items omit that marker; the hub-side pre-filter
+applies, but recipient-side enforcement of that forwarded target bound is a separate
+limitation. See [hub forwarding](/concepts/hubs-and-leaves/#forwarding-through-a-hub).
 
 The empty-list rules are implemented in
 [`PeerConfig` parsing and inbound checks](https://github.com/sini/xmsg/blob/76f8f1e8249777cfb63c4d0287431cbbf6b2ce76/src/fed.rs).
