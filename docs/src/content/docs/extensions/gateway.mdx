@@ -47,6 +47,8 @@ For example, an owner can retain the Kanidm entry while adding a proxy issuer's 
 
 Grant coexistence requires an explicit owner-run store migration and inspect read-back. Events remains bound to one selected grant. Moving it during an issuer cutover is an explicit owner action: change the configured Events grant under the normal maintenance procedure, establish the new client's subscription and verify its wake and mailbox access. Existing custody is not automatically reassigned to the new grant. Keep the old issuer/grant available until the transition has been verified.
 
+Live outbound reservation recovery is also scoped to its grant and registered sender: a foreign sender receives `Denied`, while the owning sender still receives `Pending` under contention. See [outbound authorization](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/outbound.md) for this intended narrowing.
+
 See the gateway's [profile reference and cutover example](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/auth-profiles.md) before configuring a migration. Acceptance of an issuer is separate from permission to read custody, subscribe to Events or send messages.
 
 ## Source and setup
