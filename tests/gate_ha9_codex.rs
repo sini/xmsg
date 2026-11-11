@@ -6956,3 +6956,47 @@ async fn bare_mcp_reattestation_pushes_queued_reply_once_against_racing_hook() {
     .unwrap()
     .is_none());
 }
+
+#[tokio::test]
+async fn attachment_operations_reattest_known_codex_root_after_restart() {
+    for action in ["attach", "read_attachment"] {
+        let env = CodexTestEnv::new();
+        let root = "019a0000-0000-7000-8000-000000000462";
+        let pid = 7462;
+        env.write_fake_proc(pid, 1, "7462", &env.codex_exe);
+        env.create_writer_lock(&env.codex_home, pid, root, 3);
+        env.write_root_rollout(&env.codex_home, root, "/workspace");
+        let peer = env.peer(pid);
+        handle_codex_hook_frame(
+            &env.state,
+            &peer,
+            "SessionStart",
+            None,
+            &json!({"session_id":root,"source":"startup"}),
+        )
+        .await
+        .unwrap();
+        restart_codex_fixture(&env);
+        let mut request = json!({"action":action,"codex_session":root,"codex_thread":root});
+        if action == "attach" {
+            request["name"] = json!("resume.txt");
+            request["data"] = json!("eA==");
+        } else {
+            request["message_id"] = json!("missing-item");
+            request["index"] = json!(0);
+        }
+        let frame = serde_json::from_value::<AgentFrame>(request).unwrap();
+        let result = handle_agent_frame(&env.state, &peer, frame).await;
+        if action == "attach" {
+            assert!(
+                result.is_ok(),
+                "attach must re-attest after restart: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(result, Err(xmsg::error::AppError::NotFound(_))),
+                "read must reach item lookup after re-attestation: {result:?}"
+            );
+        }
+    }
+}

@@ -1182,7 +1182,7 @@ pub async fn handle_agent_frame(
                 Ok(CallerTrace::CodexOwner {
                     owner_pid,
                     ref owner_starttime,
-                }) => resolve_codex_mcp_caller(
+                }) => resolve_codex_mcp_caller_and_drain(
                     state,
                     owner_pid,
                     owner_starttime,
@@ -1190,7 +1190,7 @@ pub async fn handle_agent_frame(
                     codex_thread.as_deref(),
                     codex_turn.as_deref(),
                     false,
-                ),
+                ).await,
                 _ if codex_session.is_some() || codex_thread.is_some() => {
                     Err(AppError::NotRecipient(
                         "codex runtime metadata rejected: caller does not descend from a trusted --codex-exe process"
@@ -1233,7 +1233,7 @@ pub async fn handle_agent_frame(
                 Ok(CallerTrace::CodexOwner {
                     owner_pid,
                     ref owner_starttime,
-                }) => resolve_codex_mcp_caller(
+                }) => resolve_codex_mcp_caller_and_drain(
                     state,
                     owner_pid,
                     owner_starttime,
@@ -1241,7 +1241,7 @@ pub async fn handle_agent_frame(
                     codex_thread.as_deref(),
                     codex_turn.as_deref(),
                     false,
-                ),
+                ).await,
                 _ if codex_session.is_some() || codex_thread.is_some() => {
                     Err(AppError::NotRecipient(
                         "codex runtime metadata rejected: caller does not descend from a trusted --codex-exe process"
