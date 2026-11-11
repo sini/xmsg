@@ -1,0 +1,113 @@
+---
+/*
+ * The landing's short use-case grid. The overview carries the fuller version
+ * of each case; keep the two in step when a case is added or reworded.
+ */
+const cases = [
+  {
+    title: 'Spread work across machines',
+    route: 'laptop → build box, GPU box, k8s pod',
+    body: 'Send a build, a test run or a training job to the machine that should do it. The reply comes back to the session that asked.',
+    href: '/concepts/federation/',
+  },
+  {
+    title: 'Mix models, subscriptions and harnesses',
+    route: 'Claude ⇄ Codex ⇄ Gemini',
+    body: 'Claude for review, Codex for builds, Gemini for docs. Ask a different model for a second opinion, or send work to the account with quota left.',
+    href: '/harnesses/claude-code/',
+  },
+  {
+    title: 'Run an orchestrator with a fleet',
+    route: '1 orchestrator → n workers',
+    body: 'One session plans and dispatches. Workers report back by reply, so the orchestrator does not have to poll.',
+    href: '/concepts/replies/',
+  },
+  {
+    title: 'Let a hosted model talk to your agents',
+    route: 'ChatGPT → gateway → local session',
+    body: 'The MCP gateway puts OAuth and owner-set policy in front of the bus, so a hosted model can message the agents you allow.',
+    href: '/extensions/gateway/',
+  },
+  {
+    title: 'Put services and bots on the bus',
+    route: 'Matrix room → genie → expert',
+    body: 'A service registers a name and answers messages like any session. genie, a Matrix support bot, is built this way.',
+    href: '/case-studies/genie-agent/',
+  },
+  {
+    title: 'Turn your agents into a swarm',
+    route: 'n sessions → one hard problem',
+    body: 'Point a dozen sessions at one problem and let them split it up. Responsibly, and at a problem you own.',
+    href: '/overview/#turn-your-agents-into-a-swarm',
+  },
+];
+---
+
+<ul class="xm-uses not-content">
+  {
+    cases.map((c) => (
+      <li>
+        <a href={c.href}>
+          <span class="xm-route">{c.route}</span>
+          <span class="xm-title">{c.title}</span>
+          <span class="xm-body">{c.body}</span>
+        </a>
+      </li>
+    ))
+  }
+</ul>
+
+<style>
+  .xm-uses {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+    gap: 0.9rem;
+    margin: 1.25rem 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .xm-uses a {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    height: 100%;
+    padding: 0.9rem 1rem 1rem;
+    border: 1px solid var(--sl-color-hairline-light);
+    border-top: 3px solid var(--sl-color-accent);
+    border-radius: 6px;
+    background: var(--sl-color-bg-nav);
+    color: var(--sl-color-gray-2);
+    text-decoration: none;
+  }
+
+  .xm-uses li:nth-child(even) a { border-top-color: var(--sl-color-orange); }
+
+  .xm-uses a:hover,
+  .xm-uses a:focus-visible {
+    border-color: var(--sl-color-gray-4);
+    background: var(--sl-color-bg);
+  }
+
+  .xm-uses a:hover .xm-title { color: var(--sl-color-accent-high); }
+
+  .xm-route {
+    font-family: var(--sl-font-mono);
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+  }
+
+  .xm-title {
+    font-family: var(--__sl-font);
+    font-size: var(--sl-text-lg);
+    font-weight: 650;
+    line-height: 1.25;
+    color: var(--sl-color-white);
+  }
+
+  .xm-body {
+    font-family: var(--__sl-font);
+    font-size: var(--sl-text-sm);
+    line-height: 1.5;
+  }
+</style>

@@ -287,13 +287,3 @@
 .sl-markdown-content :is(td, th):not(:where(.not-content *)) {
   padding: 0.4em 0.7em;
 }
-
-.hero:not(:has(img, .hero-html)) {
-  grid-template-columns: 1fr;
-  padding-block: 2.5rem 1.5rem;
-}
-
-.home-flow {
-  max-width: 32rem;
-  margin-inline: auto;
-}

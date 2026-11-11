@@ -1,0 +1,124 @@
+/*
+ * Landing page only: imported by index.mdx, so no other page loads it.
+ * Every colour resolves through `--sl-color-*` and follows the active palette.
+ */
+
+/* A wider column than the docs pages, for the exchange and the use-case grid. */
+.sl-markdown-content:has(.xm-intro) {
+  max-width: 64rem;
+  margin-inline: auto;
+}
+
+/* The page title stays the h1 for assistive tech; the lead line below is what
+   sighted readers meet first, so the title's own panel collapses. */
+main:has(.xm-intro) .content-panel:has(h1#_top) {
+  padding: 0;
+  border: 0;
+}
+
+main:has(.xm-intro) h1#_top {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.xm-eyebrow {
+  margin: 0 0 0.6rem;
+  font-family: var(--sl-font-mono);
+  font-size: var(--sl-text-sm);
+  color: var(--sl-color-accent-high);
+}
+
+.xm-eyebrow span { color: var(--sl-color-gray-3); }
+
+.xm-intro {
+  margin-bottom: 2rem;
+}
+
+.xm-lead {
+  margin: 0 0 0.75rem;
+  font-family: var(--__sl-font);
+  font-size: clamp(2rem, 5.5vw, 3.4rem);
+  font-weight: 750;
+  line-height: 1.05;
+  letter-spacing: -0.035em;
+  color: var(--sl-color-white);
+  text-wrap: balance;
+}
+
+.xm-sub {
+  max-width: 44rem;
+  margin: 0 0 1.75rem;
+  font-size: var(--sl-text-lg);
+  line-height: 1.55;
+  color: var(--sl-color-gray-2);
+}
+
+.xm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1rem;
+  margin: 0;
+}
+
+.xm-btn {
+  padding: 0.55rem 1.1rem;
+  border: 1px solid var(--sl-color-gray-4);
+  border-radius: 6px;
+  font-family: var(--__sl-font);
+  font-weight: 600;
+  color: var(--sl-color-white);
+  text-decoration: none;
+}
+
+.xm-btn:hover { border-color: var(--sl-color-gray-2); }
+
+.xm-btn.xm-primary {
+  border-color: var(--sl-color-accent);
+  background: var(--sl-color-accent);
+  color: var(--sl-color-black);
+}
+
+.xm-btn.xm-primary:hover { background: var(--sl-color-accent-high); }
+
+.xm-link {
+  font-family: var(--__sl-font);
+  color: var(--sl-color-accent-high);
+}
+
+/* Headings on this page are plain sans, set bold, unlike the docs' light mono. */
+main:has(.xm-intro) .sl-markdown-content h2 {
+  font-family: var(--__sl-font);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.xm-tools {
+  display: grid;
+  gap: 0.5rem;
+  margin: 1rem 0;
+  padding: 0;
+  list-style: none;
+}
+
+.xm-tools li {
+  display: grid;
+  grid-template-columns: 5rem 1fr;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.6rem 0.9rem;
+  border-inline-start: 3px solid var(--sl-color-accent);
+  background: var(--sl-color-bg-nav);
+  border-radius: 0 6px 6px 0;
+}
+
+.xm-tools code {
+  font-weight: 600;
+  color: var(--sl-color-accent-high);
+}
+
+.xm-tools span { color: var(--sl-color-gray-2); }
