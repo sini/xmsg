@@ -68,7 +68,10 @@ file's size and SHA-256, then serves the requested range. A failed integrity che
 verified copy; a later read tries again. A read that takes more than ten seconds returns
 `pending` while fetching continues. Retry the read to collect its result. A fetch waits and
 retries a rate-limited chunk within a three-minute total deadline. Expiry of that deadline
-returns a retryable error, discards partial chunks, and publishes no verified blob.
+returns a retryable error, discards partial chunks, and publishes no verified blob. Pending
+polls retain one job per item, so a completed failure is returned to the next poll before a
+retry starts. A completed result that is not collected expires after three minutes. At most
+64 read jobs are active or retained; a full job map returns a retryable busy error.
 
 Files travel along the message's authenticated peer route. A hub fetches from the peer that
 supplied that particular item before it serves the next hop. Having the same hash cached for

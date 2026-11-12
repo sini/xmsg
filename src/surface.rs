@@ -2058,13 +2058,8 @@ pub async fn read_attachment(
             .fed_state
             .clone()
             .ok_or_else(|| AppError::Unavailable("attachment upstream unavailable".into()))?;
-        let item = item_id.to_string();
-        let mut task = tokio::spawn(async move {
-            crate::federated_attachments::ensure_attachment(&fs, &item, index).await
-        });
-        match tokio::time::timeout(std::time::Duration::from_secs(10), &mut task).await {
-            Ok(result) => result.map_err(|e| AppError::Internal(e.to_string()))??,
-            Err(_) => return Ok(serde_json::json!({"status":"pending","state":"pending"})),
+        if !crate::federated_attachments::poll_read_fetch(&fs, item_id, index).await? {
+            return Ok(serde_json::json!({"status":"pending","state":"pending"}));
         }
     }
     let row = readable_attachment(state, caller, item_id, index)?;
