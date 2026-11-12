@@ -77,6 +77,25 @@ Setting the list does not cut delivery immediately; use the gateway's owner
 controls for an immediate stop. See the
 [gateway Events reference](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/events.md).
 
+## Renewal failures and credential recovery
+
+**Planned, not yet released.** Callback verification and the final credential/grant
+check complete before a single transaction replaces an Events subscription. A
+failed subscribe or renew leaves the old subscription, encrypted credentials,
+keys, expiry, generation and cursors unchanged; a failed first subscribe creates
+no provisional row. The old binding can keep delivering if its own credential and
+grant remain valid.
+
+When a due delivery parks for a credential, `events_status.subscription` reports
+`state: "renewal_required"` with `reason: "credential_required"`, including in
+`xmsg_inbox` and `xmsg_read_message`. Expired and disabled states take precedence.
+A failed renew keeps that signal; a successful renewal clears the scoped park and
+makes delivery due again without resetting attempts, event IDs, saved payloads or
+consumer observations. Reading status does not introspect or replace a credential.
+The hosted client must successfully renew through `events/subscribe`; an ordinary
+tool call does not replace the stored credential. See the
+[gateway Events guide](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/events.md).
+
 ## Source and setup
 
 - [Gateway repository and profiles](https://github.com/sini/xmsg-mcp-gateway).
