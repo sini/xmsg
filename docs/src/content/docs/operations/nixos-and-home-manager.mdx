@@ -92,6 +92,19 @@ programs.xmsg.server.federation = {
 };
 ```
 
+Each `peers` entry takes the same field names as an entry in the
+[peers file](/concepts/federation/#entry-fields). `pinFromCert` is extra: it computes `pin` at
+build time. These limits apply:
+
+- **`address` has no default.** On a `leaf = true` entry the hub never dials the peer, so set
+  `address = "";`.
+- **No `default_route` option.** The module cannot mark a default route.
+- **No `hub` block.** The module writes the bare-map form of the peers file, which cannot hold
+  [hub admission](/concepts/federation/#hub-admission-hub).
+
+The module has no option for a hand-written peers file. To use `default_route` or `hub`, write
+the peers file yourself and run `xmsg serve --peers-file <path>` outside this module's service.
+
 On NixOS, open the federation port in the firewall with `nixosModules.xmsg`:
 
 ```nix file=<rootDir>/nix/modules/nixos.nix#L1-L20

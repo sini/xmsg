@@ -51,19 +51,21 @@ Each entry in `peers.json` uses **exactly one** trust mechanism:
 
 ```json
 {
-  "laptop": {
-    "address": "192.168.1.50:7788",
-    "pin": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "allow": ["send", "reply", "list"],
-    "from": ["192.168.1.0/24", "fd00::/8"]
-  },
-  "worker.prod": {
-    "address": "10.0.0.12:7788",
-    "ca": "/etc/xmsg/spire-bundle.pem",
-    "identities": [
-      "spiffe://example.org/ns/prod/sa/worker"
-    ],
-    "allow": ["send", "reply"]
+  "peers": {
+    "laptop": {
+      "address": "192.168.1.50:7788",
+      "pin": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "allow": ["send", "reply", "list"],
+      "from": ["192.168.1.0/24", "fd00::/8"]
+    },
+    "worker.prod": {
+      "address": "10.0.0.12:7788",
+      "ca": "/etc/xmsg/spire-bundle.pem",
+      "identities": [
+        "spiffe://example.org/ns/prod/sa/worker"
+      ],
+      "allow": ["send", "reply"]
+    }
   }
 }
 ```
@@ -84,6 +86,50 @@ enforce:
 
 ## Peer configuration reference (`--peers-file`)
 
+### File format
+
+The peers file is a JSON object. This site uses the wrapped form in its examples:
+
+```json
+{
+  "peers": { "<entry key>": { ... } },
+  "hub": { "patterns": [ ... ], "rules": [ ... ] }
+}
+```
+
+- `peers` holds one entry for each peer. The entry key is the peer's node name or a local nickname.
+- `hub` is optional. It is permitted only in the wrapped form. See [hub admission](#hub-admission-hub).
+- Any other top-level field is refused.
+
+xmsg also accepts two other forms. A bare map has the entries at the top level, with no `peers`
+wrapper. The Home Manager module writes this form. A JSON array of entries is also accepted; each
+entry then needs a `name` field. Neither form can hold a `hub` block.
+
+### A leaf entry
+
+A hub does not dial a leaf. The leaf connects to the hub and collects its messages. Thus a
+`leaf: true` entry does not need an `address`:
+
+```json
+{
+  "peers": {
+    "guard.genie": {
+      "ca": "/etc/xmsg/ca.pem",
+      "identities": ["spiffe://example.org/ns/genie/sa/guard"],
+      "leaf": true,
+      "allow": ["send", "reply"]
+    }
+  }
+}
+```
+
+A sender on the hub can send to `<target>@guard.genie`. A peer can also ask the hub to forward a
+message there. In both cases the hub stores the message in its `peer_mailbox`, and the send
+returns `outcome: "queued"`, not `"delivered"`. The message stays queued until the leaf collects
+it and acknowledges it.
+
+### Entry fields
+
 | Field | Type | Description |
 |---|---|---|
 | `address` | `string` | Target `host:port` endpoint. Required, except on a `leaf: true` entry (the hub never dials it) or when another entry sets `default_route`. |
@@ -92,11 +138,59 @@ enforce:
 | `identities` | `list[string]` (optional) | Single concrete SPIFFE URI SAN (`["spiffe://..."]`). Required with `ca`. |
 | `allow` | `list[string]` | Permitted capabilities (`"send"`, `"reply"`, `"list"`, `"inbox"`, `"forward"`, `"relayed"`). |
 | `from` | `list[string]` (optional) | Permitted source IP addresses or CIDR blocks for inbound connections. Empty `[]` is refused. |
-| `leaf` | `bool` (optional) | When `true`, messages and `list` queries for this peer queue in the hub's durable `peer_mailbox` for long-polling instead of dialing out. Default `false`. |
+| `leaf` | `bool` (optional) | When `true`, this node does not dial the peer. Messages and `list` queries for the peer wait in this node's durable `peer_mailbox` until the peer collects them by long-polling. A send to the peer returns `outcome: "queued"`. Default `false`. |
 | `dial` | `"outbound"` (optional) | Spawns a background pull loop on this node that dials out to `address` to pull messages, answer `list` queries, and poll replies. Mutually exclusive with `leaf: true`. |
 | `principals` | `list[string]` (optional) | Inbound sender filter: service name, instance ID, or `anon:<from>`. **Absent or `[]` permits every principal**; a nonempty list restricts senders to its entries. |
 | `targets` | `list[string]` (optional) | Local recipient filter for messages and `list`: service name or instance ID, never an instance label. **Absent permits all; `[]` permits none.** |
 | `default_route` | `bool` (optional) | Use this peer for an explicit `ref@node` destination that is not a direct peer. At most one entry may set it to `true`; direct routes take precedence. See [hub forwarding](/concepts/hubs-and-leaves/#forwarding-through-a-hub). |
+
+### Mailbox retention
+
+A message in the `peer_mailbox` stays until the leaf acknowledges it, or until it is older than
+the reply TTL. The reply TTL is `--reply-ttl` (environment `XMSG_REPLY_TTL`). Its default is
+604800 seconds (7 days). xmsg deletes expired rows when it completes a local delivery. Thus an idle
+hub can keep expired rows for longer. There is no limit on the number of messages or bytes for
+each peer.
+
+### Hub admission (`hub`)
+
+A hub can admit clients that have no entry of their own. The `hub` block matches the client's
+certificate identity against patterns:
+
+```json
+{
+  "peers": {
+    "xmsg.ca-host": {
+      "address": "ca-host.example.org:7788",
+      "ca": "/etc/xmsg/fleet-ca.pem",
+      "identities": ["spiffe://example.org/host/ca-host/user/xmsg"],
+      "allow": ["send", "reply"]
+    }
+  },
+  "hub": {
+    "patterns": ["spiffe://example.org/host/*/user/*"],
+    "rules": [
+      { "pattern": "spiffe://example.org/host/*/user/alice", "allow": ["send", "reply", "list"] }
+    ]
+  }
+}
+```
+
+- **`patterns`** (required, not empty): SPIFFE URI patterns. A `*` matches exactly one whole path
+  segment. xmsg admits a client when its certificate has exactly one URI SAN, the URI matches a
+  pattern, and the chain verifies against the CA bundles of this file's `ca` entries.
+- **A CA entry is required.** xmsg refuses a `hub` block when `peers` has no `ca` entry.
+- **`rules`** (optional): each rule has a `pattern` and an `allow` list. The first rule whose
+  pattern matches the client's URI gives the client its operations. `allow` takes `send`, `reply`,
+  `list` and `forward`. It must not be empty.
+- **Closed by default.** An admitted client that matches no rule gets no operations.
+- **Load checks.** xmsg refuses a duplicate rule pattern. It also refuses a rule that no admission
+  pattern can match.
+- **Names.** The client's node name comes from its URI, as for a CA entry. At load, xmsg refuses a
+  pattern without `*` that gives this node's own name or a concrete entry's name. At connect, it
+  refuses a client whose name is a concrete entry's name. When two different URIs give the same
+  name, it refuses the second client.
+- After an admitted client connects, its name is in this node's view of known nodes.
 
 ## Mesh `list` across peers
 
