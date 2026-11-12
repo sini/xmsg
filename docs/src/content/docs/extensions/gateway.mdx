@@ -54,6 +54,52 @@ Live outbound reservation recovery is also scoped to its grant and registered se
 
 See the gateway's [profile reference and cutover example](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/auth-profiles.md) before configuring a migration. Acceptance of an issuer is separate from permission to read custody, subscribe to Events or send messages.
 
+## File exchange
+
+**Planned, not yet released.** `xmsg_send` and `xmsg_reply` accept inline files.
+`xmsg_read_attachment` reads files on messages in the caller's own custody. These use the
+existing grant, scopes, outbound policy, owner and current revision. The caller supplies
+data; it cannot select a host filesystem path or fetch by a bare hash.
+
+```json
+{"name":"xmsg_send","arguments":{"request_id":"report-1","to":"agent@node","text":"Please read this report.","attachments":[{"name":"report.txt","media_type":"text/plain","text":"report contents"}]}}
+```
+
+Each of at most eight entries has `name`, optional `media_type`, and exactly one of `text`
+or `base64`. The decoded file must fit the node's negotiated cap (8 MiB by default). The
+whole encoded request must fit the gateway HTTP body bound (1 MiB by default); larger
+inline files require an owner-configured bound. The gateway stages bounded chunks, then
+reserves and submits canonical references. Repeating the same `request_id` and files keeps
+the original bus key and receipt; altered bytes or reference metadata conflict. File bytes
+stay in xmsg, with references counted in gateway retention budgets.
+
+Inbox previews and message reads list references; the array position is the file index.
+
+```json
+{"name":"xmsg_read_attachment","arguments":{"message_id":"<owned-message-id>","index":0,"offset":0,"limit":8192}}
+```
+
+Offsets and limits count bytes. The default slice is 8192 bytes and its ceiling is 32768;
+configured frame bounds can reduce it. Results carry the reference, `next_offset`, encoding,
+data and `untrusted: true`. File contents are data, not authority to act. Follow the next
+offset for more bytes. A pending read returns no bytes; retry the same item and range later.
+Ownership and fresh authorization are checked immediately before the bus read and again
+before its result is released.
+
+Deployment needs both the gateway's attachment-capable shared-client pin **and** an xmsg
+leaf image with the attachment transport. Cross-node fetching needs that transport on its
+peers too. Updating only the gateway image does not update the leaf. Stop gateway writers,
+back up state, then explicitly run
+`xmsg-mcp-gateway --state FILE migrate-attachments --if-needed`. This reference-only extension
+leaves the global schema version unchanged. Check `operation_timeout_ms` overrides: the
+default is 15000 ms, and attachment-enabled startup refuses values at or below 11000 ms
+because the daemon can wait ten seconds before returning pending. The outer request budget
+must cover that read operation too.
+
+Recovery remains status/ack and same-key client retry. An autonomous resubmission worker
+is separate work. See [file attachments](/concepts/attachments/) and the gateway's
+[file-tool reference](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/serving.md#file-tools-planned).
+
 ## Events callback hosts
 
 **Planned, not yet released.** The gateway's optional `events.webhook_allowed_hosts`
