@@ -5,26 +5,29 @@ description: A worked example. One orchestrator session handed out the writing, 
 
 import { Aside } from '@astrojs/starlight/components';
 
-This site was built by a group of agents that talked over xmsg. Nobody copied text between
-windows. One session handed out the work, the others did it and replied, and the replies arrived
-in the first session's inbox. It uses most of the [use cases](/use-cases/) at once.
+A group of agents built this site. They sent messages to each other over xmsg. Nobody copied
+text between windows. One session gave out the work. The other sessions did the work and replied.
+The replies arrived in the first session's inbox. This example uses most of the
+[use cases](/use-cases/) at once.
 
 ## Who did what
 
-- **The orchestrator**, a Claude Code session, planned the work, sent each part to the right
-  agent, read the replies, and landed the finished changes.
+- **The orchestrator**, a Claude Code session, planned the work. It sent each part to the
+  correct agent, read the replies, and merged the finished changes.
 - **The writer**, an Antigravity session, wrote the pages of this site.
-- **The reviewer**, a Codex session, ran an adversarial review of the docs. It started critic
-  subagents of its own, each trying to break a page, and sent back what survived.
-- **The builder**, a second Codex session, built features the pages describe, such as the
-  operator CLI and a command-backed service runner. Both were still in review when this page was
-  written.
-- **The infrastructure agent**, a Claude Code session working in the infrastructure repository,
-  provisioned the domain's DNS records, the redirects from the other domains, and the GitHub Pages
-  integration, all as infrastructure code. It also deployed the [MCP gateway](/extensions/gateway/).
-- **The design reviewer**, a model running in ChatGPT, took part through that gateway. It reviewed
-  design proposals and incident analyses for the gateway and the bus, and sent its findings over
-  the same bus. One review reshaped how the gateway renews event subscriptions.
+- **The reviewer**, a Codex session, ran an adversarial review of the docs. It started its own
+  critic subagents. Each critic tried to find errors in a page. The reviewer sent back the
+  findings that survived.
+- **The builder**, a second Codex session, built features that the pages describe, such as the
+  operator CLI and a command-backed service runner. Both features were still in review when we
+  wrote this page.
+- **The infrastructure agent**, a Claude Code session in the infrastructure repository, set up
+  the domain's DNS records, the redirects from the other domains, and the GitHub Pages
+  integration. It wrote all of them as infrastructure code. It also deployed the
+  [MCP gateway](/extensions/gateway/).
+- **The design reviewer**, a model in ChatGPT, took part through that gateway. It reviewed design
+  proposals and incident analyses for the gateway and the bus. It sent its findings over the same
+  bus. One review changed how the gateway renews event subscriptions.
 
 ```mermaid
 flowchart LR
@@ -47,19 +50,20 @@ flowchart LR
 
 ## Where everything ran
 
-Every session except one ran on the same workstation, under one user, on one xmsg node. Local
-messages there use the node's Unix sockets, and the node knows which session is calling. The
-design reviewer is the exception: it runs in ChatGPT and reached the bus through the gateway, over
-HTTPS and OAuth, with the grants the owner set.
+All sessions but one ran on the same workstation, under one user, on one xmsg node. Local
+messages there use the node's Unix sockets. The node knows which session calls it. The design
+reviewer is the exception. It runs in ChatGPT. It reached the bus through the gateway, over HTTPS
+and OAuth, with the [grants](/glossary/#grant) that the owner set.
 
-The same pattern works across machines. Put the builder on a build server or the writer on a
-laptop, [federate the nodes](/concepts/federation/), and the only change is the addresses:
+The same pattern works across machines. You can put the builder on a build server or the writer
+on a laptop, and [federate the nodes](/concepts/federation/). Then only the addresses change:
 `…@alice.workstation` becomes `…@alice.buildbox`.
 
 ## Two of the exchanges
 
-These are illustrative: the shape is real, but the IDs are shortened, the addresses and labels are
-examples, and the texts are trimmed. The `[xmsg]` lines are the envelope each agent sees. [Delivery and replies](/concepts/replies/) explains them.
+These exchanges are examples. Their shape is real. But the IDs are shorter, the addresses and
+labels are examples, and the texts are cut. The `[xmsg]` lines are the envelope that each agent
+sees. [Delivery and replies](/concepts/replies/) explains them.
 
 ### The orchestrator asks for DNS
 
@@ -94,7 +98,7 @@ orchestrator, pushed into its inbox
   Findings that survived the critics: two pages name a flag the CLI does not have, …
 ```
 
-The orchestrator sent the surviving findings to the writer as its next task, and the loop ran
+The orchestrator sent the surviving findings to the writer as its next task. Then the loop ran
 again.
 
 ## What it shows
@@ -103,15 +107,15 @@ again.
   as a pushed reply. See [run an orchestrator with a fleet](/use-cases/#run-an-orchestrator-with-a-fleet-of-workers).
 - **Several harnesses and models.** Claude Code, Codex and Antigravity, plus a hosted model, each
   on the part it suited. See [use several models](/use-cases/#use-several-models-subscriptions-and-harnesses-together).
-- **A hosted model on the bus.** The design reviewer sent its findings on the gateway's and the
-  bus's designs through the gateway, not by copy and paste. See
+- **A hosted model on the bus.** The design reviewer sent its findings about the gateway and
+  the bus through the gateway. Nobody copied and pasted them. See
   [let a hosted model talk to your local agents](/use-cases/#let-a-hosted-model-talk-to-your-local-agents).
 - **Real work, not only chat.** The infrastructure agent changed DNS and deployed a service, as
-  code, because it was asked to over the bus.
+  code. It did this because a message on the bus asked it to.
 
 <Aside type="note" title="Every agent kept its own permissions">
 A message is data from a peer, not an order. Each agent acted under its own harness's tool
 permissions and its user's instructions. The infrastructure agent could change DNS because its
-own session was allowed to, not because a message said so. Read the
+own session had permission. A message did not give it that permission. Read the
 [trust model](/concepts/trust-model/).
 </Aside>

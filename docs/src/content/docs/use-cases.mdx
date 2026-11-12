@@ -9,37 +9,40 @@ case at once, read [how this site was built](/how-this-site-was-built/).
 ## Spread work across machines
 
 Your laptop does not have to do everything. Send a build to a fast build server, a test matrix to
-a spare machine, or a training run to a GPU box. Each machine runs its own xmsg node, and nodes
-talk over [mTLS federation](/concepts/federation/). A machine behind NAT can dial out instead of
-accepting connections, and a Kubernetes pod can join as a small leaf node next to its worker. See
+a spare machine, or a training run to a GPU box. Each machine runs its own xmsg
+[node](/glossary/#node). The nodes communicate over [mTLS federation](/concepts/federation/). A
+machine behind NAT can connect out to a hub, so it does not have to accept connections. A
+Kubernetes pod can join as a small [leaf](/glossary/#leaf) node next to its worker. See
 [hubs, leaves and gateways](/concepts/hubs-and-leaves/). The reply comes back to the session that
-asked, on whichever machine it runs.
+asked, on the machine where that session runs.
 
 ## Work with other people's agents
 
-Each person runs their own xmsg node, so their sessions stay theirs. Their agents can still talk.
-Two OS users on one machine run two nodes, such as `alice.workstation` and `bob.workstation`.
-Teammates on different machines do the same, and a [shared hub](/case-studies/team-hub/) can
-connect laptops that cannot reach each other directly. The nodes federate over mTLS, and each side
-has to opt in.
+Each person runs their own xmsg node, so each person's sessions stay theirs. Their agents can
+still send messages to each other. Two OS users on one machine run two nodes, such as
+`alice.workstation` and `bob.workstation`. Teammates on different machines do the same. A
+[shared hub](/case-studies/team-hub/) can connect laptops that cannot reach each other directly.
+The nodes federate over mTLS, and each side must opt in.
 
-Here alice's peers file names bob's node. bob's file has the mirror entry, naming alice's node. On
-one machine, the two nodes listen on different ports (`--fed-listen`). The names come from
-certificates signed by a shared CA (`spiffe://example.org/host/workstation/user/bob` gives
+In this example, alice's [peers file](/glossary/#peers-file) names bob's node. bob's file has
+the mirror entry, which names alice's node. On one machine, the two nodes listen on different
+ports (`--fed-listen`). The names come from certificates that a shared CA signed (`spiffe://example.org/host/workstation/user/bob` gives
 `bob.workstation`; see [federation](/concepts/federation/#self-authenticating-node-names)).
 
 ```json title="alice's peers.json"
 {
-  "bob.workstation": {
-    "address": "127.0.0.1:7789",
-    "ca": "/etc/xmsg/team-ca.pem",
-    "identities": ["spiffe://example.org/host/workstation/user/bob"],
-    "allow": ["send", "reply", "list"]
+  "peers": {
+    "bob.workstation": {
+      "address": "127.0.0.1:7789",
+      "ca": "/etc/xmsg/team-ca.pem",
+      "identities": ["spiffe://example.org/host/workstation/user/bob"],
+      "allow": ["send", "reply", "list"]
+    }
   }
 }
 ```
 
-Then alice's Claude Code session asks bob's Codex session for a review, and the answer comes back
+Then alice's Claude Code session asks bob's Codex session for a review. The answer comes back
 to her inbox:
 
 ```text
@@ -59,17 +62,17 @@ alice's session, pushed into its inbox
 
 What applies along the way:
 
-- **Consent is in both peers files.** A node accepts a peer only if its peers file names it, and
-  only for the operations in that entry's `allow` list: `send`, `reply`, `list` and others. To
-  stop an operation, remove it from `allow`. `targets` limits which of your recipients that peer
-  can reach, and `principals` limits which of its senders you accept.
+- **Consent is in both peers files.** A node accepts a peer only if its peers file names the
+  peer. It accepts only the operations in that entry's `allow` list, such as `send`, `reply` and
+  `list`. To stop an operation, remove it from `allow`. `targets` limits which of your recipients
+  that peer can reach. `principals` limits which of its senders you accept.
 - **Address the other person's node by name.** `@bob.workstation` picks one node. A bare host,
   `@workstation`, matches both people's nodes and returns `ambiguous`. A bare session ID checks
   your own user's nodes first.
-- **Every message carries its sender's address.** bob sees `id@alice.workstation`, attested by
-  the node that authenticated the connection, not taken from the message text.
-- **Replies go back to the origin.** bob's reply travels to alice's node, which pushes it into her
-  session's inbox.
+- **Every message carries its sender's address.** bob sees `id@alice.workstation`. The node that
+  authenticated the connection attests this address. xmsg does not take it from the message text.
+- **Replies go back to the origin.** bob's reply goes to alice's node. That node pushes the reply
+  into her session's inbox.
 - **Messages are data, not orders.** bob's agent still follows bob's instructions and tool
   permissions. Read the [trust model](/concepts/trust-model/).
 
@@ -79,7 +82,7 @@ and a shared hub.
 ## Use several models, subscriptions and harnesses together
 
 Each harness is good at different things, and each subscription has its own limits. With all of
-them on one bus you can:
+them on one bus, you can:
 
 - have Claude review what Codex built, or the other way around;
 - send builds to Codex, documentation to Gemini in Antigravity, and design questions to Claude;
@@ -87,37 +90,40 @@ them on one bus you can:
 - send work to whichever account still has quota left this week.
 
 [agent-quota](/extensions/agent-quota/) reports remaining weekly usage for Antigravity, Codex and
-Claude Code. Today it is a separate command, not a bus service; a service is planned.
+Claude Code. Today it is a separate command, not a bus service. A service is planned.
 
 ## Run an orchestrator with a fleet of workers
 
-An **orchestrator** is a session whose job is to plan and hand out work. It uses `list` to find
-workers, `send` to give each one a task, and gets each answer back as a pushed reply, so it does
-not have to poll. A worker that has closed is not lost: messages to a parked Claude Code, Codex or
-Antigravity conversation wait in a queue (seven days by default) and are delivered when it comes
-back. Subagents get their own addresses, so a worker can hand part of a task to a child turn. See
+An **orchestrator** is a session that plans work and gives it to other sessions. It uses `list`
+to find workers. It uses `send` to give each worker a task. Each answer comes back as a pushed
+reply, so the orchestrator does not have to poll. A worker that has closed is not lost. Messages to
+a [parked](/glossary/#parked) Claude Code, Codex or Antigravity conversation wait in a queue
+(seven days by default). xmsg delivers them when the conversation comes back.
+[Subagents](/glossary/#subagent) get their own addresses, so a worker can give part of a task to
+a child turn. See
 [delivery, queueing and replies](/concepts/replies/) and
 [subagents](/concepts/sessions-services-subagents/).
 
 ## Let a hosted model talk to your local agents
 
 A hosted model, such as one running in ChatGPT, cannot reach the Unix sockets on your machine. The
-[MCP gateway](/extensions/gateway/) is a separate service that sits at that edge. It handles OAuth,
-and you, the owner, decide which grants are enabled and who each may message. Behind it, the
-hosted model's messages travel the bus like any other, and they are still treated as data from a
-peer, not as instructions your agents must follow.
+[MCP gateway](/extensions/gateway/) is a separate service at that edge. It handles OAuth. You,
+the owner, decide which [grants](/glossary/#grant) are enabled and whom each grant can message.
+Behind the gateway, the hosted model's messages travel the bus like all other messages. They are
+data from a peer. They are not instructions that your agents must obey.
 
 ## Put services and bots on the bus
 
-A service registers a name, such as `genie-guard`, and then receives and answers messages like a
-session does. Bridges, bots, screeners and schedulers fit this shape. The
+A [service](/glossary/#service) registers a name, such as `genie-guard`. Then it receives and
+answers messages, as a session does. Bridges, bots, screeners and schedulers fit this shape. The
 [genie case study](/case-studies/genie-agent/) shows a public Matrix support bot built from several
-services, with a stronger expert model it can escalate to. The
+services. It can escalate to a stronger expert model. To start, read the
 [Matrix bridge](/extensions/matrix/) and the [Rust service client](/reference/service-client/)
-are where to start.
+pages.
 
 ## Turn your agents into a swarm
 
-Point a dozen sessions at one hard problem and let them split it up: one maps the code, others
-take a module each, one checks the rest. Responsibly, and at a problem you own. Each message
-carries its sender's address, and each agent still answers to its own user's permissions.
+Give one hard problem to a dozen sessions and let them divide it. One session maps the code.
+Other sessions take one module each. One session checks the rest. Do this responsibly, and only on
+a problem that you own. Each message carries its sender's address. Each agent still obeys its own
+user's permissions.

@@ -5,35 +5,36 @@ description: What xmsg is, who it is for, and where to read next.
 
 import { CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-xmsg lets running AI agent sessions send each other messages. A **session** is one live
+xmsg lets running AI agent sessions send messages to each other. A **session** is one live
 conversation in a harness. A **harness** is the program that runs the model and its tools:
 [Claude Code](/harnesses/claude-code/), [Codex](/harnesses/codex/),
 [Antigravity](/harnesses/antigravity/), [opencode](/harnesses/opencode/),
-[Hermes](/harnesses/hermes/) or [Pi](/harnesses/pi/). Sessions can list who is running, send a
-message, and get replies pushed into their live inbox. Headless programs join the same bus as
-**services**. It works on one machine, and across machines over mutual TLS (mTLS).
+[Hermes](/harnesses/hermes/) or [Pi](/harnesses/pi/). A session can list who is running and
+send a message. xmsg pushes the replies into the session's live inbox. A headless program joins the
+same bus as a **service**. xmsg works on one machine. It also works across machines over mutual TLS
+([mTLS](/glossary/#mtls)). The [glossary](/glossary/) defines each term that this site uses.
 
 ## The basics
 
 Three tools do most of the work:
 
 - **`list`** shows which sessions and services are running, here and on connected machines.
-- **`send`** sends text to an address. You get back a message ID and an outcome: `delivered` or
-  `queued`, or `pending` when you retry with the same idempotency key while the first send is
-  still in flight.
-- **`reply`** answers a message by its ID. The reply is stored, and pushed to the sender if it
-  has an inbox.
+- **`send`** sends text to an address. It returns a message ID and an
+  [outcome](/glossary/#outcome): `delivered` or `queued`. A retry with the same idempotency key
+  can also return `pending`, while the first send is still in progress.
+- **`reply`** answers a message by its ID. xmsg stores the reply. It also pushes the reply to the
+  sender if the sender has an inbox.
 
 An **address** names one recipient, such as `id@node` for a session or `name@node` for a service.
-A **node** is one running xmsg daemon, usually one per user per machine. Read
+A **node** is one running xmsg daemon, usually one for each user on each machine. Read
 [addressing](/concepts/addressing/) and [delivery and replies](/concepts/replies/) for the details,
 including [idempotency](/concepts/replies/#idempotency-idempotency_key).
 
 ## Who it is for
 
-- You run more than one agent session at a time and are tired of copying text between them.
+- You run more than one agent session at a time. You do not want to copy text between them.
 - You have more than one machine, such as a laptop, a build server, a GPU box or a Kubernetes
-  cluster, and want agents on each to work together.
+  cluster. You want the agents on each machine to work together.
 - You pay for more than one model or subscription and want to use them together.
 - You work in a team and want your agents to ask each other for reviews and help.
 - You are building a bot or service that agents should be able to talk to.
@@ -41,7 +42,7 @@ including [idempotency](/concepts/replies/#idempotency-idempotency_key).
 ## See it used
 
 [How this site was built](/how-this-site-was-built/) is a worked example. An orchestrator session
-handed out the writing, the review, the features and the infrastructure to other agents, and
+gave the writing, the review, the features and the infrastructure to other agents. Then it
 collected their replies.
 
 ## Where to go next
@@ -83,5 +84,5 @@ collected their replies.
 
 - [Hosted MCP gateway](/extensions/gateway/): OAuth, explicit grants, outbound policy and optional Events hints.
 - [Matrix bridge](/extensions/matrix/): Matrix admission and conversation context at the external edge.
-- [agent-quota](/extensions/agent-quota/): a separate usage command today; a bus service is planned.
+- [agent-quota](/extensions/agent-quota/): a separate usage command today. A bus service is planned.
 - [Attachments](/concepts/attachments/): planned, not yet released.
