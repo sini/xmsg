@@ -6352,7 +6352,9 @@ impl CredentialReloader {
 
         let node_identity = std::sync::OnceLock::new();
         if let Some(ref own_node) = own {
-            let running_name = fed_state.as_ref().map_or(&own_node.name, |state| &state.node_name);
+            let running_name = fed_state
+                .as_ref()
+                .map_or(&own_node.name, |state| &state.node_name);
             let _ = node_identity.set(running_name.clone());
         }
         let reloader = Self {
@@ -6591,9 +6593,15 @@ impl CredentialReloader {
         let cert_der = certs[0].to_vec();
         let candidate_identity = crate::node::node_name_from_cert(&cert_der)
             .map_err(|_| AppError::Internal("invalid node identity".to_string()))?;
-        if self.node_identity.get_or_init(|| candidate_identity.clone()) != &candidate_identity {
+        if self
+            .node_identity
+            .get_or_init(|| candidate_identity.clone())
+            != &candidate_identity
+        {
             tracing::warn!(target: "xmsg_reload", class = "identity_changed", "federation credential reload rejected");
-            return Err(AppError::Internal("node identity change refused".to_string()));
+            return Err(AppError::Internal(
+                "node identity change refused".to_string(),
+            ));
         }
         let cert_chain_der: Vec<Vec<u8>> = certs.iter().map(|c| c.to_vec()).collect();
         let key_der = key.secret_der().to_vec();

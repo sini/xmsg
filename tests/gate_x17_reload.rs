@@ -372,20 +372,60 @@ async fn test_oracle_1_outbound_presents_reloaded_cert() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let msgs = b_received.lock().unwrap();
-    assert_eq!(msgs.len(), 1);
-    assert!(msgs[0].contains("hello v2"));
-    drop(msgs);
+    {
+        let msgs = b_received.lock().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].contains("hello v2"));
+    }
     let hashes = node_a.reloader.file_hashes.lock().unwrap().clone();
-    let active = node_a.fed_state.dynamic_tls.read().unwrap().as_ref().unwrap().cert_der.clone();
-    let (_, _, foreign_cert, foreign_key) = issue_cert(&renewal_ca, &renewal_key, "foreign", &["spiffe://example.org/ns/test/sa/foreign"]);
+    let active = node_a
+        .fed_state
+        .dynamic_tls
+        .read()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .cert_der
+        .clone();
+    let (_, _, foreign_cert, foreign_key) = issue_cert(
+        &renewal_ca,
+        &renewal_key,
+        "foreign",
+        &["spiffe://example.org/ns/test/sa/foreign"],
+    );
     fs::write(&node_a.cert_path, foreign_cert).unwrap();
     fs::write(&node_a.key_path, foreign_key).unwrap();
-    assert!(node_a.reloader.check_and_reload().is_err(), "reload accepted a different derived node identity");
-    assert_eq!(*node_a.reloader.file_hashes.lock().unwrap(), hashes, "rejected identity changed committed file hashes");
-    assert_eq!(node_a.fed_state.dynamic_tls.read().unwrap().as_ref().unwrap().cert_der, active, "rejected identity replaced active TLS");
-    assert!(send_federated_message(&node_a.fed_state, "node-b", &make_envelope("recipient-b", "retained TLS")).await.is_ok(), "old TLS stopped working after rejected identity reload");
-
+    assert!(
+        node_a.reloader.check_and_reload().is_err(),
+        "reload accepted a different derived node identity"
+    );
+    assert_eq!(
+        *node_a.reloader.file_hashes.lock().unwrap(),
+        hashes,
+        "rejected identity changed committed file hashes"
+    );
+    assert_eq!(
+        node_a
+            .fed_state
+            .dynamic_tls
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .cert_der,
+        active,
+        "rejected identity replaced active TLS"
+    );
+    assert!(
+        send_federated_message(
+            &node_a.fed_state,
+            "node-b",
+            &make_envelope("recipient-b", "retained TLS")
+        )
+        .await
+        .is_ok(),
+        "old TLS stopped working after rejected identity reload"
+    );
 }
 
 // -----------------------------------------------------------------------------
