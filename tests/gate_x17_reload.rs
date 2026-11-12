@@ -611,8 +611,8 @@ async fn test_oracle_4_k8s_symlink_swap_detected() {
     let (_der_v1, _key_v1, cert_v1_pem, key_v1_pem) =
         issue_cert(&ca_params, &ca_key, "node", &[uri_v1]);
 
-    let uri_v2 = "spiffe://example.org/ns/test/sa/node-v2";
-    let (_der_v2, _key_v2, cert_v2_pem, key_v2_pem) =
+    let uri_v2 = uri_v1;
+    let (der_v2, _key_v2, cert_v2_pem, key_v2_pem) =
         issue_cert(&ca_params, &ca_key, "node", &[uri_v2]);
 
     let temp = TempDir::new().unwrap();
@@ -689,6 +689,7 @@ async fn test_oracle_4_k8s_symlink_swap_detected() {
         let tls = guard.as_ref().unwrap();
         let sans = xmsg::fed::extract_uri_sans(&tls.cert_der).unwrap();
         assert_eq!(sans, vec![uri_v2]);
+        assert_eq!(tls.cert_der, der_v2);
     }
 }
 
@@ -703,8 +704,8 @@ async fn test_oracle_5_background_watcher_polls_and_reloads() {
     let (_der_v1, _key_v1, cert_v1_pem, key_v1_pem) =
         issue_cert(&ca_params, &ca_key, "node", &[uri_v1]);
 
-    let uri_v2 = "spiffe://example.org/ns/test/sa/node-v2";
-    let (_der_v2, _key_v2, cert_v2_pem, key_v2_pem) =
+    let uri_v2 = uri_v1;
+    let (der_v2, _key_v2, cert_v2_pem, key_v2_pem) =
         issue_cert(&ca_params, &ca_key, "node", &[uri_v2]);
 
     let temp = TempDir::new().unwrap();
@@ -748,8 +749,7 @@ async fn test_oracle_5_background_watcher_polls_and_reloads() {
         tokio::time::sleep(Duration::from_millis(20)).await;
         let guard = dyn_tls.read().unwrap();
         if let Some(ref tls) = *guard {
-            let sans = xmsg::fed::extract_uri_sans(&tls.cert_der).unwrap();
-            if sans == vec![uri_v2] {
+            if tls.cert_der == der_v2 {
                 reloaded = true;
                 break;
             }
