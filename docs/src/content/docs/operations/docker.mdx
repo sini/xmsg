@@ -5,8 +5,8 @@ description: Building and verifying the minimal distroless OCI container image p
 
 import { Aside } from '@astrojs/starlight/components';
 
-An unprivileged, distroless OCI container image is built via `pkgs.dockerTools.buildLayeredImage`
-in `flake.nix` and published to `ghcr.io/sini/xmsg`:
+`flake.nix` builds an unprivileged, distroless OCI container image with
+`pkgs.dockerTools.buildLayeredImage`. The image is published to `ghcr.io/sini/xmsg`:
 
 ```nix file=<rootDir>/flake.nix#L80-L100
 ```
@@ -14,8 +14,8 @@ in `flake.nix` and published to `ghcr.io/sini/xmsg`:
 ## Security properties
 
 - **Non-root execution:** Runs as UID/GID `10001:10001`.
-- **No shell or utilities:** Contains only CA certificates (`/etc/ssl/certs/ca-bundle.crt`) and the
-  `xmsg` binary; no `/bin/sh` or auxiliary tools are present in any layer.
+- **No shell or utilities:** The image contains only CA certificates
+  (`/etc/ssl/certs/ca-bundle.crt`) and the `xmsg` binary. No layer has `/bin/sh` or other tools.
 - **Entrypoint:** `xmsg` with default command `serve` and working directory `/var/lib/xmsg`.
 
 ## Building & verification
@@ -30,6 +30,6 @@ nix build -L .#checks.x86_64-linux.image
 
 <Aside type="note" title="Docker Compose & Standalone Guide">
 {/* TODO: Add standalone Docker / Docker Compose guide for running xmsg serve and leaf containers outside Nix. */}
-**TODO:** Standalone `docker run` and `docker compose` walkthroughs (mounting `$XDG_RUNTIME_DIR/xmsg`,
-`/var/lib/xmsg`, and federation certificates) will be added in a follow-up guide.
+**TODO:** A later guide will give standalone `docker run` and `docker compose` steps. It will
+show how to mount `$XDG_RUNTIME_DIR/xmsg`, `/var/lib/xmsg` and the federation certificates.
 </Aside>

@@ -5,25 +5,30 @@ description: Running xmsg leaf sidecars and federated hub pods in Kubernetes wit
 
 import { Aside } from '@astrojs/starlight/components';
 
-In Kubernetes clusters (including gVisor-sandboxed pods), `xmsg` runs either as a central federated
-hub or as an in-pod `--leaf` sidecar alongside a service worker (`genie-guard`, `matrix-xmsg`, or
-`xmsg-mcp-gateway`):
+In a Kubernetes cluster, `xmsg` runs in one of two ways. This includes gVisor-sandboxed pods:
 
-- **Pod node identity:** A pod certificate carrying SPIFFE URI SAN
-  `spiffe://<trust-domain>/ns/<ns>/sa/<sa>` derives the canonical node name `<sa>.<ns>` (see
+- as a central federated [hub](/glossary/#hub);
+- as an in-pod `--leaf` sidecar next to a service worker (`genie-guard`, `matrix-xmsg` or
+  `xmsg-mcp-gateway`).
+
+These rules apply:
+
+- **Pod node identity:** A pod certificate with the SPIFFE URI SAN
+  `spiffe://<trust-domain>/ns/<ns>/sa/<sa>` gives the canonical node name `<sa>.<ns>` (see
   [Federation](/concepts/federation/#self-authenticating-node-names)).
-- **Leaf sidecar mode (`--leaf`):** Share an `emptyDir` volume mounted at `$XDG_RUNTIME_DIR/xmsg`
-  between the service container and an `xmsg` container running under the same UID (`10001`).
-  **Leaf mode requires `--listen`**, even when the service uses the shared Unix sockets:
+- **Leaf sidecar mode (`--leaf`):** Mount one `emptyDir` volume at `$XDG_RUNTIME_DIR/xmsg` in
+  the service container and in an `xmsg` container. Both run under the same UID (`10001`).
+  **Leaf mode needs `--listen`**, also when the service uses the shared Unix sockets:
   `xmsg serve --leaf --leaf-principal svc:<name> --listen 127.0.0.1:7787`
   (or set `XMSG_LISTEN`). Keep the listener inside the pod's isolated loopback namespace. See
   [Hubs, Leaves & Gateways](/concepts/hubs-and-leaves/#leaf-node-mode---leaf).
-- **Secret rotation:** `xmsg serve` polls `--fed-cert`, `--fed-key`, `--peers-file`, and `ca`
-  bundles by SHA-256 content hash every 30 seconds (`--fed-reload-interval-secs`), picking up
-  Kubernetes `Secret` symlink (`..data`) rotations automatically without restarting the pod.
+- **Secret rotation:** Every 30 seconds (`--fed-reload-interval-secs`), `xmsg serve` checks the
+  SHA-256 content hash of `--fed-cert`, `--fed-key`, `--peers-file` and the `ca` bundles. Thus it
+  picks up Kubernetes `Secret` symlink (`..data`) rotations automatically. The pod does not
+  restart.
 
 <Aside type="note" title="Helm Chart & Manifests">
 {/* TODO: Add Helm chart values reference and Kubernetes Deployment/StatefulSet manifests. */}
-**TODO:** Helm chart installation and full Kubernetes manifest templates are tracked for a
-follow-up release.
+**TODO:** A later release will add Helm chart installation and full Kubernetes manifest
+templates.
 </Aside>

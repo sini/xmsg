@@ -5,25 +5,27 @@ description: Running xmsg on macOS (aarch64-darwin) via Home Manager or Cargo.
 
 import { Aside } from '@astrojs/starlight/components';
 
-`xmsg` supports `aarch64-darwin` and runs macOS CI on every push and pull request that changes
-code (`.github/workflows/macos.yml`).
+`xmsg` supports `aarch64-darwin`. macOS CI (`.github/workflows/macos.yml`) runs on each push and
+pull request that changes code.
 
 ## Platform specifics on Darwin
 
-- **Runtime directory:** When `XDG_RUNTIME_DIR` is unset on macOS, `xmsg` resolves its `0700`
-  runtime directory via `getconf DARWIN_USER_TEMP_DIR`.
-- **Peer credentials:** Unix sockets (`http.sock`, `agent.sock`, `register.sock`) verify peer UID
-  via `getpeereid` and peer PID via `LOCAL_PEEREPID`, and process start times via `proc_pidinfo`.
-- **Home Manager (`launchd`):** Importing `inputs.xmsg.homeManagerModules.xmsg` on Darwin configures
-  `launchd.agents.xmsg` to run `xmsg serve`. See
+- **Runtime directory:** When `XDG_RUNTIME_DIR` is not set on macOS, `xmsg` finds its `0700`
+  runtime directory with `getconf DARWIN_USER_TEMP_DIR`.
+- **Peer credentials:** The Unix sockets (`http.sock`, `agent.sock`, `register.sock`) check the
+  peer UID with `getpeereid` and the peer PID with `LOCAL_PEEREPID`. They check process start
+  times with `proc_pidinfo`.
+- **Home Manager (`launchd`):** On Darwin, import `inputs.xmsg.homeManagerModules.xmsg`. It
+  configures `launchd.agents.xmsg` to run `xmsg serve`. See
   [NixOS & Home Manager](/operations/nixos-and-home-manager/).
-- **Antigravity on macOS:** Because XNU does not expose `flock(2)` owner PIDs to unprivileged
-  processes, macOS verifies `--agy-exe` (`proc_pidpath`) and open descriptor vnode `(vst_dev, vst_ino)`
-  and uses the `PreInvocation` hook (`Arm B′`) to trigger `xmsg register agy`. See
+- **Antigravity on macOS:** XNU does not show `flock(2)` owner PIDs to unprivileged processes.
+  Thus on macOS, xmsg checks `--agy-exe` (`proc_pidpath`) and the open descriptor's vnode
+  `(vst_dev, vst_ino)`. It uses the `PreInvocation` hook (`Arm B′`) to start
+  `xmsg register agy`. See
   [Antigravity](/harnesses/antigravity/).
-- **Codex on macOS:** The writer-lock lease watch uses `kqueue` on an `O_EVTONLY` descriptor
-  instead of `inotify`, descriptor paths come from `fcntl(F_GETPATH)`, and the lock holder is read
-  with `proc_pidinfo`. See [Codex](/harnesses/codex/).
+- **Codex on macOS:** The writer-lock lease watch uses `kqueue` on an `O_EVTONLY` descriptor, not
+  `inotify`. Descriptor paths come from `fcntl(F_GETPATH)`. xmsg reads the lock holder with
+  `proc_pidinfo`. See [Codex](/harnesses/codex/).
 
 ## What macOS CI exercises
 
@@ -35,12 +37,12 @@ The macOS job builds and tests on Apple Silicon:
 - the Codex hook check, which drives a real `codex` binary against `xmsg`;
 - the compatibility check against older `xmsg` releases.
 
-The Pi, opencode, Hermes and Antigravity hook checks run on Linux only. On macOS, the daemon side
-of those integrations runs in the Rust test suite, but no check drives the real harness.
+The Pi, opencode, Hermes and Antigravity hook checks run only on Linux. On macOS, the Rust test
+suite tests the daemon side of those integrations. But no check drives the real harness.
 
 <Aside type="note" title="Standalone macOS Installation Guide">
 {/* TODO: Add non-Nix macOS installation and launchd plist guide (Homebrew / Cargo install). */}
-**TODO:** Step-by-step non-Nix installation instructions for macOS (`cargo install`, manual
-`~/Library/LaunchAgents` plist setup, and per-harness configuration without Home Manager) will be
-added in a follow-up.
+**TODO:** A later guide will give step-by-step macOS installation instructions without Nix. It
+will cover `cargo install`, a manual `~/Library/LaunchAgents` plist, and the configuration of each
+harness without Home Manager.
 </Aside>
