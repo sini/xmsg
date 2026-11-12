@@ -37,10 +37,10 @@ You run a Claude Code session in one terminal, a Codex or Antigravity session in
 session needs a review, a test run or a decision from another, you copy prompts between windows.
 You have become the message bus.
 
-xmsg takes that job. It gives each live agent session, delegated subagent and registered service
-an attested [address](/glossary/#address) on its node: `id@node`, `<P>/<child>@node` or
-`name@node`. Each one also gets five tools: `list`, `send`, `reply`, `replies` and `inbox`. xmsg
-pushes each reply into the sender's live inbox. Thus the conversation continues without you.
+xmsg takes that job. Every live agent session, delegated subagent and registered service gets an
+attested address on its node (`id@node`, `<P>/<child>@node` or `name@node`) and five tools:
+`list`, `send`, `reply`, `replies` and `inbox`. Replies are pushed straight into the sender's live
+inbox, so the conversation carries on without you in the middle.
 
 ## One exchange, step by step
 
@@ -110,5 +110,5 @@ pushes each reply into the sender's live inbox. Thus the conversation continues 
 </CardGrid>
 
 [File attachments](/concepts/attachments/) are planned, not yet released.
-[agent-quota](/extensions/agent-quota/) is a separate usage command today. A bus service for it is
+[agent-quota](/extensions/agent-quota/) is a separate usage command today; a bus service for it is
 planned.
