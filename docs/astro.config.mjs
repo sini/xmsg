@@ -90,6 +90,7 @@ export default defineConfig({
 						{ label: 'Use Cases', slug: 'use-cases' },
 						{ label: 'How This Site Was Built', slug: 'how-this-site-was-built' },
 						{ label: 'Architecture', slug: 'architecture' },
+						{ label: 'Glossary', slug: 'glossary' },
 					],
 				},
 				{

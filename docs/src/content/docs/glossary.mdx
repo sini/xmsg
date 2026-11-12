@@ -1,0 +1,310 @@
+---
+title: Glossary
+description: The terms this site uses, each in one or two short sentences, with a link to the page that has the detail.
+---
+
+This page defines the terms that the other pages use. Each page uses a term with the meaning given
+here. The terms are in alphabetical order.
+
+## A
+
+### ack
+
+A recipient's confirmation that it has a message. A service or a harness plugin sends an `ack`
+after it takes the message. Until the `ack`, xmsg keeps the message and can deliver it
+again. See [services](/concepts/sessions-services-subagents/#services-namenode).
+
+### address
+
+The name of one recipient. It has the form `<id or name>@<node>`, with at most one `@`. A session
+uses `id@node`, a subagent uses `<P>/<child>@node`, and a service uses `name@node`. See
+[addressing](/concepts/addressing/).
+
+### agent.sock
+
+The local socket that the client tools use. It carries `list`, `send`, `reply`, `replies` and
+`inbox`. See [the daemon and its sockets](/architecture/#the-daemon-and-its-sockets).
+
+### anonymous sender
+
+A caller on `http.sock` that xmsg cannot trace to a registered session or service. Its messages
+show as `<from> · anon@<node>`. It has no inbox, so it reads its replies with `replies`.
+
+## C
+
+### CA entry
+
+A peer entry that trusts a certificate authority (`ca`) and names one certificate identity
+(`identities`). Compare [pin](#pin). See
+[trust models](/concepts/federation/#trust-models-pinned-vs-ca-signed).
+
+## D
+
+### daemon
+
+The long-running `xmsg serve` process. It holds the message store, listens on the local sockets
+and, with federation, on the network. One daemon is one [node](#node).
+
+### default route
+
+A peer entry with `"default_route": true`. xmsg sends a message for an unknown explicit
+`ref@node` destination to this peer. At most one entry can be the default route. See
+[forwarding through a hub](/concepts/hubs-and-leaves/#forwarding-through-a-hub).
+
+## E
+
+### Events
+
+An optional profile of the [gateway](#gateway). With Events, the gateway keeps incoming messages
+and sends a signed [wake](#wake) hint to the owner's subscription. See
+[the hosted MCP gateway](/extensions/gateway/).
+
+## F
+
+### federation
+
+Message exchange between nodes on different hosts, virtual machines or pods. Nodes federate over
+[mTLS](#mtls) on the `/fed/v2` protocol. See [federation](/concepts/federation/).
+
+### fork suffix
+
+A suffix `~2`, `~3`, … on a session ID. xmsg adds it when two or more live processes show the
+same conversation ID. The first process keeps the plain ID. See
+[fork suffixes](/concepts/sessions-services-subagents/#concurrent-processes-and-fork-suffixes-instance_claims).
+
+### forwarding
+
+A hub sends a message on to a third node for a peer. Forwarding is one hop at most. It needs
+`forward` on the hub and `relayed` on the recipient. See
+[forwarding through a hub](/concepts/hubs-and-leaves/#forwarding-through-a-hub).
+
+## G
+
+### gateway
+
+[xmsg-mcp-gateway](/extensions/gateway/), a separate service. It connects hosted MCP clients to
+an xmsg node through OAuth. The gateway owns the outside authentication. The node owns bus
+identity and delivery.
+
+### gone
+
+The result of a send to a recipient that cannot come back, such as an exited Pi process. The HTTP
+status is `410`. xmsg does not queue a message for a gone recipient.
+
+### grant
+
+A gateway record that permits one hosted client to act. The owner enables it and sets its
+outbound policy. A grant binds the service, the issuer, the resource, the subject and the hosted
+client. See [the hosted MCP gateway](/extensions/gateway/).
+
+## H
+
+### handoff
+
+The move of queued messages from one node to another node of the same user. It occurs when a
+parked Claude Code conversation becomes live on the other node. See
+[the queue across a user's machines](/concepts/replies/#the-queue-across-a-users-machines).
+
+### harness
+
+The program that runs a model and its tools, such as Claude Code, Codex, Antigravity, opencode,
+Hermes or Pi. A harness can run many [sessions](#session).
+
+### http.sock
+
+The local socket that serves the HTTP API (`/healthz`, `/v1/recipients`, `/v1/messages`). See
+[HTTP API and sockets](/reference/http-and-sockets/).
+
+### hub
+
+A node that other nodes connect to. A hub keeps a [mailbox](#peer-mailbox) for each leaf. It can
+also [forward](#forwarding) messages between its peers. See
+[hubs and leaves](/concepts/hubs-and-leaves/).
+
+### hub admission
+
+The optional `hub` block of a peers file. It admits clients that have no entry of their own when
+their certificate identity matches a pattern. See
+[hub admission](/concepts/federation/#hub-admission-hub).
+
+## I
+
+### idempotency key
+
+An optional `idempotency_key` on a `send` or `reply`. A retry with the same key and the same
+content gives the first result again, and xmsg does not deliver a second copy. The key is kept for
+24 hours by default. See [idempotency](/concepts/replies/#idempotency-idempotency_key).
+
+### inbox
+
+1. The place where a recipient gets pushed messages. A session or a service has an inbox. An
+   anonymous HTTP caller does not.
+2. The `inbox` tool. A subagent calls it during its turn to read its [turn mailbox](#turn-mailbox).
+
+### instance
+
+A session as a recipient: a live or parked conversation that has an instance ID. This site uses
+"session" in general text and "instance" for the ID and its rules.
+
+## L
+
+### label
+
+A sender's own description, such as a session name. xmsg shows it apart from the attested
+address. A label can address a session only when no service has that name and exactly one live
+session has the label. See
+[sender labels](/concepts/addressing/#sender-labels).
+
+### leaf
+
+A node that does not accept connections. It connects to a hub and collects its messages there.
+`xmsg serve --leaf` runs a leaf for one service, for example in a pod. On the hub, the leaf's
+entry has `"leaf": true`. See [leaf node mode](/concepts/hubs-and-leaves/#leaf-node-mode---leaf).
+
+### list
+
+The tool that shows the running sessions and services, on this node and on its peers.
+
+## M
+
+### MCP
+
+The Model Context Protocol. Harnesses use it to call tools. `xmsg mcp` gives a harness the xmsg
+tools.
+
+### mTLS
+
+Mutual TLS. Both ends of a connection show a certificate, and each end checks the other. xmsg
+federation uses only mTLS.
+
+## N
+
+### node
+
+One running xmsg daemon, usually one for each user on each machine. Its name comes from its
+certificate or its OS identity, such as `alice.workstation`. See
+[self-authenticating node names](/concepts/federation/#self-authenticating-node-names).
+
+### node selector
+
+The part of an address after `@`. It can be a canonical node name, a local nickname or a bare
+host. See [node selectors](/concepts/addressing/#node-selectors).
+
+## O
+
+### origin
+
+The attested sender of a message: its ID, service, node and label. A service makes authorization
+decisions from the origin fields, not from display text.
+
+### outbound link
+
+A peer entry with `"dial": "outbound"`. This node connects to the peer and collects its messages
+there. Use it for a full node behind NAT. See
+[outbound links](/concepts/hubs-and-leaves/#outbound-links-dial-outbound).
+
+### outcome
+
+The result of a `send`: `delivered`, `queued` or `pending`. `delivered` means the recipient has
+the message. `queued` means xmsg holds it for later delivery. `pending` means a retry with the same
+idempotency key found the first send still in progress. See
+[delivery outcomes](/concepts/replies/#delivery-outcomes-and-the-queue).
+
+## P
+
+### parked
+
+The state of a known conversation that is not running now, or is between turns. xmsg queues
+messages for a parked conversation for the [reply TTL](#reply-ttl). Claude Code, Codex and
+Antigravity conversations can be parked.
+
+### peer
+
+Another node that this node trusts. Each peer has an entry in the [peers file](#peers-file).
+
+### peer mailbox
+
+The hub's durable store (`peer_mailbox`) of messages for its leaves and outbound-linked nodes. A
+message stays there until the peer acknowledges it or the reply TTL ends. See
+[mailbox retention](/concepts/federation/#mailbox-retention).
+
+### peers file
+
+The JSON file given to `xmsg serve --peers-file`. It lists the peers, how to trust each one, and
+what each one can do. See [the peers file reference](/concepts/federation/#peer-configuration-reference---peers-file).
+
+### pin
+
+A peer entry's `pin`: the SHA-256 digest of the peer's public key (`sha256:...`). xmsg trusts the
+peer only when its key has this digest. Compare [CA entry](#ca-entry).
+
+### principal
+
+The attested identity that sends a message: a session ID, a subagent sub-address, a service name,
+or `anon:<from>` for an anonymous caller.
+
+## R
+
+### register.sock
+
+The local socket where services and harness plugins register, poll, acknowledge and reply. See
+[the daemon and its sockets](/architecture/#the-daemon-and-its-sockets).
+
+### reply
+
+An answer to a message, given by its message ID. xmsg always stores a reply. It also pushes the
+reply when the other party has an inbox. See
+[replies](/concepts/replies/#replies-stored-always-pushed-by-sender-kind).
+
+### reply TTL
+
+How long xmsg keeps queued messages, replies and parked IDs. Set it with `--reply-ttl`. The
+default is 604800 seconds (7 days).
+
+## S
+
+### send
+
+The tool that sends text to an address. It returns a message ID and an [outcome](#outcome).
+
+### service
+
+A headless program on the bus, such as a bot, a guard or a bridge. It registers a name on
+`register.sock` and long-polls for messages. Its address is `name@node`. See
+[services](/concepts/sessions-services-subagents/#services-namenode).
+
+### session
+
+One live conversation in a [harness](#harness). As a recipient it is an [instance](#instance)
+with the address `id@node`.
+
+### SPIFFE ID
+
+A URI that names a workload, such as `spiffe://example.org/host/workstation/user/alice`. xmsg
+reads it from the certificate's single URI SAN and makes the node name from it.
+
+### subagent
+
+A child turn that a parent session starts. A bound subagent has the address `<P>/<child>@node`.
+See [delegated subagents](/concepts/sessions-services-subagents/#delegated-subagents-pchildnode).
+
+## T
+
+### turn mailbox
+
+The queue for a subagent during its active turn. The subagent reads it with the `inbox` tool.
+When the turn is not active, messages go to the parent session.
+
+## V
+
+### view
+
+The set of nodes that a bare address resolves over: this node and every node in its peers file.
+See [federated view resolution](/concepts/addressing/#how-a-bare-reference-resolves-over-the-federated-view).
+
+## W
+
+### wake
+
+A signed `xmsg.message.received.v1` hint that the gateway's [Events](#events) profile sends. It
+tells a hosted client to read its mailbox.
