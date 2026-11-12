@@ -7,84 +7,95 @@ import { Aside } from '@astrojs/starlight/components';
 
 ## Same-UID trust boundary
 
-All local IPC in `xmsg` takes place over Unix domain sockets in `$XDG_RUNTIME_DIR/xmsg/` (or the
-per-user Darwin temporary directory from `getconf DARWIN_USER_TEMP_DIR` on macOS when
-`XDG_RUNTIME_DIR` is unset):
+All local IPC in `xmsg` uses Unix domain sockets in `$XDG_RUNTIME_DIR/xmsg/`. On macOS, when
+`XDG_RUNTIME_DIR` is not set, xmsg uses the per-user Darwin temporary directory from
+`getconf DARWIN_USER_TEMP_DIR`:
 
-- The runtime directory is created and verified at mode `0700`, owned by the running user's UID,
-  with `http.sock`, `agent.sock`, and `register.sock` bound at mode `0600`.
-- Startup verifies directory and socket ownership and refuses symlinks before binding.
-- Every connection on `http.sock`, `agent.sock`, and `register.sock` checks kernel-attested peer
-  credentials (`SO_PEERCRED` on Linux, `getpeereid` and `LOCAL_PEEREPID` on macOS) and drops any
-  connection whose UID does not equal the server's UID prior to protocol framing.
+- xmsg creates the runtime directory with mode `0700` and checks it. The running user's UID owns
+  it. xmsg binds `http.sock`, `agent.sock` and `register.sock` with mode `0600`.
+- At startup, xmsg checks the owner of the directory and the sockets. It refuses symlinks before
+  it binds.
+- Each connection on `http.sock`, `agent.sock` and `register.sock` checks the peer credentials
+  that the kernel attests. On Linux, xmsg uses `SO_PEERCRED`. On macOS, it uses `getpeereid` and
+  `LOCAL_PEEREPID`. xmsg drops a connection when its UID is not the server's UID. It does this
+  before it reads any protocol frame.
 
 ### Attribution vs. isolation within one UID
 
-Within a single OS user (UID), identifying a caller by its process ancestry on `agent.sock` and
-`http.sock` is **attribution, not a hostile security boundary**:
+Within one OS user (UID), xmsg identifies a caller on `agent.sock` and `http.sock` by its process
+ancestry. This is **attribution, not a security boundary against a hostile process**:
 
-- It prevents accidental cross-session or cross-harness misattribution and lets tools derive the
+- It prevents accidental misattribution between sessions or harnesses. It lets tools find the
   caller's session address automatically.
-- It does not stop a same-UID process with shell access from inspecting or impersonating another
-  session running under that same UID.
-- **Hard security boundaries** in `xmsg` are **separate OS UIDs** (for example, running separate
-  tiers or services under distinct users or pods), **mTLS peer certificates** (`/fed/v2`), and
-  **per-peer authorization policies** (`allow`, `principals`, `targets`, `from`).
-- Anyone holding a `message_id` (from a log or forwarded text) can read that message's replies via
-  `replies`.
+- It does not stop a same-UID process with shell access. That process can inspect another session
+  under the same UID, or pose as it.
+- The **hard security boundaries** in `xmsg` are these:
+  - **separate OS UIDs**, for example separate tiers or services under different users or pods;
+  - **mTLS peer certificates** (`/fed/v2`);
+  - **per-peer authorization policies** (`allow`, `principals`, `targets`, `from`).
+- Anyone with a `message_id` can read that message's replies with `replies`. A message ID can be
+  in a log or in forwarded text.
 
 <Aside type="caution" title="No-Auth HTTP Service">
-`xmsg` provides no application-level HTTP authentication tokens; it relies on Unix domain socket
-peer credentials (`SO_PEERCRED` / `getpeereid`). By default, `xmsg serve` binds **no TCP port**.
-The optional `--listen <IP:PORT>` (`XMSG_LISTEN`) flag is intended strictly for isolated container
-or Kubernetes pod loopback namespaces. Never bind `--listen` to a shared or external network
-interface.
+`xmsg` has no application-level HTTP authentication tokens. It uses Unix domain socket peer
+credentials (`SO_PEERCRED` / `getpeereid`). By default, `xmsg serve` binds **no TCP port**. The
+optional `--listen <IP:PORT>` (`XMSG_LISTEN`) flag is only for the loopback interface in an
+isolated container or Kubernetes pod network namespace. Never bind `--listen` to a shared or
+external network interface.
 </Aside>
 
 ## Per-harness attestation & identity derivation
 
-Among non-adversarial same-UID processes, `xmsg` verifies each harness's lifecycle so sessions do
-not collide or spoof one another:
+For same-UID processes that are not hostile, `xmsg` checks each harness's lifecycle. Thus
+sessions do not collide, and one session cannot pose as another:
 
-- **[Claude Code](/harnesses/claude-code/):** Discovered from `~/.claude/sessions` (or repeatable
-  `--sessions-dir`). Process liveness and start time are verified against `/proc/<pid>/stat` (or
-  `proc_pidinfo` on macOS, matching the UTC `ps -o lstart` timestamp recorded in `<pid>.json`).
-  Duplicate conversation IDs receive deterministic `X~2`, `X~3` fork claims in `instance_claims`.
-- **[Codex](/harnesses/codex/):** Verified via ancestor executable attestation
-  (`--codex-exe`), an open `<H>/thread-writer-locks/<P>.lock` descriptor under a configured
-  `--codex-home` `<H>` with a continuous lease watch (`inotify` on Linux; `kqueue` on an
-  `O_EVTONLY` descriptor on macOS), and bounded `O_NOFOLLOW` rollout header verification. Runtime MCP calls extract `sessionId`, `threadId`, and `turn_id` strictly
-  from `params._meta`, never from model-controlled `arguments`.
-  - *Shared app-server daemon note:* When multiple Codex root sessions share a single per-home
-    app-server daemon under the same UID, they share that daemon's process ancestry and writer-lock
-    descriptors; running `codex --no-daemon` gives each root its own owner process. All Codex
-    delivery paths prepend a fixed untrusted-peer-data preamble outside escaped message bodies.
-- **[Antigravity](/harnesses/antigravity/):** Verified via ancestor executable attestation
-  (`--agy-exe`) and an open file descriptor to `<presence_dir>/<conversation_id>.lock` matched by
-  device and inode `(dev, ino)` (plus `/proc/locks` exclusive `FLOCK` verification on Linux).
-- **[Pi](/harnesses/pi/), [opencode](/harnesses/opencode/), and [Hermes](/harnesses/hermes/):**
-  Admitted on `register.sock` via `SO_PEERCRED` / `getpeereid` UID verification; `xmsg` mints a
-  fresh UUID v4 per registered session and scopes all tool calls and `continues`/`subagent` frames
-  to the owning `register.sock` connection.
-- **Services (`svc`):** Admitted on `register.sock` by verifying the peer UID and matching the
-  canonical executable path (`/proc/<pid>/exe` on Linux, `proc_pidpath` on macOS) against
-  `--svc-exe <NAME>=<PATH>` (or `--leaf-principal` in `--leaf` mode). Executable resolution fails closed on deleted binaries (`(deleted)`) or changed profile
-  symlinks.
+- **[Claude Code](/harnesses/claude-code/):** xmsg finds sessions in `~/.claude/sessions` (or
+  the repeatable `--sessions-dir`). It checks that the process is live, and checks its start time,
+  against `/proc/<pid>/stat`. On macOS, it uses `proc_pidinfo` and compares the result with the
+  UTC `ps -o lstart` time in `<pid>.json`. Duplicate conversation IDs get deterministic `X~2`,
+  `X~3` fork claims in `instance_claims`.
+- **[Codex](/harnesses/codex/):** xmsg makes three checks:
+  - ancestor executable attestation (`--codex-exe`);
+  - an open `<H>/thread-writer-locks/<P>.lock` descriptor under a configured `--codex-home` `<H>`,
+    with a continuous lease watch. On Linux, the watch uses `inotify`. On macOS, it uses `kqueue`
+    on an `O_EVTONLY` descriptor;
+  - bounded `O_NOFOLLOW` rollout header verification.
+
+  Runtime MCP calls take `sessionId`, `threadId` and `turn_id` only from `params._meta`. They
+  never take them from the `arguments` that the model controls.
+  - *Shared app-server daemon note:* Two or more Codex root sessions can share one per-home
+    app-server daemon under the same UID. Then they share that daemon's process ancestry and
+    writer-lock descriptors. `codex --no-daemon` gives each root its own owner process. All Codex
+    delivery paths add a fixed untrusted-peer-data preamble outside the escaped message bodies.
+- **[Antigravity](/harnesses/antigravity/):** xmsg checks the ancestor executable
+  (`--agy-exe`). It also checks for an open file descriptor to
+  `<presence_dir>/<conversation_id>.lock`, matched by device and inode `(dev, ino)`. On Linux, it
+  also checks for an exclusive `FLOCK` in `/proc/locks`.
+- **[Pi](/harnesses/pi/), [opencode](/harnesses/opencode/) and [Hermes](/harnesses/hermes/):**
+  xmsg admits them on `register.sock` after a UID check with `SO_PEERCRED` / `getpeereid`. It
+  makes a new UUID v4 for each registered session. All tool calls and `continues`/`subagent`
+  frames are limited to the `register.sock` connection that owns the session.
+- **Services (`svc`):** xmsg admits a service on `register.sock` after two checks. The peer UID
+  must be the server UID. The canonical executable path must match `--svc-exe <NAME>=<PATH>` (or
+  `--leaf-principal` in `--leaf` mode). On Linux, xmsg reads the path from `/proc/<pid>/exe`. On
+  macOS, it uses `proc_pidpath`. The check fails closed on a deleted binary (`(deleted)`) or a
+  changed profile symlink.
 
 ## Envelope sanitization & breakout defense
 
-- **Printable-ASCII anonymous `from`:** Unattested HTTP `from` strings are restricted to printable
-  ASCII (`0x20..=0x7E`) and cannot contain `:`, `/`, or `@`, ensuring an anonymous caller can never
-  imitate an attested `id@node` address and is always rendered as `<from> · anon@<node>`.
-- **Label sanitization:** Instance labels strip quotes, angle brackets, control characters, and
-  newlines, replace non-ASCII characters with `_`, drop any label containing `@` or `·`, and cap
-  length at 64 characters.
-- **XML breakout defense:** Transport envelopes escape attribute double quotes (`&quot;`) so message
-  metadata or sender labels cannot break out of `<cross-session-message>` tags.
-- **No-symlink file ingestion:** Every path that reads harness state on disk (`~/.claude/sessions`,
-  Codex rollouts, Antigravity `transcript.jsonl`) validates UUID/subagent identifiers first and
-  walks directories with `openat(..., O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)`, rejecting symlinks,
-  FIFOs, sockets, and non-EUID files.
+- **Printable-ASCII anonymous `from`:** An unattested HTTP `from` string can contain only
+  printable ASCII (`0x20..=0x7E`). It cannot contain `:`, `/` or `@`. Thus an anonymous caller
+  cannot imitate an attested `id@node` address. xmsg always shows it as `<from> · anon@<node>`.
+- **Label sanitization:** xmsg removes quotes, angle brackets, control characters and newlines
+  from instance labels. It replaces each non-ASCII character with `_`. It drops a label that
+  contains `@` or `·`. The maximum length is 64 characters.
+- **XML breakout defense:** Transport envelopes escape attribute double quotes (`&quot;`). Thus
+  message metadata and sender labels cannot break out of `<cross-session-message>` tags.
+- **No-symlink file ingestion:** Each path that reads harness state on disk
+  (`~/.claude/sessions`, Codex rollouts, Antigravity `transcript.jsonl`) first validates the UUID
+  and subagent identifiers. Then it walks directories with
+  `openat(..., O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)`. It refuses symlinks, FIFOs, sockets and
+  files that the EUID does not own.
 
 ## Provenance is not instruction authority
 
