@@ -1,20 +1,17 @@
 ---
-title: File attachments (planned)
-description: The planned local file reference and ranged-read interface; federation and hosted gateway attachment tools follow separately.
+title: File attachments
+description: The local file reference and ranged-read interface; federation and hosted gateway attachment tools follow separately.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-<Aside type="note" title="Planned, not yet released">
-[PR #37](https://github.com/sini/xmsg/pull/37) adds local attachments. This page describes that
-planned work while it is in review. It is not released. The daemon that the other pages describe
-can refuse attachment fields and operations. Federated file fetch and hosted gateway attachment
-tools are later work.
+<Aside type="note" title="On main, not yet in a release">
+Local attachments are on the main branch. They are not in a tagged release yet. An older daemon
+refuses attachment fields and operations. Federated file fetch and hosted gateway attachment tools
+are later work.
 </Aside>
 
-## Planned local protocol
-
-These frames describe the implementation in review. You cannot install it yet.
+## Local protocol
 
 A message can carry up to eight content-addressed references:
 
@@ -62,8 +59,7 @@ returned reference in `attachments`.
 `GET /v1/messages/{id}/attachments/{index}?offset=0&length=4096` returns raw bytes,
 `Content-Type`, `X-Xmsg-Sha256`, and `Content-Range`.
 
-The planned first release supports only local files. Until federated attachment fetch is
+This version supports only local files. Until federated attachment fetch is
 available, xmsg refuses a send or reply with attachments to another node.
 
 File contents remain [untrusted peer data](/concepts/trust-model/#provenance-is-not-instruction-authority).
-See [PR #37 source and checks](https://github.com/sini/xmsg/pull/37/files) for the interface under review.

@@ -102,7 +102,7 @@ export default defineConfig({
 						{ label: 'Federation', slug: 'concepts/federation' },
 						{ label: 'Hubs, Leaves & Gateways', slug: 'concepts/hubs-and-leaves' },
 						{ label: 'Security & Trust Model', slug: 'concepts/trust-model' },
-						{ label: 'File Attachments (Planned)', slug: 'concepts/attachments' },
+						{ label: 'File Attachments', slug: 'concepts/attachments' },
 					],
 				},
 				{
