@@ -14,7 +14,9 @@ sudo pacman -Syu --needed base-devel git curl ca-certificates pkgconf
 There are no published binary releases yet. A packaged release is a follow-up; install this
 source revision with Cargo instead. SQLite is bundled, and TLS uses rustls, so this build does
 not need SQLite or OpenSSL development headers. It does need a native C compiler and linker.
-The repository declares no minimum supported Rust version. Use the current stable toolchain; the Linux container checks used Rust 1.99.1.
+xmsg requires Rust 1.88 or newer for the locked default-feature build. CI builds on the
+minimum declared in `Cargo.toml`; a current stable toolchain also works. The original Linux
+container checks used Rust 1.99.1.
 
 Install Rust using [rustup](https://rustup.rs/). Download its installer, review it, then run it:
 

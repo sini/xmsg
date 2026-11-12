@@ -39,6 +39,19 @@ env:
 # One upstream-Nix column, not gen-harness's three-evaluator matrix: this is not a gen library, so
 # evaluator divergence is not what its CI tests.
 jobs:
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CARGO_BUILD_JOBS: 4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the locked default features on the declared minimum Rust
+        run: |
+          msrv=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["rust-version"])')
+          rustup toolchain install "$msrv" --profile minimal
+          cargo +"$msrv" build --locked
+
   deps:
     if: ${{ !inputs.client_build_probe }}
     runs-on: ubuntu-latest
