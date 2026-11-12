@@ -9,9 +9,9 @@ import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
 in Matrix. People ask it questions about Nix, NixOS, den and the gen libraries, often in public
 rooms. It answers in the thread.
 
-Genie is built on xmsg. Each of its parts is a separate process that registers on an xmsg bus as a
-[service](/concepts/sessions-services-subagents/#services-namenode), and the parts talk to each
-other by xmsg messages and [replies](/concepts/replies/).
+Genie is built on xmsg. Each of its parts is a separate process. Each part registers on an xmsg
+bus as a [service](/concepts/sessions-services-subagents/#services-namenode). The parts send xmsg
+messages and [replies](/concepts/replies/) to each other.
 
 ## Terms used in these pages
 
@@ -49,15 +49,16 @@ flowchart LR
 2. The bot forwards the reviewed text to `genie-root` over xmsg. Root reads the tiers from the raw
    envelope and sets the thread tier. If the bot did not already screen the text, root sends it to
    the guard itself.
-3. Root finds or starts the thread's tier-1 process. Tier 1 reads public sources, may evaluate a
-   Nix configuration in a sandbox, and writes a draft: an answer, a confidence between 0 and 1,
-   and a list of gaps.
+3. Root finds or starts the thread's tier-1 process. Tier 1 reads public sources. It can
+   evaluate a Nix configuration in a sandbox. It writes a draft: an answer, a confidence between
+   0 and 1, and a list of gaps.
 4. Root runs the redactor over the draft, then sends the redacted text to `guard-out`. Only a
    passed draft is posted, with its confidence line.
-5. If the draft's confidence is low, a hard trigger fires, or the asker reacts 🔍 (or types
-   `!deeper`), root builds an escalation package, screens its untrusted parts, and sends it over
-   xmsg to the expert the thread tier selects. The expert's answer returns as an xmsg reply,
-   passes the redactor and `guard-out`, and is posted marked "expert review".
+5. Root escalates in three cases: the draft's confidence is low, a hard trigger fires, or the
+   asker reacts 🔍 (or types `!deeper`). Root builds an escalation package and screens its
+   untrusted parts. It sends the package over xmsg to the expert that the thread tier selects.
+   The expert's answer returns as an xmsg reply. It passes the redactor and `guard-out`. Then the
+   bot posts it, marked "expert review".
 6. The asker reacts ✅ to accept. The thread closes after acceptance or 24 hours idle.
 
 ## What genie will not do

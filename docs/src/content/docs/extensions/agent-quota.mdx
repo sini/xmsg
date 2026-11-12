@@ -3,27 +3,33 @@ title: Usage with agent-quota
 description: The existing read-only weekly quota command, with an xmsg service integration planned.
 ---
 
-[`agent-quota`](https://github.com/sini/nix-config/tree/main/pkgs/by-name/agent-quota) is currently
-a separate command that reports remaining weekly usage for Antigravity, Codex and Claude Code.
-It is packaged in the public `nix-config` repository. It is not an xmsg service yet.
+[`agent-quota`](https://github.com/sini/nix-config/tree/main/pkgs/by-name/agent-quota) is a
+separate command today. It reports the remaining weekly usage for Antigravity, Codex and Claude
+Code. The public `nix-config` repository packages it. It is not an xmsg service yet.
 
 ```sh
 agent-quota
 agent-quota --json
 ```
 
-The current command reads locally available usage information: Antigravity's local `/quota`
-command (its Gemini Models bucket), Codex rollout `rate_limits`, and Claude Code's cached weekly
-utilization. Missing or unparseable data is reported as `unknown`; a cached figure is not a live
-provider guarantee. The implementation describes these reads as credential-free and performs no
-model call.
+The command reads usage information that is available locally:
+
+- Antigravity's local `/quota` command (its Gemini Models bucket);
+- Codex rollout `rate_limits`;
+- Claude Code's cached weekly utilization.
+
+It reports missing data, and data that it cannot parse, as `unknown`. A cached figure is not a
+live guarantee from the provider. The implementation says that these reads need no credentials.
+It makes no model call.
 
 ## Planned service integration
 
-An optional per-user xmsg service is planned so agents can request quota information through the
-bus. Service registration, message schemas and quota-based dispatch are **not available in the
-current command**. Do not assume `send(to="agent-quota", ...)` has a recipient unless an operator
-has independently implemented and registered one.
+An optional xmsg service for each user is planned. With it, agents can ask for quota
+information through the bus. Service registration, message schemas and quota-based dispatch are
+**not available in the current command**. Do not assume that `send(to="agent-quota", ...)` has a
+recipient. It has one only if an operator registered one. The generic
+[`xmsg service exec`](/reference/cli-and-mcp/#xmsg-service-exec) runner can register a command
+such as `agent-quota --json` as a service.
 
 Source: [command implementation](https://github.com/sini/nix-config/blob/7cbbe3374341d7fc981b09de58c454cade460cf2/pkgs/by-name/agent-quota/agent-quota.py)
 and [package and checks](https://github.com/sini/nix-config/tree/7cbbe3374341d7fc981b09de58c454cade460cf2/pkgs/by-name/agent-quota).

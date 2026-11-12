@@ -17,7 +17,7 @@ Matrix sender id:
 - `trusted`: the sender is on the bot's trusted list (`trusted_mxids` or `owner_mxid`).
 - `public`: any other admitted sender.
 
-Root reads the tiers from the raw envelope **before** the guard sees it, and records the
+Root reads the tiers from the raw envelope **before** the guard sees it. It records the
 **thread tier**: the lowest tier among the senders whose text is in the thread. A thread becomes
 public the moment a public sender's text enters it. Only a trusted sender typing `!trust` in the
 thread raises it again. Text, a tool argument or a guard rewrite can never change the tier.
@@ -127,8 +127,8 @@ sequenceDiagram
 ```
 
 - **One session per thread.** Each escalated thread is its own interactive Claude Code session,
-  in a pane of the tier's herdr session (herdr is a terminal-session manager that can start, close and resume agent panes). The dispatcher
-  keeps a map from thread id to session id.
+  in a pane of the tier's herdr session. herdr is a terminal-session manager. It can start, close
+  and resume agent panes. The dispatcher keeps a map from thread id to session id.
 - **Messages go over xmsg; herdr only manages lifecycle.** herdr starts, parks and resumes
   sessions. The end of a turn is the session's xmsg reply, not a herdr state.
 - **A journal survives restarts.** The dispatcher writes each message to a journal before it
