@@ -157,11 +157,40 @@ it and acknowledges it.
 
 ### Mailbox retention
 
-A message in the `peer_mailbox` stays until the leaf acknowledges it, or until it is older than
-the reply TTL. The reply TTL is `--reply-ttl` (environment `XMSG_REPLY_TTL`). Its default is
-604800 seconds (7 days). xmsg deletes expired rows when it completes a local delivery. Thus an idle
-hub can keep expired rows for longer. There is no limit on the number of messages or bytes for
-each peer.
+**Planned, not yet released.** A stored message or reply stays in the `peer_mailbox` until its
+leaf acknowledges it or it passes the reply TTL. `--reply-ttl` (`XMSG_REPLY_TTL`) defaults to
+604800 seconds (7 days). Expiry cleanup also runs while the hub is idle: every 10 minutes by
+default, or once per reply-TTL period when that is shorter, with a minimum interval of 1 second.
+The existing cleanup after a local delivery remains. Expired rows can remain until the next
+cleanup tick; an ACK removes its row immediately.
+
+Each leaf has a separate budget. The defaults allow 10,000 rows and 67,108,864 bytes (64 MiB),
+intended as an offline-week budget that operators can resize for their traffic. These are two
+independent limits, not a promise that every workload fits a week. Configure the per-leaf budget
+for this daemon with:
+
+| Option | Environment | Default |
+|---|---|---|
+| `--peer-mailbox-max-rows` | `XMSG_PEER_MAILBOX_MAX_ROWS` | `10000` |
+| `--peer-mailbox-max-bytes` | `XMSG_PEER_MAILBOX_MAX_BYTES` | `67108864` |
+
+Zero refuses new stored rows. Limits count all stored messages and replies for that peer;
+transient `list` queries are not persistent rows. Bytes count every UTF-8 string column, including
+body, envelope JSON and origin/metadata, plus 16 bytes for the two integer fields. A body stored
+both directly and in the envelope counts twice. SQLite page/index overhead is outside this byte
+budget; the row limit also bounds per-row overhead.
+
+An insert that would cross either limit is refused with HTTP `429` and error code
+`peer_mailbox_full`. That refusal reaches the sender, including through a forwarding hub and
+on reply paths. Existing rows are kept; no oldest-message eviction or silent drop occurs. An
+already-stored duplicate succeeds without consuming more budget, even at capacity. ACKs and
+expiry cleanup free capacity. Existing over-limit mailboxes are not trimmed on upgrade: they
+refuse new rows until enough old rows leave. Retry a refused send/reply after capacity is freed,
+using the same idempotency key when the sending interface supports it.
+The command-backed service retains its pending response and stable reply key while it retries
+this temporary refusal. Internal delivery-rejection notices remain best-effort: a failed notice
+is logged by error code, and the rejected item is still ACKed so it cannot block the queue.
+
 
 ### Hub admission (`hub`)
 

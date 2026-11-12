@@ -2558,9 +2558,9 @@ async fn push_federated_reply(
     in_reply_to: &str,
     reply_id: &str,
     text: &str,
-) -> &'static str {
+) -> Result<&'static str, AppError> {
     let Some(fed_state) = &state.fed_state else {
-        return "push_failed";
+        return Ok("push_failed");
     };
     let replier = Sender::Session(caller.clone()).origin(&state.node_name);
     let envelope = crate::fed::FedReplyEnvelope {
@@ -2572,9 +2572,10 @@ async fn push_federated_reply(
         created_at: storage::now_epoch_secs(),
     };
     match crate::fed::send_federated_reply(fed_state, ret_host, &envelope).await {
-        Ok(_) => "pushed",
-        Err(AppError::Gone { .. }) => "sender_gone",
-        Err(_) => "push_failed",
+        Ok(_) => Ok("pushed"),
+        Err(AppError::Gone { .. }) => Ok("sender_gone"),
+        Err(error @ AppError::PeerMailboxFull(_)) => Err(error),
+        Err(_) => Ok("push_failed"),
     }
 }
 
@@ -3085,8 +3086,10 @@ async fn deliver_reply(
     }
     let push_outcome = match remote_host.as_deref() {
         Some(host) => {
-            if let Some(to) = dest_session_id.as_deref() {
-                if let Ok(db) = state.db.lock() {
+            {
+                let db = state.db.lock().map_err(db_err)?;
+                let tx = db.unchecked_transaction().map_err(db_err)?;
+                if let Some(to) = dest_session_id.as_deref() {
                     if caller_is_sender {
                         let pushed = MessageRecord {
                             id: reply_id.to_string(),
@@ -3105,10 +3108,10 @@ async fn deliver_reply(
                             },
                             return_host: Some(state.node_name.clone()),
                         };
-                        let _ = storage::insert_message(&db, &pushed);
+                        let _ = storage::insert_message(&tx, &pushed);
                     } else {
                         record_pushed_reply(
-                            &db,
+                            &tx,
                             &msg,
                             &reply_id,
                             &replier_label,
@@ -3119,49 +3122,63 @@ async fn deliver_reply(
                     }
                     let now = storage::now_epoch_secs();
                     let _ = storage::insert_outbound(
-                        &db,
+                        &tx,
                         &reply_id,
                         host,
                         &format!("{to}@{host}"),
                         "delivered",
                         now,
                     );
-                    let _ = storage::mark_outbound_resolved(&db, &reply_id);
+                    let _ = storage::mark_outbound_resolved(&tx, &reply_id);
                 }
+                if to_leaf {
+                    if let (Some(fed_state), Some(to)) =
+                        (state.fed_state.as_ref(), dest_session_id.as_deref())
+                    {
+                        let replier_origin =
+                            Sender::Session(caller.clone()).origin(&state.node_name);
+                        let envelope = crate::fed::FedEnvelope {
+                            v: crate::fed::WIRE_VERSION,
+                            id: reply_id.clone(),
+                            origin: replier_origin,
+                            to: crate::fed::FedTarget {
+                                r#ref: to.to_string(),
+                            },
+                            body: text.to_string(),
+                            thread_id: if msg.thread_id.is_empty() {
+                                msg.id.clone()
+                            } else {
+                                msg.thread_id.clone()
+                            },
+                            created_at: storage::now_epoch_secs(),
+                            forwarded: None,
+                        };
+                        crate::fed::queue_leaf_mailbox_reply_in(
+                            fed_state,
+                            &tx,
+                            host,
+                            to,
+                            &envelope,
+                            &replier_label,
+                            message_id,
+                        )?;
+                    }
+                }
+                tx.commit().map_err(db_err)?;
             }
             let outcome = if to_leaf {
-                if let (Some(fed_state), Some(to)) =
-                    (state.fed_state.as_ref(), dest_session_id.as_deref())
-                {
-                    let replier_origin = Sender::Session(caller.clone()).origin(&state.node_name);
-                    let envelope = crate::fed::FedEnvelope {
-                        v: crate::fed::WIRE_VERSION,
-                        id: reply_id.clone(),
-                        origin: replier_origin,
-                        to: crate::fed::FedTarget {
-                            r#ref: to.to_string(),
-                        },
-                        body: text.to_string(),
-                        thread_id: if msg.thread_id.is_empty() {
-                            msg.id.clone()
-                        } else {
-                            msg.thread_id.clone()
-                        },
-                        created_at: storage::now_epoch_secs(),
-                        forwarded: None,
-                    };
-                    let _ = crate::fed::queue_leaf_mailbox_reply(
-                        fed_state,
-                        host,
-                        to,
-                        &envelope,
-                        &replier_label,
-                        message_id,
-                    );
-                }
                 "stored"
             } else {
-                push_federated_reply(state, caller, host, message_id, &reply_id, text).await
+                match push_federated_reply(state, caller, host, message_id, &reply_id, text).await {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        if let Ok(db) = state.db.lock() {
+                            let _ = storage::delete_message(&db, &reply_id);
+                            let _ = storage::delete_outbound(&db, &reply_id);
+                        }
+                        return Err(error);
+                    }
+                }
             };
             run_post_deliver_pause(&state.node_name, &reply_id).await;
             if matches!(outcome, "pushed" | "stored") {

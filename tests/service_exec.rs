@@ -488,3 +488,87 @@ async fn permanent_reply_refusal_exits_without_retrying() {
         assert!(!stderr.trim().is_empty(), "failure should have a static diagnostic");
     }).await.expect("permanent refusal did not stop the runner within 10 seconds");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mailbox_full_reply_retains_stdout_key_and_ack_order_until_recovery() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::{UnixListener, UnixStream};
+
+    async fn read(stream: &mut BufReader<UnixStream>) -> Value {
+        let mut line = String::new();
+        assert!(stream.read_line(&mut line).await.unwrap() > 0);
+        serde_json::from_str(&line).unwrap()
+    }
+    async fn write(stream: &mut BufReader<UnixStream>, frame: Value) {
+        stream
+            .get_mut()
+            .write_all(format!("{frame}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+
+    let temp = tempdir().unwrap();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let register_path = temp.path().join("register.sock");
+    let agent_path = temp.path().join("agent.sock");
+    let register = UnixListener::bind(&register_path).unwrap();
+    let agent = UnixListener::bind(&agent_path).unwrap();
+    let script = temp.path().join("producer.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\nprintf x >> invocations\nprintf 'retained after capacity refusal\\n'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_xmsg"));
+    isolated(&mut command, temp.path());
+    command
+        .current_dir(temp.path())
+        .args(["service", "exec", "--name", "producer", "--register-sock"])
+        .arg(&register_path)
+        .arg("--agent-sock")
+        .arg(&agent_path)
+        .arg("--")
+        .arg(&script);
+    let mut service = Process(command.spawn().unwrap());
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let registration = json!({"status":"ok", "address":"producer@fixture", "node":"fixture"});
+        let mut first = BufReader::new(register.accept().await.unwrap().0);
+        assert_eq!(read(&mut first).await["name"], "producer");
+        write(&mut first, registration.clone()).await;
+        assert_eq!(read(&mut first).await["action"], "poll");
+        write(&mut first, json!({"action":"deliver", "messageId":"capacity-request", "fromName":"sender@fixture", "text":"ignored", "envelope":"ignored", "origin":{"service":"sender", "node":"fixture"}})).await;
+        let expected = json!({"action":"reply", "schema_version":2, "message_id":"capacity-request", "text":"retained after capacity refusal\n", "idempotency_key":"service-exec:producer:capacity-request"});
+        let mut initial_reply = BufReader::new(agent.accept().await.unwrap().0);
+        assert_eq!(read(&mut initial_reply).await, expected);
+        write(&mut initial_reply, json!({"status":"error", "error":"peer_mailbox_full", "detail":"temporary capacity refusal"})).await;
+        drop(initial_reply);
+        let mut premature_ack = String::new();
+        assert_eq!(first.read_line(&mut premature_ack).await.unwrap(), 0, "capacity-refused reply was ACKed");
+        drop(first);
+
+        let connection = loop {
+            tokio::select! {
+                result = register.accept() => break result.unwrap().0,
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                    assert!(service.0.try_wait().unwrap().is_none(), "peer_mailbox_full stopped the runner instead of retaining its pending reply");
+                }
+            }
+        };
+        let mut second = BufReader::new(connection);
+        assert_eq!(read(&mut second).await["name"], "producer");
+        write(&mut second, registration).await;
+        let mut retry = BufReader::new(agent.accept().await.unwrap().0);
+        assert_eq!(read(&mut retry).await, expected, "capacity retry changed stdout or reply key");
+        assert_eq!(fs::read(temp.path().join("invocations")).unwrap(), b"x", "capacity retry re-executed producer");
+        let mut line = String::new();
+        assert!(tokio::time::timeout(Duration::from_millis(150), second.read_line(&mut line)).await.is_err(), "runner polled or ACKed before reply acceptance");
+        write(&mut retry, json!({"status":"ok", "reply":{"seq":1,"messageId":"capacity-request","createdAt":1,"replierSessionId":"producer","text":"retained after capacity refusal\n","pushOutcome":"stored"}})).await;
+        assert_eq!(read(&mut second).await, json!({"action":"ack", "messageId":"capacity-request"}));
+        write(&mut second, json!({"status":"ok"})).await;
+        assert_eq!(read(&mut second).await["action"], "poll");
+        assert_eq!(fs::read(temp.path().join("invocations")).unwrap(), b"x");
+        assert!(service.0.try_wait().unwrap().is_none());
+    }).await.expect("capacity refusal recovery cell exceeded 10 seconds");
+}

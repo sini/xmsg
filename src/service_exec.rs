@@ -143,6 +143,7 @@ fn retryable(error: &ClientError) -> bool {
                 | "inbox_timeout"
                 | "peer_unreachable"
                 | "rate_limited"
+                | "peer_mailbox_full"
                 | "credentials_stale"
                 | "internal"
                 | "process_already_registered"

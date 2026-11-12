@@ -1560,12 +1560,108 @@ pub struct PeerMailboxMessage {
     pub origin: Origin,
 }
 
-pub fn insert_peer_mailbox(conn: &Connection, msg: &PeerMailboxMessage) -> Result<bool> {
+pub const DEFAULT_PEER_MAILBOX_MAX_ROWS: u64 = 10_000;
+pub const DEFAULT_PEER_MAILBOX_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeerMailboxLimits {
+    pub max_rows: u64,
+    pub max_bytes: u64,
+}
+impl Default for PeerMailboxLimits {
+    fn default() -> Self {
+        Self {
+            max_rows: DEFAULT_PEER_MAILBOX_MAX_ROWS,
+            max_bytes: DEFAULT_PEER_MAILBOX_MAX_BYTES,
+        }
+    }
+}
+
+type PeerMailboxLimitEntry = (
+    std::sync::Weak<std::sync::Mutex<Connection>>,
+    PeerMailboxLimits,
+);
+fn peer_mailbox_limits_registry(
+) -> &'static std::sync::Mutex<std::collections::HashMap<usize, PeerMailboxLimitEntry>> {
+    static REGISTRY: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<usize, PeerMailboxLimitEntry>>,
+    > = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+pub fn set_peer_mailbox_limits(
+    db: &std::sync::Arc<std::sync::Mutex<Connection>>,
+    limits: PeerMailboxLimits,
+) {
+    let mut registry = peer_mailbox_limits_registry().lock().unwrap();
+    registry.retain(|_, (weak, _)| weak.strong_count() > 0);
+    registry.insert(
+        std::sync::Arc::as_ptr(db) as usize,
+        (std::sync::Arc::downgrade(db), limits),
+    );
+}
+pub fn peer_mailbox_limits_for_db(
+    db: &std::sync::Arc<std::sync::Mutex<Connection>>,
+) -> PeerMailboxLimits {
+    peer_mailbox_limits_registry()
+        .lock()
+        .unwrap()
+        .get(&(std::sync::Arc::as_ptr(db) as usize))
+        .filter(|(weak, _)| std::sync::Weak::ptr_eq(weak, &std::sync::Arc::downgrade(db)))
+        .map(|(_, limits)| *limits)
+        .unwrap_or_default()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeerMailboxInsert {
+    Inserted,
+    Duplicate,
+    Full,
+}
+
+pub fn insert_peer_mailbox(
+    conn: &Connection,
+    msg: &PeerMailboxMessage,
+) -> Result<PeerMailboxInsert> {
+    insert_peer_mailbox_with_limits(conn, msg, PeerMailboxLimits::default())
+}
+
+pub fn insert_peer_mailbox_with_limits(
+    conn: &Connection,
+    msg: &PeerMailboxMessage,
+    limits: PeerMailboxLimits,
+) -> Result<PeerMailboxInsert> {
     let origin_json = serde_json::to_string(&msg.origin)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    if conn
+        .query_row("SELECT 1 FROM peer_mailbox WHERE id=?1", [&msg.id], |_| {
+            Ok(())
+        })
+        .optional()?
+        .is_some()
+    {
+        return Ok(PeerMailboxInsert::Duplicate);
+    }
+    let stored_bytes = 16u64
+        + msg.id.len() as u64
+        + msg.peer.len() as u64
+        + msg.target_ref.len() as u64
+        + msg.from_name.len() as u64
+        + msg.body.len() as u64
+        + msg.envelope.len() as u64
+        + origin_json.len() as u64;
+    let max_rows = i64::try_from(limits.max_rows).unwrap_or(i64::MAX);
+    let max_bytes = i64::try_from(limits.max_bytes).unwrap_or(i64::MAX);
+    let stored_bytes = i64::try_from(stored_bytes).unwrap_or(i64::MAX);
     let count = conn.execute(
-        "INSERT OR IGNORE INTO peer_mailbox (id, peer, target_ref, created_at, from_name, bytes, body, envelope, origin)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "WITH usage AS (
+           SELECT COUNT(*) AS rows, COALESCE(SUM(16 + length(CAST(id AS BLOB)) + length(CAST(peer AS BLOB))
+             + length(CAST(target_ref AS BLOB)) + length(CAST(from_name AS BLOB)) + length(CAST(body AS BLOB))
+             + length(CAST(envelope AS BLOB)) + length(CAST(origin AS BLOB))),0) AS stored_bytes
+           FROM peer_mailbox WHERE peer=?2
+         )
+         INSERT OR IGNORE INTO peer_mailbox (id, peer, target_ref, created_at, from_name, bytes, body, envelope, origin)
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9 FROM usage
+         WHERE rows < ?10 AND stored_bytes <= ?11 - ?12",
         params![
             msg.id,
             msg.peer,
@@ -1576,9 +1672,24 @@ pub fn insert_peer_mailbox(conn: &Connection, msg: &PeerMailboxMessage) -> Resul
             msg.body,
             msg.envelope,
             origin_json,
+            max_rows,
+            max_bytes,
+            stored_bytes,
         ],
     )?;
-    Ok(count > 0)
+    if count > 0 {
+        Ok(PeerMailboxInsert::Inserted)
+    } else if conn
+        .query_row("SELECT 1 FROM peer_mailbox WHERE id=?1", [&msg.id], |_| {
+            Ok(())
+        })
+        .optional()?
+        .is_some()
+    {
+        Ok(PeerMailboxInsert::Duplicate)
+    } else {
+        Ok(PeerMailboxInsert::Full)
+    }
 }
 
 pub fn get_next_peer_mailbox_message(
@@ -1628,7 +1739,7 @@ pub fn count_peer_mailbox_messages(conn: &Connection, peer: &str) -> Result<usiz
 
 pub fn purge_peer_mailbox(conn: &Connection, ttl_secs: u64) -> Result<usize> {
     let now = now_epoch_secs();
-    let cutoff = now.saturating_sub(ttl_secs as i64);
+    let cutoff = now.saturating_sub(i64::try_from(ttl_secs).unwrap_or(i64::MAX));
     conn.execute(
         "DELETE FROM peer_mailbox WHERE created_at < ?1",
         params![cutoff],

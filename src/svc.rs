@@ -756,9 +756,15 @@ pub async fn run_leaf_inbox_task(
                         created_at: storage::now_epoch_secs(),
                     };
 
-                    let _ =
+                    if let Err(error) =
                         crate::fed::send_federated_reply(&fed_state, &ret_host, &reply_envelope)
-                            .await;
+                            .await
+                    {
+                        tracing::warn!(
+                            code = error.code().1,
+                            "leaf rejection notice could not be sent"
+                        );
+                    }
 
                     let mut ack_backoff = 100u64;
                     loop {
