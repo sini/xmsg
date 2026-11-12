@@ -1,0 +1,30 @@
+x-node: &node
+  image: ${XMSG_IMAGE:-ghcr.io/sini/xmsg:latest}
+  user: "${XMSG_UID:?Run prepare.py}:${XMSG_GID:?Run prepare.py}"
+  command: ["serve", "--svc-exe", "status=/bin/xmsg"]
+  environment:
+    XDG_RUNTIME_DIR: /run
+    XMSG_DB_PATH: /var/lib/xmsg/xmsg.db
+    XMSG_LISTEN: 0.0.0.0:7787
+    XMSG_FED_LISTEN: 0.0.0.0:7788
+    XMSG_PEERS_FILE: /etc/xmsg/peers.json
+    XMSG_FED_CERT: /etc/xmsg/identity/node.crt
+    XMSG_FED_KEY: /etc/xmsg/identity/node.key
+    XMSG_SESSIONS_DIR: /var/lib/xmsg/sessions
+    XMSG_CODEX_HOME: /var/lib/xmsg/codex
+  restart: unless-stopped
+services:
+  node-a:
+    <<: *node
+    volumes:
+      - ./.local/a/state:/var/lib/xmsg
+      - ./.local/a/run:/run/xmsg
+      - ./.local/a/identity:/etc/xmsg/identity:ro
+      - ./.local/a/peers.federation.json:/etc/xmsg/peers.json:ro
+  node-b:
+    <<: *node
+    volumes:
+      - ./.local/b/state:/var/lib/xmsg
+      - ./.local/b/run:/run/xmsg
+      - ./.local/b/identity:/etc/xmsg/identity:ro
+      - ./.local/b/peers.federation.json:/etc/xmsg/peers.json:ro

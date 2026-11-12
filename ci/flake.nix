@@ -50,6 +50,12 @@
         { gen.ci.rootSurface.entry = "not-owed"; }
         # Nor an evaluator matrix: its CI is one upstream-Nix column, not evaluators.yml.
         { gen.ci.evaluators = "not-owed"; }
+        {
+          gen.ci.examplesExcluded.docker = {
+            row = "xmsg-fei.10";
+            reason = "Docker/Compose runtime documentation, verified against the built image; no Nix example value to evaluate.";
+          };
+        }
         # Surface package build in CI checks (doCheck = true runs cargo test)
         {
           perSystem =
