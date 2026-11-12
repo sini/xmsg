@@ -283,15 +283,16 @@ async fn test_oracle_1_outbound_presents_reloaded_cert() {
     let (_der_a1, _key_a1, cert_a1_pem, key_a1_pem) =
         issue_cert(&_ca_params, &ca_key, "node-a", &[uri_a_v1]);
 
-    let uri_a_v2 = "spiffe://example.org/ns/test/sa/node-a-v2";
+    let uri_a_v2 = uri_a_v1;
+    let (renewal_ca, renewal_key, _, renewal_pem) = generate_ca("Renewal Root CA");
     let (_der_a2, _key_a2, cert_a2_pem, key_a2_pem) =
-        issue_cert(&_ca_params, &ca_key, "node-a", &[uri_a_v2]);
+        issue_cert(&renewal_ca, &renewal_key, "node-a", &[uri_a_v2]);
 
     let uri_b = "spiffe://example.org/ns/test/sa/node-b";
     let (_der_b, _key_b, cert_b_pem, key_b_pem) =
         issue_cert(&_ca_params, &ca_key, "node-b", &[uri_b]);
 
-    // Node B only accepts node-a with URI SAN v2
+    // Node B accepts the stable URI only under the renewal CA.
     let mut b_peers = HashMap::new();
     b_peers.insert(
         "node-a".to_string(),
@@ -310,7 +311,7 @@ async fn test_oracle_1_outbound_presents_reloaded_cert() {
         },
     );
     let mut b_ca_map = HashMap::new();
-    b_ca_map.insert("node-a".to_string(), ca_pem.clone());
+    b_ca_map.insert("node-a".to_string(), renewal_pem);
 
     let node_b = create_reloader_node("node-b", b_peers, &cert_b_pem, &key_b_pem, b_ca_map).await;
     let (_b_sock, b_received) =
@@ -339,7 +340,7 @@ async fn test_oracle_1_outbound_presents_reloaded_cert() {
 
     let node_a = create_reloader_node("node-a", a_peers, &cert_a1_pem, &key_a1_pem, a_ca_map).await;
 
-    // 1. Initial attempt: Node A presents cert v1, but Node B only allows v2 => rejected!
+    // The old CA is refused; a same-identity renewal must replace the presented certificate.
     let envelope1 = make_envelope("recipient-b", "hello v1");
     let res1 = send_federated_message(&node_a.fed_state, "node-b", &envelope1).await;
     assert!(
@@ -374,6 +375,17 @@ async fn test_oracle_1_outbound_presents_reloaded_cert() {
     let msgs = b_received.lock().unwrap();
     assert_eq!(msgs.len(), 1);
     assert!(msgs[0].contains("hello v2"));
+    drop(msgs);
+    let hashes = node_a.reloader.file_hashes.lock().unwrap().clone();
+    let active = node_a.fed_state.dynamic_tls.read().unwrap().as_ref().unwrap().cert_der.clone();
+    let (_, _, foreign_cert, foreign_key) = issue_cert(&renewal_ca, &renewal_key, "foreign", &["spiffe://example.org/ns/test/sa/foreign"]);
+    fs::write(&node_a.cert_path, foreign_cert).unwrap();
+    fs::write(&node_a.key_path, foreign_key).unwrap();
+    assert!(node_a.reloader.check_and_reload().is_err(), "reload accepted a different derived node identity");
+    assert_eq!(*node_a.reloader.file_hashes.lock().unwrap(), hashes, "rejected identity changed committed file hashes");
+    assert_eq!(node_a.fed_state.dynamic_tls.read().unwrap().as_ref().unwrap().cert_der, active, "rejected identity replaced active TLS");
+    assert!(send_federated_message(&node_a.fed_state, "node-b", &make_envelope("recipient-b", "retained TLS")).await.is_ok(), "old TLS stopped working after rejected identity reload");
+
 }
 
 // -----------------------------------------------------------------------------
