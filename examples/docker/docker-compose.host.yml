@@ -1,0 +1,6 @@
+services:
+  node:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./.local/a/peers.host.json:/etc/xmsg/peers.json:ro

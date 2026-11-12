@@ -1,35 +1,287 @@
 ---
-title: OCI & Docker
-description: Building and verifying the minimal distroless OCI container image published to ghcr.io/sini/xmsg.
+title: Run xmsg in Docker
+description: Run a node, connect it to another node, and put a leaf next to a service with the minimal xmsg image.
 ---
 
-import { Aside } from '@astrojs/starlight/components';
+The image at `ghcr.io/sini/xmsg` runs an xmsg [node](/glossary/#node). Use it for a
+containerised node or a [leaf](/glossary/#leaf) next to a service. Keep the full node that runs
+harness hooks on the host where those sessions live.
 
-`flake.nix` builds an unprivileged, distroless OCI container image with
-`pkgs.dockerTools.buildLayeredImage`. The image is published to `ghcr.io/sini/xmsg`:
+| What you need | Where to run xmsg |
+|---|---|
+| Host harness sessions | A full node on that host |
+| A node that federates with other nodes | The container example below |
+| A service in its own container | A leaf sidecar sharing the service's network namespace |
 
-```nix file=<rootDir>/flake.nix#L80-L100
-```
+The examples live in [`examples/docker`](https://github.com/sini/xmsg/tree/main/examples/docker).
+They use the same image for a small version-reporting service, so you can try a message and
+reply without another application image.
 
-## Security properties
+## Prepare the local files
 
-- **Non-root execution:** Runs as UID/GID `10001:10001`.
-- **No shell or utilities:** The image contains only CA certificates
-  (`/etc/ssl/certs/ca-bundle.crt`) and the `xmsg` binary. No layer has `/bin/sh` or other tools.
-- **Entrypoint:** `xmsg` with default command `serve` and working directory `/var/lib/xmsg`.
-
-## Building & verification
+These commands run on the host. You need Docker with Compose, Python 3 and OpenSSL. Run setup
+as a non-root user from a checkout of this repository:
 
 ```bash
-# Build the OCI image archive
-nix build .#image
-
-# Run the image oracle check (asserts non-root user, xmsg entrypoint, and no /bin/sh in layers)
-nix build -L .#checks.x86_64-linux.image
+cd examples/docker
+python3 prepare.py --image ghcr.io/sini/xmsg:latest
+export COMPOSE_PROJECT_NAME=xmsg-demo
 ```
 
-<Aside type="note" title="Docker Compose & Standalone Guide">
-{/* TODO: Add standalone Docker / Docker Compose guide for running xmsg serve and leaf containers outside Nix. */}
-**TODO:** A later guide will give standalone `docker run` and `docker compose` steps. It will
-show how to mount `$XDG_RUNTIME_DIR/xmsg`, `/var/lib/xmsg` and the federation certificates.
-</Aside>
+Use the same `COMPOSE_PROJECT_NAME` in every terminal that runs Compose or a smoke helper.
+
+The helper generates local certificate/key pairs and derives each [pin](/glossary/#pin) from
+SPKI DER. It writes the [peers files](/glossary/#peers-file) under `.local/` and the image,
+UID and GID to `.env`. It keeps existing keys and configuration. These generated files are
+ignored by Git; keep private keys private. The example certificates last 30 days. Use your normal
+certificate lifecycle for a persistent installation.
+
+The image defaults to UID/GID `10001:10001`. These examples explicitly use your non-root host
+UID/GID so bind-mounted files have the right owner. If you keep UID 10001 instead, prepare the
+files for that UID. The runtime socket directory must belong to the daemon's UID and have mode
+`0700`; its sockets use `0600`.
+
+The image has xmsg and CA certificates, with no shell, `curl` or `chown`. Its working directory
+is `/var/lib/xmsg`, but that alone does not select the database path.
+
+## Run one node
+
+```bash
+docker compose up -d
+docker compose exec -T node /bin/xmsg list --json
+docker compose logs node
+```
+
+```yaml file=<rootDir>/examples/docker/docker-compose.yml
+```
+
+| Container path | Contents | Keep across upgrades? |
+|---|---|---|
+| `/var/lib/xmsg` | `xmsg.db`, SQLite sidecars and node state | Yes |
+| `/run/xmsg` | `http.sock`, `register.sock`, `agent.sock` | Recreate; do not back up sockets |
+| `/etc/xmsg/identity` | This node's certificate and private key | Yes; read-only mount |
+| `/etc/xmsg/peers.json` | Peer policy | Yes; read-only mount |
+
+`XDG_RUNTIME_DIR=/run` selects `/run/xmsg` for sockets.
+`XMSG_DB_PATH=/var/lib/xmsg/xmsg.db` selects the persistent database.
+`XMSG_LISTEN` is the local HTTP API; `XMSG_FED_LISTEN` is the separate
+[mTLS](/glossary/#mtls) federation listener. HTTP binds to `0.0.0.0` inside this container so
+port mapping works. Both published ports bind only host loopback: `17787` for HTTP and `17788`
+for federation. Use mTLS for remote peers; HTTP is a local control surface.
+
+The empty sessions/Codex directories are container-local placeholders. They do not expose host
+harness sessions.
+
+### The equivalent `docker run`
+
+Stop Compose before using the same state through another container:
+
+```bash
+docker compose down
+./run-single.sh ghcr.io/sini/xmsg:latest
+docker exec xmsg-single /bin/xmsg list --json
+docker stop xmsg-single
+docker rm xmsg-single
+```
+
+The host script supplies the complete command, without invoking a shell inside the image:
+
+```bash file=<rootDir>/examples/docker/run-single.sh
+```
+
+Run only one daemon against a state directory. These examples share `.local/a/state`, so stop
+one topology before starting the next.
+
+## Two containers: send and reply
+
+Each node gets separate state, runtime sockets and identity. Compose service names provide
+addresses; pins authenticate the peers. `a` and `b` are local peer nicknames. Canonical node
+names come from the keys, not container names.
+
+```bash
+docker compose -f docker-compose.federation.yml up -d
+python3 smoke.py
+```
+
+```yaml file=<rootDir>/examples/docker/docker-compose.federation.yml
+```
+
+Full-node services need a trusted executable. `--svc-exe status=/bin/xmsg` allows the bundled
+executable to register the [service](/glossary/#service) `status`. The smoke helper starts it
+inside B's container. Each request runs `/bin/xmsg --version` and returns stdout as one reply.
+The helper waits for the remote service, prints the send and correlated reply, and checks the
+version text. `queued` is a normal send outcome; the reply confirms processing.
+
+For a fresh stack without the smoke helper, the manual sequence is:
+
+```bash
+node_b=$(docker ps --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME" \
+  --filter label=com.docker.compose.service=node-b --format '{{.ID}}')
+docker exec -d "$node_b" /bin/xmsg service exec --name status -- /bin/xmsg --version
+sent=$(docker compose -f docker-compose.federation.yml exec -T node-a \
+  /bin/xmsg send status@b 'version?' --from docker-demo --json)
+printf '%s\n' "$sent"
+message_id=$(printf '%s' "$sent" | python3 -c 'import json,sys; print(json.load(sys.stdin)["message_id"])')
+docker compose -f docker-compose.federation.yml exec -T node-a \
+  /bin/xmsg replies "$message_id" --wait 10 --json
+```
+
+Start the manual service once, or use the helper, which reuses an already registered service.
+When finished:
+
+```bash
+docker compose -f docker-compose.federation.yml down
+```
+
+## Connect a container to a host node
+
+Configure reciprocal peers with reachable addresses. The host reaches the container's published
+federation port; the container reaches the host's federation listener. Exchange public
+certificates or pins, not private keys.
+
+This overlay changes the peer file and adds Docker's
+[`host-gateway` mapping](https://docs.docker.com/compose/how-tos/networking/#custom-dns-with-extra_hosts):
+
+```yaml file=<rootDir>/examples/docker/docker-compose.host.yml
+```
+
+The demonstration starts a separate native host node with its generated `host` identity. It
+uses empty harness directories and separate sockets/state. It does not reconfigure an existing
+host node. With a native `xmsg` on the host:
+
+```bash
+./run-host.sh
+```
+
+```bash file=<rootDir>/examples/docker/run-host.sh
+```
+
+In another terminal, from `examples/docker`, start its status service:
+
+```bash
+xmsg service exec --register-sock "$PWD/.local/host/run/register.sock" \
+  --agent-sock "$PWD/.local/host/run/agent.sock" --name status -- xmsg --version
+```
+
+Then, in a third terminal:
+
+```bash
+export COMPOSE_PROJECT_NAME=xmsg-demo
+docker compose -f docker-compose.yml -f docker-compose.host.yml up -d
+python3 smoke.py --host
+docker compose -f docker-compose.yml -f docker-compose.host.yml down
+```
+
+The demo host listens on federation port `17898` and reaches the container at
+`127.0.0.1:17788`. The host must bind an address reachable from the container; container
+loopback is not host loopback. For a real host node, merge the reciprocal peer entry into its
+existing configuration, using its reachable address. Keep harness hooks attached to that node.
+
+For a [CA entry](/glossary/#ca-entry), use a CA-issued certificate with one concrete SPIFFE URI
+and a read-only CA bundle. Key the peer entry by the URI-derived node name, with `ca` and
+`identities` instead of `pin`. CN/DNS SANs do not name an xmsg node. The
+[federation guide](/concepts/federation/#trust-models-pinned-vs-ca-signed) gives both entry forms.
+
+## A leaf sidecar for a service
+
+A leaf is an outbound client with one fixed [principal](/glossary/#principal). Share its network
+namespace with the service, explicitly bind HTTP to `127.0.0.1`, and do not publish that port.
+
+```bash
+docker compose -f docker-compose.leaf.yml up -d
+python3 smoke.py --leaf
+docker compose -f docker-compose.leaf.yml down
+```
+
+```yaml file=<rootDir>/examples/docker/docker-compose.leaf.yml
+```
+
+`--leaf` requires `--listen` and `--leaf-principal`; it has no inbound federation listener.
+`svc:demo` fixes the local identity. The hub allows principal `demo`, without `svc:`. The service
+container shares `/run/xmsg` and the same UID. It registers through the leaf's service sockets;
+leaf registration does not use the full node's trusted-executable mapping. The demo also shares the
+leaf's PID namespace so service-client liveness checks work without newer peer-PIDFD support.
+An application using only loopback HTTP needs the shared network namespace, not this PID setting.
+
+A leaf has no `http.sock`: ordinary Unix-HTTP operator commands cannot address it. Applications
+can use loopback HTTP in the shared network namespace, or the service client through
+`register.sock`/`agent.sock`. This demo uses the service client. Replace the version reporter
+with your application's image and client integration.
+
+## Upgrades and backups
+
+Pin a published version or digest in `.env` for a persistent installation. Stop writers and
+back up before changing versions. For the single-node example:
+
+```bash
+docker compose stop
+mkdir -p .local/backups
+umask 077
+tar --exclude=a/run -czf .local/backups/a-backup.tar.gz -C .local a
+# Edit XMSG_IMAGE in .env, then fetch it if using a registry:
+docker compose pull
+docker compose up -d --force-recreate
+```
+
+The archive contains complete state, including SQLite WAL/SHM files, peer policy and TLS identity.
+A changed key changes a pinned node's identity. Keep the archive private. For other topologies,
+stop that Compose file and back up each node directory. Stop a separate host demo/service too.
+Runtime sockets are excluded and recreated.
+
+To restore while stopped:
+
+```bash
+docker compose down
+mv .local/a .local/a.before-restore
+tar -xzf .local/backups/a-backup.tar.gz -C .local
+mkdir -p .local/a/run
+chmod 700 .local/a/run
+docker compose up -d --force-recreate
+```
+
+Keep UID/GID and permissions consistent with `.env`. An older image needs a compatible database
+schema; otherwise restore its matching backup. Removing a container does not remove bind-mounted
+state.
+
+## What belongs on the host
+
+Harness hooks need the host's real session state and process relationships. Empty container
+session directories cannot discover those sessions. Mounting a host socket into another
+container does not reproduce its PID/executable view: matching numeric UIDs alone is insufficient
+for full-node harness/service attestation.
+
+Use a native full node for host harnesses, mTLS between nodes, and a leaf for another service
+container. A bundled full-node service can use `docker exec` in the daemon's PID namespace, with
+its executable trusted. See [sessions and services](/concepts/sessions-services-subagents/) and
+the [UID/network trust model](/concepts/trust-model/).
+
+## Build the image yourself
+
+From the repository root, on a Linux host with a user systemd manager:
+
+```bash
+systemd-run --user --scope -q -p MemoryMax=12G nix build .#image
+docker load -i result
+systemd-run --user --scope -q -p MemoryMax=12G nix build -L .#checks.x86_64-linux.image
+```
+
+The check above is for `x86_64-linux`; select your build system on another architecture. The
+archive contains that system's image. `flake.nix` uses `dockerTools.buildLayeredImage`, with xmsg
+as entrypoint, `serve` as default command, non-root UID 10001 and CA certificates. The image
+check verifies those properties and the absence of a shell.
+
+<details>
+<summary>Host-side setup helper</summary>
+
+```python file=<rootDir>/examples/docker/prepare.py
+```
+
+</details>
+
+<details>
+<summary>Bounded send/reply smoke helper</summary>
+
+```python file=<rootDir>/examples/docker/smoke.py
+```
+
+</details>
