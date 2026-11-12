@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "xmsg.fullname" . }}-peers
+  labels:
+    {{- include "xmsg.labels" . | nindent 4 }}
+data:
+  peers.json: {{ dict "peers" .Values.peers | toJson | quote }}

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: xmsg
+description: A single xmsg full node or federation hub
+version: 0.1.0
+appVersion: "0.1.0"
+type: application

@@ -1,34 +1,152 @@
 ---
 title: Kubernetes & Helm
-description: Running xmsg leaf sidecars and federated hub pods in Kubernetes with SPIFFE X.509-SVIDs.
+description: Install one persistent xmsg node per Helm release and verify federated messaging.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-In a Kubernetes cluster, `xmsg` runs in one of two ways. This includes gVisor-sandboxed pods:
+The application chart in `charts/xmsg` runs one full [node](/glossary/#node) or
+federation [hub](/glossary/#hub) per release. It does not bundle harnesses, a gateway,
+a leaf sidecar or a certificate issuer. Install directly from a repository checkout.
 
-- as a central federated [hub](/glossary/#hub);
-- as an in-pod `--leaf` sidecar next to a service worker (`genie-guard`, `matrix-xmsg` or
-  `xmsg-mcp-gateway`).
-
-These rules apply:
-
-- **Pod node identity:** A pod certificate with the SPIFFE URI SAN
-  `spiffe://<trust-domain>/ns/<ns>/sa/<sa>` gives the canonical node name `<sa>.<ns>` (see
-  [Federation](/concepts/federation/#self-authenticating-node-names)).
-- **Leaf sidecar mode (`--leaf`):** Mount one `emptyDir` volume at `$XDG_RUNTIME_DIR/xmsg` in
-  the service container and in an `xmsg` container. Both run under the same UID (`10001`).
-  **Leaf mode needs `--listen`**, also when the service uses the shared Unix sockets:
-  `xmsg serve --leaf --leaf-principal svc:<name> --listen 127.0.0.1:7787`
-  (or set `XMSG_LISTEN`). Keep the listener inside the pod's isolated loopback namespace. See
-  [Hubs, Leaves & Gateways](/concepts/hubs-and-leaves/#leaf-node-mode---leaf).
-- **Secret rotation:** Every 30 seconds (`--fed-reload-interval-secs`), `xmsg serve` checks the
-  SHA-256 content hash of `--fed-cert`, `--fed-key`, `--peers-file` and the `ca` bundles. Thus it
-  picks up Kubernetes `Secret` symlink (`..data`) rotations automatically. The pod does not
-  restart.
-
-<Aside type="note" title="Helm Chart & Manifests">
-{/* TODO: Add Helm chart values reference and Kubernetes Deployment/StatefulSet manifests. */}
-**TODO:** A later release will add Helm chart installation and full Kubernetes manifest
-templates.
+<Aside type="note" title="Checkout version">
+The chart and examples are planned for the next release. The disposable fixture
+has been verified with Helm 4.3.1, kind 0.33 and Kubernetes 1.37: two releases exchanged
+a message and reply, and a recreated pod retained its stored reply and exchanged
+another message. Uninstalling and reinstalling both releases also retained their
+PVCs, identities and stored reply, followed by a new smoke exchange. This establishes
+the fixture behavior, not production storage or
+network-plugin behavior.
 </Aside>
+
+## Prepare a disposable two-node example
+
+The verified disposable kind cluster was named `xmsg-fei9`; use its explicit
+kubeconfig at `examples/helm/.local/kubeconfig`. Before these commands, build
+and load the checkout's [container image](/operations/docker/) onto its nodes under
+`ghcr.io/sini/xmsg:latest`. The `Never` pull policy below assumes that image is
+already present; the helper's `--image` must match the loaded repository and tag.
+
+From the repository root, with Python 3, OpenSSL, kubectl and Helm available:
+
+```sh
+export KUBECONFIG="examples/helm/.local/kubeconfig"
+python3 examples/helm/prepare.py --image ghcr.io/sini/xmsg:latest
+kubectl create namespace xmsg-helm-demo --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n xmsg-helm-demo create secret tls xmsg-a-tls \
+  --cert=examples/helm/.local/a/node.crt --key=examples/helm/.local/a/node.key \
+  --dry-run=client -o yaml | kubectl -n xmsg-helm-demo apply -f -
+kubectl -n xmsg-helm-demo create secret tls xmsg-b-tls \
+  --cert=examples/helm/.local/b/node.crt --key=examples/helm/.local/b/node.key \
+  --dry-run=client -o yaml | kubectl -n xmsg-helm-demo apply -f -
+helm upgrade --install a charts/xmsg -n xmsg-helm-demo \
+  -f examples/helm/.local/a/values.json --set image.pullPolicy=Never --wait --timeout 90s
+helm upgrade --install b charts/xmsg -n xmsg-helm-demo \
+  -f examples/helm/.local/b/values.json --set image.pullPolicy=Never --wait --timeout 90s
+python3 examples/helm/smoke.py --kubeconfig "$KUBECONFIG"
+```
+
+`prepare.py` creates disposable 30-day identities and derives their canonical
+names and peer pins. It retains existing keys and values rather than replacing
+them. `OPENSSL` can select the OpenSSL executable. Keep `.local/` private and out
+of version control; review retained values when changing the image or namespace.
+The chart itself only references existing TLS Secrets.
+
+The smoke helper requires `--kubeconfig`. It starts a temporary version-reporting
+service if needed, lists it through federation, sends `version?`, and checks the
+correlated reply. Its success line is
+`PASS: two Helm releases, federated send and correlated version reply`.
+
+## Configure a persistent node
+
+| Value | Purpose |
+| --- | --- |
+| `canonicalNodeName` | Required certificate-derived name for local probes; not a nickname |
+| `tls.existingSecret` | Existing `kubernetes.io/tls` Secret with `tls.crt` and `tls.key` |
+| `peers` | Peer entries written inside the `{"peers": ...}` JSON configuration |
+| `ca.existingConfigMap` | Optional public CA bundle files mounted under `/etc/xmsg/ca` |
+| `trustedServices` | Optional service name → executable mapping for `--svc-exe` |
+| `image.repository`, `image.tag`, `image.digest` | Image selection; a nonempty digest takes precedence over tag |
+| `resources` | Container requests and limits; empty by default |
+| `persistence.size`, `persistence.storageClassName` | PVC capacity and optional StorageClass; empty class uses the cluster default |
+| `securityContext` | UID, GID and filesystem group, each defaulting to `10001` |
+
+Pinned and CA peer policy still belongs to xmsg; see
+[Federation](/concepts/federation/). For CA peers, use the mounted public bundle path
+in the peer's `ca` field. The chart provides no issuance or renewal controller.
+A pod SPIFFE URI SAN `spiffe://<trust-domain>/ns/<ns>/sa/<sa>` gives the canonical
+node name `<sa>.<ns>`.
+
+Replicas are fixed at **one**. The retained PVC holds
+`/var/lib/xmsg/state/xmsg.db` and SQLite sidecars. Never attach it to another running
+daemon: stop the old writer before replacing or restoring state. A storage access
+mode alone is not a one-writer guarantee. Changing the configured UID for existing
+state requires an offline ownership migration.
+
+The pod runs without root, privilege escalation or capabilities, with a read-only
+root filesystem. The TLS Secret is read-only; its keys map to `node.crt` and
+`node.key` with mode `0440` and filesystem group access. `/run` and the empty
+harness placeholders are disposable `emptyDir` volumes; no host harness directories
+are mounted. Startup uses no shell, init container or `chown` command.
+
+Only federation TCP `7788` has a ClusterIP Service. `XMSG_LISTEN` is unset, so HTTP
+remains on `/run/xmsg/http.sock`. Readiness and liveness execute local
+`xmsg list --http-sock /run/xmsg/http.sock --node <canonical-name> --json`, with a
+ten-second timeout above the command's five-second request budget. Supplying the
+correct canonical name keeps these probes local.
+
+Mounted federation certificates, keys and CA bundles are checked for content
+changes every 30 seconds by default. TLS Secret rotation does not require an
+issuer controller in this chart or a forced pod restart.
+
+## Optional federation ingress policy
+
+NetworkPolicy is **off by default**. Enable it with `networkPolicy.enabled` and
+set `networkPolicy.allowedPeers`. For example, only selected gateway pods in the
+gateway namespace may reach federation:
+
+```yaml
+networkPolicy:
+  enabled: true
+  allowedPeers:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: gateway
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: xmsg-mcp-gateway
+```
+
+Both selectors in the **same peer entry are ANDed**. Separate entries are
+alternatives. An empty allowlist renders `ingress: []`, denying ingress; it does
+not render an allow-all rule with `from: []`. The policy permits only TCP `7788`
+and leaves DNS and egress unchanged. Other ingress policies selecting the same
+pod can also allow traffic. mTLS and xmsg peer policy remain required.
+
+<Aside type="caution" title="Enforcement depends on the network plugin">
+Default kind networking does not enforce NetworkPolicy. The fixture's raw TCP
+namespace/pod allow, deny and deny-all checks used an enforcing controller in a
+disposable cluster. Such a test controller is optional fixture infrastructure;
+production needs its own enforcing CNI. Merely creating a NetworkPolicy object
+is not evidence of enforcement.
+</Aside>
+
+Only in a disposable cluster with an enforcing CNI, run the policy fixture:
+
+```sh
+python3 examples/helm/policy-smoke.py --kubeconfig examples/helm/.local/kubeconfig
+```
+
+It checks new raw TCP connections with policy off, namespace denial, pod-label
+denial/restoration and an enabled empty allowlist. It temporarily changes release
+`a`'s ingress policy, restores it to off, and cleans up its random probe resources.
+The verified fixture used a separately installed `kube-network-policies` v1.1.3
+DaemonSet. The chart does not install that controller.
+
+## Leaf sidecars
+
+Leaf deployments remain separate from this full-node chart. A leaf shares a
+runtime socket volume and UID with its worker, and needs its loopback listener
+alongside the shared Unix sockets. See
+[Hubs, Leaves & Gateways](/concepts/hubs-and-leaves/#leaf-node-mode---leaf) for the
+`--leaf` setup and its trust boundary.

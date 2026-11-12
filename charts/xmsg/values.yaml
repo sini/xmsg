@@ -1,0 +1,49 @@
+image:
+  repository: ghcr.io/sini/xmsg
+  # Use an immutable published tag for upgrades.
+  tag: latest
+  # Optional sha256 digest takes precedence over tag.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# Required: the canonical name derived from this node's certificate, not its nickname.
+canonicalNodeName: ""
+tls:
+  # Required existing kubernetes.io/tls Secret; no credentials are issued by this chart.
+  existingSecret: ""
+ca:
+  # Optional public CA ConfigMap, mounted as files under /etc/xmsg/ca.
+  existingConfigMap: ""
+
+# Written verbatim inside {"peers": ...}. CA peers can use ca: /etc/xmsg/ca/ca.crt.
+peers: {}
+
+# Optional trusted service name -> executable mapping. The bundled image has /bin/xmsg.
+trustedServices: {}
+
+securityContext:
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+
+resources: {}
+
+persistence:
+  # One writer per database: replicas are fixed at one. Never share this PVC with
+  # another running daemon; stop the old writer before replacing or restoring it.
+  size: 1Gi
+  # Empty uses the cluster's default StorageClass.
+  storageClassName: ""
+
+networkPolicy:
+  enabled: false
+  # Ingress only; DNS and all egress remain unchanged. Empty means deny all ingress.
+  # namespaceSelector and podSelector in ONE entry are ANDed. For example:
+  # allowedPeers:
+  #   - namespaceSelector:
+  #       matchLabels:
+  #         kubernetes.io/metadata.name: gateway
+  #     podSelector:
+  #       matchLabels:
+  #         app.kubernetes.io/name: xmsg-mcp-gateway
+  allowedPeers: []
