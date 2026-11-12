@@ -68,8 +68,13 @@ At subscribe/renew, the gateway logs the normalized callback host only, with no
 scheme, port, path, query or signing secret. Operators can observe that host before
 setting the list; the gateway assumes no ChatGPT hostname pattern. An off-list
 host is refused before callback verification or network I/O and leaves the active
-subscription unchanged. Changing the list does not retroactively stop an existing
-subscription; use the gateway's owner controls when that is required. See the
+subscription unchanged. The allowlist applies at subscribe and renew. An
+already-active subscription to an off-list host can keep delivering until its
+subscription expires, subject to existing authorization and delivery checks. A
+refused renewal leaves that old subscription active and does not extend its expiry.
+Its default TTL is 1 hour; a requested TTL is capped at 24 hours.
+Setting the list does not cut delivery immediately; use the gateway's owner
+controls for an immediate stop. See the
 [gateway Events reference](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/events.md).
 
 ## Source and setup
