@@ -5,6 +5,7 @@ mod origin;
 pub(crate) mod wire;
 
 pub use origin::Origin;
+pub use wire::{AttachRequest, AttachmentRef};
 pub use wire::{ListResult, NodeStatus, Recipient, Registration, ReplyRecord, SendResult};
 
 use health::RegistrationHealth;
@@ -153,6 +154,9 @@ impl Delivery {
     }
     pub fn from_name(&self) -> &str {
         &self.0.from_name
+    }
+    pub fn attachments(&self) -> &[AttachmentRef] {
+        &self.0.attachments
     }
     pub fn text(&self) -> &str {
         &self.0.text
@@ -351,6 +355,12 @@ impl RegisteredService {
             .and(self.registration.max_body_bytes)
     }
 
+    pub fn max_attachment_bytes(&self) -> Option<usize> {
+        self.connection
+            .as_ref()
+            .and(self.registration.max_attachment_bytes)
+    }
+
     async fn service_exchange(
         &mut self,
         frame: SvcFrame,
@@ -479,17 +489,67 @@ impl AgentClient {
         result
     }
 
+    pub async fn attach(&self, request: AttachRequest) -> Result<Value, ClientError> {
+        self.agent(AgentFrame::Attach {
+            schema_version: Some(SCHEMA_VERSION),
+            as_agent: None,
+            codex_session: None,
+            codex_thread: None,
+            codex_turn: None,
+            name: request.name,
+            media_type: request.media_type,
+            data: request.data,
+            path: request.path,
+            upload: request.upload,
+            offset: request.offset,
+            sha256: request.sha256,
+        })
+        .await
+    }
+
+    pub async fn read_attachment(
+        &self,
+        message_id: &str,
+        index: usize,
+        offset: usize,
+        length: Option<usize>,
+    ) -> Result<Value, ClientError> {
+        self.agent(AgentFrame::ReadAttachment {
+            schema_version: Some(SCHEMA_VERSION),
+            as_agent: None,
+            codex_session: None,
+            codex_thread: None,
+            codex_turn: None,
+            message_id: message_id.to_owned(),
+            index,
+            offset: Some(offset),
+            length,
+        })
+        .await
+    }
+
     pub async fn send(
         &self,
         to: &str,
         text: &str,
         key: Option<&str>,
     ) -> Result<SendResult, ClientError> {
+        self.send_with_attachments(to, text, key, &[]).await
+    }
+
+    pub async fn send_with_attachments(
+        &self,
+        to: &str,
+        text: &str,
+        key: Option<&str>,
+        attachments: &[AttachmentRef],
+    ) -> Result<SendResult, ClientError> {
         let response = self
             .agent(AgentFrame::Send {
                 schema_version: Some(SCHEMA_VERSION),
                 to: to.to_owned(),
                 text: text.to_owned(),
+                attachments: attachments.to_vec(),
                 idempotency_key: key.map(str::to_owned),
                 as_agent: None,
                 codex_session: None,
@@ -511,11 +571,23 @@ impl AgentClient {
         text: &str,
         key: Option<&str>,
     ) -> Result<ReplyRecord, ClientError> {
+        self.reply_with_attachments(message_id, text, key, &[])
+            .await
+    }
+
+    pub async fn reply_with_attachments(
+        &self,
+        message_id: &str,
+        text: &str,
+        key: Option<&str>,
+        attachments: &[AttachmentRef],
+    ) -> Result<ReplyRecord, ClientError> {
         let response = self
             .agent(AgentFrame::Reply {
                 schema_version: Some(SCHEMA_VERSION),
                 message_id: message_id.to_owned(),
                 text: text.to_owned(),
+                attachments: attachments.to_vec(),
                 idempotency_key: key.map(str::to_owned),
                 as_agent: None,
                 codex_session: None,

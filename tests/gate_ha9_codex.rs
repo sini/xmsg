@@ -306,6 +306,7 @@ impl CodexTestEnv {
         fs::write(&agy_config.proc_locks_path, "").unwrap();
 
         let state = Arc::new(AppState {
+            max_attachment_bytes: 8 * 1024 * 1024,
             db,
             sessions_dirs: vec![base_dir.join("claude-sessions")],
             max_body: 65536,
@@ -832,6 +833,7 @@ async fn c2_mcp_environment_and_attributed_tool_paths() {
         &env.state,
         &peer,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: format!("{root_p}/{child_x}"),
             text: "task for child".to_string(),
@@ -871,6 +873,7 @@ async fn c2_mcp_environment_and_attributed_tool_paths() {
         &env.state,
         &peer,
         AgentFrame::Reply {
+            attachments: Vec::new(),
             schema_version: None,
             message_id: msg_id.clone(),
             text: "child done".to_string(),
@@ -1461,6 +1464,7 @@ async fn c4_one_owner_many_roots_and_nested_owner() {
         &env.state,
         &peer_o1,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: root_2.to_string(),
             text: "from root 1".to_string(),
@@ -1479,6 +1483,7 @@ async fn c4_one_owner_many_roots_and_nested_owner() {
         &env.state,
         &peer_o1,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: root_1.to_string(),
             text: "from root 2".to_string(),
@@ -1529,6 +1534,7 @@ async fn c4_one_owner_many_roots_and_nested_owner() {
         &env.state,
         &peer_o1,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: root_1.to_string(),
             text: "spoof".to_string(),
@@ -1551,6 +1557,7 @@ async fn c4_one_owner_many_roots_and_nested_owner() {
         &env.state,
         &peer_nested,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: root_2.to_string(),
             text: "from nested".to_string(),
@@ -1572,6 +1579,7 @@ async fn c4_one_owner_many_roots_and_nested_owner() {
         &env.state,
         &peer_o2,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: root_1.to_string(),
             text: "from sole root without meta".to_string(),
@@ -1637,6 +1645,7 @@ async fn c5_c6_server_enforcement_and_direct_child_admission() {
         &env.state,
         &peer,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: format!("{root_p}/{child_x}"),
             text: "raw root with forged as_agent".to_string(),
@@ -1714,6 +1723,7 @@ async fn c5_c6_server_enforcement_and_direct_child_admission() {
         &env.state,
         &peer,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: root_p.to_string(),
             text: "from grandchild".to_string(),
@@ -1735,6 +1745,7 @@ async fn c5_c6_server_enforcement_and_direct_child_admission() {
         &env.state,
         &peer,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: root_p.to_string(),
             text: "from z".to_string(),
@@ -1756,6 +1767,7 @@ async fn c5_c6_server_enforcement_and_direct_child_admission() {
         &env.state,
         &peer,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: root_p.to_string(),
             text: "missing thread".to_string(),
@@ -1843,6 +1855,7 @@ async fn c7_c9_hook_carriers_preamble_and_child_turn_lifecycle() {
         &env.state,
         &peer,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: root_p.to_string(),
             text: hostile_body.to_string(),
@@ -1935,6 +1948,7 @@ async fn c7_c9_hook_carriers_preamble_and_child_turn_lifecycle() {
         &env.state,
         &peer,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: root_p.to_string(),
             text: "ROOT_PRIVATE_MARKER".to_string(),
@@ -1951,6 +1965,7 @@ async fn c7_c9_hook_carriers_preamble_and_child_turn_lifecycle() {
         &env.state,
         &peer,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: format!("{root_p}/{child_x}"),
             text: "CHILD_PRIVATE_MARKER".to_string(),
@@ -1993,6 +2008,7 @@ async fn c7_c9_hook_carriers_preamble_and_child_turn_lifecycle() {
         &env.state,
         &peer,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: format!("{root_p}/{child_x}"),
             text: "FALLBACK_AFTER_STOP_MARKER".to_string(),
@@ -3089,6 +3105,7 @@ async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() 
             &env.state,
             &peer,
             AgentFrame::Send {
+                attachments: Vec::new(),
                 schema_version: None,
                 to: root_a.to_string(),
                 text: "must refuse".to_string(),
@@ -3249,6 +3266,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
         &env.state,
         &peer_sender,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: root_p.to_string(),
             text: "C17_CASE1_PENDING_MSG".to_string(),
@@ -3465,6 +3483,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
         &env.state,
         &peer_sender,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: root_p.to_string(),
             text: "C17_CASE3_NODAEMON_MSG".to_string(),
@@ -3938,6 +3957,7 @@ async fn c18_push_mode_redetection_and_pending_handoff_migration_across_resume()
         &env.state,
         &peer_sender,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: root_p.to_string(),
             text: "C18_QUEUE_ON_O2".to_string(),
@@ -3976,6 +3996,7 @@ async fn c18_push_mode_redetection_and_pending_handoff_migration_across_resume()
         &env.state,
         &peer_sender,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: root_p.to_string(),
             text: "C18_PARKED_ACROSS_RESUME".to_string(),
@@ -4023,6 +4044,7 @@ async fn c18_push_mode_redetection_and_pending_handoff_migration_across_resume()
         &env.state,
         &peer_sender,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: root_p.to_string(),
             text: "C18_LIVE_PUSH_ON_O3".to_string(),
@@ -4356,6 +4378,7 @@ async fn c19_shared_home_sibling_flock_scan_and_unlocked_fd_rejection() {
         &env.state,
         &peer_o1,
         AgentFrame::Send {
+            attachments: Vec::new(),
             schema_version: None,
             to: p2.to_string(),
             text: "C19_1_FROM_P1_TO_P2".to_string(),
@@ -4858,6 +4881,7 @@ async fn c19_3_post_admission_owner_release_without_unlink() {
         let (pi_notify_tx, _) = broadcast::channel(64);
         let (svc_notify_tx, _) = broadcast::channel(64);
         let live_state = Arc::new(AppState {
+            max_attachment_bytes: 8 * 1024 * 1024,
             db: live_db,
             sessions_dirs: vec![live_dir.path().join("claude-sessions")],
             max_body: 65536,
@@ -6006,6 +6030,7 @@ async fn xr7_codex_unrevoke_cli_and_sqlite_first_persistence() {
     let mut srv_agy_cfg = env.state.agy_config.clone();
     srv_agy_cfg.proc_root = PathBuf::from(xmsg::process::LIVE_PROC_ROOT);
     let state_srv = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         db: env.state.db.clone(),
         sessions_dirs: env.state.sessions_dirs.clone(),
         max_body: env.state.max_body,
@@ -6930,4 +6955,48 @@ async fn bare_mcp_reattestation_pushes_queued_reply_once_against_racing_hook() {
     )
     .unwrap()
     .is_none());
+}
+
+#[tokio::test]
+async fn attachment_operations_reattest_known_codex_root_after_restart() {
+    for action in ["attach", "read_attachment"] {
+        let env = CodexTestEnv::new();
+        let root = "019a0000-0000-7000-8000-000000000462";
+        let pid = 7462;
+        env.write_fake_proc(pid, 1, "7462", &env.codex_exe);
+        env.create_writer_lock(&env.codex_home, pid, root, 3);
+        env.write_root_rollout(&env.codex_home, root, "/workspace");
+        let peer = env.peer(pid);
+        handle_codex_hook_frame(
+            &env.state,
+            &peer,
+            "SessionStart",
+            None,
+            &json!({"session_id":root,"source":"startup"}),
+        )
+        .await
+        .unwrap();
+        restart_codex_fixture(&env);
+        let mut request = json!({"action":action,"codex_session":root,"codex_thread":root});
+        if action == "attach" {
+            request["name"] = json!("resume.txt");
+            request["data"] = json!("eA==");
+        } else {
+            request["message_id"] = json!("missing-item");
+            request["index"] = json!(0);
+        }
+        let frame = serde_json::from_value::<AgentFrame>(request).unwrap();
+        let result = handle_agent_frame(&env.state, &peer, frame).await;
+        if action == "attach" {
+            assert!(
+                result.is_ok(),
+                "attach must re-attest after restart: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(result, Err(xmsg::error::AppError::NotFound(_))),
+                "read must reach item lookup after re-attestation: {result:?}"
+            );
+        }
+    }
 }

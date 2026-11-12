@@ -141,6 +141,7 @@ async fn start_test_http_server(
     let (pi_notify_tx, _) = broadcast::channel(16);
 
     let state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir],
         agy_config: agy_config.clone(),
         agy_store: agy_store.clone(),
@@ -705,6 +706,7 @@ async fn create_fed_test_node(
     });
 
     let app_state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir.clone()],
         agy_config: agy_config.clone(),
         agy_store: agy_store.clone(),

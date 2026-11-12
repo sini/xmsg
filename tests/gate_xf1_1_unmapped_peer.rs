@@ -220,6 +220,7 @@ fn xf1_1_pidns_server_helper() {
         let (svc_notify_tx, _) = tokio::sync::broadcast::channel(32);
 
         let state = Arc::new(AppState {
+            max_attachment_bytes: 8 * 1024 * 1024,
             sessions_dirs: vec![sessions_dir],
             max_body: 65536,
             request_counter: std::sync::atomic::AtomicU64::new(0),
@@ -627,6 +628,7 @@ async fn test_xf1_1_unmapped_peer_pid_namespace_and_ancestry_oracles() {
     let (svc_notify_tx, _) = tokio::sync::broadcast::channel(32);
 
     let state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir.clone()],
         max_body: 65536,
         request_counter: std::sync::atomic::AtomicU64::new(0),

@@ -120,6 +120,38 @@ enum Frame {
         #[serde(default)]
         within: Option<u64>,
     },
+    Attach {
+        request_id: String,
+        session: String,
+        #[serde(default)]
+        as_agent: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        media_type: Option<String>,
+        #[serde(default)]
+        data: Option<String>,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        upload: Option<String>,
+        #[serde(default)]
+        offset: Option<usize>,
+        #[serde(default)]
+        sha256: Option<String>,
+    },
+    ReadAttachment {
+        request_id: String,
+        session: String,
+        #[serde(default)]
+        as_agent: Option<String>,
+        message_id: String,
+        index: usize,
+        #[serde(default)]
+        offset: Option<usize>,
+        #[serde(default)]
+        length: Option<usize>,
+    },
     Send {
         request_id: String,
         session: String,
@@ -127,6 +159,8 @@ enum Frame {
         as_agent: Option<String>,
         to: String,
         text: String,
+        #[serde(default)]
+        attachments: Vec<crate::client::AttachmentRef>,
         #[serde(default)]
         idempotency_key: Option<String>,
     },
@@ -137,6 +171,8 @@ enum Frame {
         as_agent: Option<String>,
         message_id: String,
         text: String,
+        #[serde(default)]
+        attachments: Vec<crate::client::AttachmentRef>,
         #[serde(default)]
         idempotency_key: Option<String>,
     },
@@ -674,12 +710,104 @@ where
                     let _ = tx.send(answer(res, &request_id));
                 });
             }
+            Frame::Attach {
+                request_id,
+                session,
+                as_agent,
+                name,
+                media_type,
+                data,
+                path,
+                upload,
+                offset,
+                sha256,
+            } => {
+                let caller =
+                    held(&*db.lock().map_err(db_err)?, &conn_id, &session).map_err(db_err)?;
+                let Some(caller) = caller else {
+                    let _ = tx.send(answer(Err(not_held(&session)), &request_id));
+                    continue;
+                };
+                let caller = match crate::agent::resolve_as_agent(
+                    &state,
+                    caller,
+                    as_agent.as_deref(),
+                    false,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tx.send(answer(Err(e), &request_id));
+                        continue;
+                    }
+                };
+                let (state, tx) = (state.clone(), tx.clone());
+                tasks.spawn(async move {
+                    let sender = surface::Sender::Session(caller);
+                    let res = surface::attach(
+                        &state,
+                        &sender,
+                        crate::client::AttachRequest {
+                            name,
+                            media_type,
+                            data,
+                            path,
+                            upload,
+                            offset,
+                            sha256,
+                        },
+                    )
+                    .await;
+                    let _ = tx.send(answer(res, &request_id));
+                });
+            }
+            Frame::ReadAttachment {
+                request_id,
+                session,
+                as_agent,
+                message_id,
+                index,
+                offset,
+                length,
+            } => {
+                let caller =
+                    held(&*db.lock().map_err(db_err)?, &conn_id, &session).map_err(db_err)?;
+                let Some(caller) = caller else {
+                    let _ = tx.send(answer(Err(not_held(&session)), &request_id));
+                    continue;
+                };
+                let caller = match crate::agent::resolve_as_agent(
+                    &state,
+                    caller,
+                    as_agent.as_deref(),
+                    false,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tx.send(answer(Err(e), &request_id));
+                        continue;
+                    }
+                };
+                let (state, tx) = (state.clone(), tx.clone());
+                tasks.spawn(async move {
+                    let res = surface::read_attachment(
+                        &state,
+                        Some(&caller),
+                        &message_id,
+                        index,
+                        offset.unwrap_or(0),
+                        length,
+                    )
+                    .await;
+                    let _ = tx.send(answer(res, &request_id));
+                });
+            }
             Frame::Send {
                 request_id,
                 session,
                 as_agent,
                 to,
                 text,
+                attachments,
                 idempotency_key,
             } => {
                 let caller =
@@ -703,17 +831,23 @@ where
                 let (state, tx) = (state.clone(), tx.clone());
                 tasks.spawn(async move {
                     let sender = surface::Sender::Session(caller);
-                    let res =
-                        surface::send(&state, &sender, &to, &text, idempotency_key.as_deref())
-                            .await
-                            .map(|r| {
-                                json!({
-                                    "status": "ok",
-                                    "message_id": r.message_id,
-                                    "address": r.address,
-                                    "outcome": r.outcome,
-                                })
-                            });
+                    let res = surface::send_with_attachments(
+                        &state,
+                        &sender,
+                        &to,
+                        &text,
+                        idempotency_key.as_deref(),
+                        &attachments,
+                    )
+                    .await
+                    .map(|r| {
+                        json!({
+                            "status": "ok",
+                            "message_id": r.message_id,
+                            "address": r.address,
+                            "outcome": r.outcome,
+                        })
+                    });
                     let _ = tx.send(answer(res, &request_id));
                 });
             }
@@ -723,6 +857,7 @@ where
                 as_agent,
                 message_id,
                 text,
+                attachments,
                 idempotency_key,
             } => {
                 let caller =
@@ -745,12 +880,13 @@ where
                 };
                 let (state, tx) = (state.clone(), tx.clone());
                 tasks.spawn(async move {
-                    let res = surface::reply(
+                    let res = surface::reply_with_attachments(
                         &state,
                         &caller,
                         &message_id,
                         &text,
                         idempotency_key.as_deref(),
+                        &attachments,
                     )
                     .await
                     .map(|r| json!({ "status": "ok", "reply": r }));

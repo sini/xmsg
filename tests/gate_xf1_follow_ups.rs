@@ -218,6 +218,7 @@ async fn test_xf1_peerpidfd_rejects_reaped_recycled_root_pid_and_fallback() {
     let (svc_notify_tx, _) = tokio::sync::broadcast::channel(32);
 
     let state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir.clone()],
         max_body: 65536,
         request_counter: std::sync::atomic::AtomicU64::new(0),
@@ -545,6 +546,7 @@ async fn test_xf1_live_peer_cred_attests_caller() {
     let (svc_notify_tx, _) = tokio::sync::broadcast::channel(32);
 
     let state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sessions_dir.clone()],
         max_body: 65536,
         request_counter: std::sync::atomic::AtomicU64::new(0),

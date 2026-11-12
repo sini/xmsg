@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::broadcast;
 
+use crate::attachments;
+use crate::client::wire::{AttachRequest, AttachmentRef};
 use crate::error::AppError;
 use crate::fed::FedListEntry;
 use crate::http::{AppState, ResolvedTarget};
@@ -1043,13 +1045,14 @@ pub async fn deliver_with_in_reply_to(
         Some(r) => format!(" ref={r}"),
         None => String::new(),
     };
+    let attachment_summary = attachment_lines(local, message_id)?;
     let envelope_text = || {
         match in_reply_to {
         Some(irt) => format!(
-            "[xmsg] reply to message_id={irt} — message_id={message_id}; reply with the xmsg reply tool (tools: send, reply, list, replies)\n\n{body}"
+            "[xmsg] reply to message_id={irt} — message_id={message_id}; reply with the xmsg reply tool (tools: send, reply, list, replies){attachment_summary}\n\n{body}"
         ),
         None => format!(
-            "[xmsg] from={from_name}{ref_part} message_id={message_id} — reply with the xmsg reply tool (tools: send, reply, list, replies)\n\n{body}"
+            "[xmsg] from={from_name}{ref_part} message_id={message_id} — reply with the xmsg reply tool (tools: send, reply, list, replies){attachment_summary}\n\n{body}"
         ),
     }
     };
@@ -1069,7 +1072,7 @@ pub async fn deliver_with_in_reply_to(
                 body: match in_reply_to {
                     Some(_) => envelope_text(),
                     None => format!(
-                        "{body}\n\n[xmsg]{ref_part} message_id={message_id} sent={sent} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
+                        "{body}\n\n[xmsg]{ref_part} message_id={message_id} sent={sent} — reply with the xmsg reply tool (tools: send, reply, list, replies){attachment_summary}"
                     ),
                 },
             };
@@ -1081,7 +1084,7 @@ pub async fn deliver_with_in_reply_to(
             let body_with_footer = match in_reply_to {
                 Some(_) => envelope_text(),
                 None => format!(
-                    "{body}\n\n[xmsg]{ref_part} message_id={message_id} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
+                    "{body}\n\n[xmsg]{ref_part} message_id={message_id} — reply with the xmsg reply tool (tools: send, reply, list, replies){attachment_summary}"
                 ),
             };
             let line = inbox::encode_transport_line(from_name, &body_with_footer)?;
@@ -1108,7 +1111,7 @@ pub async fn deliver_with_in_reply_to(
                 body: match in_reply_to {
                     Some(_) => envelope_text(),
                     None => format!(
-                        "{body}\n\n[xmsg]{ref_part} message_id={message_id} sent={sent} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
+                        "{body}\n\n[xmsg]{ref_part} message_id={message_id} sent={sent} — reply with the xmsg reply tool (tools: send, reply, list, replies){attachment_summary}"
                     ),
                 },
             };
@@ -1147,7 +1150,7 @@ pub async fn deliver_with_in_reply_to(
                     body: match in_reply_to {
                         Some(_) => envelope_text(),
                         None => format!(
-                            "{body}\n\n[xmsg]{ref_part} message_id={message_id} sent={sent} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
+                            "{body}\n\n[xmsg]{ref_part} message_id={message_id} sent={sent} — reply with the xmsg reply tool (tools: send, reply, list, replies){attachment_summary}"
                         ),
                     },
                 };
@@ -1160,7 +1163,7 @@ pub async fn deliver_with_in_reply_to(
                     let body_with_footer = match in_reply_to {
                         Some(_) => format!("{subagent_header}\n{}", envelope_text()),
                         None => format!(
-                            "{subagent_header}\n{body}\n\n[xmsg]{ref_part} message_id={message_id} — reply with the xmsg reply tool (tools: send, reply, list, replies)"
+                            "{subagent_header}\n{body}\n\n[xmsg]{ref_part} message_id={message_id} — reply with the xmsg reply tool (tools: send, reply, list, replies){attachment_summary}"
                         ),
                     };
                     let line = inbox::encode_transport_line(from_name, &body_with_footer)?;
@@ -1286,7 +1289,7 @@ pub async fn deliver_with_in_reply_to(
                 envelope: match in_reply_to {
                     Some(_) => envelope_text(),
                     None => format!(
-                        "[xmsg] from={from_name}{ref_part} message_id={message_id} sent={sent} — reply with the xmsg reply tool (tools: send, reply, list, replies)\n\n{body}"
+                        "[xmsg] from={from_name}{ref_part} message_id={message_id} sent={sent} — reply with the xmsg reply tool (tools: send, reply, list, replies){attachment_summary}\n\n{body}"
                     ),
                 },
                 delivered_at: None,
@@ -1423,8 +1426,12 @@ pub async fn push_reply(
     replier_origin: Origin,
     text: &str,
 ) -> &'static str {
+    let attachment_summary = match attachment_lines(local, reply_id) {
+        Ok(s) => s,
+        Err(_) => return "push_failed",
+    };
     let mut envelope = format!(
-        "[xmsg] reply to message_id={in_reply_to} — message_id={reply_id}; reply with the xmsg reply tool (tools: send, reply, list, replies)\n\n{text}"
+        "[xmsg] reply to message_id={in_reply_to} — message_id={reply_id}; reply with the xmsg reply tool (tools: send, reply, list, replies){attachment_summary}\n\n{text}"
     );
     let mut effective_session_id = ret_session_id.to_string();
     let mut effective_text = text.to_string();
@@ -1805,6 +1812,227 @@ pub async fn push_reply(
 /// instance, `name@node` for a service) and the outcome.
 pub use crate::client::wire::SendResult;
 
+fn attachment_expiry(created_at: i64, ttl: Duration) -> i64 {
+    created_at.saturating_add(ttl.as_secs().min(i64::MAX as u64) as i64)
+}
+
+fn attachment_digest(refs: &[AttachmentRef]) -> Result<Option<String>, AppError> {
+    use sha2::{Digest, Sha256};
+    if refs.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(hex::encode(Sha256::digest(
+        serde_json::to_vec(refs).map_err(db_err)?,
+    ))))
+}
+
+fn authorize_attachments(
+    db: &rusqlite::Connection,
+    sender: &Sender,
+    refs: &[AttachmentRef],
+    now: i64,
+) -> Result<(), AppError> {
+    if refs.is_empty() {
+        return Ok(());
+    }
+    let readable = match sender {
+        Sender::Session(caller) => {
+            let mut stmt = db.prepare("SELECT a.item_id FROM attachments a JOIN messages m ON a.item_id=m.id WHERE (m.session_id=?1 AND m.recipient_harness=?2) OR (m.return_session_id=?1 AND (m.return_harness=?2 OR m.return_harness='fed'))").map_err(db_err)?;
+            let ids = stmt
+                .query_map(rusqlite::params![caller.session_id, caller.harness], |r| {
+                    r.get::<_, String>(0)
+                })
+                .map_err(db_err)?;
+            ids.collect::<rusqlite::Result<Vec<_>>>().map_err(db_err)?
+        }
+        Sender::Anonymous(_) => Vec::new(),
+    };
+    attachments::authorize_refs(db, &sender.idempotency_principal(), refs, &readable, now)
+}
+
+pub async fn attach(
+    state: &Arc<AppState>,
+    sender: &Sender,
+    request: AttachRequest,
+) -> Result<serde_json::Value, AppError> {
+    use base64::Engine;
+    use tokio::io::AsyncReadExt;
+    let principal = sender.idempotency_principal();
+    let limits = attachments::Limits {
+        max_bytes: state.max_attachment_bytes,
+        now: storage::now_epoch_secs(),
+        ttl_secs: state.idempotency_ttl.as_secs(),
+    };
+    if request.path.is_some()
+        && (request.data.is_some()
+            || request.upload.is_some()
+            || request.offset.is_some()
+            || request.sha256.is_some())
+    {
+        return Err(AppError::BadRequest(
+            "path cannot be combined with data or upload fields".to_string(),
+        ));
+    }
+    let data = if let Some(file_path) = request.path.as_deref() {
+        if !std::path::Path::new(file_path).is_absolute() {
+            return Err(AppError::BadRequest("path must be absolute".to_string()));
+        }
+        let file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(file_path)
+            .await
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        if !file.metadata().await.map_err(db_err)?.is_file() {
+            return Err(AppError::BadRequest(
+                "path must name a regular file".to_string(),
+            ));
+        }
+        let mut data = Vec::new();
+        file.take(state.max_attachment_bytes.saturating_add(1) as u64)
+            .read_to_end(&mut data)
+            .await
+            .map_err(db_err)?;
+        Some(data)
+    } else if let Some(encoded) = request.data.as_deref() {
+        if encoded.len()
+            > state
+                .max_attachment_bytes
+                .saturating_add(2)
+                .saturating_div(3)
+                .saturating_mul(4)
+        {
+            return Err(AppError::PayloadTooLarge {
+                size: encoded.len().saturating_mul(3) / 4,
+                limit: state.max_attachment_bytes,
+            });
+        }
+        Some(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| AppError::BadRequest("data must be base64".to_string()))?,
+        )
+    } else {
+        None
+    };
+    let db = state.db.lock().map_err(db_err)?;
+    attachments::purge(&db, limits.now, limits.ttl_secs)?;
+    if let Some(upload) = request.upload.as_deref() {
+        if let Some(data) = data {
+            if request.name.is_some() || request.media_type.is_some() || request.sha256.is_some() {
+                return Err(AppError::BadRequest(
+                    "a chunk cannot include finalization fields".to_string(),
+                ));
+            }
+            let offset = request
+                .offset
+                .ok_or_else(|| AppError::BadRequest("a chunk requires offset".to_string()))?;
+            let size = attachments::append_chunk(&db, &principal, upload, offset, &data, limits)?;
+            return Ok(serde_json::json!({"status":"ok","upload":upload,"size":size}));
+        }
+        if request.offset.is_some() {
+            return Err(AppError::BadRequest("offset requires data".to_string()));
+        }
+        let name = request.name.as_deref().ok_or_else(|| {
+            AppError::BadRequest("finalizing an upload requires name".to_string())
+        })?;
+        let attachment = attachments::finish_upload(
+            &db,
+            &principal,
+            upload,
+            name,
+            request.media_type.as_deref(),
+            request.sha256.as_deref(),
+            limits,
+        )?;
+        return Ok(serde_json::json!({"status":"ok","attachment":attachment}));
+    }
+    if request.offset.is_some() || request.sha256.is_some() {
+        return Err(AppError::BadRequest(
+            "offset and sha256 require upload".to_string(),
+        ));
+    }
+    let name = request
+        .name
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("name is required".to_string()))?;
+    let data = data.ok_or_else(|| AppError::BadRequest("data or path is required".to_string()))?;
+    let attachment = attachments::stage(
+        &db,
+        &principal,
+        name,
+        request.media_type.as_deref(),
+        &data,
+        limits,
+    )?;
+    Ok(serde_json::json!({"status":"ok","attachment":attachment}))
+}
+
+pub async fn read_attachment(
+    state: &Arc<AppState>,
+    caller: Option<&Session>,
+    item_id: &str,
+    index: usize,
+    offset: usize,
+    length: Option<usize>,
+) -> Result<serde_json::Value, AppError> {
+    let db = state.db.lock().map_err(db_err)?;
+    let reply = storage::get_reply_by_pushed_id(&db, item_id).map_err(db_err)?;
+    if reply.is_none() {
+        let msg = storage::get_message(&db, item_id)
+            .map_err(db_err)?
+            .ok_or_else(|| AppError::NotFound(item_id.to_string()))?;
+        let allowed = caller.is_some_and(|c| {
+            (c.harness == msg.recipient_harness && c.session_id == msg.session_id)
+                || (msg.return_session_id.as_deref() == Some(&c.session_id)
+                    && (msg.return_harness.as_deref() == Some(&c.harness)
+                        || msg.return_harness.as_deref() == Some("fed")))
+        });
+        if !allowed {
+            return Err(AppError::Denied(
+                "caller may not read this attachment".to_string(),
+            ));
+        }
+    }
+    let row = attachments::get_row(&db, item_id, index)?
+        .ok_or_else(|| AppError::NotFound(format!("attachment {index}")))?;
+    let range = attachments::read_range(
+        &db,
+        &row,
+        offset,
+        length,
+        state.max_body,
+        storage::now_epoch_secs(),
+    )?;
+    if let Some(caller) = caller {
+        let expires =
+            attachment_expiry(storage::now_epoch_secs(), state.idempotency_ttl).min(row.expires_at);
+        db.execute("INSERT INTO staged_blobs (principal,sha256,expires_at) VALUES (?1,?2,?3) ON CONFLICT(principal,sha256) DO UPDATE SET expires_at=max(expires_at,excluded.expires_at)", rusqlite::params![caller.session_id, row.attachment.sha256, expires]).map_err(db_err)?;
+    }
+    let mut result = serde_json::to_value(range).map_err(db_err)?;
+    result["status"] = serde_json::json!("ok");
+    Ok(result)
+}
+
+fn reply_attachments(
+    db: &rusqlite::Connection,
+    mut reply: ReplyRecord,
+) -> Result<ReplyRecord, AppError> {
+    if let Some(id) = reply.pushed_message_id.as_deref() {
+        reply.attachments = attachments::list_rows(db, id)?
+            .into_iter()
+            .map(|r| r.attachment)
+            .collect();
+    }
+    Ok(reply)
+}
+
+fn attachment_lines(local: &Local<'_>, item_id: &str) -> Result<String, AppError> {
+    let db = local.db.lock().map_err(db_err)?;
+    let rows = attachments::list_rows(&db, item_id)?;
+    Ok(rows.into_iter().map(|r| format!("\n[xmsg] attachment {}: name=\"{}\" size={} type={} sha256={}; read it with the xmsg read_attachment tool", r.index, r.attachment.name, r.attachment.size, r.attachment.media_type, r.attachment.sha256)).collect())
+}
+
 fn check_idempotency_key(key: &str) -> Result<(), AppError> {
     if key.is_empty() || key.len() > 128 || key.chars().any(|c| c.is_control()) {
         return Err(AppError::BadRequest(
@@ -1849,6 +2077,17 @@ pub async fn send(
     text: &str,
     idempotency_key: Option<&str>,
 ) -> Result<SendResult, AppError> {
+    send_with_attachments(state, sender, to, text, idempotency_key, &[]).await
+}
+
+pub async fn send_with_attachments(
+    state: &Arc<AppState>,
+    sender: &Sender,
+    to: &str,
+    text: &str,
+    idempotency_key: Option<&str>,
+    refs: &[AttachmentRef],
+) -> Result<SendResult, AppError> {
     if text.is_empty() {
         return Err(AppError::BadRequest("text must not be empty".to_string()));
     }
@@ -1861,6 +2100,8 @@ pub async fn send(
     parse_to(to)?;
     let from_name = sender.label(&state.node_name)?;
     let principal = sender.idempotency_principal();
+    let refs = attachments::normalize_refs(refs, state.max_attachment_bytes)?;
+    let refs_digest = attachment_digest(&refs)?;
 
     let message_id = match idempotency_key {
         None => ulid::Ulid::new().to_string(),
@@ -1871,17 +2112,30 @@ pub async fn send(
             let held = reserve_or_wait(
                 || {
                     let db = state.db.lock().map_err(db_err)?;
-                    storage::reserve_idempotency_key(
-                        &db, &principal, key, text, to, &from_name, &fresh, ttl,
+                    storage::reserve_idempotency_key_with_refs(
+                        &db,
+                        &principal,
+                        key,
+                        text,
+                        refs_digest.as_deref(),
+                        to,
+                        &from_name,
+                        &fresh,
+                        ttl,
                     )
                     .map_err(db_err)
                 },
-                |r| r.body == text && r.to_ref == to && r.outcome == storage::KEY_PENDING,
+                |r| {
+                    r.body == text
+                        && r.refs_digest == refs_digest
+                        && r.to_ref == to
+                        && r.outcome == storage::KEY_PENDING
+                },
             )
             .await?;
             match held {
                 Reservation::Mine(id) => id,
-                Reservation::Held(r) if r.body != text || r.to_ref != to => {
+                Reservation::Held(r) if r.body != text || r.refs_digest != refs_digest || r.to_ref != to => {
                     return Err(AppError::Conflict(format!(
                         "idempotency key '{key}' was already used with a different message body or recipient"
                     )))
@@ -1919,7 +2173,8 @@ pub async fn send(
         );
         let key = idempotency_key.map(str::to_string);
         tokio::spawn(async move {
-            let res = deliver_send(&state, &sender, &to, &text, &from_name, message_id).await;
+            let res =
+                deliver_send(&state, &sender, &to, &text, &from_name, message_id, &refs).await;
             if let Some(key) = key {
                 let (address, outcome) = match &res {
                     Ok(r) => (r.address.as_str(), r.outcome.as_str()),
@@ -1947,6 +2202,7 @@ async fn deliver_send(
     text: &str,
     from_name: &str,
     message_id: String,
+    refs: &[AttachmentRef],
 ) -> Result<SendResult, AppError> {
     let (target_ref, node) = parse_to(to)?;
     let from_name = from_name.to_string();
@@ -2039,8 +2295,10 @@ async fn deliver_send(
     };
     {
         let db = state.db.lock().map_err(db_err)?;
+        let tx = db.unchecked_transaction().map_err(db_err)?;
+        authorize_attachments(&tx, sender, refs, storage::now_epoch_secs())?;
         storage::upsert_message(
-            &db,
+            &tx,
             &MessageRecord {
                 id: message_id.clone(),
                 created_at: now,
@@ -2056,6 +2314,15 @@ async fn deliver_send(
             },
         )
         .map_err(db_err)?;
+        attachments::insert_rows(
+            &tx,
+            &message_id,
+            refs,
+            attachment_expiry(now, state.reply_ttl),
+            "",
+            "",
+        )?;
+        tx.commit().map_err(db_err)?;
     }
     let delivered: Result<_, AppError> = async {
         Ok(loop {
@@ -2095,6 +2362,11 @@ async fn deliver_send(
                     None,
                 );
             };
+            if !refs.is_empty() {
+                return Err(AppError::Unavailable(
+                    "federated attachments are not supported yet".to_string(),
+                ));
+            }
             let fed_state = state
                 .fed_state
                 .as_ref()
@@ -2218,12 +2490,13 @@ async fn deliver_send(
     let (address, _recipient_harness, outcome, return_host) = match delivered {
         Ok(d) => d,
         Err(e) => {
-            if let Err(de) = state
-                .db
-                .lock()
-                .map_err(db_err)
-                .and_then(|db| storage::delete_message(&db, &message_id).map_err(db_err))
-            {
+            if let Err(de) = state.db.lock().map_err(db_err).and_then(|db| {
+                let tx = db.unchecked_transaction().map_err(db_err)?;
+                tx.execute("DELETE FROM attachments WHERE item_id=?1", [&message_id])
+                    .map_err(db_err)?;
+                storage::delete_message(&tx, &message_id).map_err(db_err)?;
+                tx.commit().map_err(db_err)
+            }) {
                 tracing::warn!(target: "xmsg", message_id = %message_id, "undelivered message's record not removed: {de}");
             }
             return Err(e);
@@ -2237,6 +2510,11 @@ async fn deliver_send(
                 tracing::warn!(target: "xmsg", message_id = %message_id, "delivered message's record not completed: {e}");
             }
             let _ = storage::purge_idempotency_keys(&db, state.idempotency_ttl.as_secs());
+            let _ = attachments::purge(
+                &db,
+                storage::now_epoch_secs(),
+                state.idempotency_ttl.as_secs(),
+            );
             let ttl = state.reply_ttl.as_secs();
             let _ = storage::purge_messages(&db, ttl);
             let _ = storage::purge_replies(&db, ttl);
@@ -2313,6 +2591,17 @@ pub async fn reply(
     text: &str,
     idempotency_key: Option<&str>,
 ) -> Result<ReplyRecord, AppError> {
+    reply_with_attachments(state, caller, message_id, text, idempotency_key, &[]).await
+}
+
+pub async fn reply_with_attachments(
+    state: &Arc<AppState>,
+    caller: &Session,
+    message_id: &str,
+    text: &str,
+    idempotency_key: Option<&str>,
+    refs: &[AttachmentRef],
+) -> Result<ReplyRecord, AppError> {
     if message_id.is_empty() || text.is_empty() {
         return Err(AppError::BadRequest(
             "message_id and text are required".to_string(),
@@ -2357,6 +2646,8 @@ pub async fn reply(
     }
 
     let principal = Sender::Session(caller.clone()).idempotency_principal();
+    let refs = attachments::normalize_refs(refs, state.max_attachment_bytes)?;
+    let refs_digest = attachment_digest(&refs)?;
     let reply_id = match idempotency_key {
         None => ulid::Ulid::new().to_string(),
         Some(key) => {
@@ -2366,17 +2657,33 @@ pub async fn reply(
             let held = reserve_or_wait(
                 || {
                     let db = state.db.lock().map_err(db_err)?;
-                    storage::reserve_reply_key(&db, &principal, key, message_id, text, &fresh, ttl)
-                        .map_err(db_err)
+                    storage::reserve_reply_key_with_refs(
+                        &db,
+                        &principal,
+                        key,
+                        message_id,
+                        text,
+                        refs_digest.as_deref(),
+                        &fresh,
+                        ttl,
+                    )
+                    .map_err(db_err)
                 },
                 |r| {
-                    r.in_reply_to == message_id && r.body == text && r.state == storage::KEY_PENDING
+                    r.in_reply_to == message_id
+                        && r.body == text
+                        && r.refs_digest == refs_digest
+                        && r.state == storage::KEY_PENDING
                 },
             )
             .await?;
             match held {
                 Reservation::Mine(id) => id,
-                Reservation::Held(r) if r.in_reply_to != message_id || r.body != text => {
+                Reservation::Held(r)
+                    if r.in_reply_to != message_id
+                        || r.body != text
+                        || r.refs_digest != refs_digest =>
+                {
                     return Err(AppError::Conflict(format!(
                         "idempotency key '{key}' was already used with a different reply"
                     )))
@@ -2388,6 +2695,7 @@ pub async fn reply(
                             storage::get_reply_by_seq(&db, seq)
                                 .map_err(db_err)?
                                 .ok_or_else(|| AppError::NotFound(format!("reply {seq} (expired)")))
+                                .and_then(|r| reply_attachments(&db, r))
                         }
                         None => Ok(ReplyRecord {
                             seq: 0,
@@ -2397,6 +2705,7 @@ pub async fn reply(
                             text: text.to_string(),
                             push_outcome: Some(storage::KEY_PENDING.to_string()),
                             pushed_message_id: Some(r.reply_id),
+                            attachments: refs.clone(),
                             replier: None,
                         }),
                     };
@@ -2425,6 +2734,7 @@ pub async fn reply(
                     message_id: &message_id,
                     text: &text,
                     reply_id,
+                    attachments: refs,
                 },
             )
             .await;
@@ -2490,6 +2800,7 @@ struct ReplyDelivery<'a> {
     message_id: &'a str,
     text: &'a str,
     reply_id: String,
+    attachments: Vec<AttachmentRef>,
 }
 
 /// Commit reply recovery and definite non-handoff custody together before any relay.
@@ -2656,6 +2967,7 @@ async fn deliver_reply(
         message_id,
         text,
         reply_id,
+        attachments: refs,
     } = delivery;
     let (remote_host, has_inbox, ret_harness, ret_session_id) = if caller_is_sender {
         if msg.recipient_harness == "fed" {
@@ -2681,6 +2993,42 @@ async fn deliver_reply(
         let ret_harness = msg.return_harness.clone().unwrap_or_default();
         let ret_session_id = msg.return_session_id.clone().unwrap_or_default();
         (remote_host, has_inbox, ret_harness, ret_session_id)
+    };
+    if !refs.is_empty() && (remote_host.is_some() || is_forwarded) {
+        return Err(AppError::Unavailable(
+            "federated attachments are not supported yet".to_string(),
+        ));
+    }
+    let early_reply = if !refs.is_empty() {
+        let db = state.db.lock().map_err(db_err)?;
+        let tx = db.unchecked_transaction().map_err(db_err)?;
+        authorize_attachments(
+            &tx,
+            &Sender::Session(caller.clone()),
+            &refs,
+            storage::now_epoch_secs(),
+        )?;
+        let record = storage::insert_reply(
+            &tx,
+            message_id,
+            &caller.session_id,
+            text,
+            Some("pending"),
+            Some(&reply_id),
+        )
+        .map_err(db_err)?;
+        attachments::insert_rows(
+            &tx,
+            &reply_id,
+            &refs,
+            attachment_expiry(record.created_at, state.reply_ttl),
+            "",
+            "",
+        )?;
+        tx.commit().map_err(db_err)?;
+        Some(record)
+    } else {
+        None
     };
     // A leaf (or other undialable) origin pulls its replies; nothing is pushed to it.
     let to_leaf = remote_host.as_deref().is_some_and(|h| {
@@ -2895,30 +3243,44 @@ async fn deliver_reply(
     };
     // The pushed copy's ID: a local push that landed, or the envelope a remote origin
     // received or will pull (which deduplicates and replies by it).
-    let pushed_id = match (
-        remote_host.as_deref(),
-        push_outcome,
-        dest_session_id.as_deref(),
-    ) {
-        (Some(_), Some("stored"), None) | (_, None, _) => None,
-        (Some(_), Some(_), _) | (None, Some("pushed"), _) => Some(reply_id.as_str()),
-        (None, Some(_), _) => None,
+    let pushed_id = if !refs.is_empty() {
+        Some(reply_id.as_str())
+    } else {
+        match (
+            remote_host.as_deref(),
+            push_outcome,
+            dest_session_id.as_deref(),
+        ) {
+            (Some(_), Some("stored"), None) | (_, None, _) => None,
+            (Some(_), Some(_), _) | (None, Some("pushed"), _) => Some(reply_id.as_str()),
+            (None, Some(_), _) => None,
+        }
     };
 
     let record = {
         let db = state.db.lock().map_err(db_err)?;
-        let record = storage::insert_reply(
-            &db,
-            message_id,
-            &caller.session_id,
-            text,
-            push_outcome,
-            pushed_id,
-        )
-        .map_err(db_err)?;
+        let record = if let Some(mut record) = early_reply {
+            db.execute(
+                "UPDATE replies SET push_outcome=?1 WHERE seq=?2",
+                rusqlite::params![push_outcome, record.seq],
+            )
+            .map_err(db_err)?;
+            record.push_outcome = push_outcome.map(str::to_string);
+            record
+        } else {
+            storage::insert_reply(
+                &db,
+                message_id,
+                &caller.session_id,
+                text,
+                push_outcome,
+                pushed_id,
+            )
+            .map_err(db_err)?
+        };
         let _ = storage::purge_replies(&db, state.reply_ttl.as_secs());
         let _ = storage::purge_messages(&db, state.reply_ttl.as_secs());
-        record
+        reply_attachments(&db, record)?
     };
     let _ = state.notify_tx.send(message_id.to_string());
     Ok(record)
@@ -2966,7 +3328,11 @@ pub async fn replies(
 
     let stored = |state: &AppState| -> Result<Vec<ReplyRecord>, AppError> {
         let db = state.db.lock().map_err(db_err)?;
-        storage::get_replies_after(&db, message_id, after).map_err(db_err)
+        storage::get_replies_after(&db, message_id, after)
+            .map_err(db_err)?
+            .into_iter()
+            .map(|r| reply_attachments(&db, r))
+            .collect()
     };
 
     // A message sent to a dialable peer: its replies may still be there.

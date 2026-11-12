@@ -101,6 +101,7 @@ exit 0
 
     let (pi_notify_tx, _) = broadcast::channel(16);
     let state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sess_dir],
         agy_config,
         agy_store: agy_store.clone(),
@@ -315,6 +316,7 @@ exit 0
     xmsg::storage::init_db(&conn).unwrap();
     let db = Arc::new(Mutex::new(conn));
     let state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sess_dir],
         agy_config,
         agy_store: agy_store.clone(),
@@ -496,6 +498,7 @@ exit 0
     xmsg::storage::init_db(&conn).unwrap();
     let db = Arc::new(Mutex::new(conn));
     let state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sess_dir.clone()],
         agy_config: agy_config.clone(),
         agy_store: agy_store.clone(),
@@ -765,6 +768,7 @@ async fn assert_nonzero_exit_not_stale(stdout_payload: &str, stderr_payload: &st
     xmsg::storage::init_db(&conn).unwrap();
     let db = Arc::new(Mutex::new(conn));
     let state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![sess_dir],
         agy_config,
         agy_store: agy_store.clone(),
