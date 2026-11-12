@@ -22,6 +22,119 @@ fn fetch_lock(fs: &FedState, item: &str, index: usize) -> Arc<tokio::sync::Mutex
     lock
 }
 
+pub const READ_FETCH_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+pub const READ_FETCH_RESULT_TTL: std::time::Duration = std::time::Duration::from_secs(180);
+pub const MAX_READ_FETCH_JOBS: usize = 64;
+
+struct ReadJob {
+    db: Weak<Mutex<rusqlite::Connection>>,
+    handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<(), AppError>>>>,
+    cancel: Arc<tokio::sync::Notify>,
+}
+
+type ReadJobs = Mutex<HashMap<FetchKey, Arc<ReadJob>>>;
+
+fn read_jobs() -> &'static ReadJobs {
+    static JOBS: OnceLock<ReadJobs> = OnceLock::new();
+    JOBS.get_or_init(Default::default)
+}
+
+fn remove_read_job(key: &FetchKey, expected: &Weak<ReadJob>) {
+    let mut jobs = read_jobs().lock().unwrap_or_else(|e| e.into_inner());
+    if jobs
+        .get(key)
+        .is_some_and(|job| Weak::ptr_eq(&Arc::downgrade(job), expected))
+    {
+        jobs.remove(key);
+    }
+}
+
+pub async fn poll_read_fetch(
+    fs: &Arc<FedState>,
+    item: &str,
+    index: usize,
+) -> Result<bool, AppError> {
+    poll_read_job(
+        &fs.db,
+        item,
+        index,
+        READ_FETCH_WAIT,
+        READ_FETCH_RESULT_TTL,
+        || {
+            let fs = fs.clone();
+            let item = item.to_string();
+            async move { ensure_attachment(&fs, &item, index).await }
+        },
+    )
+    .await
+}
+
+async fn poll_read_job<F, Fut>(
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    item: &str,
+    index: usize,
+    wait: std::time::Duration,
+    ttl: std::time::Duration,
+    start: F,
+) -> Result<bool, AppError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), AppError>> + Send + 'static,
+{
+    let deadline = tokio::time::Instant::now() + wait;
+    let key = (Arc::as_ptr(db) as usize, item.to_string(), index);
+    let job = {
+        let mut jobs = read_jobs().lock().unwrap_or_else(|e| e.into_inner());
+        jobs.retain(|_, job| job.db.strong_count() > 0);
+        if let Some(job) = jobs.get(&key) {
+            job.clone()
+        } else {
+            if jobs.keys().filter(|held| held.0 == key.0).count() >= MAX_READ_FETCH_JOBS {
+                return Err(AppError::Unavailable(
+                    "attachment read jobs full; retry".into(),
+                ));
+            }
+            let job = Arc::new(ReadJob {
+                db: Arc::downgrade(db),
+                handle: tokio::sync::Mutex::new(None),
+                cancel: Arc::new(tokio::sync::Notify::new()),
+            });
+            let worker = tokio::spawn(start());
+            let weak = Arc::downgrade(&job);
+            let cancel = job.cancel.clone();
+            let timer_key = key.clone();
+            *job.handle.try_lock().unwrap() = Some(tokio::spawn(async move {
+                let result = worker
+                    .await
+                    .unwrap_or_else(|e| Err(AppError::Internal(e.to_string())));
+                tokio::spawn(async move {
+                    tokio::select! {
+                        _ = tokio::time::sleep(ttl) => remove_read_job(&timer_key, &weak),
+                        _ = cancel.notified() => {},
+                    }
+                });
+                result
+            }));
+            jobs.insert(key.clone(), job.clone());
+            job
+        }
+    };
+    let Ok(mut handle) = tokio::time::timeout_at(deadline, job.handle.lock()).await else {
+        return Ok(false);
+    };
+    let Some(task) = handle.as_mut() else {
+        return Ok(true);
+    };
+    let Ok(result) = tokio::time::timeout_at(deadline, task).await else {
+        return Ok(false);
+    };
+    *handle = None;
+    job.cancel.notify_one();
+    remove_read_job(&key, &Arc::downgrade(&job));
+    result.map_err(|e| AppError::Internal(e.to_string()))??;
+    Ok(true)
+}
+
 pub async fn ensure_attachment(
     fs: &Arc<FedState>,
     item: &str,
@@ -290,5 +403,270 @@ mod deadline_tests {
         );
         server.abort();
         let _ = server.await;
+    }
+}
+#[cfg(test)]
+mod read_job_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    fn db() -> Arc<Mutex<rusqlite::Connection>> {
+        Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()))
+    }
+
+    fn count(db: &Arc<Mutex<rusqlite::Connection>>) -> usize {
+        let key = Arc::as_ptr(db) as usize;
+        read_jobs()
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|k| k.0 == key)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn pending_read_retains_error_until_next_poll_then_allows_retry() {
+        let db = db();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let start = || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let release = release.clone();
+            async move {
+                release.notified().await;
+                Err(AppError::Unavailable("fetch deadline exceeded".into()))
+            }
+        };
+        assert!(!poll_read_job(
+            &db,
+            "item",
+            0,
+            Duration::from_millis(1),
+            Duration::from_secs(60),
+            start
+        )
+        .await
+        .unwrap());
+        let job = read_jobs()
+            .lock()
+            .unwrap()
+            .values()
+            .find(|j| j.db.ptr_eq(&Arc::downgrade(&db)))
+            .expect("pending read must remain registered for its next poll")
+            .clone();
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let finished = job.handle.lock().await.as_ref().unwrap().is_finished();
+                if finished {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background failure must complete before the next read poll");
+        let error = poll_read_job(
+            &db,
+            "item",
+            0,
+            Duration::from_secs(1),
+            Duration::from_secs(60),
+            start,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::Unavailable(ref reason) if reason.contains("deadline")));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "poll restarted instead of consuming retained failure"
+        );
+        assert_eq!(count(&db), 0);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while Arc::strong_count(&job.cancel) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("consumption must cancel its result-retention timer");
+        assert!(!poll_read_job(
+            &db,
+            "item",
+            0,
+            Duration::from_millis(1),
+            Duration::from_secs(60),
+            start
+        )
+        .await
+        .unwrap());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a consumed failure must allow a clean retry"
+        );
+        let key = (Arc::as_ptr(&db) as usize, "item".into(), 0);
+        remove_read_job(&key, &Arc::downgrade(&job));
+        assert_eq!(
+            count(&db),
+            1,
+            "an old cleanup must never remove a replacement job"
+        );
+        release.notify_one();
+        let _ = poll_read_job(
+            &db,
+            "item",
+            0,
+            Duration::from_secs(1),
+            Duration::from_secs(60),
+            start,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn read_job_cap_refuses_before_starting_a_65th_fetch() {
+        let db = db();
+        let calls = AtomicUsize::new(0);
+        let (release, gate) = tokio::sync::watch::channel(false);
+        for index in 0..MAX_READ_FETCH_JOBS {
+            let mut gate = gate.clone();
+            assert!(!poll_read_job(
+                &db,
+                "item",
+                index,
+                Duration::from_millis(1),
+                Duration::from_secs(60),
+                || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        gate.changed().await.unwrap();
+                        Ok(())
+                    }
+                }
+            )
+            .await
+            .unwrap());
+        }
+        let mut gate = gate.clone();
+        let rejected = poll_read_job(
+            &db,
+            "item",
+            MAX_READ_FETCH_JOBS,
+            Duration::from_millis(1),
+            Duration::from_secs(60),
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    gate.changed().await.unwrap();
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        assert!(
+            matches!(rejected, Err(AppError::Unavailable(_))),
+            "65th read job must be refused before starting: {rejected:?}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), MAX_READ_FETCH_JOBS);
+        assert_eq!(count(&db), MAX_READ_FETCH_JOBS);
+        release.send(true).unwrap();
+        for index in 0..MAX_READ_FETCH_JOBS {
+            assert!(poll_read_job(
+                &db,
+                "item",
+                index,
+                Duration::from_secs(1),
+                Duration::from_secs(60),
+                || async {
+                    panic!("cap fixture job unexpectedly disappeared before consumption");
+                }
+            )
+            .await
+            .unwrap());
+        }
+        assert_eq!(count(&db), 0);
+    }
+
+    #[tokio::test]
+    async fn unconsumed_completed_read_job_expires_without_another_poll() {
+        let db = db();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate = release.clone();
+        assert!(!poll_read_job(
+            &db,
+            "item",
+            0,
+            Duration::from_millis(1),
+            Duration::from_millis(10),
+            || async move {
+                gate.notified().await;
+                Err(AppError::Unavailable("retained failure".into()))
+            }
+        )
+        .await
+        .unwrap());
+        assert_eq!(count(&db), 1);
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while count(&db) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("unconsumed completed result must expire automatically without a read poll");
+    }
+
+    #[tokio::test]
+    async fn read_poll_wait_budget_includes_another_pollers_job_mutex() {
+        let db = db();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let start = || {
+            let release = release.clone();
+            async move {
+                release.notified().await;
+                Ok(())
+            }
+        };
+        assert!(!poll_read_job(
+            &db,
+            "item",
+            0,
+            Duration::from_millis(1),
+            Duration::from_secs(60),
+            start
+        )
+        .await
+        .unwrap());
+        let key = (Arc::as_ptr(&db) as usize, "item".into(), 0);
+        let job = read_jobs().lock().unwrap().get(&key).unwrap().clone();
+        let held = job.handle.lock().await;
+        let waiting = tokio::time::timeout(
+            Duration::from_millis(100),
+            poll_read_job(
+                &db,
+                "item",
+                0,
+                Duration::from_millis(5),
+                Duration::from_secs(60),
+                start,
+            ),
+        )
+        .await
+        .expect("read poll budget must include waiting for the job mutex");
+        assert!(!waiting.unwrap());
+        drop(held);
+        release.notify_one();
+        assert!(poll_read_job(
+            &db,
+            "item",
+            0,
+            Duration::from_secs(1),
+            Duration::from_secs(60),
+            start
+        )
+        .await
+        .unwrap());
     }
 }
