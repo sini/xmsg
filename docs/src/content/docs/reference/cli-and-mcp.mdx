@@ -100,6 +100,12 @@ Starts the local IPC and optional mTLS federation daemon:
 ```rust file=<rootDir>/src/main.rs#L178-L291
 ```
 
+Planned: federation reload (`SIGHUP` or `--fed-reload-interval-secs`) accepts only
+certificates with the running node's derived name. Different-name credentials are
+refused with the content-free `identity_changed` class, retaining the previous
+TLS/peers configuration and committed file hashes. See
+[credential reloading](/operations/runtime-and-systemd/#dynamic-credential-ca-bundle--peers-reloading).
+
 The planned per-leaf offline mailbox budgets are `--peer-mailbox-max-rows 10000` and
 `--peer-mailbox-max-bytes 67108864`, also configurable with `XMSG_PEER_MAILBOX_MAX_ROWS`
 and `XMSG_PEER_MAILBOX_MAX_BYTES`. A full mailbox refuses a new row with

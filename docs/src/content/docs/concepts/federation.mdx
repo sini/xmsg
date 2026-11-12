@@ -268,3 +268,13 @@ recipient does not enforce the forwarded target limit. This is a known limitatio
 
 The empty-list rules are in
 [`PeerConfig` parsing and inbound checks](https://github.com/sini/xmsg/blob/76f8f1e8249777cfb63c4d0287431cbbf6b2ce76/src/fed.rs).
+
+## Identity during credential renewal
+
+Planned: live credential reload preserves the running node's derived name. Renewing
+a certificate for the same derived name can change its key or issuing CA; replacing
+it with a certificate deriving another name is rejected while the old TLS and peer
+configuration keep working. A pinned certificate's public key determines its name,
+so rotating that key changes the node identity. See
+[credential reloading](/operations/runtime-and-systemd/#dynamic-credential-ca-bundle--peers-reloading)
+for the renewal example and intentional identity-change procedure.

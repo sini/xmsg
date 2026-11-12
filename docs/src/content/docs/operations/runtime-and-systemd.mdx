@@ -17,10 +17,24 @@ certificates, CA bundles and `peers.json` without dropping active connections:
   new configuration: the TLS acceptor, the client credentials, the private key match, the peer
   map and the CA trust anchors. If a file is not valid or does not match, xmsg stops the reload
   and logs an error. The previous configuration continues to operate without interruption.
+- **Stable node identity:** Planned: reloads must keep the running certificate-derived node
+  name. A certificate deriving a different name is rejected before TLS, peers or committed
+  file hashes change; the old configuration remains active. The diagnostic class is
+  `identity_changed`, without certificate or identity contents. Same-name renewal remains
+  supported, including a new key or CA when the derived name stays the same. For a pinned
+  certificate without a SPIFFE URI, a new public key changes the derived name and needs a
+  planned restart/reconfiguration rather than live renewal.
 - **Per-request policy re-evaluation:** On each request, existing HTTP/1.1 keep-alive connections
   on `/fed/v2/*` check peer membership (`current_peers()`) and the source-IP CIDR policy (`from`)
   again. A long-poll that is in progress completes with the configuration it started with. The
   30–60 s wait timeout limits this. The next poll uses the new configuration.
+
+For example, renew `spiffe://example.org/ns/agents/sa/worker` while retaining the
+canonical name `worker.agents`, then use the normal reload mechanism. Replacing it
+with `spiffe://example.org/ns/agents/sa/other` is refused; restoring the intended
+certificate allows the next reload attempt. A deliberate node-identity change
+requires stopping the old node and reviewing its peer policy and stored state
+before starting the replacement.
 
 ## Systemd socket activation & `sd_notify`
 
