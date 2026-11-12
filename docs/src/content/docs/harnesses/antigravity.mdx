@@ -23,8 +23,11 @@ external hooks do not get them. Thus `xmsg` registers an Antigravity session in 
    command watcher can do this automatically. Otherwise the model runs `xmsg register agy`. Then
    `xmsg` does three things:
    - It stores the credentials only in memory.
-   - It admits the subagents that `transcript.jsonl` names.
-   - It delivers all queued messages in FIFO order (`outcome: "delivered"`).
+   - It admits the subagents that the parent's `.system_generated/subagents/*.json` descriptors
+     name. A successful registration response means those child bindings are ready, so a caller
+     can address `<parent>/kid` at once, without a retry.
+   - After that, it delivers all queued messages in FIFO order (`outcome: "delivered"`). A
+     successful registration does not mean that delivery is complete.
 
 ## Linux command watcher (Arm A) vs. Hook prompt (Arm B′)
 

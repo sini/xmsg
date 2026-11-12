@@ -1442,6 +1442,35 @@ pub fn sweep_agy_subagent_queues(
     Ok(())
 }
 
+fn prepare_agy_queue(
+    config: &AgyConfig,
+    store: &AgyStore,
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    session_key: &str,
+    conv_id: &str,
+    reply_ttl: Duration,
+) -> Result<Vec<crate::storage::AgyPendingMessage>, AppError> {
+    if !crate::claim::is_uuid_shaped(conv_id) {
+        return Ok(Vec::new());
+    }
+    let db_lock = db.lock().map_err(|e| {
+        AppError::Internal(format!("failed to lock db for agy queue preparation: {e}"))
+    })?;
+    let now = crate::storage::now_epoch_secs();
+    crate::storage::mark_live(&db_lock, conv_id, "agy", now)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let brain_dir = config.effective_brain_dir();
+    rescan_agy_subagents(&db_lock, &brain_dir, conv_id, now)?;
+    if session_key != conv_id {
+        rescan_agy_subagents(&db_lock, &brain_dir, session_key, now)?;
+    }
+    sweep_agy_subagent_queues(&db_lock, &config.proc_root, store)?;
+    crate::storage::purge_agy_messages(&db_lock, reply_ttl.as_secs())
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    crate::storage::fetch_undelivered_agy_messages(&db_lock, &[session_key, conv_id])
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
 /// Delivers what is queued for a conversation that has just registered. A message older
 /// than `reply_ttl` is dropped unread, never delivered (A14).
 pub async fn flush_agy_queue(
@@ -1452,39 +1481,24 @@ pub async fn flush_agy_queue(
     conv_id: &str,
     reply_ttl: Duration,
 ) {
-    if !crate::claim::is_uuid_shaped(conv_id) {
-        return;
-    }
-    let pending_msgs = {
-        let db_lock = match db.lock() {
-            Ok(guard) => guard,
-            Err(e) => {
-                tracing::error!("failed to lock db for agy queue flush: {e}");
-                return;
-            }
-        };
-        let now = crate::storage::now_epoch_secs();
-        // A registration is an observation: the conversation is live now (A14).
-        let _ = crate::storage::mark_live(&db_lock, conv_id, "agy", now);
-        let brain_dir = config.effective_brain_dir();
-        let _ = rescan_agy_subagents(&db_lock, &brain_dir, conv_id, now);
-        if session_key != conv_id {
-            let _ = rescan_agy_subagents(&db_lock, &brain_dir, session_key, now);
-        }
-        let _ = sweep_agy_subagent_queues(&db_lock, &config.proc_root, store);
-        if let Err(e) = crate::storage::purge_agy_messages(&db_lock, reply_ttl.as_secs()) {
-            tracing::error!("failed to purge expired agy messages: {e}");
+    let pending_msgs = match prepare_agy_queue(config, store, db, session_key, conv_id, reply_ttl) {
+        Ok(pending_msgs) => pending_msgs,
+        Err(error) => {
+            tracing::error!(%error, "failed to prepare agy queue flush");
             return;
         }
-        match crate::storage::fetch_undelivered_agy_messages(&db_lock, &[session_key, conv_id]) {
-            Ok(msgs) => msgs,
-            Err(e) => {
-                tracing::error!("failed to fetch undelivered agy messages: {e}");
-                return;
-            }
-        }
     };
+    deliver_prepared_agy_queue(config, store, db, session_key, conv_id, pending_msgs).await;
+}
 
+async fn deliver_prepared_agy_queue(
+    config: &AgyConfig,
+    store: &AgyStore,
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    session_key: &str,
+    conv_id: &str,
+    pending_msgs: Vec<crate::storage::AgyPendingMessage>,
+) {
     if pending_msgs.is_empty() {
         return;
     }
@@ -2512,6 +2526,26 @@ pub async fn run_register_server_with_listener(
                                             .write()
                                             .await
                                             .remove(&req.conversation_id);
+                                        let pending_msgs = match prepare_agy_queue(
+                                            &config_clone,
+                                            &store_clone,
+                                            &db_clone,
+                                            &reg.session_key,
+                                            &req.conversation_id,
+                                            reply_ttl,
+                                        ) {
+                                            Ok(pending_msgs) => pending_msgs,
+                                            Err(error) => {
+                                                let response = serde_json::json!({
+                                                    "status": "error",
+                                                    "detail": error.to_string(),
+                                                });
+                                                let _ = writer
+                                                    .write_all(format!("{response}\n").as_bytes())
+                                                    .await;
+                                                return;
+                                            }
+                                        };
                                         let resp = serde_json::json!({
                                             "status": "ok",
                                             "sessionId": reg.session_key,
@@ -2519,13 +2553,13 @@ pub async fn run_register_server_with_listener(
                                         let _ =
                                             writer.write_all(format!("{resp}\n").as_bytes()).await;
 
-                                        flush_agy_queue(
+                                        deliver_prepared_agy_queue(
                                             &config_clone,
                                             &store_clone,
                                             &db_clone,
                                             &reg.session_key,
                                             &req.conversation_id,
-                                            reply_ttl,
+                                            pending_msgs,
                                         )
                                         .await;
                                     }

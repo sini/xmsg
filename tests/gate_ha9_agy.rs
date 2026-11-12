@@ -1503,7 +1503,7 @@ async fn g6_reset_on_mcp_start_and_crash_preserves_queue_until_reregister() {
 // ===========================================================================
 // G7: Re-bind and collisions (`spawnStepIndex` greatest wins, tie binds neither, D8 list)
 // ===========================================================================
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn g7_rebind_on_registration_and_role_collisions_and_list() {
     let h = AgyTestHarness::start().await;
     let p_pid = 8501;
@@ -1555,15 +1555,53 @@ async fn g7_rebind_on_registration_and_role_collisions_and_list() {
         false,
     );
 
-    // Register P -> rescan binds all 4 before any child frame.
-    let reg = h
-        .register_frame(json!({
+    // The blocking client keeps its request alive while the DB lock prevents readiness.
+    let db = h.state.db.clone();
+    let register_sock = h.register_sock.clone();
+    let registration = tokio::task::spawn_blocking(move || {
+        use std::io::BufRead as _;
+        let readiness_guard = db.lock().unwrap();
+        let mut stream = std::os::unix::net::UnixStream::connect(register_sock).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let frame = json!({
             "conversation_id": P_UUID,
             "ls_address": "127.0.0.1:9",
             "csrf_token": "tok",
             "label": "agy-p",
-        }))
-        .await;
+        });
+        writeln!(stream, "{frame}").unwrap();
+        let mut reader = std::io::BufReader::new(stream);
+        let mut line = String::new();
+        let early_ack = match reader.read_line(&mut line) {
+            Ok(_) => true,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                false
+            }
+            Err(error) => panic!("registration read failed: {error}"),
+        };
+        drop(readiness_guard);
+        assert!(
+            !early_ack,
+            "registration acknowledged before descriptor rebind could complete: {line}"
+        );
+        reader
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        reader.read_line(&mut line).unwrap();
+        serde_json::from_str::<Value>(&line).unwrap()
+    });
+    let reg = tokio::time::timeout(Duration::from_secs(10), registration)
+        .await
+        .expect("registration did not complete after releasing readiness")
+        .unwrap();
     assert_eq!(reg["status"], "ok", "{reg}");
 
     // 1. `<P>/kid` resolves to W (`agent_id=<W>` in fallback header, or `address` in send response).
