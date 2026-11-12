@@ -3,38 +3,42 @@ title: Antigravity
 description: Integrating Google Antigravity (agy) with xmsg — presence lock attestation, Linux proc watcher (Arm A), hooks (Arm B'), and subagents.
 ---
 
-Antigravity (`agy`) interactive sessions run an internal language server bound to a loopback port
-authenticated with an ephemeral per-session CSRF token (`ANTIGRAVITY_LS_ADDRESS` and
-`ANTIGRAVITY_CSRF_TOKEN`). Because Antigravity exposes those variables only inside the interactive
-harness and the `run_command` subshells it spawns (not to MCP server children or external hooks),
-`xmsg` uses a two-stage registration lifecycle.
+An interactive Antigravity (`agy`) session runs an internal language server on a loopback port.
+An ephemeral CSRF token for each session protects it. Two variables hold these values:
+`ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN`. Antigravity shows them only inside the
+interactive harness and the `run_command` subshells that it starts. MCP server children and
+external hooks do not get them. Thus `xmsg` registers an Antigravity session in two stages.
 
 ## Two-stage registration lifecycle
 
 1. **Stage 1 — Identity at MCP start:**
-   When `xmsg mcp` starts as an `agy` child, `xmsg serve` walks its ancestor process chain to
-   verify a trusted `--agy-exe` binary holding an open file descriptor to
-   `~/.gemini/antigravity-cli/presence/<conversation_id>.lock` (matched by canonical `(dev, ino)`,
-   plus `/proc/locks` exclusive `FLOCK` ownership on Linux). The session immediately becomes
-   addressable under its conversation UUID (`registered: false`), and messages sent to it queue in
-   `agy_pending_messages` (`outcome: "queued"`).
+   When `xmsg mcp` starts as an `agy` child, `xmsg serve` walks its ancestor process chain. It
+   looks for a trusted `--agy-exe` binary with an open file descriptor to
+   `~/.gemini/antigravity-cli/presence/<conversation_id>.lock`. The match uses the canonical
+   `(dev, ino)`. On Linux, xmsg also checks for exclusive `FLOCK` ownership in `/proc/locks`.
+   The session is then immediately addressable by its conversation UUID (`registered: false`).
+   Messages to it wait in `agy_pending_messages` (`outcome: "queued"`).
 2. **Stage 2 — Credential capture & FIFO flush:**
-   Once `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` are registered (either automatically
-   via the Linux in-process command watcher or via the model running `xmsg register agy`), `xmsg`
-   stores the credentials in memory only, admits any subagents from `transcript.jsonl`, and flushes
-   all queued messages in FIFO order (`outcome: "delivered"`).
+   Then `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` are registered. The Linux in-process
+   command watcher can do this automatically. Otherwise the model runs `xmsg register agy`. Then
+   `xmsg` does three things:
+   - It stores the credentials only in memory.
+   - It admits the subagents that `transcript.jsonl` names.
+   - It delivers all queued messages in FIFO order (`outcome: "delivered"`).
 
 ## Linux command watcher (Arm A) vs. Hook prompt (Arm B′)
 
-- **Linux In-Process Command Watcher (Arm A):** While an attested `agy` conversation holds its
-  presence lock without registered push credentials, `xmsg serve` scans the attested `agy`
-  process's descendant tree (`/proc/<pid>/task/<tid>/children`) every 100 ms. When a descendant
-  tool command runs, `xmsg` verifies start times before and after reading `/proc/<pid>/environ` and
-  extracts **only** `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` directly into memory.
-  While Arm A is watching on the first turn, the `PreInvocation` hook stands down (printing `{}`).
-- **Darwin & Sandbox Fallback (Arm B′):** On macOS (or Linux sandboxes where `/proc` is unreadable,
-  or if a turn completes without running a shell command), `xmsg register agy --hook --event pre-invocation`
-  returns an `ephemeralMessage` asking the model to run `xmsg register agy` before anything else.
+- **Linux In-Process Command Watcher (Arm A):** An attested `agy` conversation can hold its
+  presence lock without registered push credentials. During that time, `xmsg serve` scans the
+  attested `agy` process's descendant tree (`/proc/<pid>/task/<tid>/children`) every 100 ms. When
+  a descendant tool command runs, `xmsg` checks its start time before and after it reads
+  `/proc/<pid>/environ`. It copies **only** `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN`
+  into memory. While Arm A watches on the first turn, the `PreInvocation` hook does nothing (it
+  prints `{}`).
+- **Darwin & Sandbox Fallback (Arm B′):** Arm B′ applies on macOS, in a Linux sandbox where
+  `/proc` is not readable, and when a turn ends without a shell command. There,
+  `xmsg register agy --hook --event pre-invocation` returns an `ephemeralMessage`. The message
+  tells the model to run `xmsg register agy` first.
 
 ## Hook configuration (`~/.gemini/config/hooks.json`)
 
@@ -74,25 +78,26 @@ Configure `PreInvocation`, `PreToolUse`, and `Stop` in `~/.gemini/config/hooks.j
 
 ### Subagents (`<P>/<child_uuid>@<node>`)
 
-When a registered parent session `P` spawns a subagent via `invoke_subagent`:
+A registered parent session `P` can start a subagent with `invoke_subagent`. Then the hooks do
+this:
 
 - **`PreInvocation`:** Admits the child from `P`'s
-  `brain/<P>/.system_generated/logs/transcript.jsonl`, binds `<P>/<child_uuid>@<node>`, marks the
-  child's turn active, and prints `{}` so the child never receives a registration prompt.
-- **`PreToolUse`:** Stamps `as_agent: <conversationId>` into `call_mcp_tool` / `mcp_xmsg_*` calls so
-  `send`, `reply`, and `inbox` act as `<P>/<child_uuid>@<node>` (or as `P` when called by the
-  parent).
-- **`Stop`:** Clears the subagent's active turn and sweeps any remaining messages in its turn
-  mailbox to parent `P` with a `to=<P>/<child_uuid> agent_id=<child_uuid>` header.
+  `brain/<P>/.system_generated/logs/transcript.jsonl`. Binds `<P>/<child_uuid>@<node>`. Marks the
+  child's turn active. Prints `{}`, so the child never gets a registration prompt.
+- **`PreToolUse`:** Adds `as_agent: <conversationId>` to `call_mcp_tool` / `mcp_xmsg_*` calls.
+  Thus `send`, `reply` and `inbox` act as `<P>/<child_uuid>@<node>`, or as `P` when the parent
+  calls them.
+- **`Stop`:** Clears the subagent's active turn. Moves the remaining messages in its turn mailbox
+  to the parent `P`, with a `to=<P>/<child_uuid> agent_id=<child_uuid>` header.
 
 ## Server restart resilience
 
-If `xmsg serve` restarts while an `agy` session is open, the running `xmsg mcp` child reconnects to
-`agent.sock` with backoff, restoring stage-1 registration so inbound messages queue safely until the
-next turn re-registers push credentials.
+`xmsg serve` can restart while an `agy` session is open. Then the running `xmsg mcp` child
+connects to `agent.sock` again, with backoff. This restores the stage 1 registration. Incoming
+messages queue safely until the next turn registers the push credentials again.
 
 ## Home Manager switch
 
-Set `programs.xmsg.harnesses.agy.enable = true` (requires `programs.antigravity-cli.enable = true`)
-to configure the MCP server, skill, `--agy-exe`, and `~/.gemini/config/hooks.json` automatically.
+Set `programs.xmsg.harnesses.agy.enable = true`. This needs `programs.antigravity-cli.enable = true`.
+The switch configures the MCP server, the skill, `--agy-exe` and `~/.gemini/config/hooks.json`.
 See [NixOS & Home Manager](/operations/nixos-and-home-manager/#per-harness-switches).

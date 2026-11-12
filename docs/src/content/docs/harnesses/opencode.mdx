@@ -3,45 +3,44 @@ title: opencode
 description: Integrating opencode 1.x and 2.x with xmsg via the multiplexed register.sock plugin.
 ---
 
-`opencode` loads `<config>/opencode/plugin/xmsg.ts` (`extensions/opencode/xmsg.ts`) on startup. The
-plugin's default export supports both `opencode` 1.x (`server` hook) and `opencode` 2.x (`setup`
+`opencode` loads `<config>/opencode/plugin/xmsg.ts` (`extensions/opencode/xmsg.ts`) at startup.
+The plugin's default export supports `opencode` 1.x (`server` hook) and `opencode` 2.x (`setup`
 hook in `opencode service`).
 
 ## Multiplexed `register.sock` connection
 
-Because an `opencode` process (or `opencode service` in 2.x) hosts multiple sessions inside a
-single process, process-ancestry attribution cannot distinguish one session from another. Instead:
+An `opencode` process (or `opencode service` in 2.x) holds many sessions in one process. Thus
+process-ancestry attribution cannot tell one session from another. The plugin works as follows:
 
-- On 1.x, the plugin opens one `register.sock` connection per `opencode` process.
-- On 2.x, `opencode service` sets up the plugin once per project directory, holding one
-  `register.sock` connection per served directory.
-- There is no MCP entry for `opencode`: the plugin's native tools (`xmsg_list`, `xmsg_send`,
-  `xmsg_reply`, `xmsg_replies`, `xmsg_inbox`) send multiplexed frames on `register.sock` naming the
-  calling `ToolContext.sessionID`, so every call is attributed to that session's address and no
-  other.
+- On 1.x, the plugin opens one `register.sock` connection for each `opencode` process.
+- On 2.x, `opencode service` sets up the plugin once for each project directory. It holds one
+  `register.sock` connection for each served directory.
+- `opencode` has no MCP entry. The plugin's native tools (`xmsg_list`, `xmsg_send`, `xmsg_reply`,
+  `xmsg_replies`, `xmsg_inbox`) send multiplexed frames on `register.sock`. Each frame names the
+  calling `ToolContext.sessionID`. Thus xmsg gives each call that session's address, and no other.
 
 ## Session lifecycle
 
 - **Registration on first prompt:** A session registers at its first user prompt (1.x
-  `chat.message`, 2.x session `prompt` hook) before the turn's first tool call is answered. Stored
-  inactive sessions on disk are not registered until used.
-- **Push delivery:** Inbound messages are injected into their target session as a user prompt (1.x
-  `promptAsync`, 2.x `session.prompt`), starting a turn if the session is idle. The plugin sends
-  `ack` to `xmsg` only after `opencode` accepts the prompt.
+  `chat.message`, 2.x session `prompt` hook). This occurs before xmsg answers the turn's first
+  tool call. A stored, inactive session on disk does not register until you use it.
+- **Push delivery:** xmsg puts an incoming message into its target session as a user prompt (1.x
+  `promptAsync`, 2.x `session.prompt`). If the session is idle, this starts a turn. The plugin
+  sends `ack` to `xmsg` only after `opencode` accepts the prompt.
 - **Child sessions (`<P>/<child_ses>@<node>`):** A `task` or `subagent` child session with a
-  `parentID` walks `parentID` to its root conversation `P`, binds `<P>/<child_ses>@<node>` via
-  `subagent` (`start`/`stop`/`end`) on `register.sock`, and passes `as_agent: <child_ses>` on
-  `xmsg_send`, `xmsg_reply`, and `xmsg_inbox`. While a child turn is active, messages to
-  `<P>/<child_ses>` queue for `xmsg_inbox`; otherwise they fall back to `P` with a
+  `parentID` follows `parentID` to its root conversation `P`. It binds `<P>/<child_ses>@<node>`
+  with `subagent` (`start`/`stop`/`end`) on `register.sock`. It passes `as_agent: <child_ses>` on
+  `xmsg_send`, `xmsg_reply` and `xmsg_inbox`. While a child turn is active, messages to
+  `<P>/<child_ses>` wait for `xmsg_inbox`. Otherwise they go to `P` with a
   `to=<P>/<child_ses> agent_id=<child_ses>` header.
-- **Release and reclaim:** Deleting a session releases its address (`410 gone`). Switching sessions
-  in the TUI (or quitting the TUI on 2.x while `opencode service` remains running) keeps the
-  session registered. If `opencode service` stops or reloads the plugin, the connection closes and
-  detaches its addresses so each session reclaims its address on its next prompt (within the reply
-  TTL).
+- **Release and reclaim:** When you delete a session, xmsg releases its address (`410 gone`). The
+  session stays registered when you switch sessions in the TUI. On 2.x, it also stays registered
+  when you quit the TUI while `opencode service` continues to run. If `opencode service` stops or
+  loads the plugin again, the connection closes and its addresses detach. Then each session gets
+  its address back at its next prompt, within the reply TTL.
 
 ## Home Manager switch
 
-Set `programs.xmsg.harnesses.opencode.enable = true` in Home Manager to install
+In Home Manager, set `programs.xmsg.harnesses.opencode.enable = true`. This installs
 `$XDG_CONFIG_HOME/opencode/plugin/xmsg.ts` and `opencode/skills/xmsg/SKILL.md`. See
 [NixOS & Home Manager](/operations/nixos-and-home-manager/#per-harness-switches).

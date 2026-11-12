@@ -3,49 +3,54 @@ title: Hermes
 description: Integrating Hermes Agent with xmsg via the extensions/hermes plugin.
 ---
 
-Hermes loads the `xmsg` plugin (`extensions/hermes/plugin.yaml` and `extensions/hermes/__init__.py`)
-from `$HERMES_HOME/plugins/` when `plugins.enabled` includes `"xmsg"`. Like `opencode`, the Hermes
-plugin holds one multiplexed `register.sock` connection per Hermes process.
+Hermes loads the `xmsg` plugin (`extensions/hermes/plugin.yaml` and
+`extensions/hermes/__init__.py`) from `$HERMES_HOME/plugins/` when `plugins.enabled` includes
+`"xmsg"`. As for `opencode`, the Hermes plugin holds one multiplexed `register.sock` connection
+for each Hermes process.
 
 ## Registration and tools
 
-- **Registration:** A session registers at the first `pre_llm_call` hook or `xmsg` tool call that
-  carries its `session_id`.
-- **Delegates (`delegate_task`):** A `delegate_task` subagent (whose `pre_llm_call` names its
-  parent) acts as its root conversation `P` and does not bind a separate sub-address.
-- **Tools (`xmsg` toolset):** Exposes `xmsg_list`, `xmsg_send`, `xmsg_reply`, and `xmsg_replies`,
-  sent as frames on `register.sock` under the calling `session_id`. Because Hermes defers plugin
-  tools behind its Tool Search bridge (`tools.tool_search`) by default, models discover and invoke
-  them through `tool_search` and `tool_call`.
+- **Registration:** A session registers at the first `pre_llm_call` hook or `xmsg` tool call
+  that carries its `session_id`.
+- **Delegates (`delegate_task`):** The `pre_llm_call` of a `delegate_task` subagent names its
+  parent. The subagent acts as its root conversation `P`. It does not bind a separate
+  sub-address.
+- **Tools (`xmsg` toolset):** The plugin gives `xmsg_list`, `xmsg_send`, `xmsg_reply` and
+  `xmsg_replies`. It sends them as frames on `register.sock` under the calling `session_id`. By
+  default, Hermes puts plugin tools behind its Tool Search bridge (`tools.tool_search`). Thus
+  models find and call them through `tool_search` and `tool_call`.
 
 ## Session lifecycle and compaction
 
-- **Ending a session (`on_session_finalize`):** Closing a desktop session, running `/new`, or
-  exiting the CLI releases the session's address (`410 gone`). Any late tool call from an ended
-  session's background delegate returns `gone` without re-registering the old session.
+- **Ending a session (`on_session_finalize`):** These actions release the session's address
+  (`410 gone`): you close a desktop session, run `/new`, or exit the CLI. A late tool call from an
+  ended session's background delegate returns `gone`. It does not register the old session again.
 - **Switching sessions in the CLI:** `/new` ends the old session and registers the new one
-  (`on_session_reset`). For `/resume` and `/branch` (which fire no plugin hook), the plugin detects
-  the changed `session_id` on the next hook, tool call, or push and releases the old address so one
-  session's message is never injected into another.
-- **Compression (`continues`):** Hermes's default in-place compaction preserves `session_id` and its
-  `xmsg` address. When `compression.in_place: false` is used, compression creates a new
-  `session_id`; the plugin reads `SessionDB(read_only=True).get_compression_chain` and sends a
-  `continues` frame on `register.sock` to move the `xmsg` address to the new session ID.
+  (`on_session_reset`). `/resume` and `/branch` start no plugin hook. For them, the plugin sees
+  the changed `session_id` on the next hook, tool call or push. It then releases the old address.
+  Thus xmsg never puts one session's message into another session.
+- **Compression (`continues`):** Hermes's default in-place compaction keeps `session_id` and its
+  `xmsg` address. With `compression.in_place: false`, compression makes a new `session_id`. The
+  plugin then reads `SessionDB(read_only=True).get_compression_chain`. It sends a `continues`
+  frame on `register.sock`, which moves the `xmsg` address to the new session ID.
 
 ## Push delivery and busy modes
 
-- **Classic CLI:** While a turn is running, delivered messages route through the CLI's busy-input
-  handler according to `display.busy_input_mode` (or `/busy`): `queue` runs it as the next turn,
-  `interrupt` redirects the running turn, and `steer` injects it after the current tool call. When
-  idle, it starts a new turn.
-- **TUI and desktop host:** Hermes's `inject_message` queues incoming messages on the session in all
-  busy modes so a notification never cancels in-flight work. Requires
-  `plugins.entries.xmsg.allow_gateway_injection: true` in Hermes settings.
+- **Classic CLI:** While a turn runs, a delivered message goes through the CLI's busy-input
+  handler. `display.busy_input_mode` (or `/busy`) sets the mode:
+  - `queue` runs the message as the next turn.
+  - `interrupt` redirects the running turn.
+  - `steer` puts the message in after the current tool call.
+
+  When the session is idle, the message starts a new turn.
+- **TUI and desktop host:** Hermes's `inject_message` queues incoming messages on the session in
+  all busy modes. Thus a notification never cancels work in progress. This needs
+  `plugins.entries.xmsg.allow_gateway_injection: true` in the Hermes settings.
 - **Acknowledgments:** The plugin sends `ack` only after Hermes accepts the message.
 
 ## Home Manager switch
 
-Set `programs.xmsg.harnesses.hermes.enable = true` (requires `services.hermes-agent` enabled) to
-link the plugin into `services.hermes-agent.extraPlugins`, append `"xmsg"` to
-`settings.plugins.enabled`, enable `allow_gateway_injection`, and install the `xmsg` skill. See
+Set `programs.xmsg.harnesses.hermes.enable = true`. This needs `services.hermes-agent`. The
+switch links the plugin into `services.hermes-agent.extraPlugins`, adds `"xmsg"` to
+`settings.plugins.enabled`, enables `allow_gateway_injection` and installs the `xmsg` skill. See
 [NixOS & Home Manager](/operations/nixos-and-home-manager/#per-harness-switches).

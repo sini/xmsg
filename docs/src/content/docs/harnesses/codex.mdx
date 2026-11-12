@@ -3,14 +3,17 @@ title: Codex
 description: Integrating OpenAI Codex CLI on Linux and macOS with xmsg — writer-lock lease attestation, runtime _meta attribution, live push relay, and subagents.
 ---
 
-On Linux and macOS, `xmsg` integrates with the OpenAI Codex CLI (`codex`) using writer-lock lease
-attestation, runtime JSON-RPC `_meta` caller attribution, a restricted live push relay for
-daemon-backed sessions, and hook-driven handoff for embedded (`--no-daemon`) sessions.
+On Linux and macOS, `xmsg` connects to the OpenAI Codex CLI (`codex`) with four mechanisms:
+
+- writer-lock lease attestation, which proves which session is calling;
+- runtime JSON-RPC `_meta` caller attribution;
+- a restricted live push relay, for sessions that run on the Codex app-server daemon;
+- hook-driven handoff, for embedded (`--no-daemon`) sessions.
 
 ## Attestation and admission (`--codex-exe`, `--codex-home`)
 
-To admit Codex root sessions and direct child subagents, configure `xmsg serve` with trusted Codex
-executables and home directories:
+To admit Codex root sessions and their direct child subagents, give `xmsg serve` the trusted
+Codex executables and home directories:
 
 ```bash
 xmsg serve \
@@ -18,50 +21,56 @@ xmsg serve \
   --codex-home "$HOME/.codex"
 ```
 
-- **Writer-lock & rollout verification:** A Codex root session `P` is admitted when an ancestor
-  process matching `--codex-exe` holds an open file descriptor to
-  `<H>/thread-writer-locks/<P>.lock` under a configured `--codex-home` `<H>` (monitored by a
-  continuous lease watch: `inotify` on Linux, `kqueue` on an `O_EVTONLY` descriptor on macOS),
-  and the rollout file under `<H>/sessions` passes bounded `O_NOFOLLOW` verification (`session_meta.payload.id == P` and `payload.session_id == P`).
-- **Runtime MCP `_meta` attribution:** `xmsg mcp` extracts `codex_session`
-  (`params._meta.sessionId`), `codex_thread` (`params._meta.threadId`), and `codex_turn`
-  (`params._meta["x-codex-turn-metadata"].turn_id`) strictly from the JSON-RPC `params._meta`
-  envelope — never from model-controlled `arguments` — and strips any model-supplied `as_agent`.
-- **Direct child subagents (`<P>/<X>@<node>`):** Direct children with a verified rollout under
+- **Writer-lock & rollout verification:** xmsg admits a Codex root session `P` when two
+  conditions are true:
+  - An ancestor process that matches `--codex-exe` holds an open file descriptor to
+    `<H>/thread-writer-locks/<P>.lock`, under a configured `--codex-home` `<H>`. A continuous
+    lease watch monitors it. On Linux, the watch uses `inotify`. On macOS, it uses `kqueue` on an
+    `O_EVTONLY` descriptor.
+  - The rollout file under `<H>/sessions` passes bounded `O_NOFOLLOW` verification
+    (`session_meta.payload.id == P` and `payload.session_id == P`).
+- **Runtime MCP `_meta` attribution:** `xmsg mcp` takes three values only from the JSON-RPC
+  `params._meta` envelope: `codex_session` (`params._meta.sessionId`), `codex_thread`
+  (`params._meta.threadId`) and `codex_turn` (`params._meta["x-codex-turn-metadata"].turn_id`).
+  It never takes them from the `arguments` that the model controls. It also removes any
+  `as_agent` that the model gives.
+- **Direct child subagents (`<P>/<X>@<node>`):** A direct child with a verified rollout under
   `<H>/sessions` (`payload.id == X`, `payload.session_id == P`, `payload.parent_thread_id == P`)
-  bind `<P>/<X>@<node>`. Turn state is tracked by `SubagentStart`, `PreModelRequest`, and
-  `SubagentStop` hooks (`xmsg register codex --hook --event <event>`). While a child turn is
-  active, messages to `<P>/<X>@<node>` queue for `inbox`; out-of-turn messages fall back to parent
+  binds `<P>/<X>@<node>`. The `SubagentStart`, `PreModelRequest` and `SubagentStop` hooks
+  (`xmsg register codex --hook --event <event>`) track the turn state. While a child turn is
+  active, messages to `<P>/<X>@<node>` wait for `inbox`. Out of turn, messages go to the parent
   `P` with a `to=<P>/<X> agent_id=<X>` header.
 
 ## Delivery: live push relay and hook drain
 
-- **Daemon-backed roots (live push relay):** When a Codex root runs on the per-home app-server
-  daemon (`<H>/app-server-control/app-server-control.sock`), `xmsg` connects to the control socket
-  (verifying `0700` directory, `0600` socket, and pinning peer `(pid, starttime)` to the admitted
-  owner), verifies `P` in `thread/loaded/list`, and emits a restricted text-only `turn/start`
-  request.
-- **Embedded (`--no-daemon`) roots (hook drain):** Sessions without an app-server socket drain
-  queued messages through `SessionStart`, `UserPromptSubmit`, and `Stop` hooks using transactional
-  `codex_handoff` state (`pending → inflight → accepted | unknown`) so messages are handed off at
-  most once.
-- **Untrusted-peer-data preamble:** Every Codex delivery carrier prepends a fixed untrusted-peer
-  preamble outside the escaped message body so peer messages are framed as colleague data rather
-  than system or developer instructions.
+- **Daemon-backed roots (live push relay):** A Codex root can run on the per-home app-server
+  daemon (`<H>/app-server-control/app-server-control.sock`). Then `xmsg` does these steps:
+  1. It connects to the control socket. It checks for a `0700` directory and a `0600` socket. It
+     pins the peer `(pid, starttime)` to the admitted owner.
+  2. It checks that `P` is in `thread/loaded/list`.
+  3. It sends a restricted, text-only `turn/start` request.
+- **Embedded (`--no-daemon`) roots (hook drain):** A session without an app-server socket gets its
+  queued messages through the `SessionStart`, `UserPromptSubmit` and `Stop` hooks. The hooks use
+  transactional `codex_handoff` state (`pending → inflight → accepted | unknown`). Thus xmsg hands
+  off each message at most once.
+- **Untrusted-peer-data preamble:** Each Codex delivery carrier adds a fixed untrusted-peer
+  preamble outside the escaped message body. The preamble frames peer messages as data from a
+  colleague, not as system or developer instructions.
 
 ## After a daemon restart
 
-A previously known, nonrevoked root remains queueable while waiting for fresh writer-lease
-attestation. Its next attributed MCP call can re-attest that root and start a bounded relay
-drain; an unknown root still needs registration, and explicit revocation stays in force.
-See [Codex restart custody](/concepts/replies/#replies-stored-always-pushed-by-sender-kind) for
-stable message IDs, FIFO ordering and the distinction between accepted, pending and unknown
+A known root that is not revoked stays queueable while it waits for a new writer-lease
+attestation. Its next attributed MCP call can attest that root again and start a bounded relay
+drain. An unknown root still needs registration. An explicit revocation stays in force. See
+[Codex restart custody](/concepts/replies/#replies-stored-always-pushed-by-sender-kind) for
+stable message IDs, FIFO order, and the difference between accepted, pending and unknown
 handoffs. The [re-attestation path](https://github.com/sini/xmsg/blob/f0abf583cb9394da4b08be7b717c3436919a7669/src/agent.rs)
 uses the normal writer-lease and rollout checks.
 
 ## Operator revocation (`--revoke` / `--unrevoke`)
 
-To park a Codex root session so it refuses automatic re-admission until explicitly cleared:
+Revocation parks a Codex root session. The session then refuses automatic re-admission until you
+clear the revocation:
 
 ```bash
 # Revoke a Codex root session ID (sets RevokedByOperator)
@@ -73,9 +82,9 @@ xmsg register codex --unrevoke <session-uuid>
 
 ## Labels with a shared daemon
 
-Use one real, named worktree per concurrent worker. When no explicit label reaches the hook,
-xmsg uses the basename of the session rollout's cwd as its display label. Run each Codex launch
-in a separate terminal:
+Use one real, named worktree for each concurrent worker. When no explicit label reaches the
+hook, xmsg uses the basename of the session rollout's cwd as its display label. Start each Codex
+session in a separate terminal:
 
 ```sh
 git -C /path/to/project worktree add -b worker-a ../worker-a HEAD
@@ -84,27 +93,29 @@ codex -C /path/to/worker-a
 codex -C /path/to/worker-b
 ```
 
-Do not rely on a per-client `XMSG_CODEX_LABEL` to name sessions that share an already-running
-per-home daemon. The hook sees the server process's startup environment, not each later CLI
-client's launch environment. The variable applies to a Codex process's own embedded execution
-or a freshly started daemon. `xmsg register codex --label <label>` remains an explicit hook
-argument; it does not make a launch variable cross that daemon boundary.
+Do not use a per-client `XMSG_CODEX_LABEL` to name sessions that share a per-home daemon that
+is already running. The hook sees the startup environment of the server process. It does not
+see the environment of each later CLI client. The variable applies to a Codex process's own
+embedded execution, or to a daemon that starts new. `xmsg register codex --label <label>` is
+still an explicit hook argument. It does not make a launch variable cross that daemon boundary.
 
-A running daemon may retain an older explicit environment label and mask the cwd fallback.
-The owner can arrange a clean start when idle; workers should not restart live services for
-labeling. Use the full instance address from `list` while labels collide. Labels are descriptions,
-not authorization or identity boundaries, and no authentication/profile changes are needed for
-this worktree workflow.
+A running daemon can keep an older explicit environment label. That label hides the cwd
+fallback. The owner can start the daemon again when it is idle. Workers must not restart live
+services to change labels. While labels collide, use the full instance address from `list`.
+Labels are descriptions. They are not authorization or identity boundaries. This worktree
+workflow needs no authentication or profile changes.
 
 This behavior was measured with Codex 0.167.0 and matches its
 [server-side hook environment snapshot](https://github.com/openai/codex/blob/086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a/codex-rs/hooks/src/registry.rs#L83).
 
 ## Home Manager switch
 
-`programs.xmsg.harnesses.codex.enable = true` installs `${xdg.dataHome}/xmsg/bin/xmsg`,
-configures `programs.codex.skills.xmsg` and `programs.codex.settings.mcp_servers.xmsg`, wires
-`--codex-exe` and `--codex-home` into `xmsg serve`, and exposes
-`programs.xmsg.harnesses.codex.hooks`:
+`programs.xmsg.harnesses.codex.enable = true` does these things:
+
+- It installs `${xdg.dataHome}/xmsg/bin/xmsg`.
+- It configures `programs.codex.skills.xmsg` and `programs.codex.settings.mcp_servers.xmsg`.
+- It adds `--codex-exe` and `--codex-home` to `xmsg serve`.
+- It exposes `programs.xmsg.harnesses.codex.hooks`:
 
 ```nix file=<rootDir>/nix/modules/home-manager.nix#L41-L120
 ```
