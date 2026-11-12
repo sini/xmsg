@@ -885,3 +885,71 @@ async fn registration_exposes_effective_limits_and_absent_baseline_fields() {
         let _ = server.await;
     }
 }
+
+#[tokio::test]
+async fn attachment_read_pending_is_typed_and_other_actions_refuse_pending() {
+    let (_temp, options, register, agent) = fixture();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let registration_task = tokio::spawn(async move {
+        let mut stream = BufReader::new(register.accept().await.unwrap().0);
+        request(&mut stream, registration()).await;
+        let _ = stopped.await;
+    });
+    let agent_task = tokio::spawn(async move {
+        for (index, action) in [
+            "read_attachment",
+            "read_attachment",
+            "send",
+            "reply",
+            "attach",
+            "list",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let response = if index == 1 {
+                json!({"status":"ok","attachment":{"name":"file.txt","size":4,"media_type":"text/plain","sha256":"a".repeat(64)},"offset":0,"length":4,"encoding":"utf-8","data":"body"})
+            } else {
+                json!({"status":"pending","state":"pending"})
+            };
+            let frame = request(
+                &mut BufReader::new(agent.accept().await.unwrap().0),
+                response,
+            )
+            .await;
+            assert_eq!(frame["action"], action);
+        }
+    });
+    let registered = RegisteredService::register(options).await.unwrap();
+    let client = registered.agent_client();
+    let pending = client
+        .read_attachment("item", 0, 0, None)
+        .await
+        .expect("attachment pending was refused as a protocol error");
+    assert_eq!(pending, xmsg::client::AttachmentRead::Pending);
+    let ready = client.read_attachment("item", 0, 0, None).await.unwrap();
+    let xmsg::client::AttachmentRead::Ready(ready) = ready else {
+        panic!("ready attachment was reported pending");
+    };
+    assert_eq!(ready["data"], "body");
+    assert!(matches!(
+        client.send("target@fixture", "text", None).await,
+        Err(ClientError::Protocol)
+    ));
+    assert!(matches!(
+        client.reply("item", "text", None).await,
+        Err(ClientError::Protocol)
+    ));
+    assert!(matches!(
+        client.attach(xmsg::client::AttachRequest::default()).await,
+        Err(ClientError::Protocol)
+    ));
+    assert!(matches!(
+        client.list(ListQuery::default()).await,
+        Err(ClientError::Protocol)
+    ));
+    assert!(client.health().is_ok());
+    agent_task.await.unwrap();
+    stop.send(()).unwrap();
+    registration_task.await.unwrap();
+}

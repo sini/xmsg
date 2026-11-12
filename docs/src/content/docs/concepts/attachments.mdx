@@ -53,6 +53,11 @@ base64 encoded. Follow `next` until there is no `next`. A message's sender and r
 its files. Anyone with a reply's pushed message ID can read the reply's files. This is the same
 access as for stored replies.
 
+The Rust service client returns `AttachmentRead::Ready(range)` or `AttachmentRead::Pending`
+from `AgentClient::read_attachment`. A pending read is a normal result; poll the same item and
+range later. Set the client operation timeout above the daemon's ten-second pending wait
+(for example, fifteen seconds), allowing time for response delivery.
+
 An HTTP upload uses `POST /v1/attachments?name=report.md&media_type=text/markdown` with raw
 bytes. An anonymous sender also gives its usual `from` query value. Sends and replies take the
 returned reference in `attachments`.

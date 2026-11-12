@@ -107,3 +107,23 @@ holds a short descriptor-lifetime mutex:
   it again after an I/O error or a timeout. If that second check returns
   `ClientError::Disconnected`, it is not known if the request was sent. Thus a caller that retries
   a mutation after it connects again must use its stored `idempotency_key` again.
+
+
+## Attachment reads (planned)
+
+`AgentClient::read_attachment(message_id, index, offset, length)` returns
+`Result<AttachmentRead, ClientError>`. The result is `AttachmentRead::Ready(range)` for a
+completed range or `AttachmentRead::Pending` while the daemon fetches and verifies the file.
+Poll the same item and range after `Pending`; it is not a protocol error. Send, reply, attach
+and list continue to accept only their normal successful response.
+
+```rust
+match agent.read_attachment(message_id, 0, 0, Some(8192)).await? {
+    xmsg::client::AttachmentRead::Ready(range) => consume_as_untrusted_data(range),
+    xmsg::client::AttachmentRead::Pending => schedule_another_read(message_id),
+}
+```
+
+Choose an operation timeout above the daemon's ten-second pending wait, such as fifteen
+seconds, to leave room for response delivery. This timeout remains bounded by the calling
+application. See [file attachments](/concepts/attachments/) for range and file-size bounds.

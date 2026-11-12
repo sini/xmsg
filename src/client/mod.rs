@@ -457,6 +457,12 @@ impl RegisteredService {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum AttachmentRead {
+    Ready(Value),
+    Pending,
+}
+
 impl AgentClient {
     /// Non-consuming, point-in-time health shared with the registration owner.
     pub fn health(&self) -> Result<(), ClientError> {
@@ -464,6 +470,7 @@ impl AgentClient {
     }
 
     async fn agent(&self, request: AgentFrame) -> Result<Value, ClientError> {
+        let attachment_read = matches!(&request, AgentFrame::ReadAttachment { .. });
         self.health()?;
         let result = timeout(self.options.operation_timeout, async {
             let mut connection = Connection::connect(
@@ -473,7 +480,8 @@ impl AgentClient {
             )
             .await?;
             let result = connection.exchange(&request).await?;
-            if result.get("status").and_then(Value::as_str) != Some("ok") {
+            let status = result.get("status").and_then(Value::as_str);
+            if status != Some("ok") && !(attachment_read && status == Some("pending")) {
                 return Err(ClientError::Protocol);
             }
             Ok(result)
@@ -513,19 +521,25 @@ impl AgentClient {
         index: usize,
         offset: usize,
         length: Option<usize>,
-    ) -> Result<Value, ClientError> {
-        self.agent(AgentFrame::ReadAttachment {
-            schema_version: Some(SCHEMA_VERSION),
-            as_agent: None,
-            codex_session: None,
-            codex_thread: None,
-            codex_turn: None,
-            message_id: message_id.to_owned(),
-            index,
-            offset: Some(offset),
-            length,
-        })
-        .await
+    ) -> Result<AttachmentRead, ClientError> {
+        let result = self
+            .agent(AgentFrame::ReadAttachment {
+                schema_version: Some(SCHEMA_VERSION),
+                as_agent: None,
+                codex_session: None,
+                codex_thread: None,
+                codex_turn: None,
+                message_id: message_id.to_owned(),
+                index,
+                offset: Some(offset),
+                length,
+            })
+            .await?;
+        match result.get("status").and_then(Value::as_str) {
+            Some("ok") => Ok(AttachmentRead::Ready(result)),
+            Some("pending") => Ok(AttachmentRead::Pending),
+            _ => Err(ClientError::Protocol),
+        }
     }
 
     pub async fn send(
