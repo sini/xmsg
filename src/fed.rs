@@ -7141,6 +7141,97 @@ impl AttachmentQueries {
     }
 }
 
+struct ControlOwner {
+    task: tokio::task::JoinHandle<()>,
+    legacy: Arc<std::sync::atomic::AtomicBool>,
+    next_legacy: Mutex<Instant>,
+}
+impl Drop for ControlOwner {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+pub(crate) struct ControlWorker {
+    _owner: Arc<ControlOwner>,
+}
+impl ControlWorker {
+    pub(crate) fn legacy(&self) -> bool {
+        self._owner.legacy.load(Ordering::Relaxed)
+    }
+    pub(crate) fn legacy_delay(&self) -> Duration {
+        let mut next = self._owner.next_legacy.lock().unwrap();
+        let now = Instant::now();
+        if *next > now {
+            return *next - now;
+        }
+        *next = now + Duration::from_secs(3);
+        Duration::ZERO
+    }
+}
+pub(crate) fn spawn_control_worker(fs: Arc<FedState>, peer: String) -> ControlWorker {
+    type Registry = Mutex<HashMap<(usize, String), std::sync::Weak<ControlOwner>>>;
+    static WORKERS: std::sync::OnceLock<Registry> = std::sync::OnceLock::new();
+    let mut workers = WORKERS.get_or_init(Mutex::default).lock().unwrap();
+    workers.retain(|_, worker| worker.strong_count() > 0);
+    let key = (Arc::as_ptr(&fs.db) as usize, peer.clone());
+    if let Some(owner) = workers.get(&key).and_then(std::sync::Weak::upgrade) {
+        return ControlWorker { _owner: owner };
+    }
+    let legacy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let legacy_task = legacy.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let peers = fs.current_peers();
+            match get_federated_inbox_mode(&fs, &peers, &peer, 30, Some(true)).await {
+                Ok(Some(item)) => {
+                    if matches!(&item, FedInboxItem::Message(_)) {
+                        legacy_task.store(true, Ordering::Relaxed);
+                        tracing::debug!(peer=%peer,"peer returned a message to control-only inbox; use legacy inbox");
+                        return;
+                    }
+                    spawn_control_answer(&fs, &peer, item);
+                }
+                Ok(None) => {}
+                Err(AppError::BadRequest(_)) => {
+                    legacy_task.store(true, Ordering::Relaxed);
+                    return;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+            }
+        }
+    });
+    let owner = Arc::new(ControlOwner {
+        task,
+        legacy,
+        next_legacy: Mutex::new(Instant::now()),
+    });
+    workers.insert(key, Arc::downgrade(&owner));
+    ControlWorker { _owner: owner }
+}
+pub(crate) fn spawn_control_answer(fs: &Arc<FedState>, peer: &str, item: FedInboxItem) {
+    let fs = fs.clone();
+    let peer = peer.to_string();
+    match item {
+        FedInboxItem::Attachment {
+            query,
+            item_id,
+            index,
+            offset,
+            length,
+        } => {
+            tokio::spawn(async move {
+                answer_attachment_query(&fs, &peer, &query, &item_id, index, offset, length).await;
+            });
+        }
+        FedInboxItem::List { query, v } => {
+            tokio::spawn(async move {
+                answer_list_query(&fs, &peer, &query, v.unwrap_or(1) >= 2).await;
+            });
+        }
+        FedInboxItem::Message(_) => {}
+    }
+}
+
 #[cfg(test)]
 mod attachment_query_tests {
     use super::*;
@@ -7239,96 +7330,5 @@ mod attachment_query_tests {
         assert!(restored.attachments.is_empty());
         assert_eq!(serde_json::to_value(restored).unwrap(), value);
         assert_eq!(original, value);
-    }
-}
-
-struct ControlOwner {
-    task: tokio::task::JoinHandle<()>,
-    legacy: Arc<std::sync::atomic::AtomicBool>,
-    next_legacy: Mutex<Instant>,
-}
-impl Drop for ControlOwner {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-pub(crate) struct ControlWorker {
-    _owner: Arc<ControlOwner>,
-}
-impl ControlWorker {
-    pub(crate) fn legacy(&self) -> bool {
-        self._owner.legacy.load(Ordering::Relaxed)
-    }
-    pub(crate) fn legacy_delay(&self) -> Duration {
-        let mut next = self._owner.next_legacy.lock().unwrap();
-        let now = Instant::now();
-        if *next > now {
-            return *next - now;
-        }
-        *next = now + Duration::from_secs(3);
-        Duration::ZERO
-    }
-}
-pub(crate) fn spawn_control_worker(fs: Arc<FedState>, peer: String) -> ControlWorker {
-    type Registry = Mutex<HashMap<(usize, String), std::sync::Weak<ControlOwner>>>;
-    static WORKERS: std::sync::OnceLock<Registry> = std::sync::OnceLock::new();
-    let mut workers = WORKERS.get_or_init(Mutex::default).lock().unwrap();
-    workers.retain(|_, worker| worker.strong_count() > 0);
-    let key = (Arc::as_ptr(&fs.db) as usize, peer.clone());
-    if let Some(owner) = workers.get(&key).and_then(std::sync::Weak::upgrade) {
-        return ControlWorker { _owner: owner };
-    }
-    let legacy = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let legacy_task = legacy.clone();
-    let task = tokio::spawn(async move {
-        loop {
-            let peers = fs.current_peers();
-            match get_federated_inbox_mode(&fs, &peers, &peer, 30, Some(true)).await {
-                Ok(Some(item)) => {
-                    if matches!(&item, FedInboxItem::Message(_)) {
-                        legacy_task.store(true, Ordering::Relaxed);
-                        tracing::debug!(peer=%peer,"peer returned a message to control-only inbox; use legacy inbox");
-                        return;
-                    }
-                    spawn_control_answer(&fs, &peer, item);
-                }
-                Ok(None) => {}
-                Err(AppError::BadRequest(_)) => {
-                    legacy_task.store(true, Ordering::Relaxed);
-                    return;
-                }
-                Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
-            }
-        }
-    });
-    let owner = Arc::new(ControlOwner {
-        task,
-        legacy,
-        next_legacy: Mutex::new(Instant::now()),
-    });
-    workers.insert(key, Arc::downgrade(&owner));
-    ControlWorker { _owner: owner }
-}
-pub(crate) fn spawn_control_answer(fs: &Arc<FedState>, peer: &str, item: FedInboxItem) {
-    let fs = fs.clone();
-    let peer = peer.to_string();
-    match item {
-        FedInboxItem::Attachment {
-            query,
-            item_id,
-            index,
-            offset,
-            length,
-        } => {
-            tokio::spawn(async move {
-                answer_attachment_query(&fs, &peer, &query, &item_id, index, offset, length).await;
-            });
-        }
-        FedInboxItem::List { query, v } => {
-            tokio::spawn(async move {
-                answer_list_query(&fs, &peer, &query, v.unwrap_or(1) >= 2).await;
-            });
-        }
-        FedInboxItem::Message(_) => {}
     }
 }
