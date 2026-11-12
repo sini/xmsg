@@ -3,21 +3,24 @@ title: Addressing & Resolution
 description: Recipient addresses, sender labels, local target resolution order, and federated view resolution.
 ---
 
-Every recipient on `xmsg` has an address of the form `<id or name>[@<node>]`, with at most one `@`.
+Each recipient on `xmsg` has an [address](/glossary/#address). Its form is
+`<id or name>[@<node>]`, with at most one `@`. The part after `@` names the
+[node](/glossary/#node).
 
-- **Instances (`id@node` or `id~n@node`):** A 36-character UUID, optionally followed by a monotonic
-  fork suffix `~2`, `~3`, … when multiple live processes present the same conversation ID.
+- **Instances (`id@node` or `id~n@node`):** An [instance](/glossary/#instance) is a session as a
+  recipient. Its ID is a 36-character UUID. When two or more live processes show the same
+  conversation ID, a [fork suffix](/glossary/#fork-suffix) `~2`, `~3`, … follows the UUID.
 - **Delegated subagents (`<P>/<child>@node`):** `<P>` is the parent instance ID (UUID or `X~n`) and
   `<child>` is the subagent's bound name or harness `agent_id` / child session ID.
 - **Services (`name@node`):** A bare service name (`1..=32` ASCII `[A-Za-z0-9_-]`, not `"xmsg"`,
   and not UUID-shaped).
 
-There are no kind prefixes (`svc:`, `claude:`, `session:`) and no PID references. Passing more than
-one `@` (such as `x@dest@hub`) is refused with `bad_request`.
+An address has no kind prefix (`svc:`, `claude:`, `session:`) and no PID. xmsg refuses an
+address with more than one `@` (such as `x@dest@hub`) with `bad_request`.
 
 ## Sender labels
 
-Every delivered message shows its sender in one canonical format:
+Each delivered message shows its sender in one canonical format:
 
 ```text
 instance:   label · id@node            (id@node alone when it has no label)
@@ -26,91 +29,107 @@ service:    name@node                  (all of it attested)
 anonymous:  from · anon@node           (an unattested HTTP sender)
 ```
 
-`id@node` (or `<P>/<child>@node` or `name@node`) is attested by `xmsg`: `id` includes any fork
-suffix `~n` (so the `X~2` fork of a conversation sends as `X~2`, never as plain `X`), and `node` is
-the node's canonical name or the reader's local nickname for that peer.
+`xmsg` attests `id@node` (or `<P>/<child>@node` or `name@node`):
 
-The `label` is the sender's own description (such as a Claude or Pi session name) and is shown
-apart from the attested identifier. A label containing `@` or `·` is dropped whole so it can never
-imitate the attested part; the session remains listed and addressable by its ID without a label.
-Labels are stripped of quotes, angle brackets, control characters, and newlines, non-ASCII
-characters become `_`, and the label is capped at 64 characters. The attested `id@node` suffix is
-always emitted whole.
+- `id` includes the fork suffix `~n`, if there is one. Thus the `X~2` fork of a conversation sends
+  as `X~2`, never as plain `X`.
+- `node` is the node's canonical name, or the reader's local nickname for that peer.
+
+The [label](/glossary/#label) is the sender's own description, such as a Claude or Pi session
+name. xmsg shows it apart from the attested identifier. These rules apply to a label:
+
+- xmsg drops a label that contains `@` or `·`, so a label cannot imitate the attested part. The
+  session stays listed, and you can address it by its ID.
+- xmsg removes quotes, angle brackets, control characters and newlines.
+- Each non-ASCII character becomes `_`.
+- The maximum length is 64 characters.
+
+xmsg always shows the attested `id@node` part whole.
 
 ## Local resolution order
 
-Every surface that takes a target (`POST /v1/messages`, `agent.sock` `send`, MCP `send`, and a
-federated send arriving at this node) resolves `to` in the same five-step order:
+Each surface that takes a target uses the same five steps to resolve `to`. The surfaces are
+`POST /v1/messages`, `agent.sock` `send`, MCP `send`, and a federated send that arrives at this
+node:
 
 1. **An instance ID or delegated sub-address (`<P>/<child>`).**
    Matches a Claude conversation's `X~n` or bare `X`, then an Antigravity, plugin (`opencode`,
    `hermes`), Codex, or Pi session's ID, or a sub-address `<P>/<child>` bound under `P` (where
    `<child>` matches either the subagent's bound `name` or its `agent_id`).
-   - While a subagent is in an active turn, the message queues in its turn mailbox
-     (`outcome: "queued"`) for `inbox`.
-   - When its turn is not active, the message falls back to parent `P` with a
-     `to=<P>/<child> agent_id=<agent_id>` header prepended.
-   - A bare `X` while the plain ID is free and only `X~n` forks are live returns `409 ambiguous`,
-     listing each fork as `X~n@<node>`; it is never treated as parked.
+   - While a subagent is in an active turn, the message waits in its
+     [turn mailbox](/glossary/#turn-mailbox) (`outcome: "queued"`) for `inbox`.
+   - When its turn is not active, the message goes to the parent `P`. xmsg adds a
+     `to=<P>/<child> agent_id=<agent_id>` header before the body.
+   - Sometimes the plain ID is free and only `X~n` forks are live. Then a bare `X` returns
+     `409 ambiguous` and lists each fork as `X~n@<node>`. xmsg never treats it as parked.
 2. **A name, among services first.**
-   If a registered service has the name, the send goes to that service regardless of how any
-   instance is labelled. A session labelled `genie-guard` can never shadow or block the service
+   If a registered service has the name, the send goes to that service. Instance labels do not
+   change this. A session with the label `genie-guard` cannot hide or block the service
    `genie-guard`.
 3. **Instance labels, only when unique.**
-   Only when no service has the name are live instance labels considered. The send resolves only
-   when exactly one live instance carries the label; two or more return `409 ambiguous` listing
-   each candidate as `id@<node>`.
+   xmsg uses live instance labels only when no service has the name. The send resolves only
+   when exactly one live instance has the label. Two or more return `409 ambiguous`, with each
+   candidate as `id@<node>`.
 4. **An instance observed here before and not running now.**
-   A parked Claude, Codex, or Antigravity conversation is accepted and queued (`outcome: "queued"`).
-   A Pi ID, a released or closed plugin session (`opencode`, `hermes`), or an exited `X~n` fork is
-   `410 gone` and is never queued.
+   xmsg accepts and queues a message for a [parked](/glossary/#parked) Claude, Codex or
+   Antigravity conversation (`outcome: "queued"`). A Pi ID, a released or closed plugin session
+   (`opencode`, `hermes`), or an exited `X~n` fork is `410 gone`. xmsg never queues for it.
 5. **Otherwise `404 not_found`.**
 
 ## Node selectors
 
-The part after `@` may be a canonical node name, a local peer nickname, or a bare host.
-Exact canonical names and nicknames win first. Otherwise a bare selector such as `workstation`
-matches the host component of nodes in the local view:
+The part after `@` is the [node selector](/glossary/#node-selector). It can be a canonical node
+name, a local peer nickname, or a bare host. An exact canonical name or nickname has priority.
+Otherwise a bare selector such as `workstation` matches the host part of the nodes in the local
+view:
 
 - `list(node="workstation")` lists every matching node, including the local node when it matches.
-- `send(to="guard@workstation", text="review this")` selects a single matching node. If both
+- `send(to="guard@workstation", text="review this")` selects one matching node. If both
   `alice.workstation` and `bob.workstation` match, the result is `ambiguous`, with the candidates.
-  With no match, the explicit destination follows a configured default route; without one it is unknown.
+  If no node matches, the explicit destination goes to the [default route](/glossary/#default-route),
+  if there is one. If there is no default route, the destination is unknown.
 - `send(to="guard@alice.workstation", text="review this")` selects that specific node.
 
-A bare recipient such as `guard` still uses the view-resolution rules below; it is different
-from a recipient with a bare-host suffix. Node names and peer nicknames are
-[defined by federation identity](/concepts/federation/#canonical-names-and-local-nicknames).
+A bare recipient such as `guard` uses the view rules below. It is different from a recipient
+with a bare-host suffix. Federation identity defines
+[node names and peer nicknames](/concepts/federation/#canonical-names-and-local-nicknames).
 
 ## How a bare reference resolves over the federated view
 
-A `to` with `@node` is resolved by that node alone. A bare `to` (without `@node`) on a node with
-peers resolves over the send's **view**: this node and every node in its peers file (direct peers
-and dial-out clients alike). Each peer is queried concurrently within the 5-second list timeout:
+Only the named node resolves a `to` with `@node`. A bare `to` has no `@node`. On a node with
+peers, a bare `to` resolves over the send's [view](/glossary/#view). The view is this node and each
+node in its peers file, both direct peers and dial-out clients. xmsg asks all peers at the same
+time, with a 5-second list timeout:
 
-- **The sender's user** is this node's own user: its certificate's user (`<user>` of
-  `<user>.<host>`), `<sa>.<ns>` for a Kubernetes pod, the key-derived name for a pinned node, or
-  the OS username when federation is not configured.
-- **Over the view, an instance ID is UUID-shaped:** a 36-character UUID, optionally followed by
-  `~n`. Any other `to` is treated as a name so another node's listing can never capture a name.
-- **A bare instance ID checks the sender's own user first.** This node first awaits the answers of
-  the sender's user's nodes in view (this node plus peers whose entry names an identity of that
-  user). One live listing of the ID is the destination; two or more return `ambiguous`; with none
-  live, a parked listing is the destination (`queued`). Other users' nodes are not consulted when
-  the sender's own user lists the ID.
+- **The sender's user** is this node's own user. It is one of these:
+  - the certificate's user (`<user>` of `<user>.<host>`);
+  - `<sa>.<ns>` for a Kubernetes pod;
+  - the key-derived name for a pinned node;
+  - the OS username when federation is not configured.
+- **Over the view, an instance ID has the shape of a UUID:** a 36-character UUID, with an optional
+  `~n`. xmsg treats any other `to` as a name. Thus another node's listing cannot capture a name.
+- **A bare instance ID checks the sender's own user first.** This node first waits for the answers
+  of the sender's user's nodes in view. These are this node and the peers whose entry names an
+  identity of that user. Then:
+  - One live listing of the ID is the destination.
+  - Two or more live listings return `ambiguous`.
+  - With no live listing, a parked listing is the destination (`queued`).
+
+  When the sender's own user lists the ID, xmsg does not ask other users' nodes.
 - **Otherwise, the full view is checked:**
-  - **Fail closed (`503 unavailable`).** If any node in the view could not be asked (unreachable,
-    timed out, disconnected dial-out client, or withholds `list`), a bare name or a bare ID not
-    found on the sender's user's nodes fails with `503 unavailable` naming the unreachable node.
-    Specify `@node` to bypass view fan-out and send directly to a known node.
+  - **Fail closed (`503 unavailable`).** Sometimes xmsg cannot ask a node in the view. The node
+    can be unreachable, time out, be a disconnected dial-out client, or withhold `list`. Then a
+    bare name fails with `503 unavailable`, which names the unreachable node. A bare ID that is
+    not on the sender's user's nodes fails in the same way. To skip the view, add `@node` and send
+    directly to a known node.
   - **Bare ID across users:** An ID listed under two different users is `ambiguous`. Within one
-    user, a live listing beats a parked one, two live listings are `ambiguous`, and parked-only
-    listings resolve to one queued destination.
-  - **Bare name across the view:** Services anywhere in view win over instance labels. The name
-    resolves only when exactly one recipient in view carries it; otherwise `ambiguous` lists every
-    candidate (`name@node` or `id@node`).
-- **60-second location cache:** When a bare instance ID resolves to a live session on a peer and is
-  delivered or queued there, this node caches `ID -> peer` for 60 seconds. Subsequent bare sends to
-  that ID within 60 seconds route directly to that peer marked **live-only**: if the session is now
-  parked (`not_live`) or delivery fails, the cache entry is evicted and the send re-resolves over
-  the full view.
+    user, a live listing has priority over a parked one. Two live listings are `ambiguous`.
+    Parked-only listings resolve to one queued destination.
+  - **Bare name across the view:** A service anywhere in the view has priority over instance
+    labels. The name resolves only when exactly one recipient in the view has it. Otherwise
+    `ambiguous` lists each candidate (`name@node` or `id@node`).
+- **60-second location cache:** A bare instance ID can resolve to a live session on a peer. When
+  the peer delivers or queues the message, this node caches `ID -> peer` for 60 seconds. During
+  those 60 seconds, a bare send to that ID goes directly to that peer, marked **live-only**. If the
+  session is now parked (`not_live`), or delivery fails, xmsg removes the cache entry. Then the
+  send resolves again over the full view.

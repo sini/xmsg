@@ -3,60 +3,67 @@ title: Sessions, Services & Subagents
 description: How interactive instances, long-polling daemon services, and delegated child subagents work on xmsg.
 ---
 
-`xmsg` routes messages between three kinds of recipients: **instances** (interactive AI agent
-sessions), **services** (headless daemons and bridges), and **subagents** (delegated child turns
-spawned under a parent conversation).
+`xmsg` sends messages to three kinds of recipient:
+
+- **Instances** are interactive AI agent sessions. See [instance](/glossary/#instance).
+- **Services** are headless daemons and bridges. See [service](/glossary/#service).
+- **Subagents** are child turns that a parent conversation starts. See
+  [subagent](/glossary/#subagent).
 
 ## Instances and fork claims (`X~n`)
 
-An instance is a live or parked conversation in an agent harness:
+An instance is a live or [parked](/glossary/#parked) conversation in an agent
+[harness](/glossary/#harness):
 
 - **Persistent conversation IDs (`claude`, `agy`, `codex`):** The instance ID is the harness's own
-  conversation UUID. When a conversation closes or pauses between turns, its ID remains `parked` in
-  SQLite for the reply TTL (`--reply-ttl`, 7 days by default) so inbound messages queue for its next
-  turn.
-- **Process-bound session IDs (`pi`, `opencode`, `hermes`):** `xmsg` mints a fresh UUID v4 on
-  registration. When a Pi process exits or an `opencode`/`hermes` session is deleted/finalized, its
-  address transitions to `gone` (`410`).
+  conversation UUID. A conversation can close, or pause between turns. Then its ID stays `parked`
+  in SQLite for the [reply TTL](/glossary/#reply-ttl) (`--reply-ttl`, 7 days by default).
+  Incoming messages wait for its next turn.
+- **Process-bound session IDs (`pi`, `opencode`, `hermes`):** `xmsg` makes a new UUID v4 at
+  registration. When a Pi process exits, its address becomes [`gone`](/glossary/#gone) (`410`).
+  The same occurs when an `opencode` or `hermes` session is deleted or finalized.
 
 ### Concurrent processes and fork suffixes (`instance_claims`)
 
-When multiple live processes present the same Claude conversation ID `X` (either in the same
-`~/.claude/sessions` directory or across multiple `--sessions-dir` tenant directories), `xmsg`
-manages them in the persistent SQLite `instance_claims` table:
+Two or more live processes can show the same Claude conversation ID `X`. They can be in the
+same `~/.claude/sessions` directory, or in different `--sessions-dir` tenant directories. `xmsg`
+records them in the persistent SQLite `instance_claims` table:
 
-- The first observed live process presenting `X` claims plain `X` (suffix 1).
-- Subsequent live processes presenting `X` receive monotonic fork suffixes `X~2`, `X~3`, … in
-  observation order (ties broken by `(procStart, pid)` within a scan).
-- Suffixes persist across `xmsg serve` restarts and are never promoted while live.
-- When a node observes a second live process for an already-live ID, it sends a one-time fork
-  notice to each process informing them of both addresses (`X@node` and `X~2@node`).
-- Once an `X~n` fork process exits, its claim is released and sends to `X~n` return `410 gone`. If
-  plain `X` is released, the next process presenting `X` claims plain `X`; numeric suffixes `~2`,
-  `~3`, … are never reused while records exist.
+- The first live process that xmsg sees with `X` claims plain `X` (suffix 1).
+- Each later live process with `X` gets the next [fork suffix](/glossary/#fork-suffix): `X~2`,
+  `X~3`, …, in the order xmsg sees them. Within one scan, `(procStart, pid)` breaks a tie.
+- Suffixes persist across `xmsg serve` restarts. xmsg never promotes a suffix while it is live.
+- When a node sees a second live process for an ID that is already live, it sends one fork notice
+  to each process. The notice gives both addresses (`X@node` and `X~2@node`).
+- When an `X~n` fork process exits, xmsg releases its claim. Then sends to `X~n` return
+  `410 gone`. When xmsg releases plain `X`, the next process with `X` claims plain `X`. xmsg never
+  uses a numeric suffix `~2`, `~3`, … again while its records exist.
 
 ## Services (`<name>@<node>`)
 
-Headless daemons, bots, guards, and bridges register bare service names (such as `genie-guard`,
-`matrix-xmsg`, or `xmsg-gateway`) over `register.sock`:
+Headless daemons, bots, guards and bridges register bare service names over `register.sock`.
+Examples are `genie-guard`, `matrix-xmsg` and `xmsg-gateway`:
 
 ```rust file=<rootDir>/src/client/mod.rs#L63-L105
 ```
 
-- **Executable attestation (`--svc-exe`):** On normal host nodes, `xmsg serve` requires
-  `--svc-exe <NAME>=<PATH>` (or `XMSG_SVC_EXE`). When a process connects to `register.sock` and
-  sends `{"harness":"svc","name":"<NAME>"}`, `xmsg` checks the peer UID (`peer_uid == server_uid`)
-  and verifies that the canonical executable path (`/proc/<pid>/exe` on Linux, `proc_pidpath` on
-  macOS) matches `<PATH>`. Only one live process may hold a
-  service name at a time.
-- **At-least-once long-poll and `ack`:** Services pull messages with `{"action":"poll","waitSecs":30}`
-  on `register.sock` and acknowledge each delivery with `{"action":"ack","messageId":"..."}` after
-  committing it to their own durable store. Unacknowledged messages remain `queued` (tracked in the
-  connection's `in_flight` set) and redeliver in FIFO order if the service disconnects before
-  acknowledging.
-- **Structured `origin` attestation:** Every delivered frame includes an attested `origin` struct
-  (`id`, `service`, `node`, `label`) so services make authorization decisions from structured fields
-  rather than parsing display headers:
+- **Executable attestation (`--svc-exe`):** On normal host nodes, `xmsg serve` needs
+  `--svc-exe <NAME>=<PATH>` (or `XMSG_SVC_EXE`). A process connects to `register.sock` and sends
+  `{"harness":"svc","name":"<NAME>"}`. Then `xmsg` makes two checks:
+  - The peer UID is the server UID (`peer_uid == server_uid`).
+  - The canonical executable path is `<PATH>`. On Linux, xmsg reads `/proc/<pid>/exe`. On macOS,
+    it uses `proc_pidpath`.
+
+  Only one live process can hold a service name at a time.
+- **At-least-once long-poll and `ack`:** A service pulls messages with
+  `{"action":"poll","waitSecs":30}` on `register.sock`. It stores each delivery in its own durable
+  store. Then it acknowledges the delivery with `{"action":"ack","messageId":"..."}`
+  ([ack](/glossary/#ack)). An unacknowledged message stays `queued`, in the connection's
+  `in_flight` set. If the service disconnects before the `ack`, xmsg delivers the message again,
+  in FIFO order.
+- **Structured `origin` attestation:** Each delivered frame includes an attested
+  [`origin`](/glossary/#origin) struct (`id`, `service`, `node`, `label`). Thus a service makes
+  authorization decisions from structured fields. It does not parse display headers:
 
 ```rust file=<rootDir>/src/client/origin.rs#L3-L16
 ```
@@ -66,24 +73,25 @@ See [Daemon Protocol & Rust Client](/reference/service-client/) for the wire fra
 
 ## Delegated subagents (`<P>/<child>@<node>`)
 
-When a parent conversation `P` spawns child subagents, each bound child gets a delegated
-sub-address `<P>/<child>@<node>` where `<child>` is either the subagent's bound name or its harness
-`agent_id` / child session ID. Both `<P>/<name>` and `<P>/<agent_id>` resolve to the same bound
-subagent, and `list` includes live bound subagents with `kind: "subagent"`.
+A parent conversation `P` can start child subagents. Each bound child gets a delegated
+sub-address `<P>/<child>@<node>`. `<child>` is the subagent's bound name, or its harness
+`agent_id` or child session ID. Both `<P>/<name>` and `<P>/<agent_id>` resolve to the same bound
+subagent. `list` shows live bound subagents with `kind: "subagent"`.
 
 ### Turn mailbox (`inbox`) and parent fallback
 
-- **Active turn (`inbox`):** While a subagent's turn is active (`turn_pid` live with matching start
-  time), messages and replies addressed to `<P>/<child>@<node>` queue in its turn mailbox
-  (`outcome: "queued"`). The subagent drains them during its turn by calling **`inbox(wait?)`**,
-  which returns `{address, messages: [{id, from, body, created_at}]}` and marks each drained
-  message `delivered`.
-- **Parent fallback (`to=<P>/<child> agent_id=<id>`):** When the subagent's turn is not active
-  (between turns or after `SubagentStop` / `Stop`), messages and replies addressed to
-  `<P>/<child>@<node>` fall back to the parent session `P` with a
-  `to=<P>/<child> agent_id=<agent_id>` header prepended to the message body. If `P` is currently
-  parked, the message stays queued on `<P>/<agent_id>` and is either drained by the subagent on its
-  next `inbox` call or delivered to `P` with the fallback header when `P` returns.
+- **Active turn (`inbox`):** A subagent's turn is active while `turn_pid` is live with the
+  matching start time. During the turn, messages and replies to `<P>/<child>@<node>` wait in its
+  [turn mailbox](/glossary/#turn-mailbox) (`outcome: "queued"`). The subagent reads them during
+  its turn with **`inbox(wait?)`**. The call returns
+  `{address, messages: [{id, from, body, created_at}]}` and marks each message `delivered`.
+- **Parent fallback (`to=<P>/<child> agent_id=<id>`):** The subagent's turn is not active between
+  turns, or after `SubagentStop` or `Stop`. Then messages and replies to `<P>/<child>@<node>` go
+  to the parent session `P`. xmsg adds a `to=<P>/<child> agent_id=<agent_id>` header before the
+  message body. If `P` is parked now, the message stays queued on `<P>/<agent_id>`. Then one of two
+  things occurs first:
+  - the subagent reads it with its next `inbox` call;
+  - xmsg delivers it to `P`, with the fallback header, when `P` returns.
 
 ### Per-harness subagent support
 
