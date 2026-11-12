@@ -21,8 +21,11 @@ harness and the `run_command` subshells it spawns (not to MCP server children or
 2. **Stage 2 — Credential capture & FIFO flush:**
    Once `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` are registered (either automatically
    via the Linux in-process command watcher or via the model running `xmsg register agy`), `xmsg`
-   stores the credentials in memory only, admits any subagents from `transcript.jsonl`, and flushes
-   all queued messages in FIFO order (`outcome: "delivered"`).
+   stores the credentials in memory only and admits subagents from the parent's
+   `.system_generated/subagents/*.json` descriptors. A successful registration response means those
+   child bindings are ready: a caller can immediately address `<parent>/kid` without retrying
+   registration. Queued messages flush afterward in FIFO order (`outcome: "delivered"`); registration
+   success does not mean push delivery has completed.
 
 ## Linux command watcher (Arm A) vs. Hook prompt (Arm B′)
 
