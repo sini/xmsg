@@ -44,15 +44,44 @@ and provider requirements. Keep OAuth credentials and grant administration outsi
 
 **Planned, not yet released.** The gateway can be configured with exact issuer, hosted-client and audience profiles for a common resource URL. Each keeps its own subject, scopes, provider restrictions and enabled grant. Profiles select authentication; they do not create separate bus addresses or mailboxes.
 
-For example, an owner can retain the Kanidm entry while adding a proxy issuer's entry. Readable token claims select one configured profile as a routing hint; that profile's authenticated introspection must then verify the complete binding. There is no trial of other providers after a refusal. At most one explicit opaque default can receive encrypted or opaque tokens. An unknown JWS issuer cannot fall back to it.
+For example, an owner can retain the Kanidm entry while adding a proxy issuer's entry. Readable token claims select one configured profile as a routing hint; that provider must validate the token and the gateway must match the complete binding. There is no trial of other providers after a refusal. At most one explicit opaque default can receive encrypted or opaque tokens. An unknown JWS issuer cannot fall back to it.
 
 Grant coexistence requires an explicit owner-run store migration and inspect read-back. Events remains bound to one selected grant. Moving it during an issuer cutover is an explicit owner action: change the configured Events grant under the normal maintenance procedure, establish the new client's subscription and verify its wake and mailbox access. Existing custody is not automatically reassigned to the new grant. Keep the old issuer/grant available until the transition has been verified.
 
-Outbound token verification happens once at public entry. Before effects, local checks enforce expiry and the captured grant's current revision; provider-side revocation after entry applies to the next call. Events keeps its separate authentication contract.
+With remote introspection profiles, token verification happens once at public entry. Before effects, local checks enforce expiry and the captured grant's current revision; provider-side revocation after entry applies to the next call. Events keeps its separate authentication contract.
 
 Live outbound reservation recovery is also scoped to its grant and registered sender: a foreign sender receives `Denied`, while the owning sender still receives `Pending` under contention. See [outbound authorization](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/outbound.md) for this intended narrowing.
 
 See the gateway's [profile reference and cutover example](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/auth-profiles.md) before configuring a migration. Acceptance of an issuer is separate from permission to read custody, subscribe to Events or send messages.
+
+## Gateway authorization server
+
+**Planned, not yet released.** The gateway can act as the hosted client's OAuth [authorization server](/glossary/#authorization-server) while keeping owner login at Kanidm. Local access tokens and rotating [refresh families](/glossary/#refresh-family) let the hosted connection continue beyond Kanidm's browser session. This requires the feature's implementation and hosted acceptance; it is not a promise that a deployment is configured or production-ready.
+
+| Model | Legacy Kanidm profile | Gateway AS profile (planned) |
+| --- | --- | --- |
+| Hosted access | Kanidm bearer, tied to its login session | 1-hour local access token |
+| Refresh lifetime | Kanidm's session policy | 30-day idle limit and 90-day absolute family limit by default |
+| Kanidm UI logout | Can end the refresh chain | Does not disconnect the hosted client |
+| Events credential | Stored bearer | Fixed token-family reference, without a stored bearer |
+| After reconnect | MCP can work while Events stays `credential_required` on the old bearer | New authorization creates a new family; the subscription retains its old family |
+| Restore Events | Renew or re-subscribe with the new token | Explicitly renew or re-subscribe with the new token; no automatic family follow-on |
+
+[Custody](/glossary/#custody) read/ACK, reply-target ownership lookup and [Events](/glossary/#events) subscribe/renew re-check at their effect point. A grant disable between admission and the custody step refuses read/ACK without a partial effect; retry after re-enable. If the target loses custody eligibility before reply lookup, the reply is refused without a reservation or effect. Normal sends, broker calls and stored reply receipts retain the grant and policy snapshot captured at [admission](/glossary/#admission-gateway). Events revalidates before writing future wake authority: a revocation between initial admission and that check refuses the request and writes no subscription row.
+
+Events subscriptions still have their requested lifetime: 1 hour by default, capped at 24 hours. A longer-lived token family does not extend that subscription; the client must renew it.
+
+**Logging out of Kanidm does not disconnect an AS-backed hosted client.** To cut off existing access, use the gateway grant switch, its revocation endpoint, account disable or required-group removal. Removing upstream consent alone does not revoke a local family. A family revocation forces a reconnect; a passkey prompt appears only if Kanidm needs one, because the gateway does not force a fresh browser login.
+
+[Account liveness](/glossary/#liveness-gateway) reads the owner's validity dates and exact access-group [SPN](/glossary/#spn). A permanent test account, called the canary, has known validity dates. Reading them confirms that an absent owner date means unrestricted validity rather than lost read access. A readable denying value takes effect within an access lifetime (1 hour by default). When the entry/required visibility reads null, or Kanidm is unavailable, bounded grace can extend that to 1 hour plus 15 minutes by default. These bounds rely on a trusted, NTP-disciplined clock with bounded cumulative error; no numeric clock-error allowance is promised.
+
+After a detected clock rollback, revocation must commit before new admission resumes. Storage errors keep it pending; clock catch-up alone does not clear it. If the process dies before any durable record and the clock recovers before restart, that unrecorded observation is lost. This is part of the trusted-clock assumption.
+
+The liveness service account can read personal information across Kanidm accounts. That builtin permission is broader than the owner and canary accounts the gateway queries. Kanidm 1.11.2 does not authenticate introspection callers: the configured lookup secret does not protect that request. The gateway AS's own hosted-client secret authentication remains mandatory.
+
+Cutover uses a **new** connector and its exact per-connector redirect URI. AS discovery and `/oauth/*` need public HTTPS even when MCP uses the private tunnel. Owner steps drain and acknowledge the old inbox, stop/quiesce the gateway, run the unread-custody cutover guard, start on the new selected grant, then authorize the new connector and explicitly subscribe/renew Events with its new token. Existing unread custody is not silently reassigned. A dead family remains held until explicit renewal; another live family for the same owner must not revive its old callback.
+
+See the [authorization-server reference](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/authorization-server.md) for configuration, retry/reuse rules, caps, revocation bounds, query-log redaction, guarded cutover and rollback. The owner performs deployments, connector setup and hosted acceptance.
 
 ## File exchange
 
