@@ -3,51 +3,62 @@ title: Federation
 description: Cross-host mTLS federation over /fed/v2, self-authenticating node names, pinned and CA-signed trust models, and peer policy configuration.
 ---
 
-`xmsg` federates across hosts, virtual machines, and Kubernetes pods over mutual TLS (mTLS) on the
-`/fed/v2` wire protocol.
+[Federation](/glossary/#federation) connects xmsg nodes on different hosts, virtual machines
+and Kubernetes pods. The nodes use mutual TLS ([mTLS](/glossary/#mtls)) on the `/fed/v2` wire
+protocol. Each node lists the nodes it trusts, its [peers](/glossary/#peer), in a
+[peers file](/glossary/#peers-file).
 
 ## Self-authenticating node names
 
-A node's name is derived from its cryptographic or OS identity — never assigned by a free-form flag
-(`--host-label` and `XMSG_HOST_LABEL` are refused at startup):
+xmsg makes a node's name from its cryptographic identity or its OS identity. You cannot set the
+name with a free-form flag. xmsg refuses `--host-label` and `XMSG_HOST_LABEL` at startup:
 
-1. **CA-signed identity (`--fed-cert` with URI SAN):** Derived from the single SPIFFE URI Subject
-   Alternative Name (SAN) on the node's leaf certificate:
+1. **CA-signed identity (`--fed-cert` with URI SAN):** The name comes from the single
+   [SPIFFE](/glossary/#spiffe-id) URI Subject Alternative Name (SAN) on the node's leaf
+   certificate:
    - `spiffe://<trust-domain>/host/<host>/user/<user>` $\rightarrow$ `<user>.<host>` (for example,
      `alice.workstation`).
    - `spiffe://<trust-domain>/ns/<ns>/sa/<sa>` $\rightarrow$ `<sa>.<ns>` (for example,
      `genie-guard.genie`).
-   - Dots (`.`) inside `<user>`, `<host>`, `<ns>`, or `<sa>` are refused.
-2. **Pinned key (`--fed-cert` without URI SAN):** Derived from the public key itself: the first
-   16 characters of the lowercase RFC 4648 base32 encoding of the SHA-256 digest of the key's
-   `SubjectPublicKeyInfo` DER (for example, `k5x3q7mzv2ndp4ha`).
+   - xmsg refuses a dot (`.`) in `<user>`, `<host>`, `<ns>` or `<sa>`.
+2. **Pinned key (`--fed-cert` without URI SAN):** The name comes from the public key. xmsg takes
+   the SHA-256 digest of the key's `SubjectPublicKeyInfo` DER. It encodes the digest in lowercase
+   RFC 4648 base32. The name is the first 16 characters (for example, `k5x3q7mzv2ndp4ha`).
 3. **No federation identity (local-only):** When `--fed-cert` is not set, the node name is
-   `<user>.<host>` from the effective UID's OS username and the short hostname (cut at the first
-   `.`). This name never travels on the wire.
+   `<user>.<host>`. `<user>` is the OS username of the effective UID. `<host>` is the short
+   hostname, cut at the first `.`. This name never goes on the wire.
 
 ### Canonical names and local nicknames
 
-Envelopes on `/fed/v2` carry canonical node names, and the receiving node attributes every inbound
-message to the canonical name of the peer entry that authenticated the TLS connection (unless
-[relayed by an authorized forwarding hub](/concepts/hubs-and-leaves/#forwarding-through-a-hub)).
-When typing `@node` locally, you may use either the peer's canonical name or your local nickname
-for a pinned peer (the key in your `peers.json`). Exact canonical names and nicknames take precedence
-over a bare-host selector such as `workstation`. With that selector, `list(node="workstation")` queries
-all matching nodes in the current view. A `send(to="guard@workstation", text="...")` selects a
-single match; multiple matches return `ambiguous`. With no match, the explicit destination follows
-a configured default route or is unknown. Use a canonical name to select one user on a shared host. See [node selectors](/concepts/addressing/#node-selectors).
+Envelopes on `/fed/v2` carry canonical node names. The receiving node gives each incoming
+message the canonical name of the peer entry that authenticated the TLS connection. The exception
+is a message that an
+[authorized forwarding hub relays](/concepts/hubs-and-leaves/#forwarding-through-a-hub).
+
+When you type `@node` locally, you can use the peer's canonical name. For a pinned peer, you can
+also use your local nickname, which is the key in your `peers.json`. An exact canonical name or
+nickname has priority over a bare-host selector such as `workstation`:
+
+- `list(node="workstation")` asks all matching nodes in the current view.
+- `send(to="guard@workstation", text="...")` selects one match. Two or more matches return
+  `ambiguous`. With no match, the explicit destination goes to the default route, if there is
+  one. Otherwise it is unknown.
+
+To select one user on a shared host, use a canonical name. See
+[node selectors](/concepts/addressing/#node-selectors).
 
 ## Trust models: pinned vs. CA-signed
 
 Each entry in `peers.json` uses **exactly one** trust mechanism:
 
-- **Pinned certificates (`pin`):** Authenticates a peer by matching its SHA-256 SPKI certificate
-  fingerprint (`sha256:...`). Ideal for direct 1:1 peerings, laptops, and edge nodes without PKI.
-- **CA-signed certificates (`ca` + `identities`):** Validates the peer's X.509 certificate chain
-  against a PEM trust anchor bundle (`ca`) and requires the leaf certificate's **single URI SAN** to
-  match the entry's single concrete URI (`identities`). Common Name (CN) and DNS SANs are never
-  used for identity. Ideal for SPIFFE/SPIRE, `cert-manager`, `step-ca`, or fleet CA deployments
-  where certificates rotate automatically.
+- **Pinned certificates (`pin`):** xmsg authenticates the peer when its SHA-256 SPKI certificate
+  fingerprint (`sha256:...`) is the [pin](/glossary/#pin). Use it for direct 1:1 peerings,
+  laptops and edge nodes without a PKI.
+- **CA-signed certificates (`ca` + `identities`):** xmsg checks the peer's X.509 certificate
+  chain against a PEM trust anchor bundle (`ca`). The leaf certificate's **single URI SAN** must
+  be the entry's single concrete URI (`identities`). xmsg never uses the Common Name (CN) or DNS
+  SANs for identity. Use it for SPIFFE/SPIRE, `cert-manager`, `step-ca` or a fleet CA, where
+  certificates rotate automatically. See [CA entry](/glossary/#ca-entry).
 
 ```json
 {
@@ -72,17 +83,17 @@ Each entry in `peers.json` uses **exactly one** trust mechanism:
 
 ### Naming and non-overlap invariants (`xmsg check-peers`)
 
-Both `xmsg serve` and the standalone validator `xmsg check-peers <peers.json> [--fed-cert <cert.pem>]`
-enforce:
+`xmsg serve` and the standalone validator
+`xmsg check-peers <peers.json> [--fed-cert <cert.pem>]` both apply these rules:
 
-- A CA peer entry's key must equal the node name derived from its `identities` URI (`worker.prod`
+- A CA peer entry's key must be the node name that its `identities` URI gives (`worker.prod`
   above).
-- A pinned peer entry's key is either its 16-character key-derived name or a local nickname (which
-  may not contain `.` and may not be 16 characters of `[a-z2-7]`).
-- All entry keys, derived names, and this node's own name share a single namespace with no
-  collisions or duplicate JSON keys.
-- At handshake time, a certificate must match **exactly one** peer entry; overlapping CA entries or
-  a certificate matching both a pinned entry and a CA entry fail closed.
+- A pinned peer entry's key is its 16-character key-derived name or a local nickname. A nickname
+  must not contain `.`. It must not be 16 characters of `[a-z2-7]`.
+- All entry keys, derived names and this node's own name share one namespace. There must be no
+  collisions and no duplicate JSON keys.
+- At handshake time, a certificate must match **exactly one** peer entry. Overlapping CA entries
+  fail closed. A certificate that matches both a pinned entry and a CA entry also fails closed.
 
 ## Peer configuration reference (`--peers-file`)
 
@@ -132,15 +143,15 @@ it and acknowledges it.
 
 | Field | Type | Description |
 |---|---|---|
-| `address` | `string` | Target `host:port` endpoint. Required, except on a `leaf: true` entry (the hub never dials it) or when another entry sets `default_route`. |
+| `address` | `string` | The peer's `host:port` endpoint. Required, except on a `leaf: true` entry (the hub never dials it) or when another entry sets `default_route`. |
 | `pin` | `string` (optional) | Expected SHA-256 certificate fingerprint (`sha256:...`). Mutually exclusive with `ca`. |
 | `ca` | `string` (optional) | Path to PEM trust anchor bundle. Mutually exclusive with `pin`; requires `identities`. |
 | `identities` | `list[string]` (optional) | Single concrete SPIFFE URI SAN (`["spiffe://..."]`). Required with `ca`. |
 | `allow` | `list[string]` | Permitted capabilities (`"send"`, `"reply"`, `"list"`, `"inbox"`, `"forward"`, `"relayed"`). |
 | `from` | `list[string]` (optional) | Permitted source IP addresses or CIDR blocks for inbound connections. Empty `[]` is refused. |
 | `leaf` | `bool` (optional) | When `true`, this node does not dial the peer. Messages and `list` queries for the peer wait in this node's durable `peer_mailbox` until the peer collects them by long-polling. A send to the peer returns `outcome: "queued"`. Default `false`. |
-| `dial` | `"outbound"` (optional) | Spawns a background pull loop on this node that dials out to `address` to pull messages, answer `list` queries, and poll replies. Mutually exclusive with `leaf: true`. |
-| `principals` | `list[string]` (optional) | Inbound sender filter: service name, instance ID, or `anon:<from>`. **Absent or `[]` permits every principal**; a nonempty list restricts senders to its entries. |
+| `dial` | `"outbound"` (optional) | Starts a background pull loop on this node. The loop connects to `address`. It pulls messages, answers `list` queries and polls replies. Not permitted with `leaf: true`. |
+| `principals` | `list[string]` (optional) | Inbound sender filter: service name, instance ID or `anon:<from>`. **Absent or `[]` permits every principal.** A list with entries permits only those senders. |
 | `targets` | `list[string]` (optional) | Local recipient filter for messages and `list`: service name or instance ID, never an instance label. **Absent permits all; `[]` permits none.** |
 | `default_route` | `bool` (optional) | Use this peer for an explicit `ref@node` destination that is not a direct peer. At most one entry may set it to `true`; direct routes take precedence. See [hub forwarding](/concepts/hubs-and-leaves/#forwarding-through-a-hub). |
 
@@ -194,33 +205,37 @@ certificate identity against patterns:
 
 ## Mesh `list` across peers
 
-Mailbox access is authorized by authenticated peer identity plus `leaf: true` on the
-hub's peer entry. `inbox` in `allow` is accepted and ignored; old configurations
-listing it still load. It is not an additional mailbox capability.
+Two things authorize mailbox access: the authenticated peer identity, and `leaf: true` on the
+hub's peer entry. xmsg accepts `inbox` in `allow` and ignores it. Thus old configurations that
+list it still load. It does not give more mailbox access.
 
-When a caller runs `list` without a `node` filter, `xmsg` queries this node and every peer in
-`peers.json` concurrently (5-second timeout per peer):
+When a caller runs `list` without a `node` filter, `xmsg` asks this node and each peer in
+`peers.json` at the same time. The timeout is 5 seconds for each peer:
 
-- **Direct peers** are queried over `GET /fed/v2/sessions`.
-- **Dial-out clients (`"leaf": true`)** receive a `{"kind":"list","query":"..."}` item in their
-  hub mailbox, waking their long-poll, and post their filtered recipient list back to
+- xmsg asks **direct peers** over `GET /fed/v2/sessions`.
+- **Dial-out clients (`"leaf": true`)** get a `{"kind":"list","query":"..."}` item in their hub
+  mailbox. The item wakes their long-poll. They send their filtered recipient list back to
   `POST /fed/v2/list/{query}`.
-- If a peer's `allow` list for the asker omits `"list"`, it refuses with `403 Forbidden` and the
-  asker reports that node in `nodes` as `status: "unreachable", detail: "withholds list"`.
-- Host-internal details (`pid`, `cwd`, harness, local paths) never cross `/fed/v2`; the asker drops
-  any entry whose reported `user` does not match the peer certificate's user.
+- A peer's `allow` list for the asker can omit `"list"`. Then the peer refuses with
+  `403 Forbidden`. The asker shows that node in `nodes` as
+  `status: "unreachable", detail: "withholds list"`.
+- Host-internal details (`pid`, `cwd`, harness, local paths) never cross `/fed/v2`. The asker
+  drops each entry whose reported `user` is not the peer certificate's user.
 
 ### Policy defaults matter
 
-Clearing `principals` to `[]` removes the sender restriction; it does not revoke every sender.
-To stop an operation, remove it from `allow`. To expose no local recipients, use `targets: []`.
-A network connection still needs to pass the peer's TLS identity, operation rights and any `from`
-filter. `allow`, `principals` and `from` gate traffic this node accepts from that peer.
-A hub also applies a destination peer's `targets` filter before forwarding or queueing.
-Dialable forwarding carries that bound to the recipient in `forwarded.targets` for
-semantic target checking. Mailbox pull items omit that marker; the hub-side pre-filter
-applies, but recipient-side enforcement of that forwarded target bound is a separate
-limitation. See [hub forwarding](/concepts/hubs-and-leaves/#forwarding-through-a-hub).
+`principals: []` removes the sender filter. It does not refuse all senders. To stop an
+operation, remove it from `allow`. To show no local recipients, use `targets: []`.
 
-The empty-list rules are implemented in
+A network connection must still pass the peer's TLS identity, its operation rights and the `from`
+filter, if there is one. `allow`, `principals` and `from` control the traffic that this node
+accepts from that peer.
+
+A hub also applies a destination peer's `targets` filter before it forwards or queues. Dialable
+forwarding sends that limit to the recipient in `forwarded.targets`, for semantic target checks.
+Mailbox pull items do not have that marker. The hub-side pre-filter applies to them, but the
+recipient does not enforce the forwarded target limit. This is a known limitation. See
+[hub forwarding](/concepts/hubs-and-leaves/#forwarding-through-a-hub).
+
+The empty-list rules are in
 [`PeerConfig` parsing and inbound checks](https://github.com/sini/xmsg/blob/76f8f1e8249777cfb63c4d0287431cbbf6b2ce76/src/fed.rs).

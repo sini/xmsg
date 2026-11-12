@@ -5,10 +5,15 @@ description: Container leaf nodes, NAT-friendly outbound links, single-hop hub f
 
 import { Aside } from '@astrojs/starlight/components';
 
-Not every node can accept inbound TCP connections or share a host PID namespace. `xmsg` supports
-three composable topologies on top of direct mTLS peerings: **leaf nodes** (`--leaf`), **outbound
-links** (`"dial": "outbound"`), and **single-hop hub forwarding** (`allow = ["forward"]`), plus
-external **hosted-dot gateways**.
+Some nodes cannot accept inbound TCP connections or share a host PID namespace. For them,
+`xmsg` has three topologies that you can combine with direct mTLS peerings:
+
+- **[Leaf](/glossary/#leaf) nodes** (`--leaf`);
+- **[Outbound links](/glossary/#outbound-link)** (`"dial": "outbound"`);
+- **Single-hop [hub](/glossary/#hub) forwarding** (`allow = ["forward"]`).
+
+External **hosted-dot [gateways](/glossary/#gateway)** are a fourth option. A hosted dot is a
+hosted MCP client, such as a model in ChatGPT.
 
 ```mermaid
 flowchart LR
@@ -49,98 +54,111 @@ flowchart LR
 | Full node with an outbound link | Interactive harnesses behind NAT | Keep normal harness registration; dial the hub and pull its mailbox. |
 | Forwarding hub | A knows H, H knows B, A does not dial B | Set H as A's default route and grant forwarding at both receiving hops. |
 
-Different users on the same host can run separate nodes such as `alice.workstation` and
-`bob.workstation`; the same user can have nodes on several hosts. Their explicit node names
-distinguish them. [Bare recipient resolution](/concepts/addressing/#how-a-bare-reference-resolves-over-the-federated-view)
-prefers the sender's own user's nodes for an instance ID before consulting other users.
+Different users on the same host can run separate nodes, such as `alice.workstation` and
+`bob.workstation`. One user can have nodes on several hosts. The explicit node names tell them
+apart. For an instance ID,
+[bare recipient resolution](/concepts/addressing/#how-a-bare-reference-resolves-over-the-federated-view)
+checks the sender's own user's nodes before other users' nodes.
 
 ## Leaf node mode (`--leaf`)
 
-For single-service workloads running inside containers or Kubernetes pods (such as `genie-guard` or
-a Matrix bridge sidecar), `xmsg serve --leaf` runs as an outbound-only sidecar:
+Some workloads run one service in a container or a Kubernetes pod, such as `genie-guard` or a
+Matrix bridge sidecar. For them, `xmsg serve --leaf` runs as an outbound-only sidecar:
 
-- **Local sockets:** Binds `$XDG_RUNTIME_DIR/xmsg/register.sock` (or `--leaf-register-sock`),
-  `agent.sock`, and a **required** HTTP listener (`--listen`, or `XMSG_LISTEN`). Keep it on
-  loopback inside the pod's isolated network namespace, even when the worker uses Unix sockets.
-- **Principal admission (`--leaf-principal`):** Daemons registering on `register.sock` must match
-  the configured `--leaf-principal` (for example, `svc:genie-guard`) and the server's UID
-  (`SO_PEERCRED`). Because containers in a pod may not share a PID namespace, `/proc/<pid>/exe`
-  attestation is omitted and combining `--svc-exe` with `--leaf` is refused at startup.
+- **Local sockets:** The leaf binds `$XDG_RUNTIME_DIR/xmsg/register.sock` (or
+  `--leaf-register-sock`) and `agent.sock`. It also needs an HTTP listener (`--listen`, or
+  `XMSG_LISTEN`). Keep the listener on loopback in the pod's isolated network namespace, also when
+  the worker uses Unix sockets.
+- **Principal admission (`--leaf-principal`):** A daemon that registers on `register.sock` must
+  match the configured `--leaf-principal` (for example, `svc:genie-guard`). It must also have the
+  server's UID (`SO_PEERCRED`). Containers in a pod can have separate PID namespaces. Thus the
+  leaf does not do `/proc/<pid>/exe` attestation, and xmsg refuses `--svc-exe` with `--leaf` at
+  startup.
 - **Hub-side durable mailbox (`"leaf": true`):** On the hub, the leaf peer's entry sets
-  `"leaf": true`. When any sender addresses `<target>@<leaf-peer>`, the hub checks the peer's
-  `targets` filter and stores the message in its durable SQLite `peer_mailbox`.
+  `"leaf": true`. A sender can address `<target>@<leaf-peer>`. Then the hub checks the peer's
+  `targets` filter and stores the message in its durable SQLite
+  [`peer_mailbox`](/glossary/#peer-mailbox). The send returns `outcome: "queued"`. See
+  [mailbox retention](/concepts/federation/#mailbox-retention).
 - **Long-poll and strict `ack` ordering:** The leaf's background loop long-polls
-  `GET /fed/v2/inbox?wait=<s>` on the hub, enqueues the message into the local service inbox, and
-  calls `POST /fed/v2/inbox/{id}/ack` on the hub **only after** the local service daemon
-  acknowledges the delivery over `register.sock`. If the daemon crashes before acknowledging, the
-  message remains in the hub mailbox and redelivers on reconnect.
+  `GET /fed/v2/inbox?wait=<s>` on the hub. It puts each message into the local service inbox. The
+  local service daemon then acknowledges the delivery over `register.sock`. **Only after that**,
+  the leaf calls `POST /fed/v2/inbox/{id}/ack` on the hub. If the daemon stops before its
+  acknowledgement, the message stays in the hub mailbox. The hub delivers it again when the leaf
+  connects again.
 
 ## Outbound links (`"dial": "outbound"`)
 
-A full `xmsg` node running interactive agent harnesses (`claude`, `codex`, `agy`, `opencode`,
-`hermes`, `pi`, and `svc`) behind NAT or a stateful firewall can connect to a dialable hub without
-opening an inbound port:
+A full `xmsg` node can run interactive agent harnesses (`claude`, `codex`, `agy`, `opencode`,
+`hermes`, `pi` and `svc`) behind NAT or a stateful firewall. It can connect to a dialable hub
+without an open inbound port:
 
-- **On the undialable node:** Set `"dial": "outbound"` and `"allow": ["send", "reply"]` on
-  the hub's entry in `peers.json`. (`"leaf": true` and `"dial": "outbound"` on the same entry are
-  mutually exclusive.)
-- **On the hub:** Mark the undialable node's entry with `"leaf": true` so messages and `list`
-  queries addressed to it queue in the hub's `peer_mailbox`.
-- **Mailbox authorization:** The hub authenticates the peer and requires `leaf: true`
-  for that peer's own mailbox. `inbox` in `allow` is accepted and ignored; old
-  configurations listing it still load.
-- **Background pull loop:** At startup, the full node spawns an outbound pull loop that long-polls
-  `GET /fed/v2/inbox` on the hub, answers `list` queries on `POST /fed/v2/list/{query}`, resolves
-  local targets across all harnesses, delivers messages locally, and acknowledges them at the hub.
-  If a target is unresolvable (`not_found`, `gone`, `ambiguous`), the node acknowledges the mailbox
-  item and posts an error reply (`not_found`) back to the hub over `POST /fed/v2/replies`.
-- **Outbound reply polling:** When a local session or service on the undialable node sends a
-  message to the hub, the hub cannot dial back to push replies. The undialable node automatically
-  arms `poll_federated_replies` (`GET /fed/v2/messages/{id}/replies?after=<seq>&wait=<s>`) to pull
-  replies and push them into the local sender's inbox.
+- **On the undialable node:** In `peers.json`, set `"dial": "outbound"` and
+  `"allow": ["send", "reply"]` on the hub's entry. An entry cannot have both `"leaf": true` and
+  `"dial": "outbound"`.
+- **On the hub:** Set `"leaf": true` on the undialable node's entry. Then messages and `list`
+  queries for that node wait in the hub's `peer_mailbox`.
+- **Mailbox authorization:** The hub authenticates the peer. It also needs `leaf: true` on the
+  entry before the peer can read its own mailbox. xmsg accepts `inbox` in `allow` and ignores
+  it. Thus old configurations that list it still load.
+- **Background pull loop:** At startup, the full node starts an outbound pull loop. The loop does
+  these steps:
+  1. It long-polls `GET /fed/v2/inbox` on the hub.
+  2. It answers `list` queries on `POST /fed/v2/list/{query}`.
+  3. It resolves local targets across all harnesses and delivers the messages locally.
+  4. It acknowledges the messages at the hub.
+
+  A target can fail to resolve (`not_found`, `gone`, `ambiguous`). Then the node acknowledges the
+  mailbox item. It also sends an error reply (`not_found`) to the hub over
+  `POST /fed/v2/replies`.
+- **Outbound reply polling:** A local session or service on the undialable node can send a message
+  to the hub. The hub cannot connect back to push the replies. Thus the undialable node starts
+  `poll_federated_replies` automatically
+  (`GET /fed/v2/messages/{id}/replies?after=<seq>&wait=<s>`). It pulls the replies and pushes them
+  into the local sender's inbox.
 
 ## Forwarding through a hub
 
-Two nodes that cannot dial each other directly can route messages through an intermediate hub node.
-Forwarding is strictly opt-in and bounded to a **single hop**:
+Two nodes that cannot connect to each other directly can send messages through a hub node
+between them. This is [forwarding](/glossary/#forwarding). Each node must opt in. Forwarding is
+limited to a **single hop**:
 
-- **Permission on the hub (`"forward"`):** The sending peer's entry in the hub's `peers.json` must
-  include `"forward"` in `allow`.
-- **Permission on the recipient (`"relayed"`):** The hub's entry in the recipient node's
-  `peers.json` must include `"relayed"` (or `"relay"`) in `allow` for direct forwarded
-  sends. Planned (unreleased): full-node outbound pulls apply this same grant to
-  third-party origins, comparing canonical node names rather than local nicknames.
-  Denied items get an error reply and an ACK; direct hub-origin mail still works
-  without `relayed`.
+- **Permission on the hub (`"forward"`):** In the hub's `peers.json`, the sending peer's entry
+  must have `"forward"` in `allow`.
+- **Permission on the recipient (`"relayed"`):** For direct forwarded sends, the hub's entry in
+  the recipient node's `peers.json` must have `"relayed"` (or `"relay"`) in `allow`. Mail that
+  starts on the hub itself does not need `relayed`.
+  Full-node outbound pulls apply the same grant to third-party origins. They compare canonical
+  node names, not local nicknames. A denied item gets an error reply and an ACK. This check is on
+  the main branch and is not yet in a release.
 - **Single-hop envelope mark (`forwarded`):** The hub attests the sender's `origin.node` from the
-  TLS identity of the sending peer and attaches
-  `forwarded: { "forwarder": "<hub-node>", "targets"?: [...] }`. On dialable delivery, the recipient verifies that
-  `forwarder` matches the authenticated hub connection and refuses to re-forward any message that
-  already carries `forwarded`.
-  Mailbox pull items carry the canonical origin and local target without this mark;
-  the full-node consumer delivers locally rather than forwarding the item again.
-- **Dual target filtering on dialable forwarding:** If the hub configures `targets` for the destination peer, the hub
-  checks the unresolved `ref` before relaying and also passes `targets` inside the `forwarded` mark
-  so the destination enforces that a service name in `targets` resolves to a service (never an
-  instance merely carrying that label).
-  Mailbox pull items retain the origin but omit `forwarded.targets`; only the hub's
-  pre-filter applies to that bound on the mailbox route. Recipient-side semantic
-  enforcement of the forwarded target bound remains a follow-up.
-- **Reply routing:** The hub records forwarded messages in `forwarded_messages` and relays replies
-  from the recipient back to the origin peer (either via direct push or by storing them for the
-  origin's outbound reply poller).
+  TLS identity of the sending peer. It adds
+  `forwarded: { "forwarder": "<hub-node>", "targets"?: [...] }`. On dialable delivery, the
+  recipient checks that `forwarder` is the authenticated hub connection. It refuses to forward
+  again a message that already has `forwarded`.
+  Mailbox pull items carry the canonical origin and the local target, but not this mark. The
+  full-node consumer delivers them locally. It does not forward them again.
+- **Dual target filtering on dialable forwarding:** The hub can set `targets` for the destination
+  peer. Then the hub checks the unresolved `ref` before it relays. It also sends `targets` in the
+  `forwarded` mark. The destination then makes sure that a service name in `targets` resolves to a
+  service, not to an instance that only has that label.
+  Mailbox pull items keep the origin, but they do not have `forwarded.targets`. On the mailbox
+  route, only the hub's pre-filter applies that limit. Recipient-side semantic enforcement of the
+  forwarded target limit is a follow-up.
+- **Reply routing:** The hub records forwarded messages in `forwarded_messages`. It relays replies
+  from the recipient back to the origin peer. It pushes them directly, or it stores them for the
+  origin's outbound reply poller.
 
 <Aside type="note" title="Client hop syntax">
-Client surfaces (`send` over HTTP, `agent.sock`, MCP, and plugins) accept at most one `@` in `to`
-(`ref@dest`). Explicit multi-`@` client strings (`x@dest@hub`) are refused with `bad_request`; the
-`/fed/v2` hop envelope is strictly a node-to-node mechanism.
+Client surfaces (`send` over HTTP, `agent.sock`, MCP and plugins) accept at most one `@` in `to`
+(`ref@dest`). xmsg refuses a client string with more than one `@` (`x@dest@hub`) with
+`bad_request`. Only nodes use the `/fed/v2` hop envelope.
 </Aside>
 
 ### Complete three-node forwarding example
 
-Assume A, H and B have CA-signed certificates with the single URI SANs below, and each daemon
-uses its own certificate/key plus the shared CA bundle. B has a registered service named `worker`.
-The certificate identities derive the node names in the configuration.
+In this example, A, H and B have CA-signed certificates with the single URI SANs below. Each
+daemon uses its own certificate and key, and the shared CA bundle. B has a registered service
+named `worker`. The node names in the configuration come from the certificate identities.
 
 | Node | Certificate URI SAN | Federation listener |
 |---|---|---|
@@ -200,9 +218,9 @@ B accepts relayed sends from H:
 }
 ```
 
-From A, call `send(to="worker@alice.b", text="review this")`. Direct peer routes take
-precedence over `default_route`; at most one default route is allowed. The explicit destination
-is important here: a bare name needs a complete list view, which this example does not grant.
+From A, call `send(to="worker@alice.b", text="review this")`. A direct peer route has priority
+over `default_route`. Only one default route is permitted. The explicit destination is
+necessary here. A bare name needs a complete list view, and this example does not give one.
 
 ```mermaid
 sequenceDiagram
@@ -216,14 +234,17 @@ sequenceDiagram
   H->>A: Route reply to origin
 ```
 
-The receipt reports delivery or queueing; it is separate from the recipient's answer. The
+The receipt tells you that xmsg delivered or queued the message. It is not the recipient's
+answer. The
 [three-node source oracle](https://github.com/sini/xmsg/blob/76f8f1e8249777cfb63c4d0287431cbbf6b2ce76/tests/gate_x26_hub_forwarding.rs)
 exercises this permission placement and reply route.
 
 ## Bridges and hosted clients
 
-[xmsg-mcp-gateway](/extensions/gateway/) connects hosted MCP clients through a local xmsg
-service, [matrix-xmsg](/extensions/matrix/) bridges Matrix, and
-[agent-quota](/extensions/agent-quota/) currently reports usage as a separate command.
-Each extension owns the behavior outside the bus; xmsg does not authenticate a Matrix user or
-an OAuth caller itself.
+- [xmsg-mcp-gateway](/extensions/gateway/) connects hosted MCP clients through a local xmsg
+  service.
+- [matrix-xmsg](/extensions/matrix/) connects Matrix to the bus.
+- [agent-quota](/extensions/agent-quota/) reports usage as a separate command today.
+
+Each extension owns its behavior outside the bus. xmsg does not authenticate a Matrix user or an
+OAuth caller itself.
