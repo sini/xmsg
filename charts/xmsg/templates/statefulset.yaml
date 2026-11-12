@@ -1,0 +1,149 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "xmsg.fullname" . }}
+  labels:
+    {{- include "xmsg.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: {{ include "xmsg.fullname" . }}
+  selector:
+    matchLabels:
+      {{- include "xmsg.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "xmsg.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/peers: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ .Values.securityContext.runAsUser }}
+        runAsGroup: {{ .Values.securityContext.runAsGroup }}
+        fsGroup: {{ .Values.securityContext.fsGroup }}
+      containers:
+        - name: xmsg
+          {{- if .Values.image.digest }}
+          image: {{ printf "%s@%s" .Values.image.repository .Values.image.digest | quote }}
+          {{- else }}
+          image: {{ printf "%s:%s" .Values.image.repository .Values.image.tag | quote }}
+          {{- end }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - serve
+            {{- range $name, $executable := .Values.trustedServices }}
+            - --svc-exe
+            - {{ printf "%s=%s" $name $executable | quote }}
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          ports:
+            - name: federation
+              containerPort: 7788
+              protocol: TCP
+          env:
+            - name: XDG_RUNTIME_DIR
+              value: /run
+            - name: XMSG_DB_PATH
+              value: /var/lib/xmsg/state/xmsg.db
+            - name: XMSG_FED_LISTEN
+              value: 0.0.0.0:7788
+            - name: XMSG_PEERS_FILE
+              value: /etc/xmsg/peers/peers.json
+            - name: XMSG_FED_CERT
+              value: /etc/xmsg/identity/node.crt
+            - name: XMSG_FED_KEY
+              value: /etc/xmsg/identity/node.key
+            - name: XMSG_SESSIONS_DIR
+              value: /harness/sessions
+            - name: XMSG_CODEX_HOME
+              value: /harness/codex
+          readinessProbe:
+            exec:
+              command:
+                - /bin/xmsg
+                - list
+                - --http-sock
+                - /run/xmsg/http.sock
+                - --node
+                - {{ required "canonicalNodeName must match this node's certificate identity" .Values.canonicalNodeName | quote }}
+                - --json
+            timeoutSeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command:
+                - /bin/xmsg
+                - list
+                - --http-sock
+                - /run/xmsg/http.sock
+                - --node
+                - {{ .Values.canonicalNodeName | quote }}
+                - --json
+            timeoutSeconds: 10
+            periodSeconds: 20
+            initialDelaySeconds: 30
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/xmsg
+            - name: runtime
+              mountPath: /run
+            - name: sessions
+              mountPath: /harness/sessions
+              readOnly: true
+            - name: codex
+              mountPath: /harness/codex
+              readOnly: true
+            - name: identity
+              mountPath: /etc/xmsg/identity
+              readOnly: true
+            - name: peers
+              mountPath: /etc/xmsg/peers
+              readOnly: true
+            {{- if .Values.ca.existingConfigMap }}
+            - name: ca
+              mountPath: /etc/xmsg/ca
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: runtime
+          emptyDir: {}
+        - name: sessions
+          emptyDir: {}
+        - name: codex
+          emptyDir: {}
+        - name: identity
+          secret:
+            secretName: {{ required "tls.existingSecret must name an existing TLS Secret" .Values.tls.existingSecret | quote }}
+            defaultMode: 0440
+            items:
+              - key: tls.crt
+                path: node.crt
+              - key: tls.key
+                path: node.key
+        - name: peers
+          configMap:
+            name: {{ include "xmsg.fullname" . }}-peers
+        {{- if .Values.ca.existingConfigMap }}
+        - name: ca
+          configMap:
+            name: {{ .Values.ca.existingConfigMap | quote }}
+        {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: state
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- if .Values.persistence.storageClassName }}
+        storageClassName: {{ .Values.persistence.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size | quote }}
