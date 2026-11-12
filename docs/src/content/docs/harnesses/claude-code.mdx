@@ -80,6 +80,91 @@ events to `agent.sock`. Thus each subagent gets a delegated sub-address (`<P>/<n
   This clears the active turn. Then later messages to `<P>/<child>@<node>` go to the parent `P`,
   with a `to=<P>/<child> agent_id=<agent_id>` header.
 
+## Manual setup without Home Manager
+
+After installing xmsg, run `command -v xmsg` and use that **absolute path** in the
+configuration below. `/absolute/path/to/xmsg` is a placeholder, not a command to copy unchanged.
+The daemon and Claude Code must run as the same user, with the same runtime directory.
+
+Merge this entry into your project's `.mcp.json` (or the equivalent Claude Code MCP
+configuration). Preserve any existing servers:
+
+```json
+{
+  "mcpServers": {
+    "xmsg": {
+      "command": "/absolute/path/to/xmsg",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}
+```
+
+Merge these hooks into `~/.claude/settings.json`, preserving your other settings and hook
+entries. If you use a different `CLAUDE_CONFIG_DIR`, use its settings file and give the daemon
+its corresponding `--sessions-dir`. Each command below must contain your installed path:
+
+```json
+{
+  "hooks": {
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/xmsg register claude --hook"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(Agent|SendMessage)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/xmsg register claude --hook"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^mcp__xmsg__(send|reply|inbox|list|replies)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/xmsg register claude --hook"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/absolute/path/to/xmsg register claude --hook"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+If the executable path contains spaces, shell-quote it inside each hook command; MCP's
+`command` field itself is a path, not a shell command. This matcher is for a direct MCP server
+named `xmsg`. A plugin registration can use a different tool prefix; match the actual prefix as
+the Home Manager configuration does.
+
+Restart Claude Code after changing its MCP configuration, then use its xmsg `list` tool. A
+running session should appear in `xmsg list`. Use the [local service example](/getting-started/ubuntu/)
+to test the bus before debugging harness discovery. The configuration carries no xmsg secret
+or account credentials. Claude Code itself still needs its usual independent setup.
+
 ## Home Manager switch
 
 In Home Manager, set `programs.xmsg.harnesses.claude.enable = true`. This installs the MCP

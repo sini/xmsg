@@ -1,14 +1,123 @@
 ---
 title: Arch Linux
-description: Getting started with xmsg on Arch Linux.
+description: Build xmsg with Cargo, run a local daemon, and connect Claude Code on Arch Linux.
 ---
 
-import { Aside } from '@astrojs/starlight/components';
+Install the native build prerequisites:
 
-<Aside type="note" title="Arch Linux Guide Stub">
-{/* TODO: Add Arch Linux packaging (AUR / PKGBUILD), Cargo build, and systemd --user setup guide. */}
-**TODO:** A later guide will give native Arch Linux installation instructions. It will tell you
-how to build from source or the AUR, configure `~/.config/systemd/user/xmsg.service` and connect
-harness hooks without Home Manager. If you use Nix with Home Manager on Arch Linux, see
-[NixOS & Home Manager](/operations/nixos-and-home-manager/).
-</Aside>
+```sh
+sudo pacman -Syu --needed base-devel git curl ca-certificates pkgconf
+```
+
+## Install xmsg
+
+There are no published binary releases yet. A packaged release is a follow-up; install this
+source revision with Cargo instead. SQLite is bundled, and TLS uses rustls, so this build does
+not need SQLite or OpenSSL development headers. It does need a native C compiler and linker.
+The repository declares no minimum supported Rust version. Use the current stable toolchain; the Linux container checks used Rust 1.99.1.
+
+Install Rust using [rustup](https://rustup.rs/). Download its installer, review it, then run it:
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup-init.sh
+sh rustup-init.sh -y --profile minimal --default-toolchain stable
+rm rustup-init.sh
+. "$HOME/.cargo/env"
+rustc --version
+cargo install --locked --git https://github.com/sini/xmsg \
+  --rev d25b0feb85576d93977b47b8c9ed1afa97d5cf02 xmsg
+xmsg --help
+```
+
+The executable is normally `~/.cargo/bin/xmsg`. Keep that directory in your shell's `PATH`.
+The revision above is the one used for this guide; choose a newer reviewed revision explicitly
+when upgrading.
+
+## Run in the foreground
+
+Start one [daemon](/glossary/#daemon) for your user. A normal desktop login supplies
+`XDG_RUNTIME_DIR`. In a minimal container without a user session, create a private runtime
+directory for the example and export the same value in each terminal:
+
+```sh
+export XDG_RUNTIME_DIR="$HOME/.local/run"
+install -d -m 700 "$XDG_RUNTIME_DIR"
+```
+
+Use that fallback only when `XDG_RUNTIME_DIR` is unset. Do not replace a desktop session's
+existing runtime directory. Then start the daemon:
+
+```sh
+xmsg serve --svc-exe "status=$HOME/.cargo/bin/xmsg"
+```
+
+With no `--listen`, the daemon uses Unix sockets and opens no HTTP TCP listener. The `status`
+entry trusts this xmsg executable to register the demonstration service below. Persistent
+state defaults to `~/.local/state/xmsg/xmsg.db` (or `$XDG_STATE_HOME/xmsg/xmsg.db`). Back up the
+state directory with the daemon stopped. The sockets live under `$XDG_RUNTIME_DIR/xmsg/`.
+
+## Send a local message
+
+In a second terminal, run a small [service](/glossary/#service):
+
+```sh
+xmsg service exec --name status -- /usr/bin/printf 'ready\n'
+```
+
+In a third terminal, list recipients and send a message:
+
+```sh
+xmsg list --json
+xmsg send status 'hello from the CLI' --json
+# Copy the returned message id into this command:
+xmsg replies MESSAGE_ID --wait 5 --json
+```
+
+The list includes `status`; the reply contains `ready`. The service runs the fixed command for
+each request; request text is not shell input. See [the CLI reference](/reference/cli-and-mcp/)
+for outcomes and flags. Stop the service and foreground daemon with Ctrl-C before enabling the
+user service. Keep the same runtime environment for daemon, service and CLI.
+
+## Start at login with systemd
+
+On an installed Linux desktop with a systemd user manager, create the unit directory:
+
+```sh
+mkdir -p "$HOME/.config/systemd/user"
+```
+
+Save the following as `~/.config/systemd/user/xmsg.service`:
+
+```ini
+[Unit]
+Description=xmsg user message bus
+
+[Service]
+ExecStart=%h/.cargo/bin/xmsg serve --svc-exe status=%h/.cargo/bin/xmsg
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+Then run:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now xmsg.service
+systemctl --user status xmsg.service
+journalctl --user -u xmsg.service -n 30
+```
+
+The absolute executable path avoids depending on the user manager's `PATH`. These commands run
+as your login user, without `sudo`. If `systemctl --user` reports that it cannot connect to the
+bus, use the foreground method above; ordinary disposable containers do not start a user
+manager. The foreground route is the one exercised by this guide's container checks.
+To stop automatic startup, use `systemctl --user disable --now xmsg.service`.
+
+## Connect Claude Code
+
+Follow the shared [manual Claude Code setup](/harnesses/claude-code/#manual-setup-without-home-manager)
+for MCP and hook configuration. It needs no xmsg token. A live Claude Code session is needed to
+test session delivery; the container checks exercise the configuration shape and local service
+exchange without creating a real Claude account or credentials.

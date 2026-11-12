@@ -1,48 +1,158 @@
 ---
 title: macOS
-description: Running xmsg on macOS (aarch64-darwin) via Home Manager or Cargo.
+description: Install xmsg with Cargo, run it with launchd, and connect Claude Code on macOS.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-`xmsg` supports `aarch64-darwin`. macOS CI (`.github/workflows/macos.yml`) runs on each push and
-pull request that changes code.
-
-## Platform specifics on Darwin
-
-- **Runtime directory:** When `XDG_RUNTIME_DIR` is not set on macOS, `xmsg` finds its `0700`
-  runtime directory with `getconf DARWIN_USER_TEMP_DIR`.
-- **Peer credentials:** The Unix sockets (`http.sock`, `agent.sock`, `register.sock`) check the
-  peer UID with `getpeereid` and the peer PID with `LOCAL_PEEREPID`. They check process start
-  times with `proc_pidinfo`.
-- **Home Manager (`launchd`):** On Darwin, import `inputs.xmsg.homeManagerModules.xmsg`. It
-  configures `launchd.agents.xmsg` to run `xmsg serve`. See
-  [NixOS & Home Manager](/operations/nixos-and-home-manager/).
-- **Antigravity on macOS:** XNU does not show `flock(2)` owner PIDs to unprivileged processes.
-  Thus on macOS, xmsg checks `--agy-exe` (`proc_pidpath`) and the open descriptor's vnode
-  `(vst_dev, vst_ino)`. It uses the `PreInvocation` hook (`Arm B′`) to start
-  `xmsg register agy`. See
-  [Antigravity](/harnesses/antigravity/).
-- **Codex on macOS:** The writer-lock lease watch uses `kqueue` on an `O_EVTONLY` descriptor, not
-  `inotify`. Descriptor paths come from `fcntl(F_GETPATH)`. xmsg reads the lock holder with
-  `proc_pidinfo`. See [Codex](/harnesses/codex/).
-
-## What macOS CI exercises
-
-The macOS job builds and tests on Apple Silicon:
-
-- the `xmsg` package, whose build runs the full `cargo test` suite, including macOS-only tests
-  for Claude Code start times and the Codex `kqueue` lease watch;
-- the shared service client checks;
-- the Codex hook check, which drives a real `codex` binary against `xmsg`;
-- the compatibility check against older `xmsg` releases.
-
-The Pi, opencode, Hermes and Antigravity hook checks run only on Linux. On macOS, the Rust test
-suite tests the daemon side of those integrations. But no check drives the real harness.
-
-<Aside type="note" title="Standalone macOS Installation Guide">
-{/* TODO: Add non-Nix macOS installation and launchd plist guide (Homebrew / Cargo install). */}
-**TODO:** A later guide will give step-by-step macOS installation instructions without Nix. It
-will cover `cargo install`, a manual `~/Library/LaunchAgents` plist, and the configuration of each
-harness without Home Manager.
+<Aside type="caution" title="Not verified on this release">
+The standalone installation and launchd commands below are **not verified on this release**.
+They follow the current source. The macOS CI job tests the Nix package on Apple Silicon; it does
+not run this installation procedure or load this plist.
 </Aside>
+
+## Install without Nix
+
+Install Apple's command-line developer tools with `xcode-select --install`, then install Rust
+and Cargo using [rustup](https://rustup.rs/). Open a new terminal and check `cargo --version`.
+The repository does not declare a minimum supported Rust version. Use a current stable toolchain.
+SQLite is bundled, and federation uses Rustls; separate SQLite and OpenSSL development packages
+are not required.
+
+There are no published GitHub release binaries at the time of this guide. Install this pinned
+source revision with its lockfile:
+
+```sh
+cargo install --locked --git https://github.com/sini/xmsg \
+  --rev d25b0feb85576d93977b47b8c9ed1afa97d5cf02 xmsg
+"$HOME/.cargo/bin/xmsg" --help
+```
+
+Cargo installs the executable in `~/.cargo/bin` by default. If you use `CARGO_HOME` or a custom
+installation root, substitute your actual executable path in the commands and plist below.
+
+## Start in the foreground
+
+Start the [daemon](/glossary/#daemon) in one terminal:
+
+```sh
+"$HOME/.cargo/bin/xmsg" serve
+```
+
+In another terminal, check that its local socket responds:
+
+```sh
+"$HOME/.cargo/bin/xmsg" list --json
+```
+
+An empty recipient list is normal before you start a supported harness or register a service.
+See the [CLI reference](/reference/cli-and-mcp/) for sending messages and reading replies.
+Use Control-C in the daemon terminal before switching to launchd.
+
+## Run at login with launchd
+
+A per-user LaunchAgent keeps the daemon under your login account. Create its log directory and
+a plist with your home directory expanded to absolute paths:
+
+```sh
+mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/xmsg"
+cat > "$HOME/Library/LaunchAgents/dev.json64.xmsg.plist" <<EOF_PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.json64.xmsg</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$HOME/.cargo/bin/xmsg</string>
+    <string>serve</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict><key>SuccessfulExit</key><false/></dict>
+  <key>StandardOutPath</key><string>$HOME/Library/Logs/xmsg/stdout.log</string>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/xmsg/stderr.log</string>
+</dict>
+</plist>
+EOF_PLIST
+plutil -lint "$HOME/Library/LaunchAgents/dev.json64.xmsg.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/dev.json64.xmsg.plist"
+launchctl print "gui/$(id -u)/dev.json64.xmsg"
+"$HOME/.cargo/bin/xmsg" list --json
+```
+
+Launchd does not expand `~`, `$HOME` or shell substitutions inside a loaded plist. The here-document
+above expands `$HOME` when it writes the file. If your home path contains XML characters such as
+`&`, escape them in the plist before loading it. Keep the executable path absolute: a login
+agent does not inherit your interactive shell's `PATH` setup.
+
+To stop and unload it:
+
+```sh
+launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/dev.json64.xmsg.plist"
+```
+
+## Sockets and state
+
+When `XDG_RUNTIME_DIR` is unset, xmsg uses the per-user Darwin temporary directory returned by
+`getconf DARWIN_USER_TEMP_DIR`. This is commonly the directory in the shell's `$TMPDIR`, but xmsg
+queries the operating system directly; changing `TMPDIR` does not change its socket discovery.
+The sockets are `xmsg/http.sock`, `xmsg/agent.sock` and `xmsg/register.sock` beneath that directory.
+
+```sh
+getconf DARWIN_USER_TEMP_DIR
+```
+
+The daemon creates its socket directory with mode `0700` and requires it to belong to your user.
+Leave `XDG_RUNTIME_DIR` unset in both your shell and LaunchAgent for this fallback. If you override
+it, set the same secure directory for the daemon, CLI and harness processes. See
+[the trust model](/concepts/trust-model/) and [agent.sock](/glossary/#agentsock).
+
+Persistent state defaults to `~/.local/state/xmsg/xmsg.db`, or
+`$XDG_STATE_HOME/xmsg/xmsg.db` when that variable is set. Back up the state directory using the
+[backup procedure](/operations/docker/#upgrades-and-backups); the runtime socket directory is
+not persistent state.
+
+## Connect Claude Code
+
+Use the absolute installed executable in your Claude Code MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "xmsg": {
+      "command": "/Users/YOUR_USER/.cargo/bin/xmsg",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Replace `YOUR_USER` with your account name. This contains no credentials. The daemon discovers
+live Claude Code sessions in `~/.claude/sessions`. For a custom Claude configuration directory,
+pass `--sessions-dir /absolute/path/to/sessions` to `serve` in the plist.
+
+For delegated subagents, also configure `xmsg register claude --hook` for `PreToolUse`,
+`PostToolUse`, `SubagentStart` and `SubagentStop`, using that same absolute executable. Copy the
+hook matchers and configuration shape from the [manual Claude Code setup](/harnesses/claude-code/#manual-setup-without-home-manager).
+Start a new Claude Code session, then run `xmsg list --json` in a terminal to check discovery.
+
+## Signing and platform support
+
+This guide builds the binary locally. The project does not provide a standalone signing or
+notarization procedure, and xmsg does not use a codesign identity to authorize socket callers.
+If you obtain a binary elsewhere, follow macOS's verification prompts and the distributor's
+signing instructions. Do not disable Gatekeeper to make an unknown binary run.
+
+The source supports both `aarch64-darwin` and `x86_64-darwin`; CI runs on Apple Silicon.
+MacOS Unix sockets check peer UIDs with `getpeereid` and peer PIDs with `LOCAL_PEEREPID`, and
+process start times with `proc_pidinfo`.
+
+For [Antigravity](/harnesses/antigravity/), macOS cannot expose `flock(2)` owner PIDs to an
+unprivileged process. xmsg instead checks the configured `--agy-exe` path and the open file's
+vnode, with the `PreInvocation` registration hook. For [Codex](/harnesses/codex/), writer-lock
+watching uses `kqueue` and descriptor paths from `fcntl(F_GETPATH)`.
+
+The macOS CI job builds the package (including Rust tests), shared service client checks, the
+real Codex hook check and compatibility checks. Pi, opencode, Hermes and Antigravity real-harness
+checks run on Linux; macOS has daemon-side Rust tests for those integrations.
