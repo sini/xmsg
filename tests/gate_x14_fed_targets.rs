@@ -164,6 +164,7 @@ async fn create_fed_test_node(
     let rate_limiter = rate_limiter_opt.unwrap_or_else(|| Arc::new(RateLimiter::new(60, 20)));
 
     let fed_state = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: name.to_string(),
         peers: (peers_arc).into(),
         cert_der,
@@ -884,6 +885,7 @@ async fn test_oracle_4_refused_target_does_not_consume_rate_limit_or_create_stor
     // 1. Send to refused target directly via send_federated_message with known ID
     let refused_id = "01REFUSED_MSG_ID_ORACLE4";
     let envelope_refused = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: refused_id.to_string(),
         origin: xmsg::storage::Origin {
@@ -926,6 +928,7 @@ async fn test_oracle_4_refused_target_does_not_consume_rate_limit_or_create_stor
     // If the refused send had consumed the 1-capacity rate limit budget, this would return RateLimited.
     let allowed_id = "01ALLOWED_MSG_ID_ORACLE4";
     let envelope_allowed = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: allowed_id.to_string(),
         origin: xmsg::storage::Origin {

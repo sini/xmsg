@@ -470,3 +470,13 @@ required-features = ["daemon"]
 name = "service_exec"
 path = "tests/service_exec.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "gate_owh_federated_attachments"
+path = "tests/gate_owh_federated_attachments.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_owh_transport_bounds"
+path = "tests/gate_owh_transport_bounds.rs"
+required-features = ["daemon"]

@@ -112,6 +112,7 @@ async fn create_test_node(
     let svc_store = new_svc_store();
 
     let fed_state = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: name.to_string(),
         peers: (Arc::new(peers_map)).into(),
         cert_der,
@@ -215,6 +216,7 @@ fn create_claude_session_fixture(
 
 fn make_envelope(target: &str, body: &str) -> FedEnvelope {
     FedEnvelope {
+        attachments: vec![],
         v: WIRE_VERSION,
         id: format!("msg-{}", ulid::Ulid::new()),
         origin: xmsg::storage::Origin {
@@ -235,6 +237,7 @@ fn make_envelope(target: &str, body: &str) -> FedEnvelope {
 
 fn make_reply(in_reply_to: &str, body: &str) -> FedReplyEnvelope {
     FedReplyEnvelope {
+        attachments: vec![],
         v: WIRE_VERSION,
         id: format!("rep-{}", ulid::Ulid::new()),
         in_reply_to: in_reply_to.to_string(),

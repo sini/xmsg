@@ -32,6 +32,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use crate::attachments;
+use crate::client::wire::AttachmentRef;
 use crate::error::AppError;
 use crate::fed::{AuthenticatedPeer, FedState};
 use crate::http::AppState;
@@ -64,6 +66,61 @@ pub struct Transfer {
     /// The holder's record of each message it has one for, which the reply reads.
     #[serde(default)]
     pub records: Vec<MessageRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<TransferAttachments>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransferAttachments {
+    pub item_id: String,
+    pub attachments: Vec<AttachmentRef>,
+    pub expires_at: i64,
+}
+
+fn import_attachments(
+    conn: &rusqlite::Connection,
+    transfer: &Transfer,
+    holder: &str,
+    max_bytes: usize,
+) -> Result<(), AppError> {
+    let mut seen = std::collections::HashSet::new();
+    for item in &transfer.attachments {
+        if !seen.insert(&item.item_id)
+            || !transfer.messages.iter().any(|m| m.id == item.item_id)
+            || item.attachments.is_empty()
+        {
+            return Err(AppError::BadRequest("invalid handoff attachments".into()));
+        }
+        let refs = attachments::normalize_refs(&item.attachments, max_bytes)?;
+        let held = attachments::list_rows(conn, &item.item_id)?;
+        if held.iter().any(|r| r.expires_at != item.expires_at) {
+            return Err(AppError::Conflict(
+                "handoff attachment expiry changed".into(),
+            ));
+        }
+        attachments::insert_rows(conn, &item.item_id, &refs, item.expires_at, holder, "")?;
+    }
+    Ok(())
+}
+
+fn transfer_attachments(
+    conn: &rusqlite::Connection,
+    item_id: &str,
+) -> Result<Option<TransferAttachments>, AppError> {
+    let rows = attachments::list_rows(conn, item_id)?;
+    let Some(first) = rows.first() else {
+        return Ok(None);
+    };
+    let expires_at = first.expires_at;
+    if rows.iter().any(|r| r.expires_at != expires_at) {
+        return Err(AppError::Internal("inconsistent attachment expiry".into()));
+    }
+    Ok(Some(TransferAttachments {
+        item_id: item_id.to_string(),
+        attachments: rows.into_iter().map(|r| r.attachment).collect(),
+        expires_at,
+    }))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -285,6 +342,7 @@ pub async fn step(state: &AppState, fs: &FedState, key: &str, id: &str) -> Resul
                 storage::insert_message(&tx, &rec).map_err(|e| db_err(&e))?;
             }
         }
+        import_attachments(&tx, &transfer, key, state.max_attachment_bytes)?;
         storage::set_owed_acks(&tx, id, key, &ids, until).map_err(|e| db_err(&e))?;
         tx.commit().map_err(|e| db_err(&e))?;
     }
@@ -437,7 +495,8 @@ pub async fn handoff_handler(
     // A page fits the asker's limit, and holds at least one message; the acknowledgement's
     // count of what is left brings the asker back for the rest.
     let budget = req.limit.unwrap_or(fs.max_body * 64);
-    let (mut messages, mut records, mut used) = (Vec::new(), Vec::new(), 0);
+    let (mut messages, mut records, mut attachments, mut used) =
+        (Vec::new(), Vec::new(), Vec::new(), 0);
     {
         let db = fs
             .db
@@ -448,9 +507,14 @@ pub async fn handoff_handler(
         {
             let r =
                 storage::get_message(&db, &m.id).map_err(|e| AppError::Internal(e.to_string()))?;
+            let files = transfer_attachments(&db, &m.id)?;
             let size = serde_json::to_vec(&m).map_or(0, |v| v.len())
                 + r.as_ref()
                     .and_then(|r| serde_json::to_vec(r).ok())
+                    .map_or(0, |v| v.len())
+                + files
+                    .as_ref()
+                    .and_then(|f| serde_json::to_vec(f).ok())
                     .map_or(0, |v| v.len())
                 + 2;
             if !messages.is_empty() && used + size > budget {
@@ -459,9 +523,18 @@ pub async fn handoff_handler(
             used += size;
             messages.push(m);
             records.extend(r);
+            attachments.extend(files);
         }
     }
-    Ok((StatusCode::OK, Json(Transfer { messages, records })).into_response())
+    Ok((
+        StatusCode::OK,
+        Json(Transfer {
+            messages,
+            records,
+            attachments,
+        }),
+    )
+        .into_response())
 }
 
 /// `POST /fed/v2/handoff/ack`: the asker holds what it was handed; drop it here.
@@ -545,4 +618,180 @@ async fn post(
     tokio::time::timeout(REQUEST_TIMEOUT, fut)
         .await
         .map_err(|_| unreachable("timed out asking", &"no answer"))?
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+
+    fn db() -> rusqlite::Connection {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        storage::init_db(&db).unwrap();
+        db
+    }
+
+    fn transfer() -> Transfer {
+        Transfer {
+            messages: vec![QueuedMessage {
+                id: "item".into(),
+                instance_id: "recipient".into(),
+                created_at: 10,
+                expires_at: 70,
+                from_name: "sender".into(),
+                body: "body".into(),
+            }],
+            records: vec![],
+            attachments: vec![TransferAttachments {
+                item_id: "item".into(),
+                attachments: vec![AttachmentRef {
+                    name: "file.txt".into(),
+                    size: 4,
+                    media_type: "text/plain".into(),
+                    sha256: "0".repeat(64),
+                }],
+                expires_at: 50,
+            }],
+        }
+    }
+
+    #[test]
+    fn attachment_handoff_preserves_expiry_and_holder_without_transferring_hop_secrets() {
+        let holder = db();
+        let transfer = transfer();
+        attachments::insert_rows(
+            &holder,
+            "item",
+            &transfer.attachments[0].attachments,
+            50,
+            "original-upstream",
+            "previous-downstream",
+        )
+        .unwrap();
+        let metadata = transfer_attachments(&holder, "item").unwrap().unwrap();
+        let encoded = serde_json::to_string(&metadata).unwrap();
+        assert!(!encoded.contains("original-upstream"));
+        assert!(!encoded.contains("previous-downstream"));
+        let receiver = db();
+        import_attachments(
+            &receiver,
+            &transfer,
+            "holder",
+            attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
+        )
+        .unwrap();
+        import_attachments(
+            &receiver,
+            &transfer,
+            "holder",
+            attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
+        )
+        .unwrap();
+        let rows = attachments::list_rows(&receiver, "item").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].expires_at, 50);
+        assert_eq!(rows[0].upstream, "holder");
+        assert!(rows[0].downstream.is_empty());
+        assert!(matches!(
+            attachments::read_range(&receiver, &rows[0], 0, None, 64, 51),
+            Err(AppError::GoneDetail(_))
+        ));
+    }
+
+    #[test]
+    fn attachment_handoff_refuses_unrelated_duplicate_oversized_and_conflicting_metadata() {
+        let receiver = db();
+        let mut bad = transfer();
+        bad.attachments[0].item_id = "unrelated".into();
+        assert!(matches!(
+            import_attachments(
+                &receiver,
+                &bad,
+                "holder",
+                attachments::DEFAULT_MAX_ATTACHMENT_BYTES
+            ),
+            Err(AppError::BadRequest(_))
+        ));
+        let mut bad = transfer();
+        bad.attachments.push(bad.attachments[0].clone());
+        assert!(matches!(
+            import_attachments(
+                &receiver,
+                &bad,
+                "holder",
+                attachments::DEFAULT_MAX_ATTACHMENT_BYTES
+            ),
+            Err(AppError::BadRequest(_))
+        ));
+        let mut bad = transfer();
+        bad.attachments[0].attachments[0].size = attachments::DEFAULT_MAX_ATTACHMENT_BYTES + 1;
+        assert!(matches!(
+            import_attachments(
+                &receiver,
+                &bad,
+                "holder",
+                attachments::DEFAULT_MAX_ATTACHMENT_BYTES
+            ),
+            Err(AppError::PayloadTooLarge { .. })
+        ));
+        import_attachments(
+            &receiver,
+            &transfer(),
+            "holder",
+            attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
+        )
+        .unwrap();
+        let mut changed = transfer();
+        changed.attachments[0].expires_at = 500;
+        assert!(matches!(
+            import_attachments(
+                &receiver,
+                &changed,
+                "holder",
+                attachments::DEFAULT_MAX_ATTACHMENT_BYTES
+            ),
+            Err(AppError::Conflict(_))
+        ));
+        let mut changed = transfer();
+        changed.attachments[0].attachments[0].sha256 = "1".repeat(64);
+        assert!(matches!(
+            import_attachments(
+                &receiver,
+                &changed,
+                "holder",
+                attachments::DEFAULT_MAX_ATTACHMENT_BYTES
+            ),
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(
+            attachments::list_rows(&receiver, "item").unwrap()[0].expires_at,
+            50
+        );
+    }
+
+    #[test]
+    fn attachment_handoff_failure_rolls_back_prior_rows_and_empty_wire_stays_unchanged() {
+        let receiver = db();
+        let mut transfer = transfer();
+        let mut invalid = transfer.attachments[0].clone();
+        invalid.item_id = "not-transferred".into();
+        transfer.attachments.push(invalid);
+        {
+            let tx = receiver.unchecked_transaction().unwrap();
+            assert!(import_attachments(
+                &tx,
+                &transfer,
+                "holder",
+                attachments::DEFAULT_MAX_ATTACHMENT_BYTES
+            )
+            .is_err());
+        }
+        assert!(attachments::list_rows(&receiver, "item")
+            .unwrap()
+            .is_empty());
+        let empty: Transfer = serde_json::from_str(r#"{"messages":[],"records":[]}"#).unwrap();
+        assert_eq!(
+            serde_json::to_string(&empty).unwrap(),
+            r#"{"messages":[],"records":[]}"#
+        );
+    }
 }

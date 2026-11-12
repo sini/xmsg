@@ -6612,6 +6612,7 @@ async fn federated_gone_reply_preserves_attested_return_path_and_stages_once() {
     };
     storage::insert_message(&env.state.db.lock().unwrap(), &original).unwrap();
     let fed = xmsg::fed::FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: env.state.node_name.clone(),
         peers: Arc::new(xmsg::fed::PeersMap::new(HashMap::new())).into(),
         cert_der: vec![],

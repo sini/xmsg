@@ -1,14 +1,14 @@
 ---
 title: File attachments
-description: The local file reference and ranged-read interface; federation and hosted gateway attachment tools follow separately.
+description: File references, ranged reads and authenticated fetching between nodes.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
 <Aside type="note" title="On main, not yet in a release">
-Local attachments are on the main branch. They are not in a tagged release yet. An older daemon
-refuses attachment fields and operations. Federated file fetch and hosted gateway attachment tools
-are later work.
+Local attachments are on the main branch. Federated fetching is planned for the next release.
+An older daemon refuses attachment fields and operations. Hosted gateway attachment tools
+follow separately.
 </Aside>
 
 ## Local protocol
@@ -59,7 +59,34 @@ returned reference in `attachments`.
 `GET /v1/messages/{id}/attachments/{index}?offset=0&length=4096` returns raw bytes,
 `Content-Type`, `X-Xmsg-Sha256`, and `Content-Range`.
 
-This version supports only local files. Until federated attachment fetch is
-available, xmsg refuses a send or reply with attachments to another node.
+## Files between nodes
+
+Federated attachment fetching is planned and is not in a tagged release yet. Send and reply
+use the same references across [federation](/concepts/federation/). Both nodes must support
+attachments. The receiving node fetches a file when someone first reads it, checks the whole
+file's size and SHA-256, then serves the requested range. A failed integrity check stores no
+verified copy; a later read tries again. A read that takes more than ten seconds returns
+`pending` while fetching continues. Retry the read to collect its result. A fetch waits and
+retries a rate-limited chunk within a three-minute total deadline. Expiry of that deadline
+returns a retryable error, discards partial chunks, and publishes no verified blob.
+
+Files travel along the message's authenticated peer route. A hub fetches from the peer that
+supplied that particular item before it serves the next hop. Having the same hash cached for
+a different message does not bypass this check. A peer can fetch only an item whose recorded
+downstream is that peer, while its current `reply` permission (for a message) or `send`
+permission (for a reply) remains enabled. Reloading peers therefore applies to later fetches.
+Files are never fetched from an unrelated node by hash.
+
+An outbound-only leaf answers file queries through its hub mailbox; it needs no inbound
+listener. Each chunk takes a mailbox round trip, so large files on a high-latency link can
+be slow. Queue handoff preserves the file's original expiry. If the origin's file expires
+before the first fetch, the read reports `gone`; a missing or unavailable upstream cannot
+be replaced by an unrelated cached copy. A recipient can forward a readable file without
+uploading it again: xmsg fetches and verifies it first.
+
+Federation uses authenticated `GET /fed/v2/attachments/{item_id}/{index}?offset=0&length=4096`
+for raw byte ranges, bounded by the message-body limit and charged to a separate attachment
+rate bucket. Socket and local HTTP readers keep their existing item permissions and range
+formats.
 
 File contents remain [untrusted peer data](/concepts/trust-model/#provenance-is-not-instruction-authority).

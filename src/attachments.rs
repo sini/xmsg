@@ -381,7 +381,7 @@ pub fn authorize_refs(
             for item in readable_item_ids {
                 readable = conn
                     .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM attachments WHERE item_id=?1 AND sha256=?2 AND expires_at>?3)",
+                        "SELECT EXISTS(SELECT 1 FROM attachments a WHERE item_id=?1 AND sha256=?2 AND expires_at>?3 AND (upstream='' OR EXISTS(SELECT 1 FROM attachment_verified v WHERE v.item_id=a.item_id AND v.idx=a.idx AND v.sha256=a.sha256 AND v.upstream=a.upstream)))",
                         params![item, attachment.sha256, now],
                         |r| r.get(0),
                     )
@@ -428,6 +428,11 @@ pub fn insert_rows(
             "item already has different attachments".into(),
         ));
     }
+    conn.execute(
+        "DELETE FROM attachment_verified WHERE item_id=?1",
+        [item_id],
+    )
+    .map_err(db_err)?;
     for (index, attachment) in refs.iter().enumerate() {
         conn.execute(
             "INSERT INTO attachments (item_id,idx,sha256,name,size,media_type,expires_at,upstream,downstream) \
@@ -480,6 +485,131 @@ pub fn get_row(
     .map_err(db_err)
 }
 
+pub fn is_verified(conn: &Connection, row: &AttachmentRow) -> Result<bool, AppError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM attachment_verified WHERE item_id=?1 AND idx=?2 AND sha256=?3 AND upstream=?4)",
+        params![row.item_id, row.index as i64, row.attachment.sha256, row.upstream],
+        |r| r.get(0),
+    ).map_err(db_err)
+}
+
+pub fn clear_fetch_chunks(conn: &Connection, item_id: &str, index: usize) -> Result<(), AppError> {
+    conn.execute(
+        "DELETE FROM blob_chunks WHERE owner=?1 AND upload=?2",
+        params![format!("fetch:{item_id}"), index.to_string()],
+    )
+    .map_err(db_err)?;
+    Ok(())
+}
+
+pub fn publish_verified(
+    conn: &Connection,
+    row: &AttachmentRow,
+    data: &[u8],
+    now: i64,
+) -> Result<(), AppError> {
+    let tx = conn.unchecked_transaction().map_err(db_err)?;
+    let current = get_row(&tx, &row.item_id, row.index)?
+        .ok_or_else(|| AppError::GoneDetail("attachment row is gone".into()))?;
+    if now >= current.expires_at {
+        clear_fetch_chunks(&tx, &row.item_id, row.index)?;
+        tx.commit().map_err(db_err)?;
+        return Err(AppError::GoneDetail("attachment expired".into()));
+    }
+    if current != *row {
+        return Err(AppError::Conflict(
+            "attachment row changed during fetch".into(),
+        ));
+    }
+    if data.len() != row.attachment.size
+        || hex::encode(Sha256::digest(data)) != row.attachment.sha256
+    {
+        clear_fetch_chunks(&tx, &row.item_id, row.index)?;
+        tx.commit().map_err(db_err)?;
+        return Err(AppError::Integrity(
+            "fetched attachment size or sha256 mismatch".into(),
+        ));
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO blobs (sha256,size,utf8,data,created_at) VALUES (?1,?2,?3,?4,?5)",
+        params![
+            row.attachment.sha256,
+            data.len() as i64,
+            std::str::from_utf8(data).is_ok(),
+            data,
+            now
+        ],
+    )
+    .map_err(db_err)?;
+    tx.execute(
+        "INSERT INTO attachment_verified (item_id,idx,sha256,upstream) VALUES (?1,?2,?3,?4) \
+         ON CONFLICT(item_id,idx) DO UPDATE SET sha256=excluded.sha256,upstream=excluded.upstream",
+        params![
+            row.item_id,
+            row.index as i64,
+            row.attachment.sha256,
+            row.upstream
+        ],
+    )
+    .map_err(db_err)?;
+    clear_fetch_chunks(&tx, &row.item_id, row.index)?;
+    tx.commit().map_err(db_err)?;
+    Ok(())
+}
+
+pub fn raw_range(
+    conn: &Connection,
+    row: &AttachmentRow,
+    offset: usize,
+    length: Option<usize>,
+    max_body: usize,
+    now: i64,
+) -> Result<Vec<u8>, AppError> {
+    if now >= row.expires_at {
+        return Err(AppError::GoneDetail("attachment expired".into()));
+    }
+    let length = length.unwrap_or(max_body).min(max_body);
+    if length == 0 || offset > row.attachment.size {
+        return Err(AppError::BadRequest("invalid attachment range".into()));
+    }
+    if !row.upstream.is_empty() && !is_verified(conn, row)? {
+        return Err(AppError::Unavailable(
+            "attachment requires an upstream fetch".into(),
+        ));
+    }
+    let current = get_row(conn, &row.item_id, row.index)?
+        .ok_or_else(|| AppError::GoneDetail("attachment row is gone".into()))?;
+    if current != *row {
+        return Err(AppError::Conflict(
+            "attachment row changed during read".into(),
+        ));
+    }
+    let size: Option<usize> = conn
+        .query_row(
+            "SELECT size FROM blobs WHERE sha256=?1",
+            [&row.attachment.sha256],
+            |r| usize_column(r, 0),
+        )
+        .optional()
+        .map_err(db_err)?;
+    let size = size.ok_or_else(|| AppError::GoneDetail("attachment bytes are gone".into()))?;
+    if size != row.attachment.size {
+        return Err(AppError::Integrity(
+            "stored attachment size mismatch".into(),
+        ));
+    }
+    let take = length.min(size - offset);
+    if take == 0 {
+        return Ok(Vec::new());
+    }
+    conn.query_row(
+        "SELECT substr(data,?1+1,?2) FROM blobs WHERE sha256=?3",
+        params![offset as i64, take as i64, row.attachment.sha256],
+        |r| r.get(0),
+    )
+    .map_err(db_err)
+}
+
 pub fn read_range(
     conn: &Connection,
     row: &AttachmentRow,
@@ -488,44 +618,15 @@ pub fn read_range(
     max_body: usize,
     now: i64,
 ) -> Result<AttachmentRange, AppError> {
-    if now >= row.expires_at {
-        return Err(AppError::GoneDetail("attachment expired".into()));
-    }
-    let length = length.unwrap_or(max_body).min(max_body);
-    if length == 0 || offset > row.attachment.size {
-        return Err(AppError::BadRequest("invalid attachment range".into()));
-    }
-    if !row.upstream.is_empty() {
-        return Err(AppError::Unavailable(
-            "attachment requires an upstream fetch".into(),
-        ));
-    }
-    let metadata: Option<(usize, bool)> = conn
+    let mut raw_bytes = raw_range(conn, row, offset, length, max_body, now)?;
+    let utf8: bool = conn
         .query_row(
-            "SELECT size,utf8 FROM blobs WHERE sha256=?1",
+            "SELECT utf8 FROM blobs WHERE sha256=?1",
             [&row.attachment.sha256],
-            |r| Ok((usize_column(r, 0)?, r.get(1)?)),
-        )
-        .optional()
-        .map_err(db_err)?;
-    let (size, utf8) =
-        metadata.ok_or_else(|| AppError::GoneDetail("attachment bytes are gone".into()))?;
-    if size != row.attachment.size {
-        return Err(AppError::Integrity(
-            "stored attachment size mismatch".into(),
-        ));
-    }
-    let take = length.min(size - offset);
-    let mut raw_bytes: Vec<u8> = if take == 0 {
-        Vec::new()
-    } else {
-        conn.query_row(
-            "SELECT substr(data,?1+1,?2) FROM blobs WHERE sha256=?3",
-            params![offset as i64, take as i64, row.attachment.sha256],
             |r| r.get(0),
         )
-        .map_err(db_err)?
-    };
+        .map_err(db_err)?;
+    let size = row.attachment.size;
     let (encoding, data) = if utf8 {
         if raw_bytes.first().is_some_and(|b| b & 0xc0 == 0x80) {
             return Err(AppError::BadRequest(
@@ -561,6 +662,10 @@ pub fn purge(conn: &Connection, now: i64, idempotency_ttl_secs: u64) -> Result<(
     let tx = conn.unchecked_transaction().map_err(db_err)?;
     tx.execute("DELETE FROM attachments WHERE expires_at<=?1", [now])
         .map_err(db_err)?;
+    tx.execute(
+        "DELETE FROM attachment_verified WHERE NOT EXISTS (SELECT 1 FROM attachments a WHERE a.item_id=attachment_verified.item_id AND a.idx=attachment_verified.idx AND a.sha256=attachment_verified.sha256 AND a.upstream=attachment_verified.upstream)",
+        [],
+    ).map_err(db_err)?;
     tx.execute("DELETE FROM staged_blobs WHERE expires_at<=?1", [now])
         .map_err(db_err)?;
     let cutoff = now.saturating_sub(i64::try_from(idempotency_ttl_secs).unwrap_or(i64::MAX));
@@ -865,6 +970,217 @@ mod tests {
         assert!(get_row(&conn, "message", 0).unwrap().is_none());
         let count: usize = conn
             .query_row("SELECT count(*) FROM blobs", [], |r| usize_column(r, 0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    fn remote_reference(conn: &Connection, item: &str, bytes: &[u8]) -> AttachmentRow {
+        let attachment = AttachmentRef {
+            name: "remote".into(),
+            size: bytes.len(),
+            media_type: "application/octet-stream".into(),
+            sha256: hex::encode(Sha256::digest(bytes)),
+        };
+        insert_rows(conn, item, &[attachment], 200, "origin", "recipient").unwrap();
+        get_row(conn, item, 0).unwrap().unwrap()
+    }
+
+    #[test]
+    fn remote_cache_proof_is_per_item_and_upstream_for_both_read_paths() {
+        let conn = db();
+        let a = remote_reference(&conn, "a", b"same bytes");
+        let b = remote_reference(&conn, "b", b"same bytes");
+        publish_verified(&conn, &a, b"same bytes", 101).unwrap();
+        assert_eq!(
+            raw_range(&conn, &a, 0, None, 32, 101).unwrap(),
+            b"same bytes"
+        );
+        assert_eq!(
+            read_range(&conn, &a, 0, None, 32, 101).unwrap().data,
+            "same bytes"
+        );
+        assert_eq!(
+            raw_range(&conn, &b, 0, None, 32, 101).unwrap_err().code().1,
+            "unavailable"
+        );
+        assert_eq!(
+            read_range(&conn, &b, 0, None, 32, 101)
+                .unwrap_err()
+                .code()
+                .1,
+            "unavailable"
+        );
+        let mut changed = a;
+        changed.upstream = "different".into();
+        assert!(!is_verified(&conn, &changed).unwrap());
+        assert_eq!(
+            raw_range(&conn, &changed, 0, None, 32, 101)
+                .unwrap_err()
+                .code()
+                .1,
+            "unavailable"
+        );
+    }
+
+    #[test]
+    fn bad_remote_hash_or_size_clears_chunks_without_publication_and_retry_works() {
+        let conn = db();
+        let row = remote_reference(&conn, "remote", b"good");
+        for bad in [b"evil".as_slice(), b"longer", b"bad"] {
+            append_chunk(&conn, "fetch:remote", "0", 0, bad, limits()).unwrap();
+            assert_eq!(
+                publish_verified(&conn, &row, bad, 101)
+                    .unwrap_err()
+                    .code()
+                    .1,
+                "integrity"
+            );
+            assert!(!is_verified(&conn, &row).unwrap());
+            for table in ["blobs", "blob_chunks"] {
+                let count: i64 = conn
+                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                    .unwrap();
+                assert_eq!(count, 0, "{table}");
+            }
+        }
+        publish_verified(&conn, &row, b"good", 101).unwrap();
+        assert!(is_verified(&conn, &row).unwrap());
+        assert_eq!(raw_range(&conn, &row, 0, None, 32, 101).unwrap(), b"good");
+        assert_eq!(
+            get_row(&conn, "remote", 0).unwrap().unwrap().upstream,
+            "origin"
+        );
+    }
+
+    #[test]
+    fn remote_raw_range_is_byte_exact_bounded_and_expiring() {
+        let conn = db();
+        let row = remote_reference(&conn, "remote", "€abc".as_bytes());
+        publish_verified(&conn, &row, "€abc".as_bytes(), 101).unwrap();
+        assert_eq!(
+            raw_range(&conn, &row, 1, Some(100), 1, 101).unwrap(),
+            [0x82]
+        );
+        assert_eq!(raw_range(&conn, &row, 6, None, 2, 101).unwrap(), b"");
+        assert_eq!(
+            raw_range(&conn, &row, 7, None, 2, 101)
+                .unwrap_err()
+                .code()
+                .1,
+            "bad_request"
+        );
+        assert_eq!(
+            raw_range(&conn, &row, 0, Some(0), 2, 101)
+                .unwrap_err()
+                .code()
+                .1,
+            "bad_request"
+        );
+        assert_eq!(
+            read_range(&conn, &row, 1, None, 2, 101)
+                .unwrap_err()
+                .code()
+                .1,
+            "bad_request"
+        );
+        assert_eq!(
+            raw_range(&conn, &row, 0, None, 2, 200)
+                .unwrap_err()
+                .code()
+                .1,
+            "gone"
+        );
+        assert_eq!(
+            read_range(&conn, &row, 0, None, 2, 200)
+                .unwrap_err()
+                .code()
+                .1,
+            "gone"
+        );
+        purge(&conn, 200, 30).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM attachment_verified", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn remote_forwarding_requires_its_own_possession_proof() {
+        let conn = db();
+        let local = reference(&conn, b"same bytes");
+        let remote = remote_reference(&conn, "remote", b"same bytes");
+        assert_eq!(
+            authorize_refs(
+                &conn,
+                "new-sender",
+                std::slice::from_ref(&local.attachment),
+                &["remote".into()],
+                101
+            )
+            .unwrap_err()
+            .code()
+            .1,
+            "not_found"
+        );
+        publish_verified(&conn, &remote, b"same bytes", 101).unwrap();
+        authorize_refs(
+            &conn,
+            "new-sender",
+            &[remote.attachment],
+            &["remote".into()],
+            101,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn remote_publication_enforces_declared_size_even_for_matching_hash() {
+        let conn = db();
+        let mut row = remote_reference(&conn, "remote", b"oversized");
+        conn.execute("UPDATE attachments SET size=3 WHERE item_id='remote'", [])
+            .unwrap();
+        row.attachment.size = 3;
+        assert_eq!(
+            publish_verified(&conn, &row, b"oversized", 101)
+                .unwrap_err()
+                .code()
+                .1,
+            "integrity"
+        );
+        assert!(!is_verified(&conn, &row).unwrap());
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM blobs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn remote_publication_rechecks_current_row_and_expiry() {
+        let conn = db();
+        let row = remote_reference(&conn, "remote", b"good");
+        assert_eq!(
+            publish_verified(&conn, &row, b"good", 200)
+                .unwrap_err()
+                .code()
+                .1,
+            "gone"
+        );
+        assert!(!is_verified(&conn, &row).unwrap());
+        conn.execute(
+            "UPDATE attachments SET upstream='other' WHERE item_id='remote'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            publish_verified(&conn, &row, b"good", 101)
+                .unwrap_err()
+                .code()
+                .1,
+            "conflict"
+        );
+        assert!(!is_verified(&conn, &row).unwrap());
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM blobs", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
     }
