@@ -490,3 +490,8 @@ required-features = ["daemon"]
 name = "gate_owh_transport_bounds"
 path = "tests/gate_owh_transport_bounds.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "gate_uph3_control"
+path = "tests/gate_uph3_control.rs"
+required-features = ["daemon"]

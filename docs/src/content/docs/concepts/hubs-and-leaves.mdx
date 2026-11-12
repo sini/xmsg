@@ -248,3 +248,26 @@ exercises this permission placement and reply route.
 
 Each extension owns its behavior outside the bus. xmsg does not authenticate a Matrix user or an
 OAuth caller itself.
+
+
+## Mailbox controls while a service works
+
+**Planned, not yet released.** Updated leaves and outbound links keep a separate, bounded
+control long-poll alongside message delivery. A slow service ACK therefore does not spend
+ordinary inbox tokens just to answer list or file queries. The hub still retains its durable
+message until the service ACK arrives; control traffic never acknowledges or consumes it.
+
+For example, a service can read a file while processing its current delivery. The leaf can
+answer the hub's reverse attachment query before that service ACK, while normal messages
+keep their existing peer and inbox quotas. An 8 MiB file at the default 65536-byte chunk size
+needs 128 chunk queries. The control bucket allows 120 per minute, or 360 over the whole-fetch
+180-second deadline; its initial burst covers 120 and the remaining eight refill in four
+seconds. The independent attachment-serving quota also applies. In the full-size acceptance
+case, its retries brought the total to 197 control requests and the verified transfer
+completed in 68.758 seconds.
+
+Old and new hubs/leaves retain the legacy unflagged mailbox path. Update the hub before its
+leaves to obtain the separate control budget; a mixed-version pair keeps the older combined
+polling behavior. This changes polling, not the message's peer admission, grants, ownership
+or service-ACK-before-hub-ACK rule. See the
+[wire reference](/reference/http-and-sockets/#federated-fedv2-wire-routes).

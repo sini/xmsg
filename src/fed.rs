@@ -2047,6 +2047,7 @@ pub struct RateLimiter {
     principal_limit: f64,
     peer_buckets: Mutex<HashMap<String, TokenBucket>>,
     principal_buckets: Mutex<HashMap<(String, String), TokenBucket>>,
+    control_buckets: Mutex<HashMap<String, TokenBucket>>,
 }
 
 impl RateLimiter {
@@ -2056,7 +2057,16 @@ impl RateLimiter {
             principal_limit: principal_per_min as f64,
             peer_buckets: Mutex::new(HashMap::new()),
             principal_buckets: Mutex::new(HashMap::new()),
+            control_buckets: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn check_control(&self, peer: &str) -> bool {
+        let mut buckets = self.control_buckets.lock().unwrap();
+        buckets
+            .entry(peer.to_string())
+            .or_insert_with(|| TokenBucket::new(120.0, 2.0))
+            .take(1.0)
     }
 
     pub fn check_and_consume(&self, peer: &str, principal_key: Option<&str>) -> bool {
@@ -4057,6 +4067,7 @@ async fn fed_list_answer_handler(
 #[derive(Debug, Deserialize)]
 pub struct FedInboxQuery {
     pub wait: Option<u64>,
+    pub control: Option<bool>,
 }
 
 async fn fed_get_inbox_handler(
@@ -4073,10 +4084,14 @@ async fn fed_get_inbox_handler(
         return Err(AppError::OpDenied("peer is not a leaf".to_string()));
     }
 
-    if !fed_state
-        .rate_limiter
-        .check_and_consume(&peer.name, Some(&format!("inbox:{}", peer.name)))
-    {
+    let admitted = if query.control == Some(true) {
+        fed_state.rate_limiter.check_control(&peer.name)
+    } else {
+        fed_state
+            .rate_limiter
+            .check_and_consume(&peer.name, Some(&format!("inbox:{}", peer.name)))
+    };
+    if !admitted {
         return Err(AppError::RateLimited("Rate limit exceeded".to_string()));
     }
 
@@ -4090,11 +4105,16 @@ async fn fed_get_inbox_handler(
 
     // A `list` query waiting for this client goes first (AM-1), then its messages.
     let next_item = || -> Result<Option<FedInboxItem>, AppError> {
-        if let Some(item) = attachment_queries(&fed_state).next_for(&peer.name) {
-            return Ok(Some(item));
+        if query.control != Some(false) {
+            if let Some(item) = attachment_queries(&fed_state).next_for(&peer.name) {
+                return Ok(Some(item));
+            }
+            if let Some(query) = fed_state.list_queries.next_for(&peer.name) {
+                return Ok(Some(FedInboxItem::List { query, v: Some(2) }));
+            }
         }
-        if let Some(query) = fed_state.list_queries.next_for(&peer.name) {
-            return Ok(Some(FedInboxItem::List { query, v: Some(2) }));
+        if query.control == Some(true) {
+            return Ok(None);
         }
         let db = fed_state
             .db
@@ -4143,6 +4163,25 @@ async fn fed_get_inbox_handler(
     }
 
     let mut receiver = rx.unwrap();
+    if query.control.is_some() {
+        let answer = tokio::time::timeout(Duration::from_secs(wait_secs), async {
+            loop {
+                match receiver.recv().await {
+                    Ok(target) if target == peer.name => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => return Ok::<_, AppError>(None),
+                    _ => continue,
+                }
+                if let Some(item) = next_item()? {
+                    return Ok(Some(item));
+                }
+            }
+        })
+        .await
+        .unwrap_or(Ok(None))?;
+        return Ok((StatusCode::OK, Json(answer)).into_response());
+    }
+
     let peer_name_clone = peer.name.clone();
     let _ = tokio::time::timeout(Duration::from_secs(wait_secs), async {
         loop {
@@ -4926,6 +4965,33 @@ async fn get_federated_inbox_with_peers(
     peer_name: &str,
     wait_secs: u64,
 ) -> Result<Option<FedInboxItem>, AppError> {
+    get_federated_inbox_mode(fed_state, current_peers, peer_name, wait_secs, None).await
+}
+
+pub(crate) async fn get_federated_messages(
+    fed_state: &FedState,
+    peer: &str,
+    wait: u64,
+    legacy: bool,
+) -> Result<Option<FedInboxItem>, AppError> {
+    let peers = fed_state.current_peers();
+    get_federated_inbox_mode(
+        fed_state,
+        &peers,
+        peer,
+        wait,
+        if legacy { None } else { Some(false) },
+    )
+    .await
+}
+
+async fn get_federated_inbox_mode(
+    fed_state: &FedState,
+    current_peers: &PeersMap,
+    peer_name: &str,
+    wait_secs: u64,
+    control: Option<bool>,
+) -> Result<Option<FedInboxItem>, AppError> {
     let peer = current_peers
         .get(peer_name)
         .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
@@ -4957,7 +5023,10 @@ async fn get_federated_inbox_with_peers(
             }
         });
 
-        let uri = format!("/fed/v2/inbox?wait={wait_secs}");
+        let mode = control
+            .map(|value| format!("&control={value}"))
+            .unwrap_or_default();
+        let uri = format!("/fed/v2/inbox?wait={wait_secs}{mode}");
         let req = hyper::Request::builder()
             .method("GET")
             .uri(uri)
@@ -4988,6 +5057,9 @@ async fn get_federated_inbox_with_peers(
                 .map_err(|e| AppError::Internal(format!("failed to parse inbox message: {e}")))?;
             Ok(msg)
         } else {
+            if control == Some(true) && status == StatusCode::BAD_REQUEST {
+                return Err(AppError::BadRequest("control inbox unsupported".into()));
+            }
             let err_resp: Result<WireErrorResponse, _> = serde_json::from_slice(&body_bytes);
             if let Ok(err) = err_resp {
                 match status {
@@ -5240,6 +5312,7 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
     let mut backoff_millis = 100u64;
     let max_backoff_millis = 5000u64;
     let wait_secs = 30u64;
+    let control_worker = spawn_control_worker(fed_state.clone(), peer_name.clone());
 
     loop {
         // Relay permission must use the same peer identity that authenticates this pull.
@@ -5249,7 +5322,19 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
             break;
         }
 
-        match get_federated_inbox_with_peers(&fed_state, &pull_peers, &peer_name, wait_secs).await {
+        match get_federated_inbox_mode(
+            &fed_state,
+            &pull_peers,
+            &peer_name,
+            wait_secs,
+            if control_worker.legacy() {
+                None
+            } else {
+                Some(false)
+            },
+        )
+        .await
+        {
             Ok(Some(FedInboxItem::Attachment {
                 query,
                 item_id,
@@ -7154,5 +7239,96 @@ mod attachment_query_tests {
         assert!(restored.attachments.is_empty());
         assert_eq!(serde_json::to_value(restored).unwrap(), value);
         assert_eq!(original, value);
+    }
+}
+
+struct ControlOwner {
+    task: tokio::task::JoinHandle<()>,
+    legacy: Arc<std::sync::atomic::AtomicBool>,
+    next_legacy: Mutex<Instant>,
+}
+impl Drop for ControlOwner {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+pub(crate) struct ControlWorker {
+    _owner: Arc<ControlOwner>,
+}
+impl ControlWorker {
+    pub(crate) fn legacy(&self) -> bool {
+        self._owner.legacy.load(Ordering::Relaxed)
+    }
+    pub(crate) fn legacy_delay(&self) -> Duration {
+        let mut next = self._owner.next_legacy.lock().unwrap();
+        let now = Instant::now();
+        if *next > now {
+            return *next - now;
+        }
+        *next = now + Duration::from_secs(3);
+        Duration::ZERO
+    }
+}
+pub(crate) fn spawn_control_worker(fs: Arc<FedState>, peer: String) -> ControlWorker {
+    type Registry = Mutex<HashMap<(usize, String), std::sync::Weak<ControlOwner>>>;
+    static WORKERS: std::sync::OnceLock<Registry> = std::sync::OnceLock::new();
+    let mut workers = WORKERS.get_or_init(Mutex::default).lock().unwrap();
+    workers.retain(|_, worker| worker.strong_count() > 0);
+    let key = (Arc::as_ptr(&fs.db) as usize, peer.clone());
+    if let Some(owner) = workers.get(&key).and_then(std::sync::Weak::upgrade) {
+        return ControlWorker { _owner: owner };
+    }
+    let legacy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let legacy_task = legacy.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let peers = fs.current_peers();
+            match get_federated_inbox_mode(&fs, &peers, &peer, 30, Some(true)).await {
+                Ok(Some(item)) => {
+                    if matches!(&item, FedInboxItem::Message(_)) {
+                        legacy_task.store(true, Ordering::Relaxed);
+                        tracing::debug!(peer=%peer,"peer returned a message to control-only inbox; use legacy inbox");
+                        return;
+                    }
+                    spawn_control_answer(&fs, &peer, item);
+                }
+                Ok(None) => {}
+                Err(AppError::BadRequest(_)) => {
+                    legacy_task.store(true, Ordering::Relaxed);
+                    return;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+            }
+        }
+    });
+    let owner = Arc::new(ControlOwner {
+        task,
+        legacy,
+        next_legacy: Mutex::new(Instant::now()),
+    });
+    workers.insert(key, Arc::downgrade(&owner));
+    ControlWorker { _owner: owner }
+}
+pub(crate) fn spawn_control_answer(fs: &Arc<FedState>, peer: &str, item: FedInboxItem) {
+    let fs = fs.clone();
+    let peer = peer.to_string();
+    match item {
+        FedInboxItem::Attachment {
+            query,
+            item_id,
+            index,
+            offset,
+            length,
+        } => {
+            tokio::spawn(async move {
+                answer_attachment_query(&fs, &peer, &query, &item_id, index, offset, length).await;
+            });
+        }
+        FedInboxItem::List { query, v } => {
+            tokio::spawn(async move {
+                answer_list_query(&fs, &peer, &query, v.unwrap_or(1) >= 2).await;
+            });
+        }
+        FedInboxItem::Message(_) => {}
     }
 }

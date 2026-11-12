@@ -109,6 +109,13 @@ loopback routes:
 | `/fed/v2/list/{query}` | `POST` | Posts a leaf or outbound-linked node's answer to a mailbox `list` query. |
 | `/fed/v2/handoff`, `/fed/v2/handoff/ack` | `POST` | Transfers and acknowledges a parked Claude conversation queue across a user's machines. |
 
+Mailbox control polling is planned for the next release. `GET /fed/v2/inbox?control=true&wait=30`
+long-polls only peer-bound list and attachment controls, never a durable message. It uses a
+separate bucket of 120 requests per minute (burst 120, refill two per second), with the same
+current-peer and `leaf: true` admission as mailbox reads. `control=false` selects only durable
+messages under the ordinary peer/inbox quotas. Omitting `control` retains the legacy combined
+response and ordinary quota behavior. ACK uses the existing route and follows service ACK.
+
 For mailbox pulls and ACKs, the authenticated peer must have `leaf: true` on the hub. Each peer
 can access only its own mailbox. xmsg accepts the `inbox` string in `allow` and ignores it. Thus
 old configurations that list it still load.

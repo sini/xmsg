@@ -698,9 +698,17 @@ pub async fn run_leaf_inbox_task(
     let mut backoff_millis = 100u64;
     let max_backoff_millis = 5000u64;
     let wait_secs = 30u64;
+    let control_worker = crate::fed::spawn_control_worker(fed_state.clone(), peer_name.clone());
 
     loop {
-        match crate::fed::get_federated_inbox(&fed_state, &peer_name, wait_secs).await {
+        match crate::fed::get_federated_messages(
+            &fed_state,
+            &peer_name,
+            wait_secs,
+            control_worker.legacy(),
+        )
+        .await
+        {
             Ok(Some(crate::fed::FedInboxItem::Attachment {
                 query,
                 item_id,
@@ -941,54 +949,36 @@ pub async fn run_leaf_inbox_task(
                 }
 
                 if !already_acked {
-                    loop {
-                        let is_acked = {
-                            if let Ok(conn) = db.lock() {
+                    let ack = async {
+                        loop {
+                            let acked = db.lock().ok().is_some_and(|conn| {
                                 storage::is_svc_message_acked(&conn, &msg.id).unwrap_or(false)
-                            } else {
-                                false
+                            });
+                            if acked {
+                                break;
                             }
-                        };
-
-                        if is_acked {
-                            break;
+                            tokio::time::sleep(Duration::from_millis(50)).await;
                         }
-
-                        match crate::fed::get_federated_inbox(&fed_state, &peer_name, 0).await {
-                            Ok(Some(crate::fed::FedInboxItem::Attachment {
-                                query,
-                                item_id,
-                                index,
-                                offset,
-                                length,
-                            })) => {
-                                let fs = fed_state.clone();
-                                let peer = peer_name.clone();
-                                tokio::spawn(async move {
-                                    crate::fed::answer_attachment_query(
-                                        &fs, &peer, &query, &item_id, index, offset, length,
-                                    )
-                                    .await;
-                                });
+                    };
+                    let legacy_controls = async {
+                        loop {
+                            if !control_worker.legacy() {
+                                tokio::time::sleep(Duration::from_millis(50)).await;
+                                continue;
                             }
-                            Ok(Some(crate::fed::FedInboxItem::List { query, v })) => {
-                                let fs = fed_state.clone();
-                                let peer = peer_name.clone();
-                                tokio::spawn(async move {
-                                    crate::fed::answer_list_query(
-                                        &fs,
-                                        &peer,
-                                        &query,
-                                        v.unwrap_or(1) >= 2,
-                                    )
-                                    .await;
-                                });
+                            let delay = control_worker.legacy_delay();
+                            if !delay.is_zero() {
+                                tokio::time::sleep(delay).await;
+                                continue;
                             }
-                            Err(_) => tokio::time::sleep(Duration::from_secs(5)).await,
-                            _ => {}
+                            if let Ok(Some(item)) =
+                                crate::fed::get_federated_inbox(&fed_state, &peer_name, 0).await
+                            {
+                                crate::fed::spawn_control_answer(&fed_state, &peer_name, item);
+                            }
                         }
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
+                    };
+                    tokio::select! {_ = ack=>{}, _ = legacy_controls=>{}}
                 }
 
                 let mut ack_backoff = 100u64;
