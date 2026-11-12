@@ -5,61 +5,66 @@ description: Dynamic TLS and peer reloading, systemd socket activation and sd_no
 
 ## Dynamic credential, CA bundle & peers reloading
 
-When federation is configured (`--peers-file`, `--fed-cert`, `--fed-key`), `xmsg serve` reloads
-certificates, CA bundles, and `peers.json` without dropping active connections:
+With federation (`--peers-file`, `--fed-cert`, `--fed-key`), `xmsg serve` loads new
+certificates, CA bundles and `peers.json` without dropping active connections:
 
-- **Periodic SHA-256 polling & `SIGHUP`:** Every `--fed-reload-interval-secs` (default `30`
-  seconds, `XMSG_FED_RELOAD_INTERVAL_SECS`) — or immediately upon receiving `SIGHUP` — `xmsg`
-  checks the SHA-256 content hashes of `--fed-cert`, `--fed-key`, `--peers-file`, and each peer's
-  `ca` bundle. Content hashing detects atomic symlink swaps (such as Kubernetes `..data` Secret
-  rotations) even when symlink `mtime` does not change.
-- **Atomic swap & fail-closed validation:** `xmsg` builds and validates the complete new TLS
-  acceptor, client credentials, private key match, peer map, and CA trust anchors before swapping.
-  If any file is invalid or mismatched, the reload is aborted, an error is logged, and the previous
-  active configuration stays in service uninterrupted.
-- **Per-request policy re-evaluation:** Existing HTTP/1.1 keep-alive connections on `/fed/v2/*`
-  re-verify peer membership (`current_peers()`) and source-IP CIDR policy (`from`) on every
-  request. In-flight long-polls complete on their pre-reload snapshot (bounded by the 30–60 s wait
-  timeout) before re-evaluating on the next poll.
+- **Periodic SHA-256 polling & `SIGHUP`:** `xmsg` checks the SHA-256 content hashes of
+  `--fed-cert`, `--fed-key`, `--peers-file` and each peer's `ca` bundle. It does this every
+  `--fed-reload-interval-secs` (default `30` seconds, `XMSG_FED_RELOAD_INTERVAL_SECS`), and
+  immediately when it gets `SIGHUP`. Content hashes find atomic symlink swaps, such as Kubernetes
+  `..data` Secret rotations, also when the symlink `mtime` does not change.
+- **Atomic swap & fail-closed validation:** Before the swap, `xmsg` builds and validates the full
+  new configuration: the TLS acceptor, the client credentials, the private key match, the peer
+  map and the CA trust anchors. If a file is not valid or does not match, xmsg stops the reload
+  and logs an error. The previous configuration continues to operate without interruption.
+- **Per-request policy re-evaluation:** On each request, existing HTTP/1.1 keep-alive connections
+  on `/fed/v2/*` check peer membership (`current_peers()`) and the source-IP CIDR policy (`from`)
+  again. A long-poll that is in progress completes with the configuration it started with. The
+  30–60 s wait timeout limits this. The next poll uses the new configuration.
 
 ## Systemd socket activation & `sd_notify`
 
-`xmsg serve` supports `Type=notify-reload` (`ReloadSignal=SIGHUP`) and socket activation under
-systemd (`src/systemd.rs`):
+Under systemd, `xmsg serve` supports `Type=notify-reload` (`ReloadSignal=SIGHUP`) and socket
+activation (`src/systemd.rs`):
 
-- **Socket activation (`LISTEN_FDS`, `LISTEN_PID`, `LISTEN_FDNAMES`):** When `LISTEN_PID` matches
-  `xmsg serve`'s PID and `LISTEN_FDS >= 1`, `xmsg` adopts inherited descriptors starting at FD `3`
-  (`SD_LISTEN_FDS_START`) and marks each `FD_CLOEXEC`. Descriptors are matched by canonical
-  `LISTEN_FDNAMES` slot names:
+- **Socket activation (`LISTEN_FDS`, `LISTEN_PID`, `LISTEN_FDNAMES`):** When `LISTEN_PID` is the
+  PID of `xmsg serve` and `LISTEN_FDS >= 1`, `xmsg` takes the inherited descriptors. They start at
+  FD `3` (`SD_LISTEN_FDS_START`). xmsg marks each one `FD_CLOEXEC`. It matches the descriptors by
+  their canonical `LISTEN_FDNAMES` slot names:
   - `fed` (`--fed-listen`)
   - `listen` (`--listen`)
   - `agent` (`--agent-sock`)
   - `register` (`--register-sock` / `--leaf-register-sock`)
   - `http` (`--http-sock`)
-  When `LISTEN_FDS=1` and `LISTEN_FDNAMES` is unset, the single descriptor is assigned to the sole
-  configured TCP listener (`--fed-listen` or `--listen`). Any unknown, duplicate, or unconfigured
-  slot, non-stream/non-listening socket, or bound address/path mismatch fails closed at startup.
+  When `LISTEN_FDS=1` and `LISTEN_FDNAMES` is not set, the single descriptor goes to the only
+  configured TCP listener (`--fed-listen` or `--listen`). Startup fails closed on any of these: an
+  unknown, duplicate or unconfigured slot; a socket that is not a listening stream socket; a bound
+  address or path that does not match.
 - **Readiness & reload notifications (`NOTIFY_SOCKET`):**
-  - Sends `READY=1` only after all configured listeners are bound (or adopted) and accepting
+  - xmsg sends `READY=1` only after all configured listeners are bound (or adopted) and accept
     connections.
-  - Brackets every post-startup reload with `RELOADING=1\nMONOTONIC_USEC=<usec>` followed by
-    `READY=1` (or `READY=1\nSTATUS=reload failed: <reason>` when a reload fails and retains the
-    previous configuration, or `READY=1\nSTATUS=nothing to reload` when `SIGHUP` arrives without
-    federation configured).
-  - Sends `STOPPING=1` when `SIGTERM` or `SIGINT` initiates graceful shutdown.
+  - Each reload after startup starts with `RELOADING=1\nMONOTONIC_USEC=<usec>`. It ends with one of
+    these:
+    - `READY=1` after a successful reload;
+    - `READY=1\nSTATUS=reload failed: <reason>` when the reload fails and xmsg keeps the previous
+      configuration;
+    - `READY=1\nSTATUS=nothing to reload` when `SIGHUP` arrives and federation is not configured.
+  - xmsg sends `STOPPING=1` when `SIGTERM` or `SIGINT` starts a graceful shutdown.
 
 ## Persisted state & SQLite schema version
 
-The SQLite database (`--db-path`, default `$XDG_STATE_HOME/xmsg/xmsg.db` or
-`~/.local/state/xmsg/xmsg.db`) records its schema version in `PRAGMA user_version` (currently
-**version 3**):
+The SQLite database (`--db-path`) records its schema version in `PRAGMA user_version`. The
+default path is `$XDG_STATE_HOME/xmsg/xmsg.db` or `~/.local/state/xmsg/xmsg.db`. The current
+version is **version 3**:
 
-- **Version 3:** Opened in place, preserving all queued messages, stored replies, `instance_claims`,
-  idempotency keys, `peer_mailbox`, and `forwarded_messages` across restarts.
-- **Below version 3:** Message state tables are dropped and recreated at version 3 in a single
-  transaction while preserving `instance_claims`.
-- **Above version 3:** Refused at startup naming both versions so a downgrade never corrupts newer
-  state. To roll back across a schema bump, back up `xmsg.db` before upgrading.
+- **Version 3:** xmsg opens the database in place. Queued messages, stored replies,
+  `instance_claims`, idempotency keys, `peer_mailbox` and `forwarded_messages` persist across
+  restarts.
+- **Below version 3:** In one transaction, xmsg drops the message state tables and creates them
+  again at version 3. It keeps `instance_claims`.
+- **Above version 3:** xmsg refuses the database at startup and names both versions. Thus a
+  downgrade never corrupts newer state. To roll back across a schema change, back up `xmsg.db`
+  before you upgrade.
 
 ## Building & verification
 

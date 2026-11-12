@@ -5,11 +5,11 @@ description: Installing and configuring xmsg, agent harness switches, and mTLS f
 
 The `github:sini/xmsg` flake provides two declarative modules:
 
-- **`homeManagerModules.xmsg`** (also `homeManagerModules.default`): Installs `xmsg`, runs
+- **`homeManagerModules.xmsg`** (also `homeManagerModules.default`): Installs `xmsg`. Runs
   `xmsg serve` as a user service (`systemd.user.services.xmsg` on Linux, `launchd.agents.xmsg` on
-  macOS), and wires per-harness MCP servers, plugins, extensions, skills, and hooks.
-- **`nixosModules.xmsg`** (also `nixosModules.default`): Opens the federation TCP port in the
-  system firewall when federation is enabled.
+  macOS). Configures the MCP servers, plugins, extensions, skills and hooks for each harness.
+- **`nixosModules.xmsg`** (also `nixosModules.default`): When federation is enabled, opens the
+  federation TCP port in the system firewall.
 
 ## Minimal Home Manager import
 
@@ -23,8 +23,8 @@ The `github:sini/xmsg` flake provides two declarative modules:
 }
 ```
 
-Set `programs.xmsg.server.enable = false` to install the CLI and harness integrations on a host
-without running a local `xmsg serve` daemon.
+To install the CLI and the harness integrations without a local `xmsg serve` daemon, set
+`programs.xmsg.server.enable = false`.
 
 | Option | CLI Flag | Default |
 |---|---|---|
@@ -40,28 +40,31 @@ without running a local `xmsg serve` daemon.
 ## Per-harness switches
 
 Each switch under `programs.xmsg.harnesses.<name>.enable` installs the shared skill
-(`nix/modules/skills/xmsg/SKILL.md`) and that harness's integration:
+(`nix/modules/skills/xmsg/SKILL.md`) and the integration for that harness:
 
-- **`programs.xmsg.harnesses.claude.enable`:** Adds `xmsg mcp` to
-  `programs.claude-code.mcpServers`, installs the `xmsg` skill, adds `list`, `send`, `reply`,
-  `replies`, and `inbox` permissions under `mcp__plugin_hm_xmsg__` and `mcp__xmsg__`
-  (`permissionPrefixes`), and configures `xmsg register claude --hook` (`PreToolUse`,
-  `PostToolUse`, `SubagentStart`, `SubagentStop`). Requires `programs.claude-code.enable = true`.
-- **`programs.xmsg.harnesses.codex.enable`:** Links `${xdg.dataHome}/xmsg/bin/xmsg`,
-  configures `programs.codex.skills.xmsg` and `programs.codex.settings.mcp_servers.xmsg`, enables
-  `--codex-exe` and `--codex-home` on `xmsg serve`, and exposes read-only
-  `programs.xmsg.harnesses.codex.{hooks,trustState,mcpServer}`. Requires
-  `programs.codex.enable = true`.
-- **`programs.xmsg.harnesses.agy.enable`:** Adds `xmsg mcp` to
-  `programs.antigravity-cli.mcpServers`, installs the `xmsg` skill, and writes
-  `~/.gemini/config/hooks.json` (`PreInvocation`, `PreToolUse`, `Stop`). Requires
-  `programs.antigravity-cli.enable = true`.
+- **`programs.xmsg.harnesses.claude.enable`:** Needs `programs.claude-code.enable = true`.
+  - Adds `xmsg mcp` to `programs.claude-code.mcpServers`.
+  - Installs the `xmsg` skill.
+  - Adds the `list`, `send`, `reply`, `replies` and `inbox` permissions under
+    `mcp__plugin_hm_xmsg__` and `mcp__xmsg__` (`permissionPrefixes`).
+  - Configures `xmsg register claude --hook` (`PreToolUse`, `PostToolUse`, `SubagentStart`,
+    `SubagentStop`).
+- **`programs.xmsg.harnesses.codex.enable`:** Needs `programs.codex.enable = true`.
+  - Links `${xdg.dataHome}/xmsg/bin/xmsg`.
+  - Configures `programs.codex.skills.xmsg` and `programs.codex.settings.mcp_servers.xmsg`.
+  - Enables `--codex-exe` and `--codex-home` on `xmsg serve`.
+  - Exposes the read-only `programs.xmsg.harnesses.codex.{hooks,trustState,mcpServer}`.
+- **`programs.xmsg.harnesses.agy.enable`:** Needs `programs.antigravity-cli.enable = true`.
+  - Adds `xmsg mcp` to `programs.antigravity-cli.mcpServers`.
+  - Installs the `xmsg` skill.
+  - Writes `~/.gemini/config/hooks.json` (`PreInvocation`, `PreToolUse`, `Stop`).
 - **`programs.xmsg.harnesses.opencode.enable`:** Writes `$XDG_CONFIG_HOME/opencode/plugin/xmsg.ts`
-  and `opencode/skills/xmsg/SKILL.md` directly (no `opencode` module required).
-- **`programs.xmsg.harnesses.hermes.enable`:** Links `extensions/hermes/` into
-  `services.hermes-agent.extraPlugins`, appends `"xmsg"` to `settings.plugins.enabled` via
-  `lib.mkAfter`, sets `settings.plugins.entries.xmsg.allow_gateway_injection = true`, and installs
-  `hermesHomeFiles."skills/xmsg/SKILL.md"`. Requires `services.hermes-agent` enabled.
+  and `opencode/skills/xmsg/SKILL.md` directly. It does not need an `opencode` module.
+- **`programs.xmsg.harnesses.hermes.enable`:** Needs `services.hermes-agent`.
+  - Links `extensions/hermes/` into `services.hermes-agent.extraPlugins`.
+  - Adds `"xmsg"` to `settings.plugins.enabled` with `lib.mkAfter`.
+  - Sets `settings.plugins.entries.xmsg.allow_gateway_injection = true`.
+  - Installs `hermesHomeFiles."skills/xmsg/SKILL.md"`.
 - **`programs.xmsg.harnesses.pi.enable`:** Writes `~/.pi/agent/extensions/xmsg-pi.ts` and
   `~/.pi/agent/skills/xmsg/SKILL.md`.
 
