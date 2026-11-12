@@ -55,6 +55,10 @@
             row = "xmsg-fei.10";
             reason = "Docker/Compose runtime documentation, verified against the built image; no Nix example value to evaluate.";
           };
+          gen.ci.examplesExcluded.helm = {
+            row = "xmsg-fei.9";
+            reason = "Helm/Kubernetes runtime example, verified with two federating releases; no Nix example value to evaluate.";
+          };
         }
         # Surface package build in CI checks (doCheck = true runs cargo test)
         {
