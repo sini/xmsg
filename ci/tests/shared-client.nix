@@ -60,7 +60,7 @@
               set -o pipefail
               cargoWithProfile test --locked --no-default-features --features client --test shared_client \
                 2>&1 | tee client-completion.log
-              grep -F 'test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' client-completion.log
+              grep -F 'test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' client-completion.log
               cargoWithProfile test --locked --no-default-features --features client --lib \
                 client::health::tests -- --nocapture 2>&1 | tee health.log
               grep -F 'test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured;' health.log
