@@ -15,7 +15,8 @@ not run this installation procedure or load this plist.
 
 Install Apple's command-line developer tools with `xcode-select --install`, then install Rust
 and Cargo using [rustup](https://rustup.rs/). Open a new terminal and check `cargo --version`.
-The repository does not declare a minimum supported Rust version. Use a current stable toolchain.
+xmsg requires Rust 1.88 or newer for the locked default-feature build. CI builds on the
+minimum declared in `Cargo.toml`; a current stable toolchain also works.
 SQLite is bundled, and federation uses Rustls; separate SQLite and OpenSSL development packages
 are not required.
 
