@@ -288,3 +288,12 @@ The hub here forwards between people. It does not list sessions across laptops, 
 addresses or labels. Anyone holding a `message_id` can read that message's replies, so treat
 message IDs like the messages themselves.
 </Aside>
+
+## Offline mailbox budget
+
+**Planned, not yet released.** Each offline leaf has its own 10,000-row / 64 MiB stored-mailbox
+budget by default. For a hub with a different traffic budget, pass
+`--peer-mailbox-max-rows` and `--peer-mailbox-max-bytes` to `xmsg serve`. A limit refuses the
+new send or reply with `peer_mailbox_full`; it preserves earlier mail. Tell senders to retry
+with the same idempotency key after ACK or TTL cleanup frees space. Idle hubs run expiry cleanup
+too. See [mailbox retention](/concepts/federation/#mailbox-retention) before sizing a week offline.

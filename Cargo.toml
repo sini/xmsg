@@ -470,3 +470,13 @@ required-features = ["daemon"]
 name = "service_exec"
 path = "tests/service_exec.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "gate_tvp_mailbox_storage"
+path = "tests/gate_tvp_mailbox_storage.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_tvp_mailbox_runtime"
+path = "tests/gate_tvp_mailbox_runtime.rs"
+required-features = ["daemon"]

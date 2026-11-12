@@ -3366,8 +3366,11 @@ async fn fed_reply_handler(
                     .db
                     .lock()
                     .map_err(|e| AppError::Internal(e.to_string()))?;
+                let tx = db
+                    .unchecked_transaction()
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
                 storage::insert_reply(
-                    &db,
+                    &tx,
                     &reply.in_reply_to,
                     &replier_session_id,
                     &reply.text,
@@ -3376,9 +3379,9 @@ async fn fed_reply_handler(
                 )
                 .map_err(|e| AppError::Internal(e.to_string()))?;
                 let _ =
-                    storage::insert_forwarded_message(&db, &reply.id, &peer.name, reply.created_at);
+                    storage::insert_forwarded_message(&tx, &reply.id, &peer.name, reply.created_at);
                 let _ = storage::insert_outbound(
-                    &db,
+                    &tx,
                     &reply.id,
                     &fwd.origin_peer,
                     &origin_target_ref,
@@ -3405,32 +3408,34 @@ async fn fed_reply_handler(
                     return_host: Some(peer.name.clone()),
                     thread_id: reply.in_reply_to.clone(),
                 };
-                let _ = storage::insert_message(&db, &fwd_reply_record);
-            }
-            if origin_peer_cfg.leaf && !origin_target_ref.is_empty() {
-                let envelope = FedEnvelope {
-                    v: WIRE_VERSION,
-                    id: reply.id.clone(),
-                    origin: replier.clone(),
-                    to: FedTarget {
-                        r#ref: origin_target_ref,
-                    },
-                    body: reply.text.clone(),
-                    thread_id: reply.in_reply_to.clone(),
-                    created_at: reply.created_at,
-                    forwarded: Some(FedForwarded {
-                        forwarder: fed_state.node_name.clone(),
-                        targets: None,
-                    }),
-                };
-                let _ = queue_leaf_mailbox_reply(
-                    &fed_state,
-                    &fwd.origin_peer,
-                    &envelope.to.r#ref,
-                    &envelope,
-                    &replier_badge,
-                    &reply.in_reply_to,
-                );
+                let _ = storage::insert_message(&tx, &fwd_reply_record);
+                if origin_peer_cfg.leaf && !origin_target_ref.is_empty() {
+                    let envelope = FedEnvelope {
+                        v: WIRE_VERSION,
+                        id: reply.id.clone(),
+                        origin: replier.clone(),
+                        to: FedTarget {
+                            r#ref: origin_target_ref,
+                        },
+                        body: reply.text.clone(),
+                        thread_id: reply.in_reply_to.clone(),
+                        created_at: reply.created_at,
+                        forwarded: Some(FedForwarded {
+                            forwarder: fed_state.node_name.clone(),
+                            targets: None,
+                        }),
+                    };
+                    queue_leaf_mailbox_reply_in(
+                        &fed_state,
+                        &tx,
+                        &fwd.origin_peer,
+                        &envelope.to.r#ref,
+                        &envelope,
+                        &replier_badge,
+                        &reply.in_reply_to,
+                    )?;
+                }
+                tx.commit().map_err(|e| AppError::Internal(e.to_string()))?;
             }
             let _ = fed_state.notify_tx.send(reply.in_reply_to.clone());
 
@@ -4029,6 +4034,50 @@ fn queue_leaf_mailbox_message_inner(
     from_name: &str,
     in_reply_to: Option<&str>,
 ) -> Result<DeliveryResponse, AppError> {
+    let db = fed_state
+        .db
+        .lock()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    queue_leaf_mailbox_message_in(
+        fed_state,
+        &db,
+        peer_name,
+        target_ref,
+        envelope,
+        from_name,
+        in_reply_to,
+    )
+}
+
+pub(crate) fn queue_leaf_mailbox_reply_in(
+    fed_state: &FedState,
+    db: &rusqlite::Connection,
+    peer_name: &str,
+    target_ref: &str,
+    envelope: &FedEnvelope,
+    from_name: &str,
+    in_reply_to: &str,
+) -> Result<DeliveryResponse, AppError> {
+    queue_leaf_mailbox_message_in(
+        fed_state,
+        db,
+        peer_name,
+        target_ref,
+        envelope,
+        from_name,
+        Some(in_reply_to),
+    )
+}
+
+fn queue_leaf_mailbox_message_in(
+    fed_state: &FedState,
+    db: &rusqlite::Connection,
+    peer_name: &str,
+    target_ref: &str,
+    envelope: &FedEnvelope,
+    from_name: &str,
+    in_reply_to: Option<&str>,
+) -> Result<DeliveryResponse, AppError> {
     let current_peers = fed_state.current_peers();
     let peer_cfg = current_peers
         .get(peer_name)
@@ -4079,16 +4128,18 @@ fn queue_leaf_mailbox_message_inner(
         origin,
     };
 
-    let db = fed_state
-        .db
-        .lock()
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-
-    storage::insert_peer_mailbox(&db, &mailbox_msg)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let limits = storage::peer_mailbox_limits_for_db(&fed_state.db);
+    if storage::insert_peer_mailbox_with_limits(db, &mailbox_msg, limits)
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        == storage::PeerMailboxInsert::Full
+    {
+        return Err(AppError::PeerMailboxFull(format!(
+            "mailbox for '{peer_name}' reached its configured row or byte limit"
+        )));
+    }
 
     let _ = storage::insert_outbound(
-        &db,
+        db,
         &envelope.id,
         peer_name,
         target_ref,
@@ -4097,7 +4148,7 @@ fn queue_leaf_mailbox_message_inner(
     );
     // Marked whether this insert or a forwarder's earlier one wrote the record: only a
     // mailbox send takes its client's typed rejection (`replier_is_recipient`).
-    if let Err(e) = storage::mark_outbound_via_mailbox(&db, &envelope.id) {
+    if let Err(e) = storage::mark_outbound_via_mailbox(db, &envelope.id) {
         tracing::warn!(message_id = %envelope.id, "mailbox send not marked; its client's rejection reply will be refused: {e}");
     }
 
@@ -4386,6 +4437,9 @@ pub async fn send_federated_message_with(
             let err_resp: Result<WireErrorResponse, _> = serde_json::from_slice(&body_bytes);
             if let Ok(err) = err_resp {
                 match status {
+                    _ if err.error == "peer_mailbox_full" => {
+                        Err(AppError::PeerMailboxFull(err.detail))
+                    }
                     _ if err.error == "not_live" => Err(AppError::NotLive(err.detail)),
                     StatusCode::NOT_FOUND => Err(AppError::NotFoundDetail(err.detail)),
                     StatusCode::CONFLICT => Err(AppError::Ambiguous(err.detail)),
@@ -4496,6 +4550,9 @@ pub async fn send_federated_reply(
             let err_resp: Result<WireErrorResponse, _> = serde_json::from_slice(&body_bytes);
             if let Ok(err) = err_resp {
                 match status {
+                    _ if err.error == "peer_mailbox_full" => {
+                        Err(AppError::PeerMailboxFull(err.detail))
+                    }
                     StatusCode::NOT_FOUND => Err(AppError::NotFoundDetail(err.detail)),
                     StatusCode::CONFLICT => Err(AppError::Ambiguous(err.detail)),
                     StatusCode::GONE => Err(AppError::Gone {
@@ -5254,7 +5311,14 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                             created_at: storage::now_epoch_secs(),
                         };
 
-                        let _ = send_federated_reply(&fed_state, &ret_host, &reply_envelope).await;
+                        if let Err(error) =
+                            send_federated_reply(&fed_state, &ret_host, &reply_envelope).await
+                        {
+                            tracing::warn!(
+                                code = error.code().1,
+                                "mailbox rejection notice could not be sent"
+                            );
+                        }
 
                         let msg_record = storage::MessageRecord {
                             id: msg.id.clone(),

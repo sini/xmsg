@@ -97,14 +97,20 @@ enablement for each user are deployment configuration.
 
 Starts the local IPC and optional mTLS federation daemon:
 
-```rust file=<rootDir>/src/main.rs#L178-L279
+```rust file=<rootDir>/src/main.rs#L178-L291
 ```
+
+The planned per-leaf offline mailbox budgets are `--peer-mailbox-max-rows 10000` and
+`--peer-mailbox-max-bytes 67108864`, also configurable with `XMSG_PEER_MAILBOX_MAX_ROWS`
+and `XMSG_PEER_MAILBOX_MAX_BYTES`. A full mailbox refuses a new row with
+`peer_mailbox_full`/HTTP 429. See [mailbox retention](/concepts/federation/#mailbox-retention)
+for accounting, duplicates and cleanup cadence.
 
 ### `xmsg mcp`
 
 Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
 
-```rust file=<rootDir>/src/main.rs#L281-L306
+```rust file=<rootDir>/src/main.rs#L293-L318
 ```
 
 ### `xmsg register`

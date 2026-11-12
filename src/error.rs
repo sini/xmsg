@@ -98,6 +98,9 @@ pub enum AppError {
     PeerRejected(String),
     #[error("peer unreachable: {0}")]
     PeerUnreachable(String),
+    #[error("peer mailbox full: {0}")]
+    PeerMailboxFull(String),
+
     #[error("rate limited: {0}")]
     RateLimited(String),
 }
@@ -144,6 +147,7 @@ impl AppError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "insecure_socket_dir")
             }
             AppError::PeerUnreachable(_) => (StatusCode::SERVICE_UNAVAILABLE, "peer_unreachable"),
+            AppError::PeerMailboxFull(_) => (StatusCode::TOO_MANY_REQUESTS, "peer_mailbox_full"),
             AppError::RateLimited(_) => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
         }
     }
@@ -187,6 +191,7 @@ impl AppError {
             | AppError::Internal(d)
             | AppError::InsecureSocketDir(d)
             | AppError::PeerUnreachable(d)
+            | AppError::PeerMailboxFull(d)
             | AppError::RateLimited(d) => d.clone(),
         }
     }
