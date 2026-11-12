@@ -7,13 +7,14 @@ import { Aside } from '@astrojs/starlight/components';
 
 <Aside type="note" title="Planned, not yet released">
 [PR #37](https://github.com/sini/xmsg/pull/37) adds local attachments. This page describes that
-planned, unreleased work while it is under review. The daemon documented elsewhere here may still refuse attachment
-fields and operations. Federated file fetch and hosted gateway attachment tools are follow-up work.
+planned work while it is in review. It is not released. The daemon that the other pages describe
+can refuse attachment fields and operations. Federated file fetch and hosted gateway attachment
+tools are later work.
 </Aside>
 
 ## Planned local protocol
 
-These frames describe the implementation under review, not an available installation step.
+These frames describe the implementation in review. You cannot install it yet.
 
 A message can carry up to eight content-addressed references:
 
@@ -21,48 +22,48 @@ A message can carry up to eight content-addressed references:
 {"name":"report.md","size":18,"media_type":"text/markdown","sha256":"<64 lowercase hex>"}
 ```
 
-The bytes stay in SQLite rather than message text. `--max-attachment-bytes`
-(`XMSG_MAX_ATTACHMENT_BYTES`, default 8 MiB) bounds each file. Names are sanitised
-and capped at 128 bytes; media types default to `application/octet-stream`.
-Attachment rows share the message's reply TTL. Unsent staged bytes and incomplete
-uploads expire after the idempotency TTL, and garbage collection removes orphaned
-blobs. Knowing a hash alone does not grant permission to attach or read it.
+The bytes stay in SQLite, not in the message text. `--max-attachment-bytes`
+(`XMSG_MAX_ATTACHMENT_BYTES`, default 8 MiB) sets the maximum size of each file. xmsg sanitises
+names. The maximum name length is 128 bytes. The default media type is
+`application/octet-stream`. Attachment rows have the same reply TTL as their message. Staged
+bytes that are not sent, and incomplete uploads, expire after the idempotency TTL. Garbage
+collection removes orphaned blobs. A hash alone does not give permission to attach or read a
+file.
 
 On `agent.sock`, stage inline bytes with
-`{"action":"attach","name":"report.md","data":"<base64>"}`. Inline `data` is
-the portable form, including across container filesystems. The same-host convenience
-`{"action":"attach","name":"report.md","path":"/absolute/file"}` resolves the
-path on the daemon host, which may differ from the caller's container.
-The answer contains `attachment`; include that reference in the `attachments`
-array of a send or reply. Plugin harnesses use these operations on `register.sock`
-with the held `session` and `request_id`, as for send.
+`{"action":"attach","name":"report.md","data":"<base64>"}`. Inline `data` is the portable form.
+It also works across container filesystems. On the same host, you can also use
+`{"action":"attach","name":"report.md","path":"/absolute/file"}`. The daemon resolves this path
+on its own host, which can be different from the caller's container. The answer contains
+`attachment`. Put that reference in the `attachments` array of a send or reply. Plugin harnesses
+use these operations on `register.sock`, with the held `session` and `request_id`, as for send.
 
-For larger socket uploads, send `attach` with an opaque `upload` ID, byte `offset`,
-and base64 `data` for each chunk, starting at offset zero. Retrying identical bytes
-at the same offset is a no-op; a conflicting offset is refused. Finalise with
+For larger socket uploads, send `attach` for each chunk. Give an opaque `upload` ID, the byte
+`offset` and base64 `data`. Start at offset zero. A retry of the same bytes at the same offset
+does nothing. xmsg refuses a conflicting offset. To finish, send
 `{"action":"attach","upload":"<id>","name":"report.md","sha256":"<optional expected hash>"}`.
-The server verifies an expected hash before staging the completed file.
+If you give an expected hash, the server checks it before it stages the completed file.
 
-MCP `send` and `reply` accept `attachments` entries containing either
+MCP `send` and `reply` accept `attachments` entries. Each entry is
 `{"path":"/absolute/file","name":"optional-name"}` or
-`{"name":"report.md","text":"file contents"}`, with optional `media_type`.
-MCP stages files before sending and chunks large inline text automatically.
+`{"name":"report.md","text":"file contents"}`, with an optional `media_type`. MCP stages the files
+before it sends. It divides large inline text into chunks automatically.
 
 Read with `{"action":"read_attachment","message_id":"<id>","index":0,"offset":0,"length":4096}`.
-Length defaults to and is capped at the node's message-body limit. Offsets count
-bytes; UTF-8 reads end at character boundaries, and an offset inside a character
-is refused. Other data is base64 encoded. Follow `next` until it is absent.
-A message's sender and recipient can read its files. Reply files are readable by
-holders of that reply's pushed message ID, matching stored-reply access.
+The default length, and the maximum, is the node's message-body limit. Offsets count bytes. A
+UTF-8 read ends at a character boundary. xmsg refuses an offset inside a character. Other data is
+base64 encoded. Follow `next` until there is no `next`. A message's sender and recipient can read
+its files. Anyone with a reply's pushed message ID can read the reply's files. This is the same
+access as for stored replies.
 
-HTTP uploads use `POST /v1/attachments?name=report.md&media_type=text/markdown`
-with raw bytes; an anonymous sender also supplies its usual `from` query value.
-Sends and replies take the returned reference in `attachments`.
+An HTTP upload uses `POST /v1/attachments?name=report.md&media_type=text/markdown` with raw
+bytes. An anonymous sender also gives its usual `from` query value. Sends and replies take the
+returned reference in `attachments`.
 `GET /v1/messages/{id}/attachments/{index}?offset=0&length=4096` returns raw bytes,
 `Content-Type`, `X-Xmsg-Sha256`, and `Content-Range`.
 
-The planned first release supports local files only; sends or replies carrying attachments to
-another node are refused until federated attachment fetching is available.
+The planned first release supports only local files. Until federated attachment fetch is
+available, xmsg refuses a send or reply with attachments to another node.
 
 File contents remain [untrusted peer data](/concepts/trust-model/#provenance-is-not-instruction-authority).
 See [PR #37 source and checks](https://github.com/sini/xmsg/pull/37/files) for the interface under review.

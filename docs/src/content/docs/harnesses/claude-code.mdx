@@ -3,14 +3,18 @@ title: Claude Code
 description: Integrating Claude Code with xmsg — multi-directory session discovery, MCP tools, fork claims, and delegated subagent hooks.
 ---
 
-Claude Code integrates with `xmsg` through automatic session discovery (`~/.claude/sessions`), the
-`xmsg mcp` server, and `xmsg register claude --hook` for delegated subagent sub-addresses.
+Claude Code connects to `xmsg` in three ways:
+
+- automatic session discovery (`~/.claude/sessions`);
+- the `xmsg mcp` server, which gives the session the xmsg tools;
+- `xmsg register claude --hook`, which gives delegated [subagents](/glossary/#subagent) their
+  sub-addresses.
 
 ## Session discovery (`--sessions-dir`)
 
-`xmsg serve` discovers live Claude Code sessions from `~/.claude/sessions` by default. In
-multi-tenant setups where multiple `CLAUDE_CONFIG_DIR` trees exist under the same UID, pass
-repeatable `--sessions-dir` flags or colon-separated paths in `XMSG_SESSIONS_DIR`:
+By default, `xmsg serve` finds live Claude Code sessions in `~/.claude/sessions`. A multi-tenant
+setup can have two or more `CLAUDE_CONFIG_DIR` trees under the same UID. For it, give one
+`--sessions-dir` flag for each directory, or colon-separated paths in `XMSG_SESSIONS_DIR`:
 
 ```bash
 xmsg serve --sessions-dir /path/one/sessions --sessions-dir /path/two/sessions
@@ -19,17 +23,18 @@ export XMSG_SESSIONS_DIR="/path/one/sessions:/path/two/sessions"
 xmsg serve
 ```
 
-- **Liveness verification:** `xmsg` checks process liveness and start time continuity via
-  `/proc/<pid>/stat` on Linux and `proc_pidinfo` on macOS (matching to the second the UTC
-  `ps -o lstart` timestamp Claude Code records as `procStart`).
-- **Instance claims & forks (`X~2`):** When the same conversation ID `X` is active in multiple
-  processes or directories, the first observed live process claims plain `X` and subsequent
-  processes receive monotonic fork suffixes `X~2`, `X~3`, … in `instance_claims`, accompanied by a
-  one-time fork notice to each process.
+- **Liveness verification:** `xmsg` checks that the process is live and that its start time has
+  not changed. On Linux, it uses `/proc/<pid>/stat`. On macOS, it uses `proc_pidinfo`, and the
+  result must match, to the second, the UTC `ps -o lstart` time that Claude Code records as
+  `procStart`.
+- **Instance claims & forks (`X~2`):** The same conversation ID `X` can be active in two or more
+  processes or directories. Then the first live process that xmsg sees claims plain `X`. Each
+  later process gets the next [fork suffix](/glossary/#fork-suffix) `X~2`, `X~3`, … in
+  `instance_claims`. Each process gets one fork notice.
 - **Parked queue & cross-machine handoff:** When a Claude Code process exits, its conversation ID
-  stays `parked` for the reply TTL (`7 days` by default). Messages sent to it queue in SQLite and
-  drain when the conversation is resumed — or transfer over `POST /fed/v2/handoff` if the
-  conversation resumes on another machine belonging to the same user.
+  stays [`parked`](/glossary/#parked) for the reply TTL (`7 days` by default). Messages to it
+  wait in SQLite. xmsg delivers them when the conversation resumes. If the conversation resumes on
+  another machine of the same user, the messages move there over `POST /fed/v2/handoff`.
 
 ## MCP configuration
 
@@ -46,36 +51,38 @@ Add `xmsg mcp` to your Claude Code `mcpServers` configuration:
 }
 ```
 
-For responder-only sessions that should only answer incoming messages without discovering or
-initiating new exchanges, pass `--reply-only` (which exposes only `reply` and `replies`).
+A responder-only session only answers incoming messages. It does not find recipients or start
+new exchanges. For such a session, pass `--reply-only`. Then the server gives only `reply` and
+`replies`.
 
 ## Subagent hooks (`xmsg register claude --hook`)
 
-Claude Code subagents spawned in-process via the `Agent` tool share the parent's `session_id` and
-MCP server process. `xmsg register claude --hook` wires four Claude Code hook events to
-`agent.sock` so each subagent gets a delegated sub-address (`<P>/<name>@<node>` and
+The `Agent` tool starts Claude Code subagents in the parent's process. They share the parent's
+`session_id` and MCP server process. `xmsg register claude --hook` connects four Claude Code hook
+events to `agent.sock`. Thus each subagent gets a delegated sub-address (`<P>/<name>@<node>` and
 `<P>/<agent_id>@<node>`):
 
-- **`SubagentStart`:** Sends `{"action":"subagent","event":"start","agent_id":…,"agent_type":…}` on
-  `agent.sock`, binding `<P>/<agent_id>@<node>` under parent `P` and marking the subagent's turn
-  active.
+- **`SubagentStart`:** Sends `{"action":"subagent","event":"start","agent_id":…,"agent_type":…}`
+  on `agent.sock`. This binds `<P>/<agent_id>@<node>` under the parent `P` and marks the
+  subagent's turn active.
 - **`PostToolUse` (matcher `^(Agent|SendMessage)$`):**
-  - On `Agent`, reads `tool_input.name` and `tool_response.agentId` (or
-    `subagents/agent-<id>.meta.json` beside `transcript_path`) and sends a `subagent` `bind` frame
-    so both `<P>/<name>@<node>` and `<P>/<agent_id>@<node>` resolve to the subagent.
-  - On `SendMessage`, when `tool_input.to` targets a bound subagent whose in-memory teammate
-    channel is unreachable after a restart, queues the message in the subagent's `xmsg` mailbox.
+  - On `Agent`, it reads `tool_input.name` and `tool_response.agentId` (or
+    `subagents/agent-<id>.meta.json` next to `transcript_path`). Then it sends a `subagent` `bind`
+    frame. Thus both `<P>/<name>@<node>` and `<P>/<agent_id>@<node>` resolve to the subagent.
+  - On `SendMessage`, `tool_input.to` can name a bound subagent whose in-memory teammate channel
+    is unreachable after a restart. Then the hook queues the message in the subagent's `xmsg`
+    mailbox.
 - **`PreToolUse` (matcher `^mcp__(plugin_hm_)?xmsg__(send|reply|inbox|list|replies)$`):** Returns
-  `hookSpecificOutput.updatedInput` with `as_agent` set to the hook payload's `agent_id` (when
-  called by a subagent) or `session_id` (when called by the parent), overwriting any model-supplied
-  value.
-- **`SubagentStop`:** Sends `{"action":"subagent","event":"stop","agent_id":…}` on `agent.sock`,
-  clearing the active turn so subsequent messages to `<P>/<child>@<node>` fall back to parent `P`
+  `hookSpecificOutput.updatedInput` with `as_agent` set. For a call from a subagent, `as_agent`
+  is the hook payload's `agent_id`. For a call from the parent, it is `session_id`. This replaces
+  any value that the model gave.
+- **`SubagentStop`:** Sends `{"action":"subagent","event":"stop","agent_id":…}` on `agent.sock`.
+  This clears the active turn. Then later messages to `<P>/<child>@<node>` go to the parent `P`,
   with a `to=<P>/<child> agent_id=<agent_id>` header.
 
 ## Home Manager switch
 
-Enabling `programs.xmsg.harnesses.claude.enable = true` in Home Manager installs the MCP server,
-the `xmsg` skill, tool permission rules under `mcp__plugin_hm_xmsg__` and `mcp__xmsg__`, and all
-four subagent hooks automatically. See
+In Home Manager, set `programs.xmsg.harnesses.claude.enable = true`. This installs the MCP
+server, the `xmsg` skill, the tool permission rules under `mcp__plugin_hm_xmsg__` and
+`mcp__xmsg__`, and all four subagent hooks. See
 [NixOS & Home Manager](/operations/nixos-and-home-manager/#per-harness-switches).
