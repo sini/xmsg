@@ -20,6 +20,12 @@ The name of one recipient. It has the form `<id or name>@<node>`, with at most o
 uses `id@node`, a subagent uses `<P>/<child>@node`, and a service uses `name@node`. See
 [addressing](/concepts/addressing/).
 
+### admission (gateway)
+
+The planned gateway AS checks a local token, its refresh family and its grant together, then
+keeps that request’s grant and policy snapshot. Some operations also re-check at their effect
+point. See [gateway authorization](/extensions/gateway/#gateway-authorization-server).
+
 ### agent.sock
 
 The local socket that the client tools use. It carries `list`, `send`, `reply`, `replies` and
@@ -30,6 +36,12 @@ The local socket that the client tools use. It carries `list`, `send`, `reply`, 
 A caller on `http.sock` that xmsg cannot trace to a registered session or service. Its messages
 show as `<from> · anon@<node>`. It has no inbox, so it reads its replies with `replies`.
 
+### authorization server
+
+The service that issues OAuth access and refresh tokens. The planned gateway authorization
+server keeps login at Kanidm while issuing the hosted client’s tokens itself. See
+[gateway authorization](/extensions/gateway/#gateway-authorization-server).
+
 ## C
 
 ### CA entry
@@ -37,6 +49,12 @@ show as `<from> · anon@<node>`. It has no inbox, so it reads its replies with `
 A peer entry that trusts a certificate authority (`ca`) and names one certificate identity
 (`identities`). Compare [pin](#pin). See
 [trust models](/concepts/federation/#trust-models-pinned-vs-ca-signed).
+
+### custody
+
+The gateway’s responsibility for retaining an incoming message for the hosted client. Client
+reads and ACKs record its observations separately from the gateway’s transport ACK to xmsg. See
+[the gateway](/extensions/gateway/).
 
 ## D
 
@@ -175,6 +193,12 @@ entry has `"leaf": true`. See [leaf node mode](/concepts/hubs-and-leaves/#leaf-n
 
 The tool that shows the running sessions and services, on this node and on its peers.
 
+### liveness (gateway)
+
+The planned gateway AS checks whether the owner account’s validity dates and required group
+still permit access. A permanent test account checks that those reads remain visible. See
+[gateway authorization](/extensions/gateway/#gateway-authorization-server).
+
 ## M
 
 ### MCP
@@ -255,6 +279,13 @@ or `anon:<from>` for an anonymous caller.
 
 ## R
 
+### refresh family
+
+One authorization’s chain of rotating refresh tokens and the access tokens it creates. The
+planned gateway AS revokes the family together; a new authorization does not move an existing
+Events subscription to its new family. See
+[gateway authorization](/extensions/gateway/#gateway-authorization-server).
+
 ### register.sock
 
 The local socket where services and harness plugins register, poll, acknowledge and reply. See
@@ -292,6 +323,12 @@ with the address `id@node`.
 
 A URI that names a workload, such as `spiffe://example.org/host/workstation/user/alice`. xmsg
 reads it from the certificate's single URI SAN and makes the node name from it.
+
+### SPN
+
+A Kanidm account or group name with its domain, such as `gateway-login.access@example.org`. The
+planned gateway liveness check matches the configured group SPN exactly. See
+[gateway authorization](/extensions/gateway/#gateway-authorization-server).
 
 ### subagent
 
