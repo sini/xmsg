@@ -802,3 +802,91 @@ async fn test_oracle_5_background_watcher_polls_and_reloads() {
     );
     watcher_handle.abort();
 }
+
+async fn first_identity_reload_case(running: bool, replace_before_init: bool) {
+    let (ca, ca_key, _, _) = generate_ca("first reload CA");
+    let (a_der, _, a_cert, a_key) = issue_cert(
+        &ca,
+        &ca_key,
+        "alice",
+        &["spiffe://example.org/host/laptop/user/alice"],
+    );
+    let (_, _, b_cert, b_key) = issue_cert(
+        &ca,
+        &ca_key,
+        "mallory",
+        &["spiffe://example.org/host/laptop/user/mallory"],
+    );
+    let node = create_reloader_node(
+        "alice.laptop",
+        HashMap::new(),
+        &a_cert,
+        &a_key,
+        HashMap::new(),
+    )
+    .await;
+    assert_eq!(node.fed_state.cert_chain()[0].as_ref(), a_der.as_slice());
+    let original_hashes = node.reloader.file_hashes.lock().unwrap().clone();
+    if replace_before_init {
+        fs::write(&node.cert_path, &b_cert).unwrap();
+        fs::write(&node.key_path, &b_key).unwrap();
+    }
+    let reloader = if running {
+        let created = CredentialReloader::new_full(
+            node.cert_path.clone(),
+            node.key_path.clone(),
+            None,
+            Some(xmsg::fed::OwnNode {
+                name: "alice.laptop".into(),
+                pin: None,
+            }),
+            node.fed_state.current_peers(),
+            Some(node.fed_state.clone()),
+            Arc::new(Mutex::new(Default::default())),
+        );
+        if replace_before_init {
+            assert!(
+                created.is_err(),
+                "first reloader load ignored the running node identity"
+            );
+            assert_eq!(
+                node.fed_state.cert_chain()[0].as_ref(),
+                a_der.as_slice(),
+                "initial refusal replaced live A TLS"
+            );
+            assert_eq!(*node.reloader.file_hashes.lock().unwrap(), original_hashes);
+            return;
+        }
+        Arc::new(created.unwrap())
+    } else {
+        node.reloader.clone()
+    };
+    let hashes = reloader.file_hashes.lock().unwrap().clone();
+    fs::write(&node.cert_path, b_cert).unwrap();
+    fs::write(&node.key_path, b_key).unwrap();
+    assert!(
+        reloader.check_and_reload().is_err(),
+        "first reload accepted another node identity"
+    );
+    assert_eq!(
+        node.fed_state.cert_chain()[0].as_ref(),
+        a_der.as_slice(),
+        "first refusal replaced live A TLS"
+    );
+    assert_eq!(*reloader.file_hashes.lock().unwrap(), hashes);
+}
+
+#[tokio::test]
+async fn first_reload_running_node_refuses_different_identity() {
+    first_identity_reload_case(true, false).await;
+}
+
+#[tokio::test]
+async fn first_reload_standalone_refuses_different_identity() {
+    first_identity_reload_case(false, false).await;
+}
+
+#[tokio::test]
+async fn first_reloader_load_respects_running_name() {
+    first_identity_reload_case(true, true).await;
+}
