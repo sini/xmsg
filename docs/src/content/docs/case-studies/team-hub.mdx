@@ -152,9 +152,8 @@ The `tests` service on the build box registers with `--svc-exe tests=<path to th
 
 ## Flow 1: ask a teammate's agent for a review
 
-alice's Claude Code session wants bob's Codex session to review a branch. bob started his session
-with the label `reviewer` (`XMSG_CODEX_LABEL=reviewer`), so alice can address it by that label on
-bob's node. A label resolves only when exactly one live session on that node carries it.
+alice's Claude Code session wants bob's Codex session to review a branch. bob started his session with the label `reviewer` (`XMSG_CODEX_LABEL=reviewer`). Thus alice
+can address it by that label on bob's node. A label resolves only when exactly one live session on that node carries it.
 
 ```text
 alice's Claude Code session, on alice.laptop
@@ -174,13 +173,12 @@ alice's Claude Code session, pushed into its inbox
 ```
 
 The send's `outcome` reports what happened to the message, not the answer. Here it is `queued`:
-the hub holds it in bob's mailbox until bob's node pulls it. The reply is separate. bob's node
-sends it to the hub, which recorded the forwarded message, and the hub stores the reply for alice's
-node. alice's node cannot be dialled either, so it pulls its hub mailbox and also polls
-replies to its sent messages, pushing the answer into her session's inbox. The queued
-forward and queued return are both covered by the outbound-link gate. bob's session sees
-`id@alice.laptop` as the sender:
-the hub attests which node the message came from, from that node's certificate.
+the hub holds it in bob's mailbox until bob's node pulls it. The reply is separate. bob's node sends it to the hub. The hub recorded the forwarded message, and it stores the reply
+for alice's node. Nothing can dial alice's node either. Thus alice's node pulls its hub mailbox,
+and it also polls the replies to its sent messages. It pushes the answer into her session's
+inbox. The queued
+forward and queued return are both covered by the outbound-link gate. bob's session sees `id@alice.laptop` as the sender. The hub attests the node that the message
+came from. It uses that node's certificate.
 
 ## Flow 2: borrow more resources
 
@@ -202,9 +200,8 @@ alice's Claude Code session, pushed into its inbox
   1,204 passed, 3 failed: gpu::matmul_large, gpu::fp16_round, io::mmap_huge. Logs: run 7781.
 ```
 
-A message to a service reports `queued` until the service acknowledges it. A service gets the
-sender as structured fields (`origin`: node, id, service, label), so it can decide who may start a
-GPU job from those fields rather than from the message text.
+A message to a service reports `queued` until the service acknowledges it. A service gets the sender as structured fields (`origin`: node, id, service, label). Thus it
+decides who can start a GPU job from those fields, not from the message text.
 
 ## Flow 3: ask several agents for input
 
@@ -234,9 +231,8 @@ pushed into carol's inbox as the answers arrive
   Seen this before: the timer thread holds the queue lock while it wakes a worker.
 ```
 
-Two answers arrive; bob's laptop is asleep, so the third question waits (see below). carol's agent
-can also read the replies to any message at any time with `replies(message_id=…)`, so it does not
-depend on the pushes.
+Two answers arrive; bob's laptop is asleep, so the third question waits (see below). carol's agent can also read the replies to any message at any time, with
+`replies(message_id=…)`. Thus it does not depend on the pushes.
 
 ## When a laptop is asleep or offline
 
@@ -244,11 +240,11 @@ bob closes his laptop. Nothing is lost:
 
 - **The hub keeps the message.** A message for `bob.laptop` goes into the hub's durable
   `peer_mailbox`, and the sender sees `outcome: "queued"`. The mailbox survives a hub restart.
-- **bob's node collects it on wake.** When the laptop is back online, its outbound link long-polls
-  the hub, delivers each message locally, and acknowledges it at the hub only after that.
-- **A closed session still gets it.** If bob's Claude Code, Codex or Antigravity conversation is
-  not running, it is **parked**: bob's node holds the message for the reply TTL (7 days by default)
-  and delivers it, oldest first, when that conversation runs again. The envelope then carries the
+- **bob's node collects it on wake.** When the laptop is online again, its outbound link long-polls the hub. It delivers each
+  message locally. Only after that, it acknowledges the message at the hub.
+- **A closed session still gets it.** If bob's Claude Code, Codex or Antigravity conversation is not running, it is **parked**.
+  bob's node holds the message for the reply TTL (7 days by default). It delivers the messages,
+  oldest first, when that conversation runs again. The envelope then carries the
   original send time (`[xmsg] message_id=<id> sent=<time>`).
 - **Some targets cannot wait.** A finished pi process, or a closed opencode or Hermes session, is
   `gone` and never queues. When bob's node cannot resolve a target (`not_found`, `gone` or

@@ -130,11 +130,10 @@ runtime class.
 
 ## The deployment shape
 
-The target shape is a Kubernetes pod for the bot and tier 1, with an xmsg
-[leaf](/concepts/hubs-and-leaves/#leaf-node-mode---leaf) container beside it, evaluations as
-Jobs under gVisor, and the expert tiers isolated per tier. The trust model this relies on is
-xmsg's: the bus is trusted, its boundaries are the user id and the network, and the outside-facing
-edges (the Matrix bot, and genie itself) own their own security.
+The target shape has three parts. The bot and tier 1 run in a Kubernetes pod, with an xmsg
+[leaf](/concepts/hubs-and-leaves/#leaf-node-mode---leaf) container next to them. Evaluations run
+as Jobs under gVisor. Each expert tier is isolated from the others. This relies on xmsg's trust model. The bus is trusted. Its boundaries are the user id and the
+network. The outside-facing edges, the Matrix bot and genie itself, own their own security.
 
 Today the parts sit in different places:
 
@@ -200,9 +199,9 @@ channel moved to a file descriptor passed to each session's launcher. Then the d
 was found holding the token in its JavaScript heap. A short-lived helper now does the handoff, so
 neither the dispatcher's memory, an argv nor an environment holds the token.
 
-**A readiness signal that was not one.** An early spike found that herdr reports a session `idle`
-for about a second after a message is sent, and that a successful `agent start` exit code comes
-before the session is registered. Neither is a usable signal. The dispatcher instead treats "xmsg
+**A readiness signal that was not one.** An early spike found two problems. herdr reports a session `idle` for about a second after a
+message is sent. And a successful `agent start` exit code comes before the session is
+registered. Neither is a usable signal. The dispatcher instead treats "xmsg
 lists the session" as ready, and "xmsg reply arrived" as the end of a turn.
 
 **The guard refused the owner.** A trusted owner asked genie to compare two public issues with a
