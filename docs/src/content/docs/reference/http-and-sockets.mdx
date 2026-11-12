@@ -104,6 +104,8 @@ loopback routes:
 | `/fed/v2/messages/{id}/replies` | `GET` | Pulls stored replies for a message sent by an outbound-linked or leaf node. |
 | `/fed/v2/sessions` | `GET` | Returns this node's filtered recipient list for mesh `list`. |
 | `/fed/v2/inbox`, `/fed/v2/inbox/{id}/ack` | `GET`, `POST` | Long-polls and acknowledges items in a leaf or outbound-linked peer's hub mailbox. |
+| `/fed/v2/attachments/{item_id}/{index}?offset=&length=` | `GET` | Planned: reads a bounded raw file range; requires the item's downstream peer and its current hop permission. |
+| `/fed/v2/attachment/{query}` | `POST` | Planned: answers a peer-bound mailbox attachment query with raw bytes or a JSON error. |
 | `/fed/v2/list/{query}` | `POST` | Posts a leaf or outbound-linked node's answer to a mailbox `list` query. |
 | `/fed/v2/handoff`, `/fed/v2/handoff/ack` | `POST` | Transfers and acknowledges a parked Claude conversation queue across a user's machines. |
 
@@ -146,3 +148,11 @@ Each surface uses the same error codes. HTTP uses `{"error": <code>, "detail": â
     `service_unavailable` (`503`), `peer_unreachable` (`503`), `credentials_stale` (`503`),
     `inbox_unavailable` (`502`), `inbox_timeout` (`504`), `insecure_socket_dir` (`500`) and
     `internal` (`500`).
+
+
+Federated file references and fetch routes are planned for the next release. Message and reply
+envelopes carry an optional `attachments` array; empty arrays are omitted for compatibility.
+A mailbox control item with `kind: "attachment"` carries `query`, `item_id`, `index`, `offset`
+and `length`. Only the authenticated queried peer can answer, once. Raw ranges use the
+message-body limit and the separate `attach:<peer>` rate bucket. See
+[file attachments](/concepts/attachments/) for staging, read permissions, expiry and an example.

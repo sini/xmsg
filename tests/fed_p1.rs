@@ -147,6 +147,7 @@ async fn create_test_node_full_inner(
     let (svc_notify_tx, _) = broadcast::channel(16);
 
     let fed_state = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: name.to_string(),
         peers: (peers_arc).into(),
         cert_der: cert_der.clone(),
@@ -530,6 +531,7 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
     .await;
 
     let envelope1 = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         origin: xmsg::storage::Origin {
@@ -548,6 +550,7 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
     };
 
     let fed_state_a1 = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
             [(
@@ -626,6 +629,7 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
     .await;
 
     let envelope2 = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         origin: xmsg::storage::Origin {
@@ -644,6 +648,7 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
     };
 
     let fed_state_a2 = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
             [(
@@ -731,6 +736,7 @@ async fn test_oracle_2_from_absent_pin_only_accepted() {
     .await;
 
     let envelope = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         origin: xmsg::storage::Origin {
@@ -749,6 +755,7 @@ async fn test_oracle_2_from_absent_pin_only_accepted() {
     };
 
     let fed_state_a = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
             [(
@@ -897,6 +904,7 @@ async fn test_oracle_4_reply_route_source_check() {
     }
 
     let fed_state_b = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-b".to_string(),
         peers: Arc::new(PeersMap::new(
             [(
@@ -942,6 +950,7 @@ async fn test_oracle_4_reply_route_source_check() {
     });
 
     let reply = FedReplyEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         in_reply_to: orig_msg_id,
@@ -1096,6 +1105,7 @@ async fn test_oracle_6_anonymous_from_with_colon_gives_400() {
     .await;
 
     let envelope = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         origin: xmsg::storage::Origin {
@@ -1114,6 +1124,7 @@ async fn test_oracle_6_anonymous_from_with_colon_gives_400() {
     };
 
     let fed_state_a = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
             [(
@@ -1195,6 +1206,7 @@ async fn test_oracle_7_root_harness_rejected_and_badge_spoof_sanitized() {
     .await;
 
     let fed_state_a = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
             [(
@@ -1242,6 +1254,7 @@ async fn test_oracle_7_root_harness_rejected_and_badge_spoof_sanitized() {
     // 1. XA5 (harness gate v0 P8): the wire carries no harness, so the receiver reads only
     // the origin's shape. One naming both an instance and a service gives 400.
     let env_root = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         origin: xmsg::storage::Origin {
@@ -1266,6 +1279,7 @@ async fn test_oracle_7_root_harness_rejected_and_badge_spoof_sanitized() {
 
     // 2. Name containing spoof badge separator " · claude:y"
     let env_spoof = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         origin: xmsg::storage::Origin {
@@ -1325,6 +1339,7 @@ async fn test_n4_attested_name_ascii_only_u0387() {
     .await;
 
     let fed_state_a = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
             [(
@@ -1370,6 +1385,7 @@ async fn test_n4_attested_name_ascii_only_u0387() {
     });
 
     let env_u0387 = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         origin: xmsg::storage::Origin {
@@ -1421,6 +1437,7 @@ async fn test_oracle_8_no_forward_rejected() {
     .await;
 
     let fed_state_a = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
             [(
@@ -1466,6 +1483,7 @@ async fn test_oracle_8_no_forward_rejected() {
     });
 
     let env = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         origin: xmsg::storage::Origin {
@@ -1517,6 +1535,7 @@ async fn test_oracle_9_forged_reply_id_gives_403() {
     .await;
 
     let fed_state_b = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-b".to_string(),
         peers: Arc::new(PeersMap::new(
             [(
@@ -1562,6 +1581,7 @@ async fn test_oracle_9_forged_reply_id_gives_403() {
     });
 
     let forged_reply = FedReplyEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         in_reply_to: "01H000000000000000000FORGED".to_string(),
@@ -1606,6 +1626,7 @@ async fn test_oracle_9_forged_reply_id_gives_403() {
     }
 
     let cross_peer_reply = FedReplyEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         in_reply_to: msg_c_id,
@@ -1660,6 +1681,7 @@ async fn test_oracle_10_duplicate_id_delivered_once() {
     .await;
 
     let fed_state_a = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
             [(
@@ -1706,6 +1728,7 @@ async fn test_oracle_10_duplicate_id_delivered_once() {
 
     let dup_id = ulid::Ulid::new().to_string();
     let env = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: dup_id.clone(),
         origin: xmsg::storage::Origin {
@@ -1778,6 +1801,7 @@ async fn test_oracle_11_rate_limit_429() {
     .await;
 
     let fed_state_a = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
             [(
@@ -1825,6 +1849,7 @@ async fn test_oracle_11_rate_limit_429() {
     // Send 20 messages (principal limit is 20/min)
     for _ in 0..20 {
         let env = FedEnvelope {
+            attachments: vec![],
             v: xmsg::fed::WIRE_VERSION,
             id: ulid::Ulid::new().to_string(),
             origin: xmsg::storage::Origin {
@@ -1848,6 +1873,7 @@ async fn test_oracle_11_rate_limit_429() {
 
     // 21st message should exceed rate limit
     let env_exceeded = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         origin: xmsg::storage::Origin {
@@ -1964,6 +1990,7 @@ async fn test_amendment_a_peer_without_send_gets_403_op_denied() {
     .await;
 
     let fed_state_a = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
             [(
@@ -2009,6 +2036,7 @@ async fn test_amendment_a_peer_without_send_gets_403_op_denied() {
     });
 
     let env = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         origin: xmsg::storage::Origin {
@@ -2324,6 +2352,7 @@ fn make_client_fed_state(
     base_node: &TestNode,
 ) -> Arc<FedState> {
     Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: node_name.to_string(),
         peers: Arc::new(PeersMap::new(
             [(
@@ -2441,6 +2470,7 @@ async fn test_f2_anon_origin_reply_stored() {
     );
 
     let reply = FedReplyEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         in_reply_to: anon_msg_id,
@@ -2534,6 +2564,7 @@ async fn test_f2_session_sender_always_pushed() {
     );
 
     let reply = FedReplyEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         in_reply_to: msg_id,
@@ -2633,6 +2664,7 @@ async fn test_f2_unknown_harness_reply_stored() {
     );
 
     let reply = FedReplyEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         in_reply_to: msg_id,
@@ -2828,6 +2860,7 @@ async fn test_f4_one_way_link() {
     .await;
 
     let env = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         origin: xmsg::storage::Origin {
@@ -2915,6 +2948,7 @@ async fn test_f7_outbound_timeout_on_silent_peer() {
     );
 
     let env = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         origin: xmsg::storage::Origin {
@@ -2986,6 +3020,7 @@ async fn test_f8_verbatim_remote_outcome_relay_and_dedup() {
     );
 
     let env = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         origin: xmsg::storage::Origin {
@@ -3060,6 +3095,7 @@ async fn test_f9_kind_qualified_principal_filter() {
         &fed_state_a,
         "host-b",
         &FedEnvelope {
+            attachments: vec![],
             v: xmsg::fed::WIRE_VERSION,
             id: ulid::Ulid::new().to_string(),
             origin: xmsg::storage::Origin {
@@ -3085,6 +3121,7 @@ async fn test_f9_kind_qualified_principal_filter() {
         &fed_state_a,
         "host-b",
         &FedEnvelope {
+            attachments: vec![],
             v: xmsg::fed::WIRE_VERSION,
             id: ulid::Ulid::new().to_string(),
             origin: xmsg::storage::Origin {
@@ -3114,6 +3151,7 @@ async fn test_f9_kind_qualified_principal_filter() {
         &fed_state_a,
         "host-b",
         &FedEnvelope {
+            attachments: vec![],
             v: xmsg::fed::WIRE_VERSION,
             id: ulid::Ulid::new().to_string(),
             origin: xmsg::storage::Origin {
@@ -3139,6 +3177,7 @@ async fn test_f9_kind_qualified_principal_filter() {
         &fed_state_a,
         "host-b",
         &FedEnvelope {
+            attachments: vec![],
             v: xmsg::fed::WIRE_VERSION,
             id: ulid::Ulid::new().to_string(),
             origin: xmsg::storage::Origin {
@@ -3235,6 +3274,7 @@ async fn test_f10_reply_deduplication_and_rate_limit() {
 
     let reply_id = ulid::Ulid::new().to_string();
     let reply = FedReplyEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: reply_id.clone(),
         in_reply_to: msg_id.clone(),
@@ -3280,6 +3320,7 @@ async fn test_f10_reply_deduplication_and_rate_limit() {
     let mut rate_limited = false;
     for i in 0..70 {
         let flood_reply = FedReplyEnvelope {
+            attachments: vec![],
             v: xmsg::fed::WIRE_VERSION,
             id: ulid::Ulid::new().to_string(),
             in_reply_to: msg_id.clone(),
@@ -3353,6 +3394,7 @@ async fn test_oracle_server_pin_verified() {
     );
 
     let e = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         origin: xmsg::storage::Origin {
@@ -3450,6 +3492,7 @@ async fn test_oracle_reply_allow_check() {
     );
 
     let reply = FedReplyEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         in_reply_to: msg_id,
@@ -3558,6 +3601,7 @@ async fn test_n1_offsource_replay_known_reply_id_rejected() {
         &b,
         "host-a",
         &FedReplyEnvelope {
+            attachments: vec![],
             v: xmsg::fed::WIRE_VERSION,
             id: known,
             in_reply_to: orig,
@@ -3600,6 +3644,7 @@ async fn test_n1_offsource_flood_leaves_legit_bucket_intact() {
     )
     .await;
     let legit_state = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-r".to_string(),
         peers: Arc::new(PeersMap::new(
             [(
@@ -3678,6 +3723,7 @@ async fn test_n1_offsource_flood_leaves_legit_bucket_intact() {
             &atk,
             "host-r",
             &FedReplyEnvelope {
+                attachments: vec![],
                 v: xmsg::fed::WIRE_VERSION,
                 id: ulid::Ulid::new().to_string(),
                 in_reply_to: orig.clone(),
@@ -3702,6 +3748,7 @@ async fn test_n1_offsource_flood_leaves_legit_bucket_intact() {
         &good,
         "host-r",
         &FedReplyEnvelope {
+            attachments: vec![],
             v: xmsg::fed::WIRE_VERSION,
             id: ulid::Ulid::new().to_string(),
             in_reply_to: orig,
@@ -3810,6 +3857,7 @@ async fn test_n3_unauthenticated_socket_bound_leaves_slot_for_peer() {
     }
 
     let env = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         origin: xmsg::storage::Origin {
@@ -3949,6 +3997,7 @@ async fn test_n7_mf6_tcp_peer_address_source() {
     });
 
     let env = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: ulid::Ulid::new().to_string(),
         origin: xmsg::storage::Origin {

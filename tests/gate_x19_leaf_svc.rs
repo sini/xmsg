@@ -212,6 +212,7 @@ async fn create_hub_test_node_with_listener(
     let rate_limiter = Arc::new(RateLimiter::new(60, 20));
 
     let fed_state = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: name.to_string(),
         peers: (peers_arc).into(),
         cert_der,
@@ -386,6 +387,7 @@ async fn create_leaf_test_node_opts(
     let rate_limiter = Arc::new(RateLimiter::new(60, 20));
 
     let fed_state = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: name.to_string(),
         peers: (peers_arc.clone()).into(),
         cert_der,
@@ -991,6 +993,7 @@ async fn test_oracle_4_peer_mailbox_isolation_and_non_leaf_denied() {
         .unwrap();
 
     let leaf1_fed_state = FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "leaf1".to_string(),
         peers: (Arc::new(leaf1_peers)).into(),
         cert_der: creds_leaf1.0,
@@ -1066,6 +1069,7 @@ async fn test_oracle_4_peer_mailbox_isolation_and_non_leaf_denied() {
         .unwrap();
 
     let nonleaf_fed_state = FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "nonleaf".to_string(),
         peers: (Arc::new(nonleaf_peers)).into(),
         cert_der: creds_nonleaf.0,
@@ -2422,6 +2426,7 @@ async fn test_leaf_reply_oracle_2_idempotent_redelivered_or_retried_reply() {
     leaf_svc.ack(&reply_id).await.unwrap();
 
     let dup_env = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: reply_id.clone(),
         origin: Origin::service("genie", "hub"),
@@ -2632,6 +2637,7 @@ async fn test_leaf_reply_oracle_4_targets_ceiling_applies_to_queued_replies() {
     .await;
 
     let env_disallowed = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: "01M72555555555555555555501".to_string(),
         origin: Origin::service("genie", "hub"),
@@ -2665,6 +2671,7 @@ async fn test_leaf_reply_oracle_4_targets_ceiling_applies_to_queued_replies() {
     }
 
     let env_allowed = FedEnvelope {
+        attachments: vec![],
         v: xmsg::fed::WIRE_VERSION,
         id: "01M72555555555555555555502".to_string(),
         origin: Origin::service("genie", "hub"),

@@ -125,6 +125,7 @@ async fn create_test_node(
     let (svc_notify_tx, _) = broadcast::channel(16);
 
     let fed_state = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: name.to_string(),
         peers: (peers_arc).into(),
         cert_der: cert_der.clone(),

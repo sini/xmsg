@@ -958,6 +958,7 @@ async fn test_oracle_7_removed_pull_loop_exits_on_reload() {
     };
 
     let fs = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "test-node".to_string(),
         peers: (peers_arc.clone()).into(),
         cert_der: Vec::new(),
@@ -1082,6 +1083,7 @@ async fn test_oracle_8_reload_adds_pull_loop() {
     };
 
     let fs = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "test-node".to_string(),
         peers: (peers_arc.clone()).into(),
         cert_der: Vec::new(),

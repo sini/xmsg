@@ -328,6 +328,15 @@ fn runtime() -> tokio::runtime::Runtime {
 
 #[test]
 fn forwarded_reply_refusal_does_not_poison_retry_deduplication() {
+    assert_forwarded_reply_refusal(false);
+}
+
+#[test]
+fn forwarded_file_reply_refusal_leaves_no_metadata_and_retries_after_capacity_recovers() {
+    assert_forwarded_reply_refusal(true);
+}
+
+fn assert_forwarded_reply_refusal(with_attachment: bool) {
     let hub_identity = Identity::new("hub");
     let responder = Identity::new("responder");
     let leaf = Identity::new("leaf");
@@ -366,7 +375,11 @@ fn forwarded_reply_refusal_does_not_poison_retry_deduplication() {
     .unwrap();
     storage::insert_outbound(&db, &original, "responder", "worker", "delivered", stamp).unwrap();
     storage::insert_forwarded_message(&db, &original, "offline", stamp).unwrap();
-    let reply = json!({"v":2,"id":reply_id,"in_reply_to":original,"replier":{"service":"worker","node":"unattested"},"text":"reply with a full return mailbox","created_at":stamp});
+    let mut reply = json!({"v":2,"id":reply_id,"in_reply_to":original,"replier":{"service":"worker","node":"unattested"},"text":"reply with a full return mailbox","created_at":stamp});
+    if with_attachment {
+        reply["attachments"] =
+            json!([{"name":"file.txt","size":4,"media_type":"text/plain","sha256":"a".repeat(64)}]);
+    }
     let (cert, key) = responder.der();
     let origin = hop_client::Origin {
         cert_der: &cert,
@@ -394,6 +407,12 @@ fn forwarded_reply_refusal_does_not_poison_retry_deduplication() {
                 .unwrap()
                 .is_none(),
             "capacity refusal persisted a successful reply receipt"
+        );
+        assert!(
+            xmsg::attachments::list_rows(&db, &reply_id)
+                .unwrap()
+                .is_empty(),
+            "capacity refusal persisted forwarded attachment metadata"
         );
     }
     let filler = sql_text(&before[0][0]);
@@ -449,7 +468,23 @@ fn mailbox_reply_service_child() {
         assert!(Instant::now() < deadline, "service did not receive request");
     };
     let id = message["messageId"].as_str().unwrap();
-    let frame = json!({"action":"reply","messageId":id,"text":"local worker reply","idempotencyKey":"full-mailbox-retry"});
+    let mut frame = json!({"action":"reply","messageId":id,"text":"local worker reply","idempotencyKey":"full-mailbox-retry"});
+    if directory.join("with-attachment").exists() {
+        let socket =
+            std::os::unix::net::UnixStream::connect(directory.join("run/agent.sock")).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
+        let staged = service_frame(
+            &mut std::io::BufReader::new(socket),
+            json!({"action":"attach","schema_version":2,"name":"reply.txt","media_type":"text/plain","data":base64::engine::general_purpose::STANDARD.encode(b"reply file")}),
+        );
+        assert_eq!(
+            staged["status"], "ok",
+            "attachment staging positivecontrol: {staged}"
+        );
+        frame["attachments"] = json!([staged["attachment"].clone()]);
+    }
     let attempts: Vec<_> = (0..2)
         .map(|_| service_frame(&mut reader, frame.clone()))
         .collect();
@@ -493,6 +528,15 @@ fn wait_for_file(node: &Node, name: &str) -> PathBuf {
 
 #[test]
 fn local_service_reply_refusal_preserves_retry_after_capacity_recovers() {
+    assert_local_service_reply_refusal(false);
+}
+
+#[test]
+fn local_service_file_reply_refusal_leaves_no_metadata_and_retries_after_capacity_recovers() {
+    assert_local_service_reply_refusal(true);
+}
+
+fn assert_local_service_reply_refusal(with_attachment: bool) {
     let hub_identity = Identity::new("hub");
     let leaf = Identity::new("leaf");
     let hub = Node::spawn(
@@ -504,6 +548,9 @@ fn local_service_reply_refusal_preserves_retry_after_capacity_recovers() {
     );
     assert_eq!(hub.send("status@offline", "occupy capacity").0, 202);
     let before = hub.rows();
+    if with_attachment {
+        fs::write(hub.directory.path().join("with-attachment"), "fixture").unwrap();
+    }
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .args(["--exact", "mailbox_reply_service_child", "--nocapture"])
@@ -548,6 +595,14 @@ fn local_service_reply_refusal_preserves_retry_after_capacity_recovers() {
     assert!(
         replies.is_empty(),
         "capacity refusal persisted a successful local reply receipt"
+    );
+    assert_eq!(
+        hub.db()
+            .query_row("SELECT COUNT(*) FROM attachments", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "capacity refusal persisted local attachment metadata"
     );
     storage::delete_peer_mailbox_message(&hub.db(), "offline", sql_text(&before[0][0])).unwrap();
     fs::write(hub.directory.path().join("retry-ready"), "retry").unwrap();

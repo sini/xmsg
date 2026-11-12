@@ -480,3 +480,13 @@ required-features = ["daemon"]
 name = "gate_tvp_mailbox_runtime"
 path = "tests/gate_tvp_mailbox_runtime.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "gate_owh_federated_attachments"
+path = "tests/gate_owh_federated_attachments.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_owh_transport_bounds"
+path = "tests/gate_owh_transport_bounds.rs"
+required-features = ["daemon"]

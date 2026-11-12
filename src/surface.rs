@@ -1850,6 +1850,49 @@ fn authorize_attachments(
     attachments::authorize_refs(db, &sender.idempotency_principal(), refs, &readable, now)
 }
 
+async fn prepare_attachment_refs(
+    state: &AppState,
+    sender: &Sender,
+    refs: &[AttachmentRef],
+) -> Result<(), AppError> {
+    let (Some(fs), Sender::Session(caller)) = (state.fed_state.as_ref(), sender) else {
+        return Ok(());
+    };
+    for attachment in refs {
+        let source: Option<(String, usize)> = {
+            let db = state.db.lock().map_err(db_err)?;
+            let staged: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM staged_blobs WHERE principal=?1 AND sha256=?2 AND expires_at>?3)", rusqlite::params![sender.idempotency_principal(), attachment.sha256, storage::now_epoch_secs()], |r| r.get(0)).map_err(db_err)?;
+            if staged {
+                None
+            } else {
+                let mut stmt = db.prepare("SELECT a.item_id,a.idx FROM attachments a JOIN messages m ON m.id=a.item_id WHERE a.sha256=?1 AND a.size=?2 AND a.expires_at>?3 AND ((m.session_id=?4 AND m.recipient_harness=?5) OR (m.return_session_id=?4 AND (m.return_harness=?5 OR m.return_harness='fed'))) ORDER BY (a.upstream='' OR EXISTS(SELECT 1 FROM attachment_verified v WHERE v.item_id=a.item_id AND v.idx=a.idx AND v.sha256=a.sha256 AND v.upstream=a.upstream)) DESC LIMIT 1").map_err(db_err)?;
+                let mut rows = stmt
+                    .query(rusqlite::params![
+                        attachment.sha256,
+                        attachment.size as i64,
+                        storage::now_epoch_secs(),
+                        caller.session_id,
+                        caller.harness
+                    ])
+                    .map_err(db_err)?;
+                rows.next()
+                    .map_err(db_err)?
+                    .map(|r| {
+                        Ok((
+                            r.get(0).map_err(db_err)?,
+                            r.get::<_, i64>(1).map_err(db_err)? as usize,
+                        ))
+                    })
+                    .transpose()?
+            }
+        };
+        if let Some((item, index)) = source {
+            crate::federated_attachments::ensure_attachment(fs, &item, index).await?;
+        }
+    }
+    Ok(())
+}
+
 pub async fn attach(
     state: &Arc<AppState>,
     sender: &Sender,
@@ -1968,14 +2011,12 @@ pub async fn attach(
     Ok(serde_json::json!({"status":"ok","attachment":attachment}))
 }
 
-pub async fn read_attachment(
-    state: &Arc<AppState>,
+fn readable_attachment(
+    state: &AppState,
     caller: Option<&Session>,
     item_id: &str,
     index: usize,
-    offset: usize,
-    length: Option<usize>,
-) -> Result<serde_json::Value, AppError> {
+) -> Result<attachments::AttachmentRow, AppError> {
     let db = state.db.lock().map_err(db_err)?;
     let reply = storage::get_reply_by_pushed_id(&db, item_id).map_err(db_err)?;
     if reply.is_none() {
@@ -1996,6 +2037,38 @@ pub async fn read_attachment(
     }
     let row = attachments::get_row(&db, item_id, index)?
         .ok_or_else(|| AppError::NotFound(format!("attachment {index}")))?;
+    Ok(row)
+}
+
+pub async fn read_attachment(
+    state: &Arc<AppState>,
+    caller: Option<&Session>,
+    item_id: &str,
+    index: usize,
+    offset: usize,
+    length: Option<usize>,
+) -> Result<serde_json::Value, AppError> {
+    let row = readable_attachment(state, caller, item_id, index)?;
+    if length == Some(0) || offset > row.attachment.size {
+        return Err(AppError::BadRequest("invalid attachment range".into()));
+    }
+
+    if !row.upstream.is_empty() {
+        let fs = state
+            .fed_state
+            .clone()
+            .ok_or_else(|| AppError::Unavailable("attachment upstream unavailable".into()))?;
+        let item = item_id.to_string();
+        let mut task = tokio::spawn(async move {
+            crate::federated_attachments::ensure_attachment(&fs, &item, index).await
+        });
+        match tokio::time::timeout(std::time::Duration::from_secs(10), &mut task).await {
+            Ok(result) => result.map_err(|e| AppError::Internal(e.to_string()))??,
+            Err(_) => return Ok(serde_json::json!({"status":"pending","state":"pending"})),
+        }
+    }
+    let row = readable_attachment(state, caller, item_id, index)?;
+    let db = state.db.lock().map_err(db_err)?;
     let range = attachments::read_range(
         &db,
         &row,
@@ -2204,6 +2277,7 @@ async fn deliver_send(
     message_id: String,
     refs: &[AttachmentRef],
 ) -> Result<SendResult, AppError> {
+    prepare_attachment_refs(state, sender, refs).await?;
     let (target_ref, node) = parse_to(to)?;
     let from_name = from_name.to_string();
     let (ret_harness, ret_session_id) = sender.inbox();
@@ -2314,13 +2388,17 @@ async fn deliver_send(
             },
         )
         .map_err(db_err)?;
+        let held_downstream = attachments::list_rows(&tx, &message_id)?
+            .first()
+            .map(|r| r.downstream.clone())
+            .unwrap_or_default();
         attachments::insert_rows(
             &tx,
             &message_id,
             refs,
             attachment_expiry(now, state.reply_ttl),
             "",
-            "",
+            &held_downstream,
         )?;
         tx.commit().map_err(db_err)?;
     }
@@ -2362,11 +2440,6 @@ async fn deliver_send(
                     None,
                 );
             };
-            if !refs.is_empty() {
-                return Err(AppError::Unavailable(
-                    "federated attachments are not supported yet".to_string(),
-                ));
-            }
             let fed_state = state
                 .fed_state
                 .as_ref()
@@ -2398,6 +2471,7 @@ async fn deliver_send(
                 thread_id: message_id.clone(),
                 created_at: now,
                 forwarded: None,
+                attachments: refs.to_vec(),
             };
             let resp = match crate::fed::send_federated_message_with(
                 &fed_state, &peer_key, &envelope, cached,
@@ -2492,8 +2566,11 @@ async fn deliver_send(
         Err(e) => {
             if let Err(de) = state.db.lock().map_err(db_err).and_then(|db| {
                 let tx = db.unchecked_transaction().map_err(db_err)?;
-                tx.execute("DELETE FROM attachments WHERE item_id=?1", [&message_id])
-                    .map_err(db_err)?;
+                tx.execute(
+                    "DELETE FROM attachments WHERE item_id=?1 AND downstream=''",
+                    [&message_id],
+                )
+                .map_err(db_err)?;
                 storage::delete_message(&tx, &message_id).map_err(db_err)?;
                 tx.commit().map_err(db_err)
             }) {
@@ -2558,6 +2635,7 @@ async fn push_federated_reply(
     in_reply_to: &str,
     reply_id: &str,
     text: &str,
+    refs: &[AttachmentRef],
 ) -> Result<&'static str, AppError> {
     let Some(fed_state) = &state.fed_state else {
         return Ok("push_failed");
@@ -2570,6 +2648,7 @@ async fn push_federated_reply(
         replier,
         text: text.to_string(),
         created_at: storage::now_epoch_secs(),
+        attachments: refs.to_vec(),
     };
     match crate::fed::send_federated_reply(fed_state, ret_host, &envelope).await {
         Ok(_) => Ok("pushed"),
@@ -2816,6 +2895,7 @@ pub(crate) async fn stage_codex_reply(
     text: &str,
     replier: (&str, &str),
     return_host: Option<&str>,
+    received_attachments: Option<(&[AttachmentRef], &str, i64)>,
 ) -> Result<Option<ReplyRecord>, AppError> {
     let ret_session_id = recipient.to_string();
     let reply_id = id.to_string();
@@ -2824,7 +2904,9 @@ pub(crate) async fn stage_codex_reply(
     {
         let db = local.db.lock().map_err(db_err)?;
         if let Some(existing) = storage::get_reply_by_pushed_id(&db, id).map_err(db_err)? {
-            return Ok(Some(existing));
+            if existing.push_outcome.as_deref() != Some("pending") {
+                return Ok(Some(reply_attachments(&db, existing)?));
+            }
         }
     }
     let live = crate::codex::resolve_codex_root(local.db, &ret_session_id);
@@ -2879,6 +2961,25 @@ pub(crate) async fn stage_codex_reply(
                     pid: 0,
                 });
             }
+            if let Some((refs, upstream, created_at)) = received_attachments {
+                let held = attachments::list_rows(&tx, &reply_id)?;
+                if held.is_empty() {
+                    attachments::insert_rows(
+                        &tx,
+                        &reply_id,
+                        refs,
+                        attachment_expiry(created_at, local.reply_ttl),
+                        upstream,
+                        "",
+                    )?;
+                } else if held.iter().map(|row| &row.attachment).ne(refs.iter())
+                    || held.iter().any(|row| row.upstream != upstream)
+                {
+                    return Err(AppError::Conflict(
+                        "reply attachment provenance differs".into(),
+                    ));
+                }
+            }
             let pushed = MessageRecord {
                 id: reply_id.clone(),
                 created_at: now,
@@ -2916,15 +3017,27 @@ pub(crate) async fn stage_codex_reply(
                     "codex session message queue is full".into(),
                 ));
             }
-            let record = storage::insert_reply(
-                &tx,
-                message_id,
-                replier.1,
-                text,
-                Some("sender_gone"),
-                Some(&reply_id),
-            )
-            .map_err(db_err)?;
+            let record = if let Some(mut existing) =
+                storage::get_reply_by_pushed_id(&tx, &reply_id).map_err(db_err)?
+            {
+                if existing.push_outcome.as_deref() != Some("pending") {
+                    return Ok(Some(reply_attachments(&db, existing)?));
+                }
+                storage::update_reply_push_outcome(&tx, &reply_id, "sender_gone")
+                    .map_err(db_err)?;
+                existing.push_outcome = Some("sender_gone".into());
+                existing
+            } else {
+                storage::insert_reply(
+                    &tx,
+                    message_id,
+                    replier.1,
+                    text,
+                    Some("sender_gone"),
+                    Some(&reply_id),
+                )
+                .map_err(db_err)?
+            };
             tx.commit().map_err(db_err)?;
             record
         };
@@ -2950,6 +3063,7 @@ pub(crate) async fn stage_codex_reply(
             let _ = storage::purge_messages(&db, local.reply_ttl.as_secs());
         }
         let _ = local.notify_tx.send(message_id.to_string());
+        let record = reply_attachments(&*local.db.lock().map_err(db_err)?, record)?;
         return Ok(Some(record));
     }
     Ok(None)
@@ -2970,6 +3084,7 @@ async fn deliver_reply(
         reply_id,
         attachments: refs,
     } = delivery;
+    prepare_attachment_refs(state, &Sender::Session(caller.clone()), &refs).await?;
     let (remote_host, has_inbox, ret_harness, ret_session_id) = if caller_is_sender {
         if msg.recipient_harness == "fed" {
             let db = state.db.lock().map_err(db_err)?;
@@ -2995,12 +3110,16 @@ async fn deliver_reply(
         let ret_session_id = msg.return_session_id.clone().unwrap_or_default();
         (remote_host, has_inbox, ret_harness, ret_session_id)
     };
-    if !refs.is_empty() && (remote_host.is_some() || is_forwarded) {
-        return Err(AppError::Unavailable(
-            "federated attachments are not supported yet".to_string(),
-        ));
-    }
-    let early_reply = if !refs.is_empty() {
+    // A leaf (or other undialable) origin pulls its replies; nothing is pushed to it.
+    let to_leaf = remote_host.as_deref().is_some_and(|h| {
+        state
+            .fed_state
+            .as_ref()
+            .and_then(|fs| fs.current_peers().get(h).cloned())
+            .is_some_and(|p| p.leaf)
+    });
+
+    let mut early_reply = if !refs.is_empty() && !to_leaf {
         let db = state.db.lock().map_err(db_err)?;
         let tx = db.unchecked_transaction().map_err(db_err)?;
         authorize_attachments(
@@ -3024,22 +3143,13 @@ async fn deliver_reply(
             &refs,
             attachment_expiry(record.created_at, state.reply_ttl),
             "",
-            "",
+            remote_host.as_deref().unwrap_or(""),
         )?;
         tx.commit().map_err(db_err)?;
         Some(record)
     } else {
         None
     };
-    // A leaf (or other undialable) origin pulls its replies; nothing is pushed to it.
-    let to_leaf = remote_host.as_deref().is_some_and(|h| {
-        state
-            .fed_state
-            .as_ref()
-            .and_then(|fs| fs.current_peers().get(h).cloned())
-            .is_some_and(|p| p.leaf)
-    });
-
     // A reply pushed to or stored for a remote origin is a message sent there, which its
     // receiver may answer: recorded as sent, with its recipient in `outbound` (A7's reply
     // rule; XF1 Defect 2). When `dest_session_id` is `None` (an anonymous sender on a
@@ -3078,6 +3188,7 @@ async fn deliver_reply(
             text,
             (&caller.harness, &caller.session_id),
             None,
+            None,
         )
         .await?
         {
@@ -3089,6 +3200,34 @@ async fn deliver_reply(
             {
                 let db = state.db.lock().map_err(db_err)?;
                 let tx = db.unchecked_transaction().map_err(db_err)?;
+                let deferred_reply = if to_leaf && !refs.is_empty() {
+                    authorize_attachments(
+                        &tx,
+                        &Sender::Session(caller.clone()),
+                        &refs,
+                        storage::now_epoch_secs(),
+                    )?;
+                    let record = storage::insert_reply(
+                        &tx,
+                        message_id,
+                        &caller.session_id,
+                        text,
+                        Some("pending"),
+                        Some(&reply_id),
+                    )
+                    .map_err(db_err)?;
+                    attachments::insert_rows(
+                        &tx,
+                        &reply_id,
+                        &refs,
+                        attachment_expiry(record.created_at, state.reply_ttl),
+                        "",
+                        host,
+                    )?;
+                    Some(record)
+                } else {
+                    None
+                };
                 if let Some(to) = dest_session_id.as_deref() {
                     if caller_is_sender {
                         let pushed = MessageRecord {
@@ -3152,6 +3291,7 @@ async fn deliver_reply(
                             },
                             created_at: storage::now_epoch_secs(),
                             forwarded: None,
+                            attachments: refs.clone(),
                         };
                         crate::fed::queue_leaf_mailbox_reply_in(
                             fed_state,
@@ -3165,16 +3305,29 @@ async fn deliver_reply(
                     }
                 }
                 tx.commit().map_err(db_err)?;
+                if deferred_reply.is_some() {
+                    early_reply = deferred_reply;
+                }
             }
             let outcome = if to_leaf {
                 "stored"
             } else {
-                match push_federated_reply(state, caller, host, message_id, &reply_id, text).await {
+                match push_federated_reply(state, caller, host, message_id, &reply_id, text, &refs)
+                    .await
+                {
                     Ok(outcome) => outcome,
                     Err(error) => {
                         if let Ok(db) = state.db.lock() {
                             let _ = storage::delete_message(&db, &reply_id);
                             let _ = storage::delete_outbound(&db, &reply_id);
+                            if let Some(record) = early_reply.as_ref() {
+                                let _ =
+                                    db.execute("DELETE FROM replies WHERE seq=?1", [record.seq]);
+                                let _ = db.execute(
+                                    "DELETE FROM attachments WHERE item_id=?1",
+                                    [&reply_id],
+                                );
+                            }
                         }
                         return Err(error);
                     }

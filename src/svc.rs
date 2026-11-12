@@ -701,6 +701,22 @@ pub async fn run_leaf_inbox_task(
 
     loop {
         match crate::fed::get_federated_inbox(&fed_state, &peer_name, wait_secs).await {
+            Ok(Some(crate::fed::FedInboxItem::Attachment {
+                query,
+                item_id,
+                index,
+                offset,
+                length,
+            })) => {
+                let fs = fed_state.clone();
+                let peer = peer_name.clone();
+                tokio::spawn(async move {
+                    crate::fed::answer_attachment_query(
+                        &fs, &peer, &query, &item_id, index, offset, length,
+                    )
+                    .await;
+                });
+            }
             Ok(Some(crate::fed::FedInboxItem::List { query, v })) => {
                 backoff_millis = 100;
                 crate::fed::answer_list_query(&fed_state, &peer_name, &query, v.unwrap_or(1) >= 2)
@@ -709,7 +725,9 @@ pub async fn run_leaf_inbox_task(
             Ok(Some(crate::fed::FedInboxItem::Message(msg))) => {
                 backoff_millis = 100;
 
-                if let Err(e) = crate::fed::validate_pulled_message(&msg) {
+                if let Err(e) = crate::fed::validate_pulled_message(&msg).and_then(|()| {
+                    crate::fed::check_received_refs(&fed_state, &msg.id, &msg.attachments)
+                }) {
                     tracing::warn!(
                         peer = %peer_name,
                         "rejecting malformed message pulled from hub on leaf: {e}"
@@ -748,6 +766,7 @@ pub async fn run_leaf_inbox_task(
                     .to_string();
 
                     let reply_envelope = crate::fed::FedReplyEnvelope {
+                        attachments: vec![],
                         v: crate::fed::WIRE_VERSION,
                         id: ulid::Ulid::new().to_string(),
                         in_reply_to: msg.id.clone(),
@@ -865,6 +884,15 @@ pub async fn run_leaf_inbox_task(
                         .map_err(|e| AppError::Internal(e.to_string()))?;
                     let existed_before = storage::has_svc_message(&tx, &msg.id)
                         .map_err(|e| AppError::Internal(e.to_string()))?;
+                    crate::fed::received_refs(
+                        &fed_state,
+                        &tx,
+                        &msg.id,
+                        &msg.attachments,
+                        &peer_name,
+                        "",
+                        msg_record.created_at,
+                    )?;
                     storage::insert_message(&tx, &msg_record)
                         .map_err(|e| AppError::Internal(e.to_string()))?;
                     let queued = storage::insert_svc_message_with_cap(&tx, &svc_msg, cap)
@@ -926,7 +954,40 @@ pub async fn run_leaf_inbox_task(
                             break;
                         }
 
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        match crate::fed::get_federated_inbox(&fed_state, &peer_name, 0).await {
+                            Ok(Some(crate::fed::FedInboxItem::Attachment {
+                                query,
+                                item_id,
+                                index,
+                                offset,
+                                length,
+                            })) => {
+                                let fs = fed_state.clone();
+                                let peer = peer_name.clone();
+                                tokio::spawn(async move {
+                                    crate::fed::answer_attachment_query(
+                                        &fs, &peer, &query, &item_id, index, offset, length,
+                                    )
+                                    .await;
+                                });
+                            }
+                            Ok(Some(crate::fed::FedInboxItem::List { query, v })) => {
+                                let fs = fed_state.clone();
+                                let peer = peer_name.clone();
+                                tokio::spawn(async move {
+                                    crate::fed::answer_list_query(
+                                        &fs,
+                                        &peer,
+                                        &query,
+                                        v.unwrap_or(1) >= 2,
+                                    )
+                                    .await;
+                                });
+                            }
+                            Err(_) => tokio::time::sleep(Duration::from_secs(5)).await,
+                            _ => {}
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                 }
 

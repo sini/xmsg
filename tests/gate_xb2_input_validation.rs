@@ -467,6 +467,7 @@ async fn f4_subagent_frame_shares_agent_id_validation() {
 async fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
     // 1. Valid pulled message passes `validate_pulled_message`.
     let valid_pulled = FedInboxMessage {
+        attachments: vec![],
         id: "01M6DNYSJF6YTHXYEAGY6GNX06".to_string(),
         origin: Origin::instance(VALID_UUID_1, "sini.hub", Some("worker")),
         body: "hello".to_string(),
@@ -594,6 +595,7 @@ async fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
     }
 
     let hub_fed_state = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "sini.hub".to_string(),
         peers: (hub_peers).into(),
         cert_der: hub_cert_der.clone(),
@@ -680,6 +682,7 @@ async fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
     let leaf_peers = Arc::new(PeersMap::load_from_file_for(&leaf_peers_path, None).unwrap());
 
     let leaf_fed_state = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "sini.leaf".to_string(),
         peers: (leaf_peers).into(),
         cert_der: leaf_cert_der.clone(),
@@ -777,6 +780,7 @@ async fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
         return_host: Some("sini.hub".to_string()),
     };
     let valid_transfer = Transfer {
+        attachments: vec![],
         messages: vec![valid_qmsg.clone()],
         records: vec![valid_rec.clone()],
     };
@@ -796,6 +800,7 @@ async fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
     // control char in message id, or invalid return_session_id) are refused before DB write.
     let bad_transfers = vec![
         Transfer {
+            attachments: vec![],
             messages: vec![QueuedMessage {
                 from_name: "evil\nline · id@sini.hub".to_string(),
                 ..valid_qmsg.clone()
@@ -803,6 +808,7 @@ async fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
             records: vec![],
         },
         Transfer {
+            attachments: vec![],
             messages: vec![QueuedMessage {
                 from_name: "spoof@extra · id@sini.hub".to_string(),
                 ..valid_qmsg.clone()
@@ -810,6 +816,7 @@ async fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
             records: vec![],
         },
         Transfer {
+            attachments: vec![],
             messages: vec![QueuedMessage {
                 id: "bad\nid".to_string(),
                 ..valid_qmsg.clone()
@@ -817,6 +824,7 @@ async fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
             records: vec![],
         },
         Transfer {
+            attachments: vec![],
             messages: vec![valid_qmsg.clone()],
             records: vec![MessageRecord {
                 return_session_id: Some("bad@return".to_string()),

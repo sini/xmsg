@@ -13,7 +13,7 @@
 - **MCP tools for messaging and file reads:** `list`, `send`, `reply`, `replies`, `inbox` (for [delegated subagents](https://xmsg.dev/concepts/sessions-services-subagents/#delegated-subagents-pchildnode)), and `read_attachment`.
 - **Durable queueing & cross-machine handoff:** Sends to parked conversations queue in SQLite (`7 days` default reply TTL) and drain in FIFO order when the conversation returns — or follow a Claude conversation across a user's machines over `/fed/v2/handoff`.
 - **Cross-host mTLS federation (`/fed/v2`):** Authenticate peers with pinned Ed25519 keys (`pin`) or CA-signed SPIFFE X.509-SVIDs (`ca` + `identities`), with [durable leaf mailboxes, NAT outbound links, and single-hop hub forwarding](https://xmsg.dev/concepts/hubs-and-leaves/).
-- **Local file attachments:** Stage content-addressed bytes and deliver references, then read bounded UTF-8 or binary ranges. See [file attachments](https://xmsg.dev/concepts/attachments/); cross-node file transfer follows separately.
+- **File attachments:** Stage content-addressed bytes and deliver references, then read bounded UTF-8 or binary ranges. Federated fetching verifies the whole file through its authenticated message route (planned for the next release). See [file attachments](https://xmsg.dev/concepts/attachments/).
 - **Validated Rust service client (`xmsg::client`):** Lightweight 23-package client feature (`--no-default-features --features client`) for external Rust services (`matrix-xmsg`, `genie-guard`, `xmsg-mcp-gateway`).
 
 ---

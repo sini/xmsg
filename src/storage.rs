@@ -114,6 +114,7 @@ pub const SCHEMA_VERSION: i64 = 3;
 /// `replies` references `messages`, so it is dropped first: with foreign keys on, dropping
 /// a parent that still has child rows fails.
 const MESSAGE_STATE_TABLES: &[&str] = &[
+    "attachment_verified",
     "attachments",
     "staged_blobs",
     "blob_chunks",
@@ -147,6 +148,10 @@ const SCHEMA_N: &str = r#"
             downstream TEXT NOT NULL DEFAULT '', PRIMARY KEY (item_id, idx)
         );
         CREATE INDEX IF NOT EXISTS idx_attachments_sha256 ON attachments(sha256);
+        CREATE TABLE IF NOT EXISTS attachment_verified (
+            item_id TEXT NOT NULL, idx INTEGER NOT NULL, sha256 TEXT NOT NULL,
+            upstream TEXT NOT NULL, PRIMARY KEY (item_id, idx)
+        );
         CREATE TABLE IF NOT EXISTS staged_blobs (
             principal TEXT NOT NULL, sha256 TEXT NOT NULL, expires_at INTEGER NOT NULL,
             PRIMARY KEY (principal, sha256)
@@ -1877,6 +1882,10 @@ pub fn drop_handed_over(
             continue;
         }
         tx.execute(
+            "UPDATE attachments SET downstream=?1 WHERE item_id=?2",
+            params![peer, id],
+        )?;
+        tx.execute(
             "INSERT OR REPLACE INTO outbound (id, peer, target_ref, outcome, created_at, resolved) VALUES (?1, ?2, ?3, 'queued', ?4, 1)",
             params![id, peer, instance_id, now],
         )?;
@@ -3567,6 +3576,44 @@ mod queue_tests {
         );
         assert!(
             matches!(reserve_reply_key_with_refs(&c, "p", "reply", "message", body, Some("digest"), "R2", 60).unwrap(), Reservation::Held(r) if r.refs_digest.is_none())
+        );
+    }
+
+    #[test]
+    fn handoff_ack_changes_attachment_downstream_only_for_owned_queue_rows() {
+        let c = Connection::open_in_memory().unwrap();
+        init_db(&c).unwrap();
+        let attachment = crate::client::wire::AttachmentRef {
+            name: "file".into(),
+            size: 1,
+            media_type: "application/octet-stream".into(),
+            sha256: "a".repeat(64),
+        };
+        crate::attachments::insert_rows(&c, "message", &[attachment], 200, "origin", "").unwrap();
+        c.execute("INSERT INTO instance_queue (id,instance_id,body,from_name,created_at,expires_at) VALUES ('message','instance','body','sender',100,200)", []).unwrap();
+        drop_handed_over(&c, "wrong-instance", &["message".into()], "wrong-peer", 101).unwrap();
+        assert_eq!(
+            crate::attachments::get_row(&c, "message", 0)
+                .unwrap()
+                .unwrap()
+                .downstream,
+            ""
+        );
+        drop_handed_over(&c, "instance", &["message".into()], "recipient", 101).unwrap();
+        assert_eq!(
+            crate::attachments::get_row(&c, "message", 0)
+                .unwrap()
+                .unwrap()
+                .downstream,
+            "recipient"
+        );
+        drop_handed_over(&c, "instance", &["message".into()], "another-peer", 101).unwrap();
+        assert_eq!(
+            crate::attachments::get_row(&c, "message", 0)
+                .unwrap()
+                .unwrap()
+                .downstream,
+            "recipient"
         );
     }
 

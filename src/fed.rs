@@ -18,6 +18,8 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 use tracing::{debug, info};
 
+use crate::attachments;
+use crate::client::wire::AttachmentRef;
 use crate::error::AppError;
 use crate::inbox::{self, DeliveryResponse};
 use crate::storage::{self, MessageRecord};
@@ -2118,6 +2120,8 @@ pub struct FedEnvelope {
     pub created_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forwarded: Option<FedForwarded>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentRef>,
 }
 
 /// An envelope's origin with its node attested by this node: the authenticated peer's
@@ -2241,6 +2245,11 @@ pub fn check_rendered_from_name(from_name: &str) -> Result<(), AppError> {
 /// Validates a pulled `FedInboxMessage` on the hub pull path using `check_origin` and
 /// control-character validation (XB2 F5).
 pub fn validate_pulled_message(msg: &FedInboxMessage) -> Result<(), AppError> {
+    if attachments::normalize_refs(&msg.attachments, usize::MAX)? != msg.attachments {
+        return Err(AppError::BadRequest(
+            "attachment refs must be canonical".into(),
+        ));
+    }
     if msg.id.is_empty() || msg.id.len() > 128 || msg.id.contains(char::is_whitespace) {
         return Err(AppError::BadRequest(format!(
             "invalid pulled message id '{}'",
@@ -2345,6 +2354,8 @@ pub struct FedInboxMessage {
     pub to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_reply_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentRef>,
 }
 
 /// One item of a dial-out client's mailbox: a message, or a `list` query it answers on its
@@ -2353,6 +2364,13 @@ pub struct FedInboxMessage {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FedInboxItem {
     Message(FedInboxMessage),
+    Attachment {
+        query: String,
+        item_id: String,
+        index: usize,
+        offset: u64,
+        length: usize,
+    },
     List {
         query: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2376,6 +2394,8 @@ pub struct FedReplyEnvelope {
     pub replier: storage::Origin,
     pub text: String,
     pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentRef>,
 }
 
 /// One entry of a node's `list` answer (A4, A-12, A16, XL1, XF3): an instance ID or a
@@ -2566,6 +2586,7 @@ pub struct FedState {
     pub svc_notify_tx: broadcast::Sender<String>,
     pub notify_tx: broadcast::Sender<String>,
     pub max_body: usize,
+    pub max_attachment_bytes: usize,
     pub is_leaf: bool,
     pub leaf_principal: Option<String>,
     pub outbound_replies_pushed: Arc<AtomicU64>,
@@ -2622,8 +2643,16 @@ impl FedState {
 // -----------------------------------------------------------------------------
 
 pub fn build_fed_router(fed_state: Arc<FedState>) -> Router {
-    let max_body_limit = fed_state.max_body + 4096;
+    let max_body_limit = fed_state.max_body + 4096 + 8 * 330;
     Router::new()
+        .route(
+            "/fed/v2/attachments/{item}/{index}",
+            get(fed_attachment_handler),
+        )
+        .route(
+            "/fed/v2/attachment/{query}",
+            post(fed_attachment_answer_handler),
+        )
         .route("/fed/v2/messages", post(fed_send_message_handler))
         .route("/fed/v2/replies", post(fed_reply_handler))
         .route(
@@ -2674,6 +2703,8 @@ async fn fed_send_message_handler(
             ));
         }
     }
+
+    check_received_refs(&fed_state, &envelope.id, &envelope.attachments)?;
 
     // Relayed messages check: if envelope is forwarded, recipient's entry for the peer must allow "relayed"
     if envelope.forwarded.is_some()
@@ -2784,6 +2815,7 @@ async fn fed_send_message_handler(
                 r#ref: target_ref.to_string(),
             },
             body: envelope.body.clone(),
+            attachments: envelope.attachments.clone(),
             thread_id: envelope.thread_id.clone(),
             created_at: envelope.created_at,
             forwarded: Some(FedForwarded {
@@ -2797,10 +2829,22 @@ async fn fed_send_message_handler(
                 .db
                 .lock()
                 .map_err(|e| AppError::Internal(e.to_string()))?;
-            storage::insert_forwarded_message(&db, &envelope.id, &peer.name, envelope.created_at)
+            let tx = db
+                .unchecked_transaction()
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            received_refs(
+                &fed_state,
+                &tx,
+                &envelope.id,
+                &envelope.attachments,
+                &peer.name,
+                dest,
+                envelope.created_at,
+            )?;
+            storage::insert_forwarded_message(&tx, &envelope.id, &peer.name, envelope.created_at)
                 .map_err(|e| AppError::Internal(e.to_string()))?;
             storage::insert_outbound(
-                &db,
+                &tx,
                 &envelope.id,
                 dest,
                 target_ref,
@@ -2808,6 +2852,7 @@ async fn fed_send_message_handler(
                 envelope.created_at,
             )
             .map_err(|e| AppError::Internal(e.to_string()))?;
+            tx.commit().map_err(|e| AppError::Internal(e.to_string()))?;
         }
 
         let delivery_resp =
@@ -2994,11 +3039,24 @@ async fn fed_send_message_handler(
             )
                 .into_response());
         }
-        storage::upsert_message(&db, &pre_record).map_err(|e| AppError::Internal(e.to_string()))?;
+        let tx = db
+            .unchecked_transaction()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        received_refs(
+            &fed_state,
+            &tx,
+            &envelope.id,
+            &envelope.attachments,
+            &peer.name,
+            "",
+            envelope.created_at,
+        )?;
+        storage::upsert_message(&tx, &pre_record).map_err(|e| AppError::Internal(e.to_string()))?;
         if envelope.forwarded.is_some() {
-            storage::insert_forwarded_message(&db, &envelope.id, &peer.name, envelope.created_at)
+            storage::insert_forwarded_message(&tx, &envelope.id, &peer.name, envelope.created_at)
                 .map_err(|e| AppError::Internal(e.to_string()))?;
         }
+        tx.commit().map_err(|e| AppError::Internal(e.to_string()))?;
     }
 
     // 8. Deliver to local target session
@@ -3067,6 +3125,16 @@ pub async fn deliver_federated_reply_locally(
             storage::get_message(&db, in_reply_to).map_err(|e| AppError::Internal(e.to_string()))?
         };
         if let (Some(original), Some(replier_id)) = (original, replier_origin.key()) {
+            let refs = {
+                let db = fed_state
+                    .db
+                    .lock()
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                attachments::list_rows(&db, reply_id)?
+                    .into_iter()
+                    .map(|row| row.attachment)
+                    .collect::<Vec<_>>()
+            };
             if let Some(record) = crate::surface::stage_codex_reply(
                 &fed_state.local(),
                 &original,
@@ -3076,6 +3144,7 @@ pub async fn deliver_federated_reply_locally(
                 text,
                 ("fed", replier_id),
                 Some(peer_name),
+                Some((&refs, peer_name, storage::now_epoch_secs())),
             )
             .await?
             {
@@ -3215,6 +3284,8 @@ async fn fed_reply_handler(
         ));
     }
 
+    check_received_refs(&fed_state, &reply.id, &reply.attachments)?;
+
     // The replier, its node attested here (N-2).
     let node = peers
         .canonical_name(&peer.name)
@@ -3239,6 +3310,7 @@ async fn fed_reply_handler(
             .map_err(|e| AppError::Internal(e.to_string()))?;
         if let Some(existing) = storage::get_reply_by_pushed_id(&db, &reply.id)
             .map_err(|e| AppError::Internal(e.to_string()))?
+            .filter(|r| r.push_outcome.as_deref() != Some("pending"))
         {
             return Ok((
                 StatusCode::OK,
@@ -3314,8 +3386,46 @@ async fn fed_reply_handler(
             .unwrap_or_default();
 
         if !origin_peer_cfg.leaf && !origin_peer_cfg.is_outbound() {
+            {
+                let db = fed_state
+                    .db
+                    .lock()
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                let tx = db
+                    .unchecked_transaction()
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                received_refs(
+                    &fed_state,
+                    &tx,
+                    &reply.id,
+                    &reply.attachments,
+                    &peer.name,
+                    "",
+                    reply.created_at,
+                )?;
+                if storage::get_reply_by_pushed_id(&tx, &reply.id)
+                    .map_err(|e| AppError::Internal(e.to_string()))?
+                    .is_none()
+                {
+                    storage::insert_reply(
+                        &tx,
+                        &reply.in_reply_to,
+                        &replier_key,
+                        &reply.text,
+                        Some("pending"),
+                        Some(&reply.id),
+                    )
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                }
+                tx.commit().map_err(|e| AppError::Internal(e.to_string()))?;
+            }
+
             // Dialable origin: send federated reply to origin peer
             let _ = send_federated_reply(&fed_state, &fwd.origin_peer, &reply).await?;
+            if let Ok(db) = fed_state.db.lock() {
+                storage::update_reply_push_outcome(&db, &reply.id, "relayed")
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+            }
             {
                 let db = fed_state
                     .db
@@ -3357,7 +3467,6 @@ async fn fed_reply_handler(
         } else {
             // Undialable origin (leaf / outbound link): store reply for polling, and if
             // the origin is a leaf peer, also queue into its mailbox.
-            let replier_session_id = replier_key.clone();
             let replier_badge = replier.render(&peer.name);
 
             let push_outcome = "stored";
@@ -3369,15 +3478,32 @@ async fn fed_reply_handler(
                 let tx = db
                     .unchecked_transaction()
                     .map_err(|e| AppError::Internal(e.to_string()))?;
-                storage::insert_reply(
+                received_refs(
+                    &fed_state,
                     &tx,
-                    &reply.in_reply_to,
-                    &replier_session_id,
-                    &reply.text,
-                    Some(push_outcome),
-                    Some(&reply.id),
-                )
-                .map_err(|e| AppError::Internal(e.to_string()))?;
+                    &reply.id,
+                    &reply.attachments,
+                    &peer.name,
+                    "",
+                    reply.created_at,
+                )?;
+                if storage::get_reply_by_pushed_id(&tx, &reply.id)
+                    .map_err(|e| AppError::Internal(e.to_string()))?
+                    .is_none()
+                {
+                    storage::insert_reply(
+                        &tx,
+                        &reply.in_reply_to,
+                        &replier_key,
+                        &reply.text,
+                        Some(push_outcome),
+                        Some(&reply.id),
+                    )
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                } else {
+                    storage::update_reply_push_outcome(&tx, &reply.id, push_outcome)
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                }
                 let _ =
                     storage::insert_forwarded_message(&tx, &reply.id, &peer.name, reply.created_at);
                 let _ = storage::insert_outbound(
@@ -3418,6 +3544,7 @@ async fn fed_reply_handler(
                             r#ref: origin_target_ref,
                         },
                         body: reply.text.clone(),
+                        attachments: reply.attachments.clone(),
                         thread_id: reply.in_reply_to.clone(),
                         created_at: reply.created_at,
                         forwarded: Some(FedForwarded {
@@ -3479,7 +3606,23 @@ async fn fed_reply_handler(
         // to the replier, as a message received from that peer is (A-2). Recorded before
         // the push wakes the receiver (XF2), and removed if the push does not land.
         if let (Some(orig), Some(id)) = (&orig_msg, &replier_id) {
-            if let Ok(db) = fed_state.db.lock() {
+            {
+                let db = fed_state
+                    .db
+                    .lock()
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                let tx = db
+                    .unchecked_transaction()
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                received_refs(
+                    &fed_state,
+                    &tx,
+                    &reply.id,
+                    &reply.attachments,
+                    &peer.name,
+                    "",
+                    reply.created_at,
+                )?;
                 if is_sender_followup {
                     let pushed = storage::MessageRecord {
                         id: reply.id.clone(),
@@ -3498,10 +3641,10 @@ async fn fed_reply_handler(
                         },
                         return_host: Some(peer.name.clone()),
                     };
-                    let _ = storage::insert_message(&db, &pushed);
+                    let _ = storage::insert_message(&tx, &pushed);
                 } else {
                     crate::surface::record_pushed_reply(
-                        &db,
+                        &tx,
                         orig,
                         &reply.id,
                         &replier_badge,
@@ -3510,6 +3653,7 @@ async fn fed_reply_handler(
                         Some(&peer.name),
                     );
                 }
+                tx.commit().map_err(|e| AppError::Internal(e.to_string()))?;
             }
         }
 
@@ -3563,8 +3707,20 @@ async fn fed_reply_handler(
             .db
             .lock()
             .map_err(|e| AppError::Internal(e.to_string()))?;
+        let tx = db
+            .unchecked_transaction()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        received_refs(
+            &fed_state,
+            &tx,
+            &reply.id,
+            &reply.attachments,
+            &peer.name,
+            "",
+            reply.created_at,
+        )?;
         storage::insert_reply(
-            &db,
+            &tx,
             &reply.in_reply_to,
             &replier_session_id,
             &reply.text,
@@ -3572,6 +3728,7 @@ async fn fed_reply_handler(
             Some(&reply.id),
         )
         .map_err(|e| AppError::Internal(e.to_string()))?;
+        tx.commit().map_err(|e| AppError::Internal(e.to_string()))?;
     }
     let _ = fed_state.notify_tx.send(reply.in_reply_to.clone());
 
@@ -3741,6 +3898,17 @@ async fn fed_get_replies_handler(
             .map_err(|e| AppError::Internal(e.to_string()))?;
         for r in &mut rows {
             r.replier = Some(replier_origin_for_stored_reply(&db, &fed_state, r));
+            if let Some(id) = r.pushed_message_id.as_deref() {
+                r.attachments = attachments::list_rows(&db, id)?
+                    .into_iter()
+                    .map(|row| row.attachment)
+                    .collect();
+                db.execute(
+                    "UPDATE attachments SET downstream=?2 WHERE item_id=?1",
+                    rusqlite::params![id, peer.name],
+                )
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            }
         }
         rows
     };
@@ -3771,6 +3939,17 @@ async fn fed_get_replies_handler(
             .map_err(|e| AppError::Internal(e.to_string()))?;
         for r in &mut rows {
             r.replier = Some(replier_origin_for_stored_reply(&db, &fed_state, r));
+            if let Some(id) = r.pushed_message_id.as_deref() {
+                r.attachments = attachments::list_rows(&db, id)?
+                    .into_iter()
+                    .map(|row| row.attachment)
+                    .collect();
+                db.execute(
+                    "UPDATE attachments SET downstream=?2 WHERE item_id=?1",
+                    rusqlite::params![id, peer.name],
+                )
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            }
         }
         rows
     };
@@ -3911,6 +4090,9 @@ async fn fed_get_inbox_handler(
 
     // A `list` query waiting for this client goes first (AM-1), then its messages.
     let next_item = || -> Result<Option<FedInboxItem>, AppError> {
+        if let Some(item) = attachment_queries(&fed_state).next_for(&peer.name) {
+            return Ok(Some(item));
+        }
         if let Some(query) = fed_state.list_queries.next_for(&peer.name) {
             return Ok(Some(FedInboxItem::List { query, v: Some(2) }));
         }
@@ -3918,26 +4100,38 @@ async fn fed_get_inbox_handler(
             .db
             .lock()
             .map_err(|e| AppError::Internal(e.to_string()))?;
-        Ok(storage::get_next_peer_mailbox_message(&db, &peer.name)
+        let Some(msg) = storage::get_next_peer_mailbox_message(&db, &peer.name)
             .map_err(|e| AppError::Internal(e.to_string()))?
-            .map(|msg| {
-                let in_reply_to = serde_json::from_str::<serde_json::Value>(&msg.envelope)
+        else {
+            return Ok(None);
+        };
+        let wire: Value = serde_json::from_str(&msg.envelope)
+            .map_err(|e| AppError::Internal(format!("stored mailbox envelope: {e}")))?;
+        let refs: Vec<AttachmentRef> = wire
+            .get("attachments")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| AppError::Internal(format!("stored attachment refs: {e}")))?
+            .unwrap_or_default();
+        let in_reply_to = wire
+            .get("in_reply_to")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                storage::get_reply_by_pushed_id(&db, &msg.id)
                     .ok()
-                    .and_then(|v| v.get("in_reply_to")?.as_str().map(str::to_string))
-                    .or_else(|| {
-                        storage::get_reply_by_pushed_id(&db, &msg.id)
-                            .ok()
-                            .flatten()
-                            .map(|r| r.message_id)
-                    });
-                FedInboxItem::Message(FedInboxMessage {
-                    id: msg.id,
-                    origin: msg.origin,
-                    body: msg.body,
-                    to: Some(msg.target_ref),
-                    in_reply_to,
-                })
-            }))
+                    .flatten()
+                    .map(|r| r.message_id)
+            });
+        Ok(Some(FedInboxItem::Message(FedInboxMessage {
+            id: msg.id,
+            origin: msg.origin,
+            body: msg.body,
+            attachments: refs,
+            to: Some(msg.target_ref),
+            in_reply_to,
+        })))
     };
 
     if let Some(item) = next_item()? {
@@ -4137,6 +4331,12 @@ fn queue_leaf_mailbox_message_in(
             "mailbox for '{peer_name}' reached its configured row or byte limit"
         )));
     }
+
+    db.execute(
+        "UPDATE attachments SET downstream=?2 WHERE item_id=?1",
+        rusqlite::params![envelope.id, peer_name],
+    )
+    .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let _ = storage::insert_outbound(
         db,
@@ -4339,6 +4539,8 @@ pub async fn send_federated_message_with(
         );
     }
 
+    attachment_egress(fed_state, &envelope.id, &envelope.attachments, peer_name)?;
+
     let connector = make_tls_connector_for_peer(fed_state, peer)?;
     let server_name = ServerName::try_from(peer_name.to_string())
         .map_err(|e| AppError::Internal(e.to_string()))?;
@@ -4417,7 +4619,7 @@ pub async fn send_federated_message_with(
             .map_err(|e| AppError::PeerUnreachable(format!("Request failed: {e}")))?;
 
         let status = resp.status();
-        let max_limit = fed_state.max_body + 4096;
+        let max_limit = fed_state.max_body + 4096 + 8 * 330;
         let limited = http_body_util::Limited::new(resp.into_body(), max_limit);
         use http_body_util::BodyExt;
         let body_bytes = limited
@@ -4488,6 +4690,8 @@ pub async fn send_federated_reply(
         .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
     let peer_name = peer.name.as_str();
 
+    attachment_egress(fed_state, &reply.id, &reply.attachments, peer_name)?;
+
     let reply_fut = async {
         let connector = make_tls_connector_for_peer(fed_state, peer)?;
         let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
@@ -4530,7 +4734,7 @@ pub async fn send_federated_reply(
             .map_err(|e| AppError::PeerUnreachable(format!("Request failed: {e}")))?;
 
         let status = resp.status();
-        let max_limit = fed_state.max_body + 4096;
+        let max_limit = fed_state.max_body + 4096 + 8 * 330;
         let limited = http_body_util::Limited::new(resp.into_body(), max_limit);
         use http_body_util::BodyExt;
         let body_bytes = limited
@@ -4639,7 +4843,7 @@ pub async fn poll_federated_replies(
             .map_err(|e| AppError::PeerUnreachable(format!("Request failed: {e}")))?;
 
         let status = resp.status();
-        let max_limit = fed_state.max_body + 4096;
+        let max_limit = fed_state.max_body + 4096 + 8 * 330;
         let limited = http_body_util::Limited::new(resp.into_body(), max_limit);
         use http_body_util::BodyExt;
         let body_bytes = limited
@@ -4654,6 +4858,33 @@ pub async fn poll_federated_replies(
         if status.is_success() {
             let replies: Vec<storage::ReplyRecord> = serde_json::from_slice(&body_bytes)
                 .map_err(|e| AppError::Internal(e.to_string()))?;
+            {
+                let db = fed_state
+                    .db
+                    .lock()
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                let tx = db
+                    .unchecked_transaction()
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                for reply in &replies {
+                    attachments::normalize_refs(
+                        &reply.attachments,
+                        fed_state.max_attachment_bytes,
+                    )?;
+                    if let Some(id) = reply.pushed_message_id.as_deref() {
+                        received_refs(
+                            fed_state,
+                            &tx,
+                            id,
+                            &reply.attachments,
+                            peer_name,
+                            "",
+                            reply.created_at,
+                        )?;
+                    }
+                }
+                tx.commit().map_err(|e| AppError::Internal(e.to_string()))?;
+            }
             Ok(replies)
         } else {
             let err_resp: Result<WireErrorResponse, _> = serde_json::from_slice(&body_bytes);
@@ -4740,7 +4971,7 @@ async fn get_federated_inbox_with_peers(
             .map_err(|e| AppError::PeerUnreachable(format!("Request failed: {e}")))?;
 
         let status = resp.status();
-        let max_limit = fed_state.max_body + 4096;
+        let max_limit = fed_state.max_body + 4096 + 8 * 330;
         let limited = http_body_util::Limited::new(resp.into_body(), max_limit);
         use http_body_util::BodyExt;
         let body_bytes = limited
@@ -5019,6 +5250,20 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
         }
 
         match get_federated_inbox_with_peers(&fed_state, &pull_peers, &peer_name, wait_secs).await {
+            Ok(Some(FedInboxItem::Attachment {
+                query,
+                item_id,
+                index,
+                offset,
+                length,
+            })) => {
+                let fs = fed_state.clone();
+                let peer = peer_name.clone();
+                tokio::spawn(async move {
+                    answer_attachment_query(&fs, &peer, &query, &item_id, index, offset, length)
+                        .await;
+                });
+            }
             Ok(Some(FedInboxItem::List { query, v })) => {
                 backoff_millis = 100;
                 answer_list_query(&fed_state, &peer_name, &query, v.unwrap_or(1) >= 2).await;
@@ -5042,6 +5287,11 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                     continue;
                 }
 
+                if let Err(error) = check_received_refs(&fed_state, &msg.id, &msg.attachments) {
+                    tracing::warn!(peer=%peer_name,"refusing pulled attachment refs: {error}");
+                    let _ = ack_federated_inbox(&fed_state, &peer_name, &msg.id).await;
+                    continue;
+                }
                 let target_ref = msg.to.as_deref().unwrap_or("");
                 let authorization = authorize_pulled_relay(&pull_peers, &peer_name, &msg);
                 // A12: one render, from the origin the hub attests.
@@ -5170,16 +5420,39 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                                 );
                                 true
                             } else {
-                                let _ = storage::upsert_message(&db, &pre_record);
+                                let tx = match db.unchecked_transaction() {
+                                    Ok(tx) => tx,
+                                    Err(error) => {
+                                        tracing::warn!("pulled item transaction failed: {error}");
+                                        continue;
+                                    }
+                                };
+                                if let Err(error) = received_refs(
+                                    &fed_state,
+                                    &tx,
+                                    &msg.id,
+                                    &msg.attachments,
+                                    &peer_name,
+                                    "",
+                                    pre_record.created_at,
+                                ) {
+                                    tracing::warn!(peer=%peer_name,"refusing pulled attachment metadata: {error}");
+                                    continue;
+                                }
+                                let _ = storage::upsert_message(&tx, &pre_record);
                                 if let Some(ref irt) = msg.in_reply_to {
                                     let _ = storage::insert_reply(
-                                        &db,
+                                        &tx,
                                         irt,
                                         &target.session().session_id,
                                         &msg.body,
                                         Some("accepted"),
                                         Some(&msg.id),
                                     );
+                                }
+                                if let Err(error) = tx.commit() {
+                                    tracing::warn!("pulled item transaction failed: {error}");
+                                    continue;
                                 }
                                 false
                             }
@@ -5303,6 +5576,7 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                         let replier = storage::Origin::service("system", &fed_state.node_name);
 
                         let reply_envelope = FedReplyEnvelope {
+                            attachments: Vec::new(),
                             v: WIRE_VERSION,
                             id: ulid::Ulid::new().to_string(),
                             in_reply_to: msg.id.clone(),
@@ -5500,7 +5774,7 @@ pub async fn list_direct_peer(
     })?;
 
     let status = resp.status();
-    let max_limit = fed_state.max_body + 4096;
+    let max_limit = fed_state.max_body + 4096 + 8 * 330;
     let limited = http_body_util::Limited::new(resp.into_body(), max_limit);
     use http_body_util::BodyExt;
     let body_bytes = limited
@@ -6293,5 +6567,592 @@ impl CredentialReloader {
                 }
             }
         })
+    }
+}
+
+type AttachmentWaiter = (
+    String,
+    usize,
+    tokio::sync::oneshot::Sender<Result<Vec<u8>, AppError>>,
+);
+#[derive(Default)]
+struct AttachmentQueries {
+    pending: Mutex<HashMap<String, Vec<FedInboxItem>>>,
+    waiting: Mutex<HashMap<String, AttachmentWaiter>>,
+}
+
+fn attachment_queries(fs: &FedState) -> Arc<AttachmentQueries> {
+    type Registry = Vec<(
+        std::sync::Weak<Mutex<rusqlite::Connection>>,
+        Arc<AttachmentQueries>,
+    )>;
+    static QUERIES: std::sync::OnceLock<Mutex<Registry>> = std::sync::OnceLock::new();
+    let mut registry = QUERIES.get_or_init(Mutex::default).lock().unwrap();
+    registry.retain(|(db, _)| db.strong_count() > 0);
+    if let Some((_, queries)) = registry
+        .iter()
+        .find(|(db, _)| db.ptr_eq(&Arc::downgrade(&fs.db)))
+    {
+        return queries.clone();
+    }
+    let queries = Arc::new(AttachmentQueries::default());
+    registry.push((Arc::downgrade(&fs.db), queries.clone()));
+    queries
+}
+
+impl AttachmentQueries {
+    fn next_for(&self, peer: &str) -> Option<FedInboxItem> {
+        let mut pending = self.pending.lock().ok()?;
+        let queue = pending.get_mut(peer)?;
+        (!queue.is_empty()).then(|| queue.remove(0))
+    }
+    fn forget(&self, query: &str) {
+        self.waiting.lock().unwrap().remove(query);
+        for queue in self.pending.lock().unwrap().values_mut() {
+            queue.retain(
+                |item| !matches!(item, FedInboxItem::Attachment {query:q,..} if q == query),
+            );
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct AttachmentRangeQuery {
+    offset: Option<u64>,
+    length: Option<usize>,
+}
+
+fn attachment_peer_row(
+    fs: &FedState,
+    peer: &str,
+    item: &str,
+    index: usize,
+) -> Result<attachments::AttachmentRow, AppError> {
+    let peers = fs.current_peers();
+    let config = peers
+        .get(peer)
+        .ok_or_else(|| AppError::UnknownPeer(peer.to_string()))?;
+    let db = fs
+        .db
+        .lock()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let row = attachments::get_row(&db, item, index)?
+        .ok_or_else(|| AppError::NotFoundDetail("attachment not found".into()))?;
+    if row.downstream != peer {
+        return Err(AppError::Denied(
+            "attachment is not readable by this peer".into(),
+        ));
+    }
+    if row.expires_at <= storage::now_epoch_secs() {
+        return Err(AppError::GoneDetail("attachment expired".into()));
+    }
+    let reply = storage::get_reply_by_pushed_id(&db, item)
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .is_some();
+    let right = if reply { "send" } else { "reply" };
+    if !config.allow.iter().any(|op| op == right) {
+        return Err(AppError::Denied(format!(
+            "attachment requires {right} permission"
+        )));
+    }
+    Ok(row)
+}
+
+pub async fn serve_attachment_bytes(
+    fs: &Arc<FedState>,
+    peer: &str,
+    item: &str,
+    index: usize,
+    offset: u64,
+    length: usize,
+) -> Result<Vec<u8>, AppError> {
+    attachment_peer_row(fs, peer, item, index)?;
+    if !fs
+        .rate_limiter
+        .check_and_consume(&format!("attach:{peer}"), None)
+    {
+        return Err(AppError::RateLimited(
+            "attachment rate limit exceeded".into(),
+        ));
+    }
+    crate::federated_attachments::ensure_attachment(fs, item, index).await?;
+    let row = attachment_peer_row(fs, peer, item, index)?;
+    let offset = usize::try_from(offset)
+        .map_err(|_| AppError::BadRequest("attachment offset is too large".into()))?;
+    let db = fs
+        .db
+        .lock()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    attachments::raw_range(
+        &db,
+        &row,
+        offset,
+        Some(length),
+        fs.max_body,
+        storage::now_epoch_secs(),
+    )
+}
+
+async fn fed_attachment_handler(
+    State(fs): State<Arc<FedState>>,
+    Extension(peer): Extension<Arc<AuthenticatedPeer>>,
+    AxumPath((item, index)): AxumPath<(String, usize)>,
+    Query(query): Query<AttachmentRangeQuery>,
+) -> Result<Response, AppError> {
+    let bytes = serve_attachment_bytes(
+        &fs,
+        &peer.name,
+        &item,
+        index,
+        query.offset.unwrap_or(0),
+        query.length.unwrap_or(fs.max_body),
+    )
+    .await?;
+    Ok((
+        StatusCode::OK,
+        [("content-type", "application/octet-stream")],
+        bytes,
+    )
+        .into_response())
+}
+
+async fn fed_attachment_answer_handler(
+    State(fs): State<Arc<FedState>>,
+    Extension(peer): Extension<Arc<AuthenticatedPeer>>,
+    AxumPath(query): AxumPath<String>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Response, AppError> {
+    let raw = headers
+        .get("content-type")
+        .is_some_and(|v| v == "application/octet-stream");
+    let limit = if raw { fs.max_body } else { 4096 };
+    if body.len() > limit {
+        return Err(AppError::PayloadTooLarge {
+            size: body.len(),
+            limit,
+        });
+    }
+    attachment_queries(&fs).answer(&query, &peer.name, &body, raw)?;
+    Ok(StatusCode::OK.into_response())
+}
+
+fn decode_attachment_error(error: WireErrorResponse) -> AppError {
+    match error.error.as_str() {
+        "denied" | "op_denied" => AppError::Denied(error.detail),
+        "gone" => AppError::GoneDetail(error.detail),
+        "not_found" => AppError::NotFoundDetail(error.detail),
+        "integrity" => AppError::Integrity(error.detail),
+        "rate_limited" => AppError::RateLimited(error.detail),
+        _ => AppError::Unavailable(error.detail),
+    }
+}
+
+pub async fn fetch_attachment_chunk(
+    fs: &FedState,
+    upstream: &str,
+    item: &str,
+    index: usize,
+    offset: u64,
+    length: usize,
+) -> Result<Vec<u8>, AppError> {
+    let peers = fs.current_peers();
+    let peer = peers
+        .get(upstream)
+        .ok_or_else(|| AppError::UnknownPeer(upstream.into()))?;
+    let length = length.min(fs.max_body);
+    if peer.leaf {
+        let queries = attachment_queries(fs);
+        let query = ulid::Ulid::new().to_string();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        queries
+            .waiting
+            .lock()
+            .unwrap()
+            .insert(query.clone(), (peer.name.clone(), length, tx));
+        queries
+            .pending
+            .lock()
+            .unwrap()
+            .entry(peer.name.clone())
+            .or_default()
+            .push(FedInboxItem::Attachment {
+                query: query.clone(),
+                item_id: item.into(),
+                index,
+                offset,
+                length,
+            });
+        let _ = fs.notify_tx.send(peer.name.clone());
+        struct Forget(Arc<AttachmentQueries>, String);
+        impl Drop for Forget {
+            fn drop(&mut self) {
+                self.0.forget(&self.1);
+            }
+        }
+        let _forget = Forget(queries, query);
+        return tokio::time::timeout(Duration::from_secs(120), rx)
+            .await
+            .map_err(|_| AppError::Unavailable("attachment upstream did not answer".into()))?
+            .map_err(|_| AppError::Unavailable("attachment upstream disconnected".into()))?;
+    }
+    let item_segment: String = item
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+                (byte as char).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect();
+    let uri = format!("/fed/v2/attachments/{item_segment}/{index}?offset={offset}&length={length}");
+    attachment_http(
+        fs,
+        peer,
+        "GET",
+        &uri,
+        Vec::new(),
+        "application/octet-stream",
+        length,
+    )
+    .await
+}
+
+async fn attachment_http(
+    fs: &FedState,
+    peer: &PeerConfig,
+    method: &str,
+    uri: &str,
+    body: Vec<u8>,
+    content_type: &str,
+    success_limit: usize,
+) -> Result<Vec<u8>, AppError> {
+    let request = async {
+        let connector = make_tls_connector_for_peer(fs, peer)?;
+        let tcp = tokio::net::TcpStream::connect(&peer.address)
+            .await
+            .map_err(|e| AppError::PeerUnreachable(e.to_string()))?;
+        let name = ServerName::try_from(peer.name.clone())
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let tls = connector
+            .connect(name, tcp)
+            .await
+            .map_err(|e| map_tls_connect_error(&peer.name, e))?;
+        let (mut sender, conn) =
+            hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls))
+                .await
+                .map_err(|e| AppError::PeerUnreachable(e.to_string()))?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        let req = hyper::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", &peer.name)
+            .header("content-type", content_type)
+            .body(http_body_util::Full::new(bytes::Bytes::from(body)))
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let resp = sender
+            .send_request(req)
+            .await
+            .map_err(|e| AppError::PeerUnreachable(e.to_string()))?;
+        let status = resp.status();
+        use http_body_util::BodyExt;
+        let bytes = http_body_util::Limited::new(
+            resp.into_body(),
+            if status.is_success() {
+                success_limit
+            } else {
+                fs.max_body.max(4096)
+            },
+        )
+        .collect()
+        .await
+        .map_err(|_| AppError::Integrity("attachment chunk exceeded requested bound".into()))?
+        .to_bytes();
+        if status.is_success() {
+            Ok(bytes.to_vec())
+        } else {
+            Err(serde_json::from_slice::<WireErrorResponse>(&bytes)
+                .map(decode_attachment_error)
+                .unwrap_or_else(|_| {
+                    AppError::Unavailable(format!("attachment upstream returned {status}"))
+                }))
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(120), request)
+        .await
+        .map_err(|_| AppError::Unavailable("attachment request timed out".into()))?
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn answer_attachment_query(
+    fs: &Arc<FedState>,
+    peer_key: &str,
+    query: &str,
+    item: &str,
+    index: usize,
+    offset: u64,
+    length: usize,
+) {
+    let answer = serve_attachment_bytes(fs, peer_key, item, index, offset, length).await;
+    let (body, content_type) = match answer {
+        Ok(bytes) => (bytes, "application/octet-stream"),
+        Err(error) => {
+            let (_, code) = error.code();
+            (
+                serde_json::to_vec(&json!({"error":code,"detail":error.to_string()}))
+                    .unwrap_or_default(),
+                "application/json",
+            )
+        }
+    };
+    let peers = fs.current_peers();
+    let Some(peer) = peers.get(peer_key) else {
+        return;
+    };
+    if let Err(error) = attachment_http(
+        fs,
+        peer,
+        "POST",
+        &format!("/fed/v2/attachment/{query}"),
+        body,
+        content_type,
+        fs.max_body,
+    )
+    .await
+    {
+        tracing::warn!(peer=%peer_key,"attachment answer failed: {error}");
+    }
+}
+
+fn attachment_expiry(fs: &FedState, created_at: i64) -> i64 {
+    created_at.saturating_add(i64::try_from(fs.reply_ttl.as_secs()).unwrap_or(i64::MAX))
+}
+
+pub(crate) fn check_received_refs(
+    fs: &FedState,
+    item: &str,
+    refs: &[AttachmentRef],
+) -> Result<(), AppError> {
+    if attachments::normalize_refs(refs, fs.max_attachment_bytes)? != refs {
+        return Err(AppError::BadRequest(
+            "attachment refs must be canonical".into(),
+        ));
+    }
+    let db = fs
+        .db
+        .lock()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let existing = storage::get_message(&db, item)
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .is_some()
+        || storage::get_reply_by_pushed_id(&db, item)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .is_some();
+    if existing {
+        let held: Vec<_> = attachments::list_rows(&db, item)?
+            .into_iter()
+            .map(|r| r.attachment)
+            .collect();
+        if held != refs {
+            return Err(AppError::Conflict(
+                "item already has different attachments".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn received_refs(
+    fs: &FedState,
+    db: &rusqlite::Connection,
+    item: &str,
+    refs: &[AttachmentRef],
+    upstream: &str,
+    downstream: &str,
+    created_at: i64,
+) -> Result<(), AppError> {
+    if attachments::normalize_refs(refs, fs.max_attachment_bytes)? != refs {
+        return Err(AppError::BadRequest(
+            "attachment refs must be canonical".into(),
+        ));
+    }
+    let held = attachments::list_rows(db, item)?;
+    if !held.is_empty() {
+        if held.iter().map(|row| &row.attachment).ne(refs.iter())
+            || held.iter().any(|row| {
+                row.upstream != upstream || (!downstream.is_empty() && row.downstream != downstream)
+            })
+        {
+            return Err(AppError::Conflict(
+                "item already has different attachment provenance".into(),
+            ));
+        }
+        return Ok(());
+    }
+    attachments::insert_rows(
+        db,
+        item,
+        refs,
+        attachment_expiry(fs, created_at),
+        upstream,
+        downstream,
+    )
+}
+
+fn attachment_egress(
+    fs: &FedState,
+    item: &str,
+    refs: &[AttachmentRef],
+    downstream: &str,
+) -> Result<(), AppError> {
+    let db = fs
+        .db
+        .lock()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let held = attachments::list_rows(&db, item)?;
+    if held.iter().map(|r| &r.attachment).ne(refs.iter()) {
+        return Err(AppError::Conflict(
+            "outbound attachment refs do not match item".into(),
+        ));
+    }
+    db.execute(
+        "UPDATE attachments SET downstream=?2 WHERE item_id=?1",
+        rusqlite::params![item, downstream],
+    )
+    .map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(())
+}
+
+impl AttachmentQueries {
+    fn answer(&self, query: &str, peer: &str, body: &[u8], raw: bool) -> Result<(), AppError> {
+        let mut waiting = self.waiting.lock().unwrap();
+        if !waiting
+            .get(query)
+            .is_some_and(|(asked, _, _)| asked == peer)
+        {
+            return Err(AppError::NotFoundDetail(
+                "attachment query not found".into(),
+            ));
+        }
+        let answer = if raw {
+            if body.len() > waiting.get(query).unwrap().1 {
+                Err(AppError::Integrity(
+                    "attachment chunk exceeded requested bound".into(),
+                ))
+            } else {
+                Ok(body.to_vec())
+            }
+        } else {
+            let error: WireErrorResponse = serde_json::from_slice(body)
+                .map_err(|_| AppError::BadRequest("invalid attachment answer".into()))?;
+            Err(decode_attachment_error(error))
+        };
+        let (_, _, tx) = waiting.remove(query).unwrap();
+        let _ = tx.send(answer);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod attachment_query_tests {
+    use super::*;
+
+    fn waiting(
+        queries: &AttachmentQueries,
+        query: &str,
+        length: usize,
+    ) -> tokio::sync::oneshot::Receiver<Result<Vec<u8>, AppError>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        queries
+            .waiting
+            .lock()
+            .unwrap()
+            .insert(query.into(), ("origin".into(), length, tx));
+        rx
+    }
+
+    #[tokio::test]
+    async fn attachment_answer_is_bound_to_asked_peer_and_consumed_once() {
+        let queries = AttachmentQueries::default();
+        let mut rx = waiting(&queries, "q", 4);
+        assert!(matches!(
+            queries.answer("q", "other", b"body", true),
+            Err(AppError::NotFoundDetail(_))
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        queries.answer("q", "origin", b"body", true).unwrap();
+        assert_eq!(rx.await.unwrap().unwrap(), b"body");
+        assert!(matches!(
+            queries.answer("q", "origin", b"body", true),
+            Err(AppError::NotFoundDetail(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn attachment_answer_bound_and_upstream_errors_reach_waiter() {
+        let queries = AttachmentQueries::default();
+        let rx = waiting(&queries, "large", 3);
+        queries.answer("large", "origin", b"body", true).unwrap();
+        assert!(matches!(rx.await.unwrap(), Err(AppError::Integrity(_))));
+        let rx = waiting(&queries, "gone", 1);
+        queries
+            .answer(
+                "gone",
+                "origin",
+                br#"{"error":"gone","detail":"expired"}"#,
+                false,
+            )
+            .unwrap();
+        assert!(matches!(rx.await.unwrap(), Err(AppError::GoneDetail(_))));
+    }
+
+    #[tokio::test]
+    async fn forgetting_attachment_query_removes_pending_and_waiter() {
+        let queries = AttachmentQueries::default();
+        let rx = waiting(&queries, "q", 4);
+        queries.pending.lock().unwrap().insert(
+            "origin".into(),
+            vec![FedInboxItem::Attachment {
+                query: "q".into(),
+                item_id: "item".into(),
+                index: 0,
+                offset: 0,
+                length: 4,
+            }],
+        );
+        queries.forget("q");
+        assert!(queries.next_for("origin").is_none());
+        assert!(rx.await.is_err());
+        assert!(queries.waiting.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_attachment_refs_leave_legacy_wire_unchanged() {
+        let original = json!({"v":2,"id":"item","origin":{"label":"cli","node":"origin"},"to":{"ref":"target"},"body":"text","thread_id":"item","created_at":1});
+        let envelope = FedEnvelope {
+            v: 2,
+            id: "item".into(),
+            origin: storage::Origin::anonymous("cli", "origin"),
+            to: FedTarget {
+                r#ref: "target".into(),
+            },
+            body: "text".into(),
+            thread_id: "item".into(),
+            created_at: 1,
+            forwarded: None,
+            attachments: Vec::new(),
+        };
+        let value = serde_json::to_value(&envelope).unwrap();
+        assert!(value.get("attachments").is_none());
+        let restored: FedEnvelope = serde_json::from_value(value.clone()).unwrap();
+        assert!(restored.attachments.is_empty());
+        assert_eq!(serde_json::to_value(restored).unwrap(), value);
+        assert_eq!(original, value);
     }
 }

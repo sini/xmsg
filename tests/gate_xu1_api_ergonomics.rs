@@ -163,6 +163,7 @@ async fn create_node(
     let svc_store = new_svc_store();
 
     let fed_state = Arc::new(FedState {
+        max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: name.to_string(),
         peers: (peers_arc).into(),
         cert_der,
