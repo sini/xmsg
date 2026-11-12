@@ -53,6 +53,25 @@ Live outbound reservation recovery is also scoped to its grant and registered se
 
 See the gateway's [profile reference and cutover example](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/auth-profiles.md) before configuring a migration. Acceptance of an issuer is separate from permission to read custody, subscribe to Events or send messages.
 
+## Events callback hosts
+
+**Planned, not yet released.** The gateway's optional `events.webhook_allowed_hosts`
+limits subscribe/renew callbacks to exact DNS hostnames. For example, configure
+`"webhook_allowed_hosts": ["receiver.example.com"]` inside the complete Events
+configuration, replacing the example with the approved observed receiver host.
+There are no wildcards. An empty list refuses all callbacks. An absent or `null`
+list is permissive, keeps today's behavior and warns at startup; it is not SSRF
+protection. HTTPS, public-address validation, connection pinning and redirect
+refusal remain separate transport checks.
+
+At subscribe/renew, the gateway logs the normalized callback host only, with no
+scheme, port, path, query or signing secret. Operators can observe that host before
+setting the list; the gateway assumes no ChatGPT hostname pattern. An off-list
+host is refused before callback verification or network I/O and leaves the active
+subscription unchanged. Changing the list does not retroactively stop an existing
+subscription; use the gateway's owner controls when that is required. See the
+[gateway Events reference](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/events.md).
+
 ## Source and setup
 
 - [Gateway repository and profiles](https://github.com/sini/xmsg-mcp-gateway).
