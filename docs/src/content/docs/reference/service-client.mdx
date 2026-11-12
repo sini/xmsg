@@ -3,23 +3,24 @@ title: Daemon Protocol & Rust Client
 description: Registering headless services over register.sock and using the xmsg::client Rust library.
 ---
 
-Headless daemons and service bridges (such as `matrix-xmsg`, `genie-guard`, and `xmsg-mcp-gateway`)
-connect to `xmsg` as attested services (`<name>@<node>`) over `register.sock` and `agent.sock`.
+Headless daemons and service bridges, such as `matrix-xmsg`, `genie-guard` and
+`xmsg-mcp-gateway`, connect to `xmsg` as attested [services](/glossary/#service)
+(`<name>@<node>`). They use `register.sock` and `agent.sock`.
 
 ## Service wire protocol (`register.sock`)
 
-To prevent arbitrary processes from squatting service names, `xmsg serve` requires
-`--svc-exe <NAME>=<PATH>` (or `XMSG_SVC_EXE`) on host nodes, or `--leaf --leaf-principal svc:<NAME>`
-in container leaf mode.
+A random process must not take a service name. Thus `xmsg serve` needs
+`--svc-exe <NAME>=<PATH>` (or `XMSG_SVC_EXE`) on host nodes. In container leaf mode, it needs
+`--leaf --leaf-principal svc:<NAME>`.
 
 1. **Registration frame:**
    The service connects to `$XDG_RUNTIME_DIR/xmsg/register.sock` and sends:
    ```json
    { "harness": "svc", "name": "genie-expert", "cwd": "/optional/working/dir" }
    ```
-   `xmsg` verifies the peer UID (`peer_uid == server_uid`) and the canonical executable path
-   (`/proc/<pid>/exe` on Linux, `proc_pidpath` on macOS), then
-   answers with the service address, node name, and effective server limits:
+   `xmsg` checks the peer UID (`peer_uid == server_uid`) and the canonical executable path
+   (`/proc/<pid>/exe` on Linux, `proc_pidpath` on macOS). Then it answers with the service
+   address, the node name and the effective server limits:
    ```json
    {
      "status": "ok",
@@ -35,7 +36,7 @@ in container leaf mode.
    ```json
    { "action": "poll", "waitSecs": 30 }
    ```
-   Returns either `{"action": "timeout"}` or a delivery frame with structured `origin` attestation:
+   Returns `{"action": "timeout"}`, or a delivery frame with a structured `origin` attestation:
    ```json
    {
      "action": "deliver",
@@ -58,49 +59,51 @@ in container leaf mode.
    ```json
    { "action": "reply", "messageId": "01M4FG...", "text": "Done.", "idempotencyKey": "opt-key" }
    ```
-   A message's queue row is marked `delivered` only when `ack` is received. `xmsg` tracks
-   `in_flight` message IDs per connection so pipelined polls receive the next queued message in
-   FIFO order, and any unacknowledged messages redeliver if the connection drops.
+   xmsg marks a message's queue row `delivered` only when it gets the `ack`. `xmsg` records the
+   `in_flight` message IDs of each connection. Thus pipelined polls get the next queued message in
+   FIFO order. If the connection drops, xmsg delivers each unacknowledged message again.
 
 ---
 
 ## Rust service client (`xmsg::client`)
 
-External Rust services can depend on `xmsg` with `default-features = false, features = ["client"]`
-(which pulls in 23 packages instead of the full 176-package daemon graph) to use the validated
-`xmsg::client` transport:
+An external Rust service can use the validated `xmsg::client` transport. Add `xmsg` as a
+dependency with `default-features = false, features = ["client"]`. This pulls in 23 packages, not
+the full daemon graph of 176 packages:
 
 ```rust file=<rootDir>/src/client/mod.rs#L107-L169
 ```
 
 ### Registration and `AgentClient`
 
-- **Registering (`RegisteredService::register(ClientOptions)`):** Checks socket-directory ownership
-  and mode (`0700`), socket ownership and mode (`0600`), peer UID (`SO_PEERCRED` / `getpeereid`),
-  and verifies that the returned address equals `<service>@<reported-node>` (and matches
-  `expected_node` when `Some(node)` is configured).
-- **Concurrent agent operations (`agent_client()`):** Keep `RegisteredService` alive for `poll` and
-  `ack`. Calling `registered.agent_client()` returns a clonable `AgentClient` handle for `list`,
-  `send`, and `reply` over `agent.sock` (using schema version 2 frames) without serializing behind
-  an active long-poll.
-- **Authorization boundary:** `Delivery::origin()` exposes the validated `Origin` (`id`, `service`,
-  `node`, `label`). Display fields (`from_name`, `envelope`, `label`) are never promoted to
-  authenticated identity; callers must authorize on `origin().service`, `origin().id`, and
-  `origin().node`, and call `ack` only after recording the delivery durably.
+- **Registering (`RegisteredService::register(ClientOptions)`):** Checks these things:
+  - the owner and mode of the socket directory (`0700`);
+  - the owner and mode of the socket (`0600`);
+  - the peer UID (`SO_PEERCRED` / `getpeereid`);
+  - that the returned address is `<service>@<reported-node>`. When `expected_node` is
+    `Some(node)`, the node must also match it.
+- **Concurrent agent operations (`agent_client()`):** Keep `RegisteredService` alive for `poll`
+  and `ack`. `registered.agent_client()` returns a clonable `AgentClient` handle for `list`,
+  `send` and `reply` over `agent.sock` (with schema version 2 frames). These calls do not wait
+  for an active long-poll.
+- **Authorization boundary:** `Delivery::origin()` gives the validated `Origin` (`id`, `service`,
+  `node`, `label`). The display fields (`from_name`, `envelope`, `label`) never become
+  authenticated identity. Callers must authorize on `origin().service`, `origin().id` and
+  `origin().node`. They must call `ack` only after they record the delivery durably.
 
 ### Nonblocking registration health (`health()`)
 
-Both `RegisteredService::health()` and `AgentClient::health()` return a point-in-time,
-nonblocking, non-consuming snapshot of the registration socket under a short descriptor-lifetime
-mutex:
+`RegisteredService::health()` and `AgentClient::health()` both return a snapshot of the
+registration socket at one point in time. The call does not block and does not consume data. It
+holds a short descriptor-lifetime mutex:
 
-- On Linux, performs 2 nonblocking syscalls: zero-timeout `poll` plus a 1-byte
+- On Linux, it makes 2 nonblocking syscalls: a zero-timeout `poll` and a 1-byte
   `recv(MSG_PEEK | MSG_DONTWAIT)`.
-- On macOS, performs 4 nonblocking syscalls: `kqueue`, zero-timeout `kevent` checking `EV_EOF`,
-  `close`, plus `recv(MSG_PEEK | MSG_DONTWAIT)`.
-- Peer close or write-half shutdown returns `ClientError::Disconnected`, even when unread bytes
-  precede EOF.
-- `AgentClient` operations check `health()` before submitting a frame on `agent.sock` and recheck
-  it after any I/O error or timeout. When a post-failure recheck returns
-  `ClientError::Disconnected`, request submission remains unknown, so callers retrying a mutation
-  after reconnecting must reuse their stored `idempotency_key`.
+- On macOS, it makes 4 nonblocking syscalls: `kqueue`, a zero-timeout `kevent` that checks
+  `EV_EOF`, `close`, and `recv(MSG_PEEK | MSG_DONTWAIT)`.
+- When the peer closes, or shuts down its write half, the call returns
+  `ClientError::Disconnected`. This is also true when unread bytes come before EOF.
+- `AgentClient` operations check `health()` before they send a frame on `agent.sock`. They check
+  it again after an I/O error or a timeout. If that second check returns
+  `ClientError::Disconnected`, it is not known if the request was sent. Thus a caller that retries
+  a mutation after it connects again must use its stored `idempotency_key` again.

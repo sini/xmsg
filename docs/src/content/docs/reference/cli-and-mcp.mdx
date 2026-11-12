@@ -13,9 +13,9 @@ The `xmsg` binary exposes `list`, `send`, `replies`, `show`, `service`, `serve`,
 
 ### Operator commands
 
-These commands use the daemon's existing HTTP Unix socket, on Linux and macOS.
-Pass `--http-sock PATH` to any operator command or set `XMSG_HTTP_SOCK`; otherwise
-the CLI uses the daemon's runtime-directory default, including the macOS fallback.
+These commands use the daemon's HTTP Unix socket, on Linux and macOS. To select the socket, pass
+`--http-sock PATH` to the command or set `XMSG_HTTP_SOCK`. Otherwise the CLI uses the daemon's
+runtime-directory default, which includes the macOS fallback.
 
 ```bash
 xmsg list [--node NODE] [--kind service|instance|subagent] [--status live|inactive] [--json]
@@ -24,74 +24,74 @@ xmsg replies MESSAGE_ID [--wait SECONDS] [--json]
 xmsg show MESSAGE_ID [--json]
 ```
 
-- `list` prints a recipient table with address, kind, label, status, and node, followed
-  by the nodes' status. The default is live recipients; filters narrow the daemon's view.
-- `send` prints the message ID, outcome, and resolved recipient address. `-` or omitted
-  text reads stdin through EOF, preserving newlines. An idempotency key reuses the same
-  send for identical sender, recipient, and text; requests are not automatically retried.
-  Outcomes are `delivered`, `queued`, or `pending`;
-  `pending` means the daemon has not reported a final delivery outcome.
-- `replies` prints stored reply records, optionally waiting `0..60` seconds for the first
-  reply. `show` prints message metadata and replies. Both use formatted JSON by default.
+- `list` prints a recipient table with the address, kind, label, status and node. Then it
+  prints the status of the nodes. By default, it shows live recipients. Filters make the
+  daemon's view smaller.
+- `send` prints the message ID, the outcome and the resolved recipient address. With `-`, or with
+  no text, it reads stdin until EOF and keeps the newlines. An idempotency key uses the same send
+  again for the same sender, recipient and text. The CLI does not retry requests automatically.
+  The outcomes are `delivered`, `queued` and `pending`. `pending` means that the daemon has not
+  reported a final delivery outcome.
+- `replies` prints the stored reply records. It can wait `0..60` seconds for the first reply.
+  `show` prints the message metadata and the replies. By default, both print formatted JSON.
 
-`--json` emits the server's response as compact JSON on one line, preserving its field
-names and object/array shape. Refusals exit non-zero and retain the server error code;
-JSON mode also writes the server's error object to stdout.
+`--json` writes the server's response as compact JSON on one line. It keeps the field names and
+the object and array shape. A refusal exits non-zero and keeps the server error code. In JSON
+mode, the CLI also writes the server's error object to stdout.
 
-`--from` is a plain display label, defaulting to `cli`; values containing `@` or `/` are
-rejected. An ordinary shell caller is anonymous and appears as `cli · anon@node`.
-The daemon's existing attribution and authorization rules apply to traced callers.
-Writing a reply from an anonymous
-shell is not an operator CLI command; agents and registered services use their existing
-reply interfaces.
+`--from` is a plain display label. The default is `cli`. The CLI refuses a value that contains
+`@` or `/`. An ordinary shell caller is [anonymous](/glossary/#anonymous-sender) and shows as
+`cli · anon@node`. The daemon's attribution and authorization rules apply to traced callers.
+There is no operator CLI command to reply from an anonymous shell. Agents and registered services
+use their own reply interfaces.
 
 
 ### `xmsg service exec`
 
-Runs an optional ordinary service over the daemon's existing registration and agent
-sockets. Nothing starts automatically or changes the daemon's normal behavior.
+Runs an optional ordinary service over the daemon's registration and agent sockets. Nothing
+starts automatically. The daemon's normal behavior does not change.
 
 ```bash
 xmsg service exec --name agent-quota -- agent-quota --json
 xmsg service exec --name snapshot --timeout-ms 2000 --max-output-bytes 65536 -- /path/to/producer --json
 ```
 
-`--register-sock` or `XMSG_REGISTER_SOCK` selects the registration socket, otherwise
-the daemon's runtime-directory default is used. `--agent-sock` or `XMSG_AGENT_SOCK`
-selects the agent socket, otherwise it is beside the registration socket.
-Explicit socket paths must be absolute.
-The daemon applies its ordinary service registration, executable and peer-access rules.
+`--register-sock` or `XMSG_REGISTER_SOCK` selects the registration socket. Otherwise the runner
+uses the daemon's runtime-directory default. `--agent-sock` or `XMSG_AGENT_SOCK` selects the agent
+socket. Otherwise the agent socket is next to the registration socket. An explicit socket path
+must be absolute. The daemon applies its ordinary rules for service registration, executables and
+peer access.
 
-Each delivered request runs the fixed program and literal arguments after `--`.
-Request text is ignored, the program receives no stdin, and stderr is discarded.
-Successful UTF-8 stdout is the reply, unchanged, including whitespace. Configure a
-command whose stdout is intended for its requesters; the runner adds no environment
-dump or child diagnostics to responses.
+Each delivered request runs the fixed program and the literal arguments after `--`. The runner
+ignores the request text. The program gets no stdin. The runner discards stderr. On success, the
+UTF-8 stdout is the reply, unchanged, with its whitespace. Configure a command whose stdout is
+meant for its requesters. The runner adds no environment dump and no child diagnostics to
+responses.
 
-The default runtime bound is `75000` milliseconds. The default stdout limit is
-`65536` bytes; `--max-output-bytes` accepts `64` through `1048576` and is also capped by the
-daemon's reported message limit. Timeout or output overflow kills and waits for the
-owned child. Spawn, I/O or nonzero-exit failure, empty stdout, and invalid UTF-8 produce
-one static JSON response instead:
+The default time limit is `75000` milliseconds. The default stdout limit is `65536` bytes.
+`--max-output-bytes` accepts `64` through `1048576`. The daemon's reported message limit is also a
+maximum. On a timeout or an output overflow, the runner kills the owned child and waits for it.
+These failures give one static JSON response: a spawn, I/O or nonzero-exit failure, empty stdout,
+and UTF-8 that is not valid:
 
 ```json
 {"status":"unknown","error":"timeout"}
 ```
 
-Other error codes are `output_limit`, `command_failed`, `empty_output`, and
-`invalid_utf8`. No quota or other producer value is guessed on failure.
+The other error codes are `output_limit`, `command_failed`, `empty_output` and `invalid_utf8`.
+On a failure, the runner does not guess a quota or another producer value.
 
-The runner replies with a stable per-message idempotency key, then ACKs the request.
-It retains one pending response across transport reconnects and retries an uncertain
-reply with the same key and bytes. Commands must tolerate re-execution after a process
-crash; pending responses are retained in memory. Interrupt and termination signals
-stop the runner and reap an active owned command.
-Permanent daemon refusals and configuration/trust failures exit non-zero with a
-content-free diagnostic instead of retrying the same rejected response indefinitely.
+The runner replies with a stable idempotency key for each message. Then it ACKs the request.
+It keeps one pending response across transport reconnects. It retries an uncertain reply with the
+same key and bytes. The runner keeps pending responses in memory. Thus a command must be safe to
+run again after a process crash. Interrupt and termination signals stop the runner and reap an
+active owned command. A permanent daemon refusal, or a configuration or trust failure, makes the
+runner exit non-zero with a diagnostic that has no content. The runner does not retry the same
+refused response without end.
 
-For quota service use, the producer owns account hashes, measurement age, missing/stale
-readings and the JSON schema. The transport relays that output as supplied; per-user
-installation and enabling remain deployment configuration.
+For a quota service, the producer owns the account hashes, the measurement age, missing or
+stale readings, and the JSON schema. The transport relays that output as it is. Installation and
+enablement for each user are deployment configuration.
 
 ### `xmsg serve`
 
@@ -117,10 +117,9 @@ Registers credentials or handles lifecycle hooks for [Antigravity](/harnesses/an
 
 ### `xmsg check-peers`
 
-Validates a `peers.json` file against all naming, trust-model (`pin` vs. `ca` + `identities`), and
-non-overlap rules that `xmsg serve` enforces, exiting `0` on success or non-zero naming the failure:
-
-Use it in CI or before a deploy.
+Validates a `peers.json` file against the rules that `xmsg serve` enforces: naming, the trust
+model (`pin` or `ca` + `identities`) and non-overlap. It exits `0` on success. On a failure, it
+exits non-zero and names the failure. Use it in CI or before a deploy:
 
 ```bash
 xmsg check-peers /path/to/peers.json --fed-cert /path/to/node.crt
@@ -130,16 +129,17 @@ xmsg check-peers /path/to/peers.json --fed-cert /path/to/node.crt
 
 ## MCP server tools (`xmsg mcp`)
 
-`xmsg mcp` exposes five tools over stdio JSON-RPC (or `[reply, replies]` when started with
-`--reply-only` / `XMSG_REPLY_ONLY=1`):
+`xmsg mcp` gives five tools over stdio JSON-RPC. With `--reply-only` / `XMSG_REPLY_ONLY=1`, it
+gives only `reply` and `replies`:
 
 ### `list(name?, node?, kind?, status?, within?)`
 
 Lists recipients the caller may see on this node and every reachable peer:
 
-- **`status`:** `"live"` (default, each entry carries `registered_at` in epoch seconds) or
-  `"inactive"` (shows `parked` and `closed` instances seen within `within` seconds, default
-  `86400` = 24 hours, capped at the reply TTL, each carrying `last_seen`).
+- **`status`:** `"live"` or `"inactive"`.
+  - `"live"` is the default. Each entry has `registered_at`, in epoch seconds.
+  - `"inactive"` shows the `parked` and `closed` instances that xmsg saw within `within` seconds.
+    The default is `86400` (24 hours). The maximum is the reply TTL. Each entry has `last_seen`.
 - **`kind`:** Filter by `"service"`, `"instance"`, or `"subagent"`.
 - **`name`:** Filter by service name or instance label.
 - **`node`:** An exact canonical name or local nickname queries one node. A bare-host selector queries all matching nodes in the current view; see [node selectors](/concepts/addressing/#node-selectors).
@@ -149,30 +149,31 @@ Lists recipients the caller may see on this node and every reachable peer:
 
 Sends a message to `<id or name>[@<node>]` (at most one `@`):
 
-- **`to`:** An instance UUID (optionally `~n`), a delegated sub-address (`<P>/<child>`), a service
-  name, or a unique live instance label, optionally followed by `@node`. Passing `ref`, `from`, or a
-  label containing `' · '` is refused with a migration hint.
-- **`as_agent`:** Set automatically by the harness `PreToolUse` hook when called by a subagent.
+- **`to`:** An instance UUID (with an optional `~n`), a delegated sub-address (`<P>/<child>`), a
+  service name, or a unique live instance label. `@node` can follow it. xmsg refuses `ref`, `from`
+  and a label that contains `' · '`, with a migration hint.
+- **`as_agent`:** When a subagent calls the tool, the harness `PreToolUse` hook sets it
+  automatically.
 - **Returns:** `{ message_id, address, outcome }` where `outcome` is `"delivered"`, `"queued"`, or `"pending"`.
   Use the returned `address` for follow-ups.
 
 ### `reply(message_id, text, as_agent?)`
 
-Answers `message_id`'s other party symmetrically (if you received the message, answers the sender;
-if you sent it, sends a follow-up to the recipient in the same exchange):
+Answers the other party of `message_id`. If you received the message, the reply goes to the
+sender. If you sent it, the reply is a follow-up to the recipient in the same exchange:
 
 - **Returns:** `{ bytes, messageId, inReplyTo, outcome }`, where `messageId` is the new reply's
   ULID and `inReplyTo` is `message_id`.
 
 ### `replies(message_id, wait?)`
 
-Reads stored replies to `message_id`, optionally waiting up to `wait` seconds (clamped to `0..=60`)
-for the first reply.
+Reads the stored replies to `message_id`. It can wait up to `wait` seconds (`0..=60`) for the
+first reply.
 
 ### `inbox(wait?, as_agent?)`
 
-Drains unexpired messages queued for a bound subagent's `<P>/<child>@<node>` turn mailbox while its
-turn is active, waiting up to `wait` seconds (clamped to `0..=60`) for the first message, and marks
-drained messages `delivered`:
+During a bound subagent's active turn, reads the messages in its `<P>/<child>@<node>`
+[turn mailbox](/glossary/#turn-mailbox) that have not expired. It can wait up to `wait` seconds
+(`0..=60`) for the first message. It marks each message that it reads `delivered`:
 
 - **Returns:** `{ address, messages: [{ id, from, body, created_at }] }`.

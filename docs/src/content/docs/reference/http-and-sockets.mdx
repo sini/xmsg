@@ -3,17 +3,17 @@ title: HTTP API & Unix Sockets
 description: Wire reference for http.sock, agent.sock, register.sock, /fed/v2 routes, and the unified error vocabulary.
 ---
 
-`xmsg serve` exposes three local Unix domain sockets in `$XDG_RUNTIME_DIR/xmsg/` (mode `0600` inside
-a `0700` directory) and, when federation is enabled, an mTLS listener serving `/fed/v2/*`. Every
-JSON request body or socket frame refuses unknown fields with `bad_request` naming the unknown
-fields.
+`xmsg serve` has three local Unix domain sockets in `$XDG_RUNTIME_DIR/xmsg/`. Each socket has
+mode `0600`, in a `0700` directory. With federation, it also has an mTLS listener for
+`/fed/v2/*`. Each JSON request body and socket frame refuses unknown fields. The error is
+`bad_request`, and it names the unknown fields.
 
 ## `http.sock` & HTTP API routes
 
-By default, HTTP is served exclusively over `$XDG_RUNTIME_DIR/xmsg/http.sock`. Callers whose
-process ancestry traces to a registered session or service act as that sender; untraced callers are
-**anonymous** (`<from> · anon@<node>`), may send and read replies by `message_id`, and cannot call
-`reply` (`403 denied`).
+By default, xmsg serves HTTP only on `$XDG_RUNTIME_DIR/xmsg/http.sock`. A caller whose process
+ancestry traces to a registered session or service acts as that sender. Other callers are
+**[anonymous](/glossary/#anonymous-sender)** (`<from> · anon@<node>`). An anonymous caller can
+send, and can read replies by `message_id`. It cannot call `reply` (`403 denied`).
 
 ```bash
 sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/xmsg/http.sock"
@@ -46,8 +46,8 @@ curl -s --unix-socket "$sock" "http://localhost/v1/messages/<message_id>/replies
 
 ## `agent.sock` frames
 
-Line-delimited JSON protocol used by `xmsg mcp`, hook handlers, the Pi extension, and the Rust
-service client's `AgentClient`:
+A line-delimited JSON protocol. `xmsg mcp`, the hook handlers, the Pi extension and the Rust
+service client's `AgentClient` use it:
 
 | Request Frame | Response Frame |
 |---|---|
@@ -65,15 +65,20 @@ service client's `AgentClient`:
 
 ## `register.sock` frames
 
-Used by Antigravity credential registration, Pi long-polling, headless `svc` daemons (see
-[Daemon Protocol & Rust Client](/reference/service-client/)), and multiplexed plugin harnesses
-([opencode](/harnesses/opencode/) and [Hermes](/harnesses/hermes/)).
+These clients use `register.sock`:
+
+- Antigravity credential registration;
+- Pi long-polling;
+- headless `svc` daemons (see [Daemon Protocol & Rust Client](/reference/service-client/));
+- multiplexed plugin harnesses ([opencode](/harnesses/opencode/) and
+  [Hermes](/harnesses/hermes/)).
 
 ### Multiplexed plugin protocol (`opencode`, `hermes`)
 
-The plugin opens `register.sock` with `{"harness":"opencode"}` or `{"harness":"hermes"}` (answered
-`{"status":"ok","node":"<node>"}`). Subsequent frames carry a `request_id` echoed in the response,
-allowing tool calls to be answered while a `poll` is pending on the same connection:
+The plugin opens `register.sock` with `{"harness":"opencode"}` or `{"harness":"hermes"}`. The
+answer is `{"status":"ok","node":"<node>"}`. Each later frame has a `request_id`, and the response
+has the same `request_id`. Thus xmsg can answer tool calls while a `poll` waits on the same
+connection:
 
 | Frame | Response |
 |---|---|
@@ -89,7 +94,8 @@ allowing tool calls to be answered while a `poll` is pending on the same connect
 
 ## Federated `/fed/v2` wire routes
 
-Served only on the mTLS `--fed-listen` listener (isolated from local loopback routes):
+Only the mTLS `--fed-listen` listener serves these routes. They are separate from the local
+loopback routes:
 
 | Route | Method | Description |
 |---|---|---|
@@ -101,32 +107,33 @@ Served only on the mTLS `--fed-listen` listener (isolated from local loopback ro
 | `/fed/v2/list/{query}` | `POST` | Posts a leaf or outbound-linked node's answer to a mailbox `list` query. |
 | `/fed/v2/handoff`, `/fed/v2/handoff/ack` | `POST` | Transfers and acknowledges a parked Claude conversation queue across a user's machines. |
 
-Mailbox pulls and ACKs require the authenticated peer to have `leaf: true` on the hub;
-each peer can access only its own mailbox. The `inbox` string in `allow` is accepted
-and ignored; old configurations listing it still load.
+For mailbox pulls and ACKs, the authenticated peer must have `leaf: true` on the hub. Each peer
+can access only its own mailbox. xmsg accepts the `inbox` string in `allow` and ignores it. Thus
+old configurations that list it still load.
 
-Planned (unreleased): full nodes with outbound links require `relayed` (or `relay`)
-when a pulled message's origin differs from the hub's canonical node name. A refused
-item produces a strict `{"error":"denied","detail":"..."}` reply and is ACKed at the
-hub, so it cannot block later mailbox items. Direct hub-origin mail remains deliverable
-without this grant. This uses existing origin fields and changes no wire shape.
+A full node with an outbound link needs `relayed` (or `relay`) when a pulled message's origin is
+not the hub's canonical node name. A refused item gets a strict
+`{"error":"denied","detail":"..."}` reply, and the node ACKs it at the hub. Thus it cannot block
+later mailbox items. Mail that starts on the hub itself is delivered without this grant. The
+check uses the existing origin fields and does not change the wire shape. It is on the main
+branch and is not yet in a release.
 
 ---
 
 ## Error vocabulary
 
-Every surface reports errors using the same codes (`{"error": <code>, "detail": …}` on HTTP,
-`{"status":"error","error": <code>,"detail": …}` on sockets):
+Each surface uses the same error codes. HTTP uses `{"error": <code>, "detail": …}`. Sockets use
+`{"status":"error","error": <code>,"detail": …}`:
 
 - **Addressing:**
   - `not_found` (`404`): No such recipient, message, or node.
   - `ambiguous` (`409`): Multiple recipients match; `detail` lists every candidate address.
-  - `denied` (`403`): Refused by peer rights (`allow`, `principals`, `targets`, `from`), non-party
-    `reply`, or unauthorized hub forward.
-  - `gone` (`410`): Process-bound session (`pi`, released `opencode`/`hermes`, or exited `X~n` fork)
-    has exited.
-  - `unavailable` (`503`): A node in the federated view could not be reached during bare-reference
-    resolution (`detail` names the node).
+  - `denied` (`403`): Peer rights (`allow`, `principals`, `targets`, `from`) refused the request,
+    a caller that is not a party called `reply`, or a hub forward was not authorized.
+  - `gone` (`410`): A process-bound session has exited: `pi`, a released `opencode`/`hermes`
+    session, or an exited `X~n` fork.
+  - `unavailable` (`503`): During bare-reference resolution, xmsg could not reach a node in the
+    federated view. `detail` names the node.
   - `not_live` (`409`, node-to-node): A cache-routed send reached a node where the instance is now
     only `parked`.
   - `live_elsewhere` (`409`): A reclaim names an instance ID that is live on another connection.
