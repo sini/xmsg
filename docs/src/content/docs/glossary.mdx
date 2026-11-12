@@ -51,6 +51,11 @@ A peer entry with `"default_route": true`. xmsg sends a message for an unknown e
 `ref@node` destination to this peer. At most one entry can be the default route. See
 [forwarding through a hub](/concepts/hubs-and-leaves/#forwarding-through-a-hub).
 
+### dial-out client
+
+A peer that connects to this node and pulls its mailbox here: a [leaf](#leaf), or a full node
+with an [outbound link](#outbound-link). On this node, its entry has `"leaf": true`.
+
 ## E
 
 ### Events
@@ -109,6 +114,11 @@ parked Claude Code conversation becomes live on the other node. See
 
 The program that runs a model and its tools, such as Claude Code, Codex, Antigravity, opencode,
 Hermes or Pi. A harness can run many [sessions](#session).
+
+### hosted dot
+
+A hosted MCP client, such as a model in ChatGPT. It reaches the bus through the
+[gateway](#gateway).
 
 ### http.sock
 

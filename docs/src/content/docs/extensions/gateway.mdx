@@ -3,10 +3,10 @@ title: Hosted models with xmsg-mcp-gateway
 description: Connect a hosted MCP client through OAuth, explicit grants, owner-set outbound policy and optional Events wake hints.
 ---
 
-[xmsg-mcp-gateway](https://github.com/sini/xmsg-mcp-gateway) is a separate Rust service that
+[xmsg-mcp-gateway](https://github.com/sini/xmsg-mcp-gateway) is a separate Rust service. It
 connects hosted MCP clients to an xmsg node over the local
-[Rust service client](/reference/service-client/). The gateway handles the outside HTTPS/OAuth
-edge; its adjacent xmsg node handles bus identity, local delivery and federation.
+[Rust service client](/reference/service-client/). The gateway handles the outside HTTPS and OAuth
+edge. The xmsg node next to it handles bus identity, local delivery and federation.
 
 ```mermaid
 flowchart LR
@@ -18,15 +18,16 @@ flowchart LR
 
 ## Identity, messaging and policy are separate
 
-- **Identity-only profile:** Without the owner-file `messaging` section, the Rust listener serves
-  identity only (`xmsg_identity`). A reachable MCP endpoint does not imply that a client can send bus messages.
-- **Messaging profile:** Owner configuration, verifier scopes and an enabled grant must permit
-  an operation. `xmsg_inbox` and `xmsg_read_message` give repeatable reads of the gateway's
-  mailbox. `xmsg_list`, `xmsg_send` and `xmsg_reply` appear only when the grant's outbound policy
-  permits them. All of them use the gateway's fixed registered service; the hosted caller does
-  not choose a bus identity.
-- **Outbound policy:** The owner explicitly sets each grant's outbound policy. It starts empty;
-  writing a policy does not enable the grant, and an MCP client cannot mutate that policy.
+- **Identity-only profile:** Without the owner-file `messaging` section, the Rust listener serves only identity
+  (`xmsg_identity`). A client that can reach the MCP endpoint cannot necessarily send bus
+  messages.
+- **Messaging profile:** Owner configuration, verifier scopes and an enabled [grant](/glossary/#grant)
+  must all permit an operation. `xmsg_inbox` and `xmsg_read_message` give repeatable reads of the
+  gateway's mailbox. `xmsg_list`, `xmsg_send` and `xmsg_reply` appear only when the grant's
+  outbound policy permits them. All of them use the gateway's fixed registered service. The
+  hosted caller does not choose a bus identity.
+- **Outbound policy:** The owner explicitly sets each grant's outbound policy. The policy starts
+  empty. Writing a policy does not enable the grant. An MCP client cannot change the policy.
 - **Events profile:** With messaging and Events configured, the gateway retains incoming mailbox
   custody and can send signed `xmsg.message.received.v1` wake hints to an authenticated owner's
   subscription. The hint prompts a mailbox read; retained data supports repeatable reads and
