@@ -241,13 +241,37 @@ sign-in. It does not distribute the machine's private key.
 | `xmsg enroll-ca --enroll-ca-dir DIR --enroll-policy FILE bind USER PROVIDER SUB` | Add an explicit identity alias for a bound user |
 | `xmsg enroll-ca --enroll-ca-dir DIR --enroll-policy FILE unbind USER` | Remove a user's binding and aliases; not instant peer revocation |
 
-`enroll` accepts `--flow loopback|paste` (default `loopback`), `--provider NAME`,
+`enroll` accepts `--flow loopback|paste|device` (default `loopback`), `--provider NAME`,
 `--host NAME` and `--state-dir DIR`. The default state directory is
 `$XDG_STATE_HOME/xmsg/enroll`, falling back to `~/.local/state/xmsg/enroll`.
-`--provider` is optional only with one configured provider. `device` is refused in
-v1. Fresh enrollment does not overwrite `fed.key`; choose a new state directory
+`--provider` is optional only with one configured provider. Device enrollment is
+planned, disabled by default, and requires independent local CA approval. Fresh enrollment does not overwrite `fed.key`; choose a new state directory
 for a new key/login. `enroll-ca` accepts `--db-path FILE` to select the serving
 CA's database; `init` needs no policy.
+
+Planned live-daemon device commands:
+
+```sh
+xmsg enroll-ca [--http-sock SOCKET] pending
+xmsg enroll-ca [--http-sock SOCKET] approve REQUEST_ID --user USER --host HOST --spki-sha256 DIGEST
+xmsg enroll-ca [--http-sock SOCKET] deny REQUEST_ID
+```
+
+These use mode-0600, UID-checked `http.sock` and need no `--enroll-ca-dir`,
+`--enroll-policy` or root key. They are unavailable over TCP, enrollment HTTPS,
+MCP and federation. The older commands above retain their requirements.
+`pending` exposes only authenticated requests awaiting approval. Approval must
+match the verified user, requested host, key and current policy; denial, expiry,
+policy drift and replay refuse issuance. Before authentication the client shows
+`policy user: pending verification`; afterwards it shows the verified policy
+user and `awaiting CA approval`.
+
+Provider policy requires both `device.enabled: true` and a distinct
+`clients.device` entry; registration alone does not enable it. Disabled or
+unsupported providers refuse and suggest `--flow paste`, without automatic
+fallback. Google device support remains unverified pending owner-run real-provider
+acceptance. These device command examples are illustrative pending final fixture
+verification. See [device setup and bounds](/operations/enrollment-ca/#planned-device-sign-in-from-a-remote-terminal).
 
 | Planned `serve` flag | Meaning |
 | --- | --- |
