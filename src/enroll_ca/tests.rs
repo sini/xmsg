@@ -497,3 +497,298 @@ fn renewal_keeps_old_uri_after_policy_trust_domain_changes() {
     assert_eq!(renewed.uri, "spiffe://example.org/host/lap/user/alice");
     assert_eq!(issued.spki_sha256, renewed.spki_sha256);
 }
+
+#[test]
+fn renewal_rejects_other_root_even_with_known_serial_key_and_uri() {
+    let s = Setup::new();
+    let other = Setup::new();
+    let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let csr = VerifiedCsr::parse_pem(
+        &CertificateParams::default()
+            .serialize_request(&key)
+            .unwrap()
+            .pem()
+            .unwrap(),
+    )
+    .unwrap();
+    let issued =
+        s.ca.issue(&claims("alice-id"), &csr, "lap", &[], NOW)
+            .unwrap();
+    let mut p = CertificateParams::default();
+    p.distinguished_name = rcgen::DistinguishedName::new();
+    p.subject_alt_names = vec![rcgen::SanType::URI(issued.uri.clone().try_into().unwrap())];
+    p.is_ca = rcgen::IsCa::ExplicitNoCa;
+    p.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
+    p.extended_key_usages = vec![
+        rcgen::ExtendedKeyUsagePurpose::ClientAuth,
+        rcgen::ExtendedKeyUsagePurpose::ServerAuth,
+    ];
+    p.serial_number = Some(rcgen::SerialNumber::from_slice(
+        &hex::decode(&issued.serial).unwrap(),
+    ));
+    p.not_before = time::OffsetDateTime::from_unix_timestamp(NOW - 300).unwrap();
+    p.not_after = time::OffsetDateTime::from_unix_timestamp(NOW + 30 * 86400).unwrap();
+    let forged = p.signed_by(&key, &other.ca.signer).unwrap();
+    let presented = vec![forged.der().to_vec(), other.ca.root_der.clone()];
+    let (_, leaf) = x509_parser::parse_x509_certificate(&presented[0]).unwrap();
+    assert_eq!(hex::encode(leaf.raw_serial()), issued.serial);
+    assert_eq!(spki_hash(leaf.public_key().raw), issued.spki_sha256);
+    assert!(
+        matches!(
+            s.ca.renew(&presented, NOW + 8 * 86400 + 1),
+            Err(Error::ReenrollRequired)
+        ),
+        "foreign-root known-serial certificate renewed"
+    );
+    assert_eq!(s.ca.list().unwrap().len(), 1);
+}
+#[test]
+fn own_and_concrete_reserved_names_have_no_other_refusal_mask() {
+    for own in [false, true] {
+        let s = Setup::new();
+        let mut p = policy();
+        p["users"][0]["user"] = "team".into();
+        s.replace(p);
+        let reserved = if own { vec![] } else { vec!["team.lap".into()] };
+        let host = if own { "hub" } else { "lap" };
+        assert!(
+            matches!(
+                s.ca.issue(&claims("alice-id"), &csr(false), host, &reserved, NOW),
+                Err(Error::ReservedName)
+            ),
+            "reserved name was issued"
+        );
+        assert!(s.ca.list().unwrap().is_empty());
+        assert_eq!(
+            s.db.lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM enroll_bindings", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+}
+#[test]
+fn each_deny_dimension_blocks_both_issue_and_renew() {
+    for kind in ["users", "hosts", "subs", "spkis"] {
+        let s = Setup::new();
+        let request = csr(false);
+        let issued =
+            s.ca.issue(&claims("alice-id"), &request, "lap", &[], NOW)
+                .unwrap();
+        let mut p = policy();
+        let value = match kind {
+            "users" => "alice".to_string(),
+            "hosts" => "lap".into(),
+            "subs" => "alice-id".into(),
+            _ => issued.spki_sha256.clone(),
+        };
+        p["deny"] = serde_json::json!({kind:[value]});
+        s.replace(p);
+        assert!(
+            matches!(
+                s.ca.issue(&claims("alice-id"), &request, "lap", &[], NOW + 1),
+                Err(Error::Denied)
+            ),
+            "deny {kind} allowed issuance"
+        );
+        assert!(
+            matches!(
+                s.ca.renew(&chain(&issued.cert_chain_pem), NOW + 1),
+                Err(Error::Denied)
+            ),
+            "deny {kind} allowed renewal"
+        );
+    }
+}
+#[test]
+fn explicit_alias_connects_two_verified_provider_bindings() {
+    let s = Setup::new();
+    let mut p = policy();
+    p["providers"]["other"] = serde_json::json!({"issuer":"https://other.example","clients":{"loopback":{"client_id":"other"}}});
+    p["users"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"provider":"other","sub":"other-sub","user":"alice"}));
+    s.replace(p);
+    s.ca.issue(&claims("alice-id"), &csr(false), "lap", &[], NOW)
+        .unwrap();
+    let mut c = claims("other-sub");
+    c.provider = "other".into();
+    c.iss = "https://other.example".into();
+    assert!(matches!(
+        s.ca.issue(&c, &csr(false), "second", &[], NOW),
+        Err(Error::NameBound)
+    ));
+    s.ca.bind("alice", "other", "other-sub", NOW).unwrap();
+    assert!(
+        s.ca.issue(&c, &csr(false), "second", &[], NOW).is_ok(),
+        "operator alias was refused"
+    );
+    assert!(s
+        .ca
+        .list()
+        .unwrap()
+        .iter()
+        .any(|r| r.iss == "https://other.example"));
+}
+#[test]
+fn owner_guard_precedes_loading_nonowned_file_contents() {
+    use std::os::unix::fs::MetadataExt;
+    let s = Setup::new();
+    assert!(read_owned(&s.dir.join("root.crt"), false).is_ok());
+    if crate::client::current_uid() == 0 {
+        let key = s.dir.join("root.key");
+        std::os::unix::fs::chown(&key, Some(65534), None).unwrap();
+        assert!(
+            read_owned(&key, true).is_err(),
+            "nonowned fixture key accepted"
+        );
+    } else {
+        let public_file = ["/etc/hosts", "/etc/protocols", "/etc/services"]
+            .iter()
+            .filter_map(|p| std::fs::canonicalize(p).ok())
+            .find(|p| {
+                std::fs::symlink_metadata(p).is_ok_and(|m| {
+                    m.is_file()
+                        && m.uid() != crate::client::current_uid()
+                        && m.len() < 1024 * 1024
+                        && m.permissions().mode() & 0o022 == 0
+                })
+            })
+            .expect("nonowned public file control unavailable");
+        assert!(
+            read_owned(&public_file, false).is_err(),
+            "owner check accepted nonowned public input"
+        );
+    }
+}
+#[test]
+fn preferred_username_and_group_rules_use_only_validated_projection() {
+    let s = Setup::new();
+    let mut p = policy();
+    p["users"] = serde_json::json!([{"provider":"idp","group":"members@example","user_from":"preferred_username"}]);
+    s.replace(p);
+    let mut c = claims("alice-id");
+    c.groups = vec!["members@example".into()];
+    c.preferred_username = Some("alice".into());
+    assert!(s.ca.issue(&c, &csr(false), "lap", &[], NOW).is_ok());
+    c.preferred_username = Some("alice@example".into());
+    assert!(matches!(
+        s.ca.issue(&c, &csr(false), "lap2", &[], NOW),
+        Err(Error::InvalidRuleName(_))
+    ));
+}
+
+#[test]
+fn rsa_csr_is_rejected_as_unsupported_key() {
+    assert!(
+        matches!(
+            VerifiedCsr::parse_pem(include_str!("fixtures/rsa.csr")),
+            Err(Error::UnsupportedKey)
+        ),
+        "RSA CSR admitted"
+    );
+}
+
+#[test]
+fn issue_bucket_refuses_seventh_without_losing_existing_records() {
+    let s = Setup::new();
+    let request = csr(false);
+    for n in 0..6 {
+        s.ca.issue(&claims("alice-id"), &request, &format!("lap-{n}"), &[], NOW)
+            .unwrap();
+    }
+    assert!(
+        matches!(
+            s.ca.issue(&claims("alice-id"), &request, "lap-next", &[], NOW),
+            Err(Error::RateLimited)
+        ),
+        "issuance bucket was bypassed"
+    );
+    assert_eq!(s.ca.list().unwrap().len(), 6);
+}
+#[test]
+fn unknown_serial_is_refused_even_with_valid_root_key_and_uri() {
+    let s = Setup::new();
+    let request = csr(false);
+    let registered =
+        s.ca.issue(&claims("alice-id"), &request, "lap", &[], NOW)
+            .unwrap();
+    let (unregistered, serial, _) =
+        s.ca.sign(&request.key, &registered.uri, NOW, 86400)
+            .unwrap();
+    assert_ne!(serial, registered.serial);
+    assert!(
+        matches!(
+            s.ca.renew(&chain(&unregistered), NOW + 1),
+            Err(Error::ReenrollRequired)
+        ),
+        "unknown serial borrowed another certificate record"
+    );
+}
+#[test]
+fn renewed_leaf_keeps_exact_public_key_and_uri() {
+    let s = Setup::new();
+    let original =
+        s.ca.issue(&claims("alice-id"), &csr(false), "lap", &[], NOW)
+            .unwrap();
+    let renewed =
+        s.ca.renew(&chain(&original.cert_chain_pem), NOW + 1)
+            .unwrap();
+    let a = chain(&original.cert_chain_pem);
+    let b = chain(&renewed.cert_chain_pem);
+    let (_, a) = x509_parser::parse_x509_certificate(&a[0]).unwrap();
+    let (_, b) = x509_parser::parse_x509_certificate(&b[0]).unwrap();
+    assert_eq!(
+        a.public_key().raw,
+        b.public_key().raw,
+        "renewal substituted another public key"
+    );
+    assert_eq!(
+        crate::fed::extract_uri_sans(&chain(&renewed.cert_chain_pem)[0]).unwrap(),
+        vec![original.uri]
+    );
+}
+#[test]
+fn matcher_count_refuses_both_missing_and_multiple_and_initial_bad_policy() {
+    for multiple in [false, true] {
+        let s = Setup::new();
+        let mut p = policy();
+        if multiple {
+            p["users"][0]["email"] = "alice@example".into();
+        } else {
+            p["users"][0].as_object_mut().unwrap().remove("sub");
+        }
+        s.replace(p);
+        assert!(
+            s.ca.issue(&claims("alice-id"), &csr(false), "lap", &[], NOW)
+                .is_ok(),
+            "bad policy replaced previous valid mapping"
+        );
+        assert!(
+            s.ca.reload_status().degraded,
+            "invalid matcher-count policy was accepted"
+        );
+        assert!(
+            matches!(
+                EnrollCa::open_at(&s.dir, s.db.clone(), &s.policy, "team.hub", NOW),
+                Err(Error::InvalidPolicy)
+            ),
+            "startup accepted invalid matcher-count policy"
+        );
+    }
+}
+#[test]
+fn invalid_host_segment_is_refused_without_rewriting() {
+    let s = Setup::new();
+    assert!(
+        matches!(
+            s.ca.issue(&claims("alice-id"), &csr(false), "bad.host", &[], NOW),
+            Err(Error::InvalidName)
+        ),
+        "invalid host segment was issued"
+    );
+    assert!(s.ca.list().unwrap().is_empty());
+}
