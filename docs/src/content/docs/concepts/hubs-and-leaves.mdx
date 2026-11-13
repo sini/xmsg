@@ -271,3 +271,38 @@ leaves to obtain the separate control budget; a mixed-version pair keeps the old
 polling behavior. This changes polling, not the message's peer admission, grants, ownership
 or service-ACK-before-hub-ACK rule. See the
 [wire reference](/reference/http-and-sockets/#federated-fedv2-wire-routes).
+
+## Planned: enrolled nodes and bounded hub mailboxes
+
+A hub admission rule may set `leaf: true`. A node admitted by that rule has no
+inbound address: it dials the hub, pulls its mailbox and acknowledges messages.
+The mailbox key is the certificate's canonical node name. The hub can send to the
+admitted name, including attachment queries, without a concrete per-node entry.
+Rows survive a hub restart; until the client reconnects, the in-memory admission
+is unknown. The first reconnect restores access to the queued rows.
+
+Each admission pattern binds a CA bundle, for example:
+
+```json
+{
+  "peers": {},
+  "hub": {
+    "patterns": [{"pattern": "spiffe://example.org/host/*/user/alice", "ca": "/etc/xmsg/enrollment.pem"}],
+    "rules": [{"pattern": "spiffe://example.org/host/*/user/alice", "allow": ["send", "reply"], "leaf": true}]
+  }
+}
+```
+
+Patterns under different bundles must derive disjoint node names, including across
+trust domains and the host/user and namespace/service-account forms. Partition by
+user or host. A rule spanning distinct bundles is refused; split it into rules
+for each population. A bare string pattern is supported only when the peers file
+uses one CA bundle.
+
+Per-leaf limits remain `--peer-mailbox-max-rows` and `--peer-mailbox-max-bytes`.
+All pattern-admitted mailboxes together also have
+`--admitted-mailbox-max-rows 100000` and
+`--admitted-mailbox-max-bytes 671088640`. A full mailbox refuses new rows without
+evicting old ones. Concrete leaf entries remain outside that aggregate cap.
+Expired admitted entries are removed by the mailbox purge tick once they have no
+queued rows.

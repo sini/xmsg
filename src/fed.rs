@@ -3567,7 +3567,7 @@ async fn fed_reply_handler(
 
     if let Some(fwd) = forwarded {
         let origin_peer_cfg = peers
-            .get(&fwd.origin_peer)
+            .get_peer_config(&fwd.origin_peer)
             .ok_or_else(|| AppError::UnknownPeer(fwd.origin_peer.clone()))?;
 
         let orig_msg = {
