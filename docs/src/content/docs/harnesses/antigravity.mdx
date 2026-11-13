@@ -84,9 +84,12 @@ Configure `PreInvocation`, `PreToolUse`, and `Stop` in `~/.gemini/config/hooks.j
 A registered parent session `P` can start a subagent with `invoke_subagent`. Then the hooks do
 this:
 
-- **`PreInvocation`:** Admits the child from `P`'s
-  `brain/<P>/.system_generated/logs/transcript.jsonl`. Binds `<P>/<child_uuid>@<node>`. Marks the
-  child's turn active. Prints `{}`, so the child never gets a registration prompt.
+- **`PreInvocation`:** Admits the child from its descriptor at
+  `brain/<P>/.system_generated/subagents/<child_uuid>.json`. The parent and child IDs must be
+  UUID-shaped, and the descriptor's `conversationId` (or `id`) must match the child ID.
+  Admission reads this descriptor, not the conversation transcript. It binds
+  `<P>/<child_uuid>@<node>`, marks the child's turn active and prints `{}`, so the child never
+  gets a registration prompt.
 - **`PreToolUse`:** Adds `as_agent: <conversationId>` to `call_mcp_tool` / `mcp_xmsg_*` calls.
   Thus `send`, `reply` and `inbox` act as `<P>/<child_uuid>@<node>`, or as `P` when the parent
   calls them.
