@@ -1,0 +1,92 @@
+[
+  {
+    "target": "gate_svlt_device_cli",
+    "test": "actual_device_binary_requires_operator_approval_then_renews_and_denies",
+    "test_file": "tests/gate_svlt_device_cli.rs",
+    "binaries": [
+      "xmsg"
+    ],
+    "label": "device-cli-main-registration",
+    "oracle": "actual daemon registers its local device approval authority",
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": "service.register_local_approval()?;",
+        "replacement": "let _ = &service;"
+      }
+    ],
+    "expected_literal": "device CLI exited before printing User code:"
+  },
+  {
+    "target": "gate_svlt_device_cli",
+    "test": "actual_device_binary_requires_operator_approval_then_renews_and_denies",
+    "test_file": "tests/gate_svlt_device_cli.rs",
+    "binaries": [
+      "xmsg"
+    ],
+    "label": "device-cli-main-public-router",
+    "oracle": "actual ordinary TCP listener excludes local approval routes; UID handler stays intact",
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": "let app = build_router(state.clone());",
+        "replacement": "let app = build_unix_router(state.clone());"
+      }
+    ],
+    "expected_literal": "actual public listener exposed local approval route"
+  },
+  {
+    "target": "gate_svlt_device_cli",
+    "test": "actual_device_binary_requires_operator_approval_then_renews_and_denies",
+    "test_file": "tests/gate_svlt_device_cli.rs",
+    "binaries": [
+      "xmsg"
+    ],
+    "label": "device-cli-operator-fingerprint-json",
+    "oracle": "actual operator approve command transmits the required fingerprint field",
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": ".json(&serde_json::json!({\"user\":user,\"host\":host,\"spki_sha256\":spki_sha256}))",
+        "replacement": ".json(&serde_json::json!({\"user\":user,\"host\":host}))"
+      }
+    ],
+    "expected_literal": "actual approve CLI failed:"
+  },
+  {
+    "target": "gate_svlt_device_cli",
+    "test": "actual_device_binary_requires_operator_approval_then_renews_and_denies",
+    "test_file": "tests/gate_svlt_device_cli.rs",
+    "binaries": [
+      "xmsg"
+    ],
+    "label": "device-cli-hyphen-approve",
+    "oracle": "hyphen-leading approve request IDs reach the CA through actual CLI argv",
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": "Approve {\n        #[arg(allow_hyphen_values = true)]\n        request_id: String,",
+        "replacement": "Approve {\n        request_id: String,"
+      }
+    ],
+    "expected_literal": "hyphen-leading approve request ID failed before reaching CA"
+  },
+  {
+    "target": "gate_svlt_device_cli",
+    "test": "actual_device_binary_requires_operator_approval_then_renews_and_denies",
+    "test_file": "tests/gate_svlt_device_cli.rs",
+    "binaries": [
+      "xmsg"
+    ],
+    "label": "device-cli-hyphen-deny",
+    "oracle": "hyphen-leading deny request IDs reach the CA through actual CLI argv",
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": "Deny {\n        #[arg(allow_hyphen_values = true)]\n        request_id: String,",
+        "replacement": "Deny {\n        request_id: String,"
+      }
+    ],
+    "expected_literal": "hyphen-leading deny request ID failed before reaching CA"
+  }
+]
