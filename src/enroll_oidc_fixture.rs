@@ -47,7 +47,7 @@ fn jwks(new_key: bool) -> Value {
     json!({"keys":[rsa,{"kty":"EC","crv":"P-256","x":b64(&point[1..33]),"y":b64(&point[33..]),"kid":"ec","use":"sig"}]})
 }
 #[derive(Clone)]
-struct Mode {
+pub(crate) struct Mode {
     alg: String,
     kid: String,
     overrides: serde_json::Map<String, Value>,
@@ -55,6 +55,7 @@ struct Mode {
     challenge: String,
     bad_signature: bool,
     hmac_modulus: bool,
+    client_id: String,
     after_token: Option<Arc<dyn Fn() + Send + Sync>>,
     after_refresh: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -68,6 +69,7 @@ impl Default for Mode {
             challenge: String::new(),
             bad_signature: false,
             hmac_modulus: false,
+            client_id: String::new(),
             after_token: None,
             after_refresh: None,
         }
@@ -79,15 +81,21 @@ struct Shared {
     requests: Vec<String>,
     forms: Vec<HashMap<String, String>>,
     jwks_requests: usize,
+    now: i64,
+    secret: String,
+    access: String,
+    refresh: String,
+    codes: HashMap<String, Mode>,
+    values: Vec<String>,
 }
-struct Fixture {
+pub(crate) struct Fixture {
     shared: Arc<Mutex<Shared>>,
     http: reqwest::Client,
     task: tokio::task::JoinHandle<()>,
     files: tempfile::TempDir,
 }
 impl Fixture {
-    async fn new() -> Self {
+    pub(crate) async fn new() -> Self {
         let _ = keys();
         let _ = rustls::crypto::ring::default_provider().install_default();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -119,6 +127,12 @@ impl Fixture {
             requests: vec![],
             forms: vec![],
             jwks_requests: 0,
+            now: NOW,
+            secret: SECRET.into(),
+            access: format!("fixture-access-{}", ulid::Ulid::new()),
+            refresh: format!("fixture-refresh-{}", ulid::Ulid::new()),
+            codes: HashMap::new(),
+            values: vec![],
         }));
         let state = shared.clone();
         let task = tokio::spawn(async move {
@@ -164,11 +178,73 @@ impl Fixture {
             files: tempfile::tempdir().unwrap(),
         }
     }
-    fn config(&self, secret: bool) -> ProviderConfig {
+    pub(crate) async fn new_at(now: i64) -> Self {
+        let fixture = Self::new().await;
+        {
+            let mut shared = fixture.shared.lock().unwrap();
+            shared.now = now;
+            shared.secret = format!("fixture-client-secret-{}", ulid::Ulid::new());
+        }
+        fixture
+    }
+    pub(crate) fn http_client(&self) -> reqwest::Client {
+        self.http.clone()
+    }
+    pub(crate) fn issuer(&self) -> String {
+        self.shared.lock().unwrap().issuer.clone()
+    }
+    pub(crate) fn authorize(&self, authorization_url: &str) -> (String, String) {
+        let url = reqwest::Url::parse(authorization_url).unwrap();
+        let pairs: HashMap<String, String> = url.query_pairs().into_owned().collect();
+        let state = pairs["state"].clone();
+        let mode = Mode {
+            nonce: pairs["nonce"].clone(),
+            challenge: pairs["code_challenge"].clone(),
+            client_id: pairs["client_id"].clone(),
+            ..Mode::default()
+        };
+        let code = format!("fixture-code-{}", ulid::Ulid::new());
+        let mut shared = self.shared.lock().unwrap();
+        shared
+            .values
+            .extend([code.clone(), state.clone(), mode.nonce.clone()]);
+        shared.codes.insert(code.clone(), mode);
+        (code, state)
+    }
+    pub(crate) fn set_code_claim(&self, code: &str, claim: &str, value: Value) {
+        self.shared
+            .lock()
+            .unwrap()
+            .codes
+            .get_mut(code)
+            .unwrap()
+            .overrides
+            .insert(claim.into(), value);
+    }
+    pub(crate) fn request_paths(&self) -> Vec<String> {
+        self.shared.lock().unwrap().requests.clone()
+    }
+    pub(crate) fn secret_values(&self) -> Vec<String> {
+        let shared = self.shared.lock().unwrap();
+        let mut values = shared.values.clone();
+        values.extend([
+            shared.secret.clone(),
+            shared.access.clone(),
+            shared.refresh.clone(),
+        ]);
+        for form in &shared.forms {
+            if let Some(value) = form.get("code_verifier") {
+                values.push(value.clone());
+            }
+        }
+        values
+    }
+
+    pub(crate) fn config(&self, secret: bool) -> ProviderConfig {
         use std::os::unix::fs::PermissionsExt;
         let secret_path = self.files.path().join("client");
         if secret {
-            std::fs::write(&secret_path, SECRET).unwrap();
+            std::fs::write(&secret_path, &self.shared.lock().unwrap().secret).unwrap();
             std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         ProviderConfig {
@@ -263,29 +339,40 @@ fn reply(shared: &Mutex<Shared>, path: &str, header: &str, body: &[u8]) -> Value
                     .0
                     .to_owned()
             });
+            let mode = match fields.get("code").map(String::as_str) {
+                Some("fixture-code") => shared.mode.clone(),
+                Some(code) => match shared.codes.remove(code) {
+                    Some(mode) => mode,
+                    None => return json!({"error":"invalid_grant"}),
+                },
+                None => return json!({"error":"invalid_grant"}),
+            };
+            if !mode.client_id.is_empty() && mode.client_id != client {
+                return json!({"error":"invalid_grant"});
+            }
             if !fields.get("code_verifier").is_some_and(|value| {
                 PkceCodeChallenge::from_code_verifier_sha256(&PkceCodeVerifier::new(value.clone()))
                     .as_str()
-                    == shared.mode.challenge
+                    == mode.challenge
             }) {
                 return json!({"error":"invalid_grant"});
             }
             shared.forms.push(fields);
-            let mut claims = json!({"iss":shared.issuer,"sub":"fixture-sub","aud":client,"exp":NOW+3600,"iat":NOW,"nonce":shared.mode.nonce,"email":"alice@example.org","email_verified":true,"hd":"example.org","groups":["xmsg-users@example.org","00000000-0000-0000-0000-000000000001"],"preferred_username":"alice"});
-            for (key, value) in &shared.mode.overrides {
+            let mut claims = json!({"iss":shared.issuer,"sub":"fixture-sub","aud":client,"exp":shared.now+3600,"iat":shared.now,"nonce":mode.nonce,"email":"alice@example.org","email_verified":true,"hd":"example.org","groups":["xmsg-users@example.org","00000000-0000-0000-0000-000000000001"],"preferred_username":"alice"});
+            for (key, value) in &mode.overrides {
                 claims[key] = value.clone();
             }
-            let mode = shared.mode.clone();
-            let token = sign(&claims, &mode);
+            let token = sign(&claims, &mode, &shared.secret);
+            shared.values.push(token.clone());
             if let Some(hook) = mode.after_token {
                 hook();
             }
-            json!({"access_token":"unused-fixture-access","refresh_token":"unused-fixture-refresh","token_type":"Bearer","id_token":token})
+            json!({"access_token":shared.access,"refresh_token":shared.refresh,"token_type":"Bearer","id_token":token})
         }
         _ => json!({}),
     }
 }
-fn sign(claims: &Value, mode: &Mode) -> String {
+fn sign(claims: &Value, mode: &Mode, secret: &str) -> String {
     let header = json!({"alg":mode.alg,"kid":mode.kid});
     let message = format!(
         "{}.{}",
@@ -312,7 +399,7 @@ fn sign(claims: &Value, mode: &Mode) -> String {
                 .decode(jwk["n"].as_str().unwrap())
                 .unwrap()
         } else {
-            SECRET.as_bytes().to_vec()
+            secret.as_bytes().to_vec()
         })
         .sign(&CoreJwsSigningAlgorithm::HmacSha256, message.as_bytes())
         .unwrap(),
@@ -643,5 +730,42 @@ async fn oidc_legacy_google_issuer_is_a_clear_refusal() {
             Err(Error::UnsupportedIssuer)
         ),
         "legacy Google issuer refusal class changed"
+    );
+}
+
+#[tokio::test]
+async fn reusable_fixture_codes_are_one_shot_and_use_the_requested_clock() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let fixture = crate::enroll_oidc::signed_fixture::Fixture::new_at(now).await;
+    let config = fixture.config(true);
+    assert_eq!(fixture.issuer(), config.issuer);
+    let provider = Provider::discover_with_client("fixture", &config, true, fixture.http_client())
+        .await
+        .unwrap();
+    let pending = provider
+        .begin(Flow::Loopback, "http://127.0.0.1:18551/cb")
+        .unwrap();
+    let (code, state) = fixture.authorize(&pending.authorization_url);
+    fixture.set_code_claim(&code, "email_verified", json!(false));
+    let claims = provider
+        .exchange(pending, &code, &state, &|| now)
+        .await
+        .unwrap();
+    assert!(!claims.email_verified && claims.email.is_none());
+    assert!(fixture.secret_values().contains(&code));
+    assert!(fixture.request_paths().contains(&"/token".into()));
+    let pending = provider
+        .begin(Flow::Loopback, "http://127.0.0.1:18551/cb")
+        .unwrap();
+    let state = pending.state.secret().clone();
+    assert!(
+        provider
+            .exchange(pending, &code, &state, &|| now)
+            .await
+            .is_err(),
+        "authorization code replay accepted"
     );
 }
