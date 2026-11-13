@@ -31,7 +31,9 @@ impl Harness {
         Self::new_with_address("127.0.0.1:7788").await
     }
     pub(crate) async fn new_with_address(address: &str) -> Self {
-        let now = WallClock.now();
+        Self::new_with_now(address, WallClock.now()).await
+    }
+    pub(crate) async fn new_with_now(address: &str, now: i64) -> Self {
         let idp = Fixture::new_at(now).await;
         let directory = tempfile::tempdir().unwrap();
         let config = idp.config(true);
@@ -163,7 +165,7 @@ impl Harness {
         .await
     }
 }
-fn node_state(
+pub(crate) fn node_state(
     db: Arc<Mutex<rusqlite::Connection>>,
     dir: &std::path::Path,
     chain: Vec<Vec<u8>>,
@@ -510,4 +512,275 @@ async fn probe_transport_observations() {
     println!("later_role_refused {}", result.is_err());
     bad_task.abort();
     task.abort();
+}
+
+#[derive(Clone)]
+struct TraceBytes(Arc<Mutex<Vec<u8>>>);
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TraceBytes {
+    type Writer = TraceBytes;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+impl std::io::Write for TraceBytes {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(data);
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+fn database_bytes(connection: &rusqlite::Connection) -> Vec<Vec<u8>> {
+    let mut tables = connection
+        .prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        .unwrap();
+    let names = tables
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let mut values = Vec::new();
+    for name in names {
+        let query = format!("SELECT * FROM \"{}\"", name.replace('"', "\"\""));
+        let mut statement = connection.prepare(&query).unwrap();
+        let columns = statement.column_count();
+        let mut rows = statement.query([]).unwrap();
+        while let Some(row) = rows.next().unwrap() {
+            for index in 0..columns {
+                use rusqlite::types::ValueRef;
+                match row.get_ref(index).unwrap() {
+                    ValueRef::Text(value) | ValueRef::Blob(value) => values.push(value.to_vec()),
+                    ValueRef::Integer(value) => values.push(value.to_string().into_bytes()),
+                    ValueRef::Real(value) => values.push(value.to_string().into_bytes()),
+                    ValueRef::Null => {}
+                }
+            }
+        }
+    }
+    values
+}
+#[tokio::test]
+#[ignore = "invoked in a fresh process by protocol_trace_and_database_contain_no_secrets"]
+async fn protocol_trace_child() {
+    let output = TraceBytes(Arc::new(Mutex::new(Vec::new())));
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .without_time()
+            .with_ansi(false)
+            .with_writer(output.clone())
+            .finish(),
+    )
+    .unwrap();
+    tracing::debug!(public_control = "enrollment-trace-positive-control");
+    let h = Harness::new().await;
+    let (url, task) = network_server(&h, false).await;
+    let fp = enrollment_fingerprint(&h);
+    let trust = enroll_client::bootstrap(&url, Some(&fp), None)
+        .await
+        .unwrap();
+    let http = enroll_client::http_client(&trust, None).unwrap();
+    let state = h._directory.path().join("client");
+    let csr = enroll_client::create_key(&state).unwrap();
+    let created=http.post(format!("{url}/enroll/v1/sessions")).json(&json!({"csr_pem":csr,"host":"laptop","provider":"idp","flow":"loopback","redirect_uri":"http://127.0.0.1:18551/cb"})).send().await.unwrap().json::<Value>().await.unwrap();
+    let handle = created["session"].as_str().unwrap();
+    let (code, state) = h
+        .idp
+        .authorize(created["authorization_url"].as_str().unwrap());
+    let mut header = reqwest::header::HeaderValue::from_str(handle).unwrap();
+    header.set_sensitive(true);
+    assert_eq!(
+        http.post(format!("{url}/enroll/v1/sessions/code"))
+            .header("xmsg-enroll-session", header.clone())
+            .json(&json!({"code":code,"state":state}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::ACCEPTED
+    );
+    let collected = http
+        .get(format!("{url}/enroll/v1/sessions?wait=0"))
+        .header("xmsg-enroll-session", header)
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    let pem = collected["cert_chain_pem"].as_str().unwrap();
+    let key = std::fs::read(h._directory.path().join("client/fed.key")).unwrap();
+    let renewing = enroll_client::http_client(&trust, Some((pem.as_bytes(), &key))).unwrap();
+    let renewed = renewing
+        .post(format!("{url}/enroll/v1/renew"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(renewed.status(), reqwest::StatusCode::OK);
+    let renewed = renewed.json::<Value>().await.unwrap();
+    assert_ne!(collected["serial"], renewed["serial"]);
+    let mut secrets = h.idp.secret_values();
+    secrets.push(handle.to_string());
+    let trace = output.0.lock().unwrap().clone();
+    assert!(
+        trace
+            .windows(b"enrollment-trace-positive-control".len())
+            .any(|v| v == b"enrollment-trace-positive-control"),
+        "trace positive control did not execute"
+    );
+    let database = database_bytes(&h.db.lock().unwrap());
+    assert!(
+        !database.is_empty(),
+        "database positive control had no rows"
+    );
+    for secret in secrets {
+        assert!(!secret.is_empty());
+        assert!(
+            !trace.windows(secret.len()).any(|v| v == secret.as_bytes()),
+            "enrollment trace leaked a planted secret"
+        );
+        assert!(
+            !database
+                .iter()
+                .any(|bytes| bytes.windows(secret.len()).any(|v| v == secret.as_bytes())),
+            "enrollment database stored a planted secret"
+        );
+    }
+    task.abort();
+    println!("enrollment-full-trace-and-database-census:complete");
+}
+#[test]
+fn protocol_trace_and_database_contain_no_secrets() {
+    use std::process::{Command, Stdio};
+    let name = format!(
+        "{}::protocol_trace_child",
+        module_path!().split_once("::").unwrap().1
+    );
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &name, "--ignored", "--nocapture"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("trace census child timed out");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let result = child.wait_with_output().unwrap();
+    let text = String::from_utf8_lossy(&result.stdout).into_owned()
+        + &String::from_utf8_lossy(&result.stderr);
+    assert!(
+        result.status.success(),
+        "trace/database census failed: {text}"
+    );
+    assert!(
+        text.contains("enrollment-full-trace-and-database-census:complete"),
+        "census child positive completion missing"
+    );
+}
+
+#[tokio::test]
+async fn protocol_fingerprint_mismatch_creates_no_key_or_session() {
+    let h = Harness::new().await;
+    let (url, task) = network_server(&h, false).await;
+    let fp = enrollment_fingerprint(&h);
+    let mut wrong = fp.clone();
+    wrong.pop();
+    wrong.push(if fp.ends_with('0') { '1' } else { '0' });
+    let state = h._directory.path().join("wrong-root");
+    let result = bootstrap_then_create(&h, &url, &wrong, &state).await;
+    assert!(
+        result.is_err(),
+        "wrong enrollment root fingerprint accepted"
+    );
+    assert!(
+        !state.join("fed.key").exists(),
+        "wrong fingerprint caused private key creation"
+    );
+    assert!(
+        h.service.sessions.lock().unwrap().is_empty(),
+        "wrong fingerprint sent a CSR"
+    );
+    bootstrap_then_create(&h, &url, &fp, &h._directory.path().join("correct-root"))
+        .await
+        .unwrap();
+    assert_eq!(
+        h.service.sessions.lock().unwrap().len(),
+        1,
+        "fingerprint positive control created no session"
+    );
+    task.abort();
+}
+#[tokio::test]
+async fn protocol_bootstrap_requires_reserved_ca_identity() {
+    let h = Harness::new().await;
+    let (url, task) = network_server(&h, false).await;
+    let fp = enrollment_fingerprint(&h);
+    let trust = enroll_client::bootstrap(&url, Some(&fp), None)
+        .await
+        .unwrap();
+    assert_eq!(trust.ca_identity, "spiffe://enroll.example/xmsg/enroll");
+    let (bad_url, bad_task) = network_server(&h, true).await;
+    assert!(
+        enroll_client::bootstrap(&bad_url, Some(&fp), None)
+            .await
+            .is_err(),
+        "bootstrap accepted an enrolled host as the CA"
+    );
+    bad_task.abort();
+    task.abort();
+}
+#[tokio::test]
+async fn protocol_later_connections_require_reserved_ca_identity() {
+    let h = Harness::new().await;
+    let (url, task) = network_server(&h, false).await;
+    let fp = enrollment_fingerprint(&h);
+    let trust = enroll_client::bootstrap(&url, Some(&fp), None)
+        .await
+        .unwrap();
+    let http = enroll_client::http_client(&trust, None).unwrap();
+    assert_eq!(
+        http.get(format!("{url}/enroll/v1/sessions"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let (bad_url, bad_task) = network_server(&h, true).await;
+    assert!(
+        http.get(format!("{bad_url}/enroll/v1/sessions"))
+            .send()
+            .await
+            .is_err(),
+        "later connection accepted an enrolled host as the CA"
+    );
+    bad_task.abort();
+    task.abort();
+}
+#[test]
+fn protocol_private_key_is_never_overwritten() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("identity");
+    enroll_client::create_key(&state).unwrap();
+    let original = std::fs::read(state.join("fed.key")).unwrap();
+    assert!(
+        matches!(
+            enroll_client::create_key(&state),
+            Err(enroll_client::Error::KeyExists)
+        ),
+        "enroll overwrote an existing private key"
+    );
+    assert_eq!(std::fs::read(state.join("fed.key")).unwrap(), original);
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(
+        std::fs::metadata(state.join("fed.key")).unwrap().mode() & 0o777,
+        0o600
+    );
 }
