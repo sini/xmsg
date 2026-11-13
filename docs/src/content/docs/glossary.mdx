@@ -76,6 +76,18 @@ with an [outbound link](#outbound-link). On this node, its entry has `"leaf": tr
 
 ## E
 
+### enrolled identity
+
+Planned: a host/user certificate issued after OIDC sign-in and an explicit CA
+policy match. Its user is verified; its host label is not machine attestation.
+See [the enrollment CA](/operations/enrollment-ca/).
+
+### enrollment CA
+
+Planned: an independent online signing root inside `xmsg serve`, used to issue
+short-lived host certificates without copying client keys. It does not replace
+a fleet or cluster issuer. See [setup and bounds](/operations/enrollment-ca/).
+
 ### Events
 
 An optional profile of the [gateway](#gateway). With Events, the gateway keeps incoming messages
@@ -336,6 +348,13 @@ A child turn that a parent session starts. A bound subagent has the address `<P>
 See [delegated subagents](/concepts/sessions-services-subagents/#delegated-subagents-pchildnode).
 
 ## T
+
+### trust domain
+
+The namespace label in a SPIFFE URI, such as `example.org`. A validated CA bundle
+supplies trust; a domain string alone does not. Canonical names omit it, so
+[hub bundle checks](/concepts/hubs-and-leaves/#planned-enrolled-nodes-and-bounded-hub-mailboxes)
+also refuse cross-domain patterns that can derive one name.
 
 ### turn mailbox
 

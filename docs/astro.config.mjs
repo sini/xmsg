@@ -137,6 +137,7 @@ export default defineConfig({
 					items: [
 						{ label: 'NixOS & Home Manager', slug: 'operations/nixos-and-home-manager' },
 						{ label: 'Runtime, Reloading & Systemd', slug: 'operations/runtime-and-systemd' },
+						{ label: 'Enrollment CA', slug: 'operations/enrollment-ca' },
 						{ label: 'OCI & Docker', slug: 'operations/docker' },
 						{ label: 'Kubernetes & Helm', slug: 'operations/helm-and-kubernetes' },
 						{ label: 'macOS', slug: 'getting-started/macos' },

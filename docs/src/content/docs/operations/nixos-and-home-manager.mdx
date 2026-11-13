@@ -112,3 +112,25 @@ On NixOS, open the federation port in the firewall with `nixosModules.xmsg`:
 
 ```nix file=<rootDir>/nix/modules/nixos.nix#L1-L20
 ```
+
+
+## Planned enrollment with a managed installation
+
+The [enrollment CA](/operations/enrollment-ca/) is configured through its CLI
+flags and policy file. This change does **not** add a Home Manager/NixOS enrollment
+option or automatic CA deployment aspect. Keep `root.key`, a machine's `fed.key`
+and OAuth client secrets out of Nix-store values. Fleet and cluster issuers remain
+separate from the enrollment root.
+
+The current module also cannot render a hub block or select a hand-written peers
+file. Install xmsg with the module, set `programs.xmsg.server.enable = false` if
+managing the daemon yourself, and run the documented CLI under an operator-managed
+service. Pass the flags from [the CA setup](/operations/enrollment-ca/#initialize-and-configure-the-hub),
+or the client's printed `--enroll-state`, `--peers-file` and `--fed-listen` flags.
+The existing runtime socket and harness configuration can still be used.
+
+A platform facility such as systemd `LoadCredential` may deliver private files;
+the portable form is the private file described in the guide. CA key ownership and
+permission checks still apply. A declarative deployment aspect and real-provider
+acceptance are separate operator-paced work; the module does not mint IdP
+credentials or deploy a CA automatically.

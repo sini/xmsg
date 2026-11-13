@@ -1,0 +1,295 @@
+---
+title: Enrollment CA
+description: Planned OIDC enrollment for xmsg host identities, with an in-process CA, browser sign-in and automatic renewal.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="note" title="Planned, not yet released">
+The enrollment CA runs inside `xmsg serve`; it does not require a separate CA
+service. Local fixture checks do not establish live Google or Kanidm compatibility.
+Real-provider acceptance and deployment remain operator-run work. V1 supports
+`loopback` and `paste`; device authorization is refused and belongs to a follow-up.
+</Aside>
+
+Enrollment gives a machine a short-lived [enrolled identity](/glossary/#enrolled-identity)
+without distributing its private key. The CA verifies an OIDC sign-in, maps that
+account through an explicit policy, and signs the machine's CSR. The machine keeps
+its P-256 key. The CA receives the CSR and talks to the IdP itself; the machine
+never receives an IdP access or refresh token.
+
+```mermaid
+sequenceDiagram
+    participant N as New node
+    participant C as xmsg enrollment CA
+    participant I as OIDC provider
+    N->>C: Verify root fingerprint and CA URI; send CSR
+    C-->>N: Browser authorization URL with PKCE and nonce
+    N->>I: User signs in and consents
+    I-->>N: Loopback redirect containing code and state
+    N->>C: Forward code and state for this session
+    C->>I: Redeem code and verify ID token
+    C-->>N: Certificate chain, root and federation hub entry
+    N->>C: Dial the federation hub and pull its mailbox
+```
+
+## Separate the two identities
+
+The enrollment listener is a separate HTTPS port, for example `7790`. It serves a
+certificate under the enrollment root with the reserved URI
+`spiffe://example.org/xmsg/enroll`. A client checks both that URI and the pinned
+root on bootstrap, collection and renewal. An ordinary enrolled host certificate
+cannot impersonate that listener.
+
+The hub's federation listener, for example `7788`, keeps its own identity and
+certificate. Its chain may use a fleet root distinct from the enrollment root.
+For CA mode, its `--fed-cert` file must include the leaf and its root, with exactly
+one URI SAN on the leaf. A leaf/intermediate chain missing its root is refused for
+enrollment startup. Pinned mode needs a single self-signed, non-CA certificate;
+it may still contain a URI SAN. The client receives the appropriate hub bundle or
+pin over the fingerprint-verified enrollment connection.
+
+The CA never issues the hub's own canonical name or a concrete peer's reserved
+name. Its root is separate from fleet and Kubernetes roots. Pod identities remain
+with their cluster issuer.
+
+## Initialize and configure the hub
+
+Run these planned commands as the UID that will run the CA. Paths are examples;
+`hub.crt` and `hub.key` are the hub's existing federation credentials.
+
+```sh
+xmsg enroll-ca --enroll-ca-dir ./enroll-ca init
+```
+
+`init` creates `root.crt` and the private `root.key`, and prints JSON containing
+`root_file` and `fingerprint`. Keep the key on the CA host. Share only the root
+certificate and fingerprint. The root is initialized with a ten-year lifetime;
+the enrollment service certificate cannot outlive it. The key must be a regular,
+non-symlink file owned by the serving UID with no group or other permissions.
+There is no built-in encryption-at-rest layer; use the UID boundary and the
+platform's optional credential delivery.
+
+Write `enroll-policy.json`. This example enables two named providers. Replace the
+issuer, client IDs, subject and access group with your own values. It has no
+device client.
+
+```json title="enroll-policy.json"
+{
+  "trust_domain": "example.org",
+  "hub_address": "hub.example.org:7788",
+  "providers": {
+    "google": {
+      "issuer": "https://accounts.google.com",
+      "clients": {
+        "loopback": { "client_id": "<desktop-client-id>", "client_secret_file": "/run/xmsg/google-client-secret" },
+        "paste": { "client_id": "<desktop-client-id>", "client_secret_file": "/run/xmsg/google-client-secret" }
+      }
+    },
+    "idm": {
+      "issuer": "https://idm.example.org/oauth2/openid/xmsg-enroll",
+      "clients": {
+        "loopback": { "client_id": "xmsg-enroll" },
+        "paste": { "client_id": "xmsg-enroll" }
+      }
+    }
+  },
+  "users": [
+    { "provider": "google", "sub": "<verified-google-sub>", "user": "alice" },
+    { "provider": "google", "hd": "example.org", "user_from": "email_local" },
+    { "provider": "idm", "group": "xmsg-enroll.access@idm.example.org", "user_from": "preferred_username" }
+  ],
+  "deny": { "users": [], "hosts": [], "subs": [], "spkis": [] },
+  "lifetime_secs": 86400,
+  "renew_grace_secs": 604800,
+  "reauth_after_secs": 7776000,
+  "issue_per_hour": 20,
+  "renew_per_hour": 6
+}
+```
+
+The first matching user rule decides the name. Every rule needs exactly one of
+`sub`, `email`, `hd` or `group`, and exactly one result: literal `user` or
+`user_from`. `email` is used only when verified. An `email` rule binds the first
+account presenting that address, so prefer a stable `sub`, or Google's signed `hd`
+with `email_local`. The email domain alone is not a Workspace-domain check.
+
+User and host segments accept lower-case letters, digits and internal hyphens,
+up to 32 characters, with a letter or digit at either end. Invalid results are
+refused, not rewritten: `alice.smith` does not become `alice-smith`. For
+`invalid_name`, add a literal user mapping for the reported rule. Kanidm's
+`preferred_username` needs its short-username setting; an SPN containing `@` is
+not a valid segment.
+
+Write a hand-managed `hub-peers.json` with an enrollment-root pattern and an
+explicit user rule:
+
+```json title="hub-peers.json"
+{
+  "peers": {},
+  "hub": {
+    "patterns": [
+      { "pattern": "spiffe://example.org/host/*/user/alice", "ca": "./enroll-ca/root.crt" }
+    ],
+    "rules": [
+      { "pattern": "spiffe://example.org/host/*/user/alice", "allow": ["send", "reply", "relayed"], "leaf": true }
+    ]
+  }
+}
+```
+
+This policy admits Alice's enrolled names and gives them a durable mailbox without
+one concrete peer entry per machine. Add separate rules for other policy users;
+issuing a certificate and admitting it to the bus are separate decisions. For a
+mixed fleet/enrollment hub, see [bundle isolation](/concepts/hubs-and-leaves/#planned-enrolled-nodes-and-bounded-hub-mailboxes).
+
+```sh
+xmsg serve --db-path ./hub.db \
+  --fed-cert ./hub.crt --fed-key ./hub.key \
+  --fed-listen 0.0.0.0:7788 --peers-file ./hub-peers.json \
+  --enroll-listen 0.0.0.0:7790 \
+  --enroll-ca-dir ./enroll-ca --enroll-policy ./enroll-policy.json
+```
+
+Supply the three CA flags together. `hub_address` supplies a dialable federation
+address when `--fed-listen` binds a wildcard or another address clients cannot use.
+The enrollment port is not the federation port and does not expose unauthenticated
+clients to `/fed/v2`.
+
+## Register browser clients
+
+For Google, register a **Desktop app** OAuth client for `openid email`, following
+[Google's native-app guide](https://developers.google.com/identity/protocols/oauth2/native-app).
+One registration may supply both flow entries. Keep any client-secret material on
+the CA, not on enrolling machines or in a public policy example. Every Google
+browser flow requests `prompt=consent select_account`.
+
+V1 accepts only the canonical Google issuer `https://accounts.google.com`. The
+legacy bare `accounts.google.com` spelling is refused as `unsupported_issuer`.
+This is a known limit, not an invitation to disable issuer or signature checks.
+An operator-run Google acceptance check must record that the real login supplied
+the canonical issuer; if it supplies the legacy form, stop and revisit compatibility.
+Personal-account and Workspace (`hd`) acceptance has not been established by local
+fixture tests.
+
+For Kanidm, register a public `xmsg-enroll` client with S256 PKCE and localhost
+redirects enabled, including its `enable-localhost-redirects` option. Map `openid`,
+`email` and, for group-based rules, `groups` to the allowed access group. The client
+uses a dynamic loopback port and path `/cb`. Group matches use an SPN or UUID, not
+a bare group name. See [Kanidm's OAuth2 administration guide](https://kanidm.github.io/kanidm/stable/integrations/oauth2.html).
+Every Kanidm browser flow requests `prompt=login`. Real-provider claims and fresh
+login behavior remain operator-run acceptance checks.
+
+## Enroll the machine
+
+Obtain the fingerprint through an authenticated operator channel. Replace the
+placeholder below with the complete `sha256:` value printed by `init`; it is not
+a TOFU prompt.
+
+```sh
+xmsg enroll https://hub.example.org:7790 \
+  --fingerprint 'sha256:<64-hex-digits>' --provider idm --host laptop \
+  --state-dir ./alice-enroll
+```
+
+`loopback` is the default. The client binds a loopback listener, opens the browser,
+and forwards the returned code and state. With only one provider configured,
+`--provider` may be omitted; with several, choose one explicitly.
+
+For a remote terminal with a browser on another machine, use paste mode:
+
+```sh
+xmsg enroll https://hub.example.org:7790 \
+  --fingerprint 'sha256:<64-hex-digits>' --provider idm --host laptop \
+  --flow paste --state-dir ./alice-enroll
+```
+
+Open the printed URL, sign in, and paste the final loopback redirect address back
+into this terminal. Do not send that address to someone else: consenting and
+handing it to an attacker can enroll the attacker's key as your user. The forced
+prompt makes the action visible; it does not make deliberate sharing safe.
+`--flow device` is refused in v1.
+
+Use one enrollment command for a state directory, not both examples in sequence.
+The default directory is `$XDG_STATE_HOME/xmsg/enroll`, or
+`~/.local/state/xmsg/enroll`. It holds the private `fed.key`, `fed.crt`, `root.pem`
+and `enroll.json`; a CA-mode hub also adds `hub-ca.pem`. Keep the directory private.
+An existing `fed.key` is not overwritten. For fresh sign-in or key rotation, use a
+new private state directory and switch the daemon only after enrollment succeeds.
+
+The client writes the hub entry into `peers.json` only when that file does not
+exist; otherwise it prints the entry for review. The entry dials out and uses the
+hub's actual federation bundle or pin. `--root-file` may replace the fingerprint
+for a configuration-managed enrollment root.
+
+```sh
+xmsg serve --enroll-state ./alice-enroll \
+  --peers-file ./alice-enroll/peers.json --fed-listen 127.0.0.1:0
+```
+
+Use the printed serve flags. The loopback/ephemeral federation bind above supports
+a dial-out laptop; it does not advertise a publicly dialable address. The daemon
+still needs its peers file and federation listener. The hub's `leaf: true` rule
+is what gives this pattern-admitted node a mailbox.
+
+## Renewal, denial and another provider
+
+With `--enroll-state`, the daemon starts one renewal task. It renews after two
+thirds of the lifetime, normally 16 hours, retaining the key and URI while issuing
+a fresh serial. It writes the certificate atomically and forces credential reload.
+The one-shot form is:
+
+```sh
+xmsg enroll --renew --state-dir ./alice-enroll
+```
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `lifetime_secs` | `86400` | Issued host certificate ends 24 hours after issuance; validity starts five minutes earlier |
+| `renew_grace_secs` | `604800` | An expired registered certificate can renew for up to seven days |
+| `reauth_after_secs` | `7776000` | Fresh OIDC sign-in is required after 90 days from the last login |
+| `issue_per_hour` | `20` | Per-user issuance bucket |
+| `renew_per_hour` | `6` | Separate per-user renewal bucket |
+
+Renewal does not contact the IdP and stores no IdP refresh token. Account disable
+at the IdP therefore applies on the next fresh login, not every renewal. CA
+`deny.users`, `deny.hosts`, `deny.subs` and `deny.spkis` stop new issuance/renewal
+at that CA. Match keys by SPKI, not serial: renewals change serials. An already
+issued certificate remains usable until expiry, normally at most 24 hours. There
+is no CRL/OCSP distribution, and a peer that pins the key bypasses certificate
+expiry and these CA revocation bounds entirely.
+
+Re-enrolling the same `(user, host)` with a new key supersedes the earlier key
+lineage. It cannot renew; its existing certificate still has the remaining
+lifetime. Two active machines therefore need distinct host names.
+
+Inspect records and manage explicit aliases with the same policy and database
+used by the serving CA:
+
+```sh
+xmsg enroll-ca --enroll-ca-dir ./enroll-ca --enroll-policy ./enroll-policy.json \
+  --db-path ./hub.db list
+xmsg enroll-ca --enroll-ca-dir ./enroll-ca --enroll-policy ./enroll-policy.json \
+  --db-path ./hub.db bind alice idm '<verified-idm-sub>'
+xmsg enroll-ca --enroll-ca-dir ./enroll-ca --enroll-policy ./enroll-policy.json \
+  --db-path ./hub.db unbind alice
+```
+
+An alias also needs a policy rule mapping that provider/account to the same user.
+Another account cannot silently take a bound name. `bind` refuses an identity that
+is already any user's primary binding; unbinding is an intentional operator act.
+`list` shows certificate/SPKI and supersession records, not IdP tokens. Removing a
+binding does not instantly invalidate certificates already held by peers.
+
+The policy is reloaded when its content changes. Invalid JSON or invalid rules
+keep the previous policy, log a refusal and mark readiness degraded; a valid
+replacement applies at the next policy check. Startup with no valid policy fails.
+
+## Rotate the root
+
+Root rotation creates a new enrollment root and fingerprint. Distribute the new
+root to the patterns and peer entries that should trust it; bundles may contain
+old and new roots during a deliberate overlap. Re-enroll each machine with the
+new fingerprint and switch its state directory. Do not copy `root.key` to clients
+or reuse the fleet/cluster CA key. Enrollment-root compromise affects its admitted
+users and the patterns bound to that bundle, not unrelated fleet bundles.

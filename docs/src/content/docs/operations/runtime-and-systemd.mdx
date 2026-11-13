@@ -36,6 +36,24 @@ certificate allows the next reload attempt. A deliberate node-identity change
 requires stopping the old node and reviewing its peer policy and stored state
 before starting the replacement.
 
+## Planned: enrollment renewal task
+
+`xmsg serve --enroll-state DIR` reads the saved identity and starts one mutual-TLS
+renewal task. It renews at two thirds of the lifetime (normally 16 hours), retries
+with exponential backoff capped at 15 minutes, writes `fed.crt` atomically and
+calls `CredentialReloader::force_reload`. Key and URI stay the same. The periodic
+watcher remains the fallback. See [the renewal example](/operations/enrollment-ca/#renewal-denial-and-another-provider).
+
+`enroll_state_unavailable` and `enroll_renewal_failed` report deferred work without
+logging tokens or keys. A different derived name remains an `identity_changed`
+refusal and keeps the previous TLS configuration. Re-authentication or an expired
+renewal grace needs fresh enrollment into a new private state directory.
+
+CA policy reload uses its content hash. A bad replacement keeps the previous
+policy, emits `invalid_enrollment_policy` and reports degraded reload status.
+Issuance continues under the last valid policy; startup without one is refused.
+Enrollment is not a systemd socket-activation slot: `--enroll-listen` is separate.
+
 ## Systemd socket activation & `sd_notify`
 
 Under systemd, `xmsg serve` supports `Type=notify-reload` (`ReloadSignal=SIGHUP`) and socket
