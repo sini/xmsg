@@ -502,3 +502,8 @@ required-features = ["daemon"]
 name = "gate_uph3_control"
 path = "tests/gate_uph3_control.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "enroll_hub"
+path = "tests/enroll_hub.rs"
+required-features = ["daemon"]

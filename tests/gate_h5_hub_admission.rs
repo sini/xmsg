@@ -1727,7 +1727,7 @@ fn test_oracle_7g_load_missing_ca_anchor() {
     assert!(res.is_err());
     let err = res.unwrap_err();
     assert!(
-        err.contains("hub configuration requires at least one CA trust anchor from peers; no CA peer configured"),
+        err.contains("must name its CA bundle"),
         "Unexpected error: {err}"
     );
 }

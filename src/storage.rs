@@ -279,7 +279,8 @@ const SCHEMA_N: &str = r#"
             bytes INTEGER NOT NULL,
             body TEXT NOT NULL,
             envelope TEXT NOT NULL,
-            origin TEXT NOT NULL
+            origin TEXT NOT NULL,
+            admitted INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_peer_mailbox_peer_created ON peer_mailbox(peer, created_at);
 
@@ -398,6 +399,17 @@ pub fn init_db(conn: &Connection) -> Result<()> {
     conn.execute_batch(crate::plugin::SCHEMA)?;
     if version == SCHEMA_VERSION {
         conn.execute_batch(SCHEMA_N)?;
+        let has_admitted: bool = conn.query_row(
+            "SELECT COUNT(*)>0 FROM pragma_table_info('peer_mailbox') WHERE name='admitted'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_admitted {
+            conn.execute_batch(
+                "ALTER TABLE peer_mailbox ADD COLUMN admitted INTEGER NOT NULL DEFAULT 0",
+            )?;
+        }
+
         // A column schema N has since been extended with. A key recorded before it binds
         // no recipient, so its replay with any `to` is a conflict, never a second delivery.
         let has_to_ref: bool = conn.query_row(
@@ -1567,6 +1579,8 @@ pub struct PeerMailboxMessage {
     pub origin: Origin,
 }
 
+pub const DEFAULT_ADMITTED_MAILBOX_MAX_ROWS: u64 = 100_000;
+pub const DEFAULT_ADMITTED_MAILBOX_MAX_BYTES: u64 = 640 * 1024 * 1024;
 pub const DEFAULT_PEER_MAILBOX_MAX_ROWS: u64 = 10_000;
 pub const DEFAULT_PEER_MAILBOX_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -1618,6 +1632,39 @@ pub fn peer_mailbox_limits_for_db(
         .unwrap_or_default()
 }
 
+fn admitted_mailbox_limits_registry(
+) -> &'static std::sync::Mutex<std::collections::HashMap<usize, PeerMailboxLimitEntry>> {
+    static REGISTRY: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<usize, PeerMailboxLimitEntry>>,
+    > = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+pub fn set_admitted_mailbox_limits(
+    db: &std::sync::Arc<std::sync::Mutex<Connection>>,
+    limits: PeerMailboxLimits,
+) {
+    let mut registry = admitted_mailbox_limits_registry().lock().unwrap();
+    registry.retain(|_, (weak, _)| weak.strong_count() > 0);
+    registry.insert(
+        std::sync::Arc::as_ptr(db) as usize,
+        (std::sync::Arc::downgrade(db), limits),
+    );
+}
+pub fn admitted_mailbox_limits_for_db(
+    db: &std::sync::Arc<std::sync::Mutex<Connection>>,
+) -> PeerMailboxLimits {
+    admitted_mailbox_limits_registry()
+        .lock()
+        .unwrap()
+        .get(&(std::sync::Arc::as_ptr(db) as usize))
+        .filter(|(weak, _)| std::sync::Weak::ptr_eq(weak, &std::sync::Arc::downgrade(db)))
+        .map(|(_, limits)| *limits)
+        .unwrap_or(PeerMailboxLimits {
+            max_rows: DEFAULT_ADMITTED_MAILBOX_MAX_ROWS,
+            max_bytes: DEFAULT_ADMITTED_MAILBOX_MAX_BYTES,
+        })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PeerMailboxInsert {
     Inserted,
@@ -1636,6 +1683,25 @@ pub fn insert_peer_mailbox_with_limits(
     conn: &Connection,
     msg: &PeerMailboxMessage,
     limits: PeerMailboxLimits,
+) -> Result<PeerMailboxInsert> {
+    insert_peer_mailbox_with_admission_budget(
+        conn,
+        msg,
+        limits,
+        false,
+        PeerMailboxLimits {
+            max_rows: DEFAULT_ADMITTED_MAILBOX_MAX_ROWS,
+            max_bytes: DEFAULT_ADMITTED_MAILBOX_MAX_BYTES,
+        },
+    )
+}
+
+pub fn insert_peer_mailbox_with_admission_budget(
+    conn: &Connection,
+    msg: &PeerMailboxMessage,
+    limits: PeerMailboxLimits,
+    admitted: bool,
+    global: PeerMailboxLimits,
 ) -> Result<PeerMailboxInsert> {
     let origin_json = serde_json::to_string(&msg.origin)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
@@ -1665,10 +1731,16 @@ pub fn insert_peer_mailbox_with_limits(
              + length(CAST(target_ref AS BLOB)) + length(CAST(from_name AS BLOB)) + length(CAST(body AS BLOB))
              + length(CAST(envelope AS BLOB)) + length(CAST(origin AS BLOB))),0) AS stored_bytes
            FROM peer_mailbox WHERE peer=?2
+         ), admitted_usage AS (
+           SELECT COUNT(*) AS rows, COALESCE(SUM(16 + length(CAST(id AS BLOB)) + length(CAST(peer AS BLOB))
+             + length(CAST(target_ref AS BLOB)) + length(CAST(from_name AS BLOB)) + length(CAST(body AS BLOB))
+             + length(CAST(envelope AS BLOB)) + length(CAST(origin AS BLOB))),0) AS stored_bytes
+           FROM peer_mailbox WHERE admitted=1
          )
-         INSERT OR IGNORE INTO peer_mailbox (id, peer, target_ref, created_at, from_name, bytes, body, envelope, origin)
-         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9 FROM usage
-         WHERE rows < ?10 AND stored_bytes <= ?11 - ?12",
+         INSERT OR IGNORE INTO peer_mailbox (id, peer, target_ref, created_at, from_name, bytes, body, envelope, origin, admitted)
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?13 FROM usage, admitted_usage
+         WHERE usage.rows < ?10 AND usage.stored_bytes <= ?11 - ?12
+           AND (?13=0 OR (admitted_usage.rows < ?14 AND admitted_usage.stored_bytes <= ?15 - ?12))",
         params![
             msg.id,
             msg.peer,
@@ -1682,6 +1754,9 @@ pub fn insert_peer_mailbox_with_limits(
             max_rows,
             max_bytes,
             stored_bytes,
+            admitted,
+            i64::try_from(global.max_rows).unwrap_or(i64::MAX),
+            i64::try_from(global.max_bytes).unwrap_or(i64::MAX),
         ],
     )?;
     if count > 0 {
