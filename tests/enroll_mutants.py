@@ -69,6 +69,16 @@ def instrument(tree, case, nonce):
     name = case["test"].split("::")[-1]
     pattern = rf"(\b(?:async\s+)?fn\s+{re.escape(name)}\s*\([^)]*\)\s*\{{)"
     text, count = re.subn(pattern, lambda m: m[0] + f'\n eprintln!("{marker}");', text)
+    if count == 0 and case.get("test_macro"):
+        macro = case["test_macro"]
+        assert re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", macro)
+        invocation = re.search(rf"\b{re.escape(macro)}!\(\s*{re.escape(name)}\s*,", text)
+        definition = re.search(rf"macro_rules!\s*{re.escape(macro)}\s*\{{", text)
+        assert invocation and definition and definition.end() < invocation.start(), "named macro test missing"
+        start, end = definition.end(), invocation.start()
+        fragment, count = re.subn(r"(\b(?:async\s+)?fn\s+\$name\s*\([^)]*\)\s*\{)",
+                                  lambda m: m[0] + f'\n eprintln!("{marker}");', text[start:end])
+        text = text[:start] + fragment + text[end:]
     assert count == 1, (case["test"], "named test instrumentation missing")
     file.write_text(text)
     lib = tree / "src/lib.rs"
