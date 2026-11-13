@@ -145,6 +145,10 @@ pub enum Error {
     Denied,
     #[error("invalid_name")]
     InvalidName,
+    #[error(
+        "invalid_name: users rule {0} produced no valid user segment; add a literal user rule"
+    )]
+    InvalidRuleName(usize),
     #[error("already the primary binding of '{0}'; unbind it first")]
     AlreadyPrimary(String),
     #[error("name_bound")]
@@ -161,6 +165,28 @@ pub enum Error {
     RateLimited,
     #[error("enrollment storage unavailable")]
     Storage,
+}
+impl Error {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotReady => "not_ready",
+            Self::UnsupportedFlow => "unsupported_flow",
+            Self::InvalidPolicy => "invalid_policy",
+            Self::InvalidCsr => "invalid_csr",
+            Self::UnsupportedKey => "unsupported_key",
+            Self::InvalidCaKey => "invalid_ca_key",
+            Self::Denied => "denied",
+            Self::InvalidName | Self::InvalidRuleName(_) => "invalid_name",
+            Self::AlreadyPrimary(_) => "already_primary",
+            Self::NameBound => "name_bound",
+            Self::ReservedName => "reserved_name",
+            Self::Superseded => "superseded",
+            Self::ReenrollRequired => "reenroll_required",
+            Self::ReauthRequired => "reauth_required",
+            Self::RateLimited => "rate_limited",
+            Self::Storage => "storage_unavailable",
+        }
+    }
 }
 #[derive(Clone, Serialize)]
 pub struct Issued {
@@ -274,10 +300,11 @@ impl Policy {
         if c.iss != provider.issuer || c.sub.is_empty() {
             return Err(Error::Denied);
         }
-        let r = self
+        let (rule_index, r) = self
             .users
             .iter()
-            .find(|r| {
+            .enumerate()
+            .find(|(_, r)| {
                 r.provider == c.provider
                     && (r
                         .email
@@ -295,15 +322,16 @@ impl Policy {
                 .as_deref()
                 .and_then(|v| v.split_once('@'))
                 .map(|(u, _)| u.to_lowercase())
-                .ok_or(Error::InvalidName)?,
-            (_, Some("preferred_username")) => {
-                c.preferred_username.clone().ok_or(Error::InvalidName)?
-            }
+                .ok_or(Error::InvalidRuleName(rule_index + 1))?,
+            (_, Some("preferred_username")) => c
+                .preferred_username
+                .clone()
+                .ok_or(Error::InvalidRuleName(rule_index + 1))?,
             (_, Some("sub")) => c.sub.clone(),
-            _ => return Err(Error::InvalidName),
+            _ => return Err(Error::InvalidRuleName(rule_index + 1)),
         };
         if !valid_segment(&user) {
-            return Err(Error::InvalidName);
+            return Err(Error::InvalidRuleName(rule_index + 1));
         }
         Ok((user, provider.issuer.clone()))
     }

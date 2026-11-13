@@ -328,7 +328,7 @@ fn unsupported_key_charset_and_flow_do_not_gain_authority() {
     c.hd = Some("example.com".into());
     assert!(matches!(
         s.ca.issue(&c, &csr(false), "lap", &[], NOW),
-        Err(Error::InvalidName)
+        Err(Error::InvalidRuleName(_))
     ));
     assert!(matches!(
         s.ca.policy().provider("idp").unwrap().client(Flow::Device),
