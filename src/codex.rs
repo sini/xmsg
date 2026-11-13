@@ -2383,7 +2383,7 @@ pub(crate) async fn recover_restart_root(local: &crate::surface::Local<'_>, root
             root_id,
             &candidate,
             class,
-            matches!(class, "owner_changed" | "revoked" | "handoff_unknown"),
+            matches!(class, "owner_changed" | "revoked"),
         ),
         Err((class, false)) => {
             let mut rt = runtime.lock().unwrap();
@@ -2485,7 +2485,7 @@ async fn attempt_restart_recovery(
         {
             Ok(("delivered", _)) => {}
             Ok((_, true)) => return Err(("owner_changed", true)),
-            Ok(("delivery_unknown", _)) => return Err(("handoff_unknown", true)),
+            Ok(("delivery_unknown", _)) => return Err(("handoff_unknown", false)),
             _ => return Err(("app_server_unavailable", false)),
         }
     }

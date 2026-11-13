@@ -129,6 +129,13 @@ CASES.update({
     ),
 })
 
+CASES["unknown-orphans-next-item"] = (
+    "src/codex.rs",
+    'return Err(("handoff_unknown", false))',
+    'return Err(("handoff_unknown", true))',
+    "va41_unknown_handoff_does_not_orphan_later_pending_item",
+)
+
 TESTS = (
     "va41_restart_queued_message_wakes_without_mcp_or_hook",
     "va41_restart_revoked_root_never_wakes",
@@ -143,6 +150,7 @@ TESTS = (
     "va41_repeated_failure_logs_only_class_transition_without_values",
     "va41_cancelled_owned_push_becomes_unknown_and_next_item_recovers",
     "va41_cli_starts_production_retry_scheduler_without_new_message",
+    "va41_unknown_handoff_does_not_orphan_later_pending_item",
 )
 
 

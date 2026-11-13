@@ -7054,6 +7054,22 @@ async fn va41_accept_turn(listener: UnixListener, root: &'static str) -> Value {
     panic!("relay disconnected before turn/start")
 }
 
+async fn va41_wait_accepted(env: &CodexTestEnv, id: &str) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let accepted = storage::get_codex_handoff_state(&env.state.db.lock().unwrap(), id)
+                .unwrap()
+                .is_some_and(|row| row.0 == "accepted");
+            if accepted {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("receiver ACK must be persisted before fixture aborts its scheduler");
+}
+
 #[tokio::test]
 async fn va41_restart_queued_message_wakes_without_mcp_or_hook() {
     const ROOT: &str = "019a0000-0000-7000-8000-000000000481";
@@ -7605,6 +7621,9 @@ async fn va41_eight_item_bound_retains_recovery_until_scheduled_remainder() {
     let scheduler = tokio::spawn(xmsg::codex::run_restart_recovery(env.state.clone()));
     let mut server = server;
     let bodies = tokio::time::timeout(Duration::from_secs(4), &mut server).await;
+    if bodies.is_ok() {
+        va41_wait_accepted(&env, ids.last().unwrap()).await;
+    }
     scheduler.abort();
     let _ = scheduler.await;
     if bodies.is_err() {
@@ -7803,6 +7822,9 @@ async fn va41_cancelled_owned_push_becomes_unknown_and_next_item_recovers() {
     let scheduler = tokio::spawn(xmsg::codex::run_restart_recovery(env.state.clone()));
     let mut server = server;
     let turn = tokio::time::timeout(Duration::from_secs(4), &mut server).await;
+    if turn.is_ok() {
+        va41_wait_accepted(&env, &second).await;
+    }
     scheduler.abort();
     let _ = scheduler.await;
     if turn.is_err() {
@@ -7950,4 +7972,88 @@ async fn va41_cli_starts_production_retry_scheduler_without_new_message() {
     })
     .await
     .expect("real daemon must persist accepted custody");
+}
+
+#[tokio::test]
+async fn va41_unknown_handoff_does_not_orphan_later_pending_item() {
+    const ROOT: &str = "019a0000-0000-7000-8000-000000000494";
+    let env = va41_restart_fixture(ROOT).await;
+    let first = xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        ROOT,
+        "VA41_UNKNOWN_FIRST",
+        None,
+    )
+    .await
+    .unwrap()
+    .message_id;
+    let second = xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        ROOT,
+        "VA41_UNKNOWN_SECOND",
+        None,
+    )
+    .await
+    .unwrap()
+    .message_id;
+    let listener = va41_listener(&env);
+    let mut server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        mock_ws_accept(&mut stream).await;
+        while let Some(message) = mock_ws_read_client_text(&mut stream).await {
+            let result = match message["method"].as_str().unwrap_or("") {
+                "initialize" => json!({"userAgent":"fixture"}),
+                "thread/loaded/list" => json!({"data":[ROOT]}),
+                "turn/start" => {
+                    assert!(message["params"]["input"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("VA41_UNKNOWN_FIRST"));
+                    break;
+                }
+                _ => continue,
+            };
+            mock_ws_write_server_text(
+                &mut stream,
+                &json!({"jsonrpc":"2.0","id":message["id"],"result":result}).to_string(),
+            )
+            .await;
+        }
+        drop(stream);
+        va41_accept_turn(listener, ROOT).await
+    });
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    xmsg::codex::recover_restart_roots(&env.state).await;
+    assert_eq!(
+        storage::get_codex_handoff_state(&env.state.db.lock().unwrap(), &first)
+            .unwrap()
+            .unwrap()
+            .0,
+        "unknown"
+    );
+    let scheduler = tokio::spawn(xmsg::codex::run_restart_recovery(env.state.clone()));
+    let turn = tokio::time::timeout(Duration::from_secs(6), &mut server).await;
+    if turn.is_ok() {
+        va41_wait_accepted(&env, &second).await;
+    }
+    scheduler.abort();
+    let _ = scheduler.await;
+    if turn.is_err() {
+        server.abort();
+    }
+    let turn = turn
+        .expect("unknown first handoff must not orphan the second pending item")
+        .unwrap();
+    let body = turn["params"]["input"][0]["text"].as_str().unwrap();
+    assert!(body.contains("VA41_UNKNOWN_SECOND"));
+    assert!(!body.contains("VA41_UNKNOWN_FIRST"));
+    assert_eq!(
+        storage::get_codex_handoff_state(&env.state.db.lock().unwrap(), &first)
+            .unwrap()
+            .unwrap()
+            .0,
+        "unknown"
+    );
 }
