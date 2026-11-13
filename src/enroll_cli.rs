@@ -39,7 +39,12 @@ pub struct Args {
 #[derive(Deserialize)]
 struct Created {
     session: String,
-    authorization_url: String,
+    expires_in: u64,
+    authorization_url: Option<String>,
+    user_code: Option<String>,
+    verification_uri: Option<String>,
+    request_id: Option<String>,
+    provider: Option<String>,
 }
 #[derive(Deserialize)]
 struct Collected {
@@ -219,6 +224,15 @@ type BrowserFuture<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<String>>> + Send + 'a>>;
 pub(crate) trait Browser: Send + Sync {
     fn interact<'a>(&'a self, authorization_url: &'a str, flow: Flow) -> BrowserFuture<'a>;
+    fn device<'a>(
+        &'a self,
+        _uri: &'a str,
+        _code: &'a str,
+        _request: &'a str,
+        _spki_sha256: &'a str,
+    ) -> BrowserFuture<'a> {
+        Box::pin(async { Ok(None) })
+    }
 }
 struct SystemBrowser;
 impl Browser for SystemBrowser {
@@ -254,9 +268,7 @@ pub async fn run(args: Args) -> Result<()> {
 }
 
 pub(crate) async fn run_with_browser(args: Args, browser: &dyn Browser) -> Result<()> {
-    if matches!(args.flow, Flow::Device) {
-        return Err("unsupported_flow: device enrollment is not available in v1".into());
-    }
+    let is_device = matches!(args.flow, Flow::Device);
     let directory = args
         .state_dir
         .unwrap_or_else(client::default_state_directory);
@@ -269,8 +281,19 @@ pub(crate) async fn run_with_browser(args: Args, browser: &dyn Browser) -> Resul
     let roots = args.root_file.map(std::fs::read).transpose()?;
     let trust = client::bootstrap(&url, args.fingerprint.as_deref(), roots.as_deref()).await?;
     let csr = client::create_key(&directory)?;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let redirect = format!("http://127.0.0.1:{}/cb", listener.local_addr()?.port());
+    let listener = if is_device {
+        None
+    } else {
+        Some(tokio::net::TcpListener::bind("127.0.0.1:0").await?)
+    };
+    let redirect = listener
+        .as_ref()
+        .map(|listener| {
+            listener
+                .local_addr()
+                .map(|address| format!("http://127.0.0.1:{}/cb", address.port()))
+        })
+        .transpose()?;
     let host = args.host.unwrap_or_else(|| {
         gethostname::gethostname()
             .to_string_lossy()
@@ -279,32 +302,89 @@ pub(crate) async fn run_with_browser(args: Args, browser: &dyn Browser) -> Resul
             .unwrap_or("localhost")
             .to_owned()
     });
-    let flow = if matches!(args.flow, Flow::Paste) {
-        "paste"
-    } else {
-        "loopback"
+    let flow = match args.flow {
+        Flow::Paste => "paste",
+        Flow::Loopback => "loopback",
+        Flow::Device => "device",
     };
     let http = client::http_client(&trust, None)?;
     let value=response(http.post(endpoint(&url,"/enroll/v1/sessions")?).json(&serde_json::json!({"csr_pem":csr,"host":host,"provider":args.provider,"flow":flow,"redirect_uri":redirect})).send().await?).await?;
     let created: Created = serde_json::from_value(value).map_err(|_| Error::Response)?;
-    println!("Sign in at: {}", created.authorization_url);
-    let pasted = browser
-        .interact(&created.authorization_url, args.flow)
-        .await?;
-    let (code, state) = if matches!(args.flow, Flow::Paste) {
-        callback_value(pasted.ok_or(Error::Response)?.trim())?
-    } else {
-        tokio::time::timeout(Duration::from_secs(600), callback(listener)).await??
+    if created.expires_in == 0 || created.expires_in > if is_device { 300 } else { 600 } {
+        return Err(Error::Response.into());
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(created.expires_in);
+    let display = |value: &str| {
+        value
+            .chars()
+            .take(2048)
+            .flat_map(char::escape_default)
+            .collect::<String>()
     };
-    let _ = response(
-        http.post(endpoint(&url, "/enroll/v1/sessions/code")?)
-            .header("xmsg-enroll-session", header(&created.session)?)
-            .json(&serde_json::json!({"code":code,"state":state}))
-            .send()
-            .await?,
-    )
-    .await?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+    if is_device {
+        let code = created.user_code.as_deref().ok_or(Error::Response)?;
+        let verification = created.verification_uri.as_deref().ok_or(Error::Response)?;
+        let request = created.request_id.as_deref().ok_or(Error::Response)?;
+        let projection = crate::enroll_ca::VerifiedCsr::parse_pem(&csr)?;
+        use sha2::Digest;
+        let key_fingerprint = format!(
+            "sha256:{}",
+            hex::encode(sha2::Sha256::digest(projection.spki_der()))
+        );
+        println!(
+            "CA: {}",
+            display(&reqwest::Url::parse(&url)?.origin().ascii_serialization())
+        );
+        println!(
+            "Provider: {}",
+            display(
+                created
+                    .provider
+                    .as_deref()
+                    .or(args.provider.as_deref())
+                    .unwrap_or("configured provider")
+            )
+        );
+        println!("Requested host (not attested): {}", display(&host));
+        println!("Policy user: pending verification");
+        println!("SPKI SHA-256: {key_fingerprint}");
+        println!("Request: {}", display(request));
+        println!("Sign in at: {}", display(verification));
+        println!("User code: {}", display(code));
+        println!(
+            "CA acceptance expires in {} seconds; CA operator approval is required.",
+            created.expires_in
+        );
+        println!("Only enter a code from a terminal you intentionally started; never enter a code sent in a message.");
+        browser
+            .device(verification, code, request, &key_fingerprint)
+            .await?;
+    } else {
+        let authorization = created
+            .authorization_url
+            .as_deref()
+            .ok_or(Error::Response)?;
+        println!("Sign in at: {}", display(authorization));
+        let pasted = browser.interact(authorization, args.flow).await?;
+        let (code, state) = if matches!(args.flow, Flow::Paste) {
+            callback_value(pasted.ok_or(Error::Response)?.trim())?
+        } else {
+            tokio::time::timeout(
+                Duration::from_secs(created.expires_in),
+                callback(listener.unwrap()),
+            )
+            .await??
+        };
+        let _ = response(
+            http.post(endpoint(&url, "/enroll/v1/sessions/code")?)
+                .header("xmsg-enroll-session", header(&created.session)?)
+                .json(&serde_json::json!({"code":code,"state":state}))
+                .send()
+                .await?,
+        )
+        .await?;
+    }
+    let mut shown_user = None;
     let collected = loop {
         let value = response(
             http.get(endpoint(&url, "/enroll/v1/sessions?wait=30")?)
@@ -316,10 +396,20 @@ pub(crate) async fn run_with_browser(args: Args, browser: &dyn Browser) -> Resul
         if value.get("cert_chain_pem").is_some() {
             break serde_json::from_value::<Collected>(value).map_err(|_| Error::Response)?;
         }
-        if tokio::time::Instant::now() > deadline {
+        if value.get("status").and_then(|value| value.as_str()) == Some("awaiting_approval") {
+            let user = value
+                .get("user")
+                .and_then(|value| value.as_str())
+                .ok_or(Error::Response)?;
+            if shown_user.as_deref() != Some(user) {
+                println!("Policy user: {}; awaiting CA approval", display(user));
+                shown_user = Some(user.to_owned());
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
             return Err(Error::Response.into());
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(if is_device { 1000 } else { 200 })).await;
     };
     if collected.ca_identity != trust.ca_identity {
         return Err(Error::Response.into());

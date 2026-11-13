@@ -132,6 +132,69 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+pub fn build_unix_router(state: Arc<AppState>) -> Router {
+    build_router(state.clone()).merge(
+        Router::new()
+            .route("/v1/enrollment/pending", get(enrollment_pending_handler))
+            .route(
+                "/v1/enrollment/{id}/approve",
+                post(enrollment_approve_handler),
+            )
+            .route("/v1/enrollment/{id}/deny", post(enrollment_deny_handler))
+            .layer(DefaultBodyLimit::max(4096))
+            .with_state(state),
+    )
+}
+
+fn local_enrollment(
+    state: &AppState,
+    peer: &PeerInfo,
+) -> Result<Arc<crate::enroll::Service>, AppError> {
+    let credential = peer.as_ref().and_then(|value| value.0 .0.peer.as_ref());
+    if !credential.is_some_and(|credential| credential.uid == crate::agent::current_uid()) {
+        return Err(AppError::Denied(
+            "enrollment approval requires a same-UID Unix connection".into(),
+        ));
+    }
+    state
+        .fed_state
+        .as_ref()
+        .and_then(crate::enroll::Service::local_for_fed)
+        .ok_or_else(|| AppError::ServiceUnavailable("enrollment authority unavailable".into()))
+}
+
+async fn enrollment_pending_handler(
+    State(state): State<Arc<AppState>>,
+    peer: PeerInfo,
+) -> Result<Response, AppError> {
+    Ok(Json(local_enrollment(&state, &peer)?.pending_device_requests()).into_response())
+}
+
+async fn enrollment_approve_handler(
+    State(state): State<Arc<AppState>>,
+    peer: PeerInfo,
+    AxumPath(id): AxumPath<String>,
+    body: Result<Json<crate::enroll::ApprovalRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<Response, AppError> {
+    let service = local_enrollment(&state, &peer)?;
+    let Json(body) = body.map_err(|_| AppError::BadRequest("invalid approval request".into()))?;
+    Ok(match service.approve_device(&id, body) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    })
+}
+
+async fn enrollment_deny_handler(
+    State(state): State<Arc<AppState>>,
+    peer: PeerInfo,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Response, AppError> {
+    Ok(match local_enrollment(&state, &peer)?.deny_device(&id) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error.into_response(),
+    })
+}
+
 async fn retired_sessions_handler() -> impl IntoResponse {
     (
         StatusCode::NOT_FOUND,

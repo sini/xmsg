@@ -14,13 +14,23 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::IpAddr,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicI64, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 use tokio::sync::Notify;
 
+#[path = "enroll_device.rs"]
+mod device;
+pub(crate) use device::ApprovalRequest;
+
 pub trait Clock: Send + Sync {
     fn now(&self) -> i64;
+    fn monotonic_now(&self) -> tokio::time::Instant {
+        tokio::time::Instant::now()
+    }
 }
 pub struct WallClock;
 impl Clock for WallClock {
@@ -33,23 +43,25 @@ impl Clock for WallClock {
     }
 }
 #[derive(Clone, Copy)]
-struct Failure(StatusCode, &'static str);
+pub(crate) struct Failure(StatusCode, &'static str);
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {
         (self.0, Json(serde_json::json!({"error":{"reason":self.1}}))).into_response()
     }
 }
 fn core_failure(error: crate::enroll_ca::Error) -> Failure {
-    let reason = error.code();
+    core_failure_code(error.code())
+}
+fn core_failure_code(reason: &'static str) -> Failure {
     let status = match reason {
         "unsupported_flow" | "unsupported_key" | "invalid_csr" | "invalid_name" => {
             StatusCode::BAD_REQUEST
         }
         "rate_limited" => StatusCode::TOO_MANY_REQUESTS,
         "reenroll_required" | "reauth_required" => StatusCode::UNAUTHORIZED,
-        "denied" | "name_bound" | "reserved_name" | "superseded" | "already_primary" => {
-            StatusCode::FORBIDDEN
-        }
+        "approval_expired" => StatusCode::GONE,
+        "denied" | "name_bound" | "reserved_name" | "superseded" | "already_primary"
+        | "approval_mismatch" => StatusCode::FORBIDDEN,
         _ => StatusCode::SERVICE_UNAVAILABLE,
     };
     Failure(status, reason)
@@ -70,6 +82,9 @@ fn oidc_reason(error: enroll_oidc::Error) -> &'static str {
     use enroll_oidc::Error;
     match error {
         Error::UnsupportedFlow => "unsupported_flow",
+        Error::DeviceDisabled => "device_disabled",
+        Error::DeviceUnsupported => "device_unsupported",
+        Error::Denied => "access_denied",
         Error::UnsupportedIssuer => "unsupported_issuer",
         Error::Configuration => "provider_configuration",
         Error::Unavailable => "provider_unavailable",
@@ -83,6 +98,16 @@ fn oidc_reason(error: enroll_oidc::Error) -> &'static str {
         Error::Signature => "signature",
     }
 }
+fn oidc_failure(error: enroll_oidc::Error) -> Failure {
+    let status = match &error {
+        enroll_oidc::Error::DeviceDisabled | enroll_oidc::Error::DeviceUnsupported => {
+            StatusCode::BAD_REQUEST
+        }
+        enroll_oidc::Error::Denied => StatusCode::FORBIDDEN,
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    Failure(status, oidc_reason(error))
+}
 #[derive(Clone)]
 pub struct Peer {
     pub ip: IpAddr,
@@ -95,17 +120,54 @@ struct Authorization {
 enum Phase {
     Preparing,
     Code(Authorization),
+    DevicePolling,
+    AwaitingApproval(device::AwaitingApproval),
     Exchanging,
     Consumed,
     Complete(Result<Issued, SessionFailure>),
 }
 struct Session {
     ip: IpAddr,
-    expires: i64,
+    expires: AtomicI64,
+    deadline: Mutex<Option<tokio::time::Instant>>,
+    device_active: AtomicBool,
+    cancelled: AtomicBool,
+    cancel: Notify,
+    request_id: Option<String>,
+    provider: String,
     host: String,
     csr: VerifiedCsr,
     phase: Mutex<Phase>,
     notify: Notify,
+}
+impl Session {
+    fn expired(&self, clock: &dyn Clock) -> bool {
+        self.expires.load(Ordering::Acquire) <= clock.now()
+            || self
+                .deadline
+                .lock()
+                .unwrap()
+                .is_some_and(|limit| clock.monotonic_now() >= limit)
+    }
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.device_active.store(false, Ordering::Release);
+        self.cancel.notify_waiters();
+    }
+}
+struct Reservation {
+    service: Arc<Service>,
+    handle: String,
+    keep: bool,
+}
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if !self.keep {
+            if let Some(session) = self.service.sessions.lock().unwrap().remove(&self.handle) {
+                session.cancel();
+            }
+        }
+    }
 }
 struct Bucket {
     units: u64,
@@ -137,6 +199,19 @@ pub struct Service {
     hub_entry: serde_json::Value,
     ca_identity: String,
     oidc_http: reqwest::Client,
+    local_approval: AtomicBool,
+}
+impl Drop for Service {
+    fn drop(&mut self) {
+        for session in self
+            .sessions
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+        {
+            session.cancel();
+        }
+    }
 }
 impl Service {
     pub fn new(
@@ -181,6 +256,7 @@ impl Service {
             hub_entry,
             ca_identity,
             oidc_http: http,
+            local_approval: AtomicBool::new(false),
         }
     }
     fn refresh(&self) {
@@ -192,11 +268,21 @@ impl Service {
             .and_then(|h| h.to_str().ok())
             .ok_or(Failure(StatusCode::UNAUTHORIZED, "session_required"))?;
         let mut sessions = self.sessions.lock().unwrap();
-        sessions.retain(|_, session| session.expires > self.clock.now());
+        self.prune(&mut sessions);
         sessions
             .get(handle)
             .cloned()
             .ok_or(Failure(StatusCode::GONE, "gone"))
+    }
+    fn prune(&self, sessions: &mut HashMap<String, Arc<Session>>) {
+        sessions.retain(|_, session| {
+            if session.expired(self.clock.as_ref()) {
+                session.cancel();
+                false
+            } else {
+                true
+            }
+        });
     }
 }
 #[derive(Deserialize)]
@@ -241,16 +327,22 @@ async fn create(
     body: Result<Json<Create>, JsonRejection>,
 ) -> Result<Response, Failure> {
     let Json(body) = body.map_err(|_| Failure(StatusCode::BAD_REQUEST, "invalid_request"))?;
-    if body.flow == Flow::Device {
-        return Err(Failure(StatusCode::BAD_REQUEST, "unsupported_flow"));
-    }
+    let is_device = body.flow == Flow::Device;
     if !valid_host(&body.host) {
         return Err(Failure(StatusCode::BAD_REQUEST, "invalid_host"));
     }
-    let redirect = body
-        .redirect_uri
-        .filter(|value| valid_redirect(value))
-        .ok_or(Failure(StatusCode::BAD_REQUEST, "invalid_redirect"))?;
+    let redirect = if is_device {
+        if body.redirect_uri.is_some() {
+            return Err(Failure(StatusCode::BAD_REQUEST, "invalid_redirect"));
+        }
+        None
+    } else {
+        Some(
+            body.redirect_uri
+                .filter(|value| valid_redirect(value))
+                .ok_or(Failure(StatusCode::BAD_REQUEST, "invalid_redirect"))?,
+        )
+    };
     let now = service.clock.now();
     if !service.bucket.lock().unwrap().take(now) {
         return Err(Failure(StatusCode::TOO_MANY_REQUESTS, "rate_limited"));
@@ -268,7 +360,19 @@ async fn create(
         .get(&label)
         .cloned()
         .ok_or(Failure(StatusCode::BAD_REQUEST, "unknown_provider"))?;
-    config.client(body.flow).map_err(core_failure)?;
+    if is_device && !config.device_enabled() {
+        return Err(Failure(StatusCode::BAD_REQUEST, "device_disabled"));
+    }
+    if is_device && !service.local_approval.load(Ordering::Acquire) {
+        return Err(Failure(StatusCode::BAD_REQUEST, "device_unsupported"));
+    }
+    config.client(body.flow).map_err(|error| {
+        if is_device {
+            Failure(StatusCode::BAD_REQUEST, "device_unsupported")
+        } else {
+            core_failure(error)
+        }
+    })?;
     let handle = {
         use base64::Engine;
         let mut value = [0u8; 32];
@@ -278,7 +382,15 @@ async fn create(
     };
     let session = Arc::new(Session {
         ip: peer.ip,
-        expires: now.saturating_add(600),
+        expires: AtomicI64::new(now.saturating_add(if is_device { 300 } else { 600 })),
+        deadline: Mutex::new(
+            is_device.then(|| service.clock.monotonic_now() + Duration::from_secs(300)),
+        ),
+        device_active: AtomicBool::new(is_device),
+        cancelled: AtomicBool::new(false),
+        cancel: Notify::new(),
+        request_id: is_device.then(device::request_id).transpose()?,
+        provider: label.clone(),
         host: body.host,
         csr,
         phase: Mutex::new(Phase::Preparing),
@@ -286,7 +398,29 @@ async fn create(
     });
     {
         let mut sessions = service.sessions.lock().unwrap();
-        sessions.retain(|_, s| s.expires > now);
+        service.prune(&mut sessions);
+        if is_device
+            && sessions
+                .values()
+                .filter(|s| s.device_active.load(Ordering::Acquire))
+                .count()
+                >= 8
+        {
+            return Err(Failure(
+                StatusCode::TOO_MANY_REQUESTS,
+                "device_pending_full",
+            ));
+        }
+        if is_device
+            && sessions
+                .values()
+                .any(|s| s.ip == peer.ip && s.device_active.load(Ordering::Acquire))
+        {
+            return Err(Failure(
+                StatusCode::TOO_MANY_REQUESTS,
+                "device_pending_per_ip",
+            ));
+        }
         if sessions.values().filter(|s| s.ip == peer.ip).count() >= 4 {
             return Err(Failure(StatusCode::TOO_MANY_REQUESTS, "pending_per_ip"));
         }
@@ -299,14 +433,29 @@ async fn create(
                 "session_collision",
             ));
         }
+        if session
+            .request_id
+            .as_ref()
+            .is_some_and(|id| sessions.values().any(|s| s.request_id.as_ref() == Some(id)))
+        {
+            return Err(Failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "session_collision",
+            ));
+        }
         sessions.insert(handle.clone(), session.clone());
     }
+    let mut reservation = Reservation {
+        service: service.clone(),
+        handle: handle.clone(),
+        keep: false,
+    };
     let groups = policy
         .users
         .iter()
         .any(|rule| rule.provider == label && rule.group.is_some());
     let prepared = async {
-        let provider = Arc::new(
+        Ok::<_, enroll_oidc::Error>(Arc::new(
             enroll_oidc::Provider::discover_with_client(
                 &label,
                 &config,
@@ -314,24 +463,35 @@ async fn create(
                 service.oidc_http.clone(),
             )
             .await?,
-        );
-        let pending = provider.begin(body.flow, &redirect)?;
-        Ok::<_, enroll_oidc::Error>((provider, pending))
+        ))
     }
     .await;
-    let (provider, pending) = match prepared {
+    let provider = match prepared {
         Ok(value) => value,
+        Err(error) => {
+            service.sessions.lock().unwrap().remove(&handle);
+            return Err(oidc_failure(error));
+        }
+    };
+    if session.expired(service.clock.as_ref()) {
+        service.sessions.lock().unwrap().remove(&handle);
+        return Err(Failure(StatusCode::GONE, "expired"));
+    }
+    if is_device {
+        let result = device::start(service, session, handle, provider).await;
+        reservation.keep = result.is_ok();
+        return result;
+    }
+    let pending = match provider.begin(body.flow, redirect.as_deref().unwrap()) {
+        Ok(pending) => pending,
         Err(error) => {
             service.sessions.lock().unwrap().remove(&handle);
             return Err(Failure(StatusCode::SERVICE_UNAVAILABLE, oidc_reason(error)));
         }
     };
-    if session.expires <= service.clock.now() {
-        service.sessions.lock().unwrap().remove(&handle);
-        return Err(Failure(StatusCode::GONE, "expired"));
-    }
     let authorization_url = pending.authorization_url.clone();
     *session.phase.lock().unwrap() = Phase::Code(Authorization { provider, pending });
+    reservation.keep = true;
     Ok((StatusCode::CREATED,Json(serde_json::json!({"session":handle,"expires_in":600,"authorization_url":authorization_url}))).into_response())
 }
 async fn code(
@@ -359,7 +519,7 @@ async fn code(
             })
             .await
             .map_err(|error| SessionFailure::reason(oidc_reason(error)))?;
-        if session.expires <= service.clock.now() {
+        if session.expired(service.clock.as_ref()) {
             return Err(SessionFailure::reason("expired"));
         }
         service.refresh();
@@ -425,7 +585,10 @@ async fn collect(
     let notified = session.notify.notified();
     tokio::pin!(notified);
     notified.as_mut().enable();
-    if !matches!(*session.phase.lock().unwrap(), Phase::Complete(_)) {
+    if !matches!(
+        *session.phase.lock().unwrap(),
+        Phase::Complete(_) | Phase::AwaitingApproval(_)
+    ) {
         let _ = tokio::time::timeout(
             Duration::from_secs(query.wait.unwrap_or(0).min(30)),
             notified,
@@ -437,6 +600,14 @@ async fn collect(
         match std::mem::replace(&mut *phase, Phase::Consumed) {
             Phase::Complete(result) => Some(result),
             Phase::Consumed => return Err(Failure(StatusCode::GONE, "gone")),
+            Phase::AwaitingApproval(approval) => {
+                let user = approval.projection.user().to_owned();
+                *phase = Phase::AwaitingApproval(approval);
+                return Ok(
+                    Json(serde_json::json!({"status":"awaiting_approval","user":user}))
+                        .into_response(),
+                );
+            }
             other => {
                 *phase = other;
                 None
