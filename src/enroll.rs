@@ -40,25 +40,32 @@ impl IntoResponse for Failure {
     }
 }
 fn core_failure(error: crate::enroll_ca::Error) -> Failure {
-    use crate::enroll_ca::Error;
-    match error {
-        Error::UnsupportedFlow => Failure(StatusCode::BAD_REQUEST, "unsupported_flow"),
-        Error::UnsupportedKey => Failure(StatusCode::BAD_REQUEST, "unsupported_key"),
-        Error::InvalidCsr | Error::InvalidName => {
-            Failure(StatusCode::BAD_REQUEST, "invalid_enrollment")
+    let reason = error.code();
+    let status = match reason {
+        "unsupported_flow" | "unsupported_key" | "invalid_csr" | "invalid_name" => {
+            StatusCode::BAD_REQUEST
         }
-        Error::RateLimited => Failure(StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
-        Error::NotReady | Error::Storage | Error::InvalidCaKey | Error::InvalidPolicy => {
-            Failure(StatusCode::SERVICE_UNAVAILABLE, "enrollment_unavailable")
+        "rate_limited" => StatusCode::TOO_MANY_REQUESTS,
+        "reenroll_required" | "reauth_required" => StatusCode::UNAUTHORIZED,
+        "denied" | "name_bound" | "reserved_name" | "superseded" | "already_primary" => {
+            StatusCode::FORBIDDEN
         }
-        Error::Denied => Failure(StatusCode::FORBIDDEN, "denied"),
-        Error::AlreadyPrimary(_) | Error::NameBound => Failure(StatusCode::FORBIDDEN, "name_bound"),
-        Error::ReservedName => Failure(StatusCode::FORBIDDEN, "reserved_name"),
-        Error::Superseded => Failure(StatusCode::FORBIDDEN, "superseded"),
-        Error::ReenrollRequired => Failure(StatusCode::UNAUTHORIZED, "reenroll_required"),
-        Error::ReauthRequired => Failure(StatusCode::UNAUTHORIZED, "reauth_required"),
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    Failure(status, reason)
+}
+#[derive(Serialize)]
+struct SessionFailure {
+    reason: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rule: Option<usize>,
+}
+impl SessionFailure {
+    fn reason(reason: &'static str) -> Self {
+        Self { reason, rule: None }
     }
 }
+
 fn oidc_reason(error: enroll_oidc::Error) -> &'static str {
     use enroll_oidc::Error;
     match error {
@@ -90,7 +97,7 @@ enum Phase {
     Code(Authorization),
     Exchanging,
     Consumed,
-    Complete(Result<Issued, &'static str>),
+    Complete(Result<Issued, SessionFailure>),
 }
 struct Session {
     ip: IpAddr,
@@ -129,6 +136,7 @@ pub struct Service {
     bucket: Mutex<Bucket>,
     hub_entry: serde_json::Value,
     ca_identity: String,
+    oidc_http: reqwest::Client,
 }
 impl Service {
     pub fn new(
@@ -137,6 +145,28 @@ impl Service {
         clock: Arc<dyn Clock>,
         hub_entry: serde_json::Value,
         ca_identity: String,
+    ) -> Result<Self, reqwest::Error> {
+        let http = reqwest::Client::builder()
+            .https_only(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(30))
+            .build()?;
+        Ok(Self::with_oidc_http(
+            ca,
+            fed,
+            clock,
+            hub_entry,
+            ca_identity,
+            http,
+        ))
+    }
+    pub(crate) fn with_oidc_http(
+        ca: Arc<EnrollCa>,
+        fed: Arc<crate::fed::FedState>,
+        clock: Arc<dyn Clock>,
+        hub_entry: serde_json::Value,
+        ca_identity: String,
+        http: reqwest::Client,
     ) -> Self {
         let now = clock.now();
         Self {
@@ -150,6 +180,7 @@ impl Service {
             }),
             hub_entry,
             ca_identity,
+            oidc_http: http,
         }
     }
     fn refresh(&self) {
@@ -220,6 +251,10 @@ async fn create(
         .redirect_uri
         .filter(|value| valid_redirect(value))
         .ok_or(Failure(StatusCode::BAD_REQUEST, "invalid_redirect"))?;
+    let now = service.clock.now();
+    if !service.bucket.lock().unwrap().take(now) {
+        return Err(Failure(StatusCode::TOO_MANY_REQUESTS, "rate_limited"));
+    }
     let csr = VerifiedCsr::parse_pem(&body.csr_pem).map_err(core_failure)?;
     service.refresh();
     let policy = service.ca.policy();
@@ -234,10 +269,6 @@ async fn create(
         .cloned()
         .ok_or(Failure(StatusCode::BAD_REQUEST, "unknown_provider"))?;
     config.client(body.flow).map_err(core_failure)?;
-    let now = service.clock.now();
-    if !service.bucket.lock().unwrap().take(now) {
-        return Err(Failure(StatusCode::TOO_MANY_REQUESTS, "rate_limited"));
-    }
     let handle = {
         use base64::Engine;
         let mut value = [0u8; 32];
@@ -275,7 +306,15 @@ async fn create(
         .iter()
         .any(|rule| rule.provider == label && rule.group.is_some());
     let prepared = async {
-        let provider = Arc::new(enroll_oidc::Provider::discover(&label, &config, groups).await?);
+        let provider = Arc::new(
+            enroll_oidc::Provider::discover_with_client(
+                &label,
+                &config,
+                groups,
+                service.oidc_http.clone(),
+            )
+            .await?,
+        );
         let pending = provider.begin(body.flow, &redirect)?;
         Ok::<_, enroll_oidc::Error>((provider, pending))
     }
@@ -319,9 +358,9 @@ async fn code(
                 service.clock.now()
             })
             .await
-            .map_err(oidc_reason)?;
+            .map_err(|error| SessionFailure::reason(oidc_reason(error)))?;
         if session.expires <= service.clock.now() {
-            return Err("expired");
+            return Err(SessionFailure::reason("expired"));
         }
         service.refresh();
         let peers = service.fed.current_peers();
@@ -343,7 +382,16 @@ async fn code(
                 &names,
                 service.clock.now(),
             )
-            .map_err(|error| core_failure(error).1)
+            .map_err(|error| {
+                let rule = match &error {
+                    crate::enroll_ca::Error::InvalidRuleName(index) => Some(*index),
+                    _ => None,
+                };
+                SessionFailure {
+                    reason: error.code(),
+                    rule,
+                }
+            })
     }
     .await;
     *session.phase.lock().unwrap() = Phase::Complete(result);
@@ -405,7 +453,7 @@ async fn collect(
     service.sessions.lock().unwrap().remove(handle);
     session.notify.notify_waiters();
     match result {
-        Err(reason) => Ok(Json(serde_json::json!({"error":{"reason":reason}})).into_response()),
+        Err(error) => Ok(Json(serde_json::json!({"error":error})).into_response()),
         Ok(issued) => Ok(Json(Collected {
             cert_chain_pem: issued.cert_chain_pem,
             root_pem: issued.root_pem,
@@ -544,12 +592,10 @@ impl Drop for IpGuard {
         }
     }
 }
-pub async fn listen(
-    listener: tokio::net::TcpListener,
-    service: Arc<Service>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn tls_config(
+    service: &Service,
+) -> Result<Arc<rustls::ServerConfig>, Box<dyn std::error::Error + Send + Sync>> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-    use tower::ServiceExt;
     let identity = service.ca.server_identity(service.clock.now())?;
     if identity.uri != service.ca_identity {
         return Err("enrollment server identity changed during startup".into());
@@ -568,7 +614,22 @@ pub async fn listen(
         chain,
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(identity.key_der)),
     )?;
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    Ok(Arc::new(config))
+}
+pub async fn listen(
+    listener: tokio::net::TcpListener,
+    service: Arc<Service>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let config = tls_config(&service)?;
+    listen_with_config(listener, service, config).await
+}
+pub async fn listen_with_config(
+    listener: tokio::net::TcpListener,
+    service: Arc<Service>,
+    config: Arc<rustls::ServerConfig>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use tower::ServiceExt;
+    let acceptor = tokio_rustls::TlsAcceptor::from(config);
     let semaphore = Arc::new(tokio::sync::Semaphore::new(128));
     let counts = Arc::new(Mutex::new(HashMap::<IpAddr, usize>::new()));
     let router = router(service);

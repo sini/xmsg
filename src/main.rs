@@ -61,6 +61,10 @@ enum Commands {
         long_about = "Validate a peers file (the same rules `serve` applies at startup); exit 0 if valid, otherwise print the failing rule. Use it in CI or before a deploy."
     )]
     CheckPeers(CheckPeersArgs),
+    /// Enroll this machine through an OIDC identity provider
+    Enroll(xmsg::enroll_cli::Args),
+    /// Manage the local enrollment authority
+    EnrollCa(EnrollCaArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -72,6 +76,31 @@ pub struct UnregisterArgs {
     /// Agent socket path (defaults to $XDG_RUNTIME_DIR/xmsg/agent.sock)
     #[arg(long, env = "XMSG_AGENT_SOCK")]
     pub sock: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+pub struct EnrollCaArgs {
+    #[arg(long = "enroll-ca-dir")]
+    pub ca_dir: PathBuf,
+    #[arg(long = "enroll-policy")]
+    pub policy: Option<PathBuf>,
+    #[arg(long = "db-path", env = "XMSG_DB_PATH")]
+    pub db_path: Option<PathBuf>,
+    #[command(subcommand)]
+    pub action: EnrollCaAction,
+}
+#[derive(Subcommand, Debug)]
+pub enum EnrollCaAction {
+    Init,
+    List,
+    Bind {
+        user: String,
+        provider: String,
+        sub: String,
+    },
+    Unbind {
+        user: String,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -296,6 +325,18 @@ pub struct ServeArgs {
     /// Dynamic federation TLS credential and CA reload interval in seconds (default: 30)
     #[arg(long, env = "XMSG_FED_RELOAD_INTERVAL_SECS", default_value = "30")]
     pub fed_reload_interval_secs: u64,
+    /// Separate optional enrollment HTTPS listener (IP:PORT)
+    #[arg(long)]
+    pub enroll_listen: Option<std::net::SocketAddr>,
+    /// Owner-private enrollment root directory
+    #[arg(long)]
+    pub enroll_ca_dir: Option<PathBuf>,
+    /// Enrollment provider and issuance policy JSON
+    #[arg(long)]
+    pub enroll_policy: Option<PathBuf>,
+    /// Existing enrolled identity directory and automatic renewal state
+    #[arg(long)]
+    pub enroll_state: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -364,6 +405,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .enable_all()
                 .build()?;
             rt.block_on(service_exec::run(args))?;
+        }
+        Commands::Enroll(args) => {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(xmsg::enroll_cli::run(args))
+                .map_err(|error| error.to_string())?;
+        }
+        Commands::EnrollCa(args) => {
+            use xmsg::enroll::Clock;
+            let now = xmsg::enroll::WallClock.now();
+            if matches!(args.action, EnrollCaAction::Init) {
+                let pem = xmsg::enroll_ca::initialize_ca_dir(&args.ca_dir, now)?;
+                use rustls::pki_types::pem::PemObject;
+                use sha2::Digest;
+                let root = rustls::pki_types::CertificateDer::from_pem_slice(pem.as_bytes())?;
+                println!(
+                    "{}",
+                    serde_json::json!({"root_file":args.ca_dir.join("root.crt"),"fingerprint":format!("sha256:{}",hex::encode(sha2::Sha256::digest(root.as_ref())))})
+                );
+            } else {
+                let policy = args.policy.ok_or("--enroll-policy is required")?;
+                if !args.ca_dir.join("root.key").exists() {
+                    return Err("run enroll-ca init first".into());
+                }
+                let db_file = resolve_db_path(args.db_path);
+                if let Some(parent) = db_file.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let connection = rusqlite::Connection::open(&db_file)?;
+                storage::init_db(&connection)?;
+                let ca = xmsg::enroll_ca::EnrollCa::open(
+                    &args.ca_dir,
+                    Arc::new(Mutex::new(connection)),
+                    policy,
+                    String::new(),
+                )?;
+                match args.action {
+                    EnrollCaAction::Init => unreachable!(),
+                    EnrollCaAction::List => {
+                        println!("{}", serde_json::to_string_pretty(&ca.list()?)?)
+                    }
+                    EnrollCaAction::Bind {
+                        user,
+                        provider,
+                        sub,
+                    } => ca.bind(&user, &provider, &sub, now)?,
+                    EnrollCaAction::Unbind { user } => ca.unbind(&user)?,
+                }
+            }
         }
         Commands::Serve(args) => {
             let rt = tokio::runtime::Builder::new_multi_thread()
@@ -1000,7 +1091,32 @@ fn run_hook_agy(args: RegisterAgyArgs) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(directory) = &args.enroll_state {
+        if args.fed_cert.is_some() || args.fed_key.is_some() {
+            return Err("--enroll-state conflicts with explicit --fed-cert/--fed-key".into());
+        }
+        args.fed_cert = Some(directory.join("fed.crt"));
+        args.fed_key = Some(directory.join("fed.key"));
+        if args.peers_file.is_none() && directory.join("peers.json").exists() {
+            args.peers_file = Some(directory.join("peers.json"));
+        }
+    }
+    if !matches!(
+        usize::from(args.enroll_listen.is_some())
+            + usize::from(args.enroll_ca_dir.is_some())
+            + usize::from(args.enroll_policy.is_some()),
+        0 | 3
+    ) {
+        return Err(
+            "--enroll-listen, --enroll-ca-dir and --enroll-policy must be supplied together".into(),
+        );
+    }
+    if let Some(directory) = &args.enroll_ca_dir {
+        use xmsg::enroll::Clock;
+        xmsg::enroll_ca::initialize_ca_dir(directory, xmsg::enroll::WallClock.now())?;
+    }
+
     if args.leaf {
         if args.fed_listen.is_some() {
             return Err(
@@ -1260,6 +1376,9 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let active_pull_loops = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     let mut reloader_for_sighup: Option<Arc<xmsg::fed::CredentialReloader>> = None;
 
+    let enrollment_hub_addr = fed_listener
+        .as_ref()
+        .map(|(_, address)| address.to_string());
     let fed_state = if let Some(peers_file) = args.peers_file {
         let peers = xmsg::fed::PeersMap::load_from_file_for(&peers_file, own.as_ref())
             .map_err(|e| format!("failed to load peers file: {e}"))?;
@@ -1342,6 +1461,52 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
         None
     };
+
+    if let Some(directory) = args.enroll_state {
+        let reloader = reloader_for_sighup
+            .clone()
+            .ok_or("--enroll-state requires federation credentials and peers")?;
+        bg_tasks.push(tokio::spawn(xmsg::enroll_cli::auto_renew(
+            directory, reloader,
+        )));
+    }
+    if let Some(address) = args.enroll_listen {
+        use xmsg::enroll::Clock;
+        let fed = fed_state
+            .clone()
+            .ok_or("enrollment requires federation state")?;
+        let listener_address = enrollment_hub_addr.ok_or("enrollment requires --fed-listen")?;
+        let ca = Arc::new(xmsg::enroll_ca::EnrollCa::open(
+            args.enroll_ca_dir.as_ref().unwrap(),
+            db.clone(),
+            args.enroll_policy.as_ref().unwrap(),
+            fed.node_name.clone(),
+        )?);
+        let hub_address = ca.policy().hub_address.clone().unwrap_or(listener_address);
+        let (entry, _) = xmsg::enroll::hub_entry(&fed, &hub_address, xmsg::enroll::WallClock.now())
+            .map_err(str::to_owned)?;
+        let identity = ca.reserved_uri();
+        let service = Arc::new(xmsg::enroll::Service::new(
+            ca,
+            fed,
+            Arc::new(xmsg::enroll::WallClock),
+            entry,
+            identity,
+        )?);
+        let config = xmsg::enroll::tls_config(&service).map_err(|error| error.to_string())?;
+        let listener = tokio::net::TcpListener::bind(address).await?;
+        bg_tasks.push(tokio::spawn(async move {
+            if xmsg::enroll::listen_with_config(listener, service, config)
+                .await
+                .is_err()
+            {
+                tracing::error!(
+                    class = "enroll_listener_failed",
+                    "enrollment listener stopped"
+                );
+            }
+        }));
+    }
 
     let mailbox_db = db.clone();
     let mailbox_peers = fed_state.clone();
