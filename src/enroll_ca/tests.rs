@@ -489,6 +489,11 @@ fn renewal_keeps_old_uri_after_policy_trust_domain_changes() {
     s.replace(p);
     let renewed = s.ca.renew(&chain(&issued.cert_chain_pem), NOW + 1).unwrap();
     assert_eq!(issued.uri, renewed.uri);
+    assert_eq!(
+        crate::fed::extract_uri_sans(&chain(&renewed.cert_chain_pem)[0]).unwrap(),
+        vec![issued.uri.clone()],
+        "renewal certificate drifted to current policy trust domain"
+    );
     assert_eq!(renewed.uri, "spiffe://example.org/host/lap/user/alice");
     assert_eq!(issued.spki_sha256, renewed.spki_sha256);
 }
