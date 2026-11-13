@@ -760,4 +760,4 @@ pub fn hub_entry(
 
 #[cfg(test)]
 #[path = "enroll_protocol_tests.rs"]
-mod protocol_tests;
+pub(crate) mod protocol_tests;
