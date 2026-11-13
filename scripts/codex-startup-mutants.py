@@ -136,6 +136,8 @@ CASES["unknown-orphans-next-item"] = (
     "va41_unknown_handoff_does_not_orphan_later_pending_item",
 )
 
+CASES["fresh-trusted-executable"] = ('src/codex.rs', '|| is_trusted_codex_owner_step(&config, candidate.owner_pid, &candidate.owner_starttime)\n                .is_none()', '|| false', 'va41_owner_starttime_change_clears_recovery_durably')
+
 TESTS = (
     "va41_restart_queued_message_wakes_without_mcp_or_hook",
     "va41_restart_revoked_root_never_wakes",

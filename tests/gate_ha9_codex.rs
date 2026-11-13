@@ -7468,48 +7468,57 @@ async fn va41_auto_recovery_races_mcp_and_hook_with_one_carrier() {
 #[tokio::test]
 async fn va41_owner_starttime_change_clears_recovery_durably() {
     const ROOT: &str = "019a0000-0000-7000-8000-000000000489";
-    let env = va41_restart_fixture(ROOT).await;
-    let pid = std::process::id();
-    let start = xmsg::process::starttime(Path::new(xmsg::process::LIVE_PROC_ROOT), pid).unwrap();
-    env.write_fake_proc(pid, 1, "999999999", &env.codex_exe);
-    xmsg::surface::send(
-        &env.state,
-        &xmsg::surface::Sender::Anonymous("fixture".into()),
-        ROOT,
-        "VA41_CHANGED_OWNER",
-        None,
-    )
-    .await
-    .unwrap();
-    xmsg::codex::recover_restart_roots(&env.state).await;
-    let pending: i64 = env
-        .state
-        .db
-        .lock()
-        .unwrap()
-        .query_row(
-            "SELECT restart_pending FROM codex_roots WHERE root_id=?1",
-            [ROOT],
-            |row| row.get(0),
+    for changed_executable in [false, true] {
+        let env = va41_restart_fixture(ROOT).await;
+        let pid = std::process::id();
+        let start =
+            xmsg::process::starttime(Path::new(xmsg::process::LIVE_PROC_ROOT), pid).unwrap();
+        if changed_executable {
+            let untrusted = env.codex_home.join("untrusted-executable");
+            fs::write(&untrusted, b"#!/bin/sh\n").unwrap();
+            fs::set_permissions(&untrusted, fs::Permissions::from_mode(0o755)).unwrap();
+            env.write_fake_proc(pid, 1, &start, &untrusted);
+        } else {
+            env.write_fake_proc(pid, 1, "999999999", &env.codex_exe);
+        }
+        xmsg::surface::send(
+            &env.state,
+            &xmsg::surface::Sender::Anonymous("fixture".into()),
+            ROOT,
+            "VA41_CHANGED_OWNER",
+            None,
         )
+        .await
         .unwrap();
-    assert_eq!(
-        pending, 0,
-        "owner identity change must durably cancel automatic recovery"
-    );
-    env.write_fake_proc(pid, 1, &start, &env.codex_exe);
-    restart_codex_fixture(&env);
-    let listener = va41_listener(&env);
-    xmsg::codex::recover_restart_roots(&env.state).await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), listener.accept())
-            .await
-            .is_err(),
-        "restoring old witness must not revive cancelled recovery"
-    );
-    assert!(xmsg::codex::resolve_codex_root(&env.state.db, ROOT).is_none());
+        xmsg::codex::recover_restart_roots(&env.state).await;
+        let pending: i64 = env
+            .state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT restart_pending FROM codex_roots WHERE root_id=?1",
+                [ROOT],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pending, 0,
+            "owner identity change must durably cancel automatic recovery"
+        );
+        env.write_fake_proc(pid, 1, &start, &env.codex_exe);
+        restart_codex_fixture(&env);
+        let listener = va41_listener(&env);
+        xmsg::codex::recover_restart_roots(&env.state).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "restoring old witness must not revive cancelled recovery"
+        );
+        assert!(xmsg::codex::resolve_codex_root(&env.state.db, ROOT).is_none());
+    }
 }
-
 #[tokio::test]
 async fn va41_eight_item_bound_retains_recovery_until_scheduled_remainder() {
     const ROOT: &str = "019a0000-0000-7000-8000-000000000490";
