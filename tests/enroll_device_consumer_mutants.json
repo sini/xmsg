@@ -1,0 +1,86 @@
+[
+  {
+    "label": "device-consumer-terminal-fingerprint",
+    "oracle": "device-consumer-terminal-fingerprint",
+    "target": "lib",
+    "test": "enroll_device_consumer_tests::device_consumer_enrolls_then_receives_a_pattern_mailbox_and_replies_over_federation",
+    "test_file": "src/enroll_device_consumer_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_cli.rs",
+        "needle": "format!(\n            \"sha256:{}\",\n            hex::encode(sha2::Sha256::digest(projection.spki_der()))\n        )",
+        "replacement": "hex::encode(sha2::Sha256::digest(projection.spki_der()))"
+      }
+    ],
+    "expected_literal": "terminal key fingerprint omitted sha256: prefix"
+  },
+  {
+    "label": "device-consumer-flow-wire",
+    "oracle": "device-consumer-flow-wire",
+    "target": "lib",
+    "test": "enroll_device_consumer_tests::device_consumer_enrolls_then_receives_a_pattern_mailbox_and_replies_over_federation",
+    "test_file": "src/enroll_device_consumer_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_cli.rs",
+        "needle": "Flow::Device => \"device\",",
+        "replacement": "Flow::Device => \"loopback\","
+      }
+    ],
+    "expected_literal": "called `Result::unwrap()` on an `Err` value"
+  },
+  {
+    "label": "device-consumer-approval-uid",
+    "oracle": "device-consumer-approval-uid",
+    "target": "lib",
+    "test": "enroll_device_consumer_tests::device_approval_routes_require_local_uid_and_are_absent_from_public_routers",
+    "test_file": "src/enroll_device_consumer_tests.rs",
+    "edits": [
+      {
+        "file": "src/http.rs",
+        "needle": "if !credential.is_some_and(|credential| credential.uid == crate::agent::current_uid()) {",
+        "replacement": "if false && !credential.is_some_and(|credential| credential.uid == crate::agent::current_uid()) {"
+      }
+    ],
+    "expected_literal": "approval route accepted absent or wrong UID credentials"
+  },
+  {
+    "label": "device-consumer-public-route-exposure",
+    "oracle": "public approval route isolation (routing only; UID handler remains)",
+    "target": "lib",
+    "test": "enroll_device_consumer_tests::device_approval_routes_require_local_uid_and_are_absent_from_public_routers",
+    "test_file": "src/enroll_device_consumer_tests.rs",
+    "edits": [
+      {
+        "file": "src/http.rs",
+        "needle": ".route(\"/healthz\", get(healthz_handler))",
+        "replacement": ".route(\"/healthz\", get(healthz_handler))\n        .route(\"/v1/enrollment/pending\", get(enrollment_pending_handler))"
+      },
+      {
+        "file": "src/http.rs",
+        "needle": ".route(\"/v1/enrollment/pending\", get(enrollment_pending_handler))",
+        "replacement": "",
+        "start": "pub fn build_unix_router",
+        "end": "fn local_enrollment"
+      }
+    ],
+    "expected_literal": "public router exposed local enrollment approval route"
+  },
+  {
+    "label": "device-consumer-renew-force-reload",
+    "target": "lib",
+    "test": "enroll_device_consumer_tests::device_actual_auto_renewal_reloads_the_certificate_presented_on_the_next_outbound_dial",
+    "test_file": "src/enroll_device_consumer_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_cli.rs",
+        "needle": "reloader.force_reload()?;",
+        "replacement": "let _ = &reloader;",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "next outbound TLS connection presented the stale certificate serial",
+    "oracle": "device consumer renewal presents the fresh certificate on the next TLS dial"
+  }
+]
