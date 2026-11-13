@@ -267,7 +267,7 @@ impl rustls::server::danger::ClientCertVerifier for RecordingVerifier {
         self.inner.supported_verify_schemes()
     }
 }
-fn recording_acceptor(
+pub(crate) fn recording_acceptor(
     hub: &crate::fed::FedState,
     seen: std::sync::Arc<Mutex<Vec<Vec<u8>>>>,
 ) -> tokio_rustls::TlsAcceptor {
@@ -286,14 +286,14 @@ fn recording_acceptor(
         .unwrap();
     tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config))
 }
-fn certificate_serial(pem: &[u8]) -> String {
+pub(crate) fn certificate_serial(pem: &[u8]) -> String {
     use rustls::pki_types::pem::PemObject;
     let der = rustls::pki_types::CertificateDer::from_pem_slice(pem).unwrap();
     let (_, cert) = x509_parser::parse_x509_certificate(der.as_ref()).unwrap();
     cert.raw_serial_as_string()
 }
 
-fn enrolled_node(
+pub(crate) fn enrolled_node(
     directory: &std::path::Path,
     env: &Harness,
 ) -> std::sync::Arc<crate::fed::FedState> {
