@@ -511,40 +511,66 @@ mod tests {
         }
     }
 
+    fn browser_flow_case(issuer: &str, flow: Flow) {
+        let provider = begin_fixture(issuer);
+        let client = if flow == Flow::Loopback {
+            "loopback-client"
+        } else {
+            "paste-client"
+        };
+        let pending = provider.begin(flow, "http://127.0.0.1:18551/cb").unwrap();
+        let url = reqwest::Url::parse(&pending.authorization_url).unwrap();
+        let pairs: HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(pairs.get("client_id").unwrap(), client);
+        let expected = if issuer == "https://accounts.google.com" {
+            "consent select_account"
+        } else {
+            "login"
+        };
+        assert!(
+            pairs.get("prompt").is_some_and(|v| v == expected),
+            "forced browser prompt omitted"
+        );
+        assert!(
+            pairs
+                .get("code_challenge_method")
+                .is_some_and(|v| v == "S256"),
+            "PKCE S256 challenge omitted"
+        );
+        assert!(pairs
+            .get("state")
+            .is_some_and(|v| v == pending.state.secret()));
+        assert!(pairs
+            .get("nonce")
+            .is_some_and(|v| v == pending.nonce.secret()));
+        assert_eq!(pairs.get("scope").unwrap(), "openid email groups");
+    }
     #[test]
-    fn browser_flows_bind_clients_and_force_the_prompt_and_pkce() {
-        for issuer in ["https://accounts.google.com", "https://fixture.example"] {
-            let provider = begin_fixture(issuer);
-            for (flow, client) in [
-                (Flow::Loopback, "loopback-client"),
-                (Flow::Paste, "paste-client"),
-            ] {
-                let pending = provider.begin(flow, "http://127.0.0.1:18551/cb").unwrap();
-                let url = reqwest::Url::parse(&pending.authorization_url).unwrap();
-                let pairs: HashMap<_, _> = url.query_pairs().into_owned().collect();
-                assert_eq!(pairs.get("client_id").unwrap(), client);
-                assert_eq!(
-                    pairs.get("prompt").unwrap(),
-                    if issuer == "https://accounts.google.com" {
-                        "consent select_account"
-                    } else {
-                        "login"
-                    }
-                );
-                assert_eq!(pairs.get("code_challenge_method").unwrap(), "S256");
-                assert!(pairs
-                    .get("state")
-                    .is_some_and(|v| v == pending.state.secret()));
-                assert!(pairs
-                    .get("nonce")
-                    .is_some_and(|v| v == pending.nonce.secret()));
-                assert_eq!(pairs.get("scope").unwrap(), "openid email groups");
-            }
-            assert!(matches!(
-                provider.begin(Flow::Device, "http://127.0.0.1:18551/cb"),
+    fn oidc_google_loopback_prompt() {
+        browser_flow_case("https://accounts.google.com", Flow::Loopback);
+    }
+    #[test]
+    fn oidc_google_paste_prompt() {
+        browser_flow_case("https://accounts.google.com", Flow::Paste);
+    }
+    #[test]
+    fn oidc_other_loopback_prompt() {
+        browser_flow_case("https://fixture.example", Flow::Loopback);
+    }
+    #[test]
+    fn oidc_other_paste_prompt() {
+        browser_flow_case("https://fixture.example", Flow::Paste);
+    }
+    #[test]
+    fn oidc_device_is_refused_before_redirect_or_provider_work() {
+        let provider = begin_fixture("https://fixture.example");
+        assert!(
+            matches!(
+                provider.begin(Flow::Device, "not-a-redirect"),
                 Err(Error::UnsupportedFlow)
-            ));
-        }
+            ),
+            "device refusal priority changed"
+        );
     }
 
     #[test]
@@ -611,4 +637,6 @@ mod tests {
 
 #[cfg(test)]
 #[path = "enroll_oidc_fixture.rs"]
-mod fixture_tests;
+pub(crate) mod fixture_tests;
+#[cfg(test)]
+pub(crate) use fixture_tests as signed_fixture;
