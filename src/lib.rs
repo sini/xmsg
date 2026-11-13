@@ -59,3 +59,6 @@ pub mod enroll_client;
 
 #[cfg(feature = "daemon")]
 pub mod enroll;
+
+#[cfg(feature = "daemon")]
+pub mod enroll_cli;
