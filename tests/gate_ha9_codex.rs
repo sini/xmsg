@@ -2245,6 +2245,81 @@ async fn mock_ws_write_server_text(stream: &mut UnixStream, text: &str) {
     let _ = stream.write_all(&frame).await;
 }
 
+async fn mock_ws_wait_client_close(stream: &mut UnixStream) {
+    let mut byte = [0];
+    let read = tokio::time::timeout(Duration::from_secs(3), stream.read(&mut byte))
+        .await
+        .expect("relay client must close after validating its ACK")
+        .expect("read relay client close");
+    assert_eq!(
+        read, 0,
+        "fixture received unexpected data after turn/start ACK"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn relay_ack_fixture_retains_peer_until_client_close() {
+    for close_after_ack in [true, false] {
+        let env = CodexTestEnv::new();
+        let pid = std::process::id();
+        let start =
+            xmsg::process::starttime(Path::new(xmsg::process::LIVE_PROC_ROOT), pid).unwrap();
+        env.write_fake_proc(pid, 1, &start, &env.codex_exe);
+        let listener = va41_listener(&env);
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            mock_ws_accept(&mut stream).await;
+            while let Some(message) = mock_ws_read_client_text(&mut stream).await {
+                let result = match message["method"].as_str().unwrap_or("") {
+                    "initialize" => json!({"userAgent":"fixture"}),
+                    "thread/loaded/list" => {
+                        json!({"data":["019a0000-0000-7000-8000-000000000495"]})
+                    }
+                    "turn/start" => json!({"turn":{"id":"ack-lifetime"}}),
+                    _ => continue,
+                };
+                mock_ws_write_server_text(
+                    &mut stream,
+                    &json!({"jsonrpc":"2.0","id":message["id"],"result":result}).to_string(),
+                )
+                .await;
+                if message["method"] == "turn/start" {
+                    if !close_after_ack {
+                        mock_ws_wait_client_close(&mut stream).await;
+                    }
+                    return;
+                }
+            }
+            panic!("relay must reach turn/start");
+        });
+        let job = CodexDeliveryJob {
+            root_id: "019a0000-0000-7000-8000-000000000495".into(),
+            root_generation: 1,
+            codex_home: env.codex_home.clone(),
+            owner_pid: pid,
+            owner_starttime: start,
+            message_id: "ACK_LIFETIME".into(),
+            rendered_envelope: "fixture".into(),
+            proc_root: env.proc_root.clone(),
+        };
+        let outcome = deliver_via_codex_relay(&job, || Ok(())).await;
+        server.await.unwrap();
+        if close_after_ack {
+            assert!(
+                matches!(&outcome, RelayOutcome::Uncertain { reason }
+                if reason.contains("post-response peer revalidation failed")),
+                "forced close must remove Darwin's post-ACK peer witness: {outcome:?}"
+            );
+        } else {
+            assert!(
+                matches!(outcome, RelayOutcome::Accepted { .. }),
+                "persistent fixture must preserve the ACK identity witness: {outcome:?}"
+            );
+        }
+    }
+}
+
 /// C13 & C14: Restricted relay protocol, callback non-response, mismatched response ID rejection,
 /// and impostor listener recording 0 turn/start while real owner-pinned listener records 1.
 #[tokio::test]
@@ -5324,6 +5399,10 @@ async fn c3_live_distinct_child_same_inode_flock_reopen_and_mutants() {
         .unwrap_or_else(|e| panic!("failed to register live child root {r}: {e:?}"));
     }
 
+    #[cfg(target_os = "macos")]
+    let old_generation = xmsg::codex::resolve_codex_root(&env.state.db, p_main)
+        .unwrap()
+        .generation;
     let meta_before = fs::symlink_metadata(&lock_main).unwrap();
     let (dev_before, ino_before) = (meta_before.dev(), meta_before.ino());
 
@@ -5353,23 +5432,15 @@ async fn c3_live_distinct_child_same_inode_flock_reopen_and_mutants() {
 
     // Despite the same live child holding the same (dev, ino) lock file, the continuous lease
     // witness (`NOTE_FUNLOCK` on Darwin, `IN_CLOSE_WRITE` on Linux) must revoke `p_main`!
-    let main_after_reopen = handle_agent_frame(
+    let main_after_reopen = xmsg::agent::resolve_codex_mcp_caller(
         &env.state,
-        &peer_child,
-        AgentFrame::List {
-            schema_version: None,
-            name: None,
-            node: None,
-            kind: None,
-            status: None,
-            within: None,
-            as_agent: None,
-            codex_session: Some(p_main.to_string()),
-            codex_thread: Some(p_main.to_string()),
-            codex_turn: None,
-        },
-    )
-    .await;
+        child_pid,
+        &child_starttime,
+        Some(p_main),
+        Some(p_main),
+        None,
+        false,
+    );
     #[cfg(target_os = "macos")]
     assert!(
         main_after_reopen.is_err(),
@@ -5380,6 +5451,33 @@ async fn c3_live_distinct_child_same_inode_flock_reopen_and_mutants() {
         main_after_reopen.is_ok(),
         "C3 / Q5 (Linux): same-owner same-inode flock close-and-reopen retains generation g under ruled F1 arm (a)"
     );
+
+    #[cfg(target_os = "macos")]
+    {
+        handle_agent_frame(
+            &env.state,
+            &peer_child,
+            AgentFrame::List {
+                schema_version: None,
+                name: None,
+                node: None,
+                kind: None,
+                status: None,
+                within: None,
+                as_agent: None,
+                codex_session: Some(p_main.into()),
+                codex_thread: Some(p_main.into()),
+                codex_turn: None,
+            },
+        )
+        .await
+        .expect("valid fresh witnesses must reattest after the old lease is parked");
+        let rebound = xmsg::codex::resolve_codex_root(&env.state.db, p_main).unwrap();
+        assert!(
+            rebound.generation > old_generation,
+            "reattestation must never revive the old generation"
+        );
+    }
 
     // Meanwhile, `p_sib` held continuously by the same child process must remain live!
     let sib_still_live = handle_agent_frame(
@@ -6888,6 +6986,7 @@ async fn bare_mcp_reattestation_pushes_queued_reply_once_against_racing_hook() {
             )
             .await;
             if turns == 1 {
+                mock_ws_wait_client_close(&mut stream).await;
                 break;
             }
         }
@@ -7048,6 +7147,7 @@ async fn va41_accept_turn(listener: UnixListener, root: &'static str) -> Value {
         )
         .await;
         if message["method"] == "turn/start" {
+            mock_ws_wait_client_close(&mut stream).await;
             return message;
         }
     }
@@ -7598,6 +7698,7 @@ async fn va41_eight_item_bound_retains_recovery_until_scheduled_remainder() {
                 )
                 .await;
                 if message["method"] == "turn/start" {
+                    mock_ws_wait_client_close(&mut stream).await;
                     break;
                 }
             }

@@ -30,8 +30,21 @@ jobs:
     # exists to catch.
     runs-on: macos-latest
     timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Forced failed-build pipeline control
+        id: failed_pipeline
+        continue-on-error: true
+        run: (exit 23) | tee /tmp/xmsg-failed-pipeline-control
+      - name: Require the failed pipeline to be rejected
+        if: ${{ always() }}
+        env:
+          CONTROL_OUTCOME: ${{ steps.failed_pipeline.outcome }}
+        run: test "$CONTROL_OUTCOME" = failure
 
       # gen-harness's `nix` column pin (evaluators.yml), upstream Nix like a
       # stock darwin install.
