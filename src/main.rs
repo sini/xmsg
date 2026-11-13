@@ -241,6 +241,14 @@ pub struct ServeArgs {
     #[arg(long, env = "XMSG_PEER_MAILBOX_MAX_BYTES", default_value_t = storage::DEFAULT_PEER_MAILBOX_MAX_BYTES, value_parser=clap::value_parser!(u64).range(..=i64::MAX as u64))]
     pub peer_mailbox_max_bytes: u64,
 
+    /// Maximum stored rows across all pattern-admitted leaf mailboxes
+    #[arg(long, default_value_t = storage::DEFAULT_ADMITTED_MAILBOX_MAX_ROWS, value_parser=clap::value_parser!(u64).range(..=i64::MAX as u64))]
+    pub admitted_mailbox_max_rows: u64,
+
+    /// Maximum stored bytes across all pattern-admitted leaf mailboxes
+    #[arg(long, default_value_t = storage::DEFAULT_ADMITTED_MAILBOX_MAX_BYTES, value_parser=clap::value_parser!(u64).range(..=i64::MAX as u64))]
+    pub admitted_mailbox_max_bytes: u64,
+
     /// Registration socket path (defaults to $XDG_RUNTIME_DIR/xmsg/register.sock; on macOS without it, the Darwin user temp dir)
     #[arg(long, env = "XMSG_REGISTER_SOCK")]
     pub register_sock: Option<PathBuf>,
@@ -1131,28 +1139,20 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
+    storage::set_admitted_mailbox_limits(
+        &db,
+        storage::PeerMailboxLimits {
+            max_rows: args.admitted_mailbox_max_rows,
+            max_bytes: args.admitted_mailbox_max_bytes,
+        },
+    );
+
     let sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let mut bg_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-    let mailbox_db = db.clone();
     let mailbox_ttl = args.reply_ttl;
-    bg_tasks.push(tokio::spawn(async move {
-        let cadence = Duration::from_secs(mailbox_ttl.clamp(1, 600));
-        let mut timer = tokio::time::interval(cadence);
-        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        timer.tick().await;
-        loop {
-            timer.tick().await;
-            let Ok(db) = mailbox_db.lock() else {
-                break;
-            };
-            if storage::purge_peer_mailbox(&db, mailbox_ttl).is_err() {
-                tracing::warn!("peer mailbox TTL purge failed");
-            }
-        }
-    }));
 
     if (args.peers_file.is_some() || args.fed_listen.is_some())
         && (args.fed_cert.is_none() || args.fed_key.is_none())
@@ -1342,6 +1342,33 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
         None
     };
+
+    let mailbox_db = db.clone();
+    let mailbox_peers = fed_state.clone();
+    bg_tasks.push(tokio::spawn(async move {
+        let cadence = Duration::from_secs(mailbox_ttl.clamp(1, 600));
+        let mut timer = tokio::time::interval(cadence);
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        timer.tick().await;
+        loop {
+            timer.tick().await;
+            let Ok(db) = mailbox_db.lock() else {
+                break;
+            };
+            if storage::purge_peer_mailbox(&db, mailbox_ttl).is_err() {
+                tracing::warn!("peer mailbox TTL purge failed");
+            }
+            if let Some(state) = &mailbox_peers {
+                if state
+                    .current_peers()
+                    .prune_admitted_clients(&db, storage::now_epoch_secs())
+                    .is_err()
+                {
+                    tracing::warn!("admitted client prune failed");
+                }
+            }
+        }
+    }));
 
     {
         let reloader_sighup = reloader_for_sighup.clone();

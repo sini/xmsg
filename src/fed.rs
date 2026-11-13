@@ -281,11 +281,13 @@ pub fn uri_matches_any_identity(uri: &str, patterns: &[String]) -> bool {
 pub struct HubRule {
     pub pattern: String,
     pub allow: Vec<String>,
+    pub leaf: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HubConfig {
     pub patterns: Vec<String>,
+    pub pattern_cas: HashMap<String, PathBuf>,
     pub rules: Vec<HubRule>,
 }
 
@@ -295,6 +297,7 @@ pub struct AdmittedClient {
     pub uri: String,
     pub pin: String,
     pub config: PeerConfig,
+    pub not_after: i64,
 }
 
 /// Matches a SPIFFE URI against an identity pattern.
@@ -389,6 +392,55 @@ pub fn patterns_compatible(admission: &str, rule: &str) -> bool {
     true
 }
 
+fn derivable_node_pairs(pattern: &str) -> Vec<(&str, &str)> {
+    let segments: Vec<_> = pattern.split('/').skip(3).collect();
+    if segments.len() != 4 {
+        return Vec::new();
+    }
+    let mut result = Vec::new();
+    for (first, second) in [("host", "user"), ("ns", "sa")] {
+        if (segments[0] == first || segments[0] == "*")
+            && (segments[2] == second || segments[2] == "*")
+        {
+            result.push((segments[3], segments[1]));
+        }
+    }
+    result
+}
+
+fn overlapping_node_name(a: &str, b: &str) -> Option<String> {
+    for (a_user, a_host) in derivable_node_pairs(a) {
+        for (b_user, b_host) in derivable_node_pairs(b) {
+            if (a_user == b_user || a_user == "*" || b_user == "*")
+                && (a_host == b_host || a_host == "*" || b_host == "*")
+            {
+                let user = if a_user != "*" {
+                    a_user
+                } else if b_user != "*" {
+                    b_user
+                } else {
+                    "user"
+                };
+                let host = if a_host != "*" {
+                    a_host
+                } else if b_host != "*" {
+                    b_host
+                } else {
+                    "host"
+                };
+                return Some(format!("{user}.{host}"));
+            }
+        }
+    }
+    None
+}
+
+fn certificate_not_after(der: &[u8]) -> Result<i64, AppError> {
+    let (_, cert) = x509_parser::parse_x509_certificate(der)
+        .map_err(|_| AppError::PeerRejected("invalid certificate".into()))?;
+    Ok(cert.validity().not_after.timestamp())
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PeersMap {
     peers_by_name: HashMap<String, PeerConfig>,
@@ -398,6 +450,7 @@ pub struct PeersMap {
     canonical_by_name: HashMap<String, String>,
     name_by_canonical: HashMap<String, String>,
     pub hub: Option<HubConfig>,
+    hub_bundles: HashMap<PathBuf, Vec<rustls::pki_types::TrustAnchor<'static>>>,
     pub admitted_clients: Arc<std::sync::RwLock<HashMap<String, AdmittedClient>>>,
     pub default_route_peer: Option<String>,
 }
@@ -585,6 +638,136 @@ impl PeersMap {
         anchors
     }
 
+    fn bind_hub_patterns(&mut self, hub: &mut HubConfig) -> Result<(), String> {
+        let bundles: std::collections::HashSet<PathBuf> = self
+            .ca_peers()
+            .iter()
+            .filter_map(|p| p.ca.clone())
+            .collect();
+        for pattern in &hub.patterns {
+            if !hub.pattern_cas.contains_key(pattern) {
+                if bundles.len() != 1 {
+                    return Err(format!(
+                        "pattern '{pattern}' must name its CA bundle: this file has {}",
+                        bundles.len()
+                    ));
+                }
+                hub.pattern_cas
+                    .insert(pattern.clone(), bundles.iter().next().unwrap().clone());
+            }
+        }
+        for (index, a) in hub.patterns.iter().enumerate() {
+            for b in &hub.patterns[index + 1..] {
+                if hub.pattern_cas[a] != hub.pattern_cas[b] {
+                    if let Some(name) = overlapping_node_name(a, b) {
+                        return Err(format!("patterns '{a}' and '{b}' with distinct bundles can both derive node name '{name}'; partition them by user or host"));
+                    }
+                }
+            }
+        }
+        for rule in &hub.rules {
+            let mut compatible = hub
+                .patterns
+                .iter()
+                .filter(|p| patterns_compatible(p, &rule.pattern))
+                .map(|p| &hub.pattern_cas[p]);
+            if let Some(first) = compatible.next() {
+                if compatible.any(|bundle| bundle != first) {
+                    return Err(format!("rule '{}' spans bundles; split it", rule.pattern));
+                }
+            }
+        }
+        for bundle in hub.pattern_cas.values() {
+            let pem =
+                std::fs::read(bundle).map_err(|e| format!("cannot read hub CA bundle: {e}"))?;
+            let anchors =
+                parse_ca_bundle_pem(&pem).map_err(|e| format!("invalid hub CA bundle: {e}"))?;
+            if anchors.is_empty() {
+                return Err("hub CA bundle has no anchors".into());
+            }
+            self.hub_bundles.insert(bundle.clone(), anchors);
+        }
+        Ok(())
+    }
+
+    pub fn hub_ca_paths(&self) -> HashMap<String, PathBuf> {
+        self.hub
+            .as_ref()
+            .map(|hub| {
+                hub.pattern_cas
+                    .iter()
+                    .map(|(pattern, bundle)| (format!("hub:{pattern}"), bundle.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn prune_admitted_clients(
+        &self,
+        db: &rusqlite::Connection,
+        now: i64,
+    ) -> Result<usize, rusqlite::Error> {
+        let expired: Vec<String> = self
+            .admitted_clients
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(_, client)| client.not_after <= now)
+            .map(|(name, _)| name.clone())
+            .collect();
+        let mut removed = 0;
+        for name in expired {
+            if storage::count_peer_mailbox_messages(db, &name)? == 0 {
+                let mut admitted = self.admitted_clients.write().unwrap();
+                if admitted
+                    .get(&name)
+                    .is_some_and(|client| client.not_after <= now)
+                {
+                    admitted.remove(&name);
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
+    }
+
+    fn hub_certificate_allowed(
+        &self,
+        uri: &str,
+        leaf: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        now: rustls::pki_types::UnixTime,
+    ) -> bool {
+        let Some(hub) = &self.hub else {
+            return false;
+        };
+        hub.patterns
+            .iter()
+            .filter(|p| spiffe_uri_matches_pattern(uri, p))
+            .any(|pattern| {
+                let anchors = if let Some(bundle) = hub.pattern_cas.get(pattern) {
+                    self.hub_bundles.get(bundle)
+                } else {
+                    let mut bundles = self.ca_bundles_by_name.values();
+                    let first = bundles.next();
+                    if bundles.any(|bundle| Some(bundle) != first) {
+                        return false;
+                    }
+                    first
+                };
+                anchors.is_some_and(|anchors| {
+                    verify_cert_chain(
+                        leaf,
+                        intermediates,
+                        anchors,
+                        now,
+                        webpki::KeyUsage::client_auth(),
+                    )
+                    .is_ok()
+                })
+            })
+    }
+
     pub fn contains_concrete_name(&self, name: &str) -> bool {
         self.get(name).is_some()
     }
@@ -661,12 +844,38 @@ fn parse_hub_config(hub_val: &serde_json::Value) -> Result<HubConfig, String> {
     }
 
     let mut patterns = Vec::new();
-    for p_val in pat_arr {
-        let p_str = p_val
-            .as_str()
-            .ok_or_else(|| "hub 'patterns' elements must be strings".to_string())?;
-        validate_spiffe_pattern(p_str)?;
-        patterns.push(p_str.to_string());
+    let mut pattern_cas = HashMap::new();
+    for value in pat_arr {
+        let (pattern, ca) = if let Some(pattern) = value.as_str() {
+            (pattern, None)
+        } else {
+            let object = value
+                .as_object()
+                .ok_or("hub pattern must be a string or object")?;
+            if object.keys().any(|key| key != "pattern" && key != "ca") {
+                return Err("unknown field in hub pattern".into());
+            }
+            (
+                object
+                    .get("pattern")
+                    .and_then(|v| v.as_str())
+                    .ok_or("hub pattern missing pattern")?,
+                Some(PathBuf::from(
+                    object
+                        .get("ca")
+                        .and_then(|v| v.as_str())
+                        .ok_or("hub pattern missing ca")?,
+                )),
+            )
+        };
+        validate_spiffe_pattern(pattern)?;
+        if patterns.iter().any(|p| p == pattern) {
+            return Err("duplicate hub admission pattern".into());
+        }
+        patterns.push(pattern.to_string());
+        if let Some(ca) = ca {
+            pattern_cas.insert(pattern.to_string(), ca);
+        }
     }
 
     let mut rules = Vec::new();
@@ -681,7 +890,7 @@ fn parse_hub_config(hub_val: &serde_json::Value) -> Result<HubConfig, String> {
                 .ok_or_else(|| "hub rule must be an object".to_string())?;
             for k in r_obj.keys() {
                 match k.as_str() {
-                    "pattern" | "allow" => {}
+                    "pattern" | "allow" | "leaf" => {}
                     other => return Err(format!("unknown field '{other}' in hub rule")),
                 }
             }
@@ -709,7 +918,7 @@ fn parse_hub_config(hub_val: &serde_json::Value) -> Result<HubConfig, String> {
                     format!("hub rule for pattern '{pat}': 'allow' items must be strings")
                 })?;
                 match op {
-                    "send" | "reply" | "list" | "forward" => allow.push(op.to_string()),
+                    "send" | "reply" | "list" | "forward" | "relayed" => allow.push(op.to_string()),
                     other => {
                         return Err(format!(
                             "unknown operation '{other}' in hub rule for pattern '{pat}'"
@@ -730,11 +939,20 @@ fn parse_hub_config(hub_val: &serde_json::Value) -> Result<HubConfig, String> {
             rules.push(HubRule {
                 pattern: pat.to_string(),
                 allow,
+                leaf: r_obj
+                    .get("leaf")
+                    .map(|v| v.as_bool().ok_or("hub rule leaf must be boolean"))
+                    .transpose()?
+                    .unwrap_or(false),
             });
         }
     }
 
-    Ok(HubConfig { patterns, rules })
+    Ok(HubConfig {
+        patterns,
+        pattern_cas,
+        rules,
+    })
 }
 
 impl PeersMap {
@@ -1138,17 +1356,6 @@ impl PeersMap {
         }
 
         if let Some(ref hub) = hub_config {
-            let total_ca_anchors: usize = parsed
-                .iter()
-                .filter_map(|(_, a, _, _)| a.as_ref())
-                .map(|v| v.len())
-                .sum();
-            if total_ca_anchors == 0 {
-                return Err(
-                    "hub configuration requires at least one CA trust anchor from peers; no CA peer configured".to_string(),
-                );
-            }
-
             for pattern in &hub.patterns {
                 if !pattern.contains('*') {
                     if let Ok(canonical) = crate::node::node_name_from_uri(pattern) {
@@ -1178,7 +1385,8 @@ impl PeersMap {
             }
         }
         map.default_route_peer = default_routes.into_iter().next();
-        if let Some(hub) = hub_config {
+        if let Some(mut hub) = hub_config {
+            map.bind_hub_patterns(&mut hub)?;
             map.hub = Some(hub);
         }
         Ok(map)
@@ -1279,20 +1487,7 @@ impl PeersMap {
             let uris = extract_uri_sans(leaf.as_ref()).unwrap_or_default();
             if uris.len() == 1 {
                 let uri = &uris[0];
-                let matches_pattern = hub
-                    .patterns
-                    .iter()
-                    .any(|pat| spiffe_uri_matches_pattern(uri, pat));
-                if matches_pattern {
-                    let all_anchors = self.all_ca_anchors();
-                    if verify_cert_chain(
-                        leaf,
-                        intermediates,
-                        &all_anchors,
-                        UnixTime::now(),
-                        webpki::KeyUsage::client_auth(),
-                    )
-                    .is_ok()
+                if self.hub_certificate_allowed(uri, leaf, intermediates, UnixTime::now()) {
                     {
                         let canonical =
                             crate::node::node_name_from_uri(uri).map_err(AppError::PeerRejected)?;
@@ -1307,12 +1502,11 @@ impl PeersMap {
                         }
 
                         // Rules table: find matching rule (closed by default if none)
-                        let allow = hub
+                        let rule = hub
                             .rules
                             .iter()
-                            .find(|r| spiffe_uri_matches_pattern(uri, &r.pattern))
-                            .map(|r| r.allow.clone())
-                            .unwrap_or_default();
+                            .find(|r| spiffe_uri_matches_pattern(uri, &r.pattern));
+                        let allow = rule.map(|r| r.allow.clone()).unwrap_or_default();
 
                         let peer_config = PeerConfig {
                             name: canonical.clone(),
@@ -1322,7 +1516,7 @@ impl PeersMap {
                             identities: Some(vec![uri.clone()]),
                             allow,
                             from: None,
-                            leaf: false,
+                            leaf: rule.is_some_and(|r| r.leaf),
                             principals: Vec::new(),
                             targets: None,
                             dial: None,
@@ -1343,6 +1537,10 @@ impl PeersMap {
                                     tracing::warn!("{msg}");
                                     return Err(AppError::PeerRejected(msg));
                                 }
+                                admitted.get_mut(&canonical).unwrap().not_after =
+                                    certificate_not_after(leaf.as_ref())?;
+                                admitted.get_mut(&canonical).unwrap().config = peer_config.clone();
+                                admitted.get_mut(&canonical).unwrap().pin = norm_pin.clone();
                             } else {
                                 admitted.insert(
                                     canonical.clone(),
@@ -1351,6 +1549,7 @@ impl PeersMap {
                                         uri: uri.clone(),
                                         pin: norm_pin,
                                         config: peer_config.clone(),
+                                        not_after: certificate_not_after(leaf.as_ref())?,
                                     },
                                 );
                             }
@@ -1796,26 +1995,16 @@ impl rustls::server::danger::ClientCertVerifier for CombinedClientCertVerifier {
             return Ok(rustls::server::danger::ClientCertVerified::assertion());
         }
 
-        if let Some(ref hub) = self.peers.hub {
+        if self.peers.hub.is_some() {
             let uris = extract_uri_sans(end_entity.as_ref()).map_err(|_| {
                 rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
             })?;
             if uris.len() == 1 {
                 let uri = &uris[0];
-                if hub
-                    .patterns
-                    .iter()
-                    .any(|pat| spiffe_uri_matches_pattern(uri, pat))
+                if self
+                    .peers
+                    .hub_certificate_allowed(uri, end_entity, intermediates, now)
                 {
-                    let all_anchors = self.peers.all_ca_anchors();
-                    verify_cert_chain(
-                        end_entity,
-                        intermediates,
-                        &all_anchors,
-                        now,
-                        webpki::KeyUsage::client_auth(),
-                    )?;
-
                     let canonical = crate::node::node_name_from_uri(uri).map_err(|_| {
                         rustls::Error::InvalidCertificate(
                             rustls::CertificateError::ApplicationVerificationFailure,
@@ -4313,7 +4502,7 @@ fn queue_leaf_mailbox_message_in(
 ) -> Result<DeliveryResponse, AppError> {
     let current_peers = fed_state.current_peers();
     let peer_cfg = current_peers
-        .get(peer_name)
+        .get_peer_config(peer_name)
         .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
 
     if let Some(ref allowed_targets) = peer_cfg.targets {
@@ -4362,8 +4551,16 @@ fn queue_leaf_mailbox_message_in(
     };
 
     let limits = storage::peer_mailbox_limits_for_db(&fed_state.db);
-    if storage::insert_peer_mailbox_with_limits(db, &mailbox_msg, limits)
-        .map_err(|e| AppError::Internal(e.to_string()))?
+    let admitted = !current_peers.contains_concrete_name(peer_name);
+    let global = storage::admitted_mailbox_limits_for_db(&fed_state.db);
+    if storage::insert_peer_mailbox_with_admission_budget(
+        db,
+        &mailbox_msg,
+        limits,
+        admitted,
+        global,
+    )
+    .map_err(|e| AppError::Internal(e.to_string()))?
         == storage::PeerMailboxInsert::Full
     {
         return Err(AppError::PeerMailboxFull(format!(
@@ -4563,8 +4760,9 @@ pub async fn send_federated_message_with(
 ) -> Result<DeliveryResponse, AppError> {
     let current_peers = fed_state.current_peers();
     let peer = current_peers
-        .get(peer_name)
+        .get_peer_config(peer_name)
         .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
+    let peer = &peer;
     let peer_name = peer.name.as_str();
 
     if peer.leaf {
@@ -6350,6 +6548,7 @@ impl CredentialReloader {
             }
         }
 
+        ca_paths.extend(peers.hub_ca_paths());
         let node_identity = std::sync::OnceLock::new();
         if let Some(ref own_node) = own {
             let running_name = fed_state
@@ -6517,6 +6716,7 @@ impl CredentialReloader {
                         new_ca_paths.insert(peer.name.clone(), ca_path.clone());
                     }
                 }
+                new_ca_paths.extend(new_peers_map.hub_ca_paths());
                 *self.ca_paths.lock().unwrap() = new_ca_paths;
 
                 *self.peers.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -6633,6 +6833,18 @@ impl CredentialReloader {
             ca_anchors.insert(peer_name, anchors);
         }
 
+        if let Some(hub) = &new_peers.hub {
+            for bundle in hub.pattern_cas.values() {
+                let pem = std::fs::read(bundle)
+                    .map_err(|_| AppError::Internal("cannot read hub CA bundle".into()))?;
+                let anchors = parse_ca_bundle_pem(&pem).map_err(AppError::Internal)?;
+                if anchors.is_empty() {
+                    return Err(AppError::Internal("empty hub CA bundle".into()));
+                }
+                new_peers.hub_bundles.insert(bundle.clone(), anchors);
+            }
+        }
+
         let new_peers_arc = Arc::new(new_peers);
 
         // Validate key matches cert and build acceptor
@@ -6736,7 +6948,7 @@ fn attachment_peer_row(
 ) -> Result<attachments::AttachmentRow, AppError> {
     let peers = fs.current_peers();
     let config = peers
-        .get(peer)
+        .get_peer_config(peer)
         .ok_or_else(|| AppError::UnknownPeer(peer.to_string()))?;
     let db = fs
         .db
@@ -6864,7 +7076,7 @@ pub async fn fetch_attachment_chunk(
 ) -> Result<Vec<u8>, AppError> {
     let peers = fs.current_peers();
     let peer = peers
-        .get(upstream)
+        .get_peer_config(upstream)
         .ok_or_else(|| AppError::UnknownPeer(upstream.into()))?;
     let length = length.min(fs.max_body);
     if peer.leaf {
@@ -6915,7 +7127,7 @@ pub async fn fetch_attachment_chunk(
     let uri = format!("/fed/v2/attachments/{item_segment}/{index}?offset={offset}&length={length}");
     attachment_http(
         fs,
-        peer,
+        &peer,
         "GET",
         &uri,
         Vec::new(),
