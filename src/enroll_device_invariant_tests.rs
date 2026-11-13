@@ -78,8 +78,15 @@ fn bounded_result<T>(rx: std::sync::mpsc::Receiver<T>) -> T {
 
 #[tokio::test]
 async fn enabled_device_requires_local_registration_before_provider_work() {
-    let h = enabled().await;
-    h.service.local_approval.store(false, Ordering::Release);
+    let mut h = enabled().await;
+    h.service = Arc::new(Service::with_oidc_http(
+        h.service.ca.clone(),
+        h.service.fed.clone(),
+        h.clock.clone(),
+        h.service.hub_entry.clone(),
+        h.service.ca_identity.clone(),
+        h.idp.http_client(),
+    ));
     let before = h.idp.request_paths();
     let (status, response, _) = start(&h, "remote", 1).await;
     assert_eq!(
@@ -249,7 +256,7 @@ async fn real_approval_rechecks_deadline_after_sql_mutex_wait() {
             .unwrap();
     });
     wait_for_approval_lock(&s);
-    clock.elapsed.store(301, Ordering::SeqCst);
+    clock.elapsed.store(1000, Ordering::SeqCst);
     drop(locked);
     let result = bounded_result(rx);
     worker.join().unwrap();
@@ -455,6 +462,13 @@ async fn device_secret_census_child() {
     let mut secrets = h.idp.secret_values();
     let (created, view) = awaiting(&h).await;
     secrets.extend(h.idp.secret_values());
+    assert!(
+        secrets
+            .iter()
+            .any(|value| value.starts_with("fixture-device-")),
+        "raw device-code census positive control missing"
+    );
+    secrets.push(created["request_id"].as_str().unwrap().to_owned());
     secrets.push(created["session"].as_str().unwrap().to_owned());
     secrets.push(created["user_code"].as_str().unwrap().to_owned());
     assert!(h
@@ -469,7 +483,7 @@ async fn device_secret_census_child() {
             .any(|v| v == b"device-invariant-trace-positive-control"),
         "device trace positive control missing"
     );
-    let database = database_bytes(&h.db.lock().unwrap());
+    let database = every_database_column(&h.db.lock().unwrap());
     assert!(!database.is_empty());
     for secret in secrets {
         assert!(!secret.is_empty());
@@ -539,4 +553,212 @@ async fn completed_device_approval_cannot_issue_twice() {
         "completed approval replay issued another certificate"
     );
     assert_eq!(effects(&h), [1, 1, 1]);
+}
+
+fn collect_on_thread(service: Arc<Service>, handle: String) -> (StatusCode, Value) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let request = Request::builder()
+                .uri("/enroll/v1/sessions?wait=0")
+                .header("xmsg-enroll-session", handle)
+                .body(Body::empty())
+                .unwrap();
+            let response = router(service).oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 131072).await.unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap())
+        })
+}
+#[tokio::test]
+async fn queued_collectors_behind_approval_have_one_certificate_result() {
+    let h = enabled().await;
+    let (created, view) = awaiting(&h).await;
+    let s = session(&h, &created);
+    let locked = h.db.lock().unwrap();
+    let service = h.service.clone();
+    let id = created["request_id"].as_str().unwrap().to_owned();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let approve = std::thread::spawn(move || {
+        tx.send(service.approve_device(&id, approval(&view)))
+            .unwrap();
+    });
+    wait_for_approval_lock(&s);
+    let mut collectors = Vec::new();
+    for _ in 0..2 {
+        let service = h.service.clone();
+        let handle = created["session"].as_str().unwrap().to_owned();
+        let (entered, queued) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            entered.send(()).unwrap();
+            tx.send(collect_on_thread(service, handle)).unwrap();
+        });
+        bounded_result(queued);
+        collectors.push((worker, rx));
+    }
+    drop(locked);
+    assert!(
+        bounded_result(rx).is_ok(),
+        "approval lost to queued collector"
+    );
+    approve.join().unwrap();
+    let mut certificates = 0;
+    let mut gone = 0;
+    for (worker, rx) in collectors {
+        let (status, result) = bounded_result(rx);
+        worker.join().unwrap();
+        if status == StatusCode::OK && result["cert_chain_pem"].is_string() {
+            certificates += 1;
+        }
+        if status == StatusCode::GONE {
+            gone += 1;
+        }
+    }
+    assert_eq!(
+        certificates, 1,
+        "queued collectors received duplicate or missing certificate result"
+    );
+    assert_eq!(gone, 1, "queued collect loser was not terminal");
+    assert_eq!(effects(&h), [1, 1, 1]);
+}
+
+#[tokio::test]
+async fn restart_loses_verified_awaiting_approval_without_authority_writes() {
+    let h = enabled().await;
+    let (created, view) = awaiting(&h).await;
+    assert_eq!(h.service.pending_device_requests().len(), 1);
+    let ca = h.service.ca.clone();
+    let fed = h.service.fed.clone();
+    let entry = h.service.hub_entry.clone();
+    let identity = h.service.ca_identity.clone();
+    let Harness {
+        service,
+        idp,
+        db,
+        clock,
+        _directory,
+    } = h;
+    drop(service);
+    let restarted = Arc::new(Service::with_oidc_http(
+        ca,
+        fed,
+        clock,
+        entry,
+        identity,
+        idp.http_client(),
+    ));
+    restarted.register_local_approval().unwrap();
+    assert!(
+        restarted.pending_device_requests().is_empty(),
+        "restart recovered transient verified approval"
+    );
+    assert!(
+        restarted
+            .approve_device(created["request_id"].as_str().unwrap(), approval(&view))
+            .is_err(),
+        "restart accepted old verified approval"
+    );
+    let db = db.lock().unwrap();
+    for table in ["enroll_bindings", "enroll_rates", "enroll_certs"] {
+        assert_eq!(
+            db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "restart wrote pending verified authority state"
+        );
+    }
+}
+
+#[tokio::test]
+async fn terminal_projection_denial_releases_device_permit_without_eviction() {
+    let h = enabled().await;
+    let (status, created, _) = start(&h, "remote", 1).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let s = session(&h, &created);
+    let mut policy = (*h.service.ca.policy()).clone();
+    policy.deny.users.push("alice".into());
+    std::fs::write(
+        h._directory.path().join("policy.json"),
+        serde_json::to_vec(&policy).unwrap(),
+    )
+    .unwrap();
+    assert!(h
+        .idp
+        .authorize_device(created["user_code"].as_str().unwrap()));
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if matches!(&*s.phase.lock().unwrap(), Phase::Complete(Err(error)) if error.reason == "denied") { break; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
+    assert!(
+        !s.device_active.load(Ordering::Acquire),
+        "terminal failure retained active device permit"
+    );
+    assert_eq!(effects(&h), [0, 0, 0]);
+    assert_eq!(
+        start(&h, "remote", 1).await.0,
+        StatusCode::CREATED,
+        "terminal failure did not release source-IP permit"
+    );
+    assert_eq!(
+        h.service.sessions.lock().unwrap().len(),
+        2,
+        "terminal failure evicted common pending record"
+    );
+}
+
+fn every_database_column(connection: &rusqlite::Connection) -> Vec<Vec<u8>> {
+    let mut schemas = connection
+        .prepare("PRAGMA database_list")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    if !schemas.iter().any(|name| name == "temp") {
+        schemas.push("temp".into());
+    }
+    let mut values = Vec::new();
+    for schema in schemas {
+        let schema = schema.replace('"', "\"\"");
+        let mut names = connection
+            .prepare(&format!(
+                "SELECT name FROM \"{schema}\".sqlite_schema WHERE type='table'"
+            ))
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        names.push("sqlite_schema".into());
+        for name in names {
+            let mut statement = connection
+                .prepare(&format!(
+                    "SELECT * FROM \"{schema}\".\"{}\"",
+                    name.replace('"', "\"\"")
+                ))
+                .unwrap();
+            let columns = statement.column_count();
+            let mut rows = statement.query([]).unwrap();
+            while let Some(row) = rows.next().unwrap() {
+                for column in 0..columns {
+                    use rusqlite::types::ValueRef;
+                    match row.get_ref(column).unwrap() {
+                        ValueRef::Text(value) | ValueRef::Blob(value) => {
+                            values.push(value.to_vec())
+                        }
+                        ValueRef::Integer(value) => values.push(value.to_string().into_bytes()),
+                        ValueRef::Real(value) => values.push(value.to_string().into_bytes()),
+                        ValueRef::Null => {}
+                    }
+                }
+            }
+        }
+    }
+    values
 }
