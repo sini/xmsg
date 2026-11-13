@@ -115,6 +115,37 @@ pub struct VerifiedClaims {
     pub groups: Vec<String>,
     pub preferred_username: Option<String>,
 }
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeviceProjection {
+    provider: String,
+    user: String,
+    issuer: String,
+    sub: String,
+    host: String,
+    node_name: String,
+    spki_sha256: String,
+    policy_digest: Vec<u8>,
+}
+impl DeviceProjection {
+    pub fn user(&self) -> &str {
+        &self.user
+    }
+    pub fn issuer(&self) -> &str {
+        &self.issuer
+    }
+    pub fn sub(&self) -> &str {
+        &self.sub
+    }
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+    pub fn node_name(&self) -> &str {
+        &self.node_name
+    }
+    pub fn spki_sha256(&self) -> &str {
+        &self.spki_sha256
+    }
+}
 #[derive(Clone)]
 pub struct VerifiedCsr {
     key: rcgen::PublicKey,
@@ -144,6 +175,10 @@ pub enum Error {
     NotReady,
     #[error("unsupported_flow")]
     UnsupportedFlow,
+    #[error("approval_mismatch")]
+    ApprovalMismatch,
+    #[error("approval_expired")]
+    ApprovalExpired,
     #[error("invalid_policy")]
     InvalidPolicy,
     #[error("invalid_csr")]
@@ -180,6 +215,8 @@ pub enum Error {
 impl Error {
     pub fn code(&self) -> &'static str {
         match self {
+            Self::ApprovalMismatch => "approval_mismatch",
+            Self::ApprovalExpired => "approval_expired",
             Self::NotReady => "not_ready",
             Self::UnsupportedFlow => "unsupported_flow",
             Self::InvalidPolicy => "invalid_policy",
@@ -535,8 +572,8 @@ impl EnrollCa {
         }
     }
     pub fn reload_policy(&self) -> Result<bool, Error> {
-        let read = std::fs::read(&self.policy_file).map_err(|_| Error::InvalidPolicy);
         let mut live = self.live.lock().map_err(|_| Error::Storage)?;
+        let read = std::fs::read(&self.policy_file).map_err(|_| Error::InvalidPolicy);
         let candidate = read.and_then(|bytes| {
             let hash = digest(&bytes);
             if hash == live.hash {
@@ -667,16 +704,15 @@ impl EnrollCa {
         .map_err(|_| Error::Storage)?;
         Ok(())
     }
-    pub fn issue(
+    fn projection(
         &self,
+        p: &Policy,
+        policy_digest: &[u8],
         claims: &VerifiedClaims,
         csr: &VerifiedCsr,
         host: &str,
         reserved_names: &[String],
-        now: i64,
-    ) -> Result<Issued, Error> {
-        self.reload_policy()?;
-        let p = self.policy();
+    ) -> Result<DeviceProjection, Error> {
         if !valid_segment(host) {
             return Err(Error::InvalidName);
         }
@@ -686,13 +722,104 @@ impl EnrollCa {
             return Err(Error::ReservedName);
         }
         let spki = spki_hash(&rcsr_spki(csr));
-        if Self::denied(&p, &user, host, &claims.sub, &spki) {
+        if Self::denied(p, &user, host, &claims.sub, &spki) {
             return Err(Error::Denied);
         }
+        Ok(DeviceProjection {
+            provider: claims.provider.clone(),
+            user,
+            issuer: iss,
+            sub: claims.sub.clone(),
+            host: host.into(),
+            node_name: name,
+            spki_sha256: spki,
+            policy_digest: policy_digest.into(),
+        })
+    }
+    pub fn project_device(
+        &self,
+        claims: &VerifiedClaims,
+        csr: &VerifiedCsr,
+        host: &str,
+        reserved_names: &[String],
+    ) -> Result<DeviceProjection, Error> {
+        self.reload_policy()?;
+        let live = self.live.lock().map_err(|_| Error::Storage)?;
+        live.policy
+            .provider(&claims.provider)?
+            .client(Flow::Device)?;
+        self.projection(&live.policy, &live.hash, claims, csr, host, reserved_names)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue_device_approved(
+        &self,
+        claims: &VerifiedClaims,
+        csr: &VerifiedCsr,
+        host: &str,
+        reserved_names: &[String],
+        approved: &DeviceProjection,
+        now: i64,
+        guard: impl Fn() -> bool,
+    ) -> Result<Issued, Error> {
+        self.issue_inner(
+            claims,
+            csr,
+            host,
+            reserved_names,
+            now,
+            Some(approved),
+            &guard,
+        )
+    }
+    pub fn issue(
+        &self,
+        claims: &VerifiedClaims,
+        csr: &VerifiedCsr,
+        host: &str,
+        reserved_names: &[String],
+        now: i64,
+    ) -> Result<Issued, Error> {
+        self.issue_inner(claims, csr, host, reserved_names, now, None, &|| true)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn issue_inner(
+        &self,
+        claims: &VerifiedClaims,
+        csr: &VerifiedCsr,
+        host: &str,
+        reserved_names: &[String],
+        now: i64,
+        approved: Option<&DeviceProjection>,
+        guard: &dyn Fn() -> bool,
+    ) -> Result<Issued, Error> {
         let mut db = self.db.lock().map_err(|_| Error::Storage)?;
         let tx = db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|_| Error::Storage)?;
+        self.reload_policy()?;
+        let live = self.live.lock().map_err(|_| Error::Storage)?;
+        let p = live.policy.clone();
+        let proposed = self.projection(&p, &live.hash, claims, csr, host, reserved_names)?;
+        if let Some(approved) = approved {
+            p.provider(&claims.provider)?.client(Flow::Device)?;
+            if approved.provider != proposed.provider
+                || approved.user != proposed.user
+                || approved.issuer != proposed.issuer
+                || approved.sub != proposed.sub
+                || approved.host != proposed.host
+                || approved.node_name != proposed.node_name
+                || approved.spki_sha256 != proposed.spki_sha256
+                || approved.policy_digest != proposed.policy_digest
+            {
+                return Err(Error::ApprovalMismatch);
+            }
+        }
+        if !guard() {
+            return Err(Error::ApprovalExpired);
+        }
+        let user = proposed.user;
+        let iss = proposed.issuer;
+        let spki = proposed.spki_sha256;
         use rusqlite::OptionalExtension;
         let binding: Option<(String, String)> = tx
             .query_row(
@@ -752,6 +879,9 @@ impl EnrollCa {
             rusqlite::params![serial, user, host, spki, iss, claims.sub, now, not_after],
         )
         .map_err(|_| Error::Storage)?;
+        if !guard() {
+            return Err(Error::ApprovalExpired);
+        }
         tx.commit().map_err(|_| Error::Storage)?;
         Ok(Issued {
             cert_chain_pem: chain,
