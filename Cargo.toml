@@ -59,6 +59,9 @@ daemon = ["client", "dep:openidconnect", "dep:time", "dep:chrono", "dep:axum", "
 test-hooks = []
 
 [dev-dependencies]
+rand = "=0.8.8"
+rsa = "=0.9.10"
+ring = "=0.17.14"
 proptest = "1.6"
 tempfile = "3.17"
 xmsg = { path = ".", default-features = false, features = ["test-hooks"] }
