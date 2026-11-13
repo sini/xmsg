@@ -1,0 +1,229 @@
+[
+  {
+    "label": "device-ca-equality-provider",
+    "oracle": "device CA projection/approval equality-provider",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_approval_refuses_each_projection_mismatch_without_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "approved.provider != proposed.provider",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "approval accepted changed provider"
+  },
+  {
+    "label": "device-ca-equality-user",
+    "oracle": "device CA projection/approval equality-user",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_approval_refuses_each_projection_mismatch_without_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "approved.user != proposed.user",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "approval accepted changed user"
+  },
+  {
+    "label": "device-ca-equality-issuer",
+    "oracle": "device CA projection/approval equality-issuer",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_approval_refuses_each_projection_mismatch_without_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "approved.issuer != proposed.issuer",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "approval accepted changed issuer"
+  },
+  {
+    "label": "device-ca-equality-sub",
+    "oracle": "device CA projection/approval equality-sub",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_approval_refuses_each_projection_mismatch_without_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "approved.sub != proposed.sub",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "approval accepted changed sub"
+  },
+  {
+    "label": "device-ca-equality-host",
+    "oracle": "device CA projection/approval equality-host",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_approval_refuses_each_projection_mismatch_without_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "approved.host != proposed.host",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "approval accepted changed host"
+  },
+  {
+    "label": "device-ca-equality-node_name",
+    "oracle": "device CA projection/approval equality-node_name",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_approval_refuses_each_projection_mismatch_without_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "approved.node_name != proposed.node_name",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "approval accepted changed node_name"
+  },
+  {
+    "label": "device-ca-equality-spki_sha256",
+    "oracle": "device CA projection/approval equality-spki_sha256",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_approval_refuses_each_projection_mismatch_without_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "approved.spki_sha256 != proposed.spki_sha256",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "approval accepted changed spki_sha256"
+  },
+  {
+    "label": "device-ca-equality-policy_digest",
+    "oracle": "device CA projection/approval equality-policy_digest",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_approval_refuses_each_projection_mismatch_without_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "approved.policy_digest != proposed.policy_digest",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "approval accepted changed policy_digest"
+  },
+  {
+    "label": "device-ca-guard-first",
+    "oracle": "device CA projection/approval guard-first",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_guard_runs_after_database_wait_before_any_effect",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "if !guard() {",
+        "replacement": "if false {",
+        "start": "    fn issue_inner(",
+        "end": "        use rusqlite::OptionalExtension;"
+      }
+    ],
+    "expected_literal": "expired guard accepted after SQL wait"
+  },
+  {
+    "label": "device-ca-guard-final",
+    "oracle": "device CA projection/approval guard-final",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_deadline_during_issuance_rolls_back_all_effects_and_supersession",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "        if !guard() {\n            return Err(Error::ApprovalExpired);\n        }\n        tx.commit()",
+        "replacement": "        if false {\n            return Err(Error::ApprovalExpired);\n        }\n        tx.commit()"
+      }
+    ],
+    "expected_literal": "deadline during signing committed enrollment"
+  },
+  {
+    "label": "device-ca-default-device",
+    "oracle": "device CA projection/approval default-device",
+    "target": "lib",
+    "test": "enroll_ca::tests::unsupported_key_charset_and_flow_do_not_gain_authority",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "if flow == Flow::Device && !self.device_enabled() {",
+        "replacement": "if false {"
+      }
+    ],
+    "expected_literal": "assertion failed: disabled.provider(\"idp\").unwrap().client(Flow::Device).is_err()"
+  },
+  {
+    "label": "device-ca-enabled-without-client",
+    "oracle": "device CA projection/approval enabled-without-client",
+    "target": "lib",
+    "test": "enroll_ca::tests::unsupported_key_charset_and_flow_do_not_gain_authority",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "|| (p.device_enabled() && !p.clients.contains_key(&Flow::Device))",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "assertion failed: Policy::from_json(&p.to_string()).is_err()"
+  },
+  {
+    "label": "device-ca-projection-writes",
+    "oracle": "device CA projection/approval projection-writes",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_projection_is_read_only_and_approved_issue_succeeds",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "        self.projection(&live.policy, &live.hash, claims, csr, host, reserved_names)",
+        "replacement": "        drop(live);\n        self.issue(claims, csr, host, reserved_names, 1_800_000_000)?;\n        let live = self.live.lock().map_err(|_| Error::Storage)?;\n        self.projection(&live.policy, &live.hash, claims, csr, host, reserved_names)"
+      }
+    ],
+    "expected_literal": "assertion `left == right` failed: projection spent enrollment effects before approval"
+  },
+  {
+    "label": "device-ca-policy-refresh",
+    "oracle": "device CA projection/approval policy-refresh",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_approval_invalidated_by_current_policy_and_reserved_name",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "        self.reload_policy()?;\n        let live = self.live.lock().map_err(|_| Error::Storage)?;\n        let p = live.policy.clone();",
+        "replacement": "        let live = self.live.lock().map_err(|_| Error::Storage)?;\n        let p = live.policy.clone();"
+      }
+    ],
+    "expected_literal": "policy change reused old approval"
+  },
+  {
+    "label": "device-ca-guard-before-lock",
+    "oracle": "device CA projection/approval guard-before-lock",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_projection_is_read_only_and_approved_issue_succeeds",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "    fn issue_inner(\n        &self,\n        claims: &VerifiedClaims,\n        csr: &VerifiedCsr,\n        host: &str,\n        reserved_names: &[String],\n        now: i64,\n        approved: Option<&DeviceProjection>,\n        guard: &dyn Fn() -> bool,\n    ) -> Result<Issued, Error> {\n        let mut db = self.db.lock().map_err(|_| Error::Storage)?;\n        let tx = db\n            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)\n            .map_err(|_| Error::Storage)?;\n        self.reload_policy()?;\n        let live = self.live.lock().map_err(|_| Error::Storage)?;\n        let p = live.policy.clone();\n        let proposed = self.projection(&p, &live.hash, claims, csr, host, reserved_names)?;\n        if let Some(approved) = approved {\n            p.provider(&claims.provider)?.client(Flow::Device)?;\n            if approved.provider != proposed.provider\n                || approved.user != proposed.user\n                || approved.issuer != proposed.issuer\n                || approved.sub != proposed.sub\n                || approved.host != proposed.host\n                || approved.node_name != proposed.node_name\n                || approved.spki_sha256 != proposed.spki_sha256\n                || approved.policy_digest != proposed.policy_digest\n            {\n                return Err(Error::ApprovalMismatch);\n            }\n        }\n        if !guard() {\n            return Err(Error::ApprovalExpired);\n        }\n",
+        "replacement": "    fn issue_inner(\n        &self,\n        claims: &VerifiedClaims,\n        csr: &VerifiedCsr,\n        host: &str,\n        reserved_names: &[String],\n        now: i64,\n        approved: Option<&DeviceProjection>,\n        guard: &dyn Fn() -> bool,\n    ) -> Result<Issued, Error> {\n        if !guard() {\n            return Err(Error::ApprovalExpired);\n        }\n        let mut db = self.db.lock().map_err(|_| Error::Storage)?;\n        let tx = db\n            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)\n            .map_err(|_| Error::Storage)?;\n        self.reload_policy()?;\n        let live = self.live.lock().map_err(|_| Error::Storage)?;\n        let p = live.policy.clone();\n        let proposed = self.projection(&p, &live.hash, claims, csr, host, reserved_names)?;\n        if let Some(approved) = approved {\n            p.provider(&claims.provider)?.client(Flow::Device)?;\n            if approved.provider != proposed.provider\n                || approved.user != proposed.user\n                || approved.issuer != proposed.issuer\n                || approved.sub != proposed.sub\n                || approved.host != proposed.host\n                || approved.node_name != proposed.node_name\n                || approved.spki_sha256 != proposed.spki_sha256\n                || approved.policy_digest != proposed.policy_digest\n            {\n                return Err(Error::ApprovalMismatch);\n            }\n        }\n"
+      }
+    ],
+    "expected_literal": "approval guard ran before SQL mutex acquisition"
+  }
+]

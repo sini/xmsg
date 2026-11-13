@@ -39,7 +39,9 @@
       {
         "file": "src/http.rs",
         "needle": "if !credential.is_some_and(|credential| credential.uid == crate::agent::current_uid()) {",
-        "replacement": "if false && !credential.is_some_and(|credential| credential.uid == crate::agent::current_uid()) {"
+        "replacement": "if false && !credential.is_some_and(|credential| credential.uid == crate::agent::current_uid()) {",
+        "start": "fn local_enrollment(",
+        "end": "async fn enrollment_pending_handler("
       }
     ],
     "expected_literal": "approval route accepted absent or wrong UID credentials"
