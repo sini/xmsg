@@ -198,3 +198,37 @@ rows. The existing per-leaf budgets still apply; concrete leaf entries do not
 consume the aggregate admitted budget. Rejection keeps existing messages and
 returns `429 peer_mailbox_full`. See
 [hub admission](/concepts/hubs-and-leaves/#planned-enrolled-nodes-and-bounded-hub-mailboxes).
+
+## Planned: enrollment commands
+
+[Enrollment](/operations/enrollment-ca/) issues a host certificate after OIDC
+sign-in. It does not distribute the machine's private key.
+
+| Command | Purpose |
+| --- | --- |
+| `xmsg enroll URL` | Browser sign-in and local P-256 key/CSR creation; requires `--fingerprint sha256:<hex>` or `--root-file FILE` |
+| `xmsg enroll --renew` | One renewal using saved state; no URL or IdP login required |
+| `xmsg enroll-ca --enroll-ca-dir DIR init` | Initialize the independent root and print JSON `root_file`/`fingerprint` |
+| `xmsg enroll-ca --enroll-ca-dir DIR --enroll-policy FILE list` | Inspect certificate/SPKI and supersession records |
+| `xmsg enroll-ca --enroll-ca-dir DIR --enroll-policy FILE bind USER PROVIDER SUB` | Add an explicit identity alias for a bound user |
+| `xmsg enroll-ca --enroll-ca-dir DIR --enroll-policy FILE unbind USER` | Remove a user's binding and aliases; not instant peer revocation |
+
+`enroll` accepts `--flow loopback|paste` (default `loopback`), `--provider NAME`,
+`--host NAME` and `--state-dir DIR`. The default state directory is
+`$XDG_STATE_HOME/xmsg/enroll`, falling back to `~/.local/state/xmsg/enroll`.
+`--provider` is optional only with one configured provider. `device` is refused in
+v1. Fresh enrollment does not overwrite `fed.key`; choose a new state directory
+for a new key/login. `enroll-ca` accepts `--db-path FILE` to select the serving
+CA's database; `init` needs no policy.
+
+| Planned `serve` flag | Meaning |
+| --- | --- |
+| `--enroll-listen IP:PORT` | Separate enrollment HTTPS listener, not the federation port |
+| `--enroll-ca-dir DIR` | Owner-private `root.key` and public `root.crt` directory |
+| `--enroll-policy FILE` | Provider, user mapping, deny, lifetime and rate policy |
+| `--enroll-state DIR` | Use an enrolled client's saved cert/key and automatic renewal |
+
+Supply the first three flags together with federation credentials, a peers file
+and `--fed-listen`. `--enroll-state` conflicts with explicit `--fed-cert` and
+`--fed-key`; it still needs the peers file and federation listener. See the
+[setup and renewal example](/operations/enrollment-ca/#enroll-the-machine).

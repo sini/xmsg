@@ -56,6 +56,33 @@ address. Every node trusts one CA bundle, and a new teammate needs a certificate
 the hub, not a new pin on every machine. The examples below use a CA bundle at
 `/etc/xmsg/team-ca.pem` and the trust domain `example.org`.
 
+### Planned alternative: sign in for a host certificate
+
+The hub can run the [in-process enrollment CA](/operations/enrollment-ca/) with
+its own root. Each teammate signs in through loopback or paste, creates a key on
+the laptop and receives a host/user identity from the policy's verified mapping.
+A `leaf: true` rule under the enrollment-root pattern gives the node a mailbox
+without a concrete per-host entry. The hub's federation identity may stay under
+the fleet root; the verified enrollment response carries its correct bundle.
+
+For Alice, the planned client command is:
+
+```sh
+xmsg enroll https://hub.example.org:7790 \
+  --fingerprint 'sha256:<64-hex-digits>' --provider idm --host laptop \
+  --state-dir ./alice-enroll
+```
+
+Use the printed serve flags and a private state directory. A host label is not
+attestation: user policy, not the word `laptop` or `prod-db`, gives authority.
+Real-provider compatibility remains operator-run acceptance work.
+
+The manual setup below remains a separate option. Migrating one of its names
+replaces the old concrete peer entry with the enrollment pattern/rule in one
+reviewed peers-file change. Do not keep competing identities for the same name.
+Fleet and enrollment patterns bind separate bundles, derive disjoint names and
+use rules that do not span those bundles.
+
 ## Setup
 
 ### Each laptop

@@ -295,14 +295,26 @@ Each admission pattern binds a CA bundle, for example:
 
 Patterns under different bundles must derive disjoint node names, including across
 trust domains and the host/user and namespace/service-account forms. Partition by
-user or host. A rule spanning distinct bundles is refused; split it into rules
-for each population. A bare string pattern is supported only when the peers file
-uses one CA bundle.
+verified user where possible. For example, bind `host/*/user/sini` to the fleet
+bundle and `host/*/user/alice` to the enrollment bundle. A literal host may separate
+names, but it does not attest a machine. `host/x/user/sini` and `ns/x/sa/sini` both
+derive `sini.x`; a pattern such as `*/x/*/sini` can match both forms. Keyword stars
+are included in the overlap check. A rule spanning distinct bundles is refused;
+split it into rules for each population. A bare string pattern is supported only
+when the peers file uses one CA bundle.
 
-Per-leaf limits remain `--peer-mailbox-max-rows` and `--peer-mailbox-max-bytes`.
+Per-leaf limits remain `--peer-mailbox-max-rows 10000` and
+`--peer-mailbox-max-bytes 67108864` (64 MiB).
 All pattern-admitted mailboxes together also have
 `--admitted-mailbox-max-rows 100000` and
 `--admitted-mailbox-max-bytes 671088640`. A full mailbox refuses new rows without
 evicting old ones. Concrete leaf entries remain outside that aggregate cap.
 Expired admitted entries are removed by the mailbox purge tick once they have no
 queued rows.
+
+
+The [enrollment setup](/operations/enrollment-ca/) initializes the independent root
+before the hub loads this bundle. A team can admit new user machines without
+adding one peer entry for each host. Existing queued rows survive restart, but a
+send to an admitted name is unknown until that client reconnects; no live reconnect
+latency is promised by the fixture checks.

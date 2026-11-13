@@ -28,6 +28,16 @@ name with a free-form flag. xmsg refuses `--host-label` and `XMSG_HOST_LABEL` at
    `<user>.<host>`. `<user>` is the OS username of the effective UID. `<host>` is the short
    hostname, cut at the first `.`. This name never goes on the wire.
 
+### Planned: enrolled identity through OIDC
+
+An [enrollment CA](/operations/enrollment-ca/) inside an xmsg hub can sign a host
+identity after browser sign-in. This is the CA trust form above, not a third TLS
+trust mode: `spiffe://example.org/host/laptop/user/alice` still derives
+`alice.laptop`. The user comes from a verified claim and explicit CA policy; the
+host is the machine's unverified label. Never grant authority on that host label.
+Peers trust the enrollment root only in their intended `ca` entries or
+[pattern-bound bundles](#hub-admission-hub). Fleet and pod issuers remain separate.
+
 ### Canonical names and local nicknames
 
 Envelopes on `/fed/v2` carry canonical node names. The receiving node gives each incoming
@@ -195,7 +205,8 @@ is logged by error code, and the rejected item is still ACKed so it cannot block
 ### Hub admission (`hub`)
 
 A hub can admit clients that have no entry of their own. The `hub` block matches the client's
-certificate identity against patterns:
+certificate identity against patterns. **Planned:** each pattern binds its own CA bundle,
+and a rule may grant a durable leaf mailbox:
 
 ```json
 {
@@ -208,7 +219,7 @@ certificate identity against patterns:
     }
   },
   "hub": {
-    "patterns": ["spiffe://example.org/host/*/user/*"],
+    "patterns": [{"pattern": "spiffe://example.org/host/*/user/*", "ca": "/etc/xmsg/fleet-ca.pem"}],
     "rules": [
       { "pattern": "spiffe://example.org/host/*/user/alice", "allow": ["send", "reply", "list"] }
     ]
@@ -216,13 +227,18 @@ certificate identity against patterns:
 }
 ```
 
-- **`patterns`** (required, not empty): SPIFFE URI patterns. A `*` matches exactly one whole path
-  segment. xmsg admits a client when its certificate has exactly one URI SAN, the URI matches a
-  pattern, and the chain verifies against the CA bundles of this file's `ca` entries.
-- **A CA entry is required.** xmsg refuses a `hub` block when `peers` has no `ca` entry.
-- **`rules`** (optional): each rule has a `pattern` and an `allow` list. The first rule whose
-  pattern matches the client's URI gives the client its operations. `allow` takes `send`, `reply`,
-  `list` and `forward`. It must not be empty.
+- **`patterns`** (required, not empty): a SPIFFE pattern may be an object
+  `{ "pattern": "spiffe://example.org/host/*/user/alice", "ca": "/etc/xmsg/enrollment.pem" }`.
+  A `*` matches one whole path segment, including a keyword position. The TLS verifier and
+  request admission both use the matched pattern's bundle; anchors are not pooled across
+  unrelated patterns.
+- **Every pattern needs one bundle.** An object names its bundle directly and does not need a
+  concrete CA peer entry. A bare string remains compatible when the file's CA entries resolve
+  to one bundle; with several distinct bundles, it is refused until its `ca` is explicit.
+- **`rules`** (optional): the first matching rule grants `allow` operations and optional
+  `leaf: true`. Allowed operations are `send`, `reply`, `list`, `forward` and `relayed`.
+  `leaf` defaults to false. A rule compatible with patterns of different bundles is refused;
+  split it rather than sharing a fleet rule with enrollment identities.
 - **Closed by default.** An admitted client that matches no rule gets no operations.
 - **Load checks.** xmsg refuses a duplicate rule pattern. It also refuses a rule that no admission
   pattern can match.
@@ -231,6 +247,11 @@ certificate identity against patterns:
   refuses a client whose name is a concrete entry's name. When two different URIs give the same
   name, it refuses the second client.
 - After an admitted client connects, its name is in this node's view of known nodes.
+- **Cross-bundle name checks:** patterns under distinct bundles must not derive a common
+  canonical name. The check ignores trust domains and covers both `host/…/user/…` and
+  `ns/…/sa/…`, including wildcards in keyword positions. Refusal prevents another bundle from
+  reclaiming a queued mailbox name after restart. See
+  [enrolled hub mailboxes](/concepts/hubs-and-leaves/#planned-enrolled-nodes-and-bounded-hub-mailboxes).
 
 ## Mesh `list` across peers
 
