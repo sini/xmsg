@@ -301,7 +301,7 @@ On the CA host, as the serving UID:
 ```sh
 xmsg enroll-ca pending
 xmsg enroll-ca approve REQUEST_ID --user alice --host server \
-  --spki-sha256 '<SPKI-SHA256-DIGEST>'
+  --spki-sha256 'sha256:<64-hex-digits>'
 ```
 
 Use `xmsg enroll-ca --http-sock SOCKET pending` (and the same prefix for approval

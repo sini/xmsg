@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use xmsg::http::{build_router, AppState};
+use xmsg::http::{build_router, build_unix_router, AppState};
 use xmsg::mcp::{run_mcp_loop, McpConfig};
 use xmsg::registry::resolve_sessions_dirs;
 use xmsg::storage;
@@ -85,7 +85,9 @@ pub struct UnregisterArgs {
 #[derive(Parser, Debug)]
 pub struct EnrollCaArgs {
     #[arg(long = "enroll-ca-dir")]
-    pub ca_dir: PathBuf,
+    pub ca_dir: Option<PathBuf>,
+    #[arg(long, env = "XMSG_HTTP_SOCK")]
+    pub http_sock: Option<PathBuf>,
     #[arg(long = "enroll-policy")]
     pub policy: Option<PathBuf>,
     #[arg(long = "db-path", env = "XMSG_DB_PATH")]
@@ -104,6 +106,19 @@ pub enum EnrollCaAction {
     },
     Unbind {
         user: String,
+    },
+    Pending,
+    Approve {
+        request_id: String,
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        host: String,
+        #[arg(long)]
+        spki_sha256: String,
+    },
+    Deny {
+        request_id: String,
     },
 }
 
@@ -395,6 +410,55 @@ fn resolve_db_path(path: Option<PathBuf>) -> PathBuf {
     }
 }
 
+async fn enrollment_operator(
+    socket: PathBuf,
+    action: &EnrollCaAction,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let http = reqwest::Client::builder()
+        .unix_socket(socket)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let request_path = |id: &str, operation: &str| -> Result<String, Box<dyn std::error::Error>> {
+        if id.len() != 32
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err("invalid enrollment request ID".into());
+        }
+        Ok(format!("http://localhost/v1/enrollment/{id}/{operation}"))
+    };
+    let request = match action {
+        EnrollCaAction::Pending => http.get("http://localhost/v1/enrollment/pending"),
+        EnrollCaAction::Approve {
+            request_id,
+            user,
+            host,
+            spki_sha256,
+        } => http
+            .post(request_path(request_id, "approve")?)
+            .json(&serde_json::json!({"user":user,"host":host,"spki_sha256":spki_sha256})),
+        EnrollCaAction::Deny { request_id } => http.post(request_path(request_id, "deny")?),
+        _ => return Err("not a live enrollment operator action".into()),
+    };
+    let mut response = request.send().await?;
+    let status = response.status();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len().saturating_add(chunk.len()) > 131072 {
+            return Err("enrollment operator response too large".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if !status.is_success() {
+        return Err(format!("enrollment operator request failed ({status}): {value}").into());
+    }
+    Ok(value)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
@@ -426,18 +490,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::EnrollCa(args) => {
             use xmsg::enroll::Clock;
             let now = xmsg::enroll::WallClock.now();
+            if matches!(
+                &args.action,
+                EnrollCaAction::Pending
+                    | EnrollCaAction::Approve { .. }
+                    | EnrollCaAction::Deny { .. }
+            ) {
+                let socket = match args.http_sock {
+                    Some(socket) => socket,
+                    None => xmsg::http::default_http_sock_path()?,
+                };
+                let value = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?
+                    .block_on(enrollment_operator(socket, &args.action))?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                return Ok(());
+            }
+            let directory = args
+                .ca_dir
+                .ok_or("--enroll-ca-dir is required for init/list/bind/unbind")?;
             if matches!(args.action, EnrollCaAction::Init) {
-                let pem = xmsg::enroll_ca::initialize_ca_dir(&args.ca_dir, now)?;
+                let pem = xmsg::enroll_ca::initialize_ca_dir(&directory, now)?;
                 use rustls::pki_types::pem::PemObject;
                 use sha2::Digest;
                 let root = rustls::pki_types::CertificateDer::from_pem_slice(pem.as_bytes())?;
                 println!(
                     "{}",
-                    serde_json::json!({"root_file":args.ca_dir.join("root.crt"),"fingerprint":format!("sha256:{}",hex::encode(sha2::Sha256::digest(root.as_ref())))})
+                    serde_json::json!({"root_file":directory.join("root.crt"),"fingerprint":format!("sha256:{}",hex::encode(sha2::Sha256::digest(root.as_ref())))})
                 );
             } else {
                 let policy = args.policy.ok_or("--enroll-policy is required")?;
-                if !args.ca_dir.join("root.key").exists() {
+                if !directory.join("root.key").exists() {
                     return Err("run enroll-ca init first".into());
                 }
                 let db_file = resolve_db_path(args.db_path);
@@ -447,13 +531,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let connection = rusqlite::Connection::open(&db_file)?;
                 storage::init_db(&connection)?;
                 let ca = xmsg::enroll_ca::EnrollCa::open(
-                    &args.ca_dir,
+                    &directory,
                     Arc::new(Mutex::new(connection)),
                     policy,
                     String::new(),
                 )?;
                 match args.action {
                     EnrollCaAction::Init => unreachable!(),
+                    EnrollCaAction::Pending
+                    | EnrollCaAction::Approve { .. }
+                    | EnrollCaAction::Deny { .. } => unreachable!(),
                     EnrollCaAction::List => {
                         println!("{}", serde_json::to_string_pretty(&ca.list()?)?)
                     }
@@ -1503,6 +1590,15 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
             args.enroll_policy.as_ref().unwrap(),
             fed.node_name.clone(),
         )?);
+        if args.leaf
+            && ca
+                .policy()
+                .providers
+                .values()
+                .any(|provider| provider.device_enabled())
+        {
+            return Err("device enrollment requires the local UID-protected HTTP socket".into());
+        }
         let hub_address = ca.policy().hub_address.clone().unwrap_or(listener_address);
         let (entry, _) = xmsg::enroll::hub_entry(&fed, &hub_address, xmsg::enroll::WallClock.now())
             .map_err(str::to_owned)?;
@@ -1514,6 +1610,9 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
             entry,
             identity,
         )?);
+        if !args.leaf {
+            service.register_local_approval()?;
+        }
         let config = xmsg::enroll::tls_config(&service).map_err(|error| error.to_string())?;
         let listener = tokio::net::TcpListener::bind(address).await?;
         bg_tasks.push(tokio::spawn(async move {
@@ -1777,8 +1876,8 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         Some(listener) => xmsg::http::adopt_ucred_unix_listener(listener, my_uid, None),
         None => xmsg::http::bind_ucred_unix_listener(&http_sock_path, my_uid, None)?,
     };
+    let unix_app = build_unix_router(state.clone());
     let mut shutdown_rx_unix = shutdown_rx.clone();
-    let unix_app = xmsg::http::build_unix_router(state.clone());
     server_tasks.push(tokio::spawn(async move {
         // A15: only http.sock carries the peer credentials a caller is traced by.
         let server = axum::serve(
