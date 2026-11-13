@@ -52,7 +52,9 @@ struct Mode {
     kid: String,
     overrides: serde_json::Map<String, Value>,
     nonce: String,
+    challenge: String,
     bad_signature: bool,
+    hmac_modulus: bool,
     after_token: Option<Arc<dyn Fn() + Send + Sync>>,
     after_refresh: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -63,7 +65,9 @@ impl Default for Mode {
             kid: "rsa".into(),
             overrides: Default::default(),
             nonce: String::new(),
+            challenge: String::new(),
             bad_signature: false,
+            hmac_modulus: false,
             after_token: None,
             after_refresh: None,
         }
@@ -84,6 +88,7 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
+        let _ = keys();
         let _ = rustls::crypto::ring::default_provider().install_default();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let issuer = format!(
@@ -200,6 +205,13 @@ impl Fixture {
         let pending = provider.begin(flow, "http://127.0.0.1:18551/cb").unwrap();
         let mut mode = Mode {
             nonce: pending.nonce.secret().clone(),
+            challenge: reqwest::Url::parse(&pending.authorization_url)
+                .unwrap()
+                .query_pairs()
+                .find(|(key, _)| key == "code_challenge")
+                .unwrap()
+                .1
+                .into_owned(),
             ..Mode::default()
         };
         change(&mut mode);
@@ -251,6 +263,13 @@ fn reply(shared: &Mutex<Shared>, path: &str, header: &str, body: &[u8]) -> Value
                     .0
                     .to_owned()
             });
+            if !fields.get("code_verifier").is_some_and(|value| {
+                PkceCodeChallenge::from_code_verifier_sha256(&PkceCodeVerifier::new(value.clone()))
+                    .as_str()
+                    == shared.mode.challenge
+            }) {
+                return json!({"error":"invalid_grant"});
+            }
             shared.forms.push(fields);
             let mut claims = json!({"iss":shared.issuer,"sub":"fixture-sub","aud":client,"exp":NOW+3600,"iat":NOW,"nonce":shared.mode.nonce,"email":"alice@example.org","email_verified":true,"hd":"example.org","groups":["xmsg-users@example.org","00000000-0000-0000-0000-000000000001"],"preferred_username":"alice"});
             for (key, value) in &shared.mode.overrides {
@@ -287,9 +306,16 @@ fn sign(claims: &Value, mode: &Mode) -> String {
             .unwrap()
             .as_ref()
             .to_vec(),
-        "HS256" => CoreHmacKey::new(SECRET.as_bytes())
-            .sign(&CoreJwsSigningAlgorithm::HmacSha256, message.as_bytes())
-            .unwrap(),
+        "HS256" => CoreHmacKey::new(if mode.hmac_modulus {
+            let jwk = serde_json::to_value(keys().rsa.as_verification_key()).unwrap();
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(jwk["n"].as_str().unwrap())
+                .unwrap()
+        } else {
+            SECRET.as_bytes().to_vec()
+        })
+        .sign(&CoreJwsSigningAlgorithm::HmacSha256, message.as_bytes())
+        .unwrap(),
         "none" => vec![],
         _ => unreachable!(),
     };
@@ -300,7 +326,7 @@ fn sign(claims: &Value, mode: &Mode) -> String {
 }
 
 #[tokio::test]
-async fn signed_https_browser_flows_enforce_every_token_binding() {
+async fn signed_https_browser_flows_preserve_verified_projection() {
     let fixture = Fixture::new().await;
     let provider = fixture.provider(true).await;
     for flow in [Flow::Loopback, Flow::Paste] {
@@ -315,67 +341,13 @@ async fn signed_https_browser_flows_enforce_every_token_binding() {
         assert_eq!(claims.preferred_username.as_deref(), Some("alice"));
         assert!(claims.groups.contains(&"xmsg-users@example.org".into()));
     }
-    for arm in [
-        "aud",
-        "azp",
-        "issuer",
-        "expiry",
-        "iat",
-        "nonce",
-        "signature",
-        "hs",
-        "none",
-        "unknownkid",
-        "bare",
-    ] {
-        let pending = fixture.prepare(&provider, Flow::Loopback, |mode| match arm {
-            "aud" => {
-                mode.overrides.insert("aud".into(), json!("paste-client"));
-            }
-            "azp" => {
-                mode.overrides
-                    .insert("aud".into(), json!(["loopback-client", "other"]));
-                mode.overrides.insert("azp".into(), json!("other"));
-            }
-            "issuer" => {
-                mode.overrides
-                    .insert("iss".into(), json!("https://other.example"));
-            }
-            "expiry" => {
-                mode.overrides.insert("exp".into(), json!(NOW));
-            }
-            "iat" => {
-                mode.overrides.insert("iat".into(), json!(NOW + 301));
-            }
-            "nonce" => {
-                mode.overrides.insert("nonce".into(), json!("wrong"));
-            }
-            "signature" => mode.bad_signature = true,
-            "hs" => mode.alg = "HS256".into(),
-            "none" => mode.alg = "none".into(),
-            "unknownkid" => mode.kid = "absent".into(),
-            "bare" => {
-                mode.overrides
-                    .insert("iss".into(), json!("accounts.google.com"));
-            }
-            _ => unreachable!(),
-        });
-        let state = pending.state.secret().clone();
-        let result = provider
-            .exchange(pending, "fixture-code", &state, &|| NOW)
-            .await;
-        assert!(result.is_err(), "token binding arm {arm} accepted");
-        if arm == "bare" {
-            assert!(matches!(result, Err(Error::UnsupportedIssuer)));
-        }
-    }
 }
 
 #[tokio::test]
-async fn es256_and_multiaudience_and_string_boolean_have_positive_controls() {
+async fn email_verification_projection_controls() {
     let fixture = Fixture::new().await;
     let provider = fixture.provider(false).await;
-    for arm in ["es256", "azp", "string-bool", "unverified-email"] {
+    for arm in ["string-bool", "unverified-email"] {
         let pending = fixture.prepare(&provider, Flow::Paste, |mode| match arm {
             "es256" => {
                 mode.alg = "ES256".into();
@@ -472,4 +444,204 @@ async fn verification_clock_is_sampled_after_token_and_refreshed_jwks_http() {
             "stale verification clock accepted expired token"
         );
     }
+}
+
+async fn claim_arm(arm: &str) -> Result<VerifiedClaims, Error> {
+    let fixture = Fixture::new().await;
+    let provider = fixture.provider(true).await;
+    let pending = fixture.prepare(
+        &provider,
+        if arm == "paste-aud" {
+            Flow::Paste
+        } else {
+            Flow::Loopback
+        },
+        |mode| match arm {
+            "aud" => {
+                mode.overrides.insert("aud".into(), json!("paste-client"));
+            }
+            "paste-aud" => {
+                mode.overrides
+                    .insert("aud".into(), json!("loopback-client"));
+            }
+            "azp" => {
+                mode.overrides
+                    .insert("aud".into(), json!(["loopback-client", "other"]));
+                mode.overrides.insert("azp".into(), json!("other"));
+            }
+            "issuer" => {
+                mode.overrides
+                    .insert("iss".into(), json!("https://other.example"));
+            }
+            "expiry" => {
+                mode.overrides.insert("exp".into(), json!(NOW));
+            }
+            "iat" => {
+                mode.overrides.insert("iat".into(), json!(NOW + 301));
+            }
+            "nonce" => {
+                mode.overrides.insert("nonce".into(), json!("wrong"));
+            }
+            "valid" => {}
+            "es" => {
+                mode.alg = "ES256".into();
+                mode.kid = "ec".into();
+            }
+            "multi" => {
+                mode.overrides
+                    .insert("aud".into(), json!(["loopback-client", "other"]));
+                mode.overrides
+                    .insert("azp".into(), json!("loopback-client"));
+            }
+            "bare" => {
+                mode.overrides
+                    .insert("iss".into(), json!("accounts.google.com"));
+            }
+            "signature" => mode.bad_signature = true,
+            "hs" => mode.alg = "HS256".into(),
+            "hs-modulus" => {
+                mode.alg = "HS256".into();
+                mode.hmac_modulus = true;
+            }
+            "none" => mode.alg = "none".into(),
+            "unknownkid" => mode.kid = "absent".into(),
+            _ => unreachable!(),
+        },
+    );
+    let state = pending.state.secret().clone();
+    provider
+        .exchange(pending, "fixture-code", &state, &|| NOW)
+        .await
+}
+
+#[tokio::test]
+async fn oidc_aud_refused() {
+    assert!(claim_arm("aud").await.is_err(), "OIDC guard omitted: aud");
+}
+
+#[tokio::test]
+async fn oidc_paste_aud_refused() {
+    assert!(
+        claim_arm("paste-aud").await.is_err(),
+        "OIDC guard omitted: paste-aud"
+    );
+}
+
+#[tokio::test]
+async fn oidc_azp_refused() {
+    assert!(claim_arm("azp").await.is_err(), "OIDC guard omitted: azp");
+}
+
+#[tokio::test]
+async fn oidc_issuer_refused() {
+    assert!(
+        claim_arm("issuer").await.is_err(),
+        "OIDC guard omitted: issuer"
+    );
+}
+
+#[tokio::test]
+async fn oidc_expired_refused() {
+    assert!(
+        claim_arm("expiry").await.is_err(),
+        "OIDC guard omitted: expiry"
+    );
+}
+
+#[tokio::test]
+async fn oidc_future_iat_refused() {
+    assert!(claim_arm("iat").await.is_err(), "OIDC guard omitted: iat");
+}
+
+#[tokio::test]
+async fn oidc_nonce_refused() {
+    assert!(
+        claim_arm("nonce").await.is_err(),
+        "OIDC guard omitted: nonce"
+    );
+}
+
+#[tokio::test]
+async fn oidc_bad_signature_refused() {
+    assert!(
+        claim_arm("signature").await.is_err(),
+        "OIDC guard omitted: signature"
+    );
+}
+
+#[tokio::test]
+async fn oidc_hs_client_secret_refused() {
+    assert!(claim_arm("hs").await.is_err(), "OIDC guard omitted: hs");
+}
+
+#[tokio::test]
+async fn oidc_hs_modulus_refused() {
+    assert!(
+        claim_arm("hs-modulus").await.is_err(),
+        "OIDC guard omitted: hs-modulus"
+    );
+}
+
+#[tokio::test]
+async fn oidc_unsigned_refused() {
+    assert!(claim_arm("none").await.is_err(), "OIDC guard omitted: none");
+}
+
+#[tokio::test]
+async fn oidc_unknown_kid_refused() {
+    assert!(
+        claim_arm("unknownkid").await.is_err(),
+        "OIDC guard omitted: unknownkid"
+    );
+}
+
+#[tokio::test]
+async fn oidc_es256_accepted() {
+    assert!(claim_arm("es").await.is_ok(), "valid ES256 token refused");
+}
+
+#[tokio::test]
+async fn oidc_multiaudience_accepted_with_matching_azp() {
+    assert!(
+        claim_arm("multi").await.is_ok(),
+        "valid multi-audience token refused"
+    );
+}
+
+#[tokio::test]
+async fn oidc_legacy_google_issuer_is_a_clear_refusal() {
+    let fixture = Fixture::new().await;
+    let mut provider = fixture.provider(false).await;
+    provider.issuer = "https://accounts.google.com".into();
+    let metadata = provider
+        .metadata
+        .read()
+        .unwrap()
+        .clone()
+        .set_issuer(IssuerUrl::new(provider.issuer.clone()).unwrap());
+    *provider.metadata.write().unwrap() = metadata;
+    let pending = fixture.prepare(&provider, Flow::Loopback, |mode| {
+        mode.overrides
+            .insert("iss".into(), json!("https://accounts.google.com"));
+    });
+    let state = pending.state.secret().clone();
+    let claims = provider
+        .exchange(pending, "fixture-code", &state, &|| NOW)
+        .await
+        .unwrap();
+    assert_eq!(claims.iss, "https://accounts.google.com");
+    let pending = fixture.prepare(&provider, Flow::Paste, |mode| {
+        mode.overrides
+            .insert("iss".into(), json!("accounts.google.com"));
+    });
+    let state = pending.state.secret().clone();
+    assert!(
+        matches!(
+            provider
+                .exchange(pending, "fixture-code", &state, &|| NOW)
+                .await,
+            Err(Error::UnsupportedIssuer)
+        ),
+        "legacy Google issuer refusal class changed"
+    );
 }

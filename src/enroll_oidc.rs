@@ -16,7 +16,8 @@ use openidconnect::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::io::Read;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::sync::RwLock;
 use std::time::Duration;
 
@@ -148,17 +149,27 @@ impl Provider {
                 .client_secret_file
                 .as_ref()
                 .map(|file| {
-                    let metadata =
-                        std::fs::symlink_metadata(file).map_err(|_| Error::Configuration)?;
+                    let opened = std::fs::OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+                        .open(file)
+                        .map_err(|_| Error::Configuration)?;
+                    let metadata = opened.metadata().map_err(|_| Error::Configuration)?;
                     if !metadata.is_file()
-                        || metadata.file_type().is_symlink()
                         || metadata.uid() != unsafe { libc::geteuid() }
                         || metadata.permissions().mode() & 0o077 != 0
                         || metadata.len() > 4096
                     {
                         return Err(Error::Configuration);
                     }
-                    let value = std::fs::read_to_string(file).map_err(|_| Error::Configuration)?;
+                    let mut value = String::new();
+                    opened
+                        .take(4097)
+                        .read_to_string(&mut value)
+                        .map_err(|_| Error::Configuration)?;
+                    if value.len() > 4096 {
+                        return Err(Error::Configuration);
+                    }
                     let value = value.trim_end_matches('\n');
                     if value.is_empty() {
                         return Err(Error::Configuration);
@@ -362,6 +373,7 @@ impl Provider {
         let verifier = client
             .id_token_verifier()
             .set_allowed_algs(allowed_algs(metadata))
+            // The post-verification azp check binds multi-audience tokens.
             .set_other_audience_verifier_fn(|_| true)
             .set_time_fn(move || instant)
             .set_issue_time_verifier_fn(move |issued| {
@@ -588,7 +600,9 @@ mod tests {
                 assert!(parsed.is_ok(), "canonical issuer parse control failed");
                 println!("canonical-google-id-token-parse: accepted");
             } else {
-                let error = parsed.err().expect("bare issuer unexpectedly parsed");
+                let Err(error) = parsed else {
+                    panic!("bare issuer unexpectedly parsed");
+                };
                 println!("bare-google-id-token-parse: refused {error}");
             }
         }
