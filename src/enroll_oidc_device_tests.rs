@@ -452,8 +452,12 @@ async fn device_invalid_expiry_and_unusable_interval_refused() {
         fixture.shared.lock().unwrap().device_reply =
             json!({"expires_in":expiry,"interval":interval});
         let provider = provider(&fixture).await;
+        let clock = Clock::new();
         assert!(
-            matches!(provider.begin_device().await, Err(Error::Expired)),
+            matches!(
+                provider.begin_device_with_clock(&|| clock.now()).await,
+                Err(Error::Expired)
+            ),
             "unusable device timing accepted"
         );
         assert!(!fixture.request_paths().contains(&"/token".into()));
