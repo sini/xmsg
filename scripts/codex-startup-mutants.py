@@ -70,8 +70,16 @@ CASES = {'message-trigger': ('src/surface.rs',
                           '    let euid = effective_uid();',
                           'va41_restart_moved_writer_lock_keeps_queue_and_never_wakes'),
  'rollout-id-check': ('src/codex.rs',
-                      'if id_str != target_id {',
-                      'if false {',
+                      '        if name_mentions_target && id_str != target_id {\n'
+                      '            return Err(RolloutLookupError::Invalid(format!(\n'
+                      '                "XB2: rollout {name} has payload.id={id_str:?} != expected '
+                      '{target_id:?}"\n'
+                      '            )));\n'
+                      '        }\n'
+                      '        if id_str != target_id {\n'
+                      '            continue;\n'
+                      '        }\n',
+                      '',
                       'va41_bad_rollout_remains_queued_and_awaiting_reattestation'),
  'false-live-status': ('src/surface.rs',
                        '"awaiting_reattestation"',
@@ -94,49 +102,48 @@ CASES = {'message-trigger': ('src/surface.rs',
                            'updated_at = ?4',
                            "UPDATE codex_handoff SET state = 'pending', carrier = 'push', "
                            'updated_at = ?4',
-                           'va41_auto_recovery_races_mcp_and_hook_with_one_carrier')}
-
-CASES.update({
-    "main-retry-spawn": (
-        "src/main.rs",
-        "            bg_tasks.push(tokio::spawn(xmsg::codex::run_restart_recovery(\n                state.clone(),\n            )));",
-        "",
-        "va41_cli_starts_production_retry_scheduler_without_new_message",
-    ),
-    "cancelled-owned-custody": (
-        "src/surface.rs",
-        "impl Drop for CodexPushReservationGuard {\n    fn drop(&mut self) {\n        if !self.armed {",
-        "impl Drop for CodexPushReservationGuard {\n    fn drop(&mut self) {\n        if true {",
-        "va41_cancelled_owned_push_becomes_unknown_and_next_item_recovers",
-    ),
-    "cancelled-attempt-stuck": (
-        "src/codex.rs",
-        "impl Drop for RestartAttemptGuard {\n    fn drop(&mut self) {\n        if !self.armed {",
-        "impl Drop for RestartAttemptGuard {\n    fn drop(&mut self) {\n        if true {",
-        "va41_cancelled_owned_push_becomes_unknown_and_next_item_recovers",
-    ),
-    "repeat-failure-log": (
-        "src/codex.rs",
-        "if candidate.last_class != Some(class) {",
-        "if true {",
-        "va41_repeated_failure_logs_only_class_transition_without_values",
-    ),
-    "log-owner-value": (
-        "src/codex.rs",
-        'tracing::info!(class, "codex startup recovery");',
-        'tracing::info!(class, owner_pid = candidate.owner_pid, "codex startup recovery");',
-        "va41_repeated_failure_logs_only_class_transition_without_values",
-    ),
-})
-
-CASES["unknown-orphans-next-item"] = (
-    "src/codex.rs",
-    'return Err(("handoff_unknown", false))',
-    'return Err(("handoff_unknown", true))',
-    "va41_unknown_handoff_does_not_orphan_later_pending_item",
-)
-
-CASES["fresh-trusted-executable"] = ('src/codex.rs', '|| is_trusted_codex_owner_step(&config, candidate.owner_pid, &candidate.owner_starttime)\n                .is_none()', '|| false', 'va41_owner_starttime_change_clears_recovery_durably')
+                           'va41_auto_recovery_races_mcp_and_hook_with_one_carrier'),
+ 'main-retry-spawn': ('src/main.rs',
+                      '            bg_tasks.push(tokio::spawn(xmsg::codex::run_restart_recovery(\n'
+                      '                state.clone(),\n'
+                      '            )));',
+                      '',
+                      'va41_cli_starts_production_retry_scheduler_without_new_message'),
+ 'cancelled-owned-custody': ('src/surface.rs',
+                             'impl Drop for CodexPushReservationGuard {\n'
+                             '    fn drop(&mut self) {\n'
+                             '        if !self.armed {',
+                             'impl Drop for CodexPushReservationGuard {\n'
+                             '    fn drop(&mut self) {\n'
+                             '        if true {',
+                             'va41_cancelled_owned_push_becomes_unknown_and_next_item_recovers'),
+ 'cancelled-attempt-stuck': ('src/codex.rs',
+                             'impl Drop for RestartAttemptGuard {\n'
+                             '    fn drop(&mut self) {\n'
+                             '        if !self.armed {',
+                             'impl Drop for RestartAttemptGuard {\n'
+                             '    fn drop(&mut self) {\n'
+                             '        if true {',
+                             'va41_cancelled_owned_push_becomes_unknown_and_next_item_recovers'),
+ 'repeat-failure-log': ('src/codex.rs',
+                        'if candidate.last_class != Some(class) {',
+                        'if true {',
+                        'va41_repeated_failure_logs_only_class_transition_without_values'),
+ 'log-owner-value': ('src/codex.rs',
+                     'tracing::info!(class, "codex startup recovery");',
+                     'tracing::info!(class, owner_pid = candidate.owner_pid, "codex startup '
+                     'recovery");',
+                     'va41_repeated_failure_logs_only_class_transition_without_values'),
+ 'unknown-orphans-next-item': ('src/codex.rs',
+                               'return Err(("handoff_unknown", false))',
+                               'return Err(("handoff_unknown", true))',
+                               'va41_unknown_handoff_does_not_orphan_later_pending_item'),
+ 'fresh-trusted-executable': ('src/codex.rs',
+                              '|| is_trusted_codex_owner_step(&config, candidate.owner_pid, '
+                              '&candidate.owner_starttime)\n'
+                              '                .is_none()',
+                              '|| false',
+                              'va41_owner_starttime_change_clears_recovery_durably')}
 
 TESTS = (
     "va41_restart_queued_message_wakes_without_mcp_or_hook",
