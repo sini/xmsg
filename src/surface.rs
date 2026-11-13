@@ -961,12 +961,14 @@ impl Drop for CodexPushReservationGuard {
             return;
         }
         if let Ok(db) = self.db.lock() {
-            let _ = storage::mark_owned_codex_push_unknown(
-                &db,
-                &self.root_id,
-                self.generation,
-                &self.message_id,
-            );
+            let _ = crate::observe_effects::autocommit_registered(&db, |observed_connection| {
+                crate::storage::mark_owned_codex_push_unknown(
+                    observed_connection,
+                    &self.root_id,
+                    self.generation,
+                    &self.message_id,
+                )
+            });
         }
     }
 }
@@ -1056,7 +1058,7 @@ pub(crate) async fn try_push_codex_queued_message_for_recovery(
     .await;
     let ids = [message_id.to_string()];
     let db = local.db.lock().map_err(db_err)?;
-    let outcome = match relay_outcome {
+    let outcome = crate::observe_effects::autocommit_registered(&db, |_| match relay_outcome {
         crate::codex_relay::RelayOutcome::Accepted { turn_id: _ } => {
             storage::complete_codex_handoff_accepted(&db, &root_snap.root_id, &ids)
                 .map_err(db_err)?;
@@ -1072,7 +1074,7 @@ pub(crate) async fn try_push_codex_queued_message_for_recovery(
             storage::mark_codex_handoff_unknown(&db, &ids).map_err(db_err)?;
             Ok(("delivery_unknown", false))
         }
-    };
+    });
     reservation.armed = false;
     outcome
 }
@@ -2442,7 +2444,7 @@ async fn deliver_send(
     };
     {
         let db = state.db.lock().map_err(db_err)?;
-        let tx = db.unchecked_transaction().map_err(db_err)?;
+        let tx = crate::observe_effects::transaction(&state.db, &db).map_err(db_err)?;
         authorize_attachments(&tx, sender, refs, storage::now_epoch_secs())?;
         storage::upsert_message(
             &tx,
@@ -2487,13 +2489,15 @@ async fn deliver_send(
                 let target = crate::http::resolve_target_session(state, target_ref).await?;
                 {
                     let db = state.db.lock().map_err(db_err)?;
-                    let _ = storage::delete_outbound(&db, &message_id);
-                    storage::record_message_recipient(
-                        &db,
-                        &message_id,
-                        &target.session().session_id,
-                        target.recipient_harness(),
-                    )
+                    crate::observe_effects::autocommit_registered(&db, |db| {
+                        let _ = storage::delete_outbound(db, &message_id);
+                        storage::record_message_recipient(
+                            db,
+                            &message_id,
+                            &target.session().session_id,
+                            target.recipient_harness(),
+                        )
+                    })
                     .map_err(db_err)?;
                 }
                 let (id, harness, outcome) = deliver(
@@ -2522,6 +2526,7 @@ async fn deliver_send(
             let leaf = peers.get(&peer_key).is_some_and(|p| p.leaf);
             let outbound_target = format!("{key}@{peer_key}");
             if let Ok(db) = state.db.lock() {
+                let observed = crate::observe_effects::Batch::registered(&db);
                 let _ = storage::record_message_recipient(&db, &message_id, &key, "fed");
                 if !leaf {
                     let _ = storage::insert_outbound(
@@ -2533,6 +2538,7 @@ async fn deliver_send(
                         now,
                     );
                 }
+                observed.settled(&db);
             }
             let envelope = crate::fed::FedEnvelope {
                 v: crate::fed::WIRE_VERSION,
@@ -2565,6 +2571,7 @@ async fn deliver_send(
                     }
                     let outcome = e.code().1;
                     if let Ok(db) = state.db.lock() {
+                        let observed = crate::observe_effects::Batch::registered(&db);
                         let _ = storage::insert_outbound(
                             &db,
                             &message_id,
@@ -2574,6 +2581,7 @@ async fn deliver_send(
                             now,
                         );
                         let _ = storage::update_outbound_outcome(&db, &message_id, outcome);
+                        observed.settled(&db);
                     }
                     tracing::warn!(
                         target: "xmsg",
@@ -2601,6 +2609,7 @@ async fn deliver_send(
                 None => format!("{}@{peer_key}", resp.session_id),
             };
             if let Ok(db) = state.db.lock() {
+                let observed = crate::observe_effects::Batch::registered(&db);
                 let _ = storage::record_message_recipient(
                     &db,
                     &message_id,
@@ -2615,6 +2624,7 @@ async fn deliver_send(
                     // Resolved here: the record holds the recipient's own key (XA5's reply rule).
                     let _ = storage::mark_outbound_resolved(&db, &message_id);
                 }
+                observed.settled(&db);
             }
             // A-2: the outbound reply poller is armed by the sender's kind.
             if ret_harness.is_some() && peers.get(&peer_key).is_some_and(|p| p.is_outbound()) {
@@ -2638,7 +2648,7 @@ async fn deliver_send(
         Ok(d) => d,
         Err(e) => {
             if let Err(de) = state.db.lock().map_err(db_err).and_then(|db| {
-                let tx = db.unchecked_transaction().map_err(db_err)?;
+                let tx = crate::observe_effects::transaction(&state.db, &db).map_err(db_err)?;
                 tx.execute(
                     "DELETE FROM attachments WHERE item_id=?1 AND downstream=''",
                     [&message_id],
@@ -2655,7 +2665,14 @@ async fn deliver_send(
     match state.db.lock() {
         Ok(db) => {
             if let Err(e) =
-                storage::complete_message(&db, &message_id, &outcome, return_host.as_deref())
+                crate::observe_effects::autocommit_registered(&db, |observed_connection| {
+                    crate::storage::complete_message(
+                        observed_connection,
+                        &message_id,
+                        &outcome,
+                        return_host.as_deref(),
+                    )
+                })
             {
                 tracing::warn!(target: "xmsg", message_id = %message_id, "delivered message's record not completed: {e}");
             }
@@ -3008,7 +3025,7 @@ pub(crate) async fn stage_codex_reply(
         };
         let mut record = {
             let db = local.db.lock().map_err(db_err)?;
-            let tx = db.unchecked_transaction().map_err(db_err)?;
+            let tx = crate::observe_effects::transaction(local.db, &db).map_err(db_err)?;
             if live.is_some() {
                 let allowed: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM codex_roots WHERE root_id=?1 AND generation=?2 AND active=1 AND revoked=0)", rusqlite::params![ret_session_id, generation as i64], |r| r.get(0)).map_err(db_err)?;
                 if !allowed {
@@ -3131,10 +3148,15 @@ pub(crate) async fn stage_codex_reply(
                 record.push_outcome = Some("pushed".into());
             } else if matches!(outcome, Ok("delivery_unknown")) {
                 record.push_outcome = Some("push_failed".into());
-                storage::update_reply_push_outcome(
+                crate::observe_effects::autocommit_registered(
                     &*local.db.lock().map_err(db_err)?,
-                    &reply_id,
-                    "push_failed",
+                    |observed_connection| {
+                        crate::storage::update_reply_push_outcome(
+                            observed_connection,
+                            &reply_id,
+                            "push_failed",
+                        )
+                    },
                 )
                 .map_err(db_err)?;
             }
@@ -3203,7 +3225,7 @@ async fn deliver_reply(
 
     let mut early_reply = if !refs.is_empty() && !to_leaf {
         let db = state.db.lock().map_err(db_err)?;
-        let tx = db.unchecked_transaction().map_err(db_err)?;
+        let tx = crate::observe_effects::transaction(&state.db, &db).map_err(db_err)?;
         authorize_attachments(
             &tx,
             &Sender::Session(caller.clone()),
@@ -3281,7 +3303,7 @@ async fn deliver_reply(
         Some(host) => {
             {
                 let db = state.db.lock().map_err(db_err)?;
-                let tx = db.unchecked_transaction().map_err(db_err)?;
+                let tx = crate::observe_effects::transaction(&state.db, &db).map_err(db_err)?;
                 let deferred_reply = if to_leaf && !refs.is_empty() {
                     authorize_attachments(
                         &tx,
@@ -3400,7 +3422,12 @@ async fn deliver_reply(
                     Ok(outcome) => outcome,
                     Err(error) => {
                         if let Ok(db) = state.db.lock() {
-                            let _ = storage::delete_message(&db, &reply_id);
+                            let _ = crate::observe_effects::autocommit_registered(
+                                &db,
+                                |observed_connection| {
+                                    crate::storage::delete_message(observed_connection, &reply_id)
+                                },
+                            );
                             let _ = storage::delete_outbound(&db, &reply_id);
                             if let Some(record) = early_reply.as_ref() {
                                 let _ =
@@ -3433,7 +3460,9 @@ async fn deliver_reply(
                     }
                 }
             } else if let Ok(db) = state.db.lock() {
-                let _ = storage::delete_message(&db, &reply_id);
+                let _ = crate::observe_effects::autocommit_registered(&db, |observed_connection| {
+                    crate::storage::delete_message(observed_connection, &reply_id)
+                });
                 let _ = storage::delete_outbound(&db, &reply_id);
             }
             Some(outcome)
@@ -3459,17 +3488,22 @@ async fn deliver_reply(
                         },
                         return_host: None,
                     };
-                    let _ = storage::insert_message(&db, &pushed);
+                    let _ =
+                        crate::observe_effects::autocommit_registered(&db, |observed_connection| {
+                            crate::storage::insert_message(observed_connection, &pushed)
+                        });
                 } else {
-                    record_pushed_reply(
-                        &db,
-                        &msg,
-                        &reply_id,
-                        &replier_label,
-                        text,
-                        (&caller.harness, &caller.session_id),
-                        None,
-                    );
+                    crate::observe_effects::autocommit_registered(&db, |conn| {
+                        record_pushed_reply(
+                            conn,
+                            &msg,
+                            &reply_id,
+                            &replier_label,
+                            text,
+                            (&caller.harness, &caller.session_id),
+                            None,
+                        );
+                    });
                 }
             }
             let replier_origin = Sender::Session(caller.clone()).origin(&state.node_name);
@@ -3487,7 +3521,10 @@ async fn deliver_reply(
             run_post_deliver_pause(&state.node_name, &reply_id).await;
             if outcome != "pushed" {
                 if let Ok(db) = state.db.lock() {
-                    let _ = storage::delete_message(&db, &reply_id);
+                    let _ =
+                        crate::observe_effects::autocommit_registered(&db, |observed_connection| {
+                            crate::storage::delete_message(observed_connection, &reply_id)
+                        });
                 }
             }
             Some(outcome)
@@ -3520,14 +3557,16 @@ async fn deliver_reply(
             record.push_outcome = push_outcome.map(str::to_string);
             record
         } else {
-            storage::insert_reply(
-                &db,
-                message_id,
-                &caller.session_id,
-                text,
-                push_outcome,
-                pushed_id,
-            )
+            crate::observe_effects::autocommit_registered(&db, |observed_connection| {
+                crate::storage::insert_reply(
+                    observed_connection,
+                    message_id,
+                    &caller.session_id,
+                    text,
+                    push_outcome,
+                    pushed_id,
+                )
+            })
             .map_err(db_err)?
         };
         let _ = storage::purge_replies(&db, state.reply_ttl.as_secs());
@@ -3614,14 +3653,17 @@ pub async fn replies(
                     .iter()
                     .any(|ex| ex.text == r.text && ex.replier_session_id == r.replier_session_id)
                 {
-                    let _ = storage::insert_reply(
-                        &db,
-                        message_id,
-                        &r.replier_session_id,
-                        &r.text,
-                        r.push_outcome.as_deref(),
-                        r.pushed_message_id.as_deref(),
-                    );
+                    let _ =
+                        crate::observe_effects::autocommit_registered(&db, |observed_connection| {
+                            crate::storage::insert_reply(
+                                observed_connection,
+                                message_id,
+                                &r.replier_session_id,
+                                &r.text,
+                                r.push_outcome.as_deref(),
+                                r.pushed_message_id.as_deref(),
+                            )
+                        });
                 }
             }
             return Ok(remote);

@@ -33,7 +33,7 @@ enum Commands {
     /// List mesh recipients and node status
     List(operator::ListArgs),
 
-    /// Watch recipient roster snapshots through the local daemon
+    /// Watch recipients and local message observations
     Watch(watch::WatchArgs),
 
     /// Send a message through the local daemon
@@ -1370,11 +1370,22 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
     };
     info!(node_name = %node_name, "node name");
 
+    let mut observe_path = db_path.as_os_str().to_os_string();
+    observe_path.push(".observe.sqlite");
+    let _observer = xmsg::observe::Observer::start(
+        &db,
+        &PathBuf::from(observe_path),
+        &node_name,
+        xmsg::observe::Config::default(),
+    );
+
     // Keys a stopped server left `pending` are settled before anything is served.
     {
         let conn = db.lock().map_err(|e| e.to_string())?;
-        let settled = storage::reconcile_pending_keys(&conn, &node_name)
-            .map_err(|e| format!("cannot settle pending idempotency keys: {e}"))?;
+        let settled = xmsg::observe_effects::autocommit_registered(&conn, |conn| {
+            storage::reconcile_pending_keys(conn, &node_name)
+        })
+        .map_err(|e| format!("cannot settle pending idempotency keys: {e}"))?;
         if settled > 0 {
             info!(
                 settled,
@@ -1767,11 +1778,12 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         None => xmsg::http::bind_ucred_unix_listener(&http_sock_path, my_uid, None)?,
     };
     let mut shutdown_rx_unix = shutdown_rx.clone();
+    let unix_app = xmsg::http::build_unix_router(state.clone());
     server_tasks.push(tokio::spawn(async move {
         // A15: only http.sock carries the peer credentials a caller is traced by.
         let server = axum::serve(
             ucred_listener,
-            app.into_make_service_with_connect_info::<xmsg::http::HttpPeer>(),
+            unix_app.into_make_service_with_connect_info::<xmsg::http::HttpPeer>(),
         );
         let shutdown_fut = async move {
             let _ = shutdown_rx_unix.wait_for(|&v| v).await;

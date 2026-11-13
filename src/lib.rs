@@ -35,6 +35,10 @@ pub mod mesh;
 #[cfg(feature = "daemon")]
 pub mod node;
 #[cfg(feature = "daemon")]
+pub mod observe;
+#[cfg(feature = "daemon")]
+pub mod observe_effects;
+#[cfg(feature = "daemon")]
 pub mod pi;
 #[cfg(feature = "daemon")]
 pub mod plugin;

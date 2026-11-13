@@ -1,3 +1,5 @@
+#[allow(dead_code)]
+mod observe_support;
 mod short_sock;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -154,6 +156,7 @@ struct NodeFixture {
     register_sock: PathBuf,
     sessions_dir: PathBuf,
     db_path: PathBuf,
+    http_sock: PathBuf,
     #[allow(dead_code)]
     child: ChildGuard,
 }
@@ -165,6 +168,17 @@ async fn spawn_hub_node(
     client_name: &str,
     client_pin: &str,
 ) -> (NodeFixture, u16) {
+    spawn_hub_node_observer(_name, cert_pem, key_pem, client_name, client_pin, false).await
+}
+
+async fn spawn_hub_node_observer(
+    _name: &str,
+    cert_pem: &str,
+    key_pem: &str,
+    client_name: &str,
+    client_pin: &str,
+    unavailable: bool,
+) -> (NodeFixture, u16) {
     let tmp = tempdir().unwrap();
     fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
 
@@ -172,6 +186,9 @@ async fn spawn_hub_node(
     let key_file = tmp.path().join("key.pem");
     let peers_file = tmp.path().join("peers.json");
     let db_path = tmp.path().join("hub.db");
+    if unavailable {
+        observe_support::corrupt_sidecar(&db_path);
+    }
 
     fs::write(&cert_file, cert_pem.as_bytes()).unwrap();
     fs::write(&key_file, key_pem.as_bytes()).unwrap();
@@ -264,6 +281,10 @@ async fn spawn_hub_node(
         );
     }
 
+    if unavailable {
+        observe_support::assert_unavailable_http(&http_sock).await;
+    }
+
     (
         NodeFixture {
             _tmp: tmp,
@@ -271,6 +292,7 @@ async fn spawn_hub_node(
             register_sock,
             sessions_dir,
             db_path,
+            http_sock,
             child: guard,
         },
         fed_port,
@@ -286,6 +308,27 @@ async fn spawn_client_node(
     hub_pin: &str,
     extra_svc_exe: Option<String>,
 ) -> NodeFixture {
+    spawn_client_node_observer(
+        cert_pem,
+        key_pem,
+        hub_name,
+        hub_port,
+        hub_pin,
+        extra_svc_exe,
+        false,
+    )
+    .await
+}
+
+async fn spawn_client_node_observer(
+    cert_pem: &str,
+    key_pem: &str,
+    hub_name: &str,
+    hub_port: u16,
+    hub_pin: &str,
+    extra_svc_exe: Option<String>,
+    unavailable: bool,
+) -> NodeFixture {
     let tmp = tempdir().unwrap();
     fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
 
@@ -293,6 +336,9 @@ async fn spawn_client_node(
     let key_file = tmp.path().join("key.pem");
     let peers_file = tmp.path().join("peers.json");
     let db_path = tmp.path().join("client.db");
+    if unavailable {
+        observe_support::corrupt_sidecar(&db_path);
+    }
 
     fs::write(&cert_file, cert_pem.as_bytes()).unwrap();
     fs::write(&key_file, key_pem.as_bytes()).unwrap();
@@ -376,12 +422,17 @@ async fn spawn_client_node(
     }
     assert!(ready, "client node failed to become ready");
 
+    if unavailable {
+        observe_support::assert_unavailable_http(&http_sock).await;
+    }
+
     NodeFixture {
         _tmp: tmp,
         agent_sock,
         register_sock,
         sessions_dir,
         db_path,
+        http_sock,
         child: guard,
     }
 }
@@ -393,18 +444,35 @@ async fn spawn_client_node(
 // -----------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_1_inbound_over_outbound_link() {
+    exercise_outbound_observer_1(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_oracle_1_inbound_over_outbound_link_observer_unavailable() {
+    exercise_outbound_observer_1(true).await;
+}
+
+async fn exercise_outbound_observer_1(unavailable: bool) {
     let (cert_hub, key_hub, pin_hub) = generate_self_signed_ed25519_pem("hub").unwrap();
     let (cert_client, key_client, pin_client) = generate_self_signed_ed25519_pem("client").unwrap();
 
-    let (hub, hub_port) = spawn_hub_node("hub", &cert_hub, &key_hub, "client", &pin_client).await;
-    let client = spawn_client_node(
+    let (hub, hub_port) = spawn_hub_node_observer(
+        "hub",
+        &cert_hub,
+        &key_hub,
         "client",
+        &pin_client,
+        unavailable,
+    )
+    .await;
+    let client = spawn_client_node_observer(
         &cert_client,
         &key_client,
         "hub",
         hub_port,
         &pin_hub,
         None,
+        unavailable,
     )
     .await;
 
@@ -470,6 +538,10 @@ async fn test_oracle_1_inbound_over_outbound_link() {
         got_reply,
         "Alice on hub should receive reply from Bob over outbound link"
     );
+    if unavailable {
+        observe_support::assert_unavailable_http(&hub.http_sock).await;
+        observe_support::assert_unavailable_http(&client.http_sock).await;
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -479,18 +551,35 @@ async fn test_oracle_1_inbound_over_outbound_link() {
 // -----------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_2_outbound_send_from_undialable_node() {
+    exercise_outbound_observer_2(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_oracle_2_outbound_send_from_undialable_node_observer_unavailable() {
+    exercise_outbound_observer_2(true).await;
+}
+
+async fn exercise_outbound_observer_2(unavailable: bool) {
     let (cert_hub, key_hub, pin_hub) = generate_self_signed_ed25519_pem("hub").unwrap();
     let (cert_client, key_client, pin_client) = generate_self_signed_ed25519_pem("client").unwrap();
 
-    let (hub, hub_port) = spawn_hub_node("hub", &cert_hub, &key_hub, "client", &pin_client).await;
-    let client = spawn_client_node(
+    let (hub, hub_port) = spawn_hub_node_observer(
+        "hub",
+        &cert_hub,
+        &key_hub,
         "client",
+        &pin_client,
+        unavailable,
+    )
+    .await;
+    let client = spawn_client_node_observer(
         &cert_client,
         &key_client,
         "hub",
         hub_port,
         &pin_hub,
         None,
+        unavailable,
     )
     .await;
 
@@ -554,6 +643,10 @@ async fn test_oracle_2_outbound_send_from_undialable_node() {
         got_reply,
         "Bob on undialable client should receive polled reply from Alice"
     );
+    if unavailable {
+        observe_support::assert_unavailable_http(&hub.http_sock).await;
+        observe_support::assert_unavailable_http(&client.http_sock).await;
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -563,21 +656,38 @@ async fn test_oracle_2_outbound_send_from_undialable_node() {
 // -----------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_3_svc_over_outbound_link() {
+    exercise_outbound_observer_3(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_oracle_3_svc_over_outbound_link_observer_unavailable() {
+    exercise_outbound_observer_3(true).await;
+}
+
+async fn exercise_outbound_observer_3(unavailable: bool) {
     let (cert_hub, key_hub, pin_hub) = generate_self_signed_ed25519_pem("hub").unwrap();
     let (cert_client, key_client, pin_client) = generate_self_signed_ed25519_pem("client").unwrap();
 
     let current_exe = std::env::current_exe().unwrap();
     let svc_exe_arg = format!("guard={}", current_exe.display());
 
-    let (hub, hub_port) = spawn_hub_node("hub", &cert_hub, &key_hub, "client", &pin_client).await;
-    let client = spawn_client_node(
+    let (hub, hub_port) = spawn_hub_node_observer(
+        "hub",
+        &cert_hub,
+        &key_hub,
         "client",
+        &pin_client,
+        unavailable,
+    )
+    .await;
+    let client = spawn_client_node_observer(
         &cert_client,
         &key_client,
         "hub",
         hub_port,
         &pin_hub,
         Some(svc_exe_arg),
+        unavailable,
     )
     .await;
 
@@ -666,6 +776,10 @@ async fn test_oracle_3_svc_over_outbound_link() {
         got_reply,
         "Alice on hub should receive reply from svc:guard"
     );
+    if unavailable {
+        observe_support::assert_unavailable_http(&hub.http_sock).await;
+        observe_support::assert_unavailable_http(&client.http_sock).await;
+    }
 }
 
 // -----------------------------------------------------------------------------

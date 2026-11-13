@@ -2548,7 +2548,10 @@ pub fn init_for_db(
 ) -> Arc<Mutex<CodexRuntime>> {
     let (max_gen, revoked, stale_rows) = {
         let conn = db.lock().unwrap();
-        crate::storage::startup_invalidate_codex(&conn).unwrap_or_default()
+        crate::observe_effects::autocommit_registered(&conn, |observed_connection| {
+            crate::storage::startup_invalidate_codex(observed_connection)
+        })
+        .unwrap_or_default()
     };
     let mut stale_map = HashMap::new();
     let mut restart = HashMap::new();

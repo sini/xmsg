@@ -1,3 +1,5 @@
+#[allow(dead_code)]
+mod observe_support;
 mod short_sock;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -483,6 +485,15 @@ async fn create_leaf_test_node_opts(
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_1_end_to_end_leaf_svc() {
+    exercise_end_to_end_leaf_svc(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_oracle_1_end_to_end_leaf_svc_observer_unavailable() {
+    exercise_end_to_end_leaf_svc(true).await;
+}
+
+async fn exercise_end_to_end_leaf_svc(unavailable: bool) {
     let creds_hub = generate_self_signed_ed25519("hub").unwrap();
     let creds_leaf = generate_self_signed_ed25519("leaf").unwrap();
 
@@ -524,6 +535,13 @@ async fn test_oracle_1_end_to_end_leaf_svc() {
         "svc:guard",
     )
     .await;
+
+    let unavailable_observers = unavailable.then(|| {
+        (
+            observe_support::attach_unavailable(&hub.db, &hub.name),
+            observe_support::attach_unavailable(&leaf.db, &leaf.name),
+        )
+    });
 
     let (_sock, claude_rx) =
         create_claude_session_fixture(&hub.proc_root, &hub.sessions_dir, "sess-alice", "alice");
@@ -635,6 +653,15 @@ async fn test_oracle_1_end_to_end_leaf_svc() {
         got_reply,
         "Claude session on hub should receive federated reply"
     );
+
+    if let Some((hub_observer, leaf_observer)) = unavailable_observers {
+        for observer in [&hub_observer.observer, &leaf_observer.observer] {
+            assert!(matches!(
+                observer.page(Default::default()),
+                Err(xmsg::observe::Error::Unavailable)
+            ));
+        }
+    }
 }
 
 // =============================================================================

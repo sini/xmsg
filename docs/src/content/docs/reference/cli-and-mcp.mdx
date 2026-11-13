@@ -6,9 +6,9 @@ description: Operator commands, optional command-backed services, daemon and har
 ## Command-line interface (`src/main.rs`)
 
 The `xmsg` binary exposes `list`, `watch`, `send`, `replies`, `show`, `service`, `serve`, `mcp`,
-`register`, `unregister`, and `check-peers`.
+`register`, `unregister`, `check-peers`, and `enroll-ca`.
 
-```rust file=<rootDir>/src/main.rs#L20-L68
+```rust file=<rootDir>/src/main.rs#L23-L72
 ```
 
 ### Operator commands
@@ -48,7 +48,7 @@ use their own reply interfaces.
 
 ### `xmsg watch` (planned)
 
-A local snapshot view of the recipient roster, grouped by node, kind and harness:
+A local recipient roster and metadata exchange timeline:
 
 ```sh
 xmsg watch
@@ -60,16 +60,25 @@ xmsg watch --once --plain --http-sock /absolute/path/to/http.sock
 interval is two seconds; `--interval` accepts 1–60 seconds. Ctrl-C exits. `--once` prints one
 snapshot; `--plain` disables terminal redraw styling. Non-terminal output is plain.
 
-The view polls health and live/inactive recipients only. It shows reported state, node errors,
+The roster polls health and live/inactive recipients. It shows reported state, node errors,
 partial results, truncation and the age of its last successful refresh. A failed refresh keeps
 old rows visibly stale; a successful health check alone does not make the roster fresh. It
 retains at most 1,000 rows and rejects response bodies over 4 MiB. Server-supplied names,
 labels and other fields have terminal controls escaped before display.
 
-This view reports snapshots, not message traffic, task progress, bodies or transcripts. It does
-not send, acknowledge or consume messages, and it adds no listener or daemon endpoint. Use
-`xmsg show MESSAGE_ID` for deliberate known-ID inspection. The existing caller-attribution
-rules still apply; watch does not bypass a refusal when launched from a traced harness.
+The timeline reads the local [observation journal](/reference/http-and-sockets/#local-observation-journal-planned)
+through `GET /v1/observe/events`. It shows source/destination references, message and reply
+correlation, times, event kinds and stored outcomes. Each refresh fetches at most two bounded
+pages and keeps at most 1,000 timeline rows. It displays gaps, dropped counters, local
+truncation and whether it is still catching up. Roster and timeline have separate freshness
+ages; a failed timeline refresh keeps its old cursor and visibly stale rows. Older daemons
+returning `404` leave the roster usable and mark the timeline unsupported.
+
+The journal is observation, not complete history: a crash or a full queue can lose metadata,
+and writer restart is an explicit unknown-loss gap. Stored delivery outcomes do not mean
+agent-read or task-complete. Watch reads no bodies or transcripts and does not send,
+acknowledge or consume messages or open a listener. Use `xmsg show MESSAGE_ID` for deliberate
+known-ID inspection. Existing caller-attribution rules still apply.
 
 ### `xmsg service exec`
 
@@ -122,7 +131,7 @@ enablement for each user are deployment configuration.
 
 Starts the local IPC and optional mTLS federation daemon:
 
-```rust file=<rootDir>/src/main.rs#L178-L291
+```rust file=<rootDir>/src/main.rs#L211-L344
 ```
 
 Planned: federation reload (`SIGHUP` or `--fed-reload-interval-secs`) accepts only
@@ -141,7 +150,7 @@ for accounting, duplicates and cleanup cadence.
 
 Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
 
-```rust file=<rootDir>/src/main.rs#L293-L318
+```rust file=<rootDir>/src/main.rs#L346-L371
 ```
 
 ### `xmsg register`
@@ -149,7 +158,7 @@ Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
 Registers credentials or handles lifecycle hooks for [Antigravity](/harnesses/antigravity/),
 [Claude Code](/harnesses/claude-code/), and [Codex](/harnesses/codex/):
 
-```rust file=<rootDir>/src/main.rs#L88-L176
+```rust file=<rootDir>/src/main.rs#L121-L209
 ```
 
 ### `xmsg check-peers`

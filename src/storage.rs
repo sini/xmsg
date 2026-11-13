@@ -541,10 +541,12 @@ pub fn record_message_recipient(
     session_id: &str,
     recipient_harness: &str,
 ) -> Result<()> {
+    let observed = crate::observe_effects::message_before(conn, id);
     conn.execute(
         "UPDATE messages SET session_id = ?2, recipient_harness = ?3 WHERE id = ?1",
         params![id, session_id, recipient_harness],
     )?;
+    crate::observe_effects::message_after(conn, id, observed);
     Ok(())
 }
 
@@ -557,6 +559,7 @@ pub fn complete_message(
     outcome: &str,
     return_host: Option<&str>,
 ) -> Result<()> {
+    let observed = crate::observe_effects::message_before(conn, id);
     conn.execute(
         // `queued` never replaces `delivered`: the ack can land before this send's record.
         "UPDATE messages SET
@@ -564,11 +567,14 @@ pub fn complete_message(
          return_host = ?3 WHERE id = ?1",
         params![id, outcome, return_host.unwrap_or("")],
     )?;
+    crate::observe_effects::message_after(conn, id, observed);
     Ok(())
 }
 
 pub fn delete_message(conn: &Connection, id: &str) -> Result<()> {
+    let observed = crate::observe_effects::message_before(conn, id);
     conn.execute("DELETE FROM messages WHERE id = ?1", params![id])?;
+    crate::observe_effects::message_after(conn, id, observed);
     Ok(())
 }
 
@@ -584,6 +590,7 @@ pub fn outcome_reached(outcome: &str) -> bool {
 }
 
 fn write_message(conn: &Connection, msg: &MessageRecord, on_conflict: &str) -> Result<()> {
+    let observed = crate::observe_effects::message_before(conn, &msg.id);
     conn.execute(
         &format!("INSERT INTO messages (id, created_at, session_id, from_name, bytes, outcome, recipient_harness, return_harness, return_session_id, thread_id, return_host) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11){on_conflict}"),
         params![
@@ -600,6 +607,7 @@ fn write_message(conn: &Connection, msg: &MessageRecord, on_conflict: &str) -> R
             msg.return_host.as_deref().unwrap_or(""),
         ],
     )?;
+    crate::observe_effects::message_after(conn, &msg.id, observed);
     Ok(())
 }
 
@@ -659,10 +667,12 @@ pub fn insert_outbound(
     outcome: &str,
     created_at: i64,
 ) -> Result<()> {
+    let observed = crate::observe_effects::message_before(conn, id);
     conn.execute(
         "INSERT OR IGNORE INTO outbound (id, peer, target_ref, outcome, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![id, peer, target_ref, outcome, created_at],
     )?;
+    crate::observe_effects::message_after(conn, id, observed);
     Ok(())
 }
 
@@ -687,10 +697,12 @@ pub fn get_outbound(conn: &Connection, id: &str) -> Result<Option<OutboundRecord
 }
 
 pub fn mark_outbound_resolved(conn: &Connection, id: &str) -> Result<()> {
+    let observed = crate::observe_effects::message_before(conn, id);
     conn.execute(
         "UPDATE outbound SET resolved = 1 WHERE id = ?1",
         params![id],
     )?;
+    crate::observe_effects::message_after(conn, id, observed);
     Ok(())
 }
 
@@ -734,23 +746,29 @@ pub fn forget_location(conn: &Connection, id: &str) -> Result<()> {
 }
 
 pub fn update_outbound_outcome(conn: &Connection, id: &str, outcome: &str) -> Result<()> {
+    let observed = crate::observe_effects::message_before(conn, id);
     conn.execute(
         "UPDATE outbound SET outcome = ?1 WHERE id = ?2",
         params![outcome, id],
     )?;
+    crate::observe_effects::message_after(conn, id, observed);
     Ok(())
 }
 
 pub fn update_outbound_target(conn: &Connection, id: &str, target_ref: &str) -> Result<()> {
+    let observed = crate::observe_effects::message_before(conn, id);
     conn.execute(
         "UPDATE outbound SET target_ref = ?1 WHERE id = ?2",
         params![target_ref, id],
     )?;
+    crate::observe_effects::message_after(conn, id, observed);
     Ok(())
 }
 
 pub fn delete_outbound(conn: &Connection, id: &str) -> Result<()> {
+    let observed = crate::observe_effects::message_before(conn, id);
     conn.execute("DELETE FROM outbound WHERE id = ?1", params![id])?;
+    crate::observe_effects::message_after(conn, id, observed);
     Ok(())
 }
 
@@ -776,6 +794,7 @@ pub fn insert_reply(
     )?;
     let seq = conn.last_insert_rowid();
 
+    crate::observe_effects::reply_inserted(conn, seq);
     Ok(ReplyRecord {
         seq,
         message_id: message_id.to_string(),
@@ -852,10 +871,12 @@ pub fn update_reply_push_outcome(
     pushed_message_id: &str,
     push_outcome: &str,
 ) -> Result<bool> {
+    let observed = crate::observe_effects::replies_before(conn, pushed_message_id);
     let count = conn.execute(
         "UPDATE replies SET push_outcome = ?1 WHERE pushed_message_id = ?2",
         params![push_outcome, pushed_message_id],
     )?;
+    crate::observe_effects::replies_after(conn, observed);
     Ok(count > 0)
 }
 
@@ -1015,12 +1036,14 @@ pub fn mark_agy_message_delivered(conn: &Connection, id: &str, delivered_at: i64
 /// `queued` never replaces `delivered`: an ack can land before the send that queued the
 /// message records its own outcome.
 pub fn update_message_outcome(conn: &Connection, id: &str, outcome: &str) -> Result<bool> {
+    let observed = crate::observe_effects::message_before(conn, id);
     let count = conn.execute(
         "UPDATE messages
          SET outcome = CASE WHEN outcome = 'delivered' AND ?1 = 'queued' THEN outcome ELSE ?1 END
          WHERE id = ?2",
         params![outcome, id],
     )?;
+    crate::observe_effects::message_after(conn, id, observed);
     Ok(count > 0)
 }
 
@@ -1951,6 +1974,7 @@ pub fn drop_handed_over(
 ) -> Result<usize> {
     let tx = conn.unchecked_transaction()?;
     for id in ids {
+        let observed = crate::observe_effects::transfer_before(&tx, id);
         let dropped = tx.execute(
             "DELETE FROM instance_queue WHERE id = ?1 AND instance_id = ?2",
             params![id, instance_id],
@@ -1973,6 +1997,7 @@ pub fn drop_handed_over(
         {
             insert_forwarded_message(&tx, id, &origin, now)?;
         }
+        crate::observe_effects::transfer_after(&tx, id, observed);
     }
     tx.execute(
         "DELETE FROM instance_seen WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM instance_queue WHERE instance_id = ?1 AND delivered_at IS NULL)",
@@ -2963,10 +2988,7 @@ pub fn startup_invalidate_codex(
             "UPDATE codex_handoff SET state = 'unknown', updated_at = ?2 WHERE message_id = ?1",
             params![msg_id, now],
         )?;
-        tx.execute(
-            "UPDATE messages SET outcome = 'delivery_unknown' WHERE id = ?1",
-            params![msg_id],
-        )?;
+        update_message_outcome(&tx, &msg_id, "delivery_unknown")?;
         update_reply_push_outcome(&tx, &msg_id, "push_failed")?;
     }
 
@@ -3486,10 +3508,7 @@ pub fn mark_codex_handoff_unknown(conn: &Connection, message_ids: &[String]) -> 
             "UPDATE codex_handoff SET state = 'unknown', updated_at = ?2 WHERE message_id = ?1",
             params![msg_id, now],
         )?;
-        tx.execute(
-            "UPDATE messages SET outcome = 'delivery_unknown' WHERE id = ?1",
-            params![msg_id],
-        )?;
+        update_message_outcome(&tx, msg_id, "delivery_unknown")?;
         update_reply_push_outcome(&tx, msg_id, "push_failed")?;
     }
     tx.commit()
@@ -3507,10 +3526,7 @@ pub(crate) fn mark_owned_codex_push_unknown(
         params![message_id, root_id, generation as i64, now_epoch_secs()],
     )?;
     if changed != 0 {
-        tx.execute(
-            "UPDATE messages SET outcome = 'delivery_unknown' WHERE id = ?1",
-            [message_id],
-        )?;
+        update_message_outcome(&tx, message_id, "delivery_unknown")?;
         update_reply_push_outcome(&tx, message_id, "push_failed")?;
     }
     tx.commit()?;
@@ -3549,9 +3565,13 @@ pub fn take_codex_subagent_queue_to_parent(
 ) -> Result<Vec<PiPendingMessage>> {
     let sub_queue_id = format!("{parent_id}/{agent_id}");
     let header = format!("to={parent_id}/{agent_id} agent_id={agent_id}");
+    let mut observed = crate::observe_effects::transfers_for_instance(conn, &sub_queue_id, now);
     let taken = take_queued(conn, &sub_queue_id, now)?;
     let mut moved = Vec::new();
     for message in taken {
+        let before = observed
+            .as_mut()
+            .and_then(|before| before.remove(&message.id));
         let body_with_header = format!("{header}\n{}", message.body);
         let pi_msg = PiPendingMessage {
             id: message.id.clone(),
@@ -3571,6 +3591,7 @@ pub fn take_codex_subagent_queue_to_parent(
         } else {
             untake_queued(conn, &message.id)?;
         }
+        crate::observe_effects::transfer_after(conn, &message.id, before);
     }
     Ok(moved)
 }

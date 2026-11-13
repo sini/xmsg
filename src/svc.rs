@@ -468,7 +468,16 @@ pub async fn handle_svc_connection_peer<
             SvcFrame::Ack { message_id } => {
                 {
                     let conn = db.lock().unwrap();
-                    let _ = storage::ack_svc_message(&conn, &session_id, &message_id);
+                    let _ = crate::observe_effects::autocommit_registered(
+                        &conn,
+                        |observed_connection| {
+                            crate::storage::ack_svc_message(
+                                observed_connection,
+                                &session_id,
+                                &message_id,
+                            )
+                        },
+                    );
                 }
                 in_flight.remove(&message_id);
                 let resp = serde_json::json!({ "status": "ok" });
@@ -879,7 +888,7 @@ pub async fn run_leaf_inbox_task(
                 // F2 (no silent loss or spin): propagate storage errors, do not ack hub, back off and repoll
                 let store_res = (|| -> Result<(bool, bool), AppError> {
                     let cap = storage::svc_queue_cap_for_db(&db);
-                    let mut conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+                    let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
                     if let Some(ref irt) = msg.in_reply_to {
                         if let Ok(Some(orig)) = storage::get_message(&conn, irt) {
                             msg_record.thread_id = orig.thread_id;
@@ -887,8 +896,7 @@ pub async fn run_leaf_inbox_task(
                             msg_record.thread_id = irt.clone();
                         }
                     }
-                    let tx = conn
-                        .transaction()
+                    let tx = crate::observe_effects::transaction(&db, &conn)
                         .map_err(|e| AppError::Internal(e.to_string()))?;
                     let existed_before = storage::has_svc_message(&tx, &msg.id)
                         .map_err(|e| AppError::Internal(e.to_string()))?;
