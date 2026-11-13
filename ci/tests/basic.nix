@@ -30,7 +30,7 @@
           hash = "sha256-7OTL8xTXc8Bj9Db/+IIOvFp/8+Dtj0k8zXXN+FLlOyg=";
         };
         preXl1Install = builtins.unsafeDiscardStringContext inputs.self.checks.x86_64-linux.pre-xl1-compat.installPhase;
-        sharedCompatInstall = builtins.unsafeDiscardStringContext inputs.self.checks.x86_64-linux.shared-client-compat.installPhase;
+        sharedCompatInstall = builtins.unsafeDiscardStringContext inputs.self.checks.x86_64-linux.shared-client-compat-0.installPhase;
       in
       {
         expr = {

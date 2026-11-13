@@ -1,4 +1,5 @@
 """Single-site source mutants for the shared transport; no runtime mutation flags."""
+import argparse
 import os
 import json
 from pathlib import Path
@@ -255,10 +256,20 @@ def require_cached_builds(log, expected):
 
 def main():
     self_test_daemon_hash_guard()
-    live = "--live" in sys.argv[1:]
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--live", action="store_true")
+    parser.add_argument("--shard", type=int, choices=(0, 1))
+    parser.add_argument("--manifest", type=Path)
+    args = parser.parse_args()
+    live = args.live
+    require(args.shard is None or live, "sharding requires --live")
     cases = [case for case in CASES if (case[-1] in LIVE_TESTS) == live]
     require(len(cases) == (15 if live else 27), "client mutant inventory count changed")
     require(len({case[0] for case in CASES}) == len(CASES), "duplicate client mutant names")
+    if args.shard is not None:
+        cases = cases[args.shard::2]
+        require(len(cases) == (8 if args.shard == 0 else 7), "shard inventory changed")
+    completed = []
     for name, filename, old, new, test in cases:
         with tempfile.TemporaryDirectory(prefix="xmsg-client-mutant-") as directory:
             dest = Path(directory)
@@ -297,7 +308,10 @@ def main():
             evidence = ROOT / ".artifacts" / "client-mutants"
             evidence.mkdir(parents=True, exist_ok=True)
             (evidence / (name + ".log")).write_text(red.stdout + red.stderr)
+            completed.append({"name": name, "baseline": True, "red": True})
             print(name + ": GREEN baseline, RED intended test", flush=True)
+    if args.manifest:
+        args.manifest.write_text(json.dumps({"shard": args.shard, "cases": completed}, indent=2) + "\n")
     print(f"{len(cases)}/{len(cases)} shared-client mutants killed", flush=True)
 
 
