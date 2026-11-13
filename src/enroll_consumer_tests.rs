@@ -124,3 +124,106 @@ async fn production_client_loopback_and_paste_write_verified_identity() {
         let _ = listener.await;
     }
 }
+
+#[tokio::test]
+async fn production_client_refuses_wrong_root_before_creating_a_key_or_contacting_idp() {
+    let env = Harness::new().await;
+    let (url, listener) = network_server(&env, false).await;
+    let browser = Browser {
+        idp: &env.idp,
+        calls: AtomicUsize::new(0),
+        tasks: Mutex::new(vec![]),
+    };
+    let directory = env._directory.path().join("wrong-root");
+    let wrong = format!("sha256:{}", "0".repeat(64));
+    assert_ne!(wrong, enrollment_fingerprint(&env));
+    let outcome = enroll_cli::run_with_browser(
+        args(&url, wrong, &directory, enroll_cli::Flow::Loopback),
+        &browser,
+    )
+    .await;
+    assert!(outcome.is_err(), "wrong fingerprint enrollment succeeded");
+    assert!(
+        !directory.exists(),
+        "wrong fingerprint created private state before trust"
+    );
+    assert_eq!(browser.calls.load(Ordering::SeqCst), 0);
+    assert!(
+        env.idp.request_paths().is_empty(),
+        "wrong root reached the identity provider"
+    );
+    assert_eq!(
+        env.db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM enroll_certs", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    listener.abort();
+    let _ = listener.await;
+}
+
+#[tokio::test]
+async fn production_client_keeps_existing_peers_and_refuses_key_clobber() {
+    let env = Harness::new().await;
+    let (url, listener) = network_server(&env, false).await;
+    let browser = Browser {
+        idp: &env.idp,
+        calls: AtomicUsize::new(0),
+        tasks: Mutex::new(vec![]),
+    };
+    let directory = env._directory.path().join("existing-peers");
+    crate::enroll_client::private_directory(&directory).unwrap();
+    let existing = b"{\"peers\":{}}\n";
+    std::fs::write(directory.join("peers.json"), existing).unwrap();
+    enroll_cli::run_with_browser(
+        args(
+            &url,
+            enrollment_fingerprint(&env),
+            &directory,
+            enroll_cli::Flow::Loopback,
+        ),
+        &browser,
+    )
+    .await
+    .unwrap();
+    browser.finish().await;
+    assert_eq!(
+        std::fs::read(directory.join("peers.json")).unwrap(),
+        existing,
+        "existing peers file was overwritten"
+    );
+    let key = std::fs::read(directory.join("fed.key")).unwrap();
+    let outcome = enroll_cli::run_with_browser(
+        args(
+            &url,
+            enrollment_fingerprint(&env),
+            &directory,
+            enroll_cli::Flow::Loopback,
+        ),
+        &browser,
+    )
+    .await;
+    assert!(
+        outcome.is_err(),
+        "existing private key was silently replaced"
+    );
+    assert!(
+        std::fs::read(directory.join("fed.key")).unwrap() == key,
+        "existing private key bytes changed"
+    );
+    assert_eq!(browser.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        env.db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM enroll_certs", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    listener.abort();
+    let _ = listener.await;
+}
