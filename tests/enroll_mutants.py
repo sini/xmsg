@@ -126,6 +126,7 @@ def execute(tree, artifact, test, marker, expected, env, file, literal=None):
     if expected == 101:
         assert f"test {test} ... FAILED" in result.stdout
         assert literal and literal in result.stdout, "intended assertion did not kill source fault"
+        assert not any(x in result.stdout for x in ("Elapsed(())", "kind: TimedOut", "test timed out")), "a timed-out operation is not a kill"
         assert not any(x in literal for x in ("Elapsed(())", "TimedOut", "timed out")), "timeout is not a kill"
     else:
         assert "1 passed; 0 failed" in result.stdout
