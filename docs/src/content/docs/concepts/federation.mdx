@@ -278,3 +278,15 @@ configuration keep working. A pinned certificate's public key determines its nam
 so rotating that key changes the node identity. See
 [credential reloading](/operations/runtime-and-systemd/#dynamic-credential-ca-bundle--peers-reloading)
 for the renewal example and intentional identity-change procedure.
+
+## Planned: pattern-specific admission roots
+
+Hub patterns may use the object form `{"pattern": "spiffe://example.org/host/*/user/alice", "ca": "/etc/xmsg/enrollment.pem"}`.
+The TLS verifier and request admission both verify against that pattern's bundle,
+rather than pooling every peer root. Bundle files participate in credential reload;
+an unreadable or invalid bundle retains the previous working configuration.
+Patterns bound to distinct bundles cannot derive a common node name, even with
+wildcards in keyword segments or different trust domains. A rule compatible with
+patterns of multiple bundles is refused. See
+[enrolled hub mailboxes](/concepts/hubs-and-leaves/#planned-enrolled-nodes-and-bounded-hub-mailboxes)
+for the rule's `leaf` field and a configuration example.

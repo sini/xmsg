@@ -345,6 +345,27 @@ async fn admitted_leaf_queues_pulls_acks_and_recovers_after_hub_restart() {
         .await
         .unwrap()
         .is_none());
+    let attachment_hub = hub.clone();
+    let request = tokio::spawn(async move {
+        xmsg::fed::fetch_attachment_chunk(&attachment_hub, "carol.lap", "item", 0, 3, 7).await
+    });
+    let answer = xmsg::fed::get_federated_inbox(&leaf, "fleet.hub", 1)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            answer,
+            Some(FedInboxItem::Attachment {
+                offset: 3,
+                length: 7,
+                ..
+            })
+        ),
+        "admitted leaf attachment lookup did not enqueue its query"
+    );
+    request.abort();
+    let _ = request.await;
+
     let id = ulid::Ulid::new().to_string();
     let envelope = FedEnvelope {
         v: 1,
@@ -435,4 +456,146 @@ async fn admitted_leaf_queues_pulls_acks_and_recovers_after_hub_restart() {
         .is_none());
     task.abort();
     let _ = task.await;
+    let mut no_leaf: Value = serde_json::from_str(&config).unwrap();
+    no_leaf["hub"]["rules"][0]["leaf"] = json!(false);
+    let peers = Arc::new(PeersMap::load_from_json(&no_leaf.to_string()).unwrap());
+    let (hub_cert, hub_key) = roots.cert_key(false, "spiffe://example.org/host/hub/user/fleet");
+    let hub = node_state("fleet.hub", peers, hub_cert, hub_key, open(), dir.path());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let state = hub.clone();
+    let task =
+        tokio::spawn(async move { xmsg::fed::run_fed_listener(listener, state).await.unwrap() });
+    let (cert, key) = roots.cert_key(true, "spiffe://example.org/host/lap/user/carol");
+    let leaf = node_state(
+        "carol.lap",
+        leaf_peers(&roots, addr),
+        cert,
+        key,
+        Arc::new(std::sync::Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        )),
+        dir.path(),
+    );
+    assert!(
+        xmsg::fed::get_federated_inbox(&leaf, "fleet.hub", 0)
+            .await
+            .is_err(),
+        "rule without leaf admitted an inbox pull"
+    );
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn cross_bundle_restart_takeover_cannot_be_configured() {
+    use xmsg::fed::{FedEnvelope, FedInboxItem, FedTarget};
+    let roots = Roots::new();
+    let config = json!({"peers":{}, "hub": {
+        "patterns":[{"pattern":"spiffe://fleet.org/host/*/user/*","ca":roots.fleet},{"pattern":"spiffe://enroll.org/host/*/user/*","ca":roots.enroll}],
+        "rules":[{"pattern":"spiffe://fleet.org/host/*/user/*","allow":["send"],"leaf":true},{"pattern":"spiffe://enroll.org/host/*/user/*","allow":["send"],"leaf":true}]
+    }}).to_string();
+    let own = xmsg::fed::OwnNode {
+        name: "fleet.hub".into(),
+        pin: None,
+    };
+    let before = match PeersMap::load_from_json_for(&config, Some(&own)) {
+        Err(error) => {
+            assert!(error.contains("derive node name"));
+            return;
+        }
+        Ok(peers) => Arc::new(peers),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(std::sync::Mutex::new(
+        rusqlite::Connection::open_in_memory().unwrap(),
+    ));
+    storage::init_db(&db.lock().unwrap()).unwrap();
+    let (hub_cert, hub_key) = roots.cert_key(false, "spiffe://example.org/host/hub/user/fleet");
+    let hub = node_state(
+        "fleet.hub",
+        before,
+        hub_cert.clone(),
+        hub_key.clone(),
+        db.clone(),
+        dir.path(),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let state = hub.clone();
+    let task =
+        tokio::spawn(async move { xmsg::fed::run_fed_listener(listener, state).await.unwrap() });
+    let (cert, key) = roots.cert_key(false, "spiffe://fleet.org/host/x/user/sini");
+    let fleet = node_state(
+        "sini.x",
+        leaf_peers(&roots, addr),
+        cert,
+        key,
+        Arc::new(std::sync::Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        )),
+        dir.path(),
+    );
+    assert!(xmsg::fed::get_federated_inbox(&fleet, "fleet.hub", 0)
+        .await
+        .unwrap()
+        .is_none());
+    for body in ["fleet row one", "fleet row two"] {
+        let envelope = FedEnvelope {
+            v: 1,
+            id: ulid::Ulid::new().to_string(),
+            origin: storage::Origin::service("test", "fleet.hub"),
+            to: FedTarget {
+                r#ref: "worker".into(),
+            },
+            body: body.into(),
+            thread_id: "".into(),
+            created_at: storage::now_epoch_secs(),
+            forwarded: None,
+            attachments: vec![],
+        };
+        xmsg::fed::send_federated_message(&hub, "sini.x", &envelope)
+            .await
+            .unwrap();
+    }
+    task.abort();
+    let _ = task.await;
+    let after = Arc::new(PeersMap::load_from_json_for(&config, Some(&own)).unwrap());
+    assert!(after.get_peer_config("sini.x").is_none());
+    let hub = node_state("fleet.hub", after, hub_cert, hub_key, db, dir.path());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let state = hub.clone();
+    let task =
+        tokio::spawn(async move { xmsg::fed::run_fed_listener(listener, state).await.unwrap() });
+    let (cert, key) = roots.cert_key(true, "spiffe://enroll.org/host/x/user/sini");
+    let attacker = node_state(
+        "sini.x",
+        leaf_peers(&roots, addr),
+        cert,
+        key,
+        Arc::new(std::sync::Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        )),
+        dir.path(),
+    );
+    let mut stolen = Vec::new();
+    for _ in 0..2 {
+        let Some(FedInboxItem::Message(row)) =
+            xmsg::fed::get_federated_inbox(&attacker, "fleet.hub", 0)
+                .await
+                .unwrap()
+        else {
+            panic!("takeover did not reach queued fleet row")
+        };
+        stolen.push(row.body);
+        xmsg::fed::ack_federated_inbox(&attacker, "fleet.hub", &row.id)
+            .await
+            .unwrap();
+    }
+    task.abort();
+    let _ = task.await;
+    stolen.sort();
+    assert_eq!(stolen, vec!["fleet row one", "fleet row two"]);
+    panic!("cross-bundle restart takeover observed: enrollment client pulled two fleet rows");
 }
