@@ -1204,6 +1204,7 @@ async fn test_oracle_9_admitted_clients_preserved_across_reload() {
         adm.insert(
             "client-canon".to_string(),
             xmsg::fed::AdmittedClient {
+                not_after: i64::MAX,
                 canonical_name: "client-canon".to_string(),
                 uri: "spiffe://example.org/client".to_string(),
                 pin: DUMMY_PIN.to_string(),
