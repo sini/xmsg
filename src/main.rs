@@ -1615,6 +1615,7 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         }
         let config = xmsg::enroll::tls_config(&service).map_err(|error| error.to_string())?;
         let listener = tokio::net::TcpListener::bind(address).await?;
+        info!(listen = %listener.local_addr()?, "bound enrollment https listener");
         bg_tasks.push(tokio::spawn(async move {
             if xmsg::enroll::listen_with_config(listener, service, config)
                 .await
