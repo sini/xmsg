@@ -707,3 +707,83 @@ async fn protocol_device_flow_is_refused_before_provider_work() {
     );
     assert!(h.service.sessions.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn protocol_unverified_email_cannot_issue_under_email_rule() {
+    let h = Harness::new().await;
+    let file = h._directory.path().join("policy.json");
+    let mut policy: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    policy["users"] = json!([{"provider":"idp","email":"alice@example.com","user":"alice"}]);
+    std::fs::write(&file, serde_json::to_vec(&policy).unwrap()).unwrap();
+    for verified in [json!("true"), json!(false)] {
+        let before: i64 =
+            h.db.lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM enroll_certs", [], |r| r.get(0))
+                .unwrap();
+        let (status, created, _) = h
+            .start(
+                if verified == json!(false) {
+                    "email-negative"
+                } else {
+                    "email-positive"
+                },
+                1,
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (code, state) = h
+            .idp
+            .authorize(created["authorization_url"].as_str().unwrap());
+        h.idp
+            .set_code_claim(&code, "email", json!("alice@example.com"));
+        h.idp
+            .set_code_claim(&code, "email_verified", verified.clone());
+        if verified == json!(false) {
+            h.idp
+                .set_code_signing(&code, "RS256", "rotated", false, false);
+        }
+        let handle = created["session"].as_str().unwrap();
+        let (status, _) = h
+            .request(
+                "POST",
+                "/enroll/v1/sessions/code",
+                json!({"code":code,"state":state}),
+                Some(handle),
+                1,
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let (_, result) = h
+            .request(
+                "GET",
+                "/enroll/v1/sessions?wait=0",
+                Value::Null,
+                Some(handle),
+                1,
+            )
+            .await;
+        let after: i64 =
+            h.db.lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM enroll_certs", [], |r| r.get(0))
+                .unwrap();
+        if verified == json!(false) {
+            assert!(
+                result.get("cert_chain_pem").is_none(),
+                "unverified email issued under an email rule"
+            );
+            assert_eq!(
+                result["error"]["reason"], "denied",
+                "unverified-email cell was masked by a different rejection"
+            );
+            assert_eq!(after, before, "unverified email wrote an authority row");
+        } else {
+            assert!(
+                result.get("cert_chain_pem").is_some(),
+                "verified string-boolean email was refused"
+            );
+            assert_eq!(after, before + 1);
+        }
+    }
+}

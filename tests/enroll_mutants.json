@@ -1463,5 +1463,469 @@
       }
     ],
     "expected_literal": "admitted leaf attachment lookup did not enqueue its query"
+  },
+  {
+    "label": "protocol-fingerprint-prefix",
+    "target": "lib",
+    "test": "enroll::protocol_tests::protocol_fingerprint_mismatch_creates_no_key_or_session",
+    "test_file": "src/enroll_protocol_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_client.rs",
+        "needle": "expected != &actual",
+        "replacement": "expected[..23] != actual[..23]",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "wrong enrollment root fingerprint accepted"
+  },
+  {
+    "label": "protocol-bootstrap-role",
+    "target": "lib",
+    "test": "enroll::protocol_tests::protocol_bootstrap_requires_reserved_ca_identity",
+    "test_file": "src/enroll_protocol_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_client.rs",
+        "needle": "path != \"xmsg/enroll\"",
+        "replacement": "path != \"xmsg/enroll\" && false",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "bootstrap accepted an enrolled host as the CA"
+  },
+  {
+    "label": "protocol-later-role",
+    "target": "lib",
+    "test": "enroll::protocol_tests::protocol_later_connections_require_reserved_ca_identity",
+    "test_file": "src/enroll_protocol_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_client.rs",
+        "needle": "path != \"xmsg/enroll\"",
+        "replacement": "(path != \"xmsg/enroll\" && self.expected_identity.is_none())",
+        "start": "",
+        "end": ""
+      },
+      {
+        "file": "src/enroll_client.rs",
+        "needle": "expected != identity",
+        "replacement": "expected != identity && false",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "later connection accepted an enrolled host as the CA"
+  },
+  {
+    "label": "protocol-body-user",
+    "target": "lib",
+    "test": "enroll::protocol_tests::protocol_user_field_is_not_authority",
+    "test_file": "src/enroll_protocol_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "#[derive(Deserialize)]\n#[serde(deny_unknown_fields)]\nstruct Create",
+        "replacement": "#[derive(Deserialize)]\nstruct Create",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "session accepted a self-asserted user field"
+  },
+  {
+    "label": "protocol-global-rate",
+    "target": "lib",
+    "test": "enroll::protocol_tests::protocol_global_burst_is_charged",
+    "test_file": "src/enroll_protocol_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "if !service.bucket.lock().unwrap().take(now)",
+        "replacement": "if false && !service.bucket.lock().unwrap().take(now)",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "eleventh session escaped the global burst bucket"
+  },
+  {
+    "label": "protocol-per-ip",
+    "target": "lib",
+    "test": "enroll::protocol_tests::protocol_per_ip_pending_is_bounded",
+    "test_file": "src/enroll_protocol_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "s.ip == peer.ip).count() >= 4",
+        "replacement": "s.ip == peer.ip).count() >= 400",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "fifth session escaped the per-IP pending cap"
+  },
+  {
+    "label": "protocol-pending-cap",
+    "target": "lib",
+    "test": "enroll::protocol_tests::protocol_pending_capacity_keeps_earlier_session",
+    "test_file": "src/enroll_protocol_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "if sessions.len() >= 64",
+        "replacement": "if sessions.len() >= 640",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "full pending table accepted another session"
+  },
+  {
+    "label": "protocol-pending-eviction",
+    "target": "lib",
+    "test": "enroll::protocol_tests::protocol_pending_capacity_keeps_earlier_session",
+    "test_file": "src/enroll_protocol_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "if sessions.len() >= 64 {",
+        "replacement": "if sessions.len() >= 64 { sessions.clear();",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "full pending table evicted an earlier session"
+  },
+  {
+    "label": "protocol-csr-binding",
+    "target": "lib",
+    "test": "enroll::protocol_tests::protocol_csr_key_and_single_collect_are_bound_to_session",
+    "test_file": "src/enroll_protocol_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "&session.csr,",
+        "replacement": "&VerifiedCsr::parse_pem(&rcgen::CertificateParams::default().serialize_request(&rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap()).unwrap().pem().unwrap()).unwrap(),",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "collected certificate changed the session CSR key"
+  },
+  {
+    "label": "protocol-collect-reuse",
+    "target": "lib",
+    "test": "enroll::protocol_tests::protocol_csr_key_and_single_collect_are_bound_to_session",
+    "test_file": "src/enroll_protocol_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "Phase::Complete(result) => Some(result),",
+        "replacement": "Phase::Complete(result) => { let copy=match &result { Ok(v)=>Ok(v.clone()), Err(v)=>Err(SessionFailure{reason:v.reason,rule:v.rule}) }; *phase=Phase::Complete(copy); Some(result) },",
+        "start": "",
+        "end": ""
+      },
+      {
+        "file": "src/enroll.rs",
+        "needle": "service.sessions.lock().unwrap().remove(handle);",
+        "replacement": "let _ = handle;",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "session certificate was collected more than once"
+  },
+  {
+    "label": "protocol-trace-session",
+    "target": "lib",
+    "test": "enroll::protocol_tests::protocol_trace_and_database_contain_no_secrets",
+    "test_file": "src/enroll_protocol_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "sessions.insert(handle.clone(), session.clone());",
+        "replacement": "sessions.insert(handle.clone(), session.clone()); tracing::debug!(session=%handle,\"enrollment pending\");",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "enrollment trace leaked a planted secret"
+  },
+  {
+    "label": "protocol-database-session",
+    "target": "lib",
+    "test": "enroll::protocol_tests::protocol_trace_and_database_contain_no_secrets",
+    "test_file": "src/enroll_protocol_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "sessions.insert(handle.clone(), session.clone());",
+        "replacement": "sessions.insert(handle.clone(), session.clone()); { let db=service.fed.db.lock().unwrap();db.execute_batch(\"CREATE TABLE IF NOT EXISTS enroll_fault_pending(handle TEXT NOT NULL)\").unwrap();db.execute(\"INSERT INTO enroll_fault_pending VALUES(?1)\",[&handle]).unwrap(); }",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "enrollment database stored a planted secret"
+  },
+  {
+    "label": "protocol-key-clobber",
+    "target": "lib",
+    "test": "enroll::protocol_tests::protocol_private_key_is_never_overwritten",
+    "test_file": "src/enroll_protocol_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_client.rs",
+        "needle": ".create_new(true)",
+        "replacement": ".create(true).truncate(true)",
+        "start": "pub fn create_key(",
+        "end": "pub fn atomic_write("
+      }
+    ],
+    "expected_literal": "enroll overwrote an existing private key"
+  },
+  {
+    "label": "protocol-device-coercion",
+    "target": "lib",
+    "test": "enroll::protocol_tests::protocol_device_flow_is_refused_before_provider_work",
+    "test_file": "src/enroll_protocol_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "    if body.flow == Flow::Device {",
+        "replacement": "    let mut body=body; if body.flow==Flow::Device {body.flow=Flow::Loopback;} if body.flow == Flow::Device {",
+        "start": "async fn create(",
+        "end": "async fn code("
+      }
+    ],
+    "expected_literal": "device request was silently accepted as another flow"
+  },
+  {
+    "label": "consumer-fingerprint-prefix",
+    "target": "lib",
+    "test": "enroll_consumer_tests::production_client_refuses_wrong_root_before_creating_a_key_or_contacting_idp",
+    "test_file": "src/enroll_consumer_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_client.rs",
+        "needle": ".is_some_and(|expected| expected != &actual)",
+        "replacement": ".is_some_and(|expected| !actual.starts_with(&expected[..7]))",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "wrong fingerprint enrollment succeeded"
+  },
+  {
+    "label": "consumer-key-clobber",
+    "target": "lib",
+    "test": "enroll_consumer_tests::production_client_keeps_existing_peers_and_refuses_key_clobber",
+    "test_file": "src/enroll_consumer_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_client.rs",
+        "needle": ".create_new(true)",
+        "replacement": ".create(true).truncate(true)",
+        "start": "pub fn create_key(",
+        "end": "pub fn atomic_write("
+      }
+    ],
+    "expected_literal": "existing private key bytes changed"
+  },
+  {
+    "label": "consumer-peers-clobber",
+    "target": "lib",
+    "test": "enroll_consumer_tests::production_client_keeps_existing_peers_and_refuses_key_clobber",
+    "test_file": "src/enroll_consumer_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_cli.rs",
+        "needle": ".create_new(true)",
+        "replacement": ".create(true).truncate(true)",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "existing peers file was overwritten"
+  },
+  {
+    "label": "consumer-renew-force-reload",
+    "target": "lib",
+    "test": "enroll_consumer_tests::actual_auto_renewal_reloads_the_certificate_presented_on_the_next_outbound_dial",
+    "test_file": "src/enroll_consumer_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_cli.rs",
+        "needle": "reloader.force_reload()?;",
+        "replacement": "let _ = &reloader;",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "next outbound TLS connection presented the stale certificate serial"
+  },
+  {
+    "label": "consumer-renew-sixteen-hours",
+    "target": "lib",
+    "test": "enroll_cli::renewal_policy_tests::default_lifetime_renews_at_sixteen_hours_and_retry_stops_at_fifteen_minutes",
+    "test_file": "src/enroll_cli.rs",
+    "edits": [
+      {
+        "file": "src/enroll_cli.rs",
+        "needle": ".saturating_mul(2)",
+        "replacement": ".saturating_mul(1)",
+        "start": "fn renewal_due(",
+        "end": "fn renewal_backoff("
+      }
+    ],
+    "expected_literal": "default certificate renewal is not at sixteen hours",
+    "local_measurement": "not yet run; parent final frozen runner must measure"
+  },
+  {
+    "label": "consumer-renew-backoff-cap",
+    "target": "lib",
+    "test": "enroll_cli::renewal_policy_tests::default_lifetime_renews_at_sixteen_hours_and_retry_stops_at_fifteen_minutes",
+    "test_file": "src/enroll_cli.rs",
+    "edits": [
+      {
+        "file": "src/enroll_cli.rs",
+        "needle": ".min(Duration::from_secs(900))",
+        "replacement": "",
+        "start": "fn renewal_backoff(",
+        "end": "pub async fn auto_renew("
+      }
+    ],
+    "expected_literal": "renewal retry exceeded fifteen minutes",
+    "local_measurement": "not yet run; parent final frozen runner must measure"
+  },
+  {
+    "label": "root-hub-pinned-uri",
+    "target": "lib",
+    "test": "enroll::hub_entry_tests::uri_bearing_self_signed_hub_uses_its_pin",
+    "test_file": "src/enroll.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "if chain.len() == 1 && !is_ca(&parsed) && self_signed(&parsed) {",
+        "replacement": "if chain.len() == 1 && !is_ca(&parsed) && self_signed(&parsed) && crate::fed::extract_uri_sans(leaf.as_ref()).unwrap().is_empty() {",
+        "start": "pub fn hub_entry(",
+        "end": "#[cfg(test)]"
+      }
+    ],
+    "expected_literal": "URI-bearing pinned node must use its pin"
+  },
+  {
+    "label": "root-hub-complete-chain",
+    "target": "lib",
+    "test": "enroll::hub_entry_tests::incomplete_ca_chain_is_not_an_enrollment_hub_identity",
+    "test_file": "src/enroll.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "if !is_ca(&parsed_root) || !self_signed(&parsed_root) {",
+        "replacement": "if false && (!is_ca(&parsed_root) || !self_signed(&parsed_root)) {",
+        "start": "pub fn hub_entry(",
+        "end": "#[cfg(test)]"
+      }
+    ],
+    "expected_literal": "hub entry accepted an intermediate without its root"
+  },
+  {
+    "label": "root-hub-own-anchor",
+    "target": "lib",
+    "test": "enroll_consumer_tests::production_client_loopback_and_paste_write_verified_identity",
+    "test_file": "src/enroll_consumer_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "hub_entry: service.hub_entry.clone(),",
+        "replacement": "hub_entry: {let mut entry=service.hub_entry.clone();entry[\"ca\"]=serde_json::json!(service.ca.root_pem());entry},",
+        "start": "async fn collect(",
+        "end": "async fn renew("
+      }
+    ],
+    "expected_literal": "hub bundle used enrollment root rather than fleet root"
+  },
+  {
+    "label": "reload-identity",
+    "target": "gate_x17_reload",
+    "test": "test_oracle_1_outbound_presents_reloaded_cert",
+    "test_file": "tests/gate_x17_reload.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "!= &candidate_identity",
+        "replacement": "!= &candidate_identity && false",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "reload accepted a different derived node identity"
+  },
+  {
+    "label": "reload-running-pin",
+    "target": "gate_x17_reload",
+    "test": "first_reloader_load_respects_running_name",
+    "test_file": "tests/gate_x17_reload.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "let _ = node_identity.set(running_name.clone());",
+        "replacement": "let _ = &running_name;",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "first reloader load ignored the running node identity"
+  },
+  {
+    "label": "reload-standalone",
+    "target": "gate_x17_reload",
+    "test": "first_reload_standalone_refuses_different_identity",
+    "test_file": "tests/gate_x17_reload.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "!= &candidate_identity",
+        "replacement": "!= &candidate_identity && false",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "first reload accepted another node identity"
+  },
+  {
+    "label": "protocol-email-verified",
+    "target": "lib",
+    "test": "enroll::protocol_tests::protocol_unverified_email_cannot_issue_under_email_rule",
+    "test_file": "src/enroll_protocol_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "let email_verified = claims.email_verified().unwrap_or(false);",
+        "replacement": "let email_verified = true;",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "unverified email issued under an email rule"
+  },
+  {
+    "label": "surface-admitted-reply-poll",
+    "target": "lib",
+    "test": "enroll_consumer_tests::consumer_enrolls_then_receives_a_pattern_mailbox_and_replies_over_federation",
+    "test_file": "src/enroll_consumer_tests.rs",
+    "edits": [
+      {
+        "file": "src/surface.rs",
+        "needle": ".get_peer_config(&outbound.peer)",
+        "replacement": ".get(&outbound.peer)",
+        "start": "pub async fn replies(",
+        "end": ""
+      }
+    ],
+    "expected_literal": "pending reply poll for admitted leaf must return empty replies, not UnknownPeer"
   }
 ]
