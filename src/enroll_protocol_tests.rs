@@ -43,7 +43,14 @@ impl Harness {
         storage::init_db(&connection).unwrap();
         let db = Arc::new(Mutex::new(connection));
         let ca = Arc::new(
-            EnrollCa::open(directory.path().join("ca"), db.clone(), policy, "team.hub").unwrap(),
+            EnrollCa::open_at(
+                directory.path().join("ca"),
+                db.clone(),
+                policy,
+                "team.hub",
+                now,
+            )
+            .unwrap(),
         );
         let fleet_key = rcgen::KeyPair::generate().unwrap();
         let mut parameters = rcgen::CertificateParams::default();
@@ -207,90 +214,6 @@ pub(crate) fn node_state(
         reply_ttl: Duration::from_secs(600),
         list_queries: Default::default(),
     })
-}
-
-#[tokio::test]
-async fn probe_protocol_observations() {
-    let h = Harness::new().await;
-    let (status, created, key) = h.start("laptop", 1).await;
-    println!("creation {}", status);
-    assert_eq!(status, StatusCode::CREATED);
-    let (status, collected) = h.complete(&created).await;
-    println!(
-        "collect {} keys={:?}",
-        status,
-        collected.as_object().unwrap().keys()
-    );
-    if let Some(pem) = collected["cert_chain_pem"].as_str() {
-        use rustls::pki_types::pem::PemObject;
-        let cert = rustls::pki_types::CertificateDer::from_pem_slice(pem.as_bytes()).unwrap();
-        println!(
-            "spki_equal {}",
-            fed::spki_sha256_from_der(cert.as_ref()).unwrap() == {
-                use sha2::Digest;
-                hex::encode(sha2::Sha256::digest(key.subject_public_key_info()))
-            }
-        );
-    }
-    let (second, _) = h
-        .request(
-            "GET",
-            "/enroll/v1/sessions",
-            Value::Null,
-            created["session"].as_str(),
-            1,
-        )
-        .await;
-    println!("second_collect {}", second);
-}
-
-#[tokio::test]
-async fn probe_protocol_limit_observations() {
-    let h = Harness::new().await;
-    let mut global = Vec::new();
-    for n in 1..=11 {
-        global.push(h.start(&format!("host{n}"), n).await.0.as_u16());
-    }
-    println!("global_statuses {global:?}");
-    let h = Harness::new().await;
-    let mut per_ip = Vec::new();
-    for n in 1..=5 {
-        per_ip.push(h.start(&format!("host{n}"), 1).await.0.as_u16());
-    }
-    println!("per_ip_statuses {per_ip:?}");
-    let h = Harness::new().await;
-    let mut first = None;
-    for n in 1..=64 {
-        let (status, value, _) = h.start(&format!("host{n}"), n).await;
-        assert_eq!(status, StatusCode::CREATED);
-        if n == 1 {
-            first = Some(value);
-        }
-        h.clock.0.fetch_add(2, Ordering::SeqCst);
-    }
-    let (status, _, _) = h.start("overflow", 65).await;
-    println!("pending_overflow {}", status);
-    let (status, value) = h.complete(&first.unwrap()).await;
-    println!(
-        "earlier_complete {} cert={}",
-        status,
-        value.get("cert_chain_pem").is_some()
-    );
-}
-#[tokio::test]
-async fn probe_request_authority_observations() {
-    let h = Harness::new().await;
-    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-    let csr = rcgen::CertificateParams::default()
-        .serialize_request(&key)
-        .unwrap()
-        .pem()
-        .unwrap();
-    let(status,_)=h.request("POST","/enroll/v1/sessions",json!({"csr_pem":csr,"host":"laptop","provider":"idp","flow":"loopback","redirect_uri":"http://127.0.0.1:18551/cb","user":"root"}),None,1).await;
-    println!("body_user {}", status);
-    let(status,value)=h.request("POST","/enroll/v1/sessions",json!({"csr_pem":csr,"host":"laptop","provider":"idp","flow":"device","redirect_uri":"http://127.0.0.1:18551/cb"}),None,1).await;
-    println!("device {} reason={}", status, value["error"]["reason"]);
-    println!("provider_requests {}", h.idp.request_paths().len());
 }
 
 #[tokio::test]
@@ -480,38 +403,6 @@ async fn bootstrap_then_create(
     }
     let _ = h;
     Ok(())
-}
-#[tokio::test]
-async fn probe_transport_observations() {
-    let h = Harness::new().await;
-    let (url, task) = network_server(&h, false).await;
-    let fp = enrollment_fingerprint(&h);
-    let mut wrong = fp.clone();
-    wrong.pop();
-    wrong.push(if fp.ends_with('0') { '1' } else { '0' });
-    let dir = h._directory.path().join("wrong-fingerprint");
-    let result = bootstrap_then_create(&h, &url, &wrong, &dir).await;
-    println!(
-        "wrong_fp_refused {} key_exists {} sessions {}",
-        result.is_err(),
-        dir.join("fed.key").exists(),
-        h.service.sessions.lock().unwrap().len()
-    );
-    let trust = enroll_client::bootstrap(&url, Some(&fp), None)
-        .await
-        .unwrap();
-    println!("right_fp_identity {}", trust.ca_identity);
-    let (bad_url, bad_task) = network_server(&h, true).await;
-    let result = enroll_client::bootstrap(&bad_url, Some(&fp), None).await;
-    println!("bootstrap_role_refused {}", result.is_err());
-    let result = enroll_client::http_client(&trust, None)
-        .unwrap()
-        .get(format!("{bad_url}/enroll/v1/sessions"))
-        .send()
-        .await;
-    println!("later_role_refused {}", result.is_err());
-    bad_task.abort();
-    task.abort();
 }
 
 #[derive(Clone)]
@@ -783,4 +674,27 @@ fn protocol_private_key_is_never_overwritten() {
         std::fs::metadata(state.join("fed.key")).unwrap().mode() & 0o777,
         0o600
     );
+}
+
+#[tokio::test]
+async fn protocol_device_flow_is_refused_before_provider_work() {
+    let h = Harness::new().await;
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+    let csr = rcgen::CertificateParams::default()
+        .serialize_request(&key)
+        .unwrap()
+        .pem()
+        .unwrap();
+    let(status,value)=h.request("POST","/enroll/v1/sessions",json!({"csr_pem":csr,"host":"laptop","provider":"idp","flow":"device","redirect_uri":"http://127.0.0.1:18551/cb"}),None,1).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "device request was silently accepted as another flow"
+    );
+    assert_eq!(value["error"]["reason"], "unsupported_flow");
+    assert!(
+        h.idp.request_paths().is_empty(),
+        "device request invoked provider work"
+    );
+    assert!(h.service.sessions.lock().unwrap().is_empty());
 }
