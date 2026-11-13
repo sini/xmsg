@@ -91,6 +91,9 @@ def seed_target(seed, target):
 
 def build(tree, target, case, env, logs, label, cached=False):
     targets = ["lib"] if case["target"] == "lib" else ["lib", case["target"]]
+    binaries = case.get("binaries", [])
+    assert all(re.fullmatch(r"[A-Za-z0-9_-]+", name) for name in binaries)
+    targets += ["binary:" + name for name in binaries]
     args = ["cargo", "test", "--locked", "--offline", "--no-run", "--message-format=json", "--lib"]
     if case["target"] != "lib":
         args += ["--test", case["target"]]
@@ -104,13 +107,20 @@ def build(tree, target, case, env, logs, label, cached=False):
             continue
         if value.get("reason") != "compiler-artifact" or not value.get("executable"):
             continue
-        if not value.get("profile", {}).get("test"):
+        is_test = value.get("profile", {}).get("test")
+        kind, artifact_name = value["target"]["kind"], value["target"]["name"]
+        if not is_test and kind == ["bin"] and artifact_name in binaries:
+            name = "binary:" + artifact_name
+        elif is_test:
+            name = "lib" if kind == ["lib"] else artifact_name
+        else:
             continue
-        name = "lib" if value["target"]["kind"] == ["lib"] else value["target"]["name"]
         if name not in targets:
             continue
         file = Path(value["executable"])
         assert file.resolve().is_relative_to(target.resolve()), "artifact escaped variant target"
+        if name.startswith("binary:"):
+            assert file.resolve() == (target / "debug" / artifact_name).resolve(), "spawned binary is not the variant executable"
         assert value["fresh"] == cached, (label, name, "fresh/cached artifact guard failed")
         found[name] = {"file": str(file), "sha256": digest(file), "mtime_ns": file.stat().st_mtime_ns}
     assert set(found) == set(targets), (label, found, targets)
@@ -154,8 +164,10 @@ def variant(work, evidence, case, red, seed=None, gate=None):
     if gate is not None:
         gate.wait(timeout=120)
     execute_started = time.monotonic()
+    assert all(digest(Path(a["file"])) == a["sha256"] for a in artifacts.values()), "variant artifact changed before execution"
     result = execute(tree, artifacts[case["target"]], case["test"], marker, 101 if red else 0,
                      env, evidence / f"{label}.log", case.get("expected_literal"))
+    assert all(digest(Path(a["file"])) == a["sha256"] for a in artifacts.values()), "variant artifact changed during execution"
     return directory, target, {"label": case["label"], "red": red, "status": result.returncode,
                               "nonce": nonce, "production": production, "artifacts": artifacts,
                               "assertion": case.get("expected_literal") if red else None,
