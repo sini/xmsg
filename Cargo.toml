@@ -43,7 +43,7 @@ base64 = { version = "0.23.1", optional = true }
 http-body-util = { version = "0.1.5", optional = true }
 tower = { optional = true, version = "0.5.3", features = ["util"] }
 hyper-util = { optional = true, version = "0.1.21", features = ["server", "client", "tokio", "http1", "server-auto", "service"] }
-x509-parser = { version = "0.18.1", optional = true }
+x509-parser = { version = "0.18.1", optional = true, features = ["verify"] }
 bytes = { version = "1.12.1", optional = true }
 hyper = { optional = true, version = "1.12.0", features = ["full"] }
 webpki = { optional = true, package = "rustls-webpki", version = "0.103.15", default-features = false, features = ["ring"] }
