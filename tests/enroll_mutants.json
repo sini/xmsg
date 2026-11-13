@@ -1928,5 +1928,1334 @@
       }
     ],
     "expected_literal": "pending reply poll for admitted leaf must return empty replies, not UnknownPeer"
+  },
+  {
+    "label": "device-ca-equality-provider",
+    "oracle": "device CA projection/approval equality-provider",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_approval_refuses_each_projection_mismatch_without_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "approved.provider != proposed.provider",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "approval accepted changed provider"
+  },
+  {
+    "label": "device-ca-equality-user",
+    "oracle": "device CA projection/approval equality-user",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_approval_refuses_each_projection_mismatch_without_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "approved.user != proposed.user",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "approval accepted changed user"
+  },
+  {
+    "label": "device-ca-equality-issuer",
+    "oracle": "device CA projection/approval equality-issuer",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_approval_refuses_each_projection_mismatch_without_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "approved.issuer != proposed.issuer",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "approval accepted changed issuer"
+  },
+  {
+    "label": "device-ca-equality-sub",
+    "oracle": "device CA projection/approval equality-sub",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_approval_refuses_each_projection_mismatch_without_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "approved.sub != proposed.sub",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "approval accepted changed sub"
+  },
+  {
+    "label": "device-ca-equality-host",
+    "oracle": "device CA projection/approval equality-host",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_approval_refuses_each_projection_mismatch_without_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "approved.host != proposed.host",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "approval accepted changed host"
+  },
+  {
+    "label": "device-ca-equality-node_name",
+    "oracle": "device CA projection/approval equality-node_name",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_approval_refuses_each_projection_mismatch_without_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "approved.node_name != proposed.node_name",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "approval accepted changed node_name"
+  },
+  {
+    "label": "device-ca-equality-spki_sha256",
+    "oracle": "device CA projection/approval equality-spki_sha256",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_approval_refuses_each_projection_mismatch_without_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "approved.spki_sha256 != proposed.spki_sha256",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "approval accepted changed spki_sha256"
+  },
+  {
+    "label": "device-ca-equality-policy_digest",
+    "oracle": "device CA projection/approval equality-policy_digest",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_approval_refuses_each_projection_mismatch_without_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "approved.policy_digest != proposed.policy_digest",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "approval accepted changed policy_digest"
+  },
+  {
+    "label": "device-ca-guard-first",
+    "oracle": "device CA projection/approval guard-first",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_guard_runs_after_database_wait_before_any_effect",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "if !guard() {",
+        "replacement": "if false {",
+        "start": "    fn issue_inner(",
+        "end": "        use rusqlite::OptionalExtension;"
+      }
+    ],
+    "expected_literal": "expired guard accepted after SQL wait"
+  },
+  {
+    "label": "device-ca-guard-final",
+    "oracle": "device CA projection/approval guard-final",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_deadline_during_issuance_rolls_back_all_effects_and_supersession",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "        if !guard() {\n            return Err(Error::ApprovalExpired);\n        }\n        tx.commit()",
+        "replacement": "        if false {\n            return Err(Error::ApprovalExpired);\n        }\n        tx.commit()"
+      }
+    ],
+    "expected_literal": "deadline during signing committed enrollment"
+  },
+  {
+    "label": "device-ca-default-device",
+    "oracle": "device CA projection/approval default-device",
+    "target": "lib",
+    "test": "enroll_ca::tests::unsupported_key_charset_and_flow_do_not_gain_authority",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "if flow == Flow::Device && !self.device_enabled() {",
+        "replacement": "if false {"
+      }
+    ],
+    "expected_literal": "assertion failed: disabled.provider(\"idp\").unwrap().client(Flow::Device).is_err()"
+  },
+  {
+    "label": "device-ca-enabled-without-client",
+    "oracle": "device CA projection/approval enabled-without-client",
+    "target": "lib",
+    "test": "enroll_ca::tests::unsupported_key_charset_and_flow_do_not_gain_authority",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "|| (p.device_enabled() && !p.clients.contains_key(&Flow::Device))",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "assertion failed: Policy::from_json(&p.to_string()).is_err()"
+  },
+  {
+    "label": "device-ca-projection-writes",
+    "oracle": "device CA projection/approval projection-writes",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_projection_is_read_only_and_approved_issue_succeeds",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "        self.projection(&live.policy, &live.hash, claims, csr, host, reserved_names)",
+        "replacement": "        drop(live);\n        self.issue(claims, csr, host, reserved_names, 1_800_000_000)?;\n        let live = self.live.lock().map_err(|_| Error::Storage)?;\n        self.projection(&live.policy, &live.hash, claims, csr, host, reserved_names)"
+      }
+    ],
+    "expected_literal": "assertion `left == right` failed: projection spent enrollment effects before approval"
+  },
+  {
+    "label": "device-ca-policy-refresh",
+    "oracle": "device CA projection/approval policy-refresh",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_approval_invalidated_by_current_policy_and_reserved_name",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "        self.reload_policy()?;\n        let live = self.live.lock().map_err(|_| Error::Storage)?;\n        let p = live.policy.clone();",
+        "replacement": "        let live = self.live.lock().map_err(|_| Error::Storage)?;\n        let p = live.policy.clone();"
+      }
+    ],
+    "expected_literal": "policy change reused old approval"
+  },
+  {
+    "label": "device-ca-guard-before-lock",
+    "oracle": "device CA projection/approval guard-before-lock",
+    "target": "lib",
+    "test": "enroll_ca::tests::device_projection_is_read_only_and_approved_issue_succeeds",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "    fn issue_inner(\n        &self,\n        claims: &VerifiedClaims,\n        csr: &VerifiedCsr,\n        host: &str,\n        reserved_names: &[String],\n        now: i64,\n        approved: Option<&DeviceProjection>,\n        guard: &dyn Fn() -> bool,\n    ) -> Result<Issued, Error> {\n        let mut db = self.db.lock().map_err(|_| Error::Storage)?;\n        let tx = db\n            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)\n            .map_err(|_| Error::Storage)?;\n        self.reload_policy()?;\n        let live = self.live.lock().map_err(|_| Error::Storage)?;\n        let p = live.policy.clone();\n        let proposed = self.projection(&p, &live.hash, claims, csr, host, reserved_names)?;\n        if let Some(approved) = approved {\n            p.provider(&claims.provider)?.client(Flow::Device)?;\n            if approved.provider != proposed.provider\n                || approved.user != proposed.user\n                || approved.issuer != proposed.issuer\n                || approved.sub != proposed.sub\n                || approved.host != proposed.host\n                || approved.node_name != proposed.node_name\n                || approved.spki_sha256 != proposed.spki_sha256\n                || approved.policy_digest != proposed.policy_digest\n            {\n                return Err(Error::ApprovalMismatch);\n            }\n        }\n        if !guard() {\n            return Err(Error::ApprovalExpired);\n        }\n",
+        "replacement": "    fn issue_inner(\n        &self,\n        claims: &VerifiedClaims,\n        csr: &VerifiedCsr,\n        host: &str,\n        reserved_names: &[String],\n        now: i64,\n        approved: Option<&DeviceProjection>,\n        guard: &dyn Fn() -> bool,\n    ) -> Result<Issued, Error> {\n        if !guard() {\n            return Err(Error::ApprovalExpired);\n        }\n        let mut db = self.db.lock().map_err(|_| Error::Storage)?;\n        let tx = db\n            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)\n            .map_err(|_| Error::Storage)?;\n        self.reload_policy()?;\n        let live = self.live.lock().map_err(|_| Error::Storage)?;\n        let p = live.policy.clone();\n        let proposed = self.projection(&p, &live.hash, claims, csr, host, reserved_names)?;\n        if let Some(approved) = approved {\n            p.provider(&claims.provider)?.client(Flow::Device)?;\n            if approved.provider != proposed.provider\n                || approved.user != proposed.user\n                || approved.issuer != proposed.issuer\n                || approved.sub != proposed.sub\n                || approved.host != proposed.host\n                || approved.node_name != proposed.node_name\n                || approved.spki_sha256 != proposed.spki_sha256\n                || approved.policy_digest != proposed.policy_digest\n            {\n                return Err(Error::ApprovalMismatch);\n            }\n        }\n"
+      }
+    ],
+    "expected_literal": "approval guard ran before SQL mutex acquisition"
+  },
+  {
+    "label": "device-disabled-classification",
+    "oracle": "O19 disabled device diagnostic priority",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::disabled_device_registration_does_not_read_secret_or_require_endpoint",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "if !self.device_enabled {",
+        "replacement": "if false {",
+        "start": "    async fn begin_device_with_clock(",
+        "end": "    fn device_client("
+      }
+    ],
+    "expected_literal": "disabled device must be classified before metadata"
+  },
+  {
+    "label": "device-disabled-secret-read",
+    "oracle": "O19 device device-disabled-secret-read",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::disabled_device_registration_does_not_read_secret_or_require_endpoint",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "if *flow == Flow::Device && !config.device_enabled() {",
+        "replacement": "if false {",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "disabled device registration broke browser discovery"
+  },
+  {
+    "label": "device-https-endpoint",
+    "oracle": "O19 device device-https-endpoint",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_disabled_and_unsupported_metadata_make_no_device_request",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".filter(|url| https_url(url.url()))",
+        "replacement": ".filter(|_| true)",
+        "start": "    async fn begin_device_with_clock(",
+        "end": "    fn device_client("
+      }
+    ],
+    "expected_literal": "device capability guard failed: http_endpoint"
+  },
+  {
+    "label": "device-advertised-grant",
+    "oracle": "O19 device device-advertised-grant",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_disabled_and_unsupported_metadata_make_no_device_request",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "grant.as_ref() == \"urn:ietf:params:oauth:grant-type:device_code\"",
+        "replacement": "{ let _ = grant; true }",
+        "start": "    async fn begin_device_with_clock(",
+        "end": "    fn device_client("
+      }
+    ],
+    "expected_literal": "device capability guard failed: no_grant"
+  },
+  {
+    "label": "device-google-body",
+    "oracle": "O19 device device-google-body",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_google_uses_body_auth_for_code_and_poll",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "client.set_auth_type(AuthType::RequestBody)",
+        "replacement": "client.set_auth_type(AuthType::BasicAuth)",
+        "start": "    fn device_client(",
+        "end": "    pub async fn poll_device("
+      }
+    ],
+    "expected_literal": "Google request did not use device body client ID"
+  },
+  {
+    "label": "device-lifetime-cap",
+    "oracle": "O19 device device-lifetime-cap",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_provider_lifetime_is_capped_and_larger_interval_honored",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "details.expires_in().min(Duration::from_secs(300))",
+        "replacement": "details.expires_in().min(Duration::from_secs(600))",
+        "start": "    async fn begin_device_with_clock(",
+        "end": "    fn device_client("
+      }
+    ],
+    "expected_literal": "provider lifetime exceeded CA cap"
+  },
+  {
+    "label": "device-send-time",
+    "oracle": "O19 device device-send-time",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_code_http_latency_counts_against_original_deadline",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "let deadline = sent.checked_add(lifetime)",
+        "replacement": "let deadline = clock().checked_add(lifetime)",
+        "start": "    async fn begin_device_with_clock(",
+        "end": "    fn device_client("
+      }
+    ],
+    "expected_literal": "code request latency excluded from deadline"
+  },
+  {
+    "label": "device-unusable-interval",
+    "oracle": "O19 device device-unusable-interval",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_invalid_expiry_and_unusable_interval_refused",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "|first| first >= deadline",
+        "replacement": "|first| first > deadline",
+        "start": "    async fn begin_device_with_clock(",
+        "end": "    fn device_client("
+      }
+    ],
+    "expected_literal": "unusable device timing accepted"
+  },
+  {
+    "label": "device-normalized-floor",
+    "oracle": "O19 device device-normalized-floor",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_small_interval_uses_five_second_floor_and_slowdown",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "normalized[\"interval\"] = serde_json::json!(5);",
+        "replacement": "normalized[\"interval\"] = serde_json::json!(1);",
+        "start": "    async fn begin_device_with_clock(",
+        "end": "    fn device_client("
+      }
+    ],
+    "expected_literal": "small interval bypassed five-second floor"
+  },
+  {
+    "label": "device-initial-wait",
+    "oracle": "O19 device device-initial-wait",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_signed_https_success_and_one_shot_binding",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "sleep(pending.details.interval().max(Duration::from_secs(5))).await;",
+        "replacement": "sleep(Duration::ZERO).await;",
+        "start": "    async fn poll_device_inner",
+        "end": "    fn client("
+      }
+    ],
+    "expected_literal": "assertion `left == right` failed"
+  },
+  {
+    "label": "device-backoff-floor",
+    "oracle": "O19 device device-backoff-floor",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_slowdown_above_ten_survives_transport_error",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".set_max_backoff_interval(Duration::from_secs(300))",
+        "replacement": ".set_max_backoff_interval(Duration::from_secs(10))",
+        "start": "    async fn poll_device_inner",
+        "end": "    fn client("
+      }
+    ],
+    "expected_literal": "transport backoff shrank live slow_down floor"
+  },
+  {
+    "label": "device-before-http-deadline",
+    "oracle": "O19 device device-before-http-deadline",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_poll_deadline_guard_stops_before_extra_http",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "if (self.clock)() >= self.deadline {",
+        "replacement": "if false {",
+        "start": "    fn call(&'c self,",
+        "end": "            let response = self"
+      }
+    ],
+    "expected_literal": "request sent at exact expiry"
+  },
+  {
+    "label": "device-late-response-deadline",
+    "oracle": "O19 device device-late-response-deadline",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_exact_deadline_and_late_response_refused",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "if (self.clock)() >= self.deadline {",
+        "replacement": "if false {",
+        "start": "            let response = self",
+        "end": "fn expired_device_response()"
+      },
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "if clock() >= pending.deadline {",
+        "replacement": "if false {",
+        "start": "                Error::Unavailable\n            })?;",
+        "end": "        let device_token = response.id_token().ok_or"
+      },
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "if clock() >= pending.deadline {",
+        "replacement": "if false {",
+        "start": "            verified = self.verify(&retry, &updated, device_token, no_nonce, now());",
+        "end": "    fn client("
+      }
+    ],
+    "expected_literal": "deadline equality or late signed response authorized"
+  },
+  {
+    "label": "device-client-binding",
+    "oracle": "O19 device device-client-binding",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_frozen_client_binding_refuses_other_provider",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "!= Some(pending.client_id.as_str())",
+        "replacement": "!= Some(\"other-device-client\")",
+        "start": "    async fn poll_device_inner",
+        "end": "    fn client("
+      }
+    ],
+    "expected_literal": "device session changed frozen client"
+  },
+  {
+    "label": "device-nonce",
+    "oracle": "O19 device device-nonce",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_nonce_refused",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "if nonce.is_some() {",
+        "replacement": "if false {",
+        "start": "    async fn poll_device_inner",
+        "end": "    fn client("
+      }
+    ],
+    "expected_literal": "device nonce refusal failed",
+    "test_macro": "refusal"
+  },
+  {
+    "label": "device-aud",
+    "oracle": "O19 device device-aud",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_aud_refused",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".id_token_verifier()",
+        "replacement": ".id_token_verifier().require_audience_match(false)",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "device aud refusal failed",
+    "test_macro": "refusal"
+  },
+  {
+    "label": "device-iss",
+    "oracle": "O19 device device-iss",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_issuer_refused",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".id_token_verifier()",
+        "replacement": ".id_token_verifier().require_issuer_match(false)",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "device iss refusal failed",
+    "test_macro": "refusal"
+  },
+  {
+    "label": "device-signature",
+    "oracle": "O19 device device-signature",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_bad_signature_refused",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".id_token_verifier()",
+        "replacement": ".id_token_verifier().insecure_disable_signature_check()",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "device signature refusal failed",
+    "test_macro": "refusal"
+  },
+  {
+    "label": "device-azp",
+    "oracle": "O19 device device-azp",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_azp_refused",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "if claims.audiences().len() > 1",
+        "replacement": "if false && claims.audiences().len() > 1",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "device azp refusal failed",
+    "test_macro": "refusal"
+  },
+  {
+    "label": "device-exp",
+    "oracle": "O19 device device-exp",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_expired_refused",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".set_time_fn(move || instant)",
+        "replacement": ".set_time_fn(move || instant - chrono::Duration::seconds(3600))",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "device exp refusal failed",
+    "test_macro": "refusal"
+  },
+  {
+    "label": "device-iat",
+    "oracle": "O19 device device-iat",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_future_iat_refused",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "if issued > latest_issue {",
+        "replacement": "if false && issued > latest_issue {",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "device iat refusal failed",
+    "test_macro": "refusal"
+  },
+  {
+    "label": "device-email-projection",
+    "oracle": "O19 device device-email-projection",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_es256_and_email_projection",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "let email_verified = claims.email_verified().unwrap_or(false);",
+        "replacement": "let email_verified = true;",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: !claims.email_verified"
+  },
+  {
+    "label": "device-unknownkid-refresh",
+    "oracle": "O19 device device-unknownkid-refresh",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_rotated_key_and_matching_multi_audience_accepted",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "let mut verified = self.verify(&client, &pending.metadata, device_token, no_nonce, now());",
+        "replacement": "let mut verified = self.verify(&client, &pending.metadata, device_token, no_nonce, now());\n        if matches!(&verified,Err(ClaimsVerificationError::SignatureVerification(SignatureVerificationError::NoMatchingKey))) { return Err(Error::Signature); }",
+        "start": "    async fn poll_device_inner",
+        "end": "    fn client("
+      }
+    ],
+    "expected_literal": "device rotated key not refreshed"
+  },
+  {
+    "label": "device-requires-id-token",
+    "oracle": "O19 device device-requires-id-token",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_missing_id_token_refused",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "let device_token = response.id_token().ok_or(Error::Token)?;",
+        "replacement": "let Some(device_token) = response.id_token() else { return Ok(VerifiedClaims { provider: self.label.clone(), iss: self.issuer.clone(), sub: \"fault\".into(), email: None, email_verified: false, hd: None, groups: vec![], preferred_username: None }); };",
+        "start": "    async fn poll_device_inner",
+        "end": "    fn client("
+      }
+    ],
+    "expected_literal": "device missing_token refusal failed",
+    "test_macro": "refusal"
+  },
+  {
+    "label": "device-canonical-google",
+    "oracle": "O19 device device-canonical-google",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_bare_google_refused",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "if body_has_bare_google_issuer(body.as_ref()) {",
+        "replacement": "if false {",
+        "start": "    async fn poll_device_inner",
+        "end": "    fn client("
+      }
+    ],
+    "expected_literal": "device bare_google refusal failed",
+    "test_macro": "refusal"
+  },
+  {
+    "label": "device-terminal-denial",
+    "oracle": "O19 device device-terminal-denial",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_terminal_denial_expiry_and_unsupported_do_not_retry",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "DeviceCodeErrorResponseType::AccessDenied => Error::Denied",
+        "replacement": "DeviceCodeErrorResponseType::AccessDenied => Error::Unavailable",
+        "start": "    async fn poll_device_inner",
+        "end": "    fn client("
+      }
+    ],
+    "expected_literal": "terminal device error classification failed"
+  },
+  {
+    "label": "device-fresh-clock",
+    "oracle": "O19 device device-fresh-clock",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_verification_wall_clock_sampled_after_http",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "let client = self.device_client(",
+        "replacement": "let cached_now = now();\n        let client = self.device_client(",
+        "start": "    async fn poll_device_inner",
+        "end": "    fn client("
+      },
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "self.verify(&client, &pending.metadata, device_token, no_nonce, now())",
+        "replacement": "self.verify(&client, &pending.metadata, device_token, no_nonce, cached_now)",
+        "start": "    async fn poll_device_inner",
+        "end": "    fn client("
+      },
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "self.verify(&retry, &updated, device_token, no_nonce, now())",
+        "replacement": "self.verify(&retry, &updated, device_token, no_nonce, cached_now)",
+        "start": "    async fn poll_device_inner",
+        "end": "    fn client("
+      }
+    ],
+    "expected_literal": "device verification clock sampled before token HTTP"
+  },
+  {
+    "oracle": "O19 device hard deadline",
+    "target": "lib",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "label": "device-outer-deadline",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_cancel_and_outer_deadline_stop_initial_wait",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "            pending.deadline,\n            self.poll_device_inner",
+        "replacement": "            pending.deadline + Duration::from_secs(300),\n            self.poll_device_inner",
+        "start": "    pub async fn poll_device(",
+        "end": "    async fn poll_device_inner"
+      }
+    ],
+    "expected_literal": "outer deadline waited for polling interval"
+  },
+  {
+    "oracle": "O19 device hard deadline",
+    "target": "lib",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "label": "device-jwks-deadline",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_jwks_refresh_checks_deadline_before_and_after_http",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "CoreJsonWebKeySet::fetch_async(pending.metadata.jwks_uri(), &http)",
+        "replacement": "CoreJsonWebKeySet::fetch_async(pending.metadata.jwks_uri(), &self.http)",
+        "start": "    async fn poll_device_inner",
+        "end": "    fn client("
+      }
+    ],
+    "expected_literal": "JWKS HTTP sent after device deadline"
+  },
+  {
+    "label": "device-authorization-refusal",
+    "oracle": "O19 device unsupported provider refusal",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::device_tests::device_authorization_endpoint_refusal_is_terminal_unsupported",
+    "test_file": "src/enroll_oidc_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "RequestTokenError::ServerResponse(_) => Error::DeviceUnsupported",
+        "replacement": "RequestTokenError::ServerResponse(_) => Error::Unavailable",
+        "start": "    async fn begin_device_with_clock(",
+        "end": "    fn device_client("
+      }
+    ],
+    "expected_literal": "device endpoint refusal lost unsupported classification"
+  },
+  {
+    "label": "device-consumer-terminal-fingerprint",
+    "oracle": "device-consumer-terminal-fingerprint",
+    "target": "lib",
+    "test": "enroll_device_consumer_tests::device_consumer_enrolls_then_receives_a_pattern_mailbox_and_replies_over_federation",
+    "test_file": "src/enroll_device_consumer_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_cli.rs",
+        "needle": "format!(\n            \"sha256:{}\",\n            hex::encode(sha2::Sha256::digest(projection.spki_der()))\n        )",
+        "replacement": "hex::encode(sha2::Sha256::digest(projection.spki_der()))"
+      }
+    ],
+    "expected_literal": "terminal key fingerprint omitted sha256: prefix"
+  },
+  {
+    "label": "device-consumer-flow-wire",
+    "oracle": "device-consumer-flow-wire",
+    "target": "lib",
+    "test": "enroll_device_consumer_tests::device_consumer_enrolls_then_receives_a_pattern_mailbox_and_replies_over_federation",
+    "test_file": "src/enroll_device_consumer_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_cli.rs",
+        "needle": "Flow::Device => \"device\",",
+        "replacement": "Flow::Device => \"loopback\","
+      }
+    ],
+    "expected_literal": "called `Result::unwrap()` on an `Err` value"
+  },
+  {
+    "label": "device-consumer-approval-uid",
+    "oracle": "device-consumer-approval-uid",
+    "target": "lib",
+    "test": "enroll_device_consumer_tests::device_approval_routes_require_local_uid_and_are_absent_from_public_routers",
+    "test_file": "src/enroll_device_consumer_tests.rs",
+    "edits": [
+      {
+        "file": "src/http.rs",
+        "needle": "if !credential.is_some_and(|credential| credential.uid == crate::agent::current_uid()) {",
+        "replacement": "if false && !credential.is_some_and(|credential| credential.uid == crate::agent::current_uid()) {",
+        "start": "fn local_enrollment(",
+        "end": "async fn enrollment_pending_handler("
+      }
+    ],
+    "expected_literal": "approval route accepted absent or wrong UID credentials"
+  },
+  {
+    "label": "device-consumer-public-route-exposure",
+    "oracle": "public approval route isolation (routing only; UID handler remains)",
+    "target": "lib",
+    "test": "enroll_device_consumer_tests::device_approval_routes_require_local_uid_and_are_absent_from_public_routers",
+    "test_file": "src/enroll_device_consumer_tests.rs",
+    "edits": [
+      {
+        "file": "src/http.rs",
+        "needle": ".route(\"/healthz\", get(healthz_handler))",
+        "replacement": ".route(\"/healthz\", get(healthz_handler))\n        .route(\"/v1/enrollment/pending\", get(enrollment_pending_handler))"
+      },
+      {
+        "file": "src/http.rs",
+        "needle": ".route(\"/v1/enrollment/pending\", get(enrollment_pending_handler))",
+        "replacement": "",
+        "start": "pub fn build_unix_router",
+        "end": "fn local_enrollment"
+      }
+    ],
+    "expected_literal": "public router exposed local enrollment approval route"
+  },
+  {
+    "label": "device-consumer-renew-force-reload",
+    "target": "lib",
+    "test": "enroll_device_consumer_tests::device_actual_auto_renewal_reloads_the_certificate_presented_on_the_next_outbound_dial",
+    "test_file": "src/enroll_device_consumer_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_cli.rs",
+        "needle": "reloader.force_reload()?;",
+        "replacement": "let _ = &reloader;",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "next outbound TLS connection presented the stale certificate serial",
+    "oracle": "device consumer renewal presents the fresh certificate on the next TLS dial"
+  },
+  {
+    "target": "gate_svlt_device_cli",
+    "test": "actual_device_binary_requires_operator_approval_then_renews_and_denies",
+    "test_file": "tests/gate_svlt_device_cli.rs",
+    "binaries": [
+      "xmsg"
+    ],
+    "label": "device-cli-main-registration",
+    "oracle": "actual daemon registers its local device approval authority",
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": "service.register_local_approval()?;",
+        "replacement": "let _ = &service;"
+      }
+    ],
+    "expected_literal": "device CLI exited before printing User code:"
+  },
+  {
+    "target": "gate_svlt_device_cli",
+    "test": "actual_device_binary_requires_operator_approval_then_renews_and_denies",
+    "test_file": "tests/gate_svlt_device_cli.rs",
+    "binaries": [
+      "xmsg"
+    ],
+    "label": "device-cli-main-public-router",
+    "oracle": "actual ordinary TCP listener excludes local approval routes; UID handler stays intact",
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": "let app = build_router(state.clone());",
+        "replacement": "let app = build_unix_router(state.clone());"
+      }
+    ],
+    "expected_literal": "actual public listener exposed local approval route"
+  },
+  {
+    "target": "gate_svlt_device_cli",
+    "test": "actual_device_binary_requires_operator_approval_then_renews_and_denies",
+    "test_file": "tests/gate_svlt_device_cli.rs",
+    "binaries": [
+      "xmsg"
+    ],
+    "label": "device-cli-operator-fingerprint-json",
+    "oracle": "actual operator approve command transmits the required fingerprint field",
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": ".json(&serde_json::json!({\"user\":user,\"host\":host,\"spki_sha256\":spki_sha256}))",
+        "replacement": ".json(&serde_json::json!({\"user\":user,\"host\":host}))"
+      }
+    ],
+    "expected_literal": "actual approve CLI failed:"
+  },
+  {
+    "target": "gate_svlt_device_cli",
+    "test": "actual_device_binary_requires_operator_approval_then_renews_and_denies",
+    "test_file": "tests/gate_svlt_device_cli.rs",
+    "binaries": [
+      "xmsg"
+    ],
+    "label": "device-cli-hyphen-approve",
+    "oracle": "hyphen-leading approve request IDs reach the CA through actual CLI argv",
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": "Approve {\n        #[arg(allow_hyphen_values = true)]\n        request_id: String,",
+        "replacement": "Approve {\n        request_id: String,"
+      }
+    ],
+    "expected_literal": "hyphen-leading approve request ID failed before reaching CA"
+  },
+  {
+    "target": "gate_svlt_device_cli",
+    "test": "actual_device_binary_requires_operator_approval_then_renews_and_denies",
+    "test_file": "tests/gate_svlt_device_cli.rs",
+    "binaries": [
+      "xmsg"
+    ],
+    "label": "device-cli-hyphen-deny",
+    "oracle": "hyphen-leading deny request IDs reach the CA through actual CLI argv",
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": "Deny {\n        #[arg(allow_hyphen_values = true)]\n        request_id: String,",
+        "replacement": "Deny {\n        request_id: String,"
+      }
+    ],
+    "expected_literal": "hyphen-leading deny request ID failed before reaching CA"
+  },
+  {
+    "label": "device-invariant-local-facility",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::enabled_device_requires_local_registration_before_provider_work",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "if is_device && !service.local_approval.load(Ordering::Acquire) {",
+        "replacement": "if false {",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "device started without local approval facility"
+  },
+  {
+    "label": "device-invariant-global-cap",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::device_global_cap_keeps_older_requests_and_deny_releases_permit",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": ">= 8",
+        "replacement": ">= 800",
+        "start": "async fn create(",
+        "end": "async fn code("
+      }
+    ],
+    "expected_literal": "ninth device reservation admitted"
+  },
+  {
+    "label": "device-invariant-ip-cap",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::device_ip_cap_precedes_provider_and_deny_releases_same_ip",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": ".any(|s| s.ip == peer.ip && s.device_active.load(Ordering::Acquire))",
+        "replacement": ".any(|s| false && s.ip == peer.ip && s.device_active.load(Ordering::Acquire))",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "second same-IP device admitted"
+  },
+  {
+    "label": "device-invariant-permit-release",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::device_global_cap_keeps_older_requests_and_deny_releases_permit",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "self.device_active.store(false, Ordering::Release);",
+        "replacement": "self.device_active.store(true, Ordering::Release);",
+        "start": "    fn cancel(&self) {",
+        "end": "struct Reservation"
+      }
+    ],
+    "expected_literal": "deny retained active device permit"
+  },
+  {
+    "label": "device-invariant-cancel-flag",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::device_global_cap_keeps_older_requests_and_deny_releases_permit",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "self.cancelled.store(true, Ordering::Release);",
+        "replacement": "self.cancelled.store(false, Ordering::Release);",
+        "start": "    fn cancel(&self) {",
+        "end": "struct Reservation"
+      }
+    ],
+    "expected_literal": "deny failed to cancel provider task"
+  },
+  {
+    "label": "device-invariant-mono-expiry",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::exact_monotonic_expiry_refuses_with_valid_wall_clock",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": ".is_some_and(|limit| clock.monotonic_now() >= limit)",
+        "replacement": ".is_some_and(|_limit| false)",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "monotonic equality permitted issuance"
+  },
+  {
+    "label": "device-invariant-effect-deadline",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::real_approval_rechecks_deadline_after_sql_mutex_wait",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "|| !session.expired(self.clock.as_ref()) && !session.cancelled.load(Ordering::Acquire),",
+        "replacement": "|| true,",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "SQL wait deadline did not refuse actual approval"
+  },
+  {
+    "label": "device-invariant-completion-consume",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::completed_device_approval_cannot_issue_twice",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "*phase = Phase::Complete(result.map_err(|error| SessionFailure::reason(error.code())));",
+        "replacement": "drop(result);",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "completed approval replay issued another certificate"
+  },
+  {
+    "label": "device-invariant-late-deny",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::approval_owns_phase_until_complete_then_deny_replay_and_collect_refuse",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "if !matches!(\n            *phase,\n            Phase::Preparing | Phase::DevicePolling | Phase::AwaitingApproval(_)\n        )",
+        "replacement": "if false",
+        "start": "    pub(crate) fn deny_device(",
+        "end": null
+      }
+    ],
+    "expected_literal": "late denial overwrote completed issuance"
+  },
+  {
+    "label": "device-invariant-approval-wait",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::completed_device_approval_cannot_issue_twice",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "*phase = Phase::AwaitingApproval(AwaitingApproval { claims, projection });",
+        "replacement": "let _issued = service.ca.issue(&claims, &session.csr, &session.host, &names(&service), service.clock.now());\n            *phase = Phase::AwaitingApproval(AwaitingApproval { claims, projection });",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "provider authorization wrote without local approval"
+  },
+  {
+    "label": "device-invariant-policy-current",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::changed_policy_cannot_remap_protocol_approval",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "|| approved.policy_digest != proposed.policy_digest",
+        "replacement": "|| false",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "protocol reused approval across policy revision"
+  },
+  {
+    "label": "device-invariant-drop-cancel",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::service_drop_cancels_pending_and_restart_has_no_approval",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "session.cancel();",
+        "replacement": "let _ = session;",
+        "start": "impl Drop for Service {",
+        "end": "impl Service {"
+      }
+    ],
+    "expected_literal": "service drop did not cancel device session"
+  },
+  {
+    "label": "device-invariant-cancel-notify",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::service_drop_cancels_pending_and_restart_has_no_approval",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "self.cancel.notify_waiters();",
+        "replacement": "let _ = &self.cancel;",
+        "start": "    fn cancel(&self) {",
+        "end": "struct Reservation"
+      }
+    ],
+    "expected_literal": "service drop left provider polling active"
+  },
+  {
+    "label": "device-invariant-trace-session",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::device_trace_and_every_sqlite_column_exclude_secrets",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "let pending = provider.begin_device().await.map_err(oidc_failure)?;",
+        "replacement": "tracing::debug!(leak = %handle);\n    let pending = provider.begin_device().await.map_err(oidc_failure)?;",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "device trace leaked transient secret"
+  },
+  {
+    "label": "device-invariant-trace-user-code",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::device_trace_and_every_sqlite_column_exclude_secrets",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "let code = pending.user_code();",
+        "replacement": "let code = pending.user_code();\n    tracing::debug!(leak = %code);",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "device trace leaked transient secret"
+  },
+  {
+    "label": "device-invariant-sqlite-session",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::device_trace_and_every_sqlite_column_exclude_secrets",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "let pending = provider.begin_device().await.map_err(oidc_failure)?;",
+        "replacement": "let pending = provider.begin_device().await.map_err(oidc_failure)?;\n    service.fed.db.lock().unwrap().execute_batch(\"CREATE TABLE invariant_debug(value TEXT)\").unwrap();\n    service.fed.db.lock().unwrap().execute(\"INSERT INTO invariant_debug VALUES(?1)\", [&handle]).unwrap();",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "device SQLite column stored transient secret"
+  },
+  {
+    "label": "device-invariant-queued-collect",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::queued_collectors_behind_approval_have_one_certificate_result",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "Phase::Complete(result) => Some(result),",
+        "replacement": "Phase::Complete(result) => { let copy=match &result { Ok(v)=>Ok(v.clone()), Err(v)=>Err(SessionFailure{reason:v.reason,rule:v.rule}) }; *phase=Phase::Complete(copy); Some(result) },",
+        "start": "",
+        "end": ""
+      },
+      {
+        "file": "src/enroll.rs",
+        "needle": "service.sessions.lock().unwrap().remove(handle);",
+        "replacement": "let _ = handle;",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "queued collectors received duplicate or missing certificate result"
+  },
+  {
+    "label": "device-invariant-failure-permit",
+    "oracle": "D5-D8 protocol lifecycle and hygiene",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::terminal_projection_denial_releases_device_permit_without_eviction",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "session.device_active.store(false, Ordering::Release);",
+        "replacement": "session.device_active.store(true, Ordering::Release);",
+        "start": "fn fail(",
+        "end": "fn valid_verification_uri("
+      }
+    ],
+    "expected_literal": "terminal failure retained active device permit"
+  },
+  {
+    "label": "device-invariant-trace-raw-device",
+    "oracle": "D5-D8 protocol lifecycle and hygiene",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::device_trace_and_every_sqlite_column_exclude_secrets",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "let lifetime = details.expires_in().min(Duration::from_secs(300));",
+        "replacement": "tracing::debug!(leak = %details.device_code().secret());\n        let lifetime = details.expires_in().min(Duration::from_secs(300));",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "device trace leaked transient secret"
+  },
+  {
+    "label": "device-invariant-sqlite-schema-session",
+    "oracle": "D5-D8 protocol lifecycle and hygiene",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::device_trace_and_every_sqlite_column_exclude_secrets",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "let pending = provider.begin_device().await.map_err(oidc_failure)?;",
+        "replacement": "let pending = provider.begin_device().await.map_err(oidc_failure)?;\n    service.fed.db.lock().unwrap().execute_batch(&format!(\"CREATE TABLE invariant_debug(value TEXT DEFAULT '{}')\", handle)).unwrap();",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "device SQLite column stored transient secret"
+  },
+  {
+    "label": "device-invariant-queued-collect-phase",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::queued_collectors_behind_approval_have_one_certificate_result",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "Phase::Complete(result) => Some(result),",
+        "replacement": "Phase::Complete(result) => { let copy=match &result { Ok(v)=>Ok(v.clone()), Err(v)=>Err(SessionFailure{reason:v.reason,rule:v.rule}) }; *phase=Phase::Complete(copy); Some(result) },",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "queued collectors received duplicate or missing certificate result"
+  },
+  {
+    "label": "device-invariant-publication-after-deny",
+    "oracle": "D7 denied terminal state survives late verified projection publication; no auth-grant claim",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::denied_device_cannot_be_resurrected_by_verified_claim_publication",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "if matches!(*phase, Phase::DevicePolling) && !session.cancelled.load(Ordering::Acquire) {",
+        "replacement": "if true {",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "denied device request was resurrected by late publication"
   }
 ]
