@@ -814,3 +814,222 @@ fn invalid_host_segment_is_refused_without_rewriting() {
     );
     assert!(s.ca.list().unwrap().is_empty());
 }
+
+fn device_setup() -> Setup {
+    let s = Setup::new();
+    let mut p = policy();
+    p["providers"]["idp"]["clients"]["device"] = serde_json::json!({"client_id":"D"});
+    p["providers"]["idp"]["device"] = serde_json::json!({"enabled":true});
+    s.replace(p);
+    s
+}
+fn effect_counts(s: &Setup) -> Vec<i64> {
+    let db = s.db.lock().unwrap();
+    ["enroll_bindings", "enroll_rates", "enroll_certs"]
+        .iter()
+        .map(|table| {
+            db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap()
+        })
+        .collect()
+}
+#[test]
+fn device_projection_is_read_only_and_approved_issue_succeeds() {
+    let s = device_setup();
+    let request = csr(false);
+    let c = claims("alice-id");
+    let proposed = s.ca.project_device(&c, &request, "laptop", &[]).unwrap();
+    assert_eq!(proposed.user(), "alice");
+    assert_eq!(proposed.issuer(), c.iss);
+    assert_eq!(proposed.sub(), c.sub);
+    assert_eq!(proposed.host(), "laptop");
+    assert_eq!(proposed.node_name(), "alice.laptop");
+    assert_eq!(proposed.spki_sha256(), spki_hash(&request.spki_der()));
+    assert_eq!(
+        effect_counts(&s),
+        [0, 0, 0],
+        "projection spent enrollment effects before approval"
+    );
+    let issued =
+        s.ca.issue_device_approved(&c, &request, "laptop", &[], &proposed, NOW, || true)
+            .unwrap();
+    assert_eq!(issued.uri, "spiffe://example.org/host/laptop/user/alice");
+    assert_eq!(effect_counts(&s), [1, 1, 1]);
+}
+#[test]
+fn device_approval_refuses_each_projection_mismatch_without_effects() {
+    let s = device_setup();
+    let request = csr(false);
+    let c = claims("alice-id");
+    let proposed = s.ca.project_device(&c, &request, "laptop", &[]).unwrap();
+    for field in [
+        "provider",
+        "user",
+        "issuer",
+        "sub",
+        "host",
+        "node_name",
+        "spki_sha256",
+        "policy_digest",
+    ] {
+        let mut altered = proposed.clone();
+        match field {
+            "provider" => altered.provider.push('x'),
+            "user" => altered.user.push('x'),
+            "issuer" => altered.issuer.push('x'),
+            "sub" => altered.sub.push('x'),
+            "host" => altered.host.push('x'),
+            "node_name" => altered.node_name.push('x'),
+            "spki_sha256" => altered.spki_sha256.push('x'),
+            _ => altered.policy_digest.push(0),
+        }
+        assert!(
+            matches!(
+                s.ca.issue_device_approved(&c, &request, "laptop", &[], &altered, NOW, || true),
+                Err(Error::ApprovalMismatch)
+            ),
+            "approval accepted changed {field}"
+        );
+        assert_eq!(
+            effect_counts(&s),
+            [0, 0, 0],
+            "mismatch wrote effects: {field}"
+        );
+    }
+    assert!(
+        matches!(
+            s.ca.issue_device_approved(
+                &claims("other-id"),
+                &request,
+                "laptop",
+                &[],
+                &proposed,
+                NOW,
+                || true
+            ),
+            Err(Error::ApprovalMismatch)
+        ),
+        "same-user different principal accepted"
+    );
+    assert!(
+        matches!(
+            s.ca.issue_device_approved(&c, &csr(false), "laptop", &[], &proposed, NOW, || true),
+            Err(Error::ApprovalMismatch)
+        ),
+        "different CSR accepted"
+    );
+    assert_eq!(effect_counts(&s), [0, 0, 0]);
+}
+#[test]
+fn device_approval_invalidated_by_current_policy_and_reserved_name() {
+    let s = device_setup();
+    let request = csr(false);
+    let c = claims("alice-id");
+    let proposed = s.ca.project_device(&c, &request, "laptop", &[]).unwrap();
+    assert!(matches!(
+        s.ca.issue_device_approved(
+            &c,
+            &request,
+            "laptop",
+            &["alice.laptop".into()],
+            &proposed,
+            NOW,
+            || true
+        ),
+        Err(Error::ReservedName)
+    ));
+    let mut p = policy();
+    p["providers"]["idp"]["clients"]["device"] = serde_json::json!({"client_id":"D"});
+    p["providers"]["idp"]["device"] = serde_json::json!({"enabled":true});
+    p["issue_per_hour"] = 7.into();
+    s.replace(p);
+    assert!(
+        matches!(
+            s.ca.issue_device_approved(&c, &request, "laptop", &[], &proposed, NOW, || true),
+            Err(Error::ApprovalMismatch)
+        ),
+        "policy change reused old approval"
+    );
+    assert_eq!(effect_counts(&s), [0, 0, 0]);
+    let fresh = s.ca.project_device(&c, &request, "laptop", &[]).unwrap();
+    s.ca.issue_device_approved(&c, &request, "laptop", &[], &fresh, NOW, || true)
+        .unwrap();
+}
+#[test]
+fn device_guard_runs_after_database_wait_before_any_effect() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let s = device_setup();
+    let request = csr(false);
+    let c = claims("alice-id");
+    let proposed = s.ca.project_device(&c, &request, "laptop", &[]).unwrap();
+    let valid = AtomicBool::new(true);
+    let called = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let locked = s.db.lock().unwrap();
+        let (sent, recv) = std::sync::mpsc::channel();
+        let (s, c, request, proposed, called, valid) =
+            (&s, &c, &request, &proposed, &called, &valid);
+        let worker = scope.spawn(move || {
+            sent.send(()).unwrap();
+            s.ca.issue_device_approved(c, request, "laptop", &[], proposed, NOW, || {
+                assert!(
+                    s.db.try_lock().is_err(),
+                    "approval guard ran before SQL mutex acquisition"
+                );
+                called.store(true, Ordering::SeqCst);
+                valid.load(Ordering::SeqCst)
+            })
+        });
+        recv.recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        valid.store(false, Ordering::SeqCst);
+        drop(locked);
+        assert!(
+            matches!(worker.join().unwrap(), Err(Error::ApprovalExpired)),
+            "expired guard accepted after SQL wait"
+        );
+    });
+    assert!(called.load(Ordering::SeqCst));
+    assert_eq!(
+        effect_counts(&s),
+        [0, 0, 0],
+        "expired approval spent effects"
+    );
+}
+
+#[test]
+fn device_deadline_during_issuance_rolls_back_all_effects_and_supersession() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let s = device_setup();
+    let c = claims("alice-id");
+    let old = s.ca.issue(&c, &csr(false), "laptop", &[], NOW).unwrap();
+    let before = effect_counts(&s);
+    let request = csr(false);
+    let proposed = s.ca.project_device(&c, &request, "laptop", &[]).unwrap();
+    let calls = AtomicUsize::new(0);
+    assert!(
+        matches!(
+            s.ca.issue_device_approved(&c, &request, "laptop", &[], &proposed, NOW, || calls
+                .fetch_add(1, Ordering::SeqCst)
+                == 0),
+            Err(Error::ApprovalExpired)
+        ),
+        "deadline during signing committed enrollment"
+    );
+    assert_eq!(effect_counts(&s), before, "expired signing spent effects");
+    let superseded: Option<i64> =
+        s.db.lock()
+            .unwrap()
+            .query_row(
+                "SELECT superseded_at FROM enroll_certs WHERE serial=?1",
+                [&old.serial],
+                |r| r.get(0),
+            )
+            .unwrap();
+    assert_eq!(
+        superseded, None,
+        "expired signing superseded existing certificate"
+    );
+    s.ca.issue_device_approved(&c, &request, "laptop", &[], &proposed, NOW, || true)
+        .unwrap();
+}
