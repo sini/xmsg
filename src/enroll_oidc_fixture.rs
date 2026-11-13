@@ -221,6 +221,21 @@ impl Fixture {
             .overrides
             .insert(claim.into(), value);
     }
+    pub(crate) fn set_code_signing(
+        &self,
+        code: &str,
+        alg: &str,
+        kid: &str,
+        bad_signature: bool,
+        hmac_modulus: bool,
+    ) {
+        let mut shared = self.shared.lock().unwrap();
+        let mode = shared.codes.get_mut(code).unwrap();
+        mode.alg = alg.into();
+        mode.kid = kid.into();
+        mode.bad_signature = bad_signature;
+        mode.hmac_modulus = hmac_modulus;
+    }
     pub(crate) fn request_paths(&self) -> Vec<String> {
         self.shared.lock().unwrap().requests.clone()
     }
@@ -750,6 +765,7 @@ async fn reusable_fixture_codes_are_one_shot_and_use_the_requested_clock() {
         .unwrap();
     let (code, state) = fixture.authorize(&pending.authorization_url);
     fixture.set_code_claim(&code, "email_verified", json!(false));
+    fixture.set_code_signing(&code, "RS256", "rsa", false, false);
     let claims = provider
         .exchange(pending, &code, &state, &|| now)
         .await
