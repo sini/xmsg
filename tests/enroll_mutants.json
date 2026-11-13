@@ -3257,5 +3257,73 @@
       }
     ],
     "expected_literal": "denied device request was resurrected by late publication"
+  },
+  {
+    "label": "device-invariant-approved-permit-release",
+    "oracle": "D6 success releases device subcap before collect while retaining common record",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::approved_completion_releases_device_permit_before_certificate_collection",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "session.device_active.store(false, Ordering::Release);",
+        "replacement": "session.device_active.store(true, Ordering::Release);",
+        "start": "    pub(crate) fn approve_device(",
+        "end": "    pub(crate) fn deny_device("
+      }
+    ],
+    "expected_literal": "approved completion did not release source-IP permit before collect"
+  },
+  {
+    "label": "device-invariant-operator-user",
+    "oracle": "D5 local operator confirmation input equality; distinct from CA opaque-projection check",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::signed_device_authorization_waits_for_exact_local_approval_and_collects_once",
+    "test_file": "src/enroll_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "body.user != p.user()",
+        "replacement": "false",
+        "start": "    pub(crate) fn approve_device(",
+        "end": "    pub(crate) fn deny_device("
+      }
+    ],
+    "expected_literal": "wrong approval accepted"
+  },
+  {
+    "label": "device-invariant-operator-host",
+    "oracle": "D5 local operator confirmation input equality; distinct from CA opaque-projection check",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::signed_device_authorization_waits_for_exact_local_approval_and_collects_once",
+    "test_file": "src/enroll_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "body.host != p.host()",
+        "replacement": "false",
+        "start": "    pub(crate) fn approve_device(",
+        "end": "    pub(crate) fn deny_device("
+      }
+    ],
+    "expected_literal": "wrong approval accepted"
+  },
+  {
+    "label": "device-invariant-operator-spki_sha256",
+    "oracle": "D5 local operator confirmation input equality; distinct from CA opaque-projection check",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::signed_device_authorization_waits_for_exact_local_approval_and_collects_once",
+    "test_file": "src/enroll_device_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "body.spki_sha256 != p.spki_sha256()",
+        "replacement": "false",
+        "start": "    pub(crate) fn approve_device(",
+        "end": "    pub(crate) fn deny_device("
+      }
+    ],
+    "expected_literal": "wrong approval accepted"
   }
 ]
