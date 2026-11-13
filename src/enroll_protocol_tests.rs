@@ -652,6 +652,15 @@ async fn protocol_later_connections_require_reserved_ca_identity() {
             .is_err(),
         "later connection accepted an enrolled host as the CA"
     );
+    let fresh = enroll_client::http_client(&trust, None).unwrap();
+    assert!(
+        fresh
+            .get(format!("{bad_url}/enroll/v1/sessions"))
+            .send()
+            .await
+            .is_err(),
+        "later connection accepted an enrolled host as the CA"
+    );
     bad_task.abort();
     task.abort();
 }
