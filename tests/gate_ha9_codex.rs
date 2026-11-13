@@ -7524,7 +7524,11 @@ async fn va41_eight_item_bound_retains_recovery_until_scheduled_remainder() {
     .await
     .unwrap()
     .message_id;
-    storage::mark_codex_handoff_unknown(&env.state.db.lock().unwrap(), &[unknown.clone()]).unwrap();
+    storage::mark_codex_handoff_unknown(
+        &env.state.db.lock().unwrap(),
+        std::slice::from_ref(&unknown),
+    )
+    .unwrap();
     let mut ids = Vec::new();
     for index in 0..9 {
         ids.push(
