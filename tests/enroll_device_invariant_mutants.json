@@ -1,0 +1,274 @@
+[
+  {
+    "label": "device-invariant-local-facility",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::enabled_device_requires_local_registration_before_provider_work",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "if is_device && !service.local_approval.load(Ordering::Acquire) {",
+        "replacement": "if false {",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "device started without local approval facility"
+  },
+  {
+    "label": "device-invariant-global-cap",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::device_global_cap_keeps_older_requests_and_deny_releases_permit",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": ">= 8",
+        "replacement": ">= 800",
+        "start": "async fn create(",
+        "end": "async fn code("
+      }
+    ],
+    "expected_literal": "ninth device reservation admitted"
+  },
+  {
+    "label": "device-invariant-ip-cap",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::device_ip_cap_precedes_provider_and_deny_releases_same_ip",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": ".any(|s| s.ip == peer.ip && s.device_active.load(Ordering::Acquire))",
+        "replacement": ".any(|s| false && s.ip == peer.ip && s.device_active.load(Ordering::Acquire))",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "second same-IP device admitted"
+  },
+  {
+    "label": "device-invariant-permit-release",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::device_global_cap_keeps_older_requests_and_deny_releases_permit",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "self.device_active.store(false, Ordering::Release);",
+        "replacement": "self.device_active.store(true, Ordering::Release);",
+        "start": "    fn cancel(&self) {",
+        "end": "struct Reservation"
+      }
+    ],
+    "expected_literal": "deny retained active device permit"
+  },
+  {
+    "label": "device-invariant-cancel-flag",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::device_global_cap_keeps_older_requests_and_deny_releases_permit",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "self.cancelled.store(true, Ordering::Release);",
+        "replacement": "self.cancelled.store(false, Ordering::Release);",
+        "start": "    fn cancel(&self) {",
+        "end": "struct Reservation"
+      }
+    ],
+    "expected_literal": "deny failed to cancel provider task"
+  },
+  {
+    "label": "device-invariant-mono-expiry",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::exact_monotonic_expiry_refuses_with_valid_wall_clock",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": ".is_some_and(|limit| clock.monotonic_now() >= limit)",
+        "replacement": ".is_some_and(|_limit| false)",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "monotonic equality permitted issuance"
+  },
+  {
+    "label": "device-invariant-effect-deadline",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::real_approval_rechecks_deadline_after_sql_mutex_wait",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "|| !session.expired(self.clock.as_ref()) && !session.cancelled.load(Ordering::Acquire),",
+        "replacement": "|| true,",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "SQL wait deadline did not refuse actual approval"
+  },
+  {
+    "label": "device-invariant-completion-consume",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::completed_device_approval_cannot_issue_twice",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "*phase = Phase::Complete(result.map_err(|error| SessionFailure::reason(error.code())));",
+        "replacement": "drop(result);",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "completed approval replay issued another certificate"
+  },
+  {
+    "label": "device-invariant-late-deny",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::approval_owns_phase_until_complete_then_deny_replay_and_collect_refuse",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "if !matches!(\n            *phase,\n            Phase::Preparing | Phase::DevicePolling | Phase::AwaitingApproval(_)\n        )",
+        "replacement": "if false",
+        "start": "    pub(crate) fn deny_device(",
+        "end": null
+      }
+    ],
+    "expected_literal": "late denial overwrote completed issuance"
+  },
+  {
+    "label": "device-invariant-approval-wait",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::completed_device_approval_cannot_issue_twice",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "*phase = Phase::AwaitingApproval(AwaitingApproval { claims, projection });",
+        "replacement": "let _issued = service.ca.issue(&claims, &session.csr, &session.host, &names(&service), service.clock.now());\n            *phase = Phase::AwaitingApproval(AwaitingApproval { claims, projection });",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "provider authorization wrote without local approval"
+  },
+  {
+    "label": "device-invariant-policy-current",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::changed_policy_cannot_remap_protocol_approval",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "|| approved.policy_digest != proposed.policy_digest",
+        "replacement": "|| false",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "protocol reused approval across policy revision"
+  },
+  {
+    "label": "device-invariant-drop-cancel",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::service_drop_cancels_pending_and_restart_has_no_approval",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "session.cancel();",
+        "replacement": "let _ = session;",
+        "start": "impl Drop for Service {",
+        "end": "impl Service {"
+      }
+    ],
+    "expected_literal": "service drop did not cancel device session"
+  },
+  {
+    "label": "device-invariant-cancel-notify",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::service_drop_cancels_pending_and_restart_has_no_approval",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "self.cancel.notify_waiters();",
+        "replacement": "let _ = &self.cancel;",
+        "start": "    fn cancel(&self) {",
+        "end": "struct Reservation"
+      }
+    ],
+    "expected_literal": "service drop left provider polling active"
+  },
+  {
+    "label": "device-invariant-trace-session",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::device_trace_and_every_sqlite_column_exclude_secrets",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "let pending = provider.begin_device().await.map_err(oidc_failure)?;",
+        "replacement": "tracing::debug!(leak = %handle);\n    let pending = provider.begin_device().await.map_err(oidc_failure)?;",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "device trace leaked transient secret"
+  },
+  {
+    "label": "device-invariant-trace-user-code",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::device_trace_and_every_sqlite_column_exclude_secrets",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "let code = pending.user_code();",
+        "replacement": "let code = pending.user_code();\n    tracing::debug!(leak = %code);",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "device trace leaked transient secret"
+  },
+  {
+    "label": "device-invariant-sqlite-session",
+    "oracle": "D1/D5-D8 device protocol invariants",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::device_trace_and_every_sqlite_column_exclude_secrets",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "let pending = provider.begin_device().await.map_err(oidc_failure)?;",
+        "replacement": "let pending = provider.begin_device().await.map_err(oidc_failure)?;\n    service.fed.db.lock().unwrap().execute_batch(\"CREATE TABLE invariant_debug(value TEXT)\").unwrap();\n    service.fed.db.lock().unwrap().execute(\"INSERT INTO invariant_debug VALUES(?1)\", [&handle]).unwrap();",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "device SQLite column stored transient secret"
+  }
+]

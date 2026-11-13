@@ -154,3 +154,6 @@ async fn signed_device_authorization_waits_for_exact_local_approval_and_collects
         .await;
     assert_eq!(status, StatusCode::GONE);
 }
+
+#[path = "enroll_device_invariant_tests.rs"]
+mod invariants;
