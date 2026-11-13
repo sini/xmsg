@@ -15,6 +15,7 @@ use xmsg::storage;
 
 mod operator;
 mod service_exec;
+mod watch;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -31,6 +32,9 @@ struct Cli {
 enum Commands {
     /// List mesh recipients and node status
     List(operator::ListArgs),
+
+    /// Watch recipient roster snapshots through the local daemon
+    Watch(watch::WatchArgs),
 
     /// Send a message through the local daemon
     Send(operator::SendArgs),
@@ -347,6 +351,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::List(args) => operator::list(args)?,
+        Commands::Watch(args) => {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(watch::run(args))?;
+        }
         Commands::Send(args) => operator::send(args)?,
         Commands::Replies(args) => operator::replies(args)?,
         Commands::Show(args) => operator::show(args)?,

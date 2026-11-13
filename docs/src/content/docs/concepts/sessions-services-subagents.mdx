@@ -103,3 +103,14 @@ subagent. `list` shows live bound subagents with `kind: "subagent"`.
 | [opencode](/harnesses/opencode/) (1.x & 2.x) | `<P>/<child_ses>@<node>` | Child sessions walk `parentID` to root `P`, bind via `subagent` (`start`/`stop`/`end`) on `register.sock`, and pass `as_agent` on `xmsg_send`, `xmsg_reply`, and `xmsg_inbox`. |
 | [Hermes](/harnesses/hermes/) | Root `<P>@<node>` | `delegate_task` subagents act as their root conversation `P` and do not bind separate sub-addresses. |
 | [Pi](/harnesses/pi/) | None | Single-session process; no subagent sub-addresses. |
+
+## Watch the recipient roster (planned)
+
+Run `xmsg watch` from your local owner terminal to follow live and inactive recipients and
+node reachability. The view groups identities by node, kind and harness, using the website
+demo's participant vocabulary without inventing its message-flow animation. Refresh age and
+partial/stale states distinguish an old snapshot from a currently reachable session.
+
+Watch uses existing read endpoints over `http.sock`; it records no bodies and reads no harness
+transcripts. `xmsg watch --once --plain` gives one bounded snapshot for a pipe. See the
+[CLI reference](/reference/cli-and-mcp/#xmsg-watch-planned) for refresh, socket and limit details.
