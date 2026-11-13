@@ -152,6 +152,9 @@ Lists recipients the caller may see on this node and every reachable peer:
   - `"live"` is the default. Each entry has `registered_at`, in epoch seconds.
   - `"inactive"` shows the `parked` and `closed` instances that xmsg saw within `within` seconds.
     The default is `86400` (24 hours). The maximum is the reply TTL. Each entry has `last_seen`.
+    **Planned:** startup Codex roots with queued recovery work appear here as
+    `awaiting_reattestation` until verified delivery can resume. They are excluded from the default
+    live list; deliberate parking and revoked or closed roots keep their existing states.
 - **`kind`:** Filter by `"service"`, `"instance"`, or `"subagent"`.
 - **`name`:** Filter by service name or instance label.
 - **`node`:** An exact canonical name or local nickname queries one node. A bare-host selector queries all matching nodes in the current view; see [node selectors](/concepts/addressing/#node-selectors).

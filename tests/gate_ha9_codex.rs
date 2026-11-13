@@ -7001,3 +7001,953 @@ async fn attachment_operations_reattest_known_codex_root_after_restart() {
         }
     }
 }
+
+async fn va41_restart_fixture(root: &str) -> CodexTestEnv {
+    let env = CodexTestEnv::new();
+    let pid = std::process::id();
+    let start = xmsg::process::starttime(Path::new(xmsg::process::LIVE_PROC_ROOT), pid).unwrap();
+    env.write_fake_proc(pid, 1, &start, &env.codex_exe);
+    env.create_writer_lock(&env.codex_home, pid, root, 3);
+    env.write_root_rollout(&env.codex_home, root, "/workspace");
+    handle_codex_hook_frame(
+        &env.state,
+        &env.peer(pid),
+        "SessionStart",
+        None,
+        &json!({"session_id":root,"source":"startup"}),
+    )
+    .await
+    .unwrap();
+    restart_codex_fixture(&env);
+    env
+}
+
+fn va41_listener(env: &CodexTestEnv) -> UnixListener {
+    let ctrl = env.codex_home.join("app-server-control");
+    fs::create_dir_all(&ctrl).unwrap();
+    fs::set_permissions(&ctrl, fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = ctrl.join("app-server-control.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    listener
+}
+
+async fn va41_accept_turn(listener: UnixListener, root: &'static str) -> Value {
+    let (mut stream, _) = listener.accept().await.unwrap();
+    mock_ws_accept(&mut stream).await;
+    while let Some(message) = mock_ws_read_client_text(&mut stream).await {
+        let result = match message["method"].as_str().unwrap_or("") {
+            "initialize" => json!({"userAgent":"fixture"}),
+            "thread/loaded/list" => json!({"data":[root]}),
+            "turn/start" => json!({"turn":{"id":"va41-turn"}}),
+            _ => continue,
+        };
+        mock_ws_write_server_text(
+            &mut stream,
+            &json!({"jsonrpc":"2.0","id":message["id"],"result":result}).to_string(),
+        )
+        .await;
+        if message["method"] == "turn/start" {
+            return message;
+        }
+    }
+    panic!("relay disconnected before turn/start")
+}
+
+#[tokio::test]
+async fn va41_restart_queued_message_wakes_without_mcp_or_hook() {
+    const ROOT: &str = "019a0000-0000-7000-8000-000000000481";
+    let env = va41_restart_fixture(ROOT).await;
+    let listener = va41_listener(&env);
+    let mut server = tokio::spawn(va41_accept_turn(listener, ROOT));
+    let sent = xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        ROOT,
+        "VA41_AUTO_WAKE",
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(sent.outcome, "delivered");
+    assert_eq!(
+        storage::get_message(&env.state.db.lock().unwrap(), &sent.message_id)
+            .unwrap()
+            .unwrap()
+            .outcome,
+        "delivered"
+    );
+    let turn = tokio::time::timeout(Duration::from_secs(3), &mut server).await;
+    if turn.is_err() {
+        server.abort();
+    }
+    let turn = turn
+        .expect("VA41: restarted known root must receive turn/start without MCP or hook")
+        .unwrap();
+    assert!(turn["params"]["input"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("VA41_AUTO_WAKE"));
+    assert_eq!(
+        storage::get_codex_handoff_state(&env.state.db.lock().unwrap(), &sent.message_id)
+            .unwrap()
+            .unwrap()
+            .0,
+        "accepted"
+    );
+}
+
+#[tokio::test]
+async fn va41_restart_revoked_root_never_wakes() {
+    const ROOT: &str = "019a0000-0000-7000-8000-000000000482";
+    let env = va41_restart_fixture(ROOT).await;
+    let queued = xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        ROOT,
+        "VA41_BEFORE_REVOKE",
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        storage::get_codex_handoff_state(&env.state.db.lock().unwrap(), &queued.message_id)
+            .unwrap()
+            .unwrap()
+            .0,
+        "pending"
+    );
+    xmsg::agent::apply_codex_revoke(&env.state, ROOT, true).unwrap();
+    restart_codex_fixture(&env);
+    let listener = va41_listener(&env);
+    assert!(xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        ROOT,
+        "VA41_REVOKED",
+        None
+    )
+    .await
+    .is_err());
+    xmsg::codex::recover_restart_roots(&env.state).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err(),
+        "revoked root must not even open relay connection"
+    );
+    assert!(xmsg::codex::resolve_codex_root(&env.state.db, ROOT).is_none());
+}
+
+#[tokio::test]
+async fn va41_restart_moved_writer_lock_keeps_queue_and_never_wakes() {
+    const ROOT: &str = "019a0000-0000-7000-8000-000000000483";
+    let env = va41_restart_fixture(ROOT).await;
+    let lock = env
+        .codex_home
+        .join("thread-writer-locks")
+        .join(format!("{ROOT}.lock"));
+    fs::rename(&lock, lock.with_extension("moved")).unwrap();
+    fs::write(&lock, b"").unwrap();
+    let listener = va41_listener(&env);
+    let sent = xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        ROOT,
+        "VA41_MOVED",
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(sent.outcome, "queued");
+    xmsg::codex::recover_restart_roots(&env.state).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err(),
+        "moved writer lock must not open relay connection"
+    );
+    assert_eq!(
+        storage::get_codex_handoff_state(&env.state.db.lock().unwrap(), &sent.message_id)
+            .unwrap()
+            .unwrap()
+            .0,
+        "pending"
+    );
+}
+
+#[tokio::test]
+async fn va41_unavailable_relay_retries_without_another_message() {
+    const ROOT: &str = "019a0000-0000-7000-8000-000000000484";
+    let env = va41_restart_fixture(ROOT).await;
+    let sent = xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        ROOT,
+        "VA41_RETRY",
+        None,
+    )
+    .await
+    .unwrap();
+    xmsg::codex::recover_restart_roots(&env.state).await;
+    assert_eq!(
+        storage::get_codex_handoff_state(&env.state.db.lock().unwrap(), &sent.message_id)
+            .unwrap()
+            .unwrap()
+            .0,
+        "pending"
+    );
+    let listener = va41_listener(&env);
+    let mut server = tokio::spawn(va41_accept_turn(listener, ROOT));
+    let scheduler = tokio::spawn(xmsg::codex::run_restart_recovery(env.state.clone()));
+    let turn = tokio::time::timeout(Duration::from_secs(4), &mut server).await;
+    scheduler.abort();
+    let _ = scheduler.await;
+    if turn.is_err() {
+        server.abort();
+    }
+    assert!(turn
+        .expect("production retry scheduler must wake root without new message")
+        .unwrap()["params"]["input"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("VA41_RETRY"));
+}
+
+#[tokio::test]
+async fn va41_repeated_restart_retains_pending_recovery() {
+    const ROOT: &str = "019a0000-0000-7000-8000-000000000485";
+    let env = va41_restart_fixture(ROOT).await;
+    let sent = xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        ROOT,
+        "VA41_SECOND_RESTART",
+        None,
+    )
+    .await
+    .unwrap();
+    restart_codex_fixture(&env);
+    restart_codex_fixture(&env);
+    let pending: i64 = env
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT restart_pending FROM codex_roots WHERE root_id=?1",
+            [ROOT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        pending, 1,
+        "repeated restart must preserve durable recovery eligibility"
+    );
+    let mut server = tokio::spawn(va41_accept_turn(va41_listener(&env), ROOT));
+    xmsg::codex::recover_restart_roots(&env.state).await;
+    let turn = tokio::time::timeout(Duration::from_secs(3), &mut server).await;
+    if turn.is_err() {
+        server.abort();
+    }
+    turn.expect("second restart must still recover queued root")
+        .unwrap();
+    assert_eq!(
+        storage::get_codex_handoff_state(&env.state.db.lock().unwrap(), &sent.message_id)
+            .unwrap()
+            .unwrap()
+            .0,
+        "accepted"
+    );
+}
+
+#[tokio::test]
+async fn va41_deliberate_session_end_is_not_restart_recovery() {
+    const ROOT: &str = "019a0000-0000-7000-8000-000000000486";
+    let env = va41_restart_fixture(ROOT).await;
+    handle_codex_hook_frame(
+        &env.state,
+        &env.peer(std::process::id()),
+        "SessionStart",
+        None,
+        &json!({"session_id":ROOT,"source":"resume"}),
+    )
+    .await
+    .unwrap();
+    handle_codex_hook_frame(
+        &env.state,
+        &env.peer(std::process::id()),
+        "SessionEnd",
+        None,
+        &json!({"session_id":ROOT}),
+    )
+    .await
+    .unwrap();
+    let queued = xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        ROOT,
+        "VA41_PARKED",
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(queued.outcome, "queued");
+    restart_codex_fixture(&env);
+    let listener = va41_listener(&env);
+    xmsg::codex::recover_restart_roots(&env.state).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err(),
+        "deliberate SessionEnd must not be reopened by recovery"
+    );
+    assert!(xmsg::codex::resolve_codex_root(&env.state.db, ROOT).is_none());
+}
+
+#[tokio::test]
+async fn va41_bad_rollout_remains_queued_and_awaiting_reattestation() {
+    const ROOT: &str = "019a0000-0000-7000-8000-000000000487";
+    let env = va41_restart_fixture(ROOT).await;
+    let rollout = env.write_root_rollout(&env.codex_home, ROOT, "/workspace");
+    fs::write(rollout, format!("{}\n", json!({"type":"session_meta", "payload":{"id":"019a0000-0000-7000-8000-000000009999", "session_id":ROOT,"cwd":"/workspace"}}))).unwrap();
+    let listener = va41_listener(&env);
+    let sent = xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        ROOT,
+        "VA41_BAD_ROLLOUT",
+        None,
+    )
+    .await
+    .unwrap();
+    xmsg::codex::recover_restart_roots(&env.state).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        storage::get_codex_handoff_state(&env.state.db.lock().unwrap(), &sent.message_id)
+            .unwrap()
+            .unwrap()
+            .0,
+        "pending"
+    );
+    assert!(xmsg::codex::resolve_codex_root(&env.state.db, ROOT).is_none());
+    let list = xmsg::surface::list(
+        &env.state,
+        &xmsg::surface::ListQuery {
+            status: Some("inactive".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let list = serde_json::to_value(list).unwrap();
+    let entry = list["recipients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| {
+            entry["address"]
+                .as_str()
+                .is_some_and(|address| address.starts_with(ROOT))
+        })
+        .expect("recoverable root must remain visible in inactive list");
+    assert_eq!(entry["status"], "awaiting_reattestation");
+}
+
+#[tokio::test]
+async fn va41_auto_recovery_races_mcp_and_hook_with_one_carrier() {
+    const ROOT: &str = "019a0000-0000-7000-8000-000000000488";
+    let env = va41_restart_fixture(ROOT).await;
+    xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        ROOT,
+        "VA41_RACE",
+        None,
+    )
+    .await
+    .unwrap();
+    let listener = va41_listener(&env);
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        mock_ws_accept(&mut stream).await;
+        let mut reached = Some(reached_tx);
+        let mut release = Some(release_rx);
+        while let Some(message) = mock_ws_read_client_text(&mut stream).await {
+            let result = match message["method"].as_str().unwrap_or("") {
+                "initialize" => json!({"userAgent":"fixture"}),
+                "thread/loaded/list" => json!({"data":[ROOT]}),
+                "turn/start" => {
+                    reached.take().unwrap().send(()).unwrap();
+                    release.take().unwrap().await.unwrap();
+                    json!({"turn":{"id":"va41-race"}})
+                }
+                _ => continue,
+            };
+            mock_ws_write_server_text(
+                &mut stream,
+                &json!({"jsonrpc":"2.0","id":message["id"],"result":result}).to_string(),
+            )
+            .await;
+            if message["method"] == "turn/start" {
+                break;
+            }
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "racing drain must not open a second relay carrier"
+        );
+    });
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let state = env.state.clone();
+    let recovery = tokio::spawn(async move { xmsg::codex::recover_restart_roots(&state).await });
+    tokio::time::timeout(Duration::from_secs(3), reached_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let hook = handle_codex_hook_frame(
+        &env.state,
+        &env.peer(std::process::id()),
+        "UserPromptSubmit",
+        None,
+        &json!({"session_id":ROOT}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        hook.handoff_ids.is_empty(),
+        "hook must not duplicate automatic recovery reservation"
+    );
+    handle_agent_frame(
+        &env.state,
+        &env.peer(std::process::id()),
+        AgentFrame::List {
+            schema_version: None,
+            name: None,
+            node: None,
+            kind: None,
+            status: None,
+            within: None,
+            as_agent: None,
+            codex_session: Some(ROOT.into()),
+            codex_thread: Some(ROOT.into()),
+            codex_turn: None,
+        },
+    )
+    .await
+    .unwrap();
+    release_tx.send(()).unwrap();
+    recovery.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn va41_owner_starttime_change_clears_recovery_durably() {
+    const ROOT: &str = "019a0000-0000-7000-8000-000000000489";
+    let env = va41_restart_fixture(ROOT).await;
+    let pid = std::process::id();
+    let start = xmsg::process::starttime(Path::new(xmsg::process::LIVE_PROC_ROOT), pid).unwrap();
+    env.write_fake_proc(pid, 1, "999999999", &env.codex_exe);
+    xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        ROOT,
+        "VA41_CHANGED_OWNER",
+        None,
+    )
+    .await
+    .unwrap();
+    xmsg::codex::recover_restart_roots(&env.state).await;
+    let pending: i64 = env
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT restart_pending FROM codex_roots WHERE root_id=?1",
+            [ROOT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        pending, 0,
+        "owner identity change must durably cancel automatic recovery"
+    );
+    env.write_fake_proc(pid, 1, &start, &env.codex_exe);
+    restart_codex_fixture(&env);
+    let listener = va41_listener(&env);
+    xmsg::codex::recover_restart_roots(&env.state).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err(),
+        "restoring old witness must not revive cancelled recovery"
+    );
+    assert!(xmsg::codex::resolve_codex_root(&env.state.db, ROOT).is_none());
+}
+
+#[tokio::test]
+async fn va41_eight_item_bound_retains_recovery_until_scheduled_remainder() {
+    const ROOT: &str = "019a0000-0000-7000-8000-000000000490";
+    let env = va41_restart_fixture(ROOT).await;
+    let unknown = xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        ROOT,
+        "VA41_UNKNOWN_NO_REPLAY",
+        None,
+    )
+    .await
+    .unwrap()
+    .message_id;
+    storage::mark_codex_handoff_unknown(&env.state.db.lock().unwrap(), &[unknown.clone()]).unwrap();
+    let mut ids = Vec::new();
+    for index in 0..9 {
+        ids.push(
+            xmsg::surface::send(
+                &env.state,
+                &xmsg::surface::Sender::Anonymous("fixture".into()),
+                ROOT,
+                &format!("VA41_BATCH_{index}"),
+                None,
+            )
+            .await
+            .unwrap()
+            .message_id,
+        );
+    }
+    let inflight = xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        ROOT,
+        "VA41_INFLIGHT_NO_REPLAY",
+        None,
+    )
+    .await
+    .unwrap()
+    .message_id;
+    {
+        let db = env.state.db.lock().unwrap();
+        let generation = storage::get_codex_handoff_state(&db, &inflight)
+            .unwrap()
+            .unwrap()
+            .2;
+        assert!(storage::reserve_codex_single_for_push(&db, ROOT, generation, &inflight).unwrap());
+    }
+    let listener = va41_listener(&env);
+    let server = tokio::spawn(async move {
+        let mut bodies = Vec::new();
+        for _ in 0..9 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            mock_ws_accept(&mut stream).await;
+            while let Some(message) = mock_ws_read_client_text(&mut stream).await {
+                let result = match message["method"].as_str().unwrap_or("") {
+                    "initialize" => json!({"userAgent":"fixture"}),
+                    "thread/loaded/list" => json!({"data":[ROOT]}),
+                    "turn/start" => {
+                        bodies.push(
+                            message["params"]["input"][0]["text"]
+                                .as_str()
+                                .unwrap()
+                                .to_owned(),
+                        );
+                        json!({"turn":{"id":"va41-batch"}})
+                    }
+                    _ => continue,
+                };
+                mock_ws_write_server_text(
+                    &mut stream,
+                    &json!({"jsonrpc":"2.0","id":message["id"],"result":result}).to_string(),
+                )
+                .await;
+                if message["method"] == "turn/start" {
+                    break;
+                }
+            }
+        }
+        bodies
+    });
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    xmsg::codex::recover_restart_roots(&env.state).await;
+    {
+        let db = env.state.db.lock().unwrap();
+        let accepted: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM codex_handoff WHERE root_id=?1 AND state='accepted'",
+                [ROOT],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            accepted, 8,
+            "one recovery pass must stop at eight envelopes"
+        );
+        let pending: i64 = db
+            .query_row(
+                "SELECT restart_pending FROM codex_roots WHERE root_id=?1",
+                [ROOT],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pending, 1,
+            "bounded drain must retain eligibility for its remainder"
+        );
+    }
+    let scheduler = tokio::spawn(xmsg::codex::run_restart_recovery(env.state.clone()));
+    let mut server = server;
+    let bodies = tokio::time::timeout(Duration::from_secs(4), &mut server).await;
+    scheduler.abort();
+    let _ = scheduler.await;
+    if bodies.is_err() {
+        server.abort();
+    }
+    let bodies = bodies
+        .expect("scheduled pass must drain ninth envelope")
+        .unwrap();
+    for (index, body) in bodies.iter().enumerate() {
+        assert!(
+            body.contains(&format!("VA41_BATCH_{index}")),
+            "bounded passes must preserve FIFO"
+        );
+    }
+    for (id, state) in [(unknown, "unknown"), (inflight, "inflight")] {
+        assert_eq!(
+            storage::get_codex_handoff_state(&env.state.db.lock().unwrap(), &id)
+                .unwrap()
+                .unwrap()
+                .0,
+            state,
+            "automatic recovery must not replay uncertain or reserved custody"
+        );
+    }
+    for id in ids {
+        assert_eq!(
+            storage::get_codex_handoff_state(&env.state.db.lock().unwrap(), &id)
+                .unwrap()
+                .unwrap()
+                .0,
+            "accepted"
+        );
+    }
+}
+
+#[derive(Clone)]
+struct Va41LogWriter(Arc<Mutex<Vec<u8>>>);
+impl std::io::Write for Va41LogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Va41LogWriter {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self {
+        self.clone()
+    }
+}
+
+#[tokio::test]
+async fn va41_repeated_failure_logs_only_class_transition_without_values() {
+    use tracing::instrument::WithSubscriber;
+    const ROOT: &str = "019a0000-0000-7000-8000-000000000491";
+    let env = va41_restart_fixture(ROOT).await;
+    xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        ROOT,
+        "VA41_BODY_CANARY",
+        None,
+    )
+    .await
+    .unwrap();
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(Va41LogWriter(bytes.clone()))
+        .finish();
+    // Reset runtime class history while preserving durable recovery eligibility.
+    restart_codex_fixture(&env);
+    async {
+        xmsg::codex::recover_restart_roots(&env.state).await;
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        xmsg::codex::recover_restart_roots(&env.state).await;
+    }
+    .with_subscriber(subscriber)
+    .await;
+    let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        logs.matches("codex startup recovery").count(),
+        1,
+        "same failure class must log once: {logs}"
+    );
+    assert!(
+        logs.contains("app_server_unavailable"),
+        "missing fixed failure class: {logs}"
+    );
+    let owner_pid = std::process::id().to_string();
+    let owner_starttime =
+        xmsg::process::starttime(Path::new(xmsg::process::LIVE_PROC_ROOT), std::process::id())
+            .unwrap();
+    for value in [
+        ROOT,
+        "VA41_BODY_CANARY",
+        env.codex_home.to_str().unwrap(),
+        owner_pid.as_str(),
+        owner_starttime.as_str(),
+    ] {
+        assert!(
+            !logs.contains(value),
+            "recovery log must exclude recipient, body and home values"
+        );
+    }
+}
+
+#[tokio::test]
+async fn va41_cancelled_owned_push_becomes_unknown_and_next_item_recovers() {
+    const ROOT: &str = "019a0000-0000-7000-8000-000000000492";
+    let env = va41_restart_fixture(ROOT).await;
+    let first = xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        ROOT,
+        "VA41_CANCEL_FIRST",
+        None,
+    )
+    .await
+    .unwrap()
+    .message_id;
+    let listener = va41_listener(&env);
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        mock_ws_accept(&mut stream).await;
+        while let Some(message) = mock_ws_read_client_text(&mut stream).await {
+            let result = match message["method"].as_str().unwrap_or("") {
+                "initialize" => json!({"userAgent":"fixture"}),
+                "thread/loaded/list" => json!({"data":[ROOT]}),
+                "turn/start" => {
+                    reached_tx.send(()).unwrap();
+                    break;
+                }
+                _ => continue,
+            };
+            mock_ws_write_server_text(
+                &mut stream,
+                &json!({"jsonrpc":"2.0","id":message["id"],"result":result}).to_string(),
+            )
+            .await;
+        }
+        // Hold the first socket open until cancellation closes it.
+        let mut byte = [0];
+        let _ = stream.read(&mut byte).await;
+        va41_accept_turn(listener, ROOT).await
+    });
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let state = env.state.clone();
+    let recovery = tokio::spawn(async move { xmsg::codex::recover_restart_roots(&state).await });
+    tokio::time::timeout(Duration::from_secs(3), reached_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    recovery.abort();
+    let _ = recovery.await;
+    assert_eq!(
+        storage::get_codex_handoff_state(&env.state.db.lock().unwrap(), &first)
+            .unwrap()
+            .unwrap()
+            .0,
+        "unknown"
+    );
+    let second = xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        ROOT,
+        "VA41_CANCEL_SECOND",
+        None,
+    )
+    .await
+    .unwrap()
+    .message_id;
+    let unrelated = xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        ROOT,
+        "VA41_UNRELATED_INFLIGHT",
+        None,
+    )
+    .await
+    .unwrap()
+    .message_id;
+    {
+        let db = env.state.db.lock().unwrap();
+        let generation = storage::get_codex_handoff_state(&db, &unrelated)
+            .unwrap()
+            .unwrap()
+            .2;
+        assert!(storage::reserve_codex_single_for_push(&db, ROOT, generation, &unrelated).unwrap());
+    }
+    let scheduler = tokio::spawn(xmsg::codex::run_restart_recovery(env.state.clone()));
+    let mut server = server;
+    let turn = tokio::time::timeout(Duration::from_secs(4), &mut server).await;
+    scheduler.abort();
+    let _ = scheduler.await;
+    if turn.is_err() {
+        server.abort();
+    }
+    let turn = turn
+        .expect("cancellation must not orphan the next queued item")
+        .unwrap();
+    let body = turn["params"]["input"][0]["text"].as_str().unwrap();
+    assert!(body.contains("VA41_CANCEL_SECOND"));
+    assert!(!body.contains("VA41_CANCEL_FIRST"));
+    assert_eq!(
+        storage::get_codex_handoff_state(&env.state.db.lock().unwrap(), &second)
+            .unwrap()
+            .unwrap()
+            .0,
+        "accepted"
+    );
+    assert_eq!(
+        storage::get_codex_handoff_state(&env.state.db.lock().unwrap(), &first)
+            .unwrap()
+            .unwrap()
+            .0,
+        "unknown"
+    );
+    assert_eq!(
+        storage::get_codex_handoff_state(&env.state.db.lock().unwrap(), &unrelated)
+            .unwrap()
+            .unwrap()
+            .0,
+        "inflight",
+        "cancellation must not reset an unrelated reservation"
+    );
+}
+
+struct Va41Child(std::process::Child);
+impl Drop for Va41Child {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn va41_cli_starts_production_retry_scheduler_without_new_message() {
+    const ROOT: &str = "019a0000-0000-7000-8000-000000000493";
+    let env = va41_restart_fixture(ROOT).await;
+    let sent = xmsg::surface::send(
+        &env.state,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        ROOT,
+        "VA41_CLI_RETRY",
+        None,
+    )
+    .await
+    .unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("va41-cli-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let db_path = dir.path().join("queue.sqlite");
+    env.state
+        .db
+        .lock()
+        .unwrap()
+        .execute("VACUUM INTO ?1", [db_path.to_str().unwrap()])
+        .unwrap();
+    let sessions = dir.path().join("sessions");
+    fs::create_dir(&sessions).unwrap();
+    let log_path = dir.path().join("daemon.log");
+    let log = fs::File::create(&log_path).unwrap();
+    let mut child = Va41Child(
+        std::process::Command::new(env!("CARGO_BIN_EXE_xmsg"))
+            .args(["serve", "--db-path"])
+            .arg(&db_path)
+            .arg("--http-sock")
+            .arg(dir.path().join("http.sock"))
+            .arg("--agent-sock")
+            .arg(dir.path().join("agent.sock"))
+            .arg("--register-sock")
+            .arg(dir.path().join("register.sock"))
+            .arg("--sessions-dir")
+            .arg(&sessions)
+            .arg("--codex-home")
+            .arg(&env.codex_home)
+            .arg("--codex-exe")
+            .arg(std::env::current_exe().unwrap())
+            .env_clear()
+            .env("HOME", dir.path())
+            .env("XDG_RUNTIME_DIR", dir.path())
+            .env("RUST_LOG", "info")
+            .current_dir(dir.path())
+            .stdin(std::process::Stdio::null())
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+    );
+    let observed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let logs = fs::read_to_string(&log_path).unwrap();
+            if logs.contains("app_server_unavailable") {
+                break;
+            }
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "daemon exited before retry: {logs}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        observed.is_ok(),
+        "CLI must start recovery scheduler: {}",
+        fs::read_to_string(&log_path).unwrap()
+    );
+    let mut server = tokio::spawn(va41_accept_turn(va41_listener(&env), ROOT));
+    let turn = tokio::time::timeout(Duration::from_secs(5), &mut server).await;
+    if turn.is_err() {
+        server.abort();
+    }
+    let turn = turn
+        .expect("CLI retry must deliver without any new MCP, hook or message")
+        .unwrap();
+    assert!(turn["params"]["input"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("VA41_CLI_RETRY"));
+    let db = Connection::open(&db_path).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if storage::get_codex_handoff_state(&db, &sent.message_id)
+                .unwrap()
+                .unwrap()
+                .0
+                == "accepted"
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("real daemon must persist accepted custody");
+}

@@ -59,13 +59,29 @@ xmsg serve \
 
 ## After a daemon restart
 
-A known root that is not revoked stays queueable while it waits for a new writer-lease
-attestation. Its next attributed MCP call can attest that root again and start a bounded relay
-drain. An unknown root still needs registration. An explicit revocation stays in force. See
+**Planned:** xmsg can wake a known Codex root after its own daemon restarts, without waiting for
+that root to make an MCP call. This applies only to roots loaded as recovery candidates at
+startup, with queued messages and no operator revocation. Ordinary `SessionEnd` or unsubscribe
+parking stays parked.
+
+Before delivery, xmsg rechecks the persisted owner's trusted executable, PID and process start
+time, the writer-lock lease and rollout metadata. The live relay still verifies the app-server
+socket's peer PID and start time. It does not discover or guess a replacement owner. An owner
+change ends automatic recovery; the normal hook or attributed MCP resume path remains available.
+
+A queued message triggers an attempt. If the app-server is temporarily unavailable, a bounded
+background retry handles the queued work without another message or MCP call. Retries back off
+from one second to at most thirty seconds. Each pass considers at most eight candidates, and
+each root uses the bounded eight-envelope relay drain. A drain starts no new attempt after two
+seconds; an already-started relay has its own two-second timeout, so the drain can approach
+four seconds. Recovery eligibility survives another
+xmsg restart, but ends after pending custody is resolved, revocation or an owner change.
+
+Until recovery succeeds, `list --status inactive` reports `awaiting_reattestation`; the default
+live list excludes that root. The message keeps its queued custody while checks fail. Unknown
+roots still need registration, and an explicit revocation stays in force. See
 [Codex restart custody](/concepts/replies/#replies-stored-always-pushed-by-sender-kind) for
-stable message IDs, FIFO order, and the difference between accepted, pending and unknown
-handoffs. The [re-attestation path](https://github.com/sini/xmsg/blob/f0abf583cb9394da4b08be7b717c3436919a7669/src/agent.rs)
-uses the normal writer-lease and rollout checks.
+stable message IDs, FIFO order, and accepted, pending and unknown handoffs.
 
 ## Operator revocation (`--revoke` / `--unrevoke`)
 

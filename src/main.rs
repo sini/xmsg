@@ -1413,7 +1413,13 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
             codex_homes,
             proc_root: agy_config.proc_root.clone(),
         };
+        let enabled = !codex_config.trusted_codex_exes.is_empty();
         let _ = xmsg::codex::init_for_state(&state, codex_config);
+        if enabled {
+            bg_tasks.push(tokio::spawn(xmsg::codex::run_restart_recovery(
+                state.clone(),
+            )));
+        }
     }
 
     let agent_listener = match activated.agent.take() {

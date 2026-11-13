@@ -2226,6 +2226,308 @@ impl CodexStore {
 pub struct CodexRuntime {
     pub config: CodexConfig,
     pub store: CodexStore,
+    restart: HashMap<String, RestartRecovery>,
+    restart_cursor: usize,
+}
+
+#[derive(Debug, Clone)]
+struct RestartRecovery {
+    generation: u64,
+    owner_pid: u32,
+    owner_starttime: String,
+    next_attempt: tokio::time::Instant,
+    delay: std::time::Duration,
+    in_progress: bool,
+    last_class: Option<&'static str>,
+}
+
+fn note_restart_class(candidate: &mut RestartRecovery, class: &'static str) {
+    if candidate.last_class != Some(class) {
+        tracing::info!(class, "codex startup recovery");
+        candidate.last_class = Some(class);
+    }
+}
+
+fn defer_restart_recovery(candidate: &mut RestartRecovery, class: &'static str) {
+    note_restart_class(candidate, class);
+    candidate.in_progress = false;
+    candidate.next_attempt = tokio::time::Instant::now() + candidate.delay;
+    candidate.delay = (candidate.delay * 2).min(std::time::Duration::from_secs(30));
+}
+
+struct RestartAttemptGuard {
+    runtime: Arc<Mutex<CodexRuntime>>,
+    root_id: String,
+    armed: bool,
+}
+
+impl Drop for RestartAttemptGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut rt) = self.runtime.lock() {
+            if let Some(candidate) = rt.restart.get_mut(&self.root_id) {
+                if candidate.in_progress {
+                    defer_restart_recovery(candidate, "cancelled");
+                }
+            }
+        }
+    }
+}
+
+pub fn awaiting_startup_recovery(db: &Arc<Mutex<rusqlite::Connection>>) -> HashSet<String> {
+    let runtime = for_db(db);
+    let rt = runtime.lock().unwrap();
+    let Ok(conn) = db.lock() else {
+        return HashSet::new();
+    };
+    rt.restart
+        .iter()
+        .filter_map(|(id, candidate)| {
+            (!rt.store.is_revoked(id)
+                && crate::storage::codex_startup_pending_generation(
+                    &conn,
+                    id,
+                    candidate.owner_pid,
+                    &candidate.owner_starttime,
+                )
+                .ok()
+                .flatten()
+                .is_some())
+            .then(|| id.clone())
+        })
+        .collect()
+}
+
+fn finish_restart_recovery(
+    local: &crate::surface::Local<'_>,
+    root_id: &str,
+    candidate: &RestartRecovery,
+    class: &'static str,
+    park: bool,
+) {
+    let runtime = for_db(local.db);
+    let mut rt = runtime.lock().unwrap();
+    let Some(current) = rt.restart.get_mut(root_id) else {
+        return;
+    };
+    note_restart_class(current, class);
+    let generation = current.generation;
+    if let Ok(conn) = local.db.lock() {
+        let _ = crate::storage::finish_codex_startup_recovery(
+            &conn,
+            root_id,
+            candidate.owner_pid,
+            &candidate.owner_starttime,
+            generation,
+            park,
+        );
+    }
+    if park
+        && rt.store.roots.get(root_id).is_some_and(|root| {
+            root.owner_pid == candidate.owner_pid
+                && root.owner_starttime == candidate.owner_starttime
+                && root.generation == generation
+        })
+    {
+        rt.store.park_root_for_resume(root_id);
+    }
+    rt.restart.remove(root_id);
+}
+
+pub(crate) async fn recover_restart_root(local: &crate::surface::Local<'_>, root_id: &str) {
+    let runtime = for_db(local.db);
+    let candidate = {
+        let mut rt = runtime.lock().unwrap();
+        let Some(candidate) = rt.restart.get(root_id).cloned() else {
+            return;
+        };
+        if candidate.in_progress || tokio::time::Instant::now() < candidate.next_attempt {
+            return;
+        }
+        let Ok(conn) = local.db.lock() else { return };
+        if rt.store.is_revoked(root_id)
+            || crate::storage::codex_startup_pending_generation(
+                &conn,
+                root_id,
+                candidate.owner_pid,
+                &candidate.owner_starttime,
+            )
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            rt.restart.remove(root_id);
+            return;
+        }
+        if !crate::storage::codex_startup_has_pending(&conn, root_id, local.reply_ttl.as_secs())
+            .unwrap_or(false)
+        {
+            return;
+        }
+        rt.restart.get_mut(root_id).unwrap().in_progress = true;
+        candidate
+    };
+    let mut attempt = RestartAttemptGuard {
+        runtime: runtime.clone(),
+        root_id: root_id.to_string(),
+        armed: true,
+    };
+    let result = attempt_restart_recovery(local, root_id, &candidate).await;
+    attempt.armed = false;
+    match result {
+        Ok(()) => finish_restart_recovery(local, root_id, &candidate, "recovered", false),
+        Err((class, true)) => finish_restart_recovery(
+            local,
+            root_id,
+            &candidate,
+            class,
+            matches!(class, "owner_changed" | "revoked" | "handoff_unknown"),
+        ),
+        Err((class, false)) => {
+            let mut rt = runtime.lock().unwrap();
+            if let Some(current) = rt.restart.get_mut(root_id) {
+                defer_restart_recovery(current, class);
+            }
+        }
+    }
+}
+
+async fn attempt_restart_recovery(
+    local: &crate::surface::Local<'_>,
+    root_id: &str,
+    candidate: &RestartRecovery,
+) -> Result<(), (&'static str, bool)> {
+    let runtime = for_db(local.db);
+    let snap = {
+        let mut rt = runtime.lock().unwrap();
+        let config = rt.config.clone();
+        if crate::process::starttime(&config.proc_root, candidate.owner_pid)
+            .ok()
+            .as_deref()
+            != Some(&candidate.owner_starttime)
+            || is_trusted_codex_owner_step(&config, candidate.owner_pid, &candidate.owner_starttime)
+                .is_none()
+        {
+            return Err(("owner_changed", true));
+        }
+        if rt.store.is_revoked(root_id) {
+            return Err(("revoked", true));
+        }
+        let conn = local
+            .db
+            .lock()
+            .map_err(|_| ("storage_unavailable", false))?;
+        let generation = crate::storage::codex_startup_pending_generation(
+            &conn,
+            root_id,
+            candidate.owner_pid,
+            &candidate.owner_starttime,
+        )
+        .map_err(|_| ("storage_unavailable", false))?
+        .ok_or(("eligibility_changed", true))?;
+        let snap = rt
+            .store
+            .rebind_resumed_root(
+                &config,
+                candidate.owner_pid,
+                &candidate.owner_starttime,
+                root_id,
+                None,
+                None,
+            )
+            .map_err(|reason| {
+                (
+                    if reason.contains("rollout") {
+                        "rollout_unavailable"
+                    } else {
+                        "writer_unavailable"
+                    },
+                    false,
+                )
+            })?;
+        if snap.generation != generation {
+            if !crate::storage::rebind_startup_codex_root(&conn, &snap, generation)
+                .map_err(|_| ("storage_unavailable", false))?
+            {
+                return Err(("eligibility_changed", true));
+            }
+        }
+        if let Some(current) = rt.restart.get_mut(root_id) {
+            current.generation = snap.generation;
+        }
+        snap
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    for _ in 0..MAX_CODEX_HOOK_DRAIN_ENVELOPES {
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        let next = {
+            let conn = local
+                .db
+                .lock()
+                .map_err(|_| ("storage_unavailable", false))?;
+            crate::storage::next_codex_relay_pending(
+                &conn,
+                root_id,
+                snap.generation,
+                local.reply_ttl.as_secs(),
+            )
+            .map_err(|_| ("storage_unavailable", false))?
+        };
+        let Some((id, envelope)) = next else { break };
+        match crate::surface::try_push_codex_queued_message_for_recovery(
+            local, &snap, &id, &envelope,
+        )
+        .await
+        {
+            Ok(("delivered", _)) => {}
+            Ok((_, true)) => return Err(("owner_changed", true)),
+            Ok(("delivery_unknown", _)) => return Err(("handoff_unknown", true)),
+            _ => return Err(("app_server_unavailable", false)),
+        }
+    }
+    let conn = local
+        .db
+        .lock()
+        .map_err(|_| ("storage_unavailable", false))?;
+    if crate::storage::codex_startup_has_pending(&conn, root_id, local.reply_ttl.as_secs())
+        .map_err(|_| ("storage_unavailable", false))?
+    {
+        Err(("pending", false))
+    } else {
+        Ok(())
+    }
+}
+
+pub async fn recover_restart_roots(state: &AppState) {
+    let runtime = for_state(state);
+    let ids = {
+        let mut rt = runtime.lock().unwrap();
+        let mut ids: Vec<_> = rt.restart.keys().cloned().collect();
+        ids.sort();
+        if !ids.is_empty() {
+            let offset = rt.restart_cursor % ids.len();
+            ids.rotate_left(offset);
+            rt.restart_cursor = offset.saturating_add(8);
+        }
+        ids.truncate(8);
+        ids
+    };
+    for id in ids {
+        recover_restart_root(&state.local(), &id).await;
+    }
+}
+
+pub async fn run_restart_recovery(state: Arc<AppState>) {
+    let mut timer = tokio::time::interval(std::time::Duration::from_secs(1));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        timer.tick().await;
+        recover_restart_roots(&state).await;
+    }
 }
 
 struct RegistrySlot {
@@ -2250,7 +2552,22 @@ pub fn init_for_db(
         crate::storage::startup_invalidate_codex(&conn).unwrap_or_default()
     };
     let mut stale_map = HashMap::new();
+    let mut restart = HashMap::new();
     for (root_id, s) in stale_rows {
+        if s.restart_pending && !revoked.contains(&root_id) {
+            restart.insert(
+                root_id.clone(),
+                RestartRecovery {
+                    generation: s.generation,
+                    owner_pid: s.owner_pid,
+                    owner_starttime: s.owner_starttime.clone(),
+                    next_attempt: tokio::time::Instant::now(),
+                    delay: std::time::Duration::from_secs(1),
+                    in_progress: false,
+                    last_class: None,
+                },
+            );
+        }
         stale_map.insert(
             root_id,
             StaleCodexRoot {
@@ -2267,6 +2584,8 @@ pub fn init_for_db(
     let rt = Arc::new(Mutex::new(CodexRuntime {
         config,
         store: CodexStore::with_stale(max_gen, revoked, stale_map),
+        restart,
+        restart_cursor: 0,
     }));
     let key = Arc::as_ptr(db) as usize;
     let mut map = registry().lock().unwrap();
@@ -2439,7 +2758,7 @@ pub fn sweep_codex_roots(db: &Arc<Mutex<rusqlite::Connection>>) -> Vec<CodexRoot
                 if *is_rev {
                     let _ = crate::storage::invalidate_codex_root(&conn, rev_id);
                 } else {
-                    let _ = crate::storage::park_codex_root(&conn, rev_id);
+                    let _ = crate::storage::park_codex_root_preserving_startup(&conn, rev_id);
                 }
             }
             for snap in &live {
@@ -2485,7 +2804,7 @@ pub fn resolve_codex_root(
                     if is_rev {
                         let _ = crate::storage::invalidate_codex_root(&conn, root_id);
                     } else {
-                        let _ = crate::storage::park_codex_root(&conn, root_id);
+                        let _ = crate::storage::park_codex_root_preserving_startup(&conn, root_id);
                     }
                 }
             }
@@ -2581,7 +2900,7 @@ pub fn admit_codex_subagent(
                 if root_revoked {
                     let _ = crate::storage::invalidate_codex_root(&conn, root_id);
                 } else if root_missing {
-                    let _ = crate::storage::park_codex_root(&conn, root_id);
+                    let _ = crate::storage::park_codex_root_preserving_startup(&conn, root_id);
                 }
             }
             Err(AppError::NotRecipient(msg))

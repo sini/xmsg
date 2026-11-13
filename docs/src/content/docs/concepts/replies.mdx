@@ -87,22 +87,26 @@ Each envelope that xmsg delivers to a recipient has a reply instruction footer:
   `stored`. `stored` means the origin is a leaf or an outbound-linked node, which pulls its
   replies. A reply to an anonymous HTTP caller has no push outcome. The caller reads it with
   `replies`.
-- **Codex restart custody:** These rules apply to a Codex root after a daemon restart:
-  - A known root that is not revoked stays queueable within the reply TTL. It waits for a new
-    writer-lease attestation. It is not automatically live after the restart.
-  - An attributed MCP tool call can attest again only a known root that is not revoked. It uses
-    the same full writer-lease and rollout checks as resume. An unknown root still needs
-    registration.
-  - After a successful attestation, the call starts a bounded FIFO relay drain. The drain sends at
-    most eight envelopes. It starts no new attempt after two seconds. Each relay attempt that has
-    started has its own two-second deadline.
-  - An explicit operator revocation still refuses delivery.
-  - New replies with definite non-handoff custody keep their stable message ID, their return
-    provenance and their original queue time. The same root receives them in FIFO order when it
-    registers again.
+- **Codex restart custody (planned):** These rules apply to a Codex root after an xmsg daemon restart:
+  - A known root that was active before restart and is not revoked stays queueable within the
+    reply TTL. xmsg retains its recovery eligibility across repeated restarts. Deliberate
+    `SessionEnd` or unsubscribe parking does not become an automatic recovery candidate.
+  - For queued recovery candidates, the daemon rechecks the same persisted owner, trusted
+    executable, writer lease and rollout before attempting the restricted live relay. A new
+    message triggers recovery; bounded background retries also handle existing queued work
+    without a new MCP call. Backoff starts at one second and caps at thirty seconds.
+  - Until recovery succeeds, the root appears as `awaiting_reattestation` in the inactive list,
+    rather than as live. Revocation or a changed owner ends automatic recovery. An attributed
+    MCP call or hook can still use the normal resume checks; an unknown root needs registration.
+  - Each drain sends at most eight envelopes and starts no new attempt after two seconds.
+    Each relay attempt that has started has its own two-second deadline, so a drain can approach
+    four seconds. This is not a two-second total budget. If more pending
+    envelopes remain, later bounded passes continue the work.
+  - New replies with definite non-handoff custody keep their stable message ID, return
+    provenance and original queue time. The same verified root receives them in FIFO order.
   - xmsg marks accepted handoffs `pushed`. It never replays an unknown or in-flight handoff
-    automatically.
-  - Older `sender_gone` or `push_failed` rows without the matching durable handoff are pull-only,
+    automatically. An explicit operator revocation still refuses delivery.
+  - Older `sender_gone` or `push_failed` rows without a matching durable handoff remain pull-only,
     through `replies`. xmsg does not infer a replacement identity or provenance.
 - **Cross-node replies return to the origin:** A reply to a federated message always goes back
   to the origin node, by `/fed/v2/replies` or by reply pull. The origin node decides how to

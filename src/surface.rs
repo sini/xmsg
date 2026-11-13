@@ -695,7 +695,11 @@ pub(crate) async fn listing_live(
     }
     {
         let codex_roots = crate::codex::sweep_codex_roots(local.db);
+        let awaiting = crate::codex::awaiting_startup_recovery(local.db);
         for snap in codex_roots {
+            if awaiting.contains(&snap.root_id) {
+                continue;
+            }
             out.push(live_entry(
                 &snap.root_id,
                 false,
@@ -769,6 +773,7 @@ pub(crate) async fn listing_inactive(
         storage::inactive_instances(&db, now, ttl_secs, capped_within).map_err(db_err)?
     };
     let mut out: Vec<FedListEntry> = Vec::new();
+    let awaiting = crate::codex::awaiting_startup_recovery(local.db);
     let db = local.db.lock().map_err(db_err)?;
     for e in live.iter().filter(|e| e.kind == "instance") {
         for sub in storage::list_subagents_for_parent(&db, &e.id).map_err(db_err)? {
@@ -801,7 +806,11 @@ pub(crate) async fn listing_inactive(
             out.push(inactive_entry(
                 &item.id,
                 &item.harness,
-                &item.status,
+                if item.harness == "codex" && awaiting.contains(&item.id) {
+                    "awaiting_reattestation"
+                } else {
+                    &item.status
+                },
                 user,
                 item.last_seen,
             ));
@@ -918,6 +927,56 @@ pub async fn try_push_codex_queued_message(
     message_id: &str,
     raw_envelope: &str,
 ) -> Result<&'static str, AppError> {
+    if crate::codex::awaiting_startup_recovery(local.db).contains(&root_snap.root_id) {
+        crate::codex::recover_restart_root(local, &root_snap.root_id).await;
+        let db = local.db.lock().map_err(db_err)?;
+        return Ok(
+            match storage::get_codex_handoff_state(&db, message_id)
+                .map_err(db_err)?
+                .as_ref()
+                .map(|(state, _, _)| state.as_str())
+            {
+                Some("accepted") => "delivered",
+                Some("unknown") => "delivery_unknown",
+                _ => "queued",
+            },
+        );
+    }
+    try_push_codex_queued_message_for_recovery(local, root_snap, message_id, raw_envelope)
+        .await
+        .map(|(outcome, _)| outcome)
+}
+
+struct CodexPushReservationGuard {
+    db: Arc<Mutex<rusqlite::Connection>>,
+    root_id: String,
+    generation: u64,
+    message_id: String,
+    armed: bool,
+}
+
+impl Drop for CodexPushReservationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(db) = self.db.lock() {
+            let _ = storage::mark_owned_codex_push_unknown(
+                &db,
+                &self.root_id,
+                self.generation,
+                &self.message_id,
+            );
+        }
+    }
+}
+
+pub(crate) async fn try_push_codex_queued_message_for_recovery(
+    local: &Local<'_>,
+    root_snap: &crate::codex::CodexRootSnapshot,
+    message_id: &str,
+    raw_envelope: &str,
+) -> Result<(&'static str, bool), AppError> {
     let rt_arc = crate::codex::for_db(local.db);
     let proc_root = {
         let mut rt = rt_arc.lock().unwrap();
@@ -934,7 +993,7 @@ pub async fn try_push_codex_queued_message(
                 if is_rev {
                     let _ = storage::invalidate_codex_root(&db, &root_snap.root_id);
                 } else if !has_root {
-                    let _ = storage::park_codex_root(&db, &root_snap.root_id);
+                    let _ = storage::park_codex_root_preserving_startup(&db, &root_snap.root_id);
                 }
             }
             return Err(AppError::Gone {
@@ -961,12 +1020,19 @@ pub async fn try_push_codex_queued_message(
             storage::get_codex_handoff_state(&db, message_id).map_err(db_err)?
         };
         return match state.as_ref().map(|(s, _, _)| s.as_str()) {
-            Some("accepted") => Ok("delivered"),
-            Some("unknown") => Ok("delivery_unknown"),
-            _ => Ok("queued"),
+            Some("accepted") => Ok(("delivered", false)),
+            Some("unknown") => Ok(("delivery_unknown", false)),
+            _ => Ok(("queued", false)),
         };
     }
 
+    let mut reservation = CodexPushReservationGuard {
+        db: local.db.clone(),
+        root_id: root_snap.root_id.clone(),
+        generation: root_snap.generation,
+        message_id: message_id.to_string(),
+        armed: true,
+    };
     let job = crate::codex_relay::CodexDeliveryJob {
         root_id: root_snap.root_id.clone(),
         root_generation: root_snap.generation,
@@ -990,28 +1056,25 @@ pub async fn try_push_codex_queued_message(
     .await;
     let ids = [message_id.to_string()];
     let db = local.db.lock().map_err(db_err)?;
-    match relay_outcome {
+    let outcome = match relay_outcome {
         crate::codex_relay::RelayOutcome::Accepted { turn_id: _ } => {
             storage::complete_codex_handoff_accepted(&db, &root_snap.root_id, &ids)
                 .map_err(db_err)?;
-            Ok("delivered")
+            Ok(("delivered", false))
         }
         crate::codex_relay::RelayOutcome::QueueOnly { reason }
         | crate::codex_relay::RelayOutcome::Rejected { reason } => {
-            tracing::debug!(
-                root_id = %root_snap.root_id,
-                message_id = %message_id,
-                reason = %reason,
-                "codex relay push fell back to queue"
-            );
+            let owner_changed = reason.starts_with("socket peer ");
             storage::release_codex_handoff_to_pending(&db, &ids).map_err(db_err)?;
-            Ok("queued")
+            Ok(("queued", owner_changed))
         }
         crate::codex_relay::RelayOutcome::Uncertain { reason: _ } => {
             storage::mark_codex_handoff_unknown(&db, &ids).map_err(db_err)?;
-            Ok("delivery_unknown")
+            Ok(("delivery_unknown", false))
         }
-    }
+    };
+    reservation.armed = false;
+    outcome
 }
 
 /// Delivers a message to a resolved local target. Returns the target's ID, its harness
@@ -1312,21 +1375,36 @@ pub async fn deliver_with_in_reply_to(
                 envelope: envelope_text(),
                 delivered_at: None,
             };
-            let db = local.db.lock().map_err(db_err)?;
-            if !storage::enqueue_parked_codex_message(
-                &db,
-                &session.session_id,
-                *generation,
-                &queued,
-                local.reply_ttl.as_secs() as i64,
-            )
-            .map_err(db_err)?
             {
-                return Err(AppError::ServiceUnavailable(
-                    "codex session queue unavailable".into(),
-                ));
+                let db = local.db.lock().map_err(db_err)?;
+                if !storage::enqueue_parked_codex_message(
+                    &db,
+                    &session.session_id,
+                    *generation,
+                    &queued,
+                    local.reply_ttl.as_secs() as i64,
+                )
+                .map_err(db_err)?
+                {
+                    return Err(AppError::ServiceUnavailable(
+                        "codex session queue unavailable".into(),
+                    ));
+                }
             }
-            Ok((session.session_id.clone(), "codex", "queued"))
+            crate::codex::recover_restart_root(local, &session.session_id).await;
+            let outcome = {
+                let db = local.db.lock().map_err(db_err)?;
+                match storage::get_codex_handoff_state(&db, message_id)
+                    .map_err(db_err)?
+                    .as_ref()
+                    .map(|(state, _, _)| state.as_str())
+                {
+                    Some("accepted") => "delivered",
+                    Some("unknown") => "delivery_unknown",
+                    _ => "queued",
+                }
+            };
+            Ok((session.session_id.clone(), "codex", outcome))
         }
         ResolvedTarget::Codex(root_snap, session) => {
             let pi_msg = storage::PiPendingMessage {
@@ -3036,6 +3114,15 @@ pub(crate) async fn stage_codex_reply(
             tx.commit().map_err(db_err)?;
             record
         };
+        crate::codex::recover_restart_root(local, &ret_session_id).await;
+        {
+            let db = local.db.lock().map_err(db_err)?;
+            if let Some(current) =
+                storage::get_reply_by_pushed_id(&db, &reply_id).map_err(db_err)?
+            {
+                record = current;
+            }
+        }
         if let Some(snap) = live {
             let outcome =
                 try_push_codex_queued_message(local, &snap, &reply_id, &queued.envelope).await;
