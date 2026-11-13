@@ -5399,6 +5399,9 @@ async fn c3_live_distinct_child_same_inode_flock_reopen_and_mutants() {
         .unwrap_or_else(|e| panic!("failed to register live child root {r}: {e:?}"));
     }
 
+    let sibling_generation = xmsg::codex::resolve_codex_root(&env.state.db, p_sib)
+        .unwrap()
+        .generation;
     #[cfg(target_os = "macos")]
     let old_generation = xmsg::codex::resolve_codex_root(&env.state.db, p_main)
         .unwrap()
@@ -5480,26 +5483,25 @@ async fn c3_live_distinct_child_same_inode_flock_reopen_and_mutants() {
     }
 
     // Meanwhile, `p_sib` held continuously by the same child process must remain live!
-    let sib_still_live = handle_agent_frame(
+    let sib_still_live = xmsg::agent::resolve_codex_mcp_caller(
         &env.state,
-        &peer_child,
-        AgentFrame::List {
-            schema_version: None,
-            name: None,
-            node: None,
-            kind: None,
-            status: None,
-            within: None,
-            as_agent: None,
-            codex_session: Some(p_sib.to_string()),
-            codex_thread: Some(p_sib.to_string()),
-            codex_turn: None,
-        },
-    )
-    .await;
+        child_pid,
+        &child_starttime,
+        Some(p_sib),
+        Some(p_sib),
+        None,
+        false,
+    );
     assert!(
         sib_still_live.is_ok(),
-        "C3: continuously held sibling root in distinct child process must remain live: {sib_still_live:?}"
+        "C3: continuously held sibling must remain directly valid: {sib_still_live:?}"
+    );
+    assert_eq!(
+        xmsg::codex::resolve_codex_root(&env.state.db, p_sib)
+            .unwrap()
+            .generation,
+        sibling_generation,
+        "continuous sibling must not need reattestation"
     );
 
     // Darwin single-site mutants (`C4`, `P2`: M1a, M2b, M3, M4):
