@@ -450,6 +450,49 @@ pub async fn renew_once(
     }
     Ok(())
 }
+fn renewal_due(state: &SavedState) -> i64 {
+    state.issued_at.saturating_add(
+        state
+            .not_after
+            .saturating_sub(state.issued_at)
+            .saturating_mul(2)
+            / 3,
+    )
+}
+fn renewal_backoff(current: Duration) -> Duration {
+    current.saturating_mul(2).min(Duration::from_secs(900))
+}
+
+#[cfg(test)]
+mod renewal_policy_tests {
+    use super::*;
+    #[test]
+    fn default_lifetime_renews_at_sixteen_hours_and_retry_stops_at_fifteen_minutes() {
+        let state = SavedState {
+            url: String::new(),
+            fingerprint: String::new(),
+            ca_identity: String::new(),
+            serial: String::new(),
+            issued_at: 1000,
+            not_after: 1000 + 86400,
+        };
+        assert_eq!(
+            renewal_due(&state) - state.issued_at,
+            16 * 3600,
+            "default certificate renewal is not at sixteen hours"
+        );
+        let mut delay = Duration::from_secs(1);
+        for _ in 0..20 {
+            delay = renewal_backoff(delay);
+            assert!(
+                delay <= Duration::from_secs(900),
+                "renewal retry exceeded fifteen minutes"
+            );
+        }
+        assert_eq!(delay, Duration::from_secs(900));
+    }
+}
+
 pub async fn auto_renew(directory: PathBuf, reloader: Arc<crate::fed::CredentialReloader>) {
     let mut backoff = Duration::from_secs(1);
     loop {
@@ -468,13 +511,7 @@ pub async fn auto_renew(directory: PathBuf, reloader: Arc<crate::fed::Credential
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        let due = state.issued_at.saturating_add(
-            state
-                .not_after
-                .saturating_sub(state.issued_at)
-                .saturating_mul(2)
-                / 3,
-        );
+        let due = renewal_due(&state);
         tokio::time::sleep(Duration::from_secs(due.saturating_sub(now).max(0) as u64)).await;
         match renew_once(&directory, Some(&reloader)).await {
             Ok(()) => backoff = Duration::from_secs(1),
@@ -484,7 +521,7 @@ pub async fn auto_renew(directory: PathBuf, reloader: Arc<crate::fed::Credential
                     "enrollment renewal deferred"
                 );
                 tokio::time::sleep(backoff).await;
-                backoff = backoff.saturating_mul(2).min(Duration::from_secs(900));
+                backoff = renewal_backoff(backoff);
             }
         }
     }
