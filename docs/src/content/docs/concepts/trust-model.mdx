@@ -151,7 +151,19 @@ Both browser flows request an explicit interaction: Google uses
 still ask a victim to sign in and share the resulting loopback redirect address,
 which enrolls the attacker's key as the victim. Do not share that address. These
 prompts do not promise a particular passkey ceremony; real-provider behavior is
-an operator-run acceptance check. Device authorization is refused in v1.
+an operator-run acceptance check.
+
+Planned [device enrollment](/operations/enrollment-ca/#planned-device-sign-in-from-a-remote-terminal)
+is disabled by default and requires independent CA-operator approval for every
+request. A victim can authorize an attacker's device code; successful provider
+sign-in alone therefore cannot issue a certificate. Approval uses only the local
+mode-0600, UID-checked `http.sock`, never the enrollment network, TCP, MCP or
+federation. The operator checks the verified policy user, requested host and SPKI
+fingerprint against the intended terminal through an independent trusted channel.
+The host label remains unattested. An operator who approves the wrong request can
+still enroll the attacker's key; this does not promise phishing resistance.
+Google's external sign-in screen need not display the xmsg host or policy user.
+Google device support remains unverified until owner-run real-provider acceptance.
 
 These certificates authenticate a peer. They do not turn its messages into
 instructions or isolate hostile processes within the same UID.

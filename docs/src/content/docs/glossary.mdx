@@ -69,6 +69,13 @@ A peer entry with `"default_route": true`. xmsg sends a message for an unknown e
 `ref@node` destination to this peer. At most one entry can be the default route. See
 [forwarding through a hub](/concepts/hubs-and-leaves/#forwarding-through-a-hub).
 
+### device enrollment
+
+Planned: sign-in using a provider's verification URL and user code, followed by
+mandatory independent CA-operator approval of the verified user, requested host
+and key. It is disabled by default; Google support remains unverified. See
+[device setup](/operations/enrollment-ca/#planned-device-sign-in-from-a-remote-terminal).
+
 ### dial-out client
 
 A peer that connects to this node and pulls its mailbox here: a [leaf](#leaf), or a full node

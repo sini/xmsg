@@ -77,6 +77,56 @@ Use the printed serve flags and a private state directory. A host label is not
 attestation: user policy, not the word `laptop` or `prod-db`, gives authority.
 Real-provider compatibility remains operator-run acceptance work.
 
+For an SSH terminal on Alice's server, the planned device alternative requires
+Google device enrollment to be explicitly enabled at the hub and a CA operator
+to review every request. **Google device support is unverified** pending owner-run
+real-provider acceptance. These commands are illustrative pending final fixture
+verification:
+
+```sh
+xmsg enroll https://hub.example.org:7790 --flow device --provider google \
+  --fingerprint 'sha256:<64-hex-digits>' --host server \
+  --state-dir ./alice-server-enroll
+```
+
+Alice checks the CA, provider, requested host, key fingerprint and deadline in
+her terminal, then uses the displayed verification URL and user code. She never
+uses a code received in a message. Before authentication the policy user is
+pending; after sign-in the terminal shows her verified user and waits for CA
+approval. Google's own screen need not display the xmsg host or user.
+
+The operator on the hub uses its local daemon socket:
+
+```sh
+xmsg enroll-ca pending
+xmsg enroll-ca approve REQUEST_ID --user alice --host server \
+  --spki-sha256 '<SPKI-SHA256-DIGEST>'
+```
+
+The operator compares these values with Alice's intended terminal through an
+independent trusted channel. Sign-in alone is insufficient. To reject it, run
+`xmsg enroll-ca deny REQUEST_ID`. The deadline includes sign-in and approval and
+is at most 300 seconds from the CA's provider request. Restart or expiry requires
+a fresh request. After collection Alice starts her dial-out node:
+
+```sh
+xmsg serve --enroll-state ./alice-server-enroll \
+  --peers-file ./alice-server-enroll/peers.json --fed-listen 127.0.0.1:0
+```
+
+For Kanidm 1.11/1.12, or when device mode is disabled or unsupported, explicitly
+choose paste instead; there is no automatic fallback:
+
+```sh
+xmsg enroll https://hub.example.org:7790 --flow paste --provider idm \
+  --fingerprint 'sha256:<64-hex-digits>' --host server \
+  --state-dir ./alice-server-enroll
+```
+
+Choose one flow for a fresh state directory. See
+[device setup and approval](/operations/enrollment-ca/#planned-device-sign-in-from-a-remote-terminal)
+for the separate Google client registration, local socket selection and limits.
+
 The manual setup below remains a separate option. Migrating one of its names
 replaces the old concrete peer entry with the enrollment pattern/rule in one
 reviewed peers-file change. Do not keep competing identities for the same name.

@@ -9,7 +9,8 @@ import { Aside } from '@astrojs/starlight/components';
 The enrollment CA runs inside `xmsg serve`; it does not require a separate CA
 service. Local fixture checks do not establish live Google or Kanidm compatibility.
 Real-provider acceptance and deployment remain operator-run work. V1 supports
-`loopback` and `paste`; device authorization is refused and belongs to a follow-up.
+`loopback` and `paste`. The optional device flow below is planned; Google device
+support remains **unverified** until an owner-run real-provider acceptance check.
 </Aside>
 
 Enrollment gives a machine a short-lived [enrolled identity](/glossary/#enrolled-identity)
@@ -208,7 +209,8 @@ Open the printed URL, sign in, and paste the final loopback redirect address bac
 into this terminal. Do not send that address to someone else: consenting and
 handing it to an attacker can enroll the attacker's key as your user. The forced
 prompt makes the action visible; it does not make deliberate sharing safe.
-`--flow device` is refused in v1.
+Device enrollment is a separate, explicitly enabled flow; it never replaces paste
+automatically.
 
 Use one enrollment command for a state directory, not both examples in sequence.
 The default directory is `$XDG_STATE_HOME/xmsg/enroll`, or
@@ -231,6 +233,123 @@ Use the printed serve flags. The loopback/ephemeral federation bind above suppor
 a dial-out laptop; it does not advertise a publicly dialable address. The daemon
 still needs its peers file and federation listener. The hub's `leaf: true` rule
 is what gives this pattern-admitted node a mailbox.
+
+## Planned: device sign-in from a remote terminal
+
+Device enrollment requires a CA operator for **every request**, after the provider
+sign-in. It is disabled by default. Existing loopback and paste flows keep their
+behavior. The commands in this section illustrate the planned interface; they
+have not yet been verified against the final device implementation.
+
+### Enable a supported provider
+
+For Google, register a distinct **TVs and Limited Input devices** OAuth client,
+not the Desktop app client used above. Request `openid email`. See
+[Google's device OAuth guide](https://developers.google.com/identity/protocols/oauth2/limited-input-device).
+Provider registration and real sign-in are owner-run steps. Add these fields to
+the existing `providers.google` entry, retaining its browser clients:
+
+```json
+{
+  "device": { "enabled": true },
+  "clients": {
+    "loopback": { "client_id": "<desktop-client-id>", "client_secret_file": "/run/xmsg/google-client-secret" },
+    "paste": { "client_id": "<desktop-client-id>", "client_secret_file": "/run/xmsg/google-client-secret" },
+    "device": { "client_id": "<device-client-id>", "client_secret_file": "/run/xmsg/google-device-client-secret" }
+  }
+}
+```
+
+An absent or false `device.enabled` refuses device enrollment even if a device
+client is registered. The device client's secret stays on the CA; Google client
+authentication sends it in the request body. No new Nix module option is required.
+Enabling device mode without its client or the local approval facility fails
+startup. Discovery must supply usable HTTPS device and token endpoints and, if it lists
+grant types, the RFC device grant. Unsupported discovery is refused before any
+device-code or token request. An endpoint that advertises support but refuses the
+grant terminates the request without further polling or issuance.
+
+**Google device support is unverified.** Release requires an owner-run check that
+the modern RFC device grant returns an ID token with the canonical HTTPS issuer
+`https://accounts.google.com` and valid device-client claims. Fixture success does
+not establish this. Missing ID tokens fail closed: access tokens, userinfo and
+legacy grant formats are not fallbacks. Kanidm 1.11/1.12 does not support this
+flow under the measured provider contract; use `--flow paste`. Disabled or
+unsupported providers report `device_disabled` or `device_unsupported` and suggest
+paste, never switch to it.
+
+### Start and independently approve a request
+
+On the intended remote machine:
+
+```sh
+xmsg enroll https://hub.example.org:7790 --flow device --provider google \
+  --fingerprint 'sha256:<64-hex-digits>' --host server \
+  --state-dir ./alice-server-enroll
+```
+
+Before sign-in the terminal shows the CA authority, provider, **requested host
+(not attested)**, CSR SPKI fingerprint, verification URL, user code and acceptance
+deadline, with `policy user: pending verification`. Open the verification URL in
+your browser and enter only a code from a terminal you intentionally started.
+Never authorize a code sent to you in a message. Google's screen is external;
+it need not show the xmsg host or policy user. After verified claims pass policy,
+the terminal shows the verified policy user and `awaiting CA approval`.
+
+On the CA host, as the serving UID:
+
+```sh
+xmsg enroll-ca pending
+xmsg enroll-ca approve REQUEST_ID --user alice --host server \
+  --spki-sha256 '<SPKI-SHA256-DIGEST>'
+```
+
+Use `xmsg enroll-ca --http-sock SOCKET pending` (and the same prefix for approval
+or denial) to select a daemon explicitly. The operator must compare the verified
+user, requested host and exact SPKI fingerprint with the intended terminal over
+an **independent trusted channel** before approving. Do not copy the approval
+values solely from a request sent by someone else. The pending list includes the
+provider, derived node name and remaining time, but no provider tokens, session
+handles, device code or whole CSR. To refuse a request:
+
+```sh
+xmsg enroll-ca deny REQUEST_ID
+```
+
+These three commands contact the running daemon through mode-0600, UID-checked
+`http.sock`; they require no CA directory, policy path or root key. Approval is
+never available over TCP, enrollment HTTPS, MCP or federation. The older
+`init`, `list`, `bind` and `unbind` commands retain their CA-directory/policy
+requirements (`init` needs no policy).
+
+Sign-in alone cannot issue a certificate. Approval binds the verified principal,
+policy user, host, key and current policy. A changed policy, mismatched approval,
+denial, expiry or consumed request refuses issuance rather than remapping the
+approval. Requests disappear on CA restart; start again. No binding, issuance
+bucket or supersession changes before approval and final validation. Collection
+is once-only. An operator can still approve an attacker's request by mistake;
+this is not a phishing-resistant sign-in guarantee.
+
+### Deadline and load bounds
+
+The CA accepts a request for at most `min(provider expires_in, 300 seconds)`,
+starting when it sends the device-code request. Provider latency, polling and
+operator approval all spend that same time; equality with the deadline is expired.
+The provider's own user-code lifetime may be longer. Denial, cancellation or
+expiry ends the request; late approval cannot revive it.
+
+Polling waits before its first request, uses at least five seconds or a larger
+provider interval, and honors `slow_down`. Transport backoff cannot reduce that
+floor, including after a slow-down above ten seconds; the SDK backoff envelope
+is bounded to 300 seconds and the absolute deadline still wins. There are at most
+eight active device requests globally and one per transport source IP, including
+requests awaiting approval. People behind one NAT must enroll in sequence; a
+forwarding header cannot change this limit. Existing enrollment limits still apply.
+
+Only the user code is deliberately displayed; trace logs exclude even that code.
+Device codes and ID/access/refresh tokens are never printed or persisted. Pending
+provider, session and approval secrets stay only in memory. After collection, use the printed serve
+flags and saved state as above; renewal does not contact the provider.
 
 ## Renewal, denial and another provider
 
