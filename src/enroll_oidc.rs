@@ -495,7 +495,7 @@ impl Provider {
                     };
                 }
                 if let RequestTokenError::Parse(_, body) = error {
-                    if matches!(body_has_bare_google_issuer(&body), true) {
+                    if body_has_bare_google_issuer(body.as_ref()) {
                         return Error::UnsupportedIssuer;
                     }
                 }
@@ -504,7 +504,7 @@ impl Provider {
         if clock() >= pending.deadline {
             return Err(Error::Expired);
         }
-        let token = response.id_token().ok_or_else(|| Error::Token)?;
+        let device_token = response.id_token().ok_or(Error::Token)?;
         let no_nonce = |nonce: Option<&Nonce>| {
             if nonce.is_some() {
                 Err("unexpected device nonce".into())
@@ -512,7 +512,7 @@ impl Provider {
                 Ok(())
             }
         };
-        let mut verified = self.verify(&client, &pending.metadata, token, no_nonce, now());
+        let mut verified = self.verify(&client, &pending.metadata, device_token, no_nonce, now());
         if let Err(ClaimsVerificationError::SignatureVerification(
             SignatureVerificationError::NoMatchingKey,
         )) = &verified
@@ -530,7 +530,7 @@ impl Provider {
             let retry =
                 self.device_client(updated.clone(), &pending.client_id, pending.secret.clone());
             *self.metadata.write().map_err(|_| Error::Unavailable)? = updated.clone();
-            verified = self.verify(&retry, &updated, token, no_nonce, now());
+            verified = self.verify(&retry, &updated, device_token, no_nonce, now());
         }
         if clock() >= pending.deadline {
             return Err(Error::Expired);
