@@ -139,7 +139,7 @@ pub enum Error {
     InvalidCsr,
     #[error("unsupported_key")]
     UnsupportedKey,
-    #[error("invalid_ca_key")]
+    #[error("invalid_ca_key: root.crt/root.key must match; root.key must be owner-private")]
     InvalidCaKey,
     #[error("denied")]
     Denied,
@@ -550,6 +550,9 @@ impl EnrollCa {
             hex::encode(serial),
             not_after,
         ))
+    }
+    pub fn reserved_uri(&self) -> String {
+        format!("spiffe://{}/xmsg/enroll", self.policy().trust_domain)
     }
     pub fn server_identity(&self, now: i64) -> Result<ServerIdentity, Error> {
         let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
