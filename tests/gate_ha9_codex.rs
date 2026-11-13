@@ -7679,6 +7679,39 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Va41LogWriter {
 
 #[tokio::test]
 async fn va41_repeated_failure_logs_only_class_transition_without_values() {
+    const CHILD: &str = "XMSG_VA41_LOG_ORACLE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let mut child = Va41Child(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "va41_repeated_failure_logs_only_class_transition_without_values",
+                    "--exact",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "1")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "isolated log oracle timed out"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let mut output = String::new();
+        std::io::Read::read_to_string(&mut child.0.stdout.take().unwrap(), &mut output).unwrap();
+        std::io::Read::read_to_string(&mut child.0.stderr.take().unwrap(), &mut output).unwrap();
+        assert!(status.success(), "isolated log oracle failed: {output}");
+        return;
+    }
     use tracing::instrument::WithSubscriber;
     const ROOT: &str = "019a0000-0000-7000-8000-000000000491";
     let env = va41_restart_fixture(ROOT).await;
@@ -7701,6 +7734,7 @@ async fn va41_repeated_failure_logs_only_class_transition_without_values() {
     // Reset runtime class history while preserving durable recovery eligibility.
     restart_codex_fixture(&env);
     async {
+        tracing::info!(class = "fixture_control", "va41 log capture control");
         xmsg::codex::recover_restart_roots(&env.state).await;
         tokio::time::sleep(Duration::from_millis(1100)).await;
         xmsg::codex::recover_restart_roots(&env.state).await;
@@ -7708,6 +7742,10 @@ async fn va41_repeated_failure_logs_only_class_transition_without_values() {
     .with_subscriber(subscriber)
     .await;
     let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+    assert!(
+        logs.contains("va41 log capture control"),
+        "capture positive control missing"
+    );
     assert_eq!(
         logs.matches("codex startup recovery").count(),
         1,
