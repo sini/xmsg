@@ -48,3 +48,6 @@ pub mod surface;
 pub mod svc;
 #[cfg(feature = "daemon")]
 pub mod systemd;
+
+#[cfg(feature = "daemon")]
+pub mod enroll_oidc;
