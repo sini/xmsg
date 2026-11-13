@@ -21,8 +21,11 @@ A message can carry up to eight content-addressed references:
 
 The bytes stay in SQLite, not in the message text. `--max-attachment-bytes`
 (`XMSG_MAX_ATTACHMENT_BYTES`, default 8 MiB) sets the maximum size of each file. xmsg sanitises
-names. The maximum name length is 128 bytes. The default media type is
-`application/octet-stream`. Attachment rows have the same reply TTL as their message. Staged
+names. The maximum name length is 128 bytes. Raw byte and path staging without a media type
+use `application/octet-stream`. **Planned:** inline text entries in MCP `send` and `reply` default
+to `text/plain; charset=utf-8`; an explicit `media_type` remains unchanged. xmsg accepts that
+exact UTF-8 parameter alongside bare types; other parameters such as `charset=latin1` remain
+invalid. Attachment rows have the same reply TTL as their message. Staged
 bytes that are not sent, and incomplete uploads, expire after the idempotency TTL. Garbage
 collection removes orphaned blobs. A hash alone does not give permission to attach or read a
 file.

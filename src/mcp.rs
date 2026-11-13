@@ -513,7 +513,7 @@ pub fn tool_definitions() -> Vec<Value> {
             "type": "object",
             "properties": {
                 "name": {"type": "string"},
-                "media_type": {"type": "string"},
+                "media_type": {"type": "string", "description": "Optional override; inline text defaults to text/plain; charset=utf-8, paths to application/octet-stream"},
                 "path": {"type": "string", "description": "Absolute path on the daemon host"},
                 "text": {"type": "string"}
             },
@@ -1102,7 +1102,13 @@ fn stage_mcp_attachments(
             }
             _ => return Err("each attachment requires exactly one of path and text".into()),
         }
-        if let Some(media_type) = entry.media_type {
+        let media_type = entry.media_type.or_else(|| {
+            entry
+                .text
+                .as_ref()
+                .map(|_| crate::attachments::TEXT_UTF8_MEDIA_TYPE.to_string())
+        });
+        if let Some(media_type) = media_type {
             attach["media_type"] = json!(media_type);
         }
         let result = call_agent_sock_within(&config.agent_sock, &attach, Duration::from_secs(20))?;
@@ -1127,41 +1133,92 @@ mod attachment_tests {
 
     #[test]
     fn chunked_text_staging_preserves_caller_metadata() {
-        let home = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let sock = home.path().join("agent.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
-        let worker = std::thread::spawn(move || {
-            for expected_offset in [Some(0), Some(16 * 1024), None] {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut line = String::new();
-                BufReader::new(stream.try_clone().unwrap())
-                    .read_line(&mut line)
-                    .unwrap();
-                let frame: Value = serde_json::from_str(&line).unwrap();
-                assert_eq!(frame["action"], "attach");
-                assert_eq!(frame["codex_session"], "root");
-                assert_eq!(frame["codex_thread"], "child");
-                assert_eq!(frame["codex_turn"], "turn");
-                assert!(frame.get("as_agent").is_none());
-                if let Some(offset) = expected_offset {
-                    assert_eq!(frame["offset"], offset);
-                    assert!(frame.get("name").is_none());
-                    writeln!(stream, "{}", json!({"status":"ok","size":offset+1})).unwrap();
-                } else {
-                    assert_eq!(frame["name"], "report.md");
-                    assert_eq!(frame["media_type"], "text/markdown");
-                    writeln!(stream, "{}", json!({"status":"ok","attachment":{"name":"report.md","size":16385,"media_type":"text/markdown","sha256":"a".repeat(64)}})).unwrap();
+        for provided_type in [Some("text/markdown"), None] {
+            let home = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let sock = home.path().join("agent.sock");
+            let listener = UnixListener::bind(&sock).unwrap();
+            let expected_type = provided_type.unwrap_or("text/plain; charset=utf-8");
+            let worker = std::thread::spawn(move || {
+                for expected_offset in [Some(0), Some(16 * 1024), None] {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut line = String::new();
+                    BufReader::new(stream.try_clone().unwrap())
+                        .read_line(&mut line)
+                        .unwrap();
+                    let frame: Value = serde_json::from_str(&line).unwrap();
+                    assert_eq!(frame["action"], "attach");
+                    assert_eq!(frame["codex_session"], "root");
+                    assert_eq!(frame["codex_thread"], "child");
+                    assert_eq!(frame["codex_turn"], "turn");
+                    assert!(frame.get("as_agent").is_none());
+                    if let Some(offset) = expected_offset {
+                        assert_eq!(frame["offset"], offset);
+                        assert!(frame.get("name").is_none());
+                        writeln!(stream, "{}", json!({"status":"ok","size":offset+1})).unwrap();
+                    } else {
+                        assert_eq!(frame["name"], "report.md");
+                        assert_eq!(frame["media_type"], expected_type);
+                        writeln!(stream, "{}", json!({"status":"ok","attachment":{"name":"report.md","size":16385,"media_type":expected_type,"sha256":"a".repeat(64)}})).unwrap();
+                    }
                 }
+            });
+            let config = McpConfig::new(vec![], "http://unused".into()).with_agent_sock(sock);
+            let mut entry = json!({"name":"report.md","text":"x".repeat(16385)});
+            if let Some(media_type) = provided_type {
+                entry["media_type"] = json!(media_type);
             }
-        });
-        let config = McpConfig::new(vec![], "http://unused".into()).with_agent_sock(sock);
-        let args = json!({"attachments":[{"name":"report.md","media_type":"text/markdown","text":"x".repeat(16385)}]});
-        let mut payload = json!({"action":"send","codex_session":"root","codex_thread":"child","codex_turn":"turn"});
-        stage_mcp_attachments(&config, &args, &mut payload).unwrap();
-        assert_eq!(payload["attachments"][0]["size"], 16385);
-        assert_eq!(payload["attachments"][0]["name"], "report.md");
-        worker.join().unwrap();
+            let args = json!({"attachments":[entry]});
+            let mut payload = json!({"action":"send","codex_session":"root","codex_thread":"child","codex_turn":"turn"});
+            stage_mcp_attachments(&config, &args, &mut payload).unwrap();
+            assert_eq!(payload["attachments"][0]["size"], 16385);
+            assert_eq!(payload["attachments"][0]["name"], "report.md");
+            worker.join().unwrap();
+        }
+    }
+    #[test]
+    fn inline_text_defaults_to_utf8_plain_while_paths_keep_binary_default() {
+        for action in ["send", "reply"] {
+            let home = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let sock = home.path().join("agent.sock");
+            let file = home.path().join("looks-like-text.txt");
+            std::fs::write(&file, "héllo").unwrap();
+            let listener = UnixListener::bind(&sock).unwrap();
+            let worker = std::thread::spawn(move || {
+                for expected in [
+                    Some("text/plain; charset=utf-8"),
+                    Some("text/markdown"),
+                    None,
+                ] {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut line = String::new();
+                    BufReader::new(stream.try_clone().unwrap())
+                        .read_line(&mut line)
+                        .unwrap();
+                    let frame: Value = serde_json::from_str(&line).unwrap();
+                    assert_eq!(frame.get("media_type").and_then(Value::as_str), expected);
+                    writeln!(stream, "{}", json!({"status":"ok","attachment":{"name":"a.txt","size":6,"media_type":expected.unwrap_or("application/octet-stream"),"sha256":"a".repeat(64)}})).unwrap();
+                }
+            });
+            let config = McpConfig::new(vec![], "http://unused".into()).with_agent_sock(sock);
+            let args = json!({"attachments":[
+                {"name":"a.txt","text":"héllo"},
+                {"name":"a.md","text":"héllo","media_type":"text/markdown"},
+                {"path":file}
+            ]});
+            let mut payload = json!({"action":action});
+            stage_mcp_attachments(&config, &args, &mut payload).unwrap();
+            assert_eq!(
+                payload["attachments"][0]["media_type"],
+                "text/plain; charset=utf-8"
+            );
+            assert_eq!(
+                payload["attachments"][2]["media_type"],
+                "application/octet-stream"
+            );
+            worker.join().unwrap();
+        }
     }
 
     #[test]

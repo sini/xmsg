@@ -95,7 +95,11 @@ data; it cannot select a host filesystem path or fetch by a bare hash.
 ```
 
 Each of at most eight entries has `name`, optional `media_type`, and exactly one of `text`
-or `base64`. The decoded file must fit the node's negotiated cap (8 MiB by default). The
+or `base64`. **Planned:** omitted `media_type` defaults to `text/plain; charset=utf-8` for
+`text` entries and `application/octet-stream` for `base64`, without filename or byte sniffing.
+An explicit type wins. Only the exact UTF-8 parameter shown here is accepted; other parameters
+remain invalid. Deploy the xmsg leaf with this canonical type validator **before** deploying the
+gateway default; an older leaf rejects it. The decoded file must fit the node's negotiated cap (8 MiB by default). The
 whole encoded request must fit the gateway HTTP body bound (1 MiB by default); larger
 inline files require an owner-configured bound. The gateway stages bounded chunks, then
 reserves and submits canonical references. Repeating the same `request_id` and files keeps
