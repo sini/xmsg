@@ -13,21 +13,24 @@ use std::{
 };
 use tower::ServiceExt;
 
-struct TestClock(AtomicI64);
+pub(crate) struct TestClock(pub(crate) AtomicI64);
 impl Clock for TestClock {
     fn now(&self) -> i64 {
         self.0.load(Ordering::SeqCst)
     }
 }
-struct Harness {
-    _directory: tempfile::TempDir,
-    idp: Fixture,
-    service: Arc<Service>,
-    clock: Arc<TestClock>,
-    db: Arc<Mutex<rusqlite::Connection>>,
+pub(crate) struct Harness {
+    pub(crate) _directory: tempfile::TempDir,
+    pub(crate) idp: Fixture,
+    pub(crate) service: Arc<Service>,
+    pub(crate) clock: Arc<TestClock>,
+    pub(crate) db: Arc<Mutex<rusqlite::Connection>>,
 }
 impl Harness {
-    async fn new() -> Self {
+    pub(crate) async fn new() -> Self {
+        Self::new_with_address("127.0.0.1:7788").await
+    }
+    pub(crate) async fn new_with_address(address: &str) -> Self {
         let now = WallClock.now();
         let idp = Fixture::new_at(now).await;
         let directory = tempfile::tempdir().unwrap();
@@ -65,14 +68,16 @@ impl Harness {
                 &rcgen::Issuer::from_params(&parameters, &fleet_key),
             )
             .unwrap();
+        let admitted = Arc::new(fed::PeersMap::load_from_json(&json!({"peers":{},"hub":{"patterns":[{"pattern":"spiffe://enroll.example/host/*/user/alice","ca":directory.path().join("ca/root.crt")}],"rules":[{"pattern":"spiffe://enroll.example/host/*/user/alice","allow":["send","reply","list","relayed"],"leaf":true}]}}).to_string()).unwrap());
         let fed = node_state(
             db.clone(),
             directory.path(),
             vec![leaf.der().to_vec(), fleet_root.der().to_vec()],
             leaf_key.serialize_der(),
+            admitted,
         );
         let clock = Arc::new(TestClock(AtomicI64::new(now)));
-        let (entry, _) = hub_entry(&fed, "127.0.0.1:7788", now).unwrap();
+        let (entry, _) = hub_entry(&fed, address, now).unwrap();
         let identity = ca.reserved_uri();
         let service = Arc::new(Service::with_oidc_http(
             ca,
@@ -136,7 +141,7 @@ impl Harness {
             .idp
             .authorize(created["authorization_url"].as_str().unwrap());
         let handle = created["session"].as_str().unwrap();
-        let (status, _) = self
+        let (status, response) = self
             .request(
                 "POST",
                 "/enroll/v1/sessions/code",
@@ -145,7 +150,9 @@ impl Harness {
                 1,
             )
             .await;
-        assert_eq!(status, StatusCode::ACCEPTED);
+        if status != StatusCode::ACCEPTED {
+            return (status, response);
+        }
         self.request(
             "GET",
             "/enroll/v1/sessions?wait=0",
@@ -161,13 +168,14 @@ fn node_state(
     dir: &std::path::Path,
     chain: Vec<Vec<u8>>,
     key: Vec<u8>,
+    peers: Arc<fed::PeersMap>,
 ) -> Arc<fed::FedState> {
     let (notify_tx, _) = tokio::sync::broadcast::channel(32);
     let (pi_notify_tx, _) = tokio::sync::broadcast::channel(32);
     let (svc_notify_tx, _) = tokio::sync::broadcast::channel(32);
     Arc::new(fed::FedState {
         node_name: "team.hub".into(),
-        peers: Arc::new(fed::PeersMap::new(HashMap::new())).into(),
+        peers: peers.into(),
         cert_der: chain[0].clone(),
         cert_chain_der: chain,
         key_der: key,
@@ -281,4 +289,225 @@ async fn probe_request_authority_observations() {
     let(status,value)=h.request("POST","/enroll/v1/sessions",json!({"csr_pem":csr,"host":"laptop","provider":"idp","flow":"device","redirect_uri":"http://127.0.0.1:18551/cb"}),None,1).await;
     println!("device {} reason={}", status, value["error"]["reason"]);
     println!("provider_requests {}", h.idp.request_paths().len());
+}
+
+#[tokio::test]
+async fn protocol_user_field_is_not_authority() {
+    let h = Harness::new().await;
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+    let csr = rcgen::CertificateParams::default()
+        .serialize_request(&key)
+        .unwrap()
+        .pem()
+        .unwrap();
+    let(status,_)=h.request("POST","/enroll/v1/sessions",json!({"csr_pem":csr,"host":"laptop","provider":"idp","flow":"loopback","redirect_uri":"http://127.0.0.1:18551/cb","user":"root"}),None,1).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "session accepted a self-asserted user field"
+    );
+    assert!(
+        h.idp.request_paths().is_empty(),
+        "rejected user field reached provider"
+    );
+    let (status, created, _) = h.start("laptop", 1).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, collected) = h.complete(&created).await;
+    assert_eq!(status, StatusCode::OK);
+    use rustls::pki_types::pem::PemObject;
+    let cert = rustls::pki_types::CertificateDer::from_pem_slice(
+        collected["cert_chain_pem"].as_str().unwrap().as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        crate::node::node_name_from_cert(cert.as_ref()).unwrap(),
+        "alice.laptop"
+    );
+}
+#[tokio::test]
+async fn protocol_csr_key_and_single_collect_are_bound_to_session() {
+    let h = Harness::new().await;
+    let (status, created, key) = h.start("laptop", 1).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, collected) = h.complete(&created).await;
+    assert_eq!(status, StatusCode::OK);
+    use rustls::pki_types::pem::PemObject;
+    let cert = rustls::pki_types::CertificateDer::from_pem_slice(
+        collected["cert_chain_pem"].as_str().unwrap().as_bytes(),
+    )
+    .unwrap();
+    use sha2::Digest;
+    assert_eq!(
+        fed::spki_sha256_from_der(cert.as_ref()).unwrap(),
+        hex::encode(sha2::Sha256::digest(key.subject_public_key_info())),
+        "collected certificate changed the session CSR key"
+    );
+    let (status, _) = h
+        .request(
+            "GET",
+            "/enroll/v1/sessions",
+            Value::Null,
+            created["session"].as_str(),
+            1,
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::GONE,
+        "session certificate was collected more than once"
+    );
+}
+#[tokio::test]
+async fn protocol_global_burst_is_charged() {
+    let h = Harness::new().await;
+    for n in 1..=10 {
+        assert_eq!(h.start(&format!("host{n}"), n).await.0, StatusCode::CREATED);
+    }
+    assert_eq!(
+        h.start("overflow", 11).await.0,
+        StatusCode::TOO_MANY_REQUESTS,
+        "eleventh session escaped the global burst bucket"
+    );
+}
+#[tokio::test]
+async fn protocol_per_ip_pending_is_bounded() {
+    let h = Harness::new().await;
+    for n in 1..=4 {
+        assert_eq!(h.start(&format!("host{n}"), 1).await.0, StatusCode::CREATED);
+    }
+    assert_eq!(
+        h.start("overflow", 1).await.0,
+        StatusCode::TOO_MANY_REQUESTS,
+        "fifth session escaped the per-IP pending cap"
+    );
+}
+#[tokio::test]
+async fn protocol_pending_capacity_keeps_earlier_session() {
+    let h = Harness::new().await;
+    let mut first = None;
+    for n in 1..=64 {
+        let (status, value, _) = h.start(&format!("host{n}"), n).await;
+        assert_eq!(status, StatusCode::CREATED);
+        if n == 1 {
+            first = Some(value);
+        }
+        h.clock.0.fetch_add(2, Ordering::SeqCst);
+    }
+    assert_eq!(
+        h.start("overflow", 65).await.0,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "full pending table accepted another session"
+    );
+    let (status, collected) = h.complete(&first.unwrap()).await;
+    assert!(
+        status == StatusCode::OK && collected.get("cert_chain_pem").is_some(),
+        "full pending table evicted an earlier session"
+    );
+}
+
+pub(crate) async fn network_server(
+    h: &Harness,
+    wrong_role: bool,
+) -> (String, tokio::task::JoinHandle<()>) {
+    use rustls::pki_types::{pem::PemObject, CertificateDer, PrivatePkcs8KeyDer};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "https://127.0.0.1:{}",
+        listener.local_addr().unwrap().port()
+    );
+    let config = if wrong_role {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let csr = rcgen::CertificateParams::default()
+            .serialize_request(&key)
+            .unwrap()
+            .pem()
+            .unwrap();
+        let csr = enroll_ca::VerifiedCsr::parse_pem(&csr).unwrap();
+        let claims = enroll_ca::VerifiedClaims {
+            provider: "idp".into(),
+            iss: h.idp.issuer(),
+            sub: "fixture-sub".into(),
+            email: None,
+            email_verified: false,
+            hd: None,
+            groups: vec![],
+            preferred_username: None,
+        };
+        let issued = h
+            .service
+            .ca
+            .issue(&claims, &csr, "attacker", &[], h.clock.now())
+            .unwrap();
+        let chain = CertificateDer::pem_slice_iter(issued.cert_chain_pem.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        Arc::new(
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(chain, PrivatePkcs8KeyDer::from(key.serialize_der()).into())
+                .unwrap(),
+        )
+    } else {
+        tls_config(&h.service).unwrap()
+    };
+    let service = h.service.clone();
+    let task = tokio::spawn(async move {
+        let _ = listen_with_config(listener, service, config).await;
+    });
+    (url, task)
+}
+pub(crate) fn enrollment_fingerprint(h: &Harness) -> String {
+    use rustls::pki_types::pem::PemObject;
+    use sha2::Digest;
+    let der = rustls::pki_types::CertificateDer::from_pem_slice(h.service.ca.root_pem().as_bytes())
+        .unwrap();
+    format!("sha256:{}", hex::encode(sha2::Sha256::digest(der.as_ref())))
+}
+async fn bootstrap_then_create(
+    h: &Harness,
+    url: &str,
+    fp: &str,
+    state: &std::path::Path,
+) -> Result<(), enroll_client::Error> {
+    let trust = enroll_client::bootstrap(url, Some(fp), None).await?;
+    let csr = enroll_client::create_key(state)?;
+    let http = enroll_client::http_client(&trust, None)?;
+    let response=http.post(format!("{url}/enroll/v1/sessions")).json(&json!({"csr_pem":csr,"host":"laptop","provider":"idp","flow":"loopback","redirect_uri":"http://127.0.0.1:18551/cb"})).send().await.map_err(|_|enroll_client::Error::Transport)?;
+    if response.status() != reqwest::StatusCode::CREATED {
+        return Err(enroll_client::Error::Response);
+    }
+    let _ = h;
+    Ok(())
+}
+#[tokio::test]
+async fn probe_transport_observations() {
+    let h = Harness::new().await;
+    let (url, task) = network_server(&h, false).await;
+    let fp = enrollment_fingerprint(&h);
+    let mut wrong = fp.clone();
+    wrong.pop();
+    wrong.push(if fp.ends_with('0') { '1' } else { '0' });
+    let dir = h._directory.path().join("wrong-fingerprint");
+    let result = bootstrap_then_create(&h, &url, &wrong, &dir).await;
+    println!(
+        "wrong_fp_refused {} key_exists {} sessions {}",
+        result.is_err(),
+        dir.join("fed.key").exists(),
+        h.service.sessions.lock().unwrap().len()
+    );
+    let trust = enroll_client::bootstrap(&url, Some(&fp), None)
+        .await
+        .unwrap();
+    println!("right_fp_identity {}", trust.ca_identity);
+    let (bad_url, bad_task) = network_server(&h, true).await;
+    let result = enroll_client::bootstrap(&bad_url, Some(&fp), None).await;
+    println!("bootstrap_role_refused {}", result.is_err());
+    let result = enroll_client::http_client(&trust, None)
+        .unwrap()
+        .get(format!("{bad_url}/enroll/v1/sessions"))
+        .send()
+        .await;
+    println!("later_role_refused {}", result.is_err());
+    bad_task.abort();
+    task.abort();
 }
