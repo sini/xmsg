@@ -265,9 +265,13 @@ impl Fixture {
             shared.access.clone(),
             shared.refresh.clone(),
         ]);
+        values.extend(shared.codes.keys().cloned());
+        values.extend(shared.device_user_codes.keys().cloned());
         for form in &shared.forms {
-            if let Some(value) = form.get("code_verifier") {
-                values.push(value.clone());
+            for key in ["code_verifier", "device_code", "code", "client_secret"] {
+                if let Some(value) = form.get(key) {
+                    values.push(value.clone());
+                }
             }
         }
         values
