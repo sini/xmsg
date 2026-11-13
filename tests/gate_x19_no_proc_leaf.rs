@@ -2,7 +2,7 @@
 //! - Oracle 1: Leaf `svc` registration, `list`, `send`, `poll`, `ack`, and `reply` succeed when
 //!   ALL `/proc` paths (`proc_root`, `proc_locks`, and `/proc/self/fdinfo/<pidfd>`) are unavailable.
 //! - Oracle 2: A readable `fdinfo` reporting `Pid: -1` (and malformed or missing `Pid:` lines)
-//!   remains `Dead` and is refused on leaf registration.
+//!   remains `Dead` on Linux; Darwin retains its native peer PID/start-time witness.
 //! - Oracle 3: Non-leaf session tracing (`svc` exe attestation, `agent.sock`, and caller session
 //!   resolution) remains unchanged and fails closed when `/proc` is unavailable.
 
@@ -536,7 +536,7 @@ async fn leaf_svc_without_proc_and_pidfd_dead_controls() {
 
     // =========================================================================
     // Oracle 2: Readable fdinfo with `Pid: -1`, malformed `Pid:`, or missing
-    // `Pid:` line remains `Dead` and is refused on leaf registration.
+    // `Pid:` line remains `Dead` on Linux; Darwin uses its native witness.
     // =========================================================================
     let fdinfo_cases = [
         (
@@ -557,12 +557,33 @@ async fn leaf_svc_without_proc_and_pidfd_dead_controls() {
         fs::write(&fdinfo_file, contents).unwrap();
         process::set_force_pidfd_fdinfo_file_for_test(Some(fdinfo_file));
 
-        let res = RegisteredService::register(leaf_opts.clone()).await;
-        assert!(
-            matches!(res, Err(ClientError::Refused { ref code }) if code == "not_found"),
-            "Oracle 2 ({case_name}): readable fdinfo must remain Dead and refuse leaf registration, got: {:?}",
-            res.err()
-        );
+        #[cfg(target_os = "linux")]
+        {
+            let res = RegisteredService::register(leaf_opts.clone()).await;
+            assert!(
+                matches!(res, Err(ClientError::Refused { ref code }) if code == "not_found"),
+                "Oracle 2 ({case_name}): readable fdinfo must remain Dead and refuse leaf registration, got: {:?}",
+                res.err()
+            );
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let (socket, _peer_socket) = UnixStream::pair().unwrap();
+            let peer = process::peer_cred(&socket).unwrap();
+            let pid = std::process::id();
+            assert_eq!(
+                peer.pid_or_zero(),
+                pid,
+                "native peer PID must survive the irrelevant fdinfo hook: {case_name}"
+            );
+            assert_eq!(peer.uid, current_uid());
+            let live_root = Path::new(process::LIVE_PROC_ROOT);
+            let start = process::starttime(live_root, pid).unwrap();
+            assert!(
+                peer.is_alive(live_root, &start),
+                "native start-time witness must remain valid: {case_name}"
+            );
+        }
     }
 
     // =========================================================================
