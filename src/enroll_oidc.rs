@@ -1,5 +1,51 @@
 //! OIDC browser-flow verification for node enrollment.
 
+use crate::enroll_ca::{Flow, Provider as ProviderConfig, VerifiedClaims};
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("unsupported_flow")]
+    UnsupportedFlow,
+    #[error("unsupported_issuer")]
+    UnsupportedIssuer,
+    #[error("invalid_provider")]
+    Configuration,
+    #[error("oidc_unavailable")]
+    Unavailable,
+    #[error("invalid_state")]
+    State,
+    #[error("invalid_token")]
+    Token,
+}
+
+pub struct PendingAuthorization {
+    pub authorization_url: String,
+    _opaque: (),
+}
+
+pub struct Provider;
+impl Provider {
+    pub async fn discover(
+        _label: &str,
+        _config: &ProviderConfig,
+        _groups: bool,
+    ) -> Result<Self, Error> {
+        Err(Error::Unavailable)
+    }
+    pub fn begin(&self, _flow: Flow, _redirect_uri: &str) -> Result<PendingAuthorization, Error> {
+        Err(Error::Unavailable)
+    }
+    pub async fn exchange(
+        &self,
+        _pending: PendingAuthorization,
+        _code: &str,
+        _state: &str,
+        _now: i64,
+    ) -> Result<VerifiedClaims, Error> {
+        Err(Error::Unavailable)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
