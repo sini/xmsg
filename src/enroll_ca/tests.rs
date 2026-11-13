@@ -343,3 +343,79 @@ fn unsupported_key_charset_and_flow_do_not_gain_authority() {
         Err(Error::Denied)
     ));
 }
+
+#[test]
+fn bad_proof_of_possession_and_unknown_extensions_are_refused() {
+    use base64::Engine;
+    let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let pem = CertificateParams::default()
+        .serialize_request(&key)
+        .unwrap()
+        .pem()
+        .unwrap();
+    let payload = pem
+        .lines()
+        .filter(|line| !line.starts_with("-----"))
+        .collect::<String>();
+    let mut der = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .unwrap();
+    *der.last_mut().unwrap() ^= 1;
+    let altered = format!(
+        "-----BEGIN CERTIFICATE REQUEST-----\n{}\n-----END CERTIFICATE REQUEST-----\n",
+        base64::engine::general_purpose::STANDARD.encode(der)
+    );
+    assert!(matches!(
+        VerifiedCsr::parse_pem(&altered),
+        Err(Error::InvalidCsr)
+    ));
+    let mut params = CertificateParams::default();
+    params
+        .custom_extensions
+        .push(rcgen::CustomExtension::from_oid_content(
+            &[1, 2, 3, 4],
+            vec![5, 0],
+        ));
+    let unsupported = params.serialize_request(&key).unwrap().pem().unwrap();
+    assert!(matches!(
+        VerifiedCsr::parse_pem(&unsupported),
+        Err(Error::InvalidCsr)
+    ));
+}
+#[test]
+fn serial_profile_is_per_certificate_even_for_one_public_key() {
+    let s = Setup::new();
+    let request = csr(false);
+    let uri = "spiffe://example.org/host/lap/user/alice";
+    let (a, _, _) = s.ca.sign(&request.key, uri, NOW, 86400).unwrap();
+    let (b, _, _) = s.ca.sign(&request.key, uri, NOW + 1, 86400).unwrap();
+    let a = chain(&a);
+    let b = chain(&b);
+    let (_, a) = x509_parser::parse_x509_certificate(&a[0]).unwrap();
+    let (_, b) = x509_parser::parse_x509_certificate(&b[0]).unwrap();
+    assert_ne!(
+        a.raw_serial(),
+        b.raw_serial(),
+        "same public key reused certificate serial"
+    );
+    assert_eq!(a.raw_serial().len(), 16);
+    assert_eq!(b.raw_serial().len(), 16);
+}
+#[test]
+fn configured_issuer_is_stored_and_bare_google_alias_is_refused() {
+    let s = Setup::new();
+    let mut p = policy();
+    p["providers"]["idp"]["issuer"] = "https://accounts.google.com".into();
+    s.replace(p);
+    let mut c = claims("alice-id");
+    c.iss = "https://accounts.google.com".into();
+    s.ca.issue(&c, &csr(false), "lap", &[], NOW).unwrap();
+    c.iss = "accounts.google.com".into();
+    assert!(matches!(
+        s.ca.issue(&c, &csr(false), "lap2", &[], NOW),
+        Err(Error::Denied)
+    ));
+    let rows = s.ca.list().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].iss, "https://accounts.google.com");
+}
