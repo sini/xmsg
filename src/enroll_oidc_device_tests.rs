@@ -817,3 +817,61 @@ async fn device_authorization_endpoint_refusal_is_terminal_unsupported() {
         "refused device endpoint was polled"
     );
 }
+
+#[tokio::test]
+async fn device_non_google_confidential_client_uses_basic_auth() {
+    let fixture = Fixture::new().await;
+    let config = fixture.device_config(true);
+    let provider = Provider::discover_with_client("fixture", &config, true, fixture.http_client())
+        .await
+        .unwrap();
+    let clock = Clock::new();
+    let pending = provider
+        .begin_device_with_clock(&|| clock.now())
+        .await
+        .expect("non-Google confidential device code request refused");
+    let claims = poll(&provider, pending, &clock)
+        .await
+        .expect("non-Google confidential device poll refused");
+    assert_eq!(claims.sub, "fixture-sub");
+    assert_eq!(fixture.device_requests(), 1);
+    assert_eq!(fixture.device_polls(), 1);
+    let shared = fixture.shared.lock().unwrap();
+    assert_eq!(shared.forms.len(), 2);
+    for form in &shared.forms {
+        assert!(
+            !form.contains_key("client_secret"),
+            "non-Google confidential client unexpectedly used body secret"
+        );
+    }
+}
+
+#[tokio::test]
+async fn fixture_device_authorization_rejects_wrong_client_secret() {
+    let fixture = Fixture::new().await;
+    for body_auth in [false, true] {
+        let request = fixture
+            .http_client()
+            .post(format!("{}/device", fixture.issuer()));
+        let request = if body_auth {
+            request.form(&[
+                ("client_id", "device-client"),
+                ("client_secret", "wrong-fixture-secret"),
+            ])
+        } else {
+            request
+                .basic_auth("device-client", Some("wrong-fixture-secret"))
+                .form(&[("scope", "openid email")])
+        };
+        let response = request.send().await.unwrap();
+        assert_eq!(
+            response.status(),
+            400,
+            "fixture accepted wrong device client secret"
+        );
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["error"],
+            "invalid_client"
+        );
+    }
+}
