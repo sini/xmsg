@@ -594,3 +594,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "enroll_oidc_fixture.rs"]
+mod fixture_tests;
