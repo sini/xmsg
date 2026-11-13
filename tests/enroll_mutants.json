@@ -1,0 +1,1467 @@
+[
+  {
+    "label": "core-csr-san",
+    "oracle": "O1 SAN override",
+    "target": "lib",
+    "test": "enroll_ca::tests::fresh_profile_ignores_requested_authority_and_preserves_key",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "uri.try_into().map_err(|_| Error::InvalidName)?",
+        "replacement": "\"spiffe://example.org/host/laptop/user/root\".try_into().map_err(|_| Error::InvalidName)?",
+        "start": "    fn sign(",
+        "end": "    pub fn reserved_uri("
+      }
+    ],
+    "expected_literal": "assertion `left == right` failed"
+  },
+  {
+    "label": "core-csr-ca",
+    "oracle": "O1 NoCA",
+    "target": "lib",
+    "test": "enroll_ca::tests::fresh_profile_ignores_requested_authority_and_preserves_key",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "params.is_ca = rcgen::IsCa::ExplicitNoCa;",
+        "replacement": "params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: !leaf.is_ca()"
+  },
+  {
+    "label": "core-csr-key",
+    "oracle": "O5 core SPKI equality",
+    "target": "lib",
+    "test": "enroll_ca::tests::fresh_profile_ignores_requested_authority_and_preserves_key",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "&csr.key,",
+        "replacement": "&rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).map_err(|_|Error::Storage)?,",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion `left == right` failed"
+  },
+  {
+    "label": "core-serial",
+    "oracle": "O2 serial",
+    "target": "lib",
+    "test": "enroll_ca::tests::serial_profile_is_per_certificate_even_for_one_public_key",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "params.serial_number = Some(rcgen::SerialNumber::from_slice(&serial));",
+        "replacement": "params.serial_number = None;",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion `left != right` failed: same public key reused certificate serial"
+  },
+  {
+    "label": "core-dn",
+    "oracle": "O2 empty DN/critical SAN",
+    "target": "lib",
+    "test": "enroll_ca::tests::fresh_profile_ignores_requested_authority_and_preserves_key",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "params.distinguished_name = rcgen::DistinguishedName::new();",
+        "replacement": "",
+        "start": "    fn sign(",
+        "end": "    pub fn reserved_uri("
+      }
+    ],
+    "expected_literal": "assertion failed: leaf.subject().iter().next().is_none()"
+  },
+  {
+    "label": "core-issue-expiry",
+    "oracle": "O2 explicit not_after",
+    "target": "lib",
+    "test": "enroll_ca::tests::fresh_profile_ignores_requested_authority_and_preserves_key",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "params.not_after =",
+        "replacement": "params.not_before =",
+        "start": "    fn sign(",
+        "end": "    pub fn reserved_uri("
+      }
+    ],
+    "expected_literal": "assertion `left == right` failed"
+  },
+  {
+    "label": "core-renew-expiry",
+    "oracle": "O2 explicit not_after",
+    "target": "lib",
+    "test": "enroll_ca::tests::renewal_preserves_uri_spki_new_serial_window_and_grace",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "params.not_after =",
+        "replacement": "params.not_before =",
+        "start": "    fn sign(",
+        "end": "    pub fn reserved_uri("
+      }
+    ],
+    "expected_literal": "called `Result::unwrap()` on an `Err` value: ReenrollRequired"
+  },
+  {
+    "label": "core-backdate",
+    "oracle": "O2 lifetime+300",
+    "target": "lib",
+    "test": "enroll_ca::tests::fresh_profile_ignores_requested_authority_and_preserves_key",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "params.not_before =",
+        "replacement": "params.not_after =",
+        "start": "    fn sign(",
+        "end": "    pub fn reserved_uri("
+      }
+    ],
+    "expected_literal": "assertion `left == right` failed"
+  },
+  {
+    "label": "core-renew-root",
+    "oracle": "O6 independent chain verification",
+    "target": "lib",
+    "test": "enroll_ca::tests::renewal_rejects_other_root_even_with_known_serial_key_and_uri",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "        crate::fed::verify_cert_chain(\n            &CertificateDer::from(leaf.as_slice()),\n            &intermediates,\n            &anchors,\n            UnixTime::since_unix_epoch(std::time::Duration::from_secs(at)),\n            webpki::KeyUsage::client_auth(),\n        )\n        .map_err(|_| Error::ReenrollRequired)?;\n",
+        "replacement": "        let _ = (anchors,intermediates,at);\n",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "foreign-root known-serial certificate renewed"
+  },
+  {
+    "label": "core-renew-unknown",
+    "oracle": "O6 unknown serial",
+    "target": "lib",
+    "test": "enroll_ca::tests::unknown_serial_is_refused_even_with_valid_root_key_and_uri",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "FROM enroll_certs WHERE serial=?1",
+        "replacement": "FROM enroll_certs WHERE ?1 IS NOT NULL LIMIT 1",
+        "start": "    pub fn renew(",
+        "end": "    pub fn bind("
+      }
+    ],
+    "expected_literal": "unknown serial borrowed another certificate record"
+  },
+  {
+    "label": "core-renew-grace-eval",
+    "oracle": "O6 expired grace acceptance",
+    "target": "lib",
+    "test": "enroll_ca::tests::renewal_preserves_uri_spki_new_serial_window_and_grace",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "let at = now.min(end);",
+        "replacement": "let at = now;",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "called `Result::unwrap()` on an `Err` value: ReenrollRequired"
+  },
+  {
+    "label": "core-renew-grace-cap",
+    "oracle": "O6 grace upper bound",
+    "target": "lib",
+    "test": "enroll_ca::tests::renewal_preserves_uri_spki_new_serial_window_and_grace",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "if now > end.saturating_add(p.renew_grace_secs) {",
+        "replacement": "if false {",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: matches!(s.ca.renew(&chain(&a.cert_chain_pem), NOW + 86400 + 604800 + 1),"
+  },
+  {
+    "label": "core-reauth",
+    "oracle": "O6 90d bound",
+    "target": "lib",
+    "test": "enroll_ca::tests::repeated_renewal_still_requires_fresh_login_at_ninety_days",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "if now.saturating_sub(record.oidc_at) > p.reauth_after_secs {",
+        "replacement": "if false {",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: matches!(s.ca.renew(&chain(&a.cert_chain_pem), NOW + 90 * 86400 + 1),"
+  },
+  {
+    "label": "core-reauth-carry",
+    "oracle": "O6 original oidc_at",
+    "target": "lib",
+    "test": "enroll_ca::tests::repeated_renewal_still_requires_fresh_login_at_ninety_days",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "record.oidc_at,",
+        "replacement": "now,",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: matches!(s.ca.renew(&chain(&a.cert_chain_pem), NOW + 90 * 86400 + 1),"
+  },
+  {
+    "label": "core-renew-key",
+    "oracle": "O6 same SPKI",
+    "target": "lib",
+    "test": "enroll_ca::tests::renewed_leaf_keeps_exact_public_key_and_uri",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "self.sign(&key, &uri[0], now, p.lifetime_secs)?",
+        "replacement": "self.sign(&rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).map_err(|_|Error::Storage)?, &uri[0], now, p.lifetime_secs)?",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion `left == right` failed: renewal substituted another public key"
+  },
+  {
+    "label": "core-renew-uri",
+    "oracle": "O6 exact URI",
+    "target": "lib",
+    "test": "enroll_ca::tests::renewal_keeps_old_uri_after_policy_trust_domain_changes",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "self.sign(&key, &uri[0], now, p.lifetime_secs)?",
+        "replacement": "self.sign(&key, &format!(\"spiffe://{}/host/{}/user/{}\",p.trust_domain,record.host,record.user),now,p.lifetime_secs)?",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion `left == right` failed: renewal certificate drifted to current policy trust domain"
+  },
+  {
+    "label": "core-deny-users",
+    "oracle": "O7 users",
+    "target": "lib",
+    "test": "enroll_ca::tests::each_deny_dimension_blocks_both_issue_and_renew",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "p.deny.users.iter().any(|v| v == user)",
+        "replacement": "false",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "deny users allowed issuance"
+  },
+  {
+    "label": "core-deny-hosts",
+    "oracle": "O7 hosts",
+    "target": "lib",
+    "test": "enroll_ca::tests::each_deny_dimension_blocks_both_issue_and_renew",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "p.deny.hosts.iter().any(|v| v == host)",
+        "replacement": "false",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "deny hosts allowed issuance"
+  },
+  {
+    "label": "core-deny-subs",
+    "oracle": "O7 subs",
+    "target": "lib",
+    "test": "enroll_ca::tests::each_deny_dimension_blocks_both_issue_and_renew",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "p.deny.subs.iter().any(|v| v == sub)",
+        "replacement": "false",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "deny subs allowed issuance"
+  },
+  {
+    "label": "core-deny-spkis",
+    "oracle": "O7 spkis",
+    "target": "lib",
+    "test": "enroll_ca::tests::each_deny_dimension_blocks_both_issue_and_renew",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "p.deny.spkis.iter().any(|v| v == spki)",
+        "replacement": "false",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "deny spkis allowed issuance"
+  },
+  {
+    "label": "core-renew-deny",
+    "oracle": "O7 deny at renew",
+    "target": "lib",
+    "test": "enroll_ca::tests::deny_key_survives_renewal_and_reenrollment_supersedes_old_lineage",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "if Self::denied(&p, &record.user, &record.host, &record.sub, &spki) {",
+        "replacement": "if false {",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: matches!(s.ca.renew(&chain(&b.cert_chain_pem), NOW + 2), Err(Error::Denied))"
+  },
+  {
+    "label": "core-deny-serial",
+    "oracle": "O7 SPKI not serial",
+    "target": "lib",
+    "test": "enroll_ca::tests::deny_key_survives_renewal_and_reenrollment_supersedes_old_lineage",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "Self::denied(&p, &record.user, &record.host, &record.sub, &spki)",
+        "replacement": "Self::denied(&p, &record.user, &record.host, &record.sub, &serial)",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: matches!(s.ca.renew(&chain(&b.cert_chain_pem), NOW + 2), Err(Error::Denied))"
+  },
+  {
+    "label": "core-supersession-write",
+    "oracle": "O7 supersession write",
+    "target": "lib",
+    "test": "enroll_ca::tests::deny_key_survives_renewal_and_reenrollment_supersedes_old_lineage",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "UPDATE enroll_certs SET superseded_at=COALESCE(superseded_at,?4) WHERE user=?1 AND host=?2 AND spki_sha256!=?3",
+        "replacement": "UPDATE enroll_certs SET superseded_at=COALESCE(superseded_at,?4) WHERE user=?1 AND host=?2 AND spki_sha256!=?3 AND 0",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: matches!(s.ca.renew(&chain(&b.cert_chain_pem), NOW + 4),"
+  },
+  {
+    "label": "core-supersession-read",
+    "oracle": "O7 supersession denial",
+    "target": "lib",
+    "test": "enroll_ca::tests::deny_key_survives_renewal_and_reenrollment_supersedes_old_lineage",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "if superseded {",
+        "replacement": "if false {",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: matches!(s.ca.renew(&chain(&b.cert_chain_pem), NOW + 4),"
+  },
+  {
+    "label": "core-issue-budget",
+    "oracle": "O11 issue cap",
+    "target": "lib",
+    "test": "enroll_ca::tests::issue_bucket_refuses_seventh_without_losing_existing_records",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "Self::rate(&tx, &p, &user, \"issue\", now)?;",
+        "replacement": "",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "issuance bucket was bypassed"
+  },
+  {
+    "label": "core-renew-budget-cap",
+    "oracle": "O11 renew cap",
+    "target": "lib",
+    "test": "enroll_ca::tests::independent_rate_buckets_preserve_enrollment_after_six_renewals",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "if count >= cap as i64 {",
+        "replacement": "if false {",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: matches!(s.ca.renew(&chain(&a.cert_chain_pem), NOW + 3601),"
+  },
+  {
+    "label": "core-renew-budget-kind",
+    "oracle": "O11 independent buckets",
+    "target": "lib",
+    "test": "enroll_ca::tests::independent_rate_buckets_preserve_enrollment_after_six_renewals",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "Self::rate(&tx, &p, &record.user, \"renew\", now)?;",
+        "replacement": "Self::rate(&tx, &p, &record.user, \"issue\", now)?;",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: s.ca.issue(&claims(\"alice-id\"), &csr(false), \"new-lap\", &[],"
+  },
+  {
+    "label": "core-key-mode",
+    "oracle": "O13 mode",
+    "target": "lib",
+    "test": "enroll_ca::tests::key_permissions_and_symlinks_refuse_reopening",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "(key && m.permissions().mode() & 0o077 != 0)",
+        "replacement": "false",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: matches!(EnrollCa::open_at(&s.dir, s.db.clone(), &s.policy, \"team.hub\", NOW),"
+  },
+  {
+    "label": "core-key-owner",
+    "oracle": "O13 ownership",
+    "target": "lib",
+    "test": "enroll_ca::tests::owner_guard_precedes_loading_nonowned_file_contents",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "m.uid() != crate::client::current_uid()",
+        "replacement": "false",
+        "start": "fn read_owned(",
+        "end": "fn root_files("
+      }
+    ],
+    "expected_literal": "owner check accepted nonowned public input"
+  },
+  {
+    "label": "core-key-symlink",
+    "oracle": "O13 no symlink",
+    "target": "lib",
+    "test": "enroll_ca::tests::key_permissions_and_symlinks_refuse_reopening",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK",
+        "replacement": "libc::O_CLOEXEC | libc::O_NONBLOCK",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: matches!(EnrollCa::open_at(&s.dir, s.db.clone(), &s.policy, \"team.hub\", NOW),"
+  },
+  {
+    "label": "core-user-transform",
+    "oracle": "O14 no sanitization",
+    "target": "lib",
+    "test": "enroll_ca::tests::unsupported_key_charset_and_flow_do_not_gain_authority",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "        if !valid_segment(&user) {",
+        "replacement": "        let user=user.replace(\".\",\"-\");\n        if !valid_segment(&user) {",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: matches!(s.ca.issue(&c, &csr(false), \"lap\", &[], NOW),"
+  },
+  {
+    "label": "core-host-charset",
+    "oracle": "O14 host charset",
+    "target": "lib",
+    "test": "enroll_ca::tests::invalid_host_segment_is_refused_without_rewriting",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "if !valid_segment(host) {",
+        "replacement": "if false {",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "invalid host segment was issued"
+  },
+  {
+    "label": "core-matcher-count",
+    "oracle": "O14 exactly one matcher",
+    "target": "lib",
+    "test": "enroll_ca::tests::matcher_count_refuses_both_missing_and_multiple_and_initial_bad_policy",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "                    .count()\n                    != 1",
+        "replacement": "                    .count()\n                    == usize::MAX",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "bad policy replaced previous valid mapping"
+  },
+  {
+    "label": "core-name-collision",
+    "oracle": "O14 binding collision",
+    "target": "lib",
+    "test": "enroll_ca::tests::bindings_aliases_reserved_names_and_unbind_are_authoritative",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "if (old_iss != iss || old_sub != claims.sub) && alias.as_ref() != Some(&user) {",
+        "replacement": "if false {",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: matches!(s.ca.issue(&claims(\"other-id\"), &csr(false), \"lap2\", &[], NOW),"
+  },
+  {
+    "label": "core-issuer-equality",
+    "oracle": "O14 canonical-only issuer",
+    "target": "lib",
+    "test": "enroll_ca::tests::configured_issuer_is_stored_and_bare_google_alias_is_refused",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "if c.iss != provider.issuer || c.sub.is_empty() {",
+        "replacement": "if c.sub.is_empty() {",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: matches!(s.ca.issue(&c, &csr(false), \"lap2\", &[], NOW), Err(Error::Denied))"
+  },
+  {
+    "label": "core-alias-lookup",
+    "oracle": "O14 explicit aliases",
+    "target": "lib",
+    "test": "enroll_ca::tests::explicit_alias_connects_two_verified_provider_bindings",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "        let alias: Option<String> = tx\n            .query_row(\n                \"SELECT user FROM enroll_aliases WHERE iss=?1 AND sub=?2\",\n                rusqlite::params![iss, claims.sub],\n                |r| r.get(0),\n            )\n            .optional()\n            .map_err(|_| Error::Storage)?;\n",
+        "replacement": "        let alias:Option<String>=None;\n",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "operator alias was refused"
+  },
+  {
+    "label": "core-bind-primary",
+    "oracle": "O14 primary binding alias refusal",
+    "target": "lib",
+    "test": "enroll_ca::tests::bindings_aliases_reserved_names_and_unbind_are_authoritative",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "if let Some(user) = primary {",
+        "replacement": "if let Some(user) = None::<String> {",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: matches!(s.ca.bind(\"alice\",\"idp\",\"bob-id\",NOW),Err(Error::AlreadyPrimary(ref"
+  },
+  {
+    "label": "core-unbind-alias",
+    "oracle": "O14 unbind",
+    "target": "lib",
+    "test": "enroll_ca::tests::bindings_aliases_reserved_names_and_unbind_are_authoritative",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "DELETE FROM enroll_aliases WHERE user=?1",
+        "replacement": "DELETE FROM enroll_aliases WHERE ?1 IS NULL",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "called `Result::unwrap()` on an `Err` value: Storage"
+  },
+  {
+    "label": "core-reserved-own",
+    "oracle": "O21 own name",
+    "target": "lib",
+    "test": "enroll_ca::tests::own_and_concrete_reserved_names_have_no_other_refusal_mask",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "name == self.own_node_name",
+        "replacement": "false",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "reserved name was issued"
+  },
+  {
+    "label": "core-reserved-peer",
+    "oracle": "O21 concrete name",
+    "target": "lib",
+    "test": "enroll_ca::tests::own_and_concrete_reserved_names_have_no_other_refusal_mask",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "reserved_names.contains(&name)",
+        "replacement": "false",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "reserved name was issued"
+  },
+  {
+    "label": "core-p256-ed25519",
+    "oracle": "O23 P256 only",
+    "target": "lib",
+    "test": "enroll_ca::tests::unsupported_key_charset_and_flow_do_not_gain_authority",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "if parsed.public_key.algorithm() != &rcgen::PKCS_ECDSA_P256_SHA256 {",
+        "replacement": "if false {",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: matches!(VerifiedCsr::parse_pem(&pem), Err(Error::UnsupportedKey))"
+  },
+  {
+    "label": "core-p256-rsa",
+    "oracle": "O23 P256 only",
+    "target": "lib",
+    "test": "enroll_ca::tests::rsa_csr_is_rejected_as_unsupported_key",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "if parsed.public_key.algorithm() != &rcgen::PKCS_ECDSA_P256_SHA256 {",
+        "replacement": "if false {",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "RSA CSR admitted"
+  },
+  {
+    "label": "core-policy-previous-good",
+    "oracle": "O24 parse refusal keeps policy",
+    "target": "lib",
+    "test": "enroll_ca::tests::invalid_policy_keeps_previous_and_recovery_is_visible",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "            Err(_) => {\n                live.degraded = true;\n                crate::systemd::notify_reload_failed(\"invalid enrollment policy\");\n                tracing::warn!(class=\"invalid_enrollment_policy\",file=%self.policy_file.display(),\"enrollment policy reload refused; keeping previous policy\");\n                Ok(false)\n            }",
+        "replacement": "            Err(error)=>Err(error),",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: s.ca.issue(&claims(\"alice-id\"), &csr(false), \"lap\", &[], NOW).is_ok()"
+  },
+  {
+    "label": "core-server-root-bound",
+    "oracle": "service lifetime",
+    "target": "lib",
+    "test": "enroll_ca::tests::reserved_server_identity_ends_with_root_not_host_lifetime",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "self.sign(&key, &uri, now, root_end - now)?",
+        "replacement": "self.sign(&key, &uri, now, self.policy().lifetime_secs)?",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion `left == right` failed"
+  },
+  {
+    "label": "core-csr-proof",
+    "oracle": "CSR PoP",
+    "target": "lib",
+    "test": "enroll_ca::tests::bad_proof_of_possession_and_unknown_extensions_are_refused",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "    pub fn parse_pem(pem: &str) -> Result<Self, Error> {\n        if pem.len() > 65536 {\n            return Err(Error::InvalidCsr);\n        }\n        let parsed =\n            rcgen::CertificateSigningRequestParams::from_pem(pem).map_err(|_| Error::InvalidCsr)?;\n        if parsed.public_key.algorithm() != &rcgen::PKCS_ECDSA_P256_SHA256 {\n            return Err(Error::UnsupportedKey);\n        }\n        Ok(Self {\n            key: parsed.public_key,\n        })\n    }\n",
+        "replacement": "    pub fn parse_pem(pem:&str)->Result<Self,Error>{\n        use rustls::pki_types::pem::PemObject;use x509_parser::prelude::FromDer;\n        let der=rustls::pki_types::CertificateSigningRequestDer::from_pem_slice(pem.as_bytes()).map_err(|_|Error::InvalidCsr)?;\n        let (_,request)=x509_parser::certification_request::X509CertificationRequest::from_der(der.as_ref()).map_err(|_|Error::InvalidCsr)?;\n        let key=rcgen::SubjectPublicKeyInfo::from_der(request.certification_request_info.subject_pki.raw).map_err(|_|Error::InvalidCsr)?;\n        if rcgen::PublicKeyData::algorithm(&key)!=&rcgen::PKCS_ECDSA_P256_SHA256{return Err(Error::UnsupportedKey)}\n        Ok(Self{key})\n    }\n",
+        "start": null,
+        "end": null
+      },
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "key: rcgen::PublicKey,",
+        "replacement": "key: rcgen::SubjectPublicKeyInfo,",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion failed: matches!(VerifiedCsr::parse_pem(&altered), Err(Error::InvalidCsr))"
+  },
+  {
+    "label": "oidc-aud",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::oidc_aud_refused",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".id_token_verifier()",
+        "replacement": ".id_token_verifier().require_audience_match(false)",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "OIDC guard omitted: aud"
+  },
+  {
+    "label": "oidc-paste-aud",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::oidc_paste_aud_refused",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".id_token_verifier()",
+        "replacement": ".id_token_verifier().require_audience_match(false)",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "OIDC guard omitted: paste-aud"
+  },
+  {
+    "label": "oidc-issuer",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::oidc_issuer_refused",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".id_token_verifier()",
+        "replacement": ".id_token_verifier().require_issuer_match(false)",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "OIDC guard omitted: issuer"
+  },
+  {
+    "label": "oidc-signature",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::oidc_bad_signature_refused",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".id_token_verifier()",
+        "replacement": ".id_token_verifier().insecure_disable_signature_check()",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "OIDC guard omitted: signature"
+  },
+  {
+    "label": "oidc-hs-modulus",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::oidc_hs_modulus_refused",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".id_token_verifier()",
+        "replacement": ".id_token_verifier().insecure_disable_signature_check()",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "OIDC guard omitted: hs-modulus"
+  },
+  {
+    "label": "oidc-none",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::oidc_unsigned_refused",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".id_token_verifier()",
+        "replacement": ".id_token_verifier().insecure_disable_signature_check()",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "OIDC guard omitted: none"
+  },
+  {
+    "label": "oidc-unknownkid",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::oidc_unknown_kid_refused",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".id_token_verifier()",
+        "replacement": ".id_token_verifier().insecure_disable_signature_check()",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "OIDC guard omitted: unknownkid"
+  },
+  {
+    "label": "oidc-azp",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::oidc_azp_refused",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "if claims.audiences().len() > 1",
+        "replacement": "if false && claims.audiences().len() > 1",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "OIDC guard omitted: azp"
+  },
+  {
+    "label": "oidc-expiry",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::oidc_expired_refused",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".set_time_fn(move || instant)",
+        "replacement": ".set_time_fn(|| chrono::DateTime::from_timestamp(0, 0).unwrap())",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "OIDC guard omitted: expiry"
+  },
+  {
+    "label": "oidc-iat",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::oidc_future_iat_refused",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "if issued > latest_issue",
+        "replacement": "if false && issued > latest_issue",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "OIDC guard omitted: iat"
+  },
+  {
+    "label": "oidc-nonce",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::oidc_nonce_refused",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "token.claims(&verifier, nonce).cloned()",
+        "replacement": "token.claims(&verifier, |_: Option<&Nonce>| Ok(())).cloned()",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "OIDC guard omitted: nonce"
+  },
+  {
+    "label": "oidc-es-allowlist",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::oidc_es256_accepted",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".set_allowed_algs(allowed_algs(metadata))",
+        "replacement": ".set_allowed_algs([CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256])",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "valid ES256 token refused"
+  },
+  {
+    "label": "oidc-hs-allowlist",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::oidc_hs_client_secret_refused",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "| CoreJwsSigningAlgorithm::EcdsaP256Sha256",
+        "replacement": "| CoreJwsSigningAlgorithm::EcdsaP256Sha256 | CoreJwsSigningAlgorithm::HmacSha256",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "OIDC guard omitted: hs"
+  },
+  {
+    "label": "oidc-bare-class",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::oidc_legacy_google_issuer_is_a_clear_refusal",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "if body_has_bare_google_issuer(&body)",
+        "replacement": "if false && body_has_bare_google_issuer(&body)",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "legacy Google issuer refusal class changed"
+  },
+  {
+    "label": "oidc-flow-client",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::oidc_paste_aud_refused",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".get(&flow)",
+        "replacement": ".get(&Flow::Loopback)",
+        "start": "    fn client(",
+        "end": "    pub fn begin("
+      }
+    ],
+    "expected_literal": "OIDC guard omitted: paste-aud"
+  },
+  {
+    "label": "oidc-oidc_google_loopback_prompt",
+    "target": "lib",
+    "test": "enroll_oidc::tests::oidc_google_loopback_prompt",
+    "test_file": "src/enroll_oidc.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".add_prompt(CoreAuthPrompt::Consent)",
+        "replacement": "",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "forced browser prompt omitted"
+  },
+  {
+    "label": "oidc-oidc_google_paste_prompt",
+    "target": "lib",
+    "test": "enroll_oidc::tests::oidc_google_paste_prompt",
+    "test_file": "src/enroll_oidc.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".add_prompt(CoreAuthPrompt::Consent)",
+        "replacement": "",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "forced browser prompt omitted"
+  },
+  {
+    "label": "oidc-oidc_other_loopback_prompt",
+    "target": "lib",
+    "test": "enroll_oidc::tests::oidc_other_loopback_prompt",
+    "test_file": "src/enroll_oidc.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".add_prompt(CoreAuthPrompt::Login)",
+        "replacement": "",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "forced browser prompt omitted"
+  },
+  {
+    "label": "oidc-oidc_other_paste_prompt",
+    "target": "lib",
+    "test": "enroll_oidc::tests::oidc_other_paste_prompt",
+    "test_file": "src/enroll_oidc.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".add_prompt(CoreAuthPrompt::Login)",
+        "replacement": "",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "forced browser prompt omitted"
+  },
+  {
+    "label": "oidc-pkce-challenge",
+    "target": "lib",
+    "test": "enroll_oidc::tests::oidc_google_loopback_prompt",
+    "test_file": "src/enroll_oidc.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".set_pkce_challenge(challenge)",
+        "replacement": "",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "PKCE S256 challenge omitted"
+  },
+  {
+    "label": "oidc-pkce-verifier",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::signed_https_browser_flows_preserve_verified_projection",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": ".set_pkce_verifier(pending.verifier)",
+        "replacement": "",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "Unavailable"
+  },
+  {
+    "label": "oidc-state",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::state_refusal_makes_no_token_request_and_key_refresh_is_bounded",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "if !bool::from(pending.state.secret().as_bytes().ct_eq(state.as_bytes()))",
+        "replacement": "if false && !bool::from(pending.state.secret().as_bytes().ct_eq(state.as_bytes()))",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "assertion failed:"
+  },
+  {
+    "label": "oidc-jwks-refetch",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::state_refusal_makes_no_token_request_and_key_refresh_is_bounded",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "if matches!(\n            verified,",
+        "replacement": "if false && matches!(\n            verified,",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "assertion failed:"
+  },
+  {
+    "label": "oidc-jwks-extra-fetch",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::state_refusal_makes_no_token_request_and_key_refresh_is_bounded",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "let jwks: CoreJsonWebKeySet =",
+        "replacement": "let _ = CoreJsonWebKeySet::fetch_async(metadata.jwks_uri(), &self.http).await; let jwks: CoreJsonWebKeySet =",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "left: 3"
+  },
+  {
+    "label": "oidc-clock-before-http",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::verification_clock_is_sampled_after_token_and_refreshed_jwks_http",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "        use subtle::ConstantTimeEq;",
+        "replacement": "        use subtle::ConstantTimeEq; let captured_verification_time=now();",
+        "start": "",
+        "end": ""
+      },
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "self.verify(&client, &metadata, token, &pending.nonce, now())",
+        "replacement": "self.verify(&client, &metadata, token, &pending.nonce, captured_verification_time)",
+        "start": "",
+        "end": ""
+      },
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "self.verify(&retry_client, &updated, token, &pending.nonce, now())",
+        "replacement": "self.verify(&retry_client, &updated, token, &pending.nonce, captured_verification_time)",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "stale verification clock accepted expired token"
+  },
+  {
+    "label": "oidc-clock-before-jwks",
+    "target": "lib",
+    "test": "enroll_oidc::fixture_tests::verification_clock_is_sampled_after_token_and_refreshed_jwks_http",
+    "test_file": "src/enroll_oidc_fixture.rs",
+    "edits": [
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "let token = response.id_token().ok_or(Error::Token)?;",
+        "replacement": "let token = response.id_token().ok_or(Error::Token)?; let captured_verification_time=now();",
+        "start": "",
+        "end": ""
+      },
+      {
+        "file": "src/enroll_oidc.rs",
+        "needle": "self.verify(&retry_client, &updated, token, &pending.nonce, now())",
+        "replacement": "self.verify(&retry_client, &updated, token, &pending.nonce, captured_verification_time)",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "stale verification clock accepted expired token"
+  },
+  {
+    "label": "hub-resolver-pooling",
+    "target": "enroll_hub",
+    "test": "pattern_bundle_limits_tls_and_resolver_and_admits_leaf",
+    "test_file": "tests/enroll_hub.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if self.hub_certificate_allowed(uri, leaf, intermediates, UnixTime::now()) {",
+        "replacement": "if hub.patterns.iter().any(|p| spiffe_uri_matches_pattern(uri,p)) && verify_cert_chain(leaf, intermediates, &self.all_ca_anchors(), UnixTime::now(), webpki::KeyUsage::client_auth()).is_ok() {",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "resolver pooled enrollment anchors"
+  },
+  {
+    "label": "hub-tls-pooling",
+    "target": "enroll_hub",
+    "test": "pattern_bundle_limits_tls_and_resolver_and_admits_leaf",
+    "test_file": "tests/enroll_hub.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if self\n                    .peers\n                    .hub_certificate_allowed(uri, end_entity, intermediates, now)\n                {",
+        "replacement": "if self.peers.hub.as_ref().unwrap().patterns.iter().any(|p| spiffe_uri_matches_pattern(uri,p)) && verify_cert_chain(end_entity, intermediates, &self.peers.all_ca_anchors(), now, webpki::KeyUsage::client_auth()).is_ok() {",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "TLS pooled enrollment anchors"
+  },
+  {
+    "label": "hub-name-overlap",
+    "target": "enroll_hub",
+    "test": "cross_bundle_restart_takeover_cannot_be_configured",
+    "test_file": "tests/enroll_hub.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if hub.pattern_cas[a] != hub.pattern_cas[b] {",
+        "replacement": "if false && hub.pattern_cas[a] != hub.pattern_cas[b] {",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "cross-bundle restart takeover observed"
+  },
+  {
+    "label": "hub-keyword-stars",
+    "target": "enroll_hub",
+    "test": "cross_bundle_names_and_spanning_rules_are_refused",
+    "test_file": "tests/enroll_hub.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "(segments[0] == first || segments[0] == \"*\")\n            && (segments[2] == second || segments[2] == \"*\")",
+        "replacement": "segments[0] == first && segments[2] == second",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "called `Result::unwrap_err()` on an `Ok` value"
+  },
+  {
+    "label": "hub-spanning-rule",
+    "target": "enroll_hub",
+    "test": "cross_bundle_names_and_spanning_rules_are_refused",
+    "test_file": "tests/enroll_hub.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if compatible.any(|bundle| bundle != first) {",
+        "replacement": "if false && compatible.any(|bundle| bundle != first) {",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "called `Result::unwrap_err()` on an `Ok` value"
+  },
+  {
+    "label": "hub-leaf-rule",
+    "target": "enroll_hub",
+    "test": "pattern_bundle_limits_tls_and_resolver_and_admits_leaf",
+    "test_file": "tests/enroll_hub.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "leaf: rule.is_some_and(|r| r.leaf),",
+        "replacement": "leaf: rule.is_some_and(|r| r.leaf) && false,",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "assertion failed: peer.leaf"
+  },
+  {
+    "label": "hub-global-rows",
+    "target": "enroll_hub",
+    "test": "admitted_global_caps_are_durable_and_leave_concrete_mailboxes_unchanged",
+    "test_file": "tests/enroll_hub.rs",
+    "edits": [
+      {
+        "file": "src/storage.rs",
+        "needle": "admitted_usage.rows < ?14",
+        "replacement": "?14 IS NOT NULL",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "global admitted cap lost across reopen"
+  },
+  {
+    "label": "hub-global-bytes",
+    "target": "enroll_hub",
+    "test": "admitted_global_caps_are_durable_and_leave_concrete_mailboxes_unchanged",
+    "test_file": "tests/enroll_hub.rs",
+    "edits": [
+      {
+        "file": "src/storage.rs",
+        "needle": "admitted_usage.stored_bytes <= ?15 - ?12",
+        "replacement": "?15 >= ?12",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "global admitted byte sum was not bounded"
+  },
+  {
+    "label": "hub-prune-retains-entry",
+    "target": "enroll_hub",
+    "test": "expired_admitted_entry_is_pruned_only_when_mailbox_empty",
+    "test_file": "tests/enroll_hub.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "admitted.remove(&name);",
+        "replacement": "admitted.get(&name);",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "assertion failed: peers.get_peer_config(\"carol.lap\").is_none()"
+  },
+  {
+    "label": "hub-bare-bundle-ambiguity",
+    "target": "enroll_hub",
+    "test": "cross_bundle_names_and_spanning_rules_are_refused",
+    "test_file": "tests/enroll_hub.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if bundles.len() != 1 {",
+        "replacement": "if bundles.is_empty() {",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "called `Result::unwrap_err()` on an `Ok` value"
+  },
+  {
+    "label": "hub-canonical-mailbox-key",
+    "target": "enroll_hub",
+    "test": "admitted_leaf_queues_pulls_acks_and_recovers_after_hub_restart",
+    "test_file": "tests/enroll_hub.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "peer: peer_name.to_string(),",
+        "replacement": "peer: peer_cfg.identities.as_ref().unwrap()[0].clone(),",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "admitted mailbox not keyed by canonical name"
+  },
+  {
+    "label": "hub-concrete-classification",
+    "target": "enroll_hub",
+    "test": "queue_classifies_admitted_and_concrete_leaves_for_global_budget",
+    "test_file": "tests/enroll_hub.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "let admitted = !current_peers.contains_concrete_name(peer_name);",
+        "replacement": "let admitted = true;",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "concrete leaf counted toward aggregate budget"
+  },
+  {
+    "label": "hub-admitted-classification",
+    "target": "enroll_hub",
+    "test": "queue_classifies_admitted_and_concrete_leaves_for_global_budget",
+    "test_file": "tests/enroll_hub.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "let admitted = !current_peers.contains_concrete_name(peer_name);",
+        "replacement": "let admitted = false;",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "admitted queue bypassed aggregate budget"
+  },
+  {
+    "label": "hub-send-admitted-lookup",
+    "target": "enroll_hub",
+    "test": "admitted_leaf_queues_pulls_acks_and_recovers_after_hub_restart",
+    "test_file": "tests/enroll_hub.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": ".get_peer_config(peer_name)",
+        "replacement": ".get(peer_name).cloned()",
+        "start": "pub async fn send_federated_message_with(",
+        "end": "\npub "
+      }
+    ],
+    "expected_literal": "called `Result::unwrap()` on an `Err` value: UnknownPeer"
+  },
+  {
+    "label": "hub-queue-admitted-lookup",
+    "target": "enroll_hub",
+    "test": "admitted_leaf_queues_pulls_acks_and_recovers_after_hub_restart",
+    "test_file": "tests/enroll_hub.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": ".get_peer_config(peer_name)",
+        "replacement": ".get(peer_name).cloned()",
+        "start": "fn queue_leaf_mailbox_message_in(",
+        "end": "\npub "
+      }
+    ],
+    "expected_literal": "called `Result::unwrap()` on an `Err` value: UnknownPeer"
+  },
+  {
+    "label": "hub-attachment-admitted-lookup",
+    "target": "enroll_hub",
+    "test": "admitted_leaf_queues_pulls_acks_and_recovers_after_hub_restart",
+    "test_file": "tests/enroll_hub.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": ".get_peer_config(upstream)",
+        "replacement": ".get(upstream).cloned()",
+        "start": "pub async fn fetch_attachment_chunk(",
+        "end": ""
+      }
+    ],
+    "expected_literal": "admitted leaf attachment lookup did not enqueue its query"
+  }
+]
