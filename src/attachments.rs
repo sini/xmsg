@@ -95,8 +95,13 @@ pub fn sanitize_name(name: &str) -> Result<String, AppError> {
     Ok(out)
 }
 
+pub(crate) const TEXT_UTF8_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
+
 pub fn media_type(value: Option<&str>) -> Result<String, AppError> {
     let value = value.unwrap_or("application/octet-stream");
+    if value == TEXT_UTF8_MEDIA_TYPE {
+        return Ok(value.to_string());
+    }
     let token = |part: &str| {
         !part.is_empty()
             && part
@@ -1230,6 +1235,23 @@ mod tests {
             normalize_refs(&[bad], 100).unwrap_err().code().1,
             "bad_request"
         );
+    }
+
+    #[test]
+    fn canonical_utf8_text_media_type_is_accepted_without_other_parameters() {
+        assert_eq!(
+            media_type(Some("text/plain; charset=utf-8")).unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(media_type(None).unwrap(), "application/octet-stream");
+        for invalid in [
+            "text/plain; charset=latin1",
+            "text/plain; charset=utf-16",
+            "text/plain; x=y",
+            "text/plain; charset=utf-8\r\nx:y",
+        ] {
+            assert!(media_type(Some(invalid)).is_err());
+        }
     }
 
     #[test]
