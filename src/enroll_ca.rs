@@ -20,15 +20,26 @@ pub struct ClientConfig {
     pub client_id: String,
     pub client_secret_file: Option<PathBuf>,
 }
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevicePolicy {
+    #[serde(default)]
+    pub enabled: bool,
+}
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Provider {
     pub issuer: String,
+    #[serde(default)]
+    pub device: DevicePolicy,
     pub clients: HashMap<Flow, ClientConfig>,
 }
 impl Provider {
+    pub fn device_enabled(&self) -> bool {
+        self.device.enabled
+    }
     pub fn client(&self, flow: Flow) -> Result<&ClientConfig, Error> {
-        if flow == Flow::Device {
+        if flow == Flow::Device && !self.device_enabled() {
             return Err(Error::UnsupportedFlow);
         }
         self.clients.get(&flow).ok_or(Error::UnsupportedFlow)
@@ -262,7 +273,7 @@ impl Policy {
                 || issuer.password().is_some()
                 || issuer.query().is_some()
                 || issuer.fragment().is_some()
-                || p.clients.contains_key(&Flow::Device)
+                || (p.device_enabled() && !p.clients.contains_key(&Flow::Device))
                 || p.clients.is_empty()
                 || p.clients.values().any(|c| c.client_id.is_empty())
             {
