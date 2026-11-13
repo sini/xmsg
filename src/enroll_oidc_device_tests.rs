@@ -524,7 +524,10 @@ async fn device_cancel_and_outer_deadline_stop_initial_wait() {
         ),
         "outer deadline did not stop initial wait"
     );
-    assert!(started.elapsed() < Duration::from_secs(1), "outer deadline waited for polling interval");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "outer deadline waited for polling interval"
+    );
     let pending = provider.begin_device().await.unwrap();
     let worker = provider.clone();
     let task = tokio::spawn(async move { worker.poll_device(pending, &|| NOW).await });
@@ -747,5 +750,70 @@ async fn device_provider_lifetime_is_capped_and_larger_interval_honored() {
         *clock.sleeps.lock().unwrap(),
         vec![12],
         "larger provider interval ignored"
+    );
+}
+
+#[tokio::test]
+async fn device_jwks_refresh_checks_deadline_before_and_after_http() {
+    for expire_before_fetch in [true, false] {
+        use std::sync::atomic::AtomicBool;
+        let fixture = Fixture::new().await;
+        fixture.shared.lock().unwrap().mode.kid = "rotated".into();
+        let clock = Arc::new(Clock::new());
+        let token_returned = Arc::new(AtomicBool::new(false));
+        let after_token_reads = AtomicU64::new(0);
+        if expire_before_fetch {
+            let returned = token_returned.clone();
+            fixture.shared.lock().unwrap().mode.after_token = Some(Arc::new(move || {
+                returned.store(true, Ordering::SeqCst);
+            }));
+        } else {
+            let advanced = clock.clone();
+            fixture.shared.lock().unwrap().mode.after_refresh = Some(Arc::new(move || {
+                advanced.elapsed.store(300, Ordering::SeqCst);
+            }));
+        }
+        let provider = provider(&fixture).await;
+        let monotonic = || {
+            if token_returned.load(Ordering::SeqCst) {
+                let reads = after_token_reads.fetch_add(1, Ordering::SeqCst);
+                clock.start + Duration::from_secs(if reads < 2 { 299 } else { 300 })
+            } else {
+                clock.now()
+            }
+        };
+        let pending = provider.begin_device_with_clock(&monotonic).await.unwrap();
+        let result = provider
+            .poll_device_inner(pending, &|| NOW, &monotonic, |duration| {
+                clock.sleep(duration)
+            })
+            .await;
+        assert!(
+            matches!(result, Err(Error::Expired)),
+            "JWKS fetch crossed device deadline"
+        );
+        assert_eq!(
+            fixture.shared.lock().unwrap().jwks_requests,
+            if expire_before_fetch { 1 } else { 2 },
+            "JWKS HTTP sent after device deadline"
+        );
+    }
+}
+
+#[tokio::test]
+async fn device_authorization_endpoint_refusal_is_terminal_unsupported() {
+    let fixture = Fixture::new().await;
+    fixture.shared.lock().unwrap().device_reply =
+        json!({"error":"unsupported_grant_type","__status":400});
+    let provider = provider(&fixture).await;
+    assert!(
+        matches!(provider.begin_device().await, Err(Error::DeviceUnsupported)),
+        "device endpoint refusal lost unsupported classification"
+    );
+    assert_eq!(fixture.device_requests(), 1);
+    assert_eq!(
+        fixture.device_polls(),
+        0,
+        "refused device endpoint was polled"
     );
 }

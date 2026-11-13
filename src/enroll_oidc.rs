@@ -362,7 +362,10 @@ impl Provider {
         let details: openidconnect::core::CoreDeviceAuthorizationResponse = request
             .request_async(&self.http)
             .await
-            .map_err(|_| Error::Unavailable)?;
+            .map_err(|error| match error {
+                RequestTokenError::ServerResponse(_) => Error::DeviceUnsupported,
+                _ => Error::Unavailable,
+            })?;
         // Normalize the SDK's internal interval so slow_down adds five to our five-second floor.
         let details = if details.interval() < Duration::from_secs(5) {
             let mut normalized =
@@ -514,9 +517,15 @@ impl Provider {
             SignatureVerificationError::NoMatchingKey,
         )) = &verified
         {
-            let jwks = CoreJsonWebKeySet::fetch_async(pending.metadata.jwks_uri(), &self.http)
+            let jwks = CoreJsonWebKeySet::fetch_async(pending.metadata.jwks_uri(), &http)
                 .await
-                .map_err(|_| Error::Unavailable)?;
+                .map_err(|_| {
+                    if clock() >= pending.deadline {
+                        Error::Expired
+                    } else {
+                        Error::Unavailable
+                    }
+                })?;
             let updated = pending.metadata.clone().set_jwks(jwks);
             let retry =
                 self.device_client(updated.clone(), &pending.client_id, pending.secret.clone());
