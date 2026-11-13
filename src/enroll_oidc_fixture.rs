@@ -86,6 +86,14 @@ struct Shared {
     access: String,
     refresh: String,
     codes: HashMap<String, Mode>,
+    device_reply: Value,
+    device_errors: std::collections::VecDeque<(u16, Value)>,
+    device_no_token: bool,
+    device_user_codes: HashMap<String, String>,
+    device_approved: std::collections::HashSet<String>,
+    device_auto_authorize: bool,
+    after_device: Option<Arc<dyn Fn() + Send + Sync>>,
+    discovery_overrides: serde_json::Map<String, Value>,
     values: Vec<String>,
 }
 pub(crate) struct Fixture {
@@ -132,6 +140,14 @@ impl Fixture {
             access: format!("fixture-access-{}", ulid::Ulid::new()),
             refresh: format!("fixture-refresh-{}", ulid::Ulid::new()),
             codes: HashMap::new(),
+            device_reply: json!({"expires_in":300,"interval":5}),
+            device_errors: Default::default(),
+            device_no_token: false,
+            device_user_codes: Default::default(),
+            device_approved: Default::default(),
+            device_auto_authorize: true,
+            after_device: None,
+            discovery_overrides: Default::default(),
             values: vec![],
         }));
         let state = shared.clone();
@@ -162,9 +178,11 @@ impl Fixture {
                             input.extend_from_slice(&block[..count]);
                         }
                         let path = header.lines().next().unwrap().split_whitespace().nth(1).unwrap();
-                        let response = reply(&state, path, &header, &input[header_end..]);
+                        let mut response = reply(&state, path, &header, &input[header_end..]);
+                        let status = response.as_object_mut().and_then(|value| value.remove("__status")).and_then(|value| value.as_u64()).unwrap_or(200);
+                        if status == 0 { return; }
                         let body = response.to_string();
-                        let bytes = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
+                        let bytes = format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
                         tls.write_all(bytes.as_bytes()).await.unwrap();
                         let _ = tls.shutdown().await;
                     }).await;
@@ -263,6 +281,7 @@ impl Fixture {
             std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         ProviderConfig {
+            device: Default::default(),
             issuer: self.shared.lock().unwrap().issuer.clone(),
             clients: HashMap::from([
                 (
@@ -281,6 +300,36 @@ impl Fixture {
                 ),
             ]),
         }
+    }
+    pub(crate) fn device_config(&self, secret: bool) -> ProviderConfig {
+        let mut config = self.config(secret);
+        config.device.enabled = true;
+        let mut client = config.clients[&Flow::Loopback].clone();
+        client.client_id = "device-client".into();
+        config.clients.insert(Flow::Device, client);
+        config
+    }
+    pub(crate) fn require_device_authorization(&self) {
+        self.shared.lock().unwrap().device_auto_authorize = false;
+    }
+    pub(crate) fn authorize_device(&self, user_code: &str) -> bool {
+        let mut shared = self.shared.lock().unwrap();
+        let Some(code) = shared.device_user_codes.remove(user_code) else {
+            return false;
+        };
+        shared.device_approved.insert(code)
+    }
+    pub(crate) fn device_requests(&self) -> usize {
+        self.request_paths()
+            .iter()
+            .filter(|path| path.as_str() == "/device")
+            .count()
+    }
+    pub(crate) fn device_polls(&self) -> usize {
+        self.request_paths()
+            .iter()
+            .filter(|path| path.as_str() == "/token")
+            .count()
     }
     async fn provider(&self, secret: bool) -> Provider {
         Provider::discover_with_client("fixture", &self.config(secret), true, self.http.clone())
@@ -320,7 +369,11 @@ fn reply(shared: &Mutex<Shared>, path: &str, header: &str, body: &[u8]) -> Value
     shared.requests.push(path.into());
     match path {
         "/.well-known/openid-configuration" => {
-            json!({"issuer":shared.issuer,"authorization_endpoint":format!("{}/authorize",shared.issuer),"token_endpoint":format!("{}/token",shared.issuer),"jwks_uri":format!("{}/jwks",shared.issuer),"response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256","ES256","HS256"]})
+            let mut metadata = json!({"issuer":shared.issuer,"authorization_endpoint":format!("{}/authorize",shared.issuer),"token_endpoint":format!("{}/token",shared.issuer),"jwks_uri":format!("{}/jwks",shared.issuer),"device_authorization_endpoint":format!("{}/device",shared.issuer),"grant_types_supported":["authorization_code","urn:ietf:params:oauth:grant-type:device_code"],"response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256","ES256","HS256"]});
+            for (key, value) in &shared.discovery_overrides {
+                metadata[key] = value.clone();
+            }
+            metadata
         }
         "/jwks" => {
             shared.jwks_requests += 1;
@@ -330,6 +383,30 @@ fn reply(shared: &Mutex<Shared>, path: &str, header: &str, body: &[u8]) -> Value
                 }
             }
             jwks(shared.jwks_requests > 1)
+        }
+        "/device" => {
+            let fields: HashMap<String, String> = openidconnect::url::form_urlencoded::parse(body)
+                .into_owned()
+                .collect();
+            let Some(client) = fields.get("client_id") else {
+                return json!({"error":"invalid_client", "__status":400});
+            };
+            let code = format!("fixture-device-{}", ulid::Ulid::new());
+            let mut mode = shared.mode.clone();
+            mode.client_id = client.clone();
+            mode.nonce.clear();
+            shared.codes.insert(code.clone(), mode);
+            shared.forms.push(fields);
+            let mut response = shared.device_reply.clone();
+            response["device_code"] = json!(code);
+            let user_code = format!("TEST-{}", ulid::Ulid::new());
+            shared.device_user_codes.insert(user_code.clone(), code);
+            response["user_code"] = json!(user_code);
+            response["verification_url"] = json!(format!("{}/verify", shared.issuer));
+            if let Some(hook) = &shared.after_device {
+                hook();
+            }
+            response
         }
         "/token" => {
             let mut form = reqwest::Url::parse("https://form.example/").unwrap();
@@ -354,7 +431,27 @@ fn reply(shared: &Mutex<Shared>, path: &str, header: &str, body: &[u8]) -> Value
                     .0
                     .to_owned()
             });
-            let mode = match fields.get("code").map(String::as_str) {
+            let device = fields
+                .get("grant_type")
+                .is_some_and(|value| value == "urn:ietf:params:oauth:grant-type:device_code");
+            if device {
+                if !shared.device_auto_authorize
+                    && !fields
+                        .get("device_code")
+                        .is_some_and(|code| shared.device_approved.contains(code))
+                {
+                    return json!({"error":"authorization_pending","__status":428});
+                }
+                if let Some((status, mut response)) = shared.device_errors.pop_front() {
+                    shared.forms.push(fields);
+                    response["__status"] = json!(status);
+                    return response;
+                }
+            }
+            let mode = match fields
+                .get(if device { "device_code" } else { "code" })
+                .map(String::as_str)
+            {
                 Some("fixture-code") => shared.mode.clone(),
                 Some(code) => match shared.codes.remove(code) {
                     Some(mode) => mode,
@@ -365,17 +462,27 @@ fn reply(shared: &Mutex<Shared>, path: &str, header: &str, body: &[u8]) -> Value
             if !mode.client_id.is_empty() && mode.client_id != client {
                 return json!({"error":"invalid_grant"});
             }
-            if !fields.get("code_verifier").is_some_and(|value| {
-                PkceCodeChallenge::from_code_verifier_sha256(&PkceCodeVerifier::new(value.clone()))
+            if !device
+                && !fields.get("code_verifier").is_some_and(|value| {
+                    PkceCodeChallenge::from_code_verifier_sha256(&PkceCodeVerifier::new(
+                        value.clone(),
+                    ))
                     .as_str()
-                    == mode.challenge
-            }) {
+                        == mode.challenge
+                })
+            {
                 return json!({"error":"invalid_grant"});
             }
             shared.forms.push(fields);
             let mut claims = json!({"iss":shared.issuer,"sub":"fixture-sub","aud":client,"exp":shared.now+3600,"iat":shared.now,"nonce":mode.nonce,"email":"alice@example.org","email_verified":true,"hd":"example.org","groups":["xmsg-users@example.org","00000000-0000-0000-0000-000000000001"],"preferred_username":"alice"});
+            if device {
+                claims.as_object_mut().unwrap().remove("nonce");
+            }
             for (key, value) in &mode.overrides {
                 claims[key] = value.clone();
+            }
+            if device && shared.device_no_token {
+                return json!({"access_token":shared.access,"token_type":"Bearer"});
             }
             let token = sign(&claims, &mode, &shared.secret);
             shared.values.push(token.clone());
@@ -785,3 +892,6 @@ async fn reusable_fixture_codes_are_one_shot_and_use_the_requested_clock() {
         "authorization code replay accepted"
     );
 }
+
+#[path = "enroll_oidc_device_tests.rs"]
+mod device_tests;
