@@ -851,8 +851,14 @@ fn device_projection_is_read_only_and_approved_issue_succeeds() {
         "projection spent enrollment effects before approval"
     );
     let issued =
-        s.ca.issue_device_approved(&c, &request, "laptop", &[], &proposed, NOW, || true)
-            .unwrap();
+        s.ca.issue_device_approved(&c, &request, "laptop", &[], &proposed, NOW, || {
+            assert!(
+                s.db.try_lock().is_err(),
+                "approval guard ran before SQL mutex acquisition"
+            );
+            true
+        })
+        .unwrap();
     assert_eq!(issued.uri, "spiffe://example.org/host/laptop/user/alice");
     assert_eq!(effect_counts(&s), [1, 1, 1]);
 }
