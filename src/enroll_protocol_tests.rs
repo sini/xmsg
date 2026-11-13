@@ -31,7 +31,9 @@ impl Harness {
         Self::new_with_address("127.0.0.1:7788").await
     }
     pub(crate) async fn new_with_address(address: &str) -> Self {
-        let now = WallClock.now();
+        Self::new_with_now(address, WallClock.now()).await
+    }
+    pub(crate) async fn new_with_now(address: &str, now: i64) -> Self {
         let idp = Fixture::new_at(now).await;
         let directory = tempfile::tempdir().unwrap();
         let config = idp.config(true);
@@ -41,7 +43,14 @@ impl Harness {
         storage::init_db(&connection).unwrap();
         let db = Arc::new(Mutex::new(connection));
         let ca = Arc::new(
-            EnrollCa::open(directory.path().join("ca"), db.clone(), policy, "team.hub").unwrap(),
+            EnrollCa::open_at(
+                directory.path().join("ca"),
+                db.clone(),
+                policy,
+                "team.hub",
+                now,
+            )
+            .unwrap(),
         );
         let fleet_key = rcgen::KeyPair::generate().unwrap();
         let mut parameters = rcgen::CertificateParams::default();
@@ -163,7 +172,7 @@ impl Harness {
         .await
     }
 }
-fn node_state(
+pub(crate) fn node_state(
     db: Arc<Mutex<rusqlite::Connection>>,
     dir: &std::path::Path,
     chain: Vec<Vec<u8>>,
