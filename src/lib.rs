@@ -56,3 +56,6 @@ pub mod enroll_oidc;
 
 #[cfg(feature = "daemon")]
 pub mod enroll_client;
+
+#[cfg(feature = "daemon")]
+pub mod enroll;
