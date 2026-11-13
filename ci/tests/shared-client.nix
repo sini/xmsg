@@ -40,6 +40,47 @@
       clientArtifacts = (craneLib.buildDepsOnly clientArgs).overrideAttrs {
         cargoArtifacts = inputs.xmsg.packages.${system}.cargoArtifacts;
       };
+      compatShard =
+        shard: count:
+        package.overrideAttrs {
+          pname = "xmsg-shared-client-compat-${toString shard}";
+          dontBuild = true;
+          preCheck = "";
+          installPhase = ''
+            mkdir -p "$out"
+            printf '%s\n' "${baseline}" "${baselineSrc}" "${baseline.cargoDeps}" > "$out/sources"
+            cp live-completion.json "$out/completion.json"
+          '';
+          XMSG_SHARED_BASELINE_BIN = lib.getExe baseline;
+          nativeBuildInputs = (package.nativeBuildInputs or [ ]) ++ [ pkgs.python3 ];
+          checkPhase = ''
+            runHook preCheck
+            set -o pipefail
+            cargoWithProfile test --locked --test shared_client_live \
+              pinned_and_candidate_service_contract -- --ignored --exact --nocapture 2>&1 | tee compat.log
+            grep -F '1 passed; 0 failed; 0 ignored' compat.log
+            grep -F 'shared-client: verified baseline and candidate service contract completed' compat.log
+            if grep -Eqi 'skipping|0 passed|1 ignored' compat.log; then
+              echo 'shared-client live compatibility was skipped' >&2
+              exit 1
+            fi
+            set +e
+            XMSG_SHARED_BASELINE_BIN=/nonexistent/required-xmsg-baseline \
+              cargoWithProfile test --locked --test shared_client_live \
+                pinned_and_candidate_service_contract -- --ignored --exact > missing.log 2>&1
+            missing_rc=$?
+            set -e
+            if [ "$missing_rc" -eq 0 ]; then
+              echo 'missing baseline executable was accepted' >&2
+              exit 1
+            fi
+            grep -F 'test pinned_and_candidate_service_contract ... FAILED' missing.log
+            python3 scripts/client-mutants.py --live --shard ${toString shard} --manifest live-completion.json | tee live-mutants.log
+            grep -Fx '${toString count}/${toString count} shared-client mutants killed' live-mutants.log
+            python3 -c 'import runpy; runpy.run_path("scripts/client-mutants.py")["require_cached_builds"]("live-mutants.log", ${toString (count * 2)})'
+            runHook postCheck
+          '';
+        };
     in
     {
       checks = {
@@ -75,43 +116,8 @@
         );
       }
       // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-        shared-client-compat = package.overrideAttrs {
-          pname = "xmsg-shared-client-compat";
-          dontBuild = true;
-          preCheck = "";
-          installPhase = ''
-            printf '%s\n' "${baseline}" "${baselineSrc}" "${baseline.cargoDeps}" > "$out"
-          '';
-          XMSG_SHARED_BASELINE_BIN = lib.getExe baseline;
-          nativeBuildInputs = (package.nativeBuildInputs or [ ]) ++ [ pkgs.python3 ];
-          checkPhase = ''
-            runHook preCheck
-            set -o pipefail
-            cargoWithProfile test --locked --test shared_client_live \
-              pinned_and_candidate_service_contract -- --ignored --exact --nocapture 2>&1 | tee compat.log
-            grep -F '1 passed; 0 failed; 0 ignored' compat.log
-            grep -F 'shared-client: verified baseline and candidate service contract completed' compat.log
-            if grep -Eqi 'skipping|0 passed|1 ignored' compat.log; then
-              echo 'shared-client live compatibility was skipped' >&2
-              exit 1
-            fi
-            set +e
-            XMSG_SHARED_BASELINE_BIN=/nonexistent/required-xmsg-baseline \
-              cargoWithProfile test --locked --test shared_client_live \
-                pinned_and_candidate_service_contract -- --ignored --exact > missing.log 2>&1
-            missing_rc=$?
-            set -e
-            if [ "$missing_rc" -eq 0 ]; then
-              echo 'missing baseline executable was accepted' >&2
-              exit 1
-            fi
-            grep -F 'test pinned_and_candidate_service_contract ... FAILED' missing.log
-            python3 scripts/client-mutants.py --live | tee live-mutants.log
-            grep -Fx '15/15 shared-client mutants killed' live-mutants.log
-            python3 -c 'import runpy; runpy.run_path("scripts/client-mutants.py")["require_cached_builds"]("live-mutants.log", 30)'
-            runHook postCheck
-          '';
-        };
+        shared-client-compat-0 = compatShard 0 8;
+        shared-client-compat-1 = compatShard 1 7;
       };
     };
 }

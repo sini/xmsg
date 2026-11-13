@@ -34,7 +34,9 @@ env:
     peers-render
     pre-xl1-compat
     shared-client
-    shared-client-compat
+  COMPAT_CHECKS: >-
+    shared-client-compat-0
+    shared-client-compat-1
 
 # One upstream-Nix column, not gen-harness's three-evaluator matrix: this is not a gen library, so
 # evaluator divergence is not what its CI tests.
@@ -75,12 +77,15 @@ jobs:
           if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nix-daemon 2>/dev/null; then
             sudo systemctl restart nix-daemon
           fi
+      - name: Compatibility completion controls
+        run: python3 scripts/client-compat-completion-tests.py
       - name: Assert CI check coverage
         run: |
           expected=$(nix eval ./ci#checks.x86_64-linux --apply builtins.attrNames --json | jq -S .)
           read -r -a fast <<< "$FAST_CHECKS"
           read -r -a pkg <<< "$PACKAGE_CHECKS"
-          covered=$(printf '%s\n' "${fast[@]}" "${pkg[@]}" | jq -R . | jq -s 'sort | unique')
+          read -r -a compat <<< "$COMPAT_CHECKS"
+          covered=$(printf '%s\n' "${fast[@]}" "${pkg[@]}" "${compat[@]}" | jq -R . | jq -s 'sort | unique')
           if [ "$expected" != "$covered" ]; then
             echo "CI check coverage mismatch!" >&2
             echo "Flake checks: $expected" >&2
@@ -169,6 +174,82 @@ jobs:
           fi
           nix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev "$ATTIC_TOKEN"
           for i in 1 2 3; do nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci && exit 0; echo "attic push ci failed (attempt $i)" >&2; sleep $((i * 10)); done; exit 1
+
+  shared-client-compat:
+    if: ${{ !inputs.client_build_probe }}
+    needs: [deps]
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          github_access_token: ${{ github.token }}
+      - name: Configure Attic and llm-agents substituters
+        env:
+          ATTIC_PUBLIC_KEY: ${{ vars.ATTIC_PUBLIC_KEY }}
+        run: |
+          sudo mkdir -p /etc/nix
+          {
+            echo "extra-substituters = https://cache.numtide.com${ATTIC_PUBLIC_KEY:+ https://attic.json64.dev/ci}"
+            echo "extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=${ATTIC_PUBLIC_KEY:+ ${ATTIC_PUBLIC_KEY}}"
+          } | sudo tee -a /etc/nix/nix.conf >/dev/null
+          if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nix-daemon 2>/dev/null; then
+            sudo systemctl restart nix-daemon
+          fi
+      - name: Compatibility shard baseline and mutants
+        run: |
+          output=$(nix build -L --no-link --print-out-paths "./ci#checks.x86_64-linux.shared-client-compat-${{ matrix.shard }}")
+          printf '%s\n' "$output" > /tmp/attic-paths
+          cp "$output/completion.json" completion.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: shared-client-compat-${{ matrix.shard }}
+          path: completion.json
+          if-no-files-found: error
+
+      - name: Push to Attic cache
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          if [ -z "${ATTIC_TOKEN:-}" ]; then
+            echo "ATTIC_TOKEN is not set; skipping Attic cache push"
+            exit 0
+          fi
+          if [ ! -s /tmp/attic-paths ]; then
+            echo "No paths to push; skipping Attic cache push"
+            exit 0
+          fi
+          nix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev "$ATTIC_TOKEN"
+          for i in 1 2 3; do nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci && exit 0; echo "attic push ci failed (attempt $i)" >&2; sleep $((i * 10)); done; exit 1
+
+  shared-client-compat-completion:
+    if: ${{ always() && !inputs.client_build_probe }}
+    needs: [shared-client-compat]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require successful shard jobs
+        env:
+          SHARDS_RESULT: ${{ needs.shared-client-compat.result }}
+        run: test "$SHARDS_RESULT" = success
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: shared-client-compat-*
+          path: compat-results
+      - name: Require exactly the complete 15-case union
+        run: |
+          python3 scripts/client-compat-completion.py \
+            compat-results/shared-client-compat-0/completion.json \
+            compat-results/shared-client-compat-1/completion.json
 
   fmt:
     if: ${{ !inputs.client_build_probe }}
