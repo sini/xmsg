@@ -194,8 +194,9 @@ def arm(name, mutation, seed):
         artifacts = [json.loads(line) for line in build.stdout.splitlines() if line.startswith("{")]
         binaries = [a for a in artifacts if a.get("reason") == "compiler-artifact" and a.get("target", {}).get("name") == "gate_ha9_codex" and a.get("executable")]
         libraries = [a for a in artifacts if a.get("reason") == "compiler-artifact" and a.get("target", {}).get("name") == "xmsg" and "lib" in a.get("target", {}).get("kind", [])]
-        if len(binaries) != 1 or binaries[0]["fresh"] or len(libraries) != 1 or libraries[0]["fresh"]:
-            raise RuntimeError(f"{name}: missing freshly built test/library")
+        mains = [a for a in artifacts if a.get("reason") == "compiler-artifact" and a.get("target", {}).get("name") == "xmsg" and "bin" in a.get("target", {}).get("kind", []) and a.get("executable")]
+        if len(binaries) != 1 or binaries[0]["fresh"] or len(libraries) != 1 or libraries[0]["fresh"] or len(mains) != 1 or mains[0]["fresh"]:
+            raise RuntimeError(f"{name}: missing freshly built test/library/main")
         binary = Path(binaries[0]["executable"])
         result = subprocess.run([str(binary), selected, *(["--exact"] if mutation else []), "--nocapture"], cwd=checkout, env=env, text=True, capture_output=True, timeout=60)
         output = result.stdout + result.stderr
@@ -203,7 +204,7 @@ def arm(name, mutation, seed):
             raise RuntimeError(f"{name}: intended compiled arm did not execute: {output}")
         if result.returncode != (0 if mutation is None else 101):
             raise RuntimeError(f"{name}: unexpected test outcome {result.returncode}: {output}")
-        print(json.dumps({"nonce": NONCE, "arm": name, "source_sha256": source_hash.hexdigest(), "artifact": str(binary), "artifact_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "target": str(target), "exit": result.returncode, "marker": marker}), flush=True)
+        print(json.dumps({"nonce": NONCE, "arm": name, "source_sha256": source_hash.hexdigest(), "artifact": str(binary), "artifact_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "main_artifact_sha256": hashlib.sha256(Path(mains[0]["executable"]).read_bytes()).hexdigest(), "target": str(target), "exit": result.returncode, "marker": marker}), flush=True)
         print(output, flush=True)
 
 

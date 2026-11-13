@@ -2284,8 +2284,8 @@ pub fn awaiting_startup_recovery(db: &Arc<Mutex<rusqlite::Connection>>) -> HashS
     };
     rt.restart
         .iter()
-        .filter_map(|(id, candidate)| {
-            (!rt.store.is_revoked(id)
+        .filter(|(id, candidate)| {
+            !rt.store.is_revoked(id)
                 && crate::storage::codex_startup_pending_generation(
                     &conn,
                     id,
@@ -2294,9 +2294,9 @@ pub fn awaiting_startup_recovery(db: &Arc<Mutex<rusqlite::Connection>>) -> HashS
                 )
                 .ok()
                 .flatten()
-                .is_some())
-            .then(|| id.clone())
+                .is_some()
         })
+        .map(|(id, _)| id.clone())
         .collect()
 }
 
@@ -2447,12 +2447,11 @@ async fn attempt_restart_recovery(
                     false,
                 )
             })?;
-        if snap.generation != generation {
-            if !crate::storage::rebind_startup_codex_root(&conn, &snap, generation)
+        if snap.generation != generation
+            && !crate::storage::rebind_startup_codex_root(&conn, &snap, generation)
                 .map_err(|_| ("storage_unavailable", false))?
-            {
-                return Err(("eligibility_changed", true));
-            }
+        {
+            return Err(("eligibility_changed", true));
         }
         if let Some(current) = rt.restart.get_mut(root_id) {
             current.generation = snap.generation;
