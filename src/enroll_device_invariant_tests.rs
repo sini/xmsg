@@ -76,6 +76,21 @@ fn bounded_result<T>(rx: std::sync::mpsc::Receiver<T>) -> T {
         .unwrap_or_else(|_| panic!("device worker barrier timed out"))
 }
 
+fn thread_finished(worker: &std::thread::JoinHandle<()>) -> bool {
+    let limit = std::time::Instant::now() + Duration::from_secs(10);
+    while !worker.is_finished() && std::time::Instant::now() < limit {
+        std::thread::yield_now();
+    }
+    worker.is_finished()
+}
+fn join_worker(worker: std::thread::JoinHandle<()>) {
+    assert!(
+        thread_finished(&worker),
+        "device worker completion timed out"
+    );
+    worker.join().unwrap();
+}
+
 #[tokio::test]
 async fn enabled_device_requires_local_registration_before_provider_work() {
     let mut h = enabled().await;
@@ -259,7 +274,7 @@ async fn real_approval_rechecks_deadline_after_sql_mutex_wait() {
     clock.elapsed.store(1000, Ordering::SeqCst);
     drop(locked);
     let result = bounded_result(rx);
-    worker.join().unwrap();
+    join_worker(worker);
     assert!(
         matches!(result, Err(Failure(_, "approval_expired"))),
         "SQL wait deadline did not refuse actual approval"
@@ -321,8 +336,8 @@ async fn approval_owns_phase_until_complete_then_deny_replay_and_collect_refuse(
         bounded_result(drx).is_err(),
         "late denial overwrote completed issuance"
     );
-    worker.join().unwrap();
-    deny.join().unwrap();
+    join_worker(worker);
+    join_worker(deny);
     assert!(
         h.service
             .approve_device(created["request_id"].as_str().unwrap(), approval(&view))
@@ -586,6 +601,11 @@ async fn queued_collectors_behind_approval_have_one_certificate_result() {
             .unwrap();
     });
     wait_for_approval_lock(&s);
+    assert_eq!(
+        Arc::strong_count(&s),
+        3,
+        "collector owner baseline control failed"
+    );
     let mut collectors = Vec::new();
     for _ in 0..2 {
         let service = h.service.clone();
@@ -599,17 +619,25 @@ async fn queued_collectors_behind_approval_have_one_certificate_result() {
         bounded_result(queued);
         collectors.push((worker, rx));
     }
+    let limit = std::time::Instant::now() + Duration::from_secs(10);
+    while Arc::strong_count(&s) != 5 {
+        assert!(
+            std::time::Instant::now() < limit,
+            "collectors did not clone session before SQL release"
+        );
+        std::thread::yield_now();
+    }
     drop(locked);
     assert!(
         bounded_result(rx).is_ok(),
         "approval lost to queued collector"
     );
-    approve.join().unwrap();
+    join_worker(approve);
     let mut certificates = 0;
     let mut gone = 0;
     for (worker, rx) in collectors {
         let (status, result) = bounded_result(rx);
-        worker.join().unwrap();
+        join_worker(worker);
         if status == StatusCode::OK && result["cert_chain_pem"].is_string() {
             certificates += 1;
         }
@@ -761,4 +789,188 @@ fn every_database_column(connection: &rusqlite::Connection) -> Vec<Vec<u8>> {
         }
     }
     values
+}
+
+struct PolicyFifo {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    release: Option<std::sync::mpsc::Sender<()>>,
+    done: std::sync::mpsc::Receiver<Result<(), ()>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    restored: bool,
+}
+impl PolicyFifo {
+    fn new(path: PathBuf) -> (Self, std::sync::mpsc::Receiver<()>) {
+        use std::io::Write;
+        use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(
+            unsafe { libc::mkfifo(name.as_ptr(), 0o600) },
+            0,
+            "private policy FIFO creation failed"
+        );
+        let (release, released) = std::sync::mpsc::channel();
+        let (arrived, reader) = std::sync::mpsc::channel();
+        let (finished, done) = std::sync::mpsc::channel();
+        let file_path = path.clone();
+        let policy = bytes.clone();
+        let worker = std::thread::spawn(move || {
+            let result = (|| -> Result<(), ()> {
+                let limit = std::time::Instant::now() + Duration::from_secs(30);
+                let mut file = loop {
+                    match std::fs::OpenOptions::new()
+                        .write(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(&file_path)
+                    {
+                        Ok(file) => break file,
+                        Err(error)
+                            if error.raw_os_error() == Some(libc::ENXIO)
+                                && std::time::Instant::now() < limit =>
+                        {
+                            std::thread::sleep(Duration::from_millis(1))
+                        }
+                        Err(_) => return Err(()),
+                    }
+                };
+                arrived.send(()).map_err(|_| ())?;
+                released
+                    .recv_timeout(Duration::from_secs(30))
+                    .map_err(|_| ())?;
+                file.write_all(&policy).map_err(|_| ())?;
+                Ok(())
+            })();
+            let _ = finished.send(result);
+        });
+        (
+            Self {
+                path,
+                bytes,
+                release: Some(release),
+                done,
+                worker: Some(worker),
+                restored: false,
+            },
+            reader,
+        )
+    }
+    fn restore(&mut self) -> std::io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::remove_file(&self.path)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&self.path)?;
+        file.write_all(&self.bytes)?;
+        self.restored = true;
+        Ok(())
+    }
+    fn finish(&mut self) {
+        self.release
+            .take()
+            .unwrap()
+            .send(())
+            .expect("policy FIFO release failed");
+        let result = self
+            .done
+            .recv_timeout(Duration::from_secs(30))
+            .expect("policy FIFO writer timed out");
+        join_worker(self.worker.take().unwrap());
+        self.restore().expect("policy FIFO restoration failed");
+        assert!(result.is_ok(), "policy FIFO writer failed");
+    }
+}
+impl Drop for PolicyFifo {
+    fn drop(&mut self) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        if self.restored {
+            return;
+        }
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+        let mut keeper = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&self.path)
+            .ok();
+        if let Some(file) = &mut keeper {
+            let _ = file.write_all(&self.bytes);
+        }
+        if self.done.recv_timeout(Duration::from_secs(35)).is_ok() {
+            if let Some(worker) = self.worker.take() {
+                if thread_finished(&worker) {
+                    let _ = worker.join();
+                }
+            }
+        }
+        drop(keeper);
+        let _ = self.restore();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn denied_device_cannot_be_resurrected_by_verified_claim_publication() {
+    let h = enabled().await;
+    let (status, created, _) = start(&h, "remote", 1).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let s = session(&h, &created);
+    let (mut policy, reader) = PolicyFifo::new(h._directory.path().join("policy.json"));
+    assert!(h
+        .idp
+        .authorize_device(created["user_code"].as_str().unwrap()));
+    reader
+        .recv_timeout(Duration::from_secs(30))
+        .expect("verified policy-reader handshake timed out");
+    assert_eq!(
+        Arc::strong_count(&s),
+        3,
+        "poll producer owner baseline control failed"
+    );
+    assert!(h
+        .service
+        .deny_device(created["request_id"].as_str().unwrap())
+        .is_ok());
+    policy.finish();
+    assert!(
+        std::fs::read(&policy.path).unwrap() == policy.bytes,
+        "policy FIFO restoration changed policy"
+    );
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while Arc::strong_count(&s) != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("known poll producer completion timed out");
+    assert!(
+        !h.service.ca.reload_status().degraded,
+        "policy FIFO did not deliver valid policy"
+    );
+    let (status, result) = h
+        .request(
+            "GET",
+            "/enroll/v1/sessions?wait=0",
+            Value::Null,
+            Some(created["session"].as_str().unwrap()),
+            1,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        result["error"]["reason"], "access_denied",
+        "denied device request was resurrected by late publication"
+    );
+    assert_eq!(
+        effects(&h),
+        [0, 0, 0],
+        "late publication wrote authority state"
+    );
 }

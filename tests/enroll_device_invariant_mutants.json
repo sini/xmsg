@@ -344,5 +344,38 @@
       }
     ],
     "expected_literal": "device SQLite column stored transient secret"
+  },
+  {
+    "label": "device-invariant-queued-collect-phase",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::queued_collectors_behind_approval_have_one_certificate_result",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "Phase::Complete(result) => Some(result),",
+        "replacement": "Phase::Complete(result) => { let copy=match &result { Ok(v)=>Ok(v.clone()), Err(v)=>Err(SessionFailure{reason:v.reason,rule:v.rule}) }; *phase=Phase::Complete(copy); Some(result) },",
+        "start": "",
+        "end": ""
+      }
+    ],
+    "expected_literal": "queued collectors received duplicate or missing certificate result"
+  },
+  {
+    "label": "device-invariant-publication-after-deny",
+    "oracle": "D7 denied terminal state survives late verified projection publication; no auth-grant claim",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::denied_device_cannot_be_resurrected_by_verified_claim_publication",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": "if matches!(*phase, Phase::DevicePolling) && !session.cancelled.load(Ordering::Acquire) {",
+        "replacement": "if true {",
+        "start": null,
+        "end": null
+      }
+    ],
+    "expected_literal": "denied device request was resurrected by late publication"
   }
 ]
