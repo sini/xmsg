@@ -966,6 +966,7 @@ fn device_guard_runs_after_database_wait_before_any_effect() {
     let called = AtomicBool::new(false);
     std::thread::scope(|scope| {
         let locked = s.db.lock().unwrap();
+        locked.execute_batch("CREATE TRIGGER refuse_unapproved_write BEFORE INSERT ON enroll_bindings BEGIN SELECT RAISE(ABORT, 'write before approval'); END;").unwrap();
         let (sent, recv) = std::sync::mpsc::channel();
         let (s, c, request, proposed, called, valid) =
             (&s, &c, &request, &proposed, &called, &valid);
