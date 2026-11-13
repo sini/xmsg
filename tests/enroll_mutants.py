@@ -43,7 +43,9 @@ def source_copy(destination):
 
 def edit(tree, item):
     filename = item["file"]
-    assert filename.startswith("src/") and "fixture" not in filename
+    relative = Path(filename)
+    assert not relative.is_absolute() and relative.parts[0] == "src" and ".." not in relative.parts
+    assert "tests" not in relative.parts and not relative.stem.endswith("_tests") and "fixture" not in filename
     file = tree / filename
     text = file.read_text()
     start = text.index(item["start"]) if item.get("start") else 0
@@ -144,7 +146,7 @@ def variant(work, evidence, case, red, seed=None, gate=None):
     production = {item["file"]: digest(tree / item["file"]) for item in case["edits"]}
     marker = instrument(tree, case, nonce)
     seed_target(seed, target)
-    env = {**os.environ, "CARGO_TARGET_DIR": str(target), "CARGO_BUILD_JOBS": "4", "CARGO_INCREMENTAL": "0"}
+    env = {**os.environ, "CARGO_TARGET_DIR": str(target), "CARGO_BUILD_JOBS": "4", "CARGO_INCREMENTAL": "0", "CARGO_PROFILE_TEST_DEBUG": "0", "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_CODEGEN_UNITS": "256"}
     artifacts = build(tree, target, case, env, evidence, label)
     execute(tree, artifacts["lib"], "enrollment_build_nonce_receipt", f"enroll-build nonce={nonce}", 0,
             env, evidence / f"{label}-nonce.log")
@@ -187,7 +189,11 @@ def main():
         cases = [c for c in cases if c["label"] in args.case]
         assert len(cases) == len(set(args.case)), "unknown case"
     args.evidence.mkdir(parents=True, exist_ok=True)
-    source_hashes = {name: digest(ROOT / name) for c in cases for name in [e["file"] for e in c["edits"]]}
+    tracked = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-z"]).decode().strip("\0").split("\0")
+    source_hashes = {name: digest(ROOT / name) for name in tracked}
+    for case in cases:
+        for item in case["edits"]:
+            assert item["file"] in source_hashes, "untracked production source"
     results = []
     with tempfile.TemporaryDirectory(prefix="xmsg-enroll-gates-") as temporary:
         work = Path(temporary)
@@ -203,7 +209,7 @@ def main():
             return
         seed_directory, seed, baseline = variant(work, args.evidence, {**cases[0], "label": "baseline"}, False)
         results.append(baseline)
-        seed_env = {**os.environ, "CARGO_TARGET_DIR": str(seed), "CARGO_BUILD_JOBS": "4", "CARGO_INCREMENTAL": "0"}
+        seed_env = {**os.environ, "CARGO_TARGET_DIR": str(seed), "CARGO_BUILD_JOBS": "4", "CARGO_INCREMENTAL": "0", "CARGO_PROFILE_TEST_DEBUG": "0", "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_CODEGEN_UNITS": "256"}
         cached_refused = False
         try:
             build(seed_directory / "tree", seed, cases[0], seed_env, args.evidence, "cached-refusal")
@@ -223,7 +229,9 @@ def main():
             assert all(digest(ROOT / name) == value for name, value in source_hashes.items()), "immutable source changed"
         shutil.rmtree(seed_directory)
     (args.evidence / "results.json").write_text(json.dumps(results, indent=2) + "\n")
-    print(f"enrollment-source-complete:{len(cases)}", flush=True)
+    assert len(results) == 1 + 2 * len(cases)
+    mode = "partial" if args.case else "complete"
+    print(f"enrollment-source-{mode}:{len(cases)}", flush=True)
 
 
 if __name__ == "__main__":

@@ -3591,7 +3591,7 @@ pub async fn replies(
     if let (Some(outbound), Some(fed_state)) = (outbound, state.fed_state.as_ref()) {
         let peer_is_leaf = fed_state
             .current_peers()
-            .get(&outbound.peer)
+            .get_peer_config(&outbound.peer)
             .map(|p| p.leaf)
             .unwrap_or(false);
         if !peer_is_leaf {

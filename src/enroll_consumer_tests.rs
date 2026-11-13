@@ -405,6 +405,8 @@ async fn consumer_enrolls_then_receives_a_pattern_mailbox_and_replies_over_feder
         queued.outcome, "queued",
         "consumer node had no admitted mailbox"
     );
+    let pending = crate::surface::replies(&state, &id, 0, 0).await;
+    assert!(pending.as_ref().is_ok_and(|rows|rows.is_empty()),"pending reply poll for admitted leaf must return empty replies, not UnknownPeer: {pending:?}");
     let item = fed::get_federated_inbox(&leaf, "team.hub", 0)
         .await
         .unwrap()

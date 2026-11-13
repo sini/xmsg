@@ -492,41 +492,6 @@ pub fn router(service: Arc<Service>) -> Router {
         .layer(DefaultBodyLimit::max(65536))
         .with_state(service)
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn redirect_and_host_bounds() {
-        assert!(valid_redirect("http://127.0.0.1:18551/cb"));
-        assert!(valid_redirect("http://[::1]:18551/cb"));
-        for value in [
-            "https://127.0.0.1:1/cb",
-            "http://localhost:1/cb",
-            "http://127.0.0.2:1/cb",
-            "http://127.0.0.1:1/cb?x=1",
-            "http://127.0.0.1:1/no",
-        ] {
-            assert!(!valid_redirect(value));
-        }
-        assert!(valid_host("laptop-1"));
-        for host in ["", "Laptop", "a.b", "-x", "x-", "a/b"] {
-            assert!(!valid_host(host));
-        }
-    }
-    #[test]
-    fn burst_is_bounded_and_refills_without_eviction() {
-        let mut bucket = Bucket {
-            units: 10_000_000,
-            observed: 0,
-        };
-        for _ in 0..10 {
-            assert!(bucket.take(0));
-        }
-        assert!(!bucket.take(0));
-        assert!(bucket.take(2));
-        assert!(!bucket.take(2));
-    }
-}
 
 #[derive(Debug)]
 struct PresentedCertificate;
@@ -761,3 +726,180 @@ pub fn hub_entry(
 #[cfg(test)]
 #[path = "enroll_protocol_tests.rs"]
 pub(crate) mod protocol_tests;
+
+#[cfg(test)]
+mod hub_entry_tests {
+    use super::*;
+    use crate::enroll::protocol_tests::{node_state, Harness};
+
+    #[tokio::test]
+    async fn uri_bearing_self_signed_hub_uses_its_pin() {
+        let h = Harness::new().await;
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::default();
+        params.is_ca = rcgen::IsCa::ExplicitNoCa;
+        params.subject_alt_names = vec![rcgen::SanType::URI(
+            "spiffe://fleet.example/host/hub/user/team"
+                .try_into()
+                .unwrap(),
+        )];
+        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+        let cert = params.self_signed(&key).unwrap();
+        let fed = node_state(
+            h.db.clone(),
+            h._directory.path(),
+            vec![cert.der().to_vec()],
+            key.serialize_der(),
+            h.service.fed.current_peers(),
+        );
+        let (entry, bundle) = hub_entry(&fed, "127.0.0.1:7788", WallClock.now())
+            .expect("URI-bearing pinned node must use its pin");
+        assert!(bundle.is_none());
+        assert!(entry.get("ca").is_none());
+        let pin = crate::fed::spki_sha256_from_der(cert.der()).unwrap();
+        assert_eq!(entry["pin"], format!("sha256:{pin}"));
+        assert_eq!(
+            entry["name"],
+            crate::node::node_name_from_pin(&pin).unwrap()
+        );
+        let state = h._directory.path().join("pinned-client");
+        let csr = crate::enroll_client::create_key(&state).unwrap();
+        let issued = h
+            .service
+            .ca
+            .issue(
+                &crate::enroll_ca::VerifiedClaims {
+                    provider: "idp".into(),
+                    iss: h.idp.issuer(),
+                    sub: "fixture-sub".into(),
+                    email: None,
+                    email_verified: false,
+                    hd: None,
+                    groups: vec![],
+                    preferred_username: None,
+                },
+                &VerifiedCsr::parse_pem(&csr).unwrap(),
+                "pinned-client",
+                &[],
+                WallClock.now(),
+            )
+            .unwrap();
+        use rustls::pki_types::pem::PemObject;
+        let chain =
+            rustls::pki_types::CertificateDer::pem_slice_iter(issued.cert_chain_pem.as_bytes())
+                .map(|c| c.unwrap().to_vec())
+                .collect();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let name = entry["name"].as_str().unwrap();
+        let peers = Arc::new(crate::fed::PeersMap::load_from_json(&serde_json::json!({"peers":{name:{"address":address.to_string(),"pin":entry["pin"],"allow":["send"]}}}).to_string()).unwrap());
+        let key =
+            rcgen::KeyPair::from_pem(&std::fs::read_to_string(state.join("fed.key")).unwrap())
+                .unwrap();
+        let client = node_state(
+            h.db.clone(),
+            h._directory.path(),
+            chain,
+            key.serialize_der(),
+            peers.clone(),
+        );
+        let server = tokio::spawn(crate::fed::run_fed_listener(listener, fed));
+        let connector =
+            crate::fed::make_tls_connector_for_peer(&client, peers.get(name).unwrap()).unwrap();
+        let socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        let connected = tokio::time::timeout(
+            Duration::from_secs(3),
+            connector.connect(
+                rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+                socket,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(
+            connected.is_ok(),
+            "URI-bearing pinned hub could not be dialed"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn incomplete_ca_chain_is_not_an_enrollment_hub_identity() {
+        let h = Harness::new().await;
+        let root_key = rcgen::KeyPair::generate().unwrap();
+        let mut root_params = rcgen::CertificateParams::default();
+        root_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        root_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
+        let intermediate_key = rcgen::KeyPair::generate().unwrap();
+        let mut intermediate_params = rcgen::CertificateParams::default();
+        intermediate_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+        intermediate_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
+        let intermediate = intermediate_params
+            .signed_by(
+                &intermediate_key,
+                &rcgen::Issuer::from_params(&root_params, &root_key),
+            )
+            .unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::default();
+        params.subject_alt_names = vec![rcgen::SanType::URI(
+            "spiffe://fleet.example/host/hub/user/team"
+                .try_into()
+                .unwrap(),
+        )];
+        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+        let leaf = params
+            .signed_by(
+                &key,
+                &rcgen::Issuer::from_params(&intermediate_params, &intermediate_key),
+            )
+            .unwrap();
+        let fed = node_state(
+            h.db.clone(),
+            h._directory.path(),
+            vec![leaf.der().to_vec(), intermediate.der().to_vec()],
+            key.serialize_der(),
+            Arc::new(crate::fed::PeersMap::new(HashMap::new())),
+        );
+        assert!(
+            hub_entry(&fed, "127.0.0.1:7788", WallClock.now()).is_err(),
+            "hub entry accepted an intermediate without its root"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn redirect_and_host_bounds() {
+        assert!(valid_redirect("http://127.0.0.1:18551/cb"));
+        assert!(valid_redirect("http://[::1]:18551/cb"));
+        for value in [
+            "https://127.0.0.1:1/cb",
+            "http://localhost:1/cb",
+            "http://127.0.0.2:1/cb",
+            "http://127.0.0.1:1/cb?x=1",
+            "http://127.0.0.1:1/no",
+        ] {
+            assert!(!valid_redirect(value));
+        }
+        assert!(valid_host("laptop-1"));
+        for host in ["", "Laptop", "a.b", "-x", "x-", "a/b"] {
+            assert!(!valid_host(host));
+        }
+    }
+    #[test]
+    fn burst_is_bounded_and_refills_without_eviction() {
+        let mut bucket = Bucket {
+            units: 10_000_000,
+            observed: 0,
+        };
+        for _ in 0..10 {
+            assert!(bucket.take(0));
+        }
+        assert!(!bucket.take(0));
+        assert!(bucket.take(2));
+        assert!(!bucket.take(2));
+    }
+}
