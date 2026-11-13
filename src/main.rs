@@ -109,6 +109,7 @@ pub enum EnrollCaAction {
     },
     Pending,
     Approve {
+        #[arg(allow_hyphen_values = true)]
         request_id: String,
         #[arg(long)]
         user: String,
@@ -118,6 +119,7 @@ pub enum EnrollCaAction {
         spki_sha256: String,
     },
     Deny {
+        #[arg(allow_hyphen_values = true)]
         request_id: String,
     },
 }
