@@ -336,6 +336,28 @@ fn unsupported_key_charset_and_flow_do_not_gain_authority() {
     ));
     let mut p = policy();
     p["providers"]["idp"]["clients"]["device"] = serde_json::json!({"client_id":"D"});
+    let disabled = Policy::from_json(&p.to_string()).unwrap();
+    assert!(!disabled.provider("idp").unwrap().device_enabled());
+    assert!(disabled
+        .provider("idp")
+        .unwrap()
+        .client(Flow::Device)
+        .is_err());
+    p["providers"]["idp"]["device"] = serde_json::json!({"enabled":true});
+    let enabled = Policy::from_json(&p.to_string()).unwrap();
+    assert_eq!(
+        enabled
+            .provider("idp")
+            .unwrap()
+            .client(Flow::Device)
+            .unwrap()
+            .client_id,
+        "D"
+    );
+    p["providers"]["idp"]["clients"]
+        .as_object_mut()
+        .unwrap()
+        .remove("device");
     assert!(Policy::from_json(&p.to_string()).is_err());
     c.iss = "accounts.google.com".into();
     assert!(matches!(
