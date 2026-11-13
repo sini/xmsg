@@ -466,6 +466,7 @@ fn claim_error(error: ClaimsVerificationError) -> Error {
 }
 #[cfg(test)]
 mod tests {
+    use super::*;
     fn begin_fixture(issuer: &str) -> Provider {
         let metadata: CoreProviderMetadata = serde_json::from_value(serde_json::json!({
             "issuer": issuer, "authorization_endpoint": "https://fixture.example/authorize",
