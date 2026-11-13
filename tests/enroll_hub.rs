@@ -225,6 +225,27 @@ fn admitted_global_caps_are_durable_and_leave_concrete_mailboxes_unchanged() {
         .unwrap(),
         PeerMailboxInsert::Full
     );
+    let bytes_db = rusqlite::Connection::open_in_memory().unwrap();
+    storage::init_db(&bytes_db).unwrap();
+    let budget = PeerMailboxLimits {
+        max_rows: 100,
+        max_bytes: 512,
+    };
+    let mut first = message("byte-a", "alice.lap");
+    first.body = "x".repeat(256);
+    let mut second = message("byte-b", "bob.lap");
+    second.body = "y".repeat(256);
+    assert_eq!(
+        storage::insert_peer_mailbox_with_admission_budget(&bytes_db, &first, leaf, true, budget)
+            .unwrap(),
+        PeerMailboxInsert::Inserted
+    );
+    assert_eq!(
+        storage::insert_peer_mailbox_with_admission_budget(&bytes_db, &second, leaf, true, budget)
+            .unwrap(),
+        PeerMailboxInsert::Full,
+        "global admitted byte sum was not bounded"
+    );
 }
 #[test]
 fn expired_admitted_entry_is_pruned_only_when_mailbox_empty() {
@@ -391,6 +412,12 @@ async fn admitted_leaf_queues_pulls_acks_and_recovers_after_hub_restart() {
         .await
         .unwrap();
     assert_eq!(delivery.outcome.as_deref(), Some("queued"));
+    assert_eq!(
+        storage::count_peer_mailbox_messages(&hub.db.lock().unwrap(), "carol.lap").unwrap(),
+        1,
+        "admitted mailbox not keyed by canonical name"
+    );
+
     assert!(hub
         .db
         .lock()
@@ -598,4 +625,66 @@ async fn cross_bundle_restart_takeover_cannot_be_configured() {
     stolen.sort();
     assert_eq!(stolen, vec!["fleet row one", "fleet row two"]);
     panic!("cross-bundle restart takeover observed: enrollment client pulled two fleet rows");
+}
+
+#[tokio::test]
+async fn queue_classifies_admitted_and_concrete_leaves_for_global_budget() {
+    use xmsg::fed::{FedEnvelope, FedTarget};
+    let roots = Roots::new();
+    let dir = tempfile::tempdir().unwrap();
+    let pat = "spiffe://example.org/host/*/user/carol";
+    let config = json!({"peers":{"bob.lap":{"ca":roots.enroll,"identities":["spiffe://example.org/host/lap/user/bob"],"leaf":true,"allow":["send"]}},"hub":{"patterns":[{"pattern":pat,"ca":roots.enroll}],"rules":[{"pattern":pat,"allow":["send"],"leaf":true}]}});
+    let peers = Arc::new(PeersMap::load_from_json(&config.to_string()).unwrap());
+    let cert = roots.cert(true, "spiffe://example.org/host/lap/user/carol");
+    peers.resolve_incoming_peer(&cert, &[]).unwrap();
+    let db = Arc::new(std::sync::Mutex::new(
+        rusqlite::Connection::open_in_memory().unwrap(),
+    ));
+    storage::init_db(&db.lock().unwrap()).unwrap();
+    storage::set_admitted_mailbox_limits(
+        &db,
+        PeerMailboxLimits {
+            max_rows: 0,
+            max_bytes: 0,
+        },
+    );
+    let (cert, key) = roots.cert_key(false, "spiffe://example.org/host/hub/user/fleet");
+    let hub = node_state("fleet.hub", peers, cert, key, db, dir.path());
+    let envelope = FedEnvelope {
+        v: 1,
+        id: ulid::Ulid::new().to_string(),
+        origin: storage::Origin::service("test", "fleet.hub"),
+        to: FedTarget {
+            r#ref: "worker".into(),
+        },
+        body: "concrete exemption".into(),
+        thread_id: "".into(),
+        created_at: storage::now_epoch_secs(),
+        forwarded: None,
+        attachments: vec![],
+    };
+    assert!(
+        xmsg::fed::send_federated_message(&hub, "carol.lap", &envelope)
+            .await
+            .is_err(),
+        "admitted queue bypassed aggregate budget"
+    );
+    assert!(
+        xmsg::fed::send_federated_message(&hub, "bob.lap", &envelope)
+            .await
+            .is_ok(),
+        "concrete leaf counted toward aggregate budget"
+    );
+    assert_eq!(
+        hub.db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT admitted FROM peer_mailbox WHERE peer='bob.lap'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
 }
