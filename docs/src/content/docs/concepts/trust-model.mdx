@@ -121,3 +121,37 @@ flowchart LR
 Within one UID, xmsg does not isolate hostile local processes from each other. It also does not
 make peer text safe to execute or supply end-to-end outside-service authorization: external
 [bridges and gateways](/extensions/gateway/) own their outside-facing boundaries.
+
+
+## Planned: the enrollment CA boundary
+
+The [enrollment CA](/operations/enrollment-ca/) is an optional online signing
+root inside an xmsg node. It issues only the host/user form: the user comes from
+a verified OIDC account and explicit policy, while the host is a label supplied
+by the enrolling machine. **A host name is not attestation.** Alice can request
+`alice.prod-db` from another device. Never grant permissions merely because an
+enrolled certificate says `host/prod-db/user/*`; grant on the verified user.
+
+The enrollment root is independent of fleet and cluster roots. A hub pattern
+binds one bundle, patterns of different bundles cannot derive a common canonical
+name, and a rule spanning bundles is refused. Compromise of the CA host therefore
+affects the peer entries and hub patterns/rules trusting its root, including their
+names and mailboxes. It does not make that root satisfy a fleet-bundle pattern.
+It remains the operator's job to give enrollment identities suitably narrow rules.
+
+Default host certificates expire 24 hours after issuance. The CA deny list stops
+new issuance or renewal immediately there; there is no CRL or OCSP distribution
+to peers. Renewal does not query the IdP, and fresh login is required after
+90 days. Disabling an IdP account is not an immediate revocation of an existing
+certificate. **Pinned peers bypass certificate expiry**: pinning an enrolled key
+also bypasses these CA expiry/revocation bounds.
+
+Both browser flows request an explicit interaction: Google uses
+`consent select_account`; Kanidm and other providers use `login`. An attacker can
+still ask a victim to sign in and share the resulting loopback redirect address,
+which enrolls the attacker's key as the victim. Do not share that address. These
+prompts do not promise a particular passkey ceremony; real-provider behavior is
+an operator-run acceptance check. Device authorization is refused in v1.
+
+These certificates authenticate a peer. They do not turn its messages into
+instructions or isolate hostile processes within the same UID.
