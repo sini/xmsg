@@ -137,7 +137,10 @@ pub fn build_unix_router(state: Arc<AppState>) -> Router {
         Router::new()
             .route("/v1/observe/events", get(observe_events_handler))
             .route("/v1/enrollment/pending", get(enrollment_pending_handler))
-            .route("/v1/enrollment/{id}/approve", post(enrollment_approve_handler))
+            .route(
+                "/v1/enrollment/{id}/approve",
+                post(enrollment_approve_handler),
+            )
             .route("/v1/enrollment/{id}/deny", post(enrollment_deny_handler))
             .layer(DefaultBodyLimit::max(4096))
             .with_state(state),
