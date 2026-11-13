@@ -1694,13 +1694,14 @@
     "edits": [
       {
         "file": "src/enroll.rs",
-        "needle": "    if body.flow == Flow::Device {",
-        "replacement": "    let mut body=body; if body.flow==Flow::Device {body.flow=Flow::Loopback;} if body.flow == Flow::Device {",
+        "needle": "if is_device && !config.device_enabled() {",
+        "replacement": "if false && is_device && !config.device_enabled() {",
         "start": "async fn create(",
         "end": "async fn code("
       }
     ],
-    "expected_literal": "device request was silently accepted as another flow"
+    "expected_literal": "assertion `left == right` failed",
+    "oracle": "O19 default-disabled classification: bypassing this guard changes device_disabled to device_unsupported; remaining independent refusal guards stay active, no auth-bypass claim"
   },
   {
     "label": "consumer-fingerprint-prefix",

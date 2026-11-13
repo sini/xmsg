@@ -13,6 +13,46 @@ use std::{
 };
 use tower::ServiceExt;
 
+#[path = "enroll_device_tests.rs"]
+mod device_tests;
+
+#[tokio::test]
+async fn device_is_disabled_before_provider_work_without_explicit_opt_in() {
+    let harness = Harness::new().await;
+    let before = harness.idp.request_paths();
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+    let csr = rcgen::CertificateParams::default()
+        .serialize_request(&key)
+        .unwrap()
+        .pem()
+        .unwrap();
+    let (status, response) = harness
+        .request(
+            "POST",
+            "/enroll/v1/sessions",
+            json!({"csr_pem":csr,"host":"remote","provider":"idp","flow":"device"}),
+            None,
+            1,
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(response["error"]["reason"], "device_disabled");
+    assert_eq!(
+        harness.idp.request_paths(),
+        before,
+        "disabled device request contacted provider"
+    );
+    let db = harness.db.lock().unwrap();
+    for table in ["enroll_bindings", "enroll_rates", "enroll_certs"] {
+        let count: i64 = db
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "disabled device request wrote authority state");
+    }
+}
+
 pub(crate) struct TestClock(pub(crate) AtomicI64);
 impl Clock for TestClock {
     fn now(&self) -> i64 {
@@ -694,13 +734,21 @@ async fn protocol_device_flow_is_refused_before_provider_work() {
         .unwrap()
         .pem()
         .unwrap();
-    let(status,value)=h.request("POST","/enroll/v1/sessions",json!({"csr_pem":csr,"host":"laptop","provider":"idp","flow":"device","redirect_uri":"http://127.0.0.1:18551/cb"}),None,1).await;
+    let (status, value) = h
+        .request(
+            "POST",
+            "/enroll/v1/sessions",
+            json!({"csr_pem":csr,"host":"laptop","provider":"idp","flow":"device"}),
+            None,
+            1,
+        )
+        .await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
         "device request was silently accepted as another flow"
     );
-    assert_eq!(value["error"]["reason"], "unsupported_flow");
+    assert_eq!(value["error"]["reason"], "device_disabled");
     assert!(
         h.idp.request_paths().is_empty(),
         "device request invoked provider work"
