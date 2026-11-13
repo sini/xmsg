@@ -15,6 +15,8 @@ pub mod codex;
 #[cfg(feature = "daemon")]
 pub mod codex_relay;
 #[cfg(feature = "daemon")]
+pub mod enroll_ca;
+#[cfg(feature = "daemon")]
 pub mod error;
 #[cfg(feature = "daemon")]
 pub mod fed;
