@@ -53,3 +53,6 @@ pub mod systemd;
 
 #[cfg(feature = "daemon")]
 pub mod enroll_oidc;
+
+#[cfg(feature = "daemon")]
+pub mod enroll_client;
