@@ -217,3 +217,12 @@ During a bound subagent's active turn, reads the messages in its `<P>/<child>@<n
 (`0..=60`) for the first message. It marks each message that it reads `delivered`:
 
 - **Returns:** `{ address, messages: [{ id, from, body, created_at }] }`.
+
+### Planned: aggregate admitted-leaf mailbox budgets
+
+`xmsg serve --admitted-mailbox-max-rows 100000 --admitted-mailbox-max-bytes 671088640`
+bounds all pattern-admitted leaf mailboxes together. Zero refuses new admitted
+rows. The existing per-leaf budgets still apply; concrete leaf entries do not
+consume the aggregate admitted budget. Rejection keeps existing messages and
+returns `429 peer_mailbox_full`. See
+[hub admission](/concepts/hubs-and-leaves/#planned-enrolled-nodes-and-bounded-hub-mailboxes).

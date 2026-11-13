@@ -3197,7 +3197,7 @@ async fn deliver_reply(
         state
             .fed_state
             .as_ref()
-            .and_then(|fs| fs.current_peers().get(h).cloned())
+            .and_then(|fs| fs.current_peers().get_peer_config(h))
             .is_some_and(|p| p.leaf)
     });
 
