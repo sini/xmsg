@@ -512,3 +512,8 @@ required-features = ["daemon"]
 name = "observe_http"
 path = "tests/observe_http.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "gate_svlt_device_cli"
+path = "tests/gate_svlt_device_cli.rs"
+required-features = ["daemon"]
