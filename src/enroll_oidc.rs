@@ -4,7 +4,7 @@ use base64::Engine;
 use openidconnect::core::{
     CoreAuthDisplay, CoreAuthPrompt, CoreErrorResponseType, CoreGenderClaim, CoreJsonWebKey,
     CoreJsonWebKeySet, CoreJweContentEncryptionAlgorithm, CoreJwsSigningAlgorithm,
-    CoreProviderMetadata, CoreResponseType, CoreRevocableToken, CoreRevocationErrorResponse,
+    CoreResponseType, CoreRevocableToken, CoreRevocationErrorResponse,
     CoreTokenIntrospectionResponse, CoreTokenType,
 };
 use openidconnect::{
@@ -14,7 +14,29 @@ use openidconnect::{
     RequestTokenError, Scope, SignatureVerificationError, StandardErrorResponse,
     StandardTokenResponse, TokenResponse,
 };
+use openidconnect::{AdditionalProviderMetadata, AuthType, DeviceAuthorizationUrl, NonceVerifier};
 use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct DeviceMetadata {
+    #[serde(default)]
+    device_authorization_endpoint: Option<DeviceAuthorizationUrl>,
+}
+impl AdditionalProviderMetadata for DeviceMetadata {}
+type CoreProviderMetadata = openidconnect::ProviderMetadata<
+    DeviceMetadata,
+    CoreAuthDisplay,
+    openidconnect::core::CoreClientAuthMethod,
+    openidconnect::core::CoreClaimName,
+    openidconnect::core::CoreClaimType,
+    openidconnect::core::CoreGrantType,
+    CoreJweContentEncryptionAlgorithm,
+    openidconnect::core::CoreJweKeyManagementAlgorithm,
+    CoreJsonWebKey,
+    openidconnect::core::CoreResponseMode,
+    CoreResponseType,
+    openidconnect::core::CoreSubjectIdentifierType,
+>;
 use std::collections::HashMap;
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -25,6 +47,12 @@ use std::time::Duration;
 pub enum Error {
     #[error("unsupported_flow")]
     UnsupportedFlow,
+    #[error("device_disabled")]
+    DeviceDisabled,
+    #[error("device_unsupported")]
+    DeviceUnsupported,
+    #[error("device_denied")]
+    Denied,
     #[error("unsupported_issuer")]
     UnsupportedIssuer,
     #[error("invalid_provider")]
@@ -100,10 +128,85 @@ pub struct PendingAuthorization {
     verifier: PkceCodeVerifier,
 }
 
+struct DeadlineHttp<'a> {
+    http: &'a reqwest::Client,
+    deadline: tokio::time::Instant,
+    clock: &'a (dyn Fn() -> tokio::time::Instant + Send + Sync),
+}
+impl<'c> openidconnect::AsyncHttpClient<'c> for DeadlineHttp<'_> {
+    type Error = std::io::Error;
+    type Future = std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<openidconnect::HttpResponse, Self::Error>>
+                + Send
+                + 'c,
+        >,
+    >;
+    fn call(&'c self, request: openidconnect::HttpRequest) -> Self::Future {
+        Box::pin(async move {
+            if (self.clock)() >= self.deadline {
+                return Ok(expired_device_response());
+            }
+            let response = self
+                .http
+                .call(request)
+                .await
+                .map_err(|_| std::io::Error::other("oidc_unavailable"))?;
+            if (self.clock)() >= self.deadline {
+                return Ok(expired_device_response());
+            }
+            Ok(response)
+        })
+    }
+}
+fn expired_device_response() -> openidconnect::HttpResponse {
+    // A transport error would make the SDK retry; expiry must terminate polling.
+    hyper::Response::builder()
+        .status(400)
+        .header("content-type", "application/json")
+        .body(br#"{"error":"expired_token"}"#.to_vec())
+        .expect("static expiry response")
+}
+
+pub struct PendingDeviceAuthorization {
+    user_code: String,
+    verification_uri: String,
+    verification_uri_complete: Option<String>,
+    deadline: tokio::time::Instant,
+    issuer: String,
+    client_id: String,
+    secret: Option<ClientSecret>,
+    details: openidconnect::core::CoreDeviceAuthorizationResponse,
+    metadata: CoreProviderMetadata,
+}
+
+impl PendingDeviceAuthorization {
+    pub fn user_code(&self) -> &str {
+        &self.user_code
+    }
+    pub fn verification_uri(&self) -> &str {
+        &self.verification_uri
+    }
+    pub fn verification_uri_complete(&self) -> Option<&str> {
+        self.verification_uri_complete.as_deref()
+    }
+    pub fn deadline(&self) -> tokio::time::Instant {
+        self.deadline
+    }
+    pub fn expires_in(&self) -> Duration {
+        self.deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+    }
+    pub fn interval(&self) -> Duration {
+        self.details.interval().max(Duration::from_secs(5))
+    }
+}
+
 pub struct Provider {
     label: String,
     issuer: String,
     groups: bool,
+    device_enabled: bool,
     clients: HashMap<Flow, FlowClient>,
     metadata: RwLock<CoreProviderMetadata>,
     http: reqwest::Client,
@@ -130,10 +233,7 @@ impl Provider {
         groups: bool,
         http: reqwest::Client,
     ) -> Result<Self, Error> {
-        if label.is_empty()
-            || config.clients.is_empty()
-            || config.clients.contains_key(&Flow::Device)
-        {
+        if label.is_empty() || config.clients.is_empty() {
             return Err(Error::Configuration);
         }
         let issuer = IssuerUrl::new(config.issuer.clone()).map_err(|_| Error::Configuration)?;
@@ -142,6 +242,9 @@ impl Provider {
         }
         let mut clients = HashMap::new();
         for (flow, client) in &config.clients {
+            if *flow == Flow::Device && !config.device_enabled() {
+                continue;
+            }
             if client.client_id.is_empty() {
                 return Err(Error::Configuration);
             }
@@ -201,10 +304,230 @@ impl Provider {
             label: label.into(),
             issuer: config.issuer.clone(),
             groups,
+            device_enabled: config.device_enabled(),
             clients,
             metadata: RwLock::new(metadata),
             http,
         })
+    }
+
+    pub async fn begin_device(&self) -> Result<PendingDeviceAuthorization, Error> {
+        self.begin_device_with_clock(&tokio::time::Instant::now)
+            .await
+    }
+
+    async fn begin_device_with_clock(
+        &self,
+        clock: &(dyn Fn() -> tokio::time::Instant + Send + Sync),
+    ) -> Result<PendingDeviceAuthorization, Error> {
+        if !self.device_enabled {
+            return Err(Error::DeviceDisabled);
+        }
+        let metadata = self
+            .metadata
+            .read()
+            .map_err(|_| Error::Unavailable)?
+            .clone();
+        let endpoint = metadata
+            .additional_metadata()
+            .device_authorization_endpoint
+            .clone()
+            .filter(|url| https_url(url.url()))
+            .ok_or(Error::DeviceUnsupported)?;
+        if !self.clients.contains_key(&Flow::Device)
+            || metadata
+                .grant_types_supported()
+                .as_ref()
+                .is_some_and(|grants| {
+                    !grants.iter().any(|grant| {
+                        grant.as_ref() == "urn:ietf:params:oauth:grant-type:device_code"
+                    })
+                })
+        {
+            return Err(Error::DeviceUnsupported);
+        }
+        let selected = self
+            .clients
+            .get(&Flow::Device)
+            .ok_or(Error::UnsupportedFlow)?;
+        let client = self.device_client(metadata.clone(), &selected.id, selected.secret.clone());
+        let client = client.set_device_authorization_url(endpoint);
+        let mut request = client
+            .exchange_device_code()
+            .add_scope(Scope::new("email".into()));
+        if self.groups {
+            request = request.add_scope(Scope::new("groups".into()));
+        }
+        let sent = clock();
+        let details: openidconnect::core::CoreDeviceAuthorizationResponse = request
+            .request_async(&self.http)
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        // Normalize the SDK's internal interval so slow_down adds five to our five-second floor.
+        let details = if details.interval() < Duration::from_secs(5) {
+            let mut normalized =
+                serde_json::to_value(&details).map_err(|_| Error::Configuration)?;
+            normalized["interval"] = serde_json::json!(5);
+            serde_json::from_value(normalized).map_err(|_| Error::Configuration)?
+        } else {
+            details
+        };
+        let lifetime = details.expires_in().min(Duration::from_secs(300));
+        let deadline = sent.checked_add(lifetime).ok_or(Error::Expired)?;
+        let interval = details.interval().max(Duration::from_secs(5));
+        if lifetime.is_zero()
+            || clock()
+                .checked_add(interval)
+                .is_none_or(|first| first >= deadline)
+        {
+            return Err(Error::Expired);
+        }
+        if details.device_code().secret().is_empty()
+            || details.user_code().secret().is_empty()
+            || !https_url(details.verification_uri().url())
+            || details.verification_uri_complete().is_some_and(|uri| {
+                reqwest::Url::parse(uri.secret())
+                    .ok()
+                    .is_none_or(|url| !https_url(&url))
+            })
+        {
+            return Err(Error::Configuration);
+        }
+        Ok(PendingDeviceAuthorization {
+            user_code: details.user_code().secret().clone(),
+            verification_uri: details.verification_uri().as_str().into(),
+            verification_uri_complete: details
+                .verification_uri_complete()
+                .map(|uri| uri.secret().clone()),
+            deadline,
+            issuer: self.issuer.clone(),
+            client_id: selected.id.clone(),
+            secret: selected.secret.clone(),
+            details,
+            metadata,
+        })
+    }
+
+    fn device_client(
+        &self,
+        metadata: CoreProviderMetadata,
+        id: &str,
+        secret: Option<ClientSecret>,
+    ) -> OidcClient {
+        let client = OidcClient::from_provider_metadata(metadata, ClientId::new(id.into()), secret);
+        if self.issuer == "https://accounts.google.com" {
+            client.set_auth_type(AuthType::RequestBody)
+        } else {
+            client
+        }
+    }
+
+    pub async fn poll_device(
+        &self,
+        pending: PendingDeviceAuthorization,
+        now: &(dyn Fn() -> i64 + Send + Sync),
+    ) -> Result<VerifiedClaims, Error> {
+        tokio::time::timeout_at(
+            pending.deadline,
+            self.poll_device_inner(pending, now, &tokio::time::Instant::now, tokio::time::sleep),
+        )
+        .await
+        .map_err(|_| Error::Expired)?
+    }
+
+    async fn poll_device_inner<S, F>(
+        &self,
+        pending: PendingDeviceAuthorization,
+        now: &(dyn Fn() -> i64 + Send + Sync),
+        clock: &(dyn Fn() -> tokio::time::Instant + Send + Sync),
+        sleep: S,
+    ) -> Result<VerifiedClaims, Error>
+    where
+        S: Fn(Duration) -> F,
+        F: std::future::Future<Output = ()>,
+    {
+        if pending.issuer != self.issuer
+            || !self.device_enabled
+            || self
+                .clients
+                .get(&Flow::Device)
+                .map(|client| client.id.as_str())
+                != Some(pending.client_id.as_str())
+        {
+            return Err(Error::Configuration);
+        }
+        let client = self.device_client(
+            pending.metadata.clone(),
+            &pending.client_id,
+            pending.secret.clone(),
+        );
+        sleep(pending.details.interval().max(Duration::from_secs(5))).await;
+        let remaining = pending
+            .deadline
+            .checked_duration_since(clock())
+            .filter(|duration| !duration.is_zero())
+            .ok_or(Error::Expired)?;
+        let http = DeadlineHttp {
+            http: &self.http,
+            deadline: pending.deadline,
+            clock,
+        };
+        let response = client
+            .exchange_device_access_token(&pending.details)
+            .map_err(|_| Error::Configuration)?
+            .set_max_backoff_interval(Duration::from_secs(300))
+            .request_async(
+                &http,
+                |delay| sleep(delay.max(Duration::from_secs(5))),
+                Some(remaining),
+            )
+            .await
+            .map_err(|error| {
+                if let RequestTokenError::ServerResponse(ref error) = error {
+                    use openidconnect::DeviceCodeErrorResponseType;
+                    return match error.error() {
+                        DeviceCodeErrorResponseType::AccessDenied => Error::Denied,
+                        DeviceCodeErrorResponseType::ExpiredToken => Error::Expired,
+                        _ => Error::DeviceUnsupported,
+                    };
+                }
+                if let RequestTokenError::Parse(_, body) = error {
+                    if matches!(body_has_bare_google_issuer(&body), true) {
+                        return Error::UnsupportedIssuer;
+                    }
+                }
+                Error::Unavailable
+            })?;
+        if clock() >= pending.deadline {
+            return Err(Error::Expired);
+        }
+        let token = response.id_token().ok_or_else(|| Error::Token)?;
+        let no_nonce = |nonce: Option<&Nonce>| {
+            if nonce.is_some() {
+                Err("unexpected device nonce".into())
+            } else {
+                Ok(())
+            }
+        };
+        let mut verified = self.verify(&client, &pending.metadata, token, no_nonce, now());
+        if let Err(ClaimsVerificationError::SignatureVerification(
+            SignatureVerificationError::NoMatchingKey,
+        )) = &verified
+        {
+            let jwks = CoreJsonWebKeySet::fetch_async(pending.metadata.jwks_uri(), &self.http)
+                .await
+                .map_err(|_| Error::Unavailable)?;
+            let updated = pending.metadata.clone().set_jwks(jwks);
+            let retry =
+                self.device_client(updated.clone(), &pending.client_id, pending.secret.clone());
+            *self.metadata.write().map_err(|_| Error::Unavailable)? = updated.clone();
+            verified = self.verify(&retry, &updated, token, no_nonce, now());
+        }
+        if clock() >= pending.deadline {
+            return Err(Error::Expired);
+        }
+        let claims = verified.map_err(claim_error)?;
+        self.project_claims(claims, &pending.client_id)
     }
 
     fn client(
@@ -329,8 +652,16 @@ impl Provider {
             verified = self.verify(&retry_client, &updated, token, &pending.nonce, now());
         }
         let claims = verified.map_err(claim_error)?;
+        self.project_claims(claims, &pending.client_id)
+    }
+
+    fn project_claims(
+        &self,
+        claims: openidconnect::IdTokenClaims<ExtraClaims, CoreGenderClaim>,
+        client_id: &str,
+    ) -> Result<VerifiedClaims, Error> {
         if claims.audiences().len() > 1
-            && claims.authorized_party().map(|v| v.as_str()) != Some(pending.client_id.as_str())
+            && claims.authorized_party().map(|v| v.as_str()) != Some(client_id)
         {
             return Err(Error::Audience);
         }
@@ -351,7 +682,7 @@ impl Provider {
         })
     }
 
-    fn verify(
+    fn verify<N: NonceVerifier>(
         &self,
         client: &OidcClient,
         metadata: &CoreProviderMetadata,
@@ -361,7 +692,7 @@ impl Provider {
             CoreJweContentEncryptionAlgorithm,
             CoreJwsSigningAlgorithm,
         >,
-        nonce: &Nonce,
+        nonce: N,
         now: i64,
     ) -> Result<openidconnect::IdTokenClaims<ExtraClaims, CoreGenderClaim>, ClaimsVerificationError>
     {
@@ -490,6 +821,7 @@ mod tests {
             label: "fixture".into(),
             issuer: issuer.into(),
             groups: true,
+            device_enabled: false,
             clients: HashMap::from([
                 (
                     Flow::Loopback,
