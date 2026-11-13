@@ -419,3 +419,76 @@ fn configured_issuer_is_stored_and_bare_google_alias_is_refused() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].iss, "https://accounts.google.com");
 }
+
+#[test]
+fn public_root_cannot_add_unowned_trust_or_be_writable_by_other_uids() {
+    let s = Setup::new();
+    let cert = s.dir.join("root.crt");
+    std::fs::set_permissions(&cert, std::fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(
+        matches!(
+            EnrollCa::open_at(&s.dir, s.db.clone(), &s.policy, "team.hub", NOW),
+            Err(Error::InvalidCaKey)
+        ),
+        "world-writable root certificate accepted"
+    );
+    std::fs::set_permissions(&cert, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let other = Setup::new();
+    std::fs::write(&cert, format!("{}{}", s.ca.root_pem(), other.ca.root_pem())).unwrap();
+    assert!(
+        matches!(
+            EnrollCa::open_at(&s.dir, s.db.clone(), &s.policy, "team.hub", NOW),
+            Err(Error::InvalidCaKey)
+        ),
+        "extra enrollment trust anchor accepted"
+    );
+}
+
+#[test]
+fn reserved_server_identity_ends_with_root_not_host_lifetime() {
+    let s = Setup::new();
+    let identity = s.ca.server_identity(NOW).unwrap();
+    let (_, leaf) = x509_parser::parse_x509_certificate(&identity.cert_chain_der[0]).unwrap();
+    let root = chain(s.ca.root_pem());
+    let (_, root) = x509_parser::parse_x509_certificate(&root[0]).unwrap();
+    assert_eq!(
+        leaf.validity().not_after.timestamp(),
+        root.validity().not_after.timestamp()
+    );
+    assert!(
+        leaf.validity().not_after.timestamp() > NOW + 86400,
+        "server identity inherited one-day host lifetime"
+    );
+    assert_eq!(
+        crate::fed::extract_uri_sans(&identity.cert_chain_der[0]).unwrap(),
+        vec!["spiffe://example.org/xmsg/enroll"]
+    );
+    assert!(s
+        .ca
+        .server_identity(root.validity().not_after.timestamp())
+        .is_err());
+    let mut p = policy();
+    p["lifetime_secs"] = 3600.into();
+    s.replace(p);
+    s.ca.reload_policy().unwrap();
+    let another = s.ca.server_identity(NOW + 1).unwrap();
+    let (_, leaf) = x509_parser::parse_x509_certificate(&another.cert_chain_der[0]).unwrap();
+    assert_eq!(
+        leaf.validity().not_after.timestamp(),
+        root.validity().not_after.timestamp()
+    );
+}
+#[test]
+fn renewal_keeps_old_uri_after_policy_trust_domain_changes() {
+    let s = Setup::new();
+    let issued =
+        s.ca.issue(&claims("alice-id"), &csr(false), "lap", &[], NOW)
+            .unwrap();
+    let mut p = policy();
+    p["trust_domain"] = "other.example".into();
+    s.replace(p);
+    let renewed = s.ca.renew(&chain(&issued.cert_chain_pem), NOW + 1).unwrap();
+    assert_eq!(issued.uri, renewed.uri);
+    assert_eq!(renewed.uri, "spiffe://example.org/host/lap/user/alice");
+    assert_eq!(issued.spki_sha256, renewed.spki_sha256);
+}

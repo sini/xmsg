@@ -229,8 +229,13 @@ impl Policy {
             return Err(Error::InvalidPolicy);
         }
         for p in self.providers.values() {
-            if !p.issuer.starts_with("https://")
-                || p.issuer.contains(['?', '#'])
+            let issuer = reqwest::Url::parse(&p.issuer).map_err(|_| Error::InvalidPolicy)?;
+            if issuer.scheme() != "https"
+                || issuer.host_str().is_none()
+                || !issuer.username().is_empty()
+                || issuer.password().is_some()
+                || issuer.query().is_some()
+                || issuer.fragment().is_some()
                 || p.clients.contains_key(&Flow::Device)
                 || p.clients.is_empty()
                 || p.clients.values().any(|c| c.client_id.is_empty())
@@ -329,7 +334,7 @@ fn read_owned(path: &Path, key: bool) -> Result<Vec<u8>, Error> {
         io::Read,
         os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     };
-    let mut f = std::fs::OpenOptions::new()
+    let f = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)
@@ -338,12 +343,18 @@ fn read_owned(path: &Path, key: bool) -> Result<Vec<u8>, Error> {
     if !m.is_file()
         || m.uid() != crate::client::current_uid()
         || m.len() > 1024 * 1024
+        || m.permissions().mode() & 0o022 != 0
         || (key && m.permissions().mode() & 0o077 != 0)
     {
         return Err(Error::InvalidCaKey);
     }
     let mut bytes = Vec::new();
-    f.read_to_end(&mut bytes).map_err(|_| Error::InvalidCaKey)?;
+    f.take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Error::InvalidCaKey)?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(Error::InvalidCaKey);
+    }
     Ok(bytes)
 }
 fn root_files(
@@ -418,9 +429,13 @@ fn root_files(
     if kp.algorithm() != &rcgen::PKCS_ECDSA_P256_SHA256 {
         return Err(Error::InvalidCaKey);
     }
-    let der = rustls::pki_types::CertificateDer::from_pem_slice(pem.as_bytes())
-        .map_err(|_| Error::InvalidCaKey)?
-        .to_vec();
+    let certs = rustls::pki_types::CertificateDer::pem_slice_iter(pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| Error::InvalidCaKey)?;
+    if certs.len() != 1 {
+        return Err(Error::InvalidCaKey);
+    }
+    let der = certs[0].to_vec();
     let (_, parsed) = x509_parser::parse_x509_certificate(&der).map_err(|_| Error::InvalidCaKey)?;
     if parsed.public_key().raw != rcgen::PublicKeyData::subject_public_key_info(&kp)
         || !parsed.is_ca()
@@ -558,7 +573,13 @@ impl EnrollCa {
         let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
             .map_err(|_| Error::Storage)?;
         let uri = format!("spiffe://{}/xmsg/enroll", self.policy().trust_domain);
-        let (chain, _, _) = self.sign(&key, &uri, now, self.policy().lifetime_secs)?;
+        let (_, root) =
+            x509_parser::parse_x509_certificate(&self.root_der).map_err(|_| Error::InvalidCaKey)?;
+        let root_end = root.validity().not_after.timestamp();
+        if now < root.validity().not_before.timestamp() || now >= root_end {
+            return Err(Error::InvalidCaKey);
+        }
+        let (chain, _, _) = self.sign(&key, &uri, now, root_end - now)?;
         use rustls::pki_types::pem::PemObject;
         let cert_chain_der = rustls::pki_types::CertificateDer::pem_slice_iter(chain.as_bytes())
             .map(|c| c.map(|d| d.to_vec()).map_err(|_| Error::Storage))
