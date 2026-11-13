@@ -974,3 +974,54 @@ async fn denied_device_cannot_be_resurrected_by_verified_claim_publication() {
         "late publication wrote authority state"
     );
 }
+
+#[tokio::test]
+async fn approved_completion_releases_device_permit_before_certificate_collection() {
+    let h = enabled().await;
+    let (created, view) = awaiting(&h).await;
+    assert!(h
+        .service
+        .approve_device(created["request_id"].as_str().unwrap(), approval(&view))
+        .is_ok());
+    let first = session(&h, &created);
+    assert!(
+        matches!(*first.phase.lock().unwrap(), Phase::Complete(Ok(_))),
+        "issued certificate was not awaiting collection"
+    );
+    assert_eq!(effects(&h), [1, 1, 1]);
+    let (status, replacement, _) = start(&h, "replacement", 1).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "approved completion did not release source-IP permit before collect"
+    );
+    assert_eq!(
+        h.service.sessions.lock().unwrap().len(),
+        2,
+        "permit release evicted uncollected certificate record"
+    );
+    assert!(matches!(
+        *first.phase.lock().unwrap(),
+        Phase::Complete(Ok(_))
+    ));
+    assert!(h
+        .service
+        .deny_device(replacement["request_id"].as_str().unwrap())
+        .is_ok());
+    assert_eq!(
+        effects(&h),
+        [1, 1, 1],
+        "unapproved replacement wrote authority state"
+    );
+    let (status, result) = h
+        .request(
+            "GET",
+            "/enroll/v1/sessions?wait=0",
+            Value::Null,
+            Some(created["session"].as_str().unwrap()),
+            1,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(result["cert_chain_pem"].is_string());
+}
