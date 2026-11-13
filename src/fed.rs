@@ -2839,8 +2839,7 @@ async fn fed_send_message_handler(
                 .db
                 .lock()
                 .map_err(|e| AppError::Internal(e.to_string()))?;
-            let tx = db
-                .unchecked_transaction()
+            let tx = crate::observe_effects::transaction(&fed_state.db, &db)
                 .map_err(|e| AppError::Internal(e.to_string()))?;
             received_refs(
                 &fed_state,
@@ -2884,6 +2883,7 @@ async fn fed_send_message_handler(
                 .db
                 .lock()
                 .map_err(|e| AppError::Internal(e.to_string()))?;
+            let observed = crate::observe_effects::Batch::registered(&db);
             let _ = storage::update_outbound_outcome(&db, &envelope.id, outcome);
             // The resolved address, as the destination reported it.
             let _ = storage::update_outbound_target(
@@ -2905,6 +2905,7 @@ async fn fed_send_message_handler(
                 thread_id: envelope.thread_id.clone(),
             };
             let _ = storage::insert_message(&db, &fwd_msg_record);
+            observed.settled(&db);
         }
 
         return Ok((StatusCode::ACCEPTED, Json(delivery_resp)).into_response());
@@ -2992,7 +2993,9 @@ async fn fed_send_message_handler(
                 thread_id: envelope.thread_id.clone(),
             };
             if let Ok(db) = fed_state.db.lock() {
-                let _ = storage::upsert_message(&db, &pre_record);
+                let _ = crate::observe_effects::autocommit_registered(&db, |observed_connection| {
+                    crate::storage::upsert_message(observed_connection, &pre_record)
+                });
             }
             return Err(err);
         }
@@ -3049,8 +3052,7 @@ async fn fed_send_message_handler(
             )
                 .into_response());
         }
-        let tx = db
-            .unchecked_transaction()
+        let tx = crate::observe_effects::transaction(&fed_state.db, &db)
             .map_err(|e| AppError::Internal(e.to_string()))?;
         received_refs(
             &fed_state,
@@ -3087,7 +3089,9 @@ async fn fed_send_message_handler(
                     .db
                     .lock()
                     .map_err(|e| AppError::Internal(e.to_string()))?;
-                let _ = storage::update_message_outcome(&db, &envelope.id, outcome_str);
+                let _ = crate::observe_effects::autocommit_registered(&db, |observed_connection| {
+                    storage::update_message_outcome(observed_connection, &envelope.id, outcome_str)
+                });
             }
             Ok((
                 StatusCode::ACCEPTED,
@@ -3106,7 +3110,13 @@ async fn fed_send_message_handler(
                 .db
                 .lock()
                 .map_err(|e| AppError::Internal(e.to_string()))?;
-            let _ = storage::update_message_outcome(&db, &envelope.id, "delivery_failed");
+            let _ = crate::observe_effects::autocommit_registered(&db, |observed_connection| {
+                storage::update_message_outcome(
+                    observed_connection,
+                    &envelope.id,
+                    "delivery_failed",
+                )
+            });
             Err(err)
         }
     }
@@ -3187,14 +3197,16 @@ pub async fn deliver_federated_reply_locally(
                 Some("accepted" | "pushed")
             )
         } else {
-            storage::insert_reply(
-                &db,
-                in_reply_to,
-                ret_session_id,
-                text,
-                Some("accepted"),
-                Some(reply_id),
-            )
+            crate::observe_effects::autocommit_registered(&db, |observed_connection| {
+                crate::storage::insert_reply(
+                    observed_connection,
+                    in_reply_to,
+                    ret_session_id,
+                    text,
+                    Some("accepted"),
+                    Some(reply_id),
+                )
+            })
             .map_err(|e| AppError::Internal(e.to_string()))?;
             false
         }
@@ -3221,7 +3233,9 @@ pub async fn deliver_federated_reply_locally(
             .db
             .lock()
             .map_err(|e| AppError::Internal(e.to_string()))?;
-        let _ = storage::update_reply_push_outcome(&db, reply_id, push_res);
+        let _ = crate::observe_effects::autocommit_registered(&db, |observed_connection| {
+            crate::storage::update_reply_push_outcome(observed_connection, reply_id, push_res)
+        });
     }
     let _ = fed_state.notify_tx.send(in_reply_to.to_string());
     Ok(push_res)
@@ -3401,8 +3415,7 @@ async fn fed_reply_handler(
                     .db
                     .lock()
                     .map_err(|e| AppError::Internal(e.to_string()))?;
-                let tx = db
-                    .unchecked_transaction()
+                let tx = crate::observe_effects::transaction(&fed_state.db, &db)
                     .map_err(|e| AppError::Internal(e.to_string()))?;
                 received_refs(
                     &fed_state,
@@ -3433,8 +3446,14 @@ async fn fed_reply_handler(
             // Dialable origin: send federated reply to origin peer
             let _ = send_federated_reply(&fed_state, &fwd.origin_peer, &reply).await?;
             if let Ok(db) = fed_state.db.lock() {
-                storage::update_reply_push_outcome(&db, &reply.id, "relayed")
-                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                crate::observe_effects::autocommit_registered(&db, |observed_connection| {
+                    crate::storage::update_reply_push_outcome(
+                        observed_connection,
+                        &reply.id,
+                        "relayed",
+                    )
+                })
+                .map_err(|e| AppError::Internal(e.to_string()))?;
             }
             {
                 let db = fed_state
@@ -3443,6 +3462,7 @@ async fn fed_reply_handler(
                     .map_err(|e| AppError::Internal(e.to_string()))?;
                 let _ =
                     storage::insert_forwarded_message(&db, &reply.id, &peer.name, reply.created_at);
+                let observed = crate::observe_effects::Batch::registered(&db);
                 let _ = storage::insert_outbound(
                     &db,
                     &reply.id,
@@ -3465,6 +3485,7 @@ async fn fed_reply_handler(
                     thread_id: reply.in_reply_to.clone(),
                 };
                 let _ = storage::insert_message(&db, &fwd_reply_record);
+                observed.settled(&db);
             }
             return Ok((
                 StatusCode::OK,
@@ -3485,8 +3506,7 @@ async fn fed_reply_handler(
                     .db
                     .lock()
                     .map_err(|e| AppError::Internal(e.to_string()))?;
-                let tx = db
-                    .unchecked_transaction()
+                let tx = crate::observe_effects::transaction(&fed_state.db, &db)
                     .map_err(|e| AppError::Internal(e.to_string()))?;
                 received_refs(
                     &fed_state,
@@ -3621,8 +3641,7 @@ async fn fed_reply_handler(
                     .db
                     .lock()
                     .map_err(|e| AppError::Internal(e.to_string()))?;
-                let tx = db
-                    .unchecked_transaction()
+                let tx = crate::observe_effects::transaction(&fed_state.db, &db)
                     .map_err(|e| AppError::Internal(e.to_string()))?;
                 received_refs(
                     &fed_state,
@@ -3684,7 +3703,12 @@ async fn fed_reply_handler(
                 if res != "pushed" {
                     if let Ok(db) = fed_state.db.lock() {
                         if matches!(storage::get_codex_handoff_state(&db, &reply.id), Ok(None)) {
-                            let _ = storage::delete_message(&db, &reply.id);
+                            let _ = crate::observe_effects::autocommit_registered(
+                                &db,
+                                |observed_connection| {
+                                    crate::storage::delete_message(observed_connection, &reply.id)
+                                },
+                            );
                         }
                     }
                 }
@@ -3693,7 +3717,12 @@ async fn fed_reply_handler(
             Err(e) => {
                 if let Ok(db) = fed_state.db.lock() {
                     if matches!(storage::get_codex_handoff_state(&db, &reply.id), Ok(None)) {
-                        let _ = storage::delete_message(&db, &reply.id);
+                        let _ = crate::observe_effects::autocommit_registered(
+                            &db,
+                            |observed_connection| {
+                                crate::storage::delete_message(observed_connection, &reply.id)
+                            },
+                        );
                     }
                 }
                 return Err(e);
@@ -3717,8 +3746,7 @@ async fn fed_reply_handler(
             .db
             .lock()
             .map_err(|e| AppError::Internal(e.to_string()))?;
-        let tx = db
-            .unchecked_transaction()
+        let tx = crate::observe_effects::transaction(&fed_state.db, &db)
             .map_err(|e| AppError::Internal(e.to_string()))?;
         received_refs(
             &fed_state,
@@ -4902,8 +4930,7 @@ pub async fn poll_federated_replies(
                     .db
                     .lock()
                     .map_err(|e| AppError::Internal(e.to_string()))?;
-                let tx = db
-                    .unchecked_transaction()
+                let tx = crate::observe_effects::transaction(&fed_state.db, &db)
                     .map_err(|e| AppError::Internal(e.to_string()))?;
                 for reply in &replies {
                     attachments::normalize_refs(
@@ -5241,14 +5268,19 @@ pub fn spawn_outbound_reply_poller(
                                     "fed"
                                 };
                                 if let Ok(db) = fed_state.db.lock() {
-                                    crate::surface::record_pushed_reply(
+                                    crate::observe_effects::autocommit_registered(
                                         &db,
-                                        &orig,
-                                        &reply_id,
-                                        &replier_badge,
-                                        &r.text,
-                                        (replier_ret_harness, &r.replier_session_id),
-                                        Some(&peer_name),
+                                        |observed_connection| {
+                                            crate::surface::record_pushed_reply(
+                                                observed_connection,
+                                                &orig,
+                                                &reply_id,
+                                                &replier_badge,
+                                                &r.text,
+                                                (replier_ret_harness, &r.replier_session_id),
+                                                Some(&peer_name),
+                                            )
+                                        },
                                     );
                                 }
                                 match deliver_federated_reply_locally(
@@ -5271,7 +5303,16 @@ pub fn spawn_outbound_reply_poller(
                                                 storage::get_codex_handoff_state(&db, &reply_id),
                                                 Ok(None)
                                             ) {
-                                                let _ = storage::delete_message(&db, &reply_id);
+                                                let _ =
+                                                    crate::observe_effects::autocommit_registered(
+                                                        &db,
+                                                        |observed_connection| {
+                                                            crate::storage::delete_message(
+                                                                observed_connection,
+                                                                &reply_id,
+                                                            )
+                                                        },
+                                                    );
                                             }
                                         }
                                         should_stop = true;
@@ -5282,7 +5323,16 @@ pub fn spawn_outbound_reply_poller(
                                                 storage::get_codex_handoff_state(&db, &reply_id),
                                                 Ok(None)
                                             ) {
-                                                let _ = storage::delete_message(&db, &reply_id);
+                                                let _ =
+                                                    crate::observe_effects::autocommit_registered(
+                                                        &db,
+                                                        |observed_connection| {
+                                                            crate::storage::delete_message(
+                                                                observed_connection,
+                                                                &reply_id,
+                                                            )
+                                                        },
+                                                    );
                                             }
                                         }
                                     }
@@ -5505,13 +5555,16 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                                 );
                                 true
                             } else {
-                                let tx = match db.unchecked_transaction() {
-                                    Ok(tx) => tx,
-                                    Err(error) => {
-                                        tracing::warn!("pulled item transaction failed: {error}");
-                                        continue;
-                                    }
-                                };
+                                let tx =
+                                    match crate::observe_effects::transaction(&fed_state.db, &db) {
+                                        Ok(tx) => tx,
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                "pulled item transaction failed: {error}"
+                                            );
+                                            continue;
+                                        }
+                                    };
                                 if let Err(error) = received_refs(
                                     &fed_state,
                                     &tx,
@@ -5596,6 +5649,7 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                         };
 
                         if let Ok(db) = fed_state.db.lock() {
+                            let observed = crate::observe_effects::Batch::registered(&db);
                             let _ = storage::complete_message(
                                 &db,
                                 &msg.id,
@@ -5613,6 +5667,7 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                                     storage::update_reply_push_outcome(&db, &msg.id, push_outcome);
                                 let _ = fed_state.notify_tx.send(irt.clone());
                             }
+                            observed.settled(&db);
                         }
 
                         let mut ack_backoff = 100u64;
@@ -5694,7 +5749,12 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                         };
 
                         if let Ok(db) = fed_state.db.lock() {
-                            let _ = storage::upsert_message(&db, &msg_record);
+                            let _ = crate::observe_effects::autocommit_registered(
+                                &db,
+                                |observed_connection| {
+                                    crate::storage::upsert_message(observed_connection, &msg_record)
+                                },
+                            );
                         }
 
                         let mut ack_backoff = 100u64;

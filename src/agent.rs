@@ -736,11 +736,8 @@ pub async fn run_agent_server_with_listener(
                                     Some("accepted") => {
                                         if let Ok(db) = state_clone.db.lock() {
                                             let _ =
-                                                crate::storage::complete_codex_handoff_accepted(
-                                                    &db,
-                                                    &outcome.root_id,
-                                                    &outcome.handoff_ids,
-                                                );
+                                                crate::observe_effects::autocommit_registered(&db, |observed_connection| crate::storage::complete_codex_handoff_accepted(observed_connection, &outcome.root_id,
+                                                &outcome.handoff_ids,));
                                         }
                                         let ok_line = serde_json::json!({ "status": "ok" });
                                         let _ = writer
@@ -764,10 +761,7 @@ pub async fn run_agent_server_with_listener(
                                     }
                                     _ => {
                                         if let Ok(db) = state_clone.db.lock() {
-                                            let _ = crate::storage::mark_codex_handoff_unknown(
-                                                &db,
-                                                &outcome.handoff_ids,
-                                            );
+                                            let _ = crate::observe_effects::autocommit_registered(&db, |observed_connection| crate::storage::mark_codex_handoff_unknown(observed_connection, &outcome.handoff_ids,));
                                         }
                                         break;
                                     }

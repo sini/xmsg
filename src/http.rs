@@ -132,6 +132,39 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+pub fn build_unix_router(state: Arc<AppState>) -> Router {
+    build_router(state.clone()).merge(
+        Router::new()
+            .route("/v1/observe/events", get(observe_events_handler))
+            .with_state(state),
+    )
+}
+
+async fn observe_events_handler(
+    State(state): State<Arc<AppState>>,
+    peer: PeerInfo,
+    query: Result<Query<crate::observe::Query>, QueryRejection>,
+) -> Result<Json<crate::observe::Page>, AppError> {
+    let credential = peer.as_ref().and_then(|value| value.0 .0.peer.as_ref());
+    if !credential.is_some_and(|credential| credential.uid == crate::agent::current_uid()) {
+        return Err(AppError::Denied(
+            "observation requires a same-UID Unix connection".into(),
+        ));
+    }
+    let Query(query) =
+        query.map_err(|_| AppError::BadRequest("invalid observation cursor".into()))?;
+    let observer = crate::observe::for_db(&state.db)
+        .ok_or_else(|| AppError::ServiceUnavailable("observer unavailable".into()))?;
+    observer.page(query).map(Json).map_err(|error| match error {
+        crate::observe::Error::BadQuery => {
+            AppError::BadRequest("invalid observation cursor".into())
+        }
+        crate::observe::Error::Unavailable => {
+            AppError::ServiceUnavailable("observer unavailable".into())
+        }
+    })
+}
+
 async fn retired_sessions_handler() -> impl IntoResponse {
     (
         StatusCode::NOT_FOUND,

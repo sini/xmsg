@@ -496,3 +496,8 @@ required-features = ["daemon"]
 name = "gate_uph3_control"
 path = "tests/gate_uph3_control.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "observe_http"
+path = "tests/observe_http.rs"
+required-features = ["daemon"]

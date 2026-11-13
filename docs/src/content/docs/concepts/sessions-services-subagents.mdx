@@ -104,13 +104,20 @@ subagent. `list` shows live bound subagents with `kind: "subagent"`.
 | [Hermes](/harnesses/hermes/) | Root `<P>@<node>` | `delegate_task` subagents act as their root conversation `P` and do not bind separate sub-addresses. |
 | [Pi](/harnesses/pi/) | None | Single-session process; no subagent sub-addresses. |
 
-## Watch the recipient roster (planned)
+## Watch recipients and exchanges (planned)
 
 Run `xmsg watch` from your local owner terminal to follow live and inactive recipients and
 node reachability. The view groups identities by node, kind and harness, using the website
-demo's participant vocabulary without inventing its message-flow animation. Refresh age and
+demo's participant vocabulary. Its exchange timeline comes from committed local metadata,
+with explicit source/destination references and message/reply correlation. Refresh age and
 partial/stale states distinguish an old snapshot from a currently reachable session.
 
-Watch uses existing read endpoints over `http.sock`; it records no bodies and reads no harness
-transcripts. `xmsg watch --once --plain` gives one bounded snapshot for a pipe. See the
+The timeline is observation, not complete history. Bounded retention, queue drops and writer
+restart appear as counters and gaps; a delivery outcome does not establish that an agent read
+a message or finished a task. Roster and timeline freshness are separate, and an older daemon
+without the journal still supplies the roster.
+
+Watch uses local read endpoints over `http.sock`; it records no bodies and reads no harness
+transcripts. For example, run `xmsg watch --once --plain` before restarting a local service,
+then `xmsg watch` to follow its roster state and newly observed exchanges. See the
 [CLI reference](/reference/cli-and-mcp/#xmsg-watch-planned) for refresh, socket and limit details.

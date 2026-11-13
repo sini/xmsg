@@ -42,6 +42,57 @@ curl -s --unix-socket "$sock" "http://localhost/v1/messages/<message_id>/replies
 | `GET /v1/messages/{id}/replies?after={seq}&wait={seconds}` | Reads stored replies to `{id}`, waiting up to `wait` seconds (max `60`, max `128` concurrent waiters). |
 | `GET /v1/messages/{id}` | Returns the stored message record and its replies. |
 
+### Local observation journal (planned)
+
+`GET /v1/observe/events` reads bounded message metadata over `http.sock` from the
+same UID. It is absent from the shared TCP router, including a leaf's TCP listener.
+It grants no remote peer right and reads no message bodies or harness transcripts.
+
+```bash
+curl -s --unix-socket "$sock" \
+  'http://localhost/v1/observe/events?after=0&limit=100'
+```
+
+The optional query fields are `epoch`, `after` and `limit`. Unknown fields and
+invalid bounds return `400 bad_request`. `after` is a nonnegative sequence up to
+`9223372036854775807`; `limit` defaults to `100`, with range `1..200`. No long poll
+is available. Each page is at most 256 KiB and each event at most 4 KiB.
+
+Without a cursor, the first page is a recent tail in ascending sequence order;
+`initial_omitted` distinguishes that intentional omission from loss. Use `after=0`
+to begin at the retained floor. To continue, pass the response's `epoch` and `next`
+as the next request's `epoch` and `after`. `has_more` reports remaining retained
+events at that snapshot. `floor`, `head`, `gaps` and `losses` describe continuity.
+An old epoch or a cursor ahead of the journal produces an explicit reset; an
+evicted cursor produces a gap. Sequence orders local observations, not globally
+synchronized effects or agent progress.
+
+This is **observation, not complete history**. Metadata is queued after a primary
+commit; a crash can lose an observation before persistence. Each writer startup
+adds a durable `writer_restart` gap with unknown loss, even when the epoch stays
+the same. Known queue drops, capacity evictions and TTL expiry have separate
+counters. A bounded capture overflow also reports a gap rather than inventing
+intermediate transitions. A full or unavailable observer never blocks delivery.
+
+The sidecar is `<configured-db-path>.observe.sqlite`, mode `0600`, beside the
+primary database in its private directory. Primary schema version 3 is unchanged;
+older binaries ignore the sidecar. Defaults retain seven days, 10,000 events or
+16 MiB of stored metadata, whichever limit applies first. The byte budget is
+logical metadata; SQLite indexes and journal overhead are additional. Idle
+cleanup runs at least every ten minutes. The pending queue separately retains
+at most 256 events or 1 MiB and drops oldest observations on overflow.
+
+A corrupt or unsupported sidecar makes observation unavailable; it does not reset
+message state or silently delete the journal. Observation errors return
+`503 service_unavailable`. Metadata includes endpoint references, message/reply
+correlation, source/capture/persistence times and the actual stored outcome.
+`delivered`, `queued` and `delivery_unknown` retain their bus meanings; none
+asserts that an agent read a message or finished a task.
+
+Endpoint references stay absent when their node cannot be established. The
+`body_availability` hint describes capture time: original send bodies are not
+retained, and a retained reply at capture time is no promise that it still exists.
+
 ---
 
 ## `agent.sock` frames

@@ -6,6 +6,8 @@
 //! oracle needs a fault between two nodes (a lost acknowledgement, a crash), the asker
 //! reaches the holder through an in-process mTLS proxy that presents the holder's identity
 //! and forwards as the asker, and the fault happens there.
+#[allow(dead_code)]
+mod observe_support;
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -151,7 +153,21 @@ async fn start_with(
     peers: Value,
     extra: &[String],
 ) -> Node {
+    start_with_observer(name, p, creds, peers, extra, false).await
+}
+
+async fn start_with_observer(
+    name: &str,
+    p: Prepared,
+    creds: &Creds,
+    peers: Value,
+    extra: &[String],
+    unavailable: bool,
+) -> Node {
     let Prepared { tmp } = p;
+    if unavailable {
+        observe_support::corrupt_sidecar(&tmp.path().join("node.db"));
+    }
     let run_dir = tmp.path().join("run");
     let sessions_dir = tmp.path().join("sessions");
     for d in [&run_dir, &sessions_dir] {
@@ -206,6 +222,9 @@ async fn start_with(
         child: None,
     };
     node.spawn().await;
+    if unavailable {
+        observe_support::assert_unavailable_http(&node.run_dir.join("http.sock")).await;
+    }
     node
 }
 
@@ -363,6 +382,15 @@ async fn mesh(names: &[&str], dead: &[&str]) -> Mesh {
 
 /// `mesh`, with extra serve arguments for some nodes.
 async fn mesh_with(names: &[&str], dead: &[&str], extra: &[(&str, Vec<String>)]) -> Mesh {
+    mesh_with_observer(names, dead, extra, false).await
+}
+
+async fn mesh_with_observer(
+    names: &[&str],
+    dead: &[&str],
+    extra: &[(&str, Vec<String>)],
+    unavailable: bool,
+) -> Mesh {
     let ca = Ca::new();
     let creds: HashMap<String, Creds> =
         names.iter().map(|n| (n.to_string(), ca.issue(n))).collect();
@@ -378,7 +406,8 @@ async fn mesh_with(names: &[&str], dead: &[&str], extra: &[(&str, Vec<String>)])
             .iter()
             .find(|(n, _)| *n == me)
             .map_or(&[][..], |(_, a)| a.as_slice());
-        let node = start_with(me, p, &creds[me], Value::Object(peers), args).await;
+        let node =
+            start_with_observer(me, p, &creds[me], Value::Object(peers), args, unavailable).await;
         nodes.insert(me.to_string(), node);
     }
     let fed_ports: HashMap<String, u16> = nodes
@@ -770,7 +799,16 @@ async fn forward(
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_oracle_1_the_queue_follows_the_conversation() {
-    let m = mesh(&["sini.p", "sini.q"], &[]).await;
+    exercise_observed_handoff(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_oracle_1_the_queue_follows_the_conversation_observer_unavailable() {
+    exercise_observed_handoff(true).await;
+}
+
+async fn exercise_observed_handoff(unavailable: bool) {
+    let m = mesh_with_observer(&["sini.p", "sini.q"], &[], &[], unavailable).await;
     let (p, q) = (m.node("sini.p"), m.node("sini.q"));
     park(p, X).await;
     queue_at(p, "first while parked").await;
@@ -794,6 +832,11 @@ async fn test_oracle_1_the_queue_follows_the_conversation() {
             )
             .unwrap();
         assert_eq!(e, expires, "the expiry did not travel with {id}");
+    }
+    drop(db);
+    if unavailable {
+        observe_support::assert_unavailable_http(&p.run_dir.join("http.sock")).await;
+        observe_support::assert_unavailable_http(&q.run_dir.join("http.sock")).await;
     }
 }
 

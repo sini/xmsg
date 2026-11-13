@@ -315,7 +315,7 @@ pub async fn step(state: &AppState, fs: &FedState, key: &str, id: &str) -> Resul
         .unwrap_or(0);
     {
         let db = state.db.lock().map_err(|e| db_err(&e))?;
-        let tx = db.unchecked_transaction().map_err(|e| db_err(&e))?;
+        let tx = crate::observe_effects::transaction(&state.db, &db).map_err(|e| db_err(&e))?;
         for m in &transfer.messages {
             let m = QueuedMessage {
                 instance_id: id.to_string(),
@@ -548,13 +548,15 @@ pub async fn ack_handler(
         .db
         .lock()
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    let remaining = storage::drop_handed_over(
-        &db,
-        &ack.id,
-        &ack.messages,
-        &peer.name,
-        storage::now_epoch_secs(),
-    )
+    let remaining = crate::observe_effects::autocommit_registered(&db, |observed_connection| {
+        crate::storage::drop_handed_over(
+            observed_connection,
+            &ack.id,
+            &ack.messages,
+            &peer.name,
+            storage::now_epoch_secs(),
+        )
+    })
     .map_err(|e| AppError::Internal(e.to_string()))?;
     Ok((StatusCode::OK, Json(AckAnswer { remaining })).into_response())
 }
