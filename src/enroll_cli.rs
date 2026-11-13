@@ -215,7 +215,45 @@ async fn callback(listener: tokio::net::TcpListener) -> Result<(String, String)>
     let _ = socket.write_all(reply).await;
     result
 }
+type BrowserFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<String>>> + Send + 'a>>;
+pub(crate) trait Browser: Send + Sync {
+    fn interact<'a>(&'a self, authorization_url: &'a str, flow: Flow) -> BrowserFuture<'a>;
+}
+struct SystemBrowser;
+impl Browser for SystemBrowser {
+    fn interact<'a>(&'a self, authorization_url: &'a str, flow: Flow) -> BrowserFuture<'a> {
+        Box::pin(async move {
+            if matches!(flow, Flow::Paste) {
+                println!("Paste the final loopback redirect address:");
+                let value = tokio::task::spawn_blocking(|| {
+                    let mut value = String::new();
+                    std::io::stdin().read_line(&mut value).map(|_| value)
+                })
+                .await??;
+                Ok(Some(value))
+            } else {
+                let command = if cfg!(target_os = "macos") {
+                    "open"
+                } else {
+                    "xdg-open"
+                };
+                let _ = std::process::Command::new(command)
+                    .arg(authorization_url)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+                Ok(None)
+            }
+        })
+    }
+}
+
 pub async fn run(args: Args) -> Result<()> {
+    run_with_browser(args, &SystemBrowser).await
+}
+
+pub(crate) async fn run_with_browser(args: Args, browser: &dyn Browser) -> Result<()> {
     if matches!(args.flow, Flow::Device) {
         return Err("unsupported_flow: device enrollment is not available in v1".into());
     }
@@ -250,25 +288,12 @@ pub async fn run(args: Args) -> Result<()> {
     let value=response(http.post(endpoint(&url,"/enroll/v1/sessions")?).json(&serde_json::json!({"csr_pem":csr,"host":host,"provider":args.provider,"flow":flow,"redirect_uri":redirect})).send().await?).await?;
     let created: Created = serde_json::from_value(value).map_err(|_| Error::Response)?;
     println!("Sign in at: {}", created.authorization_url);
+    let pasted = browser
+        .interact(&created.authorization_url, args.flow)
+        .await?;
     let (code, state) = if matches!(args.flow, Flow::Paste) {
-        println!("Paste the final loopback redirect address:");
-        let value = tokio::task::spawn_blocking(|| {
-            let mut value = String::new();
-            std::io::stdin().read_line(&mut value).map(|_| value)
-        })
-        .await??;
-        callback_value(value.trim())?
+        callback_value(pasted.ok_or(Error::Response)?.trim())?
     } else {
-        let command = if cfg!(target_os = "macos") {
-            "open"
-        } else {
-            "xdg-open"
-        };
-        let _ = std::process::Command::new(command)
-            .arg(&created.authorization_url)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
         tokio::time::timeout(Duration::from_secs(600), callback(listener)).await??
     };
     let _ = response(

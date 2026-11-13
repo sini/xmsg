@@ -62,3 +62,6 @@ pub mod enroll;
 
 #[cfg(feature = "daemon")]
 pub mod enroll_cli;
+
+#[cfg(all(test, feature = "daemon"))]
+mod enroll_consumer_tests;
