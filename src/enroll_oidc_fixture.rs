@@ -364,6 +364,44 @@ impl Drop for Fixture {
         self.task.abort();
     }
 }
+fn fixture_client_auth(
+    fields: &HashMap<String, String>,
+    header: &str,
+    expected_secret: &str,
+) -> Option<String> {
+    if let Some(value) = header.lines().find_map(|line| {
+        line.split_once(':')
+            .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .map(|(_, value)| value.trim())
+    }) {
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(value.strip_prefix("Basic ")?)
+            .ok()?;
+        let decoded = std::str::from_utf8(&decoded).ok()?;
+        let (client, secret) = decoded.split_once(':')?;
+        if secret != expected_secret
+            || client.is_empty()
+            || fields
+                .get("client_id")
+                .is_some_and(|body_client| body_client != client)
+        {
+            return None;
+        }
+        Some(client.into())
+    } else {
+        if fields
+            .get("client_secret")
+            .is_some_and(|secret| secret != expected_secret)
+        {
+            return None;
+        }
+        fields
+            .get("client_id")
+            .filter(|client| !client.is_empty())
+            .cloned()
+    }
+}
+
 fn reply(shared: &Mutex<Shared>, path: &str, header: &str, body: &[u8]) -> Value {
     let mut shared = shared.lock().unwrap();
     shared.requests.push(path.into());
@@ -388,7 +426,7 @@ fn reply(shared: &Mutex<Shared>, path: &str, header: &str, body: &[u8]) -> Value
             let fields: HashMap<String, String> = openidconnect::url::form_urlencoded::parse(body)
                 .into_owned()
                 .collect();
-            let Some(client) = fields.get("client_id") else {
+            let Some(client) = fixture_client_auth(&fields, header, &shared.secret) else {
                 return json!({"error":"invalid_client", "__status":400});
             };
             let code = format!("fixture-device-{}", ulid::Ulid::new());
@@ -412,25 +450,9 @@ fn reply(shared: &Mutex<Shared>, path: &str, header: &str, body: &[u8]) -> Value
             let mut form = reqwest::Url::parse("https://form.example/").unwrap();
             form.set_query(Some(std::str::from_utf8(body).unwrap()));
             let fields: HashMap<String, String> = form.query_pairs().into_owned().collect();
-            let client = fields.get("client_id").cloned().unwrap_or_else(|| {
-                let value = header
-                    .lines()
-                    .find_map(|l| {
-                        l.split_once(':')
-                            .filter(|(k, _)| k.eq_ignore_ascii_case("authorization"))
-                            .map(|(_, v)| v.trim())
-                    })
-                    .unwrap();
-                let value = base64::engine::general_purpose::STANDARD
-                    .decode(value.strip_prefix("Basic ").unwrap())
-                    .unwrap();
-                String::from_utf8(value)
-                    .unwrap()
-                    .split_once(':')
-                    .unwrap()
-                    .0
-                    .to_owned()
-            });
+            let Some(client) = fixture_client_auth(&fields, header, &shared.secret) else {
+                return json!({"error":"invalid_client", "__status":400});
+            };
             let device = fields
                 .get("grant_type")
                 .is_some_and(|value| value == "urn:ietf:params:oauth:grant-type:device_code");
