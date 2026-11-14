@@ -78,6 +78,14 @@ jobs:
           sudo launchctl kickstart -k system/org.nixos.nix-daemon || true
 
       # Release packaging and client checks stay separate from the ordinary dev-profile suite.
+      - name: Warm release and dev dependency seeds
+        run: |
+          sys=$(nix eval --impure --raw --expr builtins.currentSystem)
+          nix build -L --no-link --print-out-paths \
+            ".#packages.$sys.cargoArtifacts" \
+            "./ci#checks.$sys.tests.cargoArtifacts" \
+            "./ci#checks.$sys.shared-client.cargoArtifacts" | tee -a /tmp/attic-paths
+
       - name: checks.package
         run: |
           nix --version

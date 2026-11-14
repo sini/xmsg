@@ -110,9 +110,12 @@ jobs:
           nix build -L --keep-going --no-link --print-out-paths "${refs[@]}" | tee -a /tmp/attic-paths
       - name: Source revision provenance and warm-store red drive
         run: python3 scripts/client-pin.py
-      - name: Build cargoArtifacts
+      - name: Warm release and dev dependency seeds
         run: |
-          nix build -L --no-link --print-out-paths .#packages.x86_64-linux.cargoArtifacts | tee -a /tmp/attic-paths
+          nix build -L --no-link --print-out-paths \
+            .#packages.x86_64-linux.cargoArtifacts \
+            ./ci#checks.x86_64-linux.tests.cargoArtifacts \
+            ./ci#checks.x86_64-linux.shared-client.cargoArtifacts | tee -a /tmp/attic-paths
       - name: Push to Attic cache
         if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
         env:
