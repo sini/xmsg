@@ -140,6 +140,87 @@ async fn wait_for_mcp_socket_read(pid: u32, csw_before: Option<u64>) {
     }
 }
 
+struct EscrowReadbackProxy {
+    task: tokio::task::JoinHandle<()>,
+    readback: Option<tokio::sync::oneshot::Receiver<Value>>,
+}
+
+impl Drop for EscrowReadbackProxy {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl EscrowReadbackProxy {
+    async fn wait_for_cached_escrow(&mut self) -> Value {
+        tokio::time::timeout(Duration::from_secs(3), self.readback.take().unwrap())
+            .await
+            .expect("MCP must read back the written escrow before bus restart")
+            .expect("escrow proxy must retain its read-back observer")
+    }
+}
+
+async fn start_escrow_readback_proxy(front: &Path, backend: &Path) -> EscrowReadbackProxy {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let listener = tokio::net::UnixListener::bind(front).unwrap();
+    fs::set_permissions(front, fs::Permissions::from_mode(0o600)).unwrap();
+    let backend = backend.to_path_buf();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let observer = Arc::new(Mutex::new(Some(tx)));
+    let cut = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let task = tokio::spawn(async move {
+        let mut sessions = tokio::task::JoinSet::new();
+        let mut sequence = 0;
+        loop {
+            let (client, _) = listener.accept().await.unwrap();
+            sequence += 1;
+            // MCP startup makes one one-shot call before the reconnecting worker starts.
+            let worker_connection = sequence >= 2;
+            let backend = backend.clone();
+            let observer = observer.clone();
+            let cut = cut.clone();
+            sessions.spawn(async move {
+                let Ok(server) = tokio::net::UnixStream::connect(backend).await else { return };
+                let (client_read, mut client_write) = client.into_split();
+                let (server_read, mut server_write) = server.into_split();
+                let mut client_read = tokio::io::BufReader::new(client_read).lines();
+                let mut server_read = tokio::io::BufReader::new(server_read).lines();
+                loop {
+                    tokio::select! {
+                        line = client_read.next_line() => {
+                            let Ok(Some(request)) = line else { break };
+                            let value: Value = serde_json::from_str(&request).unwrap();
+                            if worker_connection && cut.load(std::sync::atomic::Ordering::Acquire)
+                                && value["action"] == "mcp_start" && value.get("csrf_token").is_some()
+                            {
+                                if let Some(tx) = observer.lock().unwrap().take() { let _ = tx.send(value); }
+                            }
+                            if server_write.write_all(format!("{request}\n").as_bytes()).await.is_err() { break; }
+                        }
+                        line = server_read.next_line() => {
+                            let Ok(Some(response)) = line else { break };
+                            if client_write.write_all(format!("{response}\n").as_bytes()).await.is_err() { break; }
+                            if client_write.flush().await.is_err() { break; }
+                            let value: Value = serde_json::from_str(&response).unwrap();
+                            if worker_connection && value["event"] == "agy_escrow"
+                                && !cut.swap(true, std::sync::atomic::Ordering::AcqRel)
+                            {
+                                // FIFO delivers the escrow before EOF; reconnect must expose the cached values.
+                                let _ = client_write.shutdown().await;
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    EscrowReadbackProxy {
+        task,
+        readback: Some(rx),
+    }
+}
+
 async fn start_test_server(
     agent_sock: PathBuf,
     sessions_dir: PathBuf,
@@ -432,7 +513,10 @@ async fn c1_bus_restart_preserves_stage2_credentials_and_delivers_immediately() 
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread")]
 async fn c2_custom_label_and_registered_at_survive_bus_restart() {
-    let tmp = tempdir().unwrap();
+    let tmp = tempfile::Builder::new()
+        .prefix("xf4-escrow-")
+        .tempdir_in("/tmp")
+        .unwrap();
     let sock_dir = tmp.path().join("sockets");
     fs::create_dir_all(&sock_dir).unwrap();
     fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700)).unwrap();
@@ -482,7 +566,17 @@ async fn c2_custom_label_and_registered_at_survive_bus_restart() {
     )
     .await;
 
-    let mut child = spawn_mcp_child(&agent_sock);
+    let proxy_socket = sock_dir.join("mcp-front.sock");
+    setup_mock_process(
+        &proc_root,
+        std::process::id(),
+        parent_pid,
+        None,
+        None,
+        "200",
+    );
+    let mut proxy = start_escrow_readback_proxy(&proxy_socket, &agent_sock).await;
+    let mut child = spawn_mcp_child(&proxy_socket);
     let child_pid = child.id();
     setup_mock_process(&proc_root, child_pid, parent_pid, None, None, "200");
 
@@ -496,7 +590,6 @@ async fn c2_custom_label_and_registered_at_survive_bus_restart() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let csw_before = wait_for_mcp_reregister_ready(child_pid).await;
 
     let custom_reg_at: i64 = 1_700_001_234;
     {
@@ -520,7 +613,11 @@ async fn c2_custom_label_and_registered_at_survive_bus_restart() {
             .insert(conv_id.to_string(), info);
     }
     notify_agy_escrow();
-    wait_for_mcp_socket_read(child_pid, csw_before).await;
+    let cached = proxy.wait_for_cached_escrow().await;
+    assert_eq!(cached["label"], "agy-custom-worker");
+    assert_eq!(cached["registered_at"], custom_reg_at);
+    assert_eq!(cached["ls_address"], "127.0.0.1:42999");
+    assert_eq!(cached["csrf_token"], "secret-csrf-cell2");
 
     server1.stop().await;
 
