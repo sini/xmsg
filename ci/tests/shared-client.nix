@@ -5,6 +5,7 @@
       pkgs,
       lib,
       system,
+      config,
       ...
     }:
     let
@@ -29,7 +30,7 @@
         version = "0.1.0";
         src = package.src;
         strictDeps = true;
-        CARGO_PROFILE = "release";
+        CARGO_PROFILE = "dev";
         cargoExtraArgs = "--no-default-features --features client";
         __darwinAllowLocalNetworking = true;
       };
@@ -38,18 +39,55 @@
       # buildDepsOnly resets cargoArtifacts; override the resulting derivation so
       # inheritCargoArtifactsHook receives the daemon cache during postPatch.
       clientArtifacts = (craneLib.buildDepsOnly clientArgs).overrideAttrs {
-        cargoArtifacts = inputs.xmsg.packages.${system}.cargoArtifacts;
+        cargoArtifacts = config.checks.tests.cargoArtifacts;
+      };
+      releasePreflight = package.overrideAttrs {
+        pname = "xmsg-shared-client-release-compat";
+        dontBuild = true;
+        doCheck = true;
+        preCheck = "";
+        XMSG_SHARED_BASELINE_BIN = lib.getExe baseline;
+        checkPhase = ''
+          runHook preCheck
+          set -o pipefail
+          cargoWithProfile test --locked --test shared_client_live \
+            pinned_and_candidate_service_contract -- --ignored --exact --nocapture 2>&1 | tee compat.log
+          grep -F '1 passed; 0 failed; 0 ignored' compat.log
+          grep -F 'shared-client: verified baseline and candidate service contract completed' compat.log
+          if grep -Eqi 'skipping|0 passed|1 ignored' compat.log; then
+            echo 'shared-client live compatibility was skipped' >&2
+            exit 1
+          fi
+          set +e
+          XMSG_SHARED_BASELINE_BIN=/nonexistent/required-xmsg-baseline \
+            cargoWithProfile test --locked --test shared_client_live \
+              pinned_and_candidate_service_contract -- --ignored --exact > missing.log 2>&1
+          missing_rc=$?
+          set -e
+          if [ "$missing_rc" -eq 0 ]; then
+            echo 'missing baseline executable was accepted' >&2
+            exit 1
+          fi
+          grep -F 'test pinned_and_candidate_service_contract ... FAILED' missing.log
+          runHook postCheck
+        '';
+        installPhase = ''
+          mkdir -p "$out"
+          cp compat.log missing.log "$out/"
+        '';
       };
       compatShard =
         shard: count:
         package.overrideAttrs {
           pname = "xmsg-shared-client-compat-${toString shard}";
+          CARGO_PROFILE = "dev";
+          cargoArtifacts = config.checks.tests.cargoArtifacts;
           dontBuild = true;
           doCheck = true;
           preCheck = "";
           installPhase = ''
             mkdir -p "$out"
-            printf '%s\n' "${baseline}" "${baselineSrc}" "${baseline.cargoDeps}" > "$out/sources"
+            printf '%s\n' "${baseline}" "${baselineSrc}" "${baseline.cargoDeps}" "${releasePreflight}" > "$out/sources"
             cp live-completion.json "$out/completion.json"
           '';
           XMSG_SHARED_BASELINE_BIN = lib.getExe baseline;
@@ -57,25 +95,6 @@
           checkPhase = ''
             runHook preCheck
             set -o pipefail
-            cargoWithProfile test --locked --test shared_client_live \
-              pinned_and_candidate_service_contract -- --ignored --exact --nocapture 2>&1 | tee compat.log
-            grep -F '1 passed; 0 failed; 0 ignored' compat.log
-            grep -F 'shared-client: verified baseline and candidate service contract completed' compat.log
-            if grep -Eqi 'skipping|0 passed|1 ignored' compat.log; then
-              echo 'shared-client live compatibility was skipped' >&2
-              exit 1
-            fi
-            set +e
-            XMSG_SHARED_BASELINE_BIN=/nonexistent/required-xmsg-baseline \
-              cargoWithProfile test --locked --test shared_client_live \
-                pinned_and_candidate_service_contract -- --ignored --exact > missing.log 2>&1
-            missing_rc=$?
-            set -e
-            if [ "$missing_rc" -eq 0 ]; then
-              echo 'missing baseline executable was accepted' >&2
-              exit 1
-            fi
-            grep -F 'test pinned_and_candidate_service_contract ... FAILED' missing.log
             python3 scripts/client-mutants.py --live --shard ${toString shard} --manifest live-completion.json | tee live-mutants.log
             grep -Fx '${toString count}/${toString count} shared-client mutants killed' live-mutants.log
             python3 -c 'import runpy; runpy.run_path("scripts/client-mutants.py")["require_cached_builds"]("live-mutants.log", ${toString (count * 2)})'
@@ -117,6 +136,7 @@
         );
       }
       // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+        shared-client-release-compat = releasePreflight;
         shared-client-compat-0 = compatShard 0 8;
         shared-client-compat-1 = compatShard 1 7;
       };

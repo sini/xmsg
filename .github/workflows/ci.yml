@@ -35,6 +35,7 @@ env:
     peers-render
     pre-xl1-compat
     shared-client
+    shared-client-release-compat
   TEST_CHECKS: tests
   COMPAT_CHECKS: >-
     shared-client-compat-0
