@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "fresh unmodified 80a0b04d cargo test --locked, exit0",
-    "darwin": "43552988066 at80a0b04d"
+    "linux": "cargo test --locked at d9103048e0a74cd702c47846b238507cfc9e3a5a: exit0,935 passed/8 ignored/94 summaries",
+    "darwin": "927/10 from job132541573029 plus the unchanged service-liveness 11-test delta; native PR CI must verify938/10"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -93,20 +93,21 @@
     "tests/registry_fixtures.rs",
     "tests/service_exec.rs",
     "tests/shared_client.rs",
-    "tests/shared_client_live.rs"
+    "tests/shared_client_live.rs",
+    "tests/svc_liveness.rs"
   ],
   "platforms": {
     "linux": {
-      "passed": 924,
+      "passed": 935,
       "failed": 0,
       "ignored": 8,
-      "summaries": 93
+      "summaries": 94
     },
     "darwin": {
-      "passed": 927,
+      "passed": 938,
       "failed": 0,
       "ignored": 10,
-      "summaries": 93
+      "summaries": 94
     }
   }
 }
