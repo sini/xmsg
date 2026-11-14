@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "43519558282",
-    "darwin": "43523985784"
+    "linux": "fresh unmodified 80a0b04d cargo test --locked, exit0",
+    "darwin": "43552988066 at80a0b04d"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -38,6 +38,7 @@
     "tests/gate_probe_pi.rs",
     "tests/gate_r1_agy_autoreg.rs",
     "tests/gate_svc_delivered_acked.rs",
+    "tests/gate_svlt_device_cli.rs",
     "tests/gate_tvp_mailbox_runtime.rs",
     "tests/gate_tvp_mailbox_storage.rs",
     "tests/gate_u8_replies.rs",
@@ -96,16 +97,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 859,
+      "passed": 924,
       "failed": 0,
-      "ignored": 7,
-      "summaries": 92
+      "ignored": 8,
+      "summaries": 93
     },
     "darwin": {
-      "passed": 862,
+      "passed": 927,
       "failed": 0,
-      "ignored": 9,
-      "summaries": 92
+      "ignored": 10,
+      "summaries": 93
     }
   }
 }
