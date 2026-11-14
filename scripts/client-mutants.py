@@ -39,7 +39,7 @@ CASES = [
     ("live-register-version", "src/client/mod.rs", "serde_json::to_vec(request)", 'serde_json::to_vec(&{ let mut v = serde_json::to_value(request).unwrap(); v.as_object_mut().unwrap().insert("schema_version".into(), serde_json::json!(2)); v })', "@live"),
     ("live-register-skip-service-name-validation", "src/svc.rs", "if let Err(e) = crate::claim::validate_service_name(&name) {", "if let Err(e) = Ok::<(), AppError>(()) {", "@live"),
     ("live-register-allow-second-service-per-process", "src/svc.rs", "existing.session_id != session_id", "false", "@live"),
-    ("live-reregister-eof-clobbers-newer-token", "src/svc.rs", "&& info.token == my_token", "", "@live"),
+    ("live-reregister-eof-clobbers-newer-token", "src/svc.rs", ".is_some_and(|info| info.token == self.token)", ".is_some_and(|_| true)", "@live"),
     ("live-check-origin-skip-service-name-validation", "src/fed.rs", "(Some(name), None) => crate::claim::validate_service_name(name),", "(Some(_name), None) => Ok(()),", "@live"),
     ("live-register-declared-reply-ttl", "src/svc.rs", "let reply_ttl_secs = state.reply_ttl.as_secs();", "let reply_ttl_secs = storage::DEFAULT_REPLY_TTL_SECS;", "@live"),
     ("live-register-declared-idempotency-ttl", "src/svc.rs", "let idempotency_ttl_secs = state.idempotency_ttl.as_secs();", "let idempotency_ttl_secs = storage::DEFAULT_IDEMPOTENCY_TTL_SECS;", "@live"),
