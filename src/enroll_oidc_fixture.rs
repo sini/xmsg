@@ -93,6 +93,7 @@ struct Shared {
     device_approved: std::collections::HashSet<String>,
     device_auto_authorize: bool,
     after_device: Option<Arc<dyn Fn() + Send + Sync>>,
+    before_discovery: Option<Arc<dyn Fn() + Send + Sync>>,
     discovery_overrides: serde_json::Map<String, Value>,
     values: Vec<String>,
 }
@@ -147,6 +148,7 @@ impl Fixture {
             device_approved: Default::default(),
             device_auto_authorize: true,
             after_device: None,
+            before_discovery: None,
             discovery_overrides: Default::default(),
             values: vec![],
         }));
@@ -178,6 +180,10 @@ impl Fixture {
                             input.extend_from_slice(&block[..count]);
                         }
                         let path = header.lines().next().unwrap().split_whitespace().nth(1).unwrap();
+                        if path == "/.well-known/openid-configuration" {
+                            let hook = { state.lock().unwrap().before_discovery.clone() };
+                            if let Some(hook) = hook { hook(); }
+                        }
                         let mut response = reply(&state, path, &header, &input[header_end..]);
                         let status = response.as_object_mut().and_then(|value| value.remove("__status")).and_then(|value| value.as_u64()).unwrap_or(200);
                         if status == 0 { return; }
@@ -315,6 +321,9 @@ impl Fixture {
     }
     pub(crate) fn require_device_authorization(&self) {
         self.shared.lock().unwrap().device_auto_authorize = false;
+    }
+    pub(crate) fn set_before_discovery_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        self.shared.lock().unwrap().before_discovery = hook;
     }
     pub(crate) fn authorize_device(&self, user_code: &str) -> bool {
         let mut shared = self.shared.lock().unwrap();

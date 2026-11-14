@@ -1,0 +1,50 @@
+[
+  {
+    "label": "device-reservation-same-ip",
+    "oracle": "D6 supplementary atomic check-and-reserve race; thresholds unchanged",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::reservation::concurrent_same_ip_reservations_admit_exactly_one",
+    "test_file": "src/enroll_device_reservation_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "        sessions.insert(handle.clone(), session.clone());\n",
+        "replacement": "",
+        "start": "async fn create(",
+        "end": "async fn code("
+      },
+      {
+        "file": "src/enroll.rs",
+        "needle": "    if session.expired(service.clock.as_ref()) {\n        service.sessions.lock().unwrap().remove(&handle);",
+        "replacement": "    service.sessions.lock().unwrap().insert(handle.clone(), session.clone());\n    if session.expired(service.clock.as_ref()) {\n        service.sessions.lock().unwrap().remove(&handle);",
+        "start": "async fn create(",
+        "end": "async fn code("
+      }
+    ],
+    "expected_literal": "concurrent same-IP reservation leaked the single active slot"
+  },
+  {
+    "label": "device-reservation-global-eighth",
+    "oracle": "D6 supplementary atomic check-and-reserve race; thresholds unchanged",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::reservation::concurrent_global_reservations_admit_only_the_eighth",
+    "test_file": "src/enroll_device_reservation_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": "        sessions.insert(handle.clone(), session.clone());\n",
+        "replacement": "",
+        "start": "async fn create(",
+        "end": "async fn code("
+      },
+      {
+        "file": "src/enroll.rs",
+        "needle": "    if session.expired(service.clock.as_ref()) {\n        service.sessions.lock().unwrap().remove(&handle);",
+        "replacement": "    service.sessions.lock().unwrap().insert(handle.clone(), session.clone());\n    if session.expired(service.clock.as_ref()) {\n        service.sessions.lock().unwrap().remove(&handle);",
+        "start": "async fn create(",
+        "end": "async fn code("
+      }
+    ],
+    "expected_literal": "concurrent global reservation leaked the eighth active slot"
+  }
+]
