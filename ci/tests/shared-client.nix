@@ -89,6 +89,8 @@
             mkdir -p "$out"
             printf '%s\n' "${baseline}" "${baselineSrc}" "${baseline.cargoDeps}" "${releasePreflight}" > "$out/sources"
             cp live-completion.json "$out/completion.json"
+            cp live-mutants.log "$out/"
+            cp -r .artifacts/client-mutants "$out/mutants"
           '';
           XMSG_SHARED_BASELINE_BIN = lib.getExe baseline;
           nativeBuildInputs = (package.nativeBuildInputs or [ ]) ++ [ pkgs.python3 ];
@@ -113,6 +115,11 @@
               pkgs.python3
             ];
             cargoTestExtraArgs = "--lib --test shared_client";
+            installPhase = ''
+              mkdir -p "$out"
+              cp client-mutants.log client-completion.log health.log feature.log "$out/"
+              cp -r .artifacts/client-mutants "$out/mutants"
+            '';
             preCheck = ''
               cargoWithProfile clippy --all-targets --locked --no-default-features --features client -- -D warnings
               python3 scripts/client-graph.py
