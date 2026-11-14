@@ -77,8 +77,7 @@ jobs:
           } | sudo tee -a /etc/nix/nix.conf >/dev/null
           sudo launchctl kickstart -k system/org.nixos.nix-daemon || true
 
-      # The check `nix flake check ./ci` builds on Linux, for this system: the
-      # package, whose checkPhase runs `cargo test`.
+      # Release packaging and client checks stay separate from the ordinary dev-profile suite.
       - name: checks.package
         run: |
           nix --version
@@ -96,6 +95,81 @@ jobs:
           sys=$(nix eval --impure --raw --expr builtins.currentSystem)
           nix build "./ci#checks.$sys.pre-xl1-compat" -L --no-link --print-out-paths | tee -a /tmp/attic-paths
 
+      - name: Push to Attic cache
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          if [ -z "${ATTIC_TOKEN:-}" ]; then
+            echo "ATTIC_TOKEN is not set; skipping Attic cache push"
+            exit 0
+          fi
+          if [ ! -s /tmp/attic-paths ]; then
+            echo "No paths to push; skipping Attic cache push"
+            exit 0
+          fi
+          nix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev "$ATTIC_TOKEN"
+          for i in 1 2 3; do nix shell --inputs-from . nixpkgs#attic-client -c sh -c 'xargs attic push ci < /tmp/attic-paths' && exit 0; echo "attic push ci failed (attempt $i)" >&2; sleep $((i * 10)); done; exit 1
+
+  tests:
+    if: ${{ !inputs.lock_probe }}
+    runs-on: macos-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Forced failed-build pipeline control
+        id: failed_pipeline
+        continue-on-error: true
+        run: (exit 23) | tee /tmp/xmsg-failed-pipeline-control
+      - name: Require the failed pipeline to be rejected
+        if: ${{ always() }}
+        env:
+          CONTROL_OUTCOME: ${{ steps.failed_pipeline.outcome }}
+        run: test "$CONTROL_OUTCOME" = failure
+
+      # gen-harness's `nix` column pin (evaluators.yml), upstream Nix like a
+      # stock darwin install.
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.35.2/install
+          github_access_token: ${{ github.token }}
+          # Sandbox off on purpose: the sandboxed Linux package build already
+          # gates sandbox purity, and the darwin sandbox is brittle.
+          extra_nix_config: |
+            sandbox = false
+            extra-substituters = https://cache.numtide.com
+            extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=
+
+      # No cache step: gen-harness dropped magic-nix-cache because its Post
+      # step re-uploads what the job just downloaded.
+
+      - name: Configure Attic substituter
+        env:
+          ATTIC_PUBLIC_KEY: ${{ vars.ATTIC_PUBLIC_KEY }}
+        run: |
+          if [ -z "${ATTIC_PUBLIC_KEY:-}" ]; then
+            echo "ATTIC_PUBLIC_KEY is not set; skipping Attic substituter configuration"
+            exit 0
+          fi
+          sudo mkdir -p /etc/nix
+          {
+            echo "extra-substituters = https://cache.numtide.com https://attic.json64.dev/ci"
+            echo "extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g= ${ATTIC_PUBLIC_KEY}"
+          } | sudo tee -a /etc/nix/nix.conf >/dev/null
+          sudo launchctl kickstart -k system/org.nixos.nix-daemon || true
+
+      - name: Warm dev-profile test artifacts
+        run: |
+          sys=$(nix eval --impure --raw --expr builtins.currentSystem)
+          nix build "./ci#checks.$sys.tests.cargoArtifacts" -L --no-link --print-out-paths | tee -a /tmp/attic-paths
+      - name: Ordinary tests and exact completion counts
+        run: |
+          sys=$(nix eval --impure --raw --expr builtins.currentSystem)
+          nix build "./ci#checks.$sys.tests" -L --no-link --print-out-paths | tee -a /tmp/attic-paths
       - name: Push to Attic cache
         if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
         env:

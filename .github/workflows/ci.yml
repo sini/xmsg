@@ -23,6 +23,7 @@ env:
     pi-extension
     pi-paths
     root-surface
+    ordinary-counts
     treefmt-tree-root
   PACKAGE_CHECKS: >-
     agy-hook
@@ -34,6 +35,7 @@ env:
     peers-render
     pre-xl1-compat
     shared-client
+  TEST_CHECKS: tests
   COMPAT_CHECKS: >-
     shared-client-compat-0
     shared-client-compat-1
@@ -85,7 +87,8 @@ jobs:
           read -r -a fast <<< "$FAST_CHECKS"
           read -r -a pkg <<< "$PACKAGE_CHECKS"
           read -r -a compat <<< "$COMPAT_CHECKS"
-          covered=$(printf '%s\n' "${fast[@]}" "${pkg[@]}" "${compat[@]}" | jq -R . | jq -s 'sort | unique')
+          read -r -a test_checks <<< "$TEST_CHECKS"
+          covered=$(printf '%s\n' "${fast[@]}" "${pkg[@]}" "${compat[@]}" "${test_checks[@]}" | jq -R . | jq -s 'sort | unique')
           if [ "$expected" != "$covered" ]; then
             echo "CI check coverage mismatch!" >&2
             echo "Flake checks: $expected" >&2
@@ -159,6 +162,51 @@ jobs:
             refs+=("./ci#checks.x86_64-linux.$c")
           done
           nix build -L --keep-going --no-link --print-out-paths "${refs[@]}" | tee -a /tmp/attic-paths
+      - name: Push to Attic cache
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          if [ -z "${ATTIC_TOKEN:-}" ]; then
+            echo "ATTIC_TOKEN is not set; skipping Attic cache push"
+            exit 0
+          fi
+          if [ ! -s /tmp/attic-paths ]; then
+            echo "No paths to push; skipping Attic cache push"
+            exit 0
+          fi
+          nix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev "$ATTIC_TOKEN"
+          for i in 1 2 3; do nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci && exit 0; echo "attic push ci failed (attempt $i)" >&2; sleep $((i * 10)); done; exit 1
+
+  tests:
+    if: ${{ !inputs.client_build_probe }}
+    needs: [deps]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          github_access_token: ${{ github.token }}
+      - name: Configure Attic and llm-agents substituters
+        env:
+          ATTIC_PUBLIC_KEY: ${{ vars.ATTIC_PUBLIC_KEY }}
+        run: |
+          sudo mkdir -p /etc/nix
+          {
+            echo "extra-substituters = https://cache.numtide.com${ATTIC_PUBLIC_KEY:+ https://attic.json64.dev/ci}"
+            echo "extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=${ATTIC_PUBLIC_KEY:+ ${ATTIC_PUBLIC_KEY}}"
+          } | sudo tee -a /etc/nix/nix.conf >/dev/null
+          if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nix-daemon 2>/dev/null; then
+            sudo systemctl restart nix-daemon
+          fi
+      - name: Warm dev-profile test artifacts
+        run: nix build -L --no-link --print-out-paths ./ci#checks.x86_64-linux.tests.cargoArtifacts | tee -a /tmp/attic-paths
+      - name: Ordinary tests and exact completion counts
+        run: nix build -L --no-link --print-out-paths ./ci#checks.x86_64-linux.tests | tee -a /tmp/attic-paths
       - name: Push to Attic cache
         if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
         env:

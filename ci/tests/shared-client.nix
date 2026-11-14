@@ -45,6 +45,7 @@
         package.overrideAttrs {
           pname = "xmsg-shared-client-compat-${toString shard}";
           dontBuild = true;
+          doCheck = true;
           preCheck = "";
           installPhase = ''
             mkdir -p "$out"
