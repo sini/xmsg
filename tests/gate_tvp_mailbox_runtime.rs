@@ -8,7 +8,7 @@ use rusqlite::{types::Value as SqlValue, Connection};
 use serde_json::{json, Value};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -433,6 +433,14 @@ fn assert_forwarded_reply_refusal(with_attachment: bool) {
     assert_eq!(sql_text(&hub.rows()[0][0]), reply_id);
 }
 
+fn publish_fixture_file(path: &Path, contents: impl AsRef<[u8]>) {
+    use std::io::Write;
+    let mut pending = tempfile::NamedTempFile::new_in(path.parent().unwrap()).unwrap();
+    pending.write_all(contents.as_ref()).unwrap();
+    pending.flush().unwrap();
+    pending.persist(path).unwrap();
+}
+
 fn service_frame(
     reader: &mut std::io::BufReader<std::os::unix::net::UnixStream>,
     value: Value,
@@ -458,7 +466,7 @@ fn mailbox_reply_service_child() {
     let mut reader = std::io::BufReader::new(socket);
     let registered = service_frame(&mut reader, json!({"harness":"svc","name":"worker"}));
     assert_eq!(registered["status"], "ok", "{registered}");
-    fs::write(directory.join("service-ready"), "ready").unwrap();
+    publish_fixture_file(&directory.join("service-ready"), "ready");
     let deadline = Instant::now() + Duration::from_secs(15);
     let message = loop {
         let message = service_frame(&mut reader, json!({"action":"poll","waitSecs":1}));
@@ -488,11 +496,10 @@ fn mailbox_reply_service_child() {
     let attempts: Vec<_> = (0..2)
         .map(|_| service_frame(&mut reader, frame.clone()))
         .collect();
-    fs::write(
-        directory.join("reply-attempts.json"),
+    publish_fixture_file(
+        &directory.join("reply-attempts.json"),
         serde_json::to_vec(&attempts).unwrap(),
-    )
-    .unwrap();
+    );
     let deadline = Instant::now() + Duration::from_secs(15);
     while !directory.join("retry-ready").exists() {
         assert!(
@@ -502,11 +509,10 @@ fn mailbox_reply_service_child() {
         std::thread::sleep(Duration::from_millis(10));
     }
     let result = service_frame(&mut reader, frame);
-    fs::write(
-        directory.join("reply-recovered.json"),
+    publish_fixture_file(
+        &directory.join("reply-recovered.json"),
         serde_json::to_vec(&result).unwrap(),
-    )
-    .unwrap();
+    );
 }
 
 struct ServiceProcess(Child);
@@ -605,7 +611,7 @@ fn assert_local_service_reply_refusal(with_attachment: bool) {
         "capacity refusal persisted local attachment metadata"
     );
     storage::delete_peer_mailbox_message(&hub.db(), "offline", sql_text(&before[0][0])).unwrap();
-    fs::write(hub.directory.path().join("retry-ready"), "retry").unwrap();
+    publish_fixture_file(&hub.directory.path().join("retry-ready"), "retry");
     let result: Value =
         serde_json::from_slice(&fs::read(wait_for_file(&hub, "reply-recovered.json")).unwrap())
             .unwrap();
