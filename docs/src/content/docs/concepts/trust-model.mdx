@@ -81,6 +81,14 @@ sessions do not collide, and one session cannot pose as another:
   macOS, it uses `proc_pidpath`. The check fails closed on a deleted binary (`(deleted)`) or a
   changed profile symlink.
 
+Service liveness is **planned** to distinguish an unavailable start-time lookup from a process
+that is known to have exited. Linux leaves keep working without `/proc`, including a live pidfd
+whose peer PID is not visible in the container. Where available, xmsg retains the kernel pin or
+compares a captured start token; macOS reads its native token without a mounted `/proc`. If that
+facility is unavailable, the portable registration belongs to its connection. Unknown start time
+(`0`) alone will not keep a disconnected service live, and an old connection will not remove a
+newer registration. These lifecycle checks do not add isolation within a trusted UID.
+
 ## Envelope sanitization & breakout defense
 
 - **Printable-ASCII anonymous `from`:** An unattested HTTP `from` string can contain only

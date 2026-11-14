@@ -99,6 +99,7 @@ fn register_fake_svc(state: &AppState, pid: u32, name: &str) -> Session {
             cwd: "/workspace".to_string(),
             registered_at: now,
             token: 1,
+            liveness: None,
         },
     );
     Session {

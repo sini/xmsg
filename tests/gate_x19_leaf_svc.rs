@@ -2124,9 +2124,20 @@ async fn register_hub_service(
         xmsg::process::starttime(&live_proc, my_pid).unwrap_or_else(|_| "1000".to_string());
     let pid_dir = hub.proc_root.join(my_pid.to_string());
     fs::create_dir_all(&pid_dir).unwrap();
-    let stat_content =
-        format!("{my_pid} (svc_test) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {my_proc_start} 0 0\n");
-    fs::write(pid_dir.join("stat"), stat_content).unwrap();
+    let mut fields = vec!["0".to_string(); 22];
+    fields[0] = "S".into();
+    fields[1] = "1".into();
+    fields[19] = my_proc_start.clone();
+    fs::write(
+        pid_dir.join("stat"),
+        format!("{my_pid} (svc_test) {}\n", fields.join(" ")),
+    )
+    .unwrap();
+    assert_eq!(
+        xmsg::process::starttime(&hub.proc_root, my_pid).unwrap(),
+        my_proc_start,
+        "hub service fixture must expose the real field22 start token"
+    );
 
     let reg_sock = hub
         .agent_sock

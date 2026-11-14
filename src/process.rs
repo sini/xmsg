@@ -53,6 +53,45 @@ pub fn starttime(proc_root: &Path, pid: u32) -> io::Result<String> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "stat too short"))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StartTimeProbe {
+    Known(String),
+    Unavailable,
+    Gone,
+}
+
+fn classify_starttime_error(error: io::Error) -> io::Result<StartTimeProbe> {
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(StartTimeProbe::Gone),
+        Some(libc::EPERM | libc::EACCES | libc::ENOSYS | libc::EOPNOTSUPP) => {
+            Ok(StartTimeProbe::Unavailable)
+        }
+        _ => Err(error),
+    }
+}
+
+pub(crate) fn probe_starttime(proc_root: &Path, pid: u32) -> io::Result<StartTimeProbe> {
+    if pid == 0 {
+        return Ok(StartTimeProbe::Gone);
+    }
+    #[cfg(target_os = "macos")]
+    if is_live(proc_root) {
+        return macos::probe_starttime(pid);
+    }
+    match starttime(proc_root, pid) {
+        Ok(token) => Ok(StartTimeProbe::Known(token)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // A missing peer is not evidence of death when the proc backend itself is absent.
+            Ok(if starttime(proc_root, std::process::id()).is_ok() {
+                StartTimeProbe::Gone
+            } else {
+                StartTimeProbe::Unavailable
+            })
+        }
+        Err(error) => classify_starttime_error(error),
+    }
+}
+
 /// One read of a process: its parent, its start token (as [`starttime`] returns it) and the
 /// number its start is ordered by, `None` when that is not a number.
 struct Link {
@@ -347,6 +386,32 @@ pub fn peer_cred(stream: &tokio::net::UnixStream) -> io::Result<PeerCred> {
 }
 
 impl PeerCred {
+    pub(crate) fn service_pin_liveness(&self) -> Option<bool> {
+        match &self.pin {
+            #[cfg(target_os = "linux")]
+            PeerPin::Dead => Some(false),
+            #[cfg(target_os = "linux")]
+            PeerPin::Visible(fd) => match pidfd_state(fd) {
+                PidfdState::Visible(pid) => Some(self.pid == Some(pid)),
+                PidfdState::Dead | PidfdState::Unmapped => Some(false),
+                PidfdState::Unreadable => None,
+            },
+            #[cfg(target_os = "linux")]
+            PeerPin::Unmapped(fd) => match pidfd_state(fd) {
+                PidfdState::Unmapped => Some(true),
+                PidfdState::Dead | PidfdState::Visible(_) => Some(false),
+                PidfdState::Unreadable => None,
+            },
+            PeerPin::Unpinned => {
+                if self.pid.is_some_and(|pid| pid > 0) {
+                    None
+                } else {
+                    Some(false)
+                }
+            }
+        }
+    }
+
     /// Constructs an unpinned `PeerCred` from a bare `(uid, pid)` pair (for non-socket callers
     /// and unit tests that supply a numeric PID directly).
     pub fn unpinned(uid: u32, pid: u32) -> Self {
@@ -798,7 +863,12 @@ mod macos {
         FORCE_LINK_ORDER.with(|cell| *cell.borrow_mut() = override_pair);
     }
 
-    pub fn bsdinfo(pid: u32) -> io::Result<libc::proc_bsdinfo> {
+    enum BsdInfoError {
+        Syscall(io::Error),
+        Short,
+    }
+
+    fn bsdinfo_raw(pid: u32) -> Result<libc::proc_bsdinfo, BsdInfoError> {
         let mut info = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
         let size = size_of::<libc::proc_bsdinfo>() as libc::c_int;
         // SAFETY: the buffer is a properly sized and aligned proc_bsdinfo.
@@ -812,20 +882,37 @@ mod macos {
             )
         };
         if n <= 0 {
-            // Fails for missing PIDs and, without root, for other users' processes.
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("cannot read process {pid}"),
-            ));
+            return Err(BsdInfoError::Syscall(io::Error::last_os_error()));
         }
         if n != size {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("short proc_bsdinfo for {pid}"),
-            ));
+            return Err(BsdInfoError::Short);
         }
         // SAFETY: proc_pidinfo filled all `size` bytes.
         Ok(unsafe { info.assume_init() })
+    }
+
+    pub fn bsdinfo(pid: u32) -> io::Result<libc::proc_bsdinfo> {
+        bsdinfo_raw(pid).map_err(|error| match error {
+            BsdInfoError::Syscall(_) => io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("cannot read process {pid}"),
+            ),
+            BsdInfoError::Short => io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("short proc_bsdinfo for {pid}"),
+            ),
+        })
+    }
+
+    pub(super) fn probe_starttime(pid: u32) -> io::Result<super::StartTimeProbe> {
+        match bsdinfo_raw(pid) {
+            Ok(info) => Ok(super::StartTimeProbe::Known(starttime_token(&info))),
+            Err(BsdInfoError::Syscall(error)) => super::classify_starttime_error(error),
+            Err(BsdInfoError::Short) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "short native start-time reply",
+            )),
+        }
     }
 
     pub fn starttime_token(info: &libc::proc_bsdinfo) -> String {
@@ -1346,5 +1433,25 @@ mod tests {
         child.kill().ok();
         child.wait().ok();
         assert_eq!(args.unwrap(), ["-c", "sleep 5; :", "y"]);
+    }
+}
+
+#[cfg(test)]
+mod service_start_tests {
+    use super::*;
+
+    #[test]
+    fn gone_is_distinct_from_unavailable() {
+        assert_eq!(
+            classify_starttime_error(io::Error::from_raw_os_error(libc::ESRCH)).unwrap(),
+            StartTimeProbe::Gone
+        );
+        for errno in [libc::EPERM, libc::EACCES, libc::ENOSYS, libc::EOPNOTSUPP] {
+            assert_eq!(
+                classify_starttime_error(io::Error::from_raw_os_error(errno)).unwrap(),
+                StartTimeProbe::Unavailable
+            );
+        }
+        assert!(classify_starttime_error(io::Error::from_raw_os_error(libc::EIO)).is_err());
     }
 }

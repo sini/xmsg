@@ -70,6 +70,11 @@ xmsg = { path = ".", default-features = false, features = ["test-hooks"] }
 opt-level = 2
 
 [[test]]
+name = "svc_liveness"
+path = "tests/svc_liveness.rs"
+required-features = ["daemon"]
+
+[[test]]
 name = "agent_sock"
 path = "tests/agent_sock.rs"
 required-features = ["daemon"]
