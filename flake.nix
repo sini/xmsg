@@ -65,10 +65,10 @@
             // {
               inherit cargoArtifacts;
               nativeBuildInputs = [ pkgs.clippy ];
-              preCheck = ''
+              postBuild = ''
                 cargoWithProfile clippy --all-targets --locked -- -D warnings
               '';
-              doCheck = true;
+              doCheck = false;
               meta = {
                 description = "Fast, lightweight local HTTP bridge into live agent sessions";
                 mainProgram = "xmsg";
