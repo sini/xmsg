@@ -879,6 +879,7 @@ async fn test_oracle_4_refused_target_does_not_consume_rate_limit_or_create_stor
             cwd: "/workspace".to_string(),
             registered_at: storage::now_epoch_secs(),
             token: 1,
+            liveness: None,
         },
     );
 

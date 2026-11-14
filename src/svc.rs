@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
@@ -45,6 +45,105 @@ pub struct SvcSessionInfo {
     pub cwd: String,
     pub registered_at: i64,
     pub token: u64,
+    pub liveness: Option<Arc<SvcLiveness>>,
+}
+
+#[derive(Debug)]
+pub struct SvcLiveness {
+    peer: crate::process::PeerCred,
+    start: crate::process::StartTimeProbe,
+    connected: AtomicBool,
+}
+
+#[derive(Debug, Clone)]
+struct SvcPeerSnapshot {
+    start: crate::process::StartTimeProbe,
+}
+
+fn probe_service_peer(
+    proc_root: &Path,
+    peer: &crate::process::PeerCred,
+) -> Result<crate::process::StartTimeProbe, AppError> {
+    use crate::process::StartTimeProbe;
+    if peer.service_pin_liveness() == Some(false) {
+        return Ok(StartTimeProbe::Gone);
+    }
+    if peer.is_unmapped() {
+        return Ok(StartTimeProbe::Unavailable);
+    }
+    let start = crate::process::probe_starttime(proc_root, peer.pid_or_zero())
+        .map_err(|error| AppError::Internal(format!("service start-time query failed: {error}")))?;
+    Ok(if peer.service_pin_liveness() == Some(false) {
+        StartTimeProbe::Gone
+    } else {
+        start
+    })
+}
+
+impl SvcPeerSnapshot {
+    fn capture(proc_root: &Path, peer: &crate::process::PeerCred) -> Result<Self, AppError> {
+        let start = probe_service_peer(proc_root, peer)?;
+        if start == crate::process::StartTimeProbe::Gone {
+            return Err(AppError::NotFound("service process is gone".into()));
+        }
+        Ok(Self { start })
+    }
+
+    fn reconcile(&self, current: crate::process::StartTimeProbe) -> Result<Self, AppError> {
+        use crate::process::StartTimeProbe;
+        if current == StartTimeProbe::Gone {
+            return Err(AppError::NotFound("service process is gone".into()));
+        }
+        if let (StartTimeProbe::Known(previous), StartTimeProbe::Known(now)) =
+            (&self.start, &current)
+        {
+            if previous != now {
+                return Err(AppError::NotRecipient(
+                    "service process identity changed".into(),
+                ));
+            }
+        }
+        Ok(match current {
+            StartTimeProbe::Known(_) => Self { start: current },
+            _ => self.clone(),
+        })
+    }
+
+    fn validate(
+        &self,
+        proc_root: &Path,
+        peer: &crate::process::PeerCred,
+    ) -> Result<Self, AppError> {
+        self.reconcile(probe_service_peer(proc_root, peer)?)
+    }
+
+    fn token(&self) -> String {
+        match &self.start {
+            crate::process::StartTimeProbe::Known(token) => token.clone(),
+            _ => "0".into(),
+        }
+    }
+}
+
+struct SvcRegistrationGuard {
+    store: SvcStore,
+    session_id: String,
+    token: u64,
+    liveness: Arc<SvcLiveness>,
+}
+
+impl Drop for SvcRegistrationGuard {
+    fn drop(&mut self) {
+        self.liveness.connected.store(false, Ordering::Release);
+        if let Ok(mut store) = self.store.write() {
+            if store
+                .get(&self.session_id)
+                .is_some_and(|info| info.token == self.token)
+            {
+                store.remove(&self.session_id);
+            }
+        }
+    }
 }
 
 pub type SvcStore = Arc<RwLock<HashMap<String, SvcSessionInfo>>>;
@@ -60,10 +159,19 @@ pub fn next_svc_token() -> u64 {
 }
 
 pub fn is_svc_session_alive(proc_root: &Path, info: &SvcSessionInfo) -> bool {
-    match crate::process::starttime(proc_root, info.pid) {
-        Ok(st) => st == info.starttime,
-        Err(_) => info.starttime == "0",
+    use crate::process::StartTimeProbe;
+    if let Some(witness) = &info.liveness {
+        if !witness.connected.load(Ordering::Acquire) {
+            return false;
+        }
+        return probe_service_peer(proc_root, &witness.peer).is_ok_and(|current| match current {
+            StartTimeProbe::Gone => false,
+            StartTimeProbe::Unavailable => true,
+            StartTimeProbe::Known(_) => current == witness.start,
+        });
     }
+    matches!(crate::process::probe_starttime(proc_root, info.pid),
+        Ok(StartTimeProbe::Known(token)) if info.starttime != "0" && token == info.starttime)
 }
 
 pub fn verify_svc_process(
@@ -216,6 +324,36 @@ pub async fn handle_svc_connection_peer<
     R: tokio::io::AsyncBufRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 >(
+    buf_reader: R,
+    writer: W,
+    state: Arc<crate::http::AppState>,
+    trusted_svc_exes: &HashMap<String, PathBuf>,
+    my_uid: u32,
+    peer: crate::process::PeerCred,
+    req: SvcRegisterRequest,
+    leaf_mode: bool,
+    leaf_principal: Option<String>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    handle_svc_connection_captured(
+        buf_reader,
+        writer,
+        state,
+        trusted_svc_exes,
+        my_uid,
+        peer,
+        req,
+        leaf_mode,
+        leaf_principal,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_svc_connection_captured<
+    R: tokio::io::AsyncBufRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+>(
     mut buf_reader: R,
     mut writer: W,
     state: Arc<crate::http::AppState>,
@@ -225,6 +363,7 @@ pub async fn handle_svc_connection_peer<
     req: SvcRegisterRequest,
     leaf_mode: bool,
     leaf_principal: Option<String>,
+    captured: Option<Result<SvcPeerSnapshot, AppError>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let peer_uid = peer.uid;
     let peer_pid = peer.pid.unwrap_or(0);
@@ -262,15 +401,27 @@ pub async fn handle_svc_connection_peer<
             return Err(e.into());
         }
 
-        if !peer.is_pin_alive() {
+        if peer.service_pin_liveness() == Some(false) {
             let e = AppError::NotFound(format!("peer process {peer_pid} is no longer alive"));
             let err_resp = e.frame();
             let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
             return Err(e.into());
         }
 
-        peer.starttime(&proc_root)
-            .unwrap_or_else(|_| "0".to_string())
+        let snapshot = match captured {
+            Some(snapshot) => snapshot,
+            None => SvcPeerSnapshot::capture(&proc_root, &peer),
+        }
+        .and_then(|snapshot| snapshot.validate(&proc_root, &peer));
+        match snapshot {
+            Ok(snapshot) => snapshot.token(),
+            Err(error) => {
+                let _ = writer
+                    .write_all(format!("{}\n", error.frame()).as_bytes())
+                    .await;
+                return Err(error.into());
+            }
+        }
     } else {
         match verify_svc_process_peer(&proc_root, trusted_svc_exes, my_uid, &peer, &name) {
             Ok(st) => st,
@@ -282,6 +433,16 @@ pub async fn handle_svc_connection_peer<
         }
     };
 
+    let start_probe = if starttime == "0" {
+        crate::process::StartTimeProbe::Unavailable
+    } else {
+        crate::process::StartTimeProbe::Known(starttime.clone())
+    };
+    let liveness = Arc::new(SvcLiveness {
+        peer: peer.clone(),
+        start: start_probe,
+        connected: AtomicBool::new(true),
+    });
     let session_id = name.clone();
 
     // Single live registration check (Gate r2 G5 / Oracle 5) and one-service-per-process
@@ -319,6 +480,7 @@ pub async fn handle_svc_connection_peer<
                 cwd: req.cwd.unwrap_or_else(|| "/".to_string()),
                 registered_at: now_epoch_secs(),
                 token: token_val,
+                liveness: Some(liveness.clone()),
             };
             store_lock.insert(session_id.clone(), info);
         }
@@ -340,6 +502,13 @@ pub async fn handle_svc_connection_peer<
         let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
         return Err(e.into());
     }
+
+    let _registration = SvcRegistrationGuard {
+        store: store.clone(),
+        session_id: session_id.clone(),
+        token: my_token,
+        liveness,
+    };
 
     // The registration's address, this node's name (AM-4), and the daemon's effective
     // limits in force (XR5): reply TTL, idempotency TTL, per-service queue cap, and
@@ -511,14 +680,6 @@ pub async fn handle_svc_connection_peer<
         }
     }
 
-    {
-        let mut store_lock = store.write().unwrap();
-        if let Some(info) = store_lock.get(&session_id) {
-            if info.pid == peer_pid && info.starttime == starttime && info.token == my_token {
-                store_lock.remove(&session_id);
-            }
-        }
-    }
     Ok(())
 }
 
@@ -642,6 +803,7 @@ pub async fn run_leaf_register_server_with_listener(
             }
         };
 
+        let captured = SvcPeerSnapshot::capture(&state.agy_config.proc_root, &peer);
         let state_clone = state.clone();
         let leaf_principal_clone = leaf_principal.clone();
 
@@ -678,7 +840,7 @@ pub async fn run_leaf_register_server_with_listener(
             };
 
             let empty_map = HashMap::new();
-            if let Err(e) = handle_svc_connection_peer(
+            if let Err(e) = handle_svc_connection_captured(
                 buf_reader,
                 writer,
                 state_clone,
@@ -688,6 +850,7 @@ pub async fn run_leaf_register_server_with_listener(
                 req,
                 true,
                 Some(leaf_principal_clone),
+                Some(captured),
             )
             .await
             {
@@ -1014,5 +1177,53 @@ pub async fn run_leaf_inbox_task(
                 backoff_millis = (backoff_millis * 2).min(max_backoff_millis);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_query_is_not_a_known_token_mismatch() {
+        use crate::process::StartTimeProbe;
+        let known = SvcPeerSnapshot {
+            start: StartTimeProbe::Known("123".into()),
+        };
+        assert_eq!(
+            known.reconcile(StartTimeProbe::Unavailable).unwrap().start,
+            known.start
+        );
+        let portable = SvcPeerSnapshot {
+            start: StartTimeProbe::Unavailable,
+        };
+        assert_eq!(
+            portable
+                .reconcile(StartTimeProbe::Known("123".into()))
+                .unwrap()
+                .start,
+            known.start
+        );
+        assert!(known.reconcile(StartTimeProbe::Gone).is_err());
+    }
+
+    #[test]
+    fn stale_start_token_is_refused() {
+        let peer =
+            crate::process::PeerCred::unpinned(unsafe { libc::geteuid() }, std::process::id());
+        let root = Path::new(crate::process::LIVE_PROC_ROOT);
+        let actual = SvcPeerSnapshot::capture(root, &peer).unwrap();
+        assert!(
+            matches!(actual.start, crate::process::StartTimeProbe::Known(_)),
+            "native token positive control"
+        );
+        let stale = SvcPeerSnapshot {
+            start: crate::process::StartTimeProbe::Known("not-the-native-token".into()),
+        };
+        assert!(
+            stale.validate(root, &peer).is_err(),
+            "stale token must not acquire a new registration"
+        );
+        assert!(actual.validate(root, &peer).is_ok());
     }
 }

@@ -674,6 +674,7 @@ async fn test_xs2_svc_store_admits_only_hop0_while_refusing_child_of_svc() {
                 cwd: "/".to_string(),
                 registered_at: 1000,
                 token: 1,
+                liveness: None,
             },
         );
     }
@@ -716,6 +717,7 @@ async fn test_xs2_svc_store_admits_only_hop0_while_refusing_child_of_svc() {
                 cwd: "/".to_string(),
                 registered_at: 1000,
                 token: 1,
+                liveness: None,
             },
         );
 
@@ -962,6 +964,7 @@ async fn test_xr4_resolve_caller_session_refuses_ambiguous_multi_svc_pid() {
                     cwd: "/".to_string(),
                     registered_at: 1000,
                     token: 1,
+                    liveness: None,
                 },
             );
         }
