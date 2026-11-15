@@ -82,7 +82,9 @@ before display.
 
 The timeline reads the local [observation journal](/reference/http-and-sockets/#local-observation-journal-planned)
 through `GET /v1/observe/events`. It shows source/destination references, message and reply
-correlation, times, event kinds and stored outcomes. Each refresh fetches at most two bounded
+correlation, times, event kinds and stored outcomes. The planned `arrival` kind means the
+daemon committed a queued item's delivery mark for an inbox result. It is not proof of client
+receipt, agent-read or task-complete. Each refresh fetches at most two bounded
 pages and keeps at most 1,000 timeline rows. It displays gaps, dropped counters, local
 truncation and whether it is still catching up. Roster and timeline have separate freshness
 ages; a failed timeline refresh keeps its old cursor and visibly stale rows. Older daemons
