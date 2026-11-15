@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "Previous collector candidate, pending rebased execution: cargo test --locked --offline on c3a12d5da4958ebe2459a8e030985e604506d8ae: exit0; 1125 passed, 8 ignored, 97 summaries; all 94 integration targets",
-    "darwin": "run43702639740 job132776893095 at6224fffd8aa4c6167372b407d3546410459da03f:1027passed/10ignored/0failed/97summaries; canonical derivation lines exclude Nix error-tail replay; all11 snapshot fixtures passed"
+    "linux": "cargo test --locked --offline on 61043220ab7868e5cfe3654d3a85be40fa509774: exit0, 1139 passed/8 ignored/98 summaries; all95 integration targets",
+    "darwin": "macOS run43707544950 job132791784970 on61043220ab7868e5cfe3654d3a85be40fa509774: cargo results1142passed/10ignored/0failed/98summaries, all95targets; count guard refused previous baseline; canonical derivation lines exclude Nix error-tail replay"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -102,16 +102,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1125,
+      "passed": 1139,
       "failed": 0,
       "ignored": 8,
-      "summaries": 97
+      "summaries": 98
     },
     "darwin": {
-      "passed": 1027,
+      "passed": 1142,
       "failed": 0,
       "ignored": 10,
-      "summaries": 97
+      "summaries": 98
     }
   }
 }
