@@ -160,3 +160,103 @@ mod invariants;
 
 #[path = "enroll_device_reservation_tests.rs"]
 mod reservation;
+
+#[tokio::test]
+async fn diagnostic_pending_count_is_private_and_does_not_prune() {
+    let harness = enabled().await;
+    let (status, created, _) = start(&harness, "diagnostic-canary-host", 1).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        authorized(&harness, &created).await["status"],
+        "awaiting_approval"
+    );
+    let config = crate::ca_health::Config {
+        enabled: Some(true),
+        ca_dir: None,
+    };
+    let report = crate::ca_health::live(&config, Some(&harness.service), harness.clock.now());
+    assert_eq!(report.pending_approvals, Some(1));
+    let text = serde_json::to_string(&report).unwrap();
+    for canary in [
+        created["user_code"].as_str().unwrap(),
+        created["request_id"].as_str().unwrap(),
+        "diagnostic-canary-host",
+        "alice",
+        "fixture-sub",
+    ] {
+        assert!(
+            !text.contains(canary),
+            "diagnostic serialized pending identity or code canary"
+        );
+    }
+    let session = harness
+        .service
+        .sessions
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let count = harness.service.sessions.lock().unwrap().len();
+    let before = effects(&harness);
+    harness.clock.0.fetch_add(86_400, Ordering::SeqCst);
+    assert_eq!(harness.service.pending_device_approval_count(), 0);
+    assert_eq!(
+        harness.service.sessions.lock().unwrap().len(),
+        count,
+        "diagnostic pruned expired session store"
+    );
+    assert!(
+        !session.cancelled.load(Ordering::Acquire),
+        "diagnostic cancelled expired session"
+    );
+    assert_eq!(effects(&harness), before);
+    harness.clock.0.fetch_sub(86_400, Ordering::SeqCst);
+    *session.deadline.lock().unwrap() = Some(tokio::time::Instant::now());
+    assert_eq!(
+        harness.service.pending_device_approval_count(),
+        0,
+        "diagnostic ignored monotonic deadline"
+    );
+    assert_eq!(harness.service.sessions.lock().unwrap().len(), count);
+    assert!(!session.cancelled.load(Ordering::Acquire));
+    let root =
+        rustls::pki_types::CertificateDer::from_pem_slice(harness.service.ca.root_pem().as_bytes())
+            .unwrap();
+    let (_, parsed) = x509_parser::parse_x509_certificate(root.as_ref()).unwrap();
+    let after = parsed.validity().not_after.timestamp();
+    for (now, expected) in [(after - 1, "warn"), (after, "fail")] {
+        harness.clock.0.store(now, Ordering::SeqCst);
+        let report = crate::ca_health::live(&config, Some(&harness.service), harness.clock.now());
+        assert_eq!(
+            report
+                .checks
+                .iter()
+                .find(|c| c.id == "ca.root_expiry")
+                .unwrap()
+                .status,
+            expected
+        );
+    }
+    harness
+        .clock
+        .0
+        .store(crate::ca_health::now(), Ordering::SeqCst);
+    std::fs::write(
+        harness._directory.path().join("ca/root.crt"),
+        b"disk-root-differs-from-loaded",
+    )
+    .unwrap();
+    let report = crate::ca_health::live(&config, Some(&harness.service), harness.clock.now());
+    assert_eq!(
+        report
+            .checks
+            .iter()
+            .find(|c| c.id == "ca.root_expiry")
+            .unwrap()
+            .status,
+        "pass",
+        "diagnostic reloaded public root from disk"
+    );
+}

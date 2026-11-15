@@ -165,15 +165,21 @@ impl Fixture {
     fn assert_read_only_requests(&self) {
         let requests = self.requests.lock().unwrap();
         assert!(!requests.is_empty(), "health detector never ran");
-        assert!(
-            requests.iter().all(|request| matches!(
-                request.as_str(),
-                "GET /healthz HTTP/1.1"
-                    | "GET /v1/recipients?read_only=true&liveness=true HTTP/1.1"
-                    | "GET /v1/diagnostics/federation HTTP/1.1"
-            )),
-            "unexpected requests: {requests:?}"
-        );
+        assert_eq!(requests.len() % 4, 0, "incomplete doctor request sequence");
+        for invocation in requests.as_chunks::<4>().0 {
+            let mut actual = invocation.iter().map(String::as_str).collect::<Vec<_>>();
+            actual.sort_unstable();
+            assert_eq!(
+                actual,
+                [
+                    "GET /healthz HTTP/1.1",
+                    "GET /v1/diagnostics/enrollment HTTP/1.1",
+                    "GET /v1/diagnostics/federation HTTP/1.1",
+                    "GET /v1/recipients?read_only=true&liveness=true HTTP/1.1",
+                ],
+                "doctor retried or used a mutating route"
+            );
+        }
     }
 }
 
@@ -626,7 +632,7 @@ fn unsupported_or_cold_process_source_warns_without_live_listing_fallback() {
         fixture.assert_read_only_requests();
         assert_eq!(
             fixture.requests.lock().unwrap().len(),
-            3,
+            4,
             "doctor retried through another route"
         );
     }
@@ -771,7 +777,7 @@ fn unavailable_federation_source_never_falls_back_to_direct_peer_dials() {
             "doctor dialled a peer itself"
         );
         fixture.assert_read_only_requests();
-        assert_eq!(fixture.requests.lock().unwrap().len(), 3);
+        assert_eq!(fixture.requests.lock().unwrap().len(), 4);
     }
 }
 
@@ -803,4 +809,51 @@ fn federation_peer_results_are_bounded_and_terminal_safe() {
     let text = fixture.command().output().unwrap();
     assert!(text.status.success());
     assert!(!String::from_utf8_lossy(&text.stdout).contains('\u{1b}'));
+}
+
+#[test]
+fn explicit_installed_ca_is_separate_from_client_enrollment_state() {
+    let fixture = Fixture::healthy();
+    let ca = fixture.root.path().join("ca");
+    fs::create_dir(&ca).unwrap();
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::default();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let now = time::OffsetDateTime::now_utc();
+    params.not_before = now - time::Duration::days(20);
+    params.not_after = now + time::Duration::days(20);
+    fs::write(ca.join("root.crt"), params.self_signed(&key).unwrap().pem()).unwrap();
+    fs::write(ca.join("root.key"), b"SYNTHETIC-DOCTOR-KEY-CANARY").unwrap();
+    fs::set_permissions(ca.join("root.key"), fs::Permissions::from_mode(0o600)).unwrap();
+    let before = snapshot(fixture.root.path());
+    let output = fixture
+        .command()
+        .arg("--enroll-ca-dir")
+        .arg(&ca)
+        .arg("--json")
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    status(&report, "ca.root_expiry", "pass");
+    status(&report, "ca.signing_key_metadata", "pass");
+    status(&report, "ca.configuration", "warn");
+    status(&report, "ca.pending_approvals", "warn");
+    assert!(check(&report, "ca.source")["message"]
+        .as_str()
+        .unwrap()
+        .contains("installed_not_loaded"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("SYNTHETIC-DOCTOR-KEY-CANARY"));
+    assert_eq!(snapshot(fixture.root.path()), before);
+    fixture.assert_read_only_requests();
+    fs::remove_file(fixture.run.join("http.sock")).unwrap();
+    let output = fixture
+        .command()
+        .arg("--enroll-ca-dir")
+        .arg(&ca)
+        .arg("--json")
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    status(&report, "ca.root_expiry", "pass");
+    status(&report, "ca.configuration", "warn");
 }
