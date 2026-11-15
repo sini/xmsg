@@ -11,6 +11,22 @@ use tokio::sync::Semaphore;
 
 const MAX_QUERY: usize = 1024;
 const MAX_READS: usize = 8;
+
+pub(crate) fn read_slots(fed: &Arc<FedState>) -> Arc<Semaphore> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock, Weak};
+    type Budgets = HashMap<usize, (Weak<FedState>, Weak<Semaphore>)>;
+    static BUDGETS: OnceLock<Mutex<Budgets>> = OnceLock::new();
+    let mut budgets = BUDGETS.get_or_init(Mutex::default).lock().unwrap();
+    budgets.retain(|_, (fed, slots)| fed.strong_count() > 0 && slots.strong_count() > 0);
+    let key = Arc::as_ptr(fed) as usize;
+    if let Some(slots) = budgets.get(&key).and_then(|(_, slots)| slots.upgrade()) {
+        return slots;
+    }
+    let slots = Arc::new(Semaphore::new(MAX_READS));
+    budgets.insert(key, (Arc::downgrade(fed), Arc::downgrade(&slots)));
+    slots
+}
 const REQUEST_BUDGET: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
@@ -105,8 +121,8 @@ pub(crate) fn router(fed: Arc<FedState>) -> Router {
     let state = Arc::new(ExportState {
         #[cfg(any(test, feature = "test-hooks"))]
         controls: test_hooks::controls(&fed),
+        slots: read_slots(&fed),
         fed,
-        slots: Arc::new(Semaphore::new(MAX_READS)),
     });
     Router::new()
         .route("/fed/v2/observe/events", get(events))

@@ -2618,6 +2618,9 @@ pub struct FedInboxMessage {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FedInboxItem {
     Message(FedInboxMessage),
+    Observe {
+        request: crate::observe_relay::Control,
+    },
     Attachment {
         query: String,
         item_id: String,
@@ -2915,6 +2918,7 @@ impl FedState {
 
 pub fn build_fed_router(fed_state: Arc<FedState>) -> Router {
     let observe = crate::observe_fed::router(fed_state.clone());
+    let relay = crate::observe_relay::router(fed_state.clone());
     let max_body_limit = fed_state.max_body + 4096 + 8 * 330;
     Router::new()
         .route(
@@ -2940,6 +2944,7 @@ pub fn build_fed_router(fed_state: Arc<FedState>) -> Router {
         .layer(DefaultBodyLimit::max(max_body_limit))
         .with_state(fed_state)
         .merge(observe)
+        .merge(relay)
 }
 
 async fn fed_send_message_handler(
@@ -4359,6 +4364,7 @@ async fn fed_list_answer_handler(
 pub struct FedInboxQuery {
     pub wait: Option<u64>,
     pub control: Option<bool>,
+    pub observe_relay: Option<u8>,
 }
 
 async fn fed_get_inbox_handler(
@@ -4397,11 +4403,26 @@ async fn fed_get_inbox_handler(
     // A `list` query waiting for this client goes first (AM-1), then its messages.
     let next_item = || -> Result<Option<FedInboxItem>, AppError> {
         if query.control != Some(false) {
-            if let Some(item) = attachment_queries(&fed_state).next_for(&peer.name) {
-                return Ok(Some(item));
-            }
-            if let Some(query) = fed_state.list_queries.next_for(&peer.name) {
-                return Ok(Some(FedInboxItem::List { query, v: Some(2) }));
+            let turn = crate::observe_relay::control_turn(&fed_state, &peer.name);
+            for offset in 0..3 {
+                match (turn + offset) % 3 {
+                    0 if query.control == Some(true) && query.observe_relay == Some(1) => {
+                        if let Some(item) = crate::observe_relay::next_for(&fed_state, &peer.name) {
+                            return Ok(Some(item));
+                        }
+                    }
+                    1 => {
+                        if let Some(item) = attachment_queries(&fed_state).next_for(&peer.name) {
+                            return Ok(Some(item));
+                        }
+                    }
+                    2 => {
+                        if let Some(query) = fed_state.list_queries.next_for(&peer.name) {
+                            return Ok(Some(FedInboxItem::List { query, v: Some(2) }));
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
         if query.control == Some(true) {
@@ -4445,6 +4466,7 @@ async fn fed_get_inbox_handler(
         })))
     };
 
+    crate::observe_relay::before_dispatch(&fed_state).await;
     if let Some(item) = next_item()? {
         return Ok((StatusCode::OK, Json(Some(item))).into_response());
     }
@@ -4463,6 +4485,7 @@ async fn fed_get_inbox_handler(
                     Err(_) => return Ok::<_, AppError>(None),
                     _ => continue,
                 }
+                crate::observe_relay::before_dispatch(&fed_state).await;
                 if let Some(item) = next_item()? {
                     return Ok(Some(item));
                 }
@@ -5302,6 +5325,32 @@ async fn get_federated_inbox_mode(
     wait_secs: u64,
     control: Option<bool>,
 ) -> Result<Option<FedInboxItem>, AppError> {
+    Ok(get_federated_inbox_witnessed(
+        fed_state,
+        current_peers,
+        peer_name,
+        wait_secs,
+        control,
+        false,
+    )
+    .await?
+    .0)
+}
+
+async fn get_federated_inbox_witnessed(
+    fed_state: &FedState,
+    current_peers: &PeersMap,
+    peer_name: &str,
+    wait_secs: u64,
+    control: Option<bool>,
+    advertise: bool,
+) -> Result<
+    (
+        Option<FedInboxItem>,
+        Option<crate::observe_relay::PollWitness>,
+    ),
+    AppError,
+> {
     let peer = current_peers
         .get(peer_name)
         .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
@@ -5315,6 +5364,10 @@ async fn get_federated_inbox_mode(
                 AppError::PeerUnreachable(format!("Failed to connect to {}: {e}", peer.address))
             })?;
 
+        let remote_ip = tcp_stream
+            .peer_addr()
+            .map_err(|_| AppError::Unavailable("observation transport unavailable".into()))?
+            .ip();
         let server_name = ServerName::try_from(peer_name.to_string())
             .map_err(|e| AppError::Internal(e.to_string()))?;
         let tls_stream = connector
@@ -5322,6 +5375,15 @@ async fn get_federated_inbox_mode(
             .await
             .map_err(|e| map_tls_connect_error(peer_name, e))?;
 
+        let witness = crate::observe_relay::PollWitness::new(
+            remote_ip,
+            tls_stream
+                .get_ref()
+                .1
+                .peer_certificates()
+                .and_then(|certs| certs.first())
+                .map(|cert| cert.as_ref()),
+        )?;
         let io = hyper_util::rt::TokioIo::new(tls_stream);
         let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
             .await
@@ -5336,7 +5398,12 @@ async fn get_federated_inbox_mode(
         let mode = control
             .map(|value| format!("&control={value}"))
             .unwrap_or_default();
-        let uri = format!("/fed/v2/inbox?wait={wait_secs}{mode}");
+        let capability = if advertise && control == Some(true) {
+            "&observe_relay=1"
+        } else {
+            ""
+        };
+        let uri = format!("/fed/v2/inbox?wait={wait_secs}{mode}{capability}");
         let req = hyper::Request::builder()
             .method("GET")
             .uri(uri)
@@ -5350,7 +5417,19 @@ async fn get_federated_inbox_mode(
             .map_err(|e| AppError::PeerUnreachable(format!("Request failed: {e}")))?;
 
         let status = resp.status();
-        let max_limit = fed_state.max_body + 4096 + 8 * 330;
+        let max_limit = if advertise {
+            8192
+        } else {
+            fed_state.max_body + 4096 + 8 * 330
+        };
+        if resp.headers().get("content-length").is_some_and(|v| {
+            v.to_str()
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .is_none_or(|n| n > max_limit)
+        }) {
+            return Err(AppError::BadRequest("invalid control response".into()));
+        }
         let limited = http_body_util::Limited::new(resp.into_body(), max_limit);
         use http_body_util::BodyExt;
         let body_bytes = limited
@@ -5365,7 +5444,25 @@ async fn get_federated_inbox_mode(
         if status.is_success() {
             let msg: Option<FedInboxItem> = serde_json::from_slice(&body_bytes)
                 .map_err(|e| AppError::Internal(format!("failed to parse inbox message: {e}")))?;
-            Ok(msg)
+            if let Some(FedInboxItem::Observe { request }) = &msg {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct ObserveEnvelope {
+                    kind: String,
+                    request: crate::observe_relay::Control,
+                }
+                let closed: ObserveEnvelope = serde_json::from_slice(&body_bytes)
+                    .map_err(|_| AppError::BadRequest("invalid observation control".into()))?;
+                if closed.kind != "observe"
+                    || closed.request != *request
+                    || !advertise
+                    || body_bytes.len() > 8192
+                    || !request.wire_valid()
+                {
+                    return Err(AppError::BadRequest("invalid observation control".into()));
+                }
+            }
+            Ok((msg, Some(witness)))
         } else {
             if control == Some(true) && status == StatusCode::BAD_REQUEST {
                 return Err(AppError::BadRequest("control inbox unsupported".into()));
@@ -5388,7 +5485,7 @@ async fn get_federated_inbox_mode(
     let timeout_duration = Duration::from_secs(wait_secs + 5);
     match tokio::time::timeout(timeout_duration, poll_fut).await {
         Ok(res) => res,
-        Err(_) => Ok(None),
+        Err(_) => Ok((None, None)),
     }
 }
 
@@ -5668,6 +5765,7 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
         )
         .await
         {
+            Ok(Some(FedInboxItem::Observe { .. })) => {}
             Ok(Some(FedInboxItem::Attachment {
                 query,
                 item_id,
@@ -7566,10 +7664,24 @@ pub(crate) fn spawn_control_worker(fs: Arc<FedState>, peer: String) -> ControlWo
     let legacy = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let legacy_task = legacy.clone();
     let task = tokio::spawn(async move {
+        let read_slots = crate::observe_fed::read_slots(&fs);
         loop {
             let peers = fs.current_peers();
-            match get_federated_inbox_mode(&fs, &peers, &peer, 30, Some(true)).await {
-                Ok(Some(item)) => {
+            let advertise = peers.reverse_observe.leaf_enabled;
+            match get_federated_inbox_witnessed(&fs, &peers, &peer, 30, Some(true), advertise).await
+            {
+                Ok((Some(FedInboxItem::Observe { request }), Some(witness))) => {
+                    crate::observe_relay::spawn_answer(
+                        &fs,
+                        &peer,
+                        peers,
+                        witness,
+                        request,
+                        &read_slots,
+                    )
+                    .await;
+                }
+                Ok((Some(item), _)) => {
                     if matches!(&item, FedInboxItem::Message(_)) {
                         legacy_task.store(true, Ordering::Relaxed);
                         tracing::debug!(peer=%peer,"peer returned a message to control-only inbox; use legacy inbox");
@@ -7577,7 +7689,7 @@ pub(crate) fn spawn_control_worker(fs: Arc<FedState>, peer: String) -> ControlWo
                     }
                     spawn_control_answer(&fs, &peer, item);
                 }
-                Ok(None) => {}
+                Ok((None, _)) => {}
                 Err(AppError::BadRequest(_)) => {
                     legacy_task.store(true, Ordering::Relaxed);
                     return;
@@ -7614,7 +7726,7 @@ pub(crate) fn spawn_control_answer(fs: &Arc<FedState>, peer: &str, item: FedInbo
                 answer_list_query(&fs, &peer, &query, v.unwrap_or(1) >= 2).await;
             });
         }
-        FedInboxItem::Message(_) => {}
+        FedInboxItem::Observe { .. } | FedInboxItem::Message(_) => {}
     }
 }
 

@@ -904,6 +904,7 @@ pub async fn run_leaf_inbox_task(
         )
         .await
         {
+            Ok(Some(crate::fed::FedInboxItem::Observe { .. })) => {}
             Ok(Some(crate::fed::FedInboxItem::Attachment {
                 query,
                 item_id,
