@@ -540,3 +540,8 @@ required-features = ["daemon"]
 name = "gate_dtxj_collector"
 path = "tests/gate_dtxj_collector.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "gate_dtxj_unknown_wire"
+path = "tests/gate_dtxj_unknown_wire.rs"
+required-features = ["daemon"]
