@@ -2756,6 +2756,7 @@ pub struct AuthenticatedPeer {
     pub name: String,
     pub pin: String,
     pub uri: Option<String>,
+    pub certificate_has_uri: bool,
     /// The user of the certificate the peer presented (A16), empty when it names none, so
     /// that no listing entry matches it (P-3).
     pub user: String,
@@ -4407,7 +4408,7 @@ async fn fed_get_inbox_handler(
             for offset in 0..3 {
                 match (turn + offset) % 3 {
                     0 if query.control == Some(true) && query.observe_relay == Some(1) => {
-                        if let Some(item) = crate::observe_relay::next_for(&fed_state, &peer.name) {
+                        if let Some(item) = crate::observe_relay::next_for(&fed_state, &peer) {
                             return Ok(Some(item));
                         }
                     }
@@ -5376,7 +5377,7 @@ async fn get_federated_inbox_witnessed(
             .map_err(|e| map_tls_connect_error(peer_name, e))?;
 
         let witness = if advertise {
-            Some(crate::observe_relay::PollWitness::new(
+            crate::observe_relay::PollWitness::new(
                 remote_ip,
                 tls_stream
                     .get_ref()
@@ -5384,7 +5385,9 @@ async fn get_federated_inbox_witnessed(
                     .peer_certificates()
                     .and_then(|certs| certs.first())
                     .map(|cert| cert.as_ref()),
-            )?)
+                peer,
+            )
+            .ok()
         } else {
             None
         };
@@ -5460,6 +5463,7 @@ async fn get_federated_inbox_witnessed(
                 if closed.kind != "observe"
                     || closed.request != *request
                     || !advertise
+                    || witness.is_none()
                     || body_bytes.len() > 8192
                     || !request.wire_valid()
                 {
@@ -6500,6 +6504,10 @@ pub async fn run_fed_listener_with_acceptor(
     acceptor: tokio_rustls::TlsAcceptor,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let router = build_fed_router(fed_state.clone());
+    #[cfg(any(test, feature = "test-hooks"))]
+    crate::observe_relay::test_hooks::controls(&fed_state)
+        .listeners
+        .fetch_add(1, Ordering::Relaxed);
     let conn_semaphore = Arc::new(tokio::sync::Semaphore::new(128));
     let unauth_ip_counts: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
     let peer_conn_counts: Arc<Mutex<HashMap<String, usize>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -6626,6 +6634,8 @@ pub async fn run_fed_listener_with_acceptor(
                 name: peer_config.name.clone(),
                 pin: client_pin,
                 uri: verified_uri,
+                certificate_has_uri: extract_uri_sans(leaf.as_ref())
+                    .map_or(true, |uris| !uris.is_empty()),
                 user: crate::node::user_from_cert(leaf.as_ref()).unwrap_or_default(),
                 remote_ip: remote_addr.ip(),
             });
@@ -6660,6 +6670,13 @@ pub async fn run_fed_listener_with_acceptor(
                         {
                             return Ok::<_, std::convert::Infallible>(err.into_response());
                         }
+                        #[cfg(any(test, feature = "test-hooks"))]
+                        crate::observe_relay::test_hooks::record_request(
+                            &fed_state_req,
+                            req.method().as_str(),
+                            req.uri().path(),
+                            req.uri().query(),
+                        );
                         let mut req = req.map(axum::body::Body::new);
                         req.extensions_mut().insert(peer_info);
                         req.extensions_mut().insert(tls_admission);

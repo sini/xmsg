@@ -353,3 +353,27 @@ both grant and request opt-in. Reconnect after peer-policy reload.
 See [fleet observer concepts](/concepts/fleet-observer/) and the
 [grant and request example](/operations/fleet-observer/). The collector, owner
 authentication and web view remain planned and unimplemented.
+
+
+## Reverse observation controls (planned)
+
+Reverse metadata export is **planned, not yet released**. It reuses the leaf's
+outbound control-only HTTP polls. A capable leaf advertises `observe_relay=1`
+on each poll; the hub can send an Observe control only to that currently waiting
+poll. A concurrent legacy poll can receive only its existing List/Attachment
+controls. The capability disappears when its poll completes or disconnects.
+The leaf answers with a fresh outbound mTLS POST; no leaf listener, consuming
+message poll, custody row, ACK, or message wake is introduced.
+
+The top-level `reverse_observe` peers block has independent `hub_enabled` and
+`leaf_enabled` booleans, both defaulting to `false`, and an empty-by-default
+`routes` list. Each route has exactly `hub`, `leaf`, and `collector`, containing
+literal full SPIFFE identities or lowercase `sha256:` pins. Unknown, duplicate,
+and wildcard route configuration is refused. A route does not grant `observe`:
+the end collector needs that right independently at both hub and leaf.
+
+The hub attests the actual authenticated collector, and the leaf checks that
+assertion against its enabled exact route and its own current collector policy.
+The hub is an owner-administered trusted origin attestor, not independent leaf
+proof. See [the trust and IP limits](/concepts/fleet-observer/) and
+[the hub/leaf configuration example](/operations/fleet-observer/#reverse-observation-through-a-trusted-hub-planned).

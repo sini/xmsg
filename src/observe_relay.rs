@@ -230,6 +230,24 @@ fn certificate_identity(cert: &[u8]) -> Result<String, Failure> {
 fn own_identity(fs: &FedState) -> Result<String, Failure> {
     certificate_identity(fs.cert_chain().first().ok_or(Failure::Denied)?.as_ref())
 }
+fn certificate_matches(cert: &[u8], identity: &str) -> bool {
+    if let Some(pin) = identity.strip_prefix("sha256:") {
+        crate::fed::spki_sha256_from_der(cert).is_ok_and(|actual| actual == pin)
+    } else {
+        certificate_identity(cert).is_ok_and(|actual| actual == identity)
+    }
+}
+fn own_matches(fs: &FedState, identity: &str) -> bool {
+    fs.cert_chain()
+        .first()
+        .is_some_and(|cert| certificate_matches(cert.as_ref(), identity))
+}
+fn unsupported_leaf(fs: &FedState, identity: &str) -> bool {
+    identity.starts_with("sha256:")
+        && fs.cert_chain().first().is_some_and(|cert| {
+            crate::fed::extract_uri_sans(cert.as_ref()).map_or(true, |uris| !uris.is_empty())
+        })
+}
 fn peer_identity(peer: &AuthenticatedPeer) -> String {
     peer.uri
         .clone()
@@ -356,7 +374,7 @@ impl RelayState {
             },
             true,
         )?;
-        if own_identity(&self.fed)? != c.hub || peer_identity(&waiter.collector) != c.collector {
+        if !own_matches(&self.fed, &c.hub) || peer_identity(&waiter.collector) != c.collector {
             return Err(Failure::Denied);
         }
         let config = peers
@@ -429,14 +447,13 @@ async fn relay_inner(
     if !Arc::ptr_eq(&peers, &tls.peers) || tls.config.name != collector.name {
         return Err(Failure::Denied);
     }
-    let hub = own_identity(&state.fed)?;
     let collector_identity = peer_identity(&collector);
     let route = peers
         .reverse_observe
         .routes
         .iter()
         .find(|r| {
-            r.hub == hub
+            own_matches(&state.fed, &r.hub)
                 && r.collector == collector_identity
                 && identity_node(&r.leaf).as_deref() == Some(&leaf)
         })
@@ -445,7 +462,7 @@ async fn relay_inner(
     let leaf_config = config_for_identity(&peers, &route.leaf).ok_or(Failure::Denied)?;
     let control = Control {
         id: ulid::Ulid::new().to_string(),
-        hub,
+        hub: route.hub,
         leaf: route.leaf,
         collector: collector_identity,
         read: kind,
@@ -527,7 +544,7 @@ async fn relay_inner(
         let config = state.authorize(&binding)?;
         validate_dto(&body, &control, &config)?;
     }
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/json")
         .body(axum::body::Body::new(HeldBody {
@@ -535,7 +552,7 @@ async fn relay_inner(
             _reservations: reservations,
             _forget: forget,
         }))
-        .map_err(|_| Failure::Invalid)?)
+        .map_err(|_| Failure::Invalid)
 }
 struct Reservations {
     _slot: OwnedSemaphorePermit,
@@ -589,14 +606,19 @@ pub(crate) async fn before_dispatch(fs: &Arc<FedState>) {
     #[cfg(not(any(test, feature = "test-hooks")))]
     let _ = fs;
 }
-pub(crate) fn next_for(fs: &Arc<FedState>, peer: &str) -> Option<FedInboxItem> {
+pub(crate) fn next_for(fs: &Arc<FedState>, peer: &AuthenticatedPeer) -> Option<FedInboxItem> {
     let state = shared(fs);
     let mut queue = state.queue.lock().unwrap();
     let mut ids = queue.waiting.keys().cloned().collect::<Vec<_>>();
     ids.sort();
     for id in ids {
         let w = queue.waiting.get_mut(&id)?;
-        if w.expected_leaf != peer || w.dispatched {
+        if w.expected_leaf != peer.name || w.dispatched {
+            continue;
+        }
+        if w.control.leaf.starts_with("sha256:") && peer.certificate_has_uri {
+            let w = queue.waiting.remove(&id)?;
+            let _ = w.tx.send(Err(Failure::Unsupported));
             continue;
         }
         let valid = state.authorize(w).map(|_| ()).and_then(|()| {
@@ -667,14 +689,12 @@ async fn answer_inner(state: Arc<RelayState>, id: String, request: Request) -> R
     } else {
         Err(Failure::parse(status)?)
     };
-    if request.headers().get("content-length").is_some_and(|v| {
+    let invalid_length = request.headers().get("content-length").is_some_and(|v| {
         v.to_str()
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .is_none_or(|n| n > MAX_BYTES)
-    }) {
-        return Err(Failure::Invalid);
-    }
+    });
     let (deadline, _reservations) = {
         let mut queue = state.queue.lock().unwrap();
         let w = queue.waiting.get_mut(&id).ok_or(Failure::Invalid)?;
@@ -691,13 +711,17 @@ async fn answer_inner(state: Arc<RelayState>, id: String, request: Request) -> R
         w.answering = true;
         (w.deadline, w.reservations.clone())
     };
-    let body = tokio::time::timeout_at(
-        deadline,
-        axum::body::to_bytes(request.into_body(), MAX_BYTES),
-    )
-    .await
-    .map_err(|_| Failure::Unreachable)
-    .and_then(|result| result.map_err(|_| Failure::Invalid));
+    let body = if invalid_length {
+        Err(Failure::Invalid)
+    } else {
+        tokio::time::timeout_at(
+            deadline,
+            axum::body::to_bytes(request.into_body(), MAX_BYTES),
+        )
+        .await
+        .map_err(|_| Failure::Unreachable)
+        .and_then(|result| result.map_err(|_| Failure::Invalid))
+    };
     let mut queue = state.queue.lock().unwrap();
     let w = queue.waiting.remove(&id).ok_or(Failure::Invalid)?;
     let result = (|| {
@@ -783,10 +807,15 @@ pub mod test_hooks {
         pub before_post: crate::observe_fed::test_hooks::Gate,
         pub before_send: crate::observe_fed::test_hooks::Gate,
         pub clock_offset_ms: std::sync::atomic::AtomicU64,
+        pub listeners: std::sync::atomic::AtomicUsize,
+        pub control_polls: std::sync::atomic::AtomicUsize,
+        pub custody_polls: std::sync::atomic::AtomicUsize,
+        pub acks: std::sync::atomic::AtomicUsize,
+        pub delivery_posts: std::sync::atomic::AtomicUsize,
     }
     pub fn controls(fs: &Arc<FedState>) -> Arc<Controls> {
-        static CONTROLS: OnceLock<Mutex<HashMap<usize, (Weak<FedState>, Weak<Controls>)>>> =
-            OnceLock::new();
+        type Registry = HashMap<usize, (Weak<FedState>, Weak<Controls>)>;
+        static CONTROLS: OnceLock<Mutex<Registry>> = OnceLock::new();
         let mut all = CONTROLS.get_or_init(Mutex::default).lock().unwrap();
         all.retain(|_, (f, c)| f.strong_count() > 0 && c.strong_count() > 0);
         let key = Arc::as_ptr(fs) as usize;
@@ -805,6 +834,23 @@ pub mod test_hooks {
             _worker: crate::fed::spawn_control_worker(fs, peer),
         }
     }
+    pub fn record_request(fs: &Arc<FedState>, method: &str, route: &str, query: Option<&str>) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let c = controls(fs);
+        if method == "GET" && route == "/fed/v2/inbox" {
+            if query.is_some_and(|q| q.split('&').any(|p| p == "control=true")) {
+                c.control_polls.fetch_add(1, Relaxed);
+            } else {
+                c.custody_polls.fetch_add(1, Relaxed);
+            }
+        }
+        if method == "POST" && route.starts_with("/fed/v2/inbox/") && route.ends_with("/ack") {
+            c.acks.fetch_add(1, Relaxed);
+        }
+        if method == "POST" && matches!(route, "/fed/v2/messages" | "/fed/v2/replies") {
+            c.delivery_posts.fetch_add(1, Relaxed);
+        }
+    }
     pub fn pending(fs: &Arc<FedState>) -> usize {
         shared(fs).queue.lock().unwrap().waiting.len()
     }
@@ -815,14 +861,23 @@ pub(crate) struct PollWitness {
     identity: String,
 }
 impl PollWitness {
-    pub(crate) fn new(ip: std::net::IpAddr, cert: Option<&[u8]>) -> Result<Self, AppError> {
-        Ok(Self {
-            ip,
-            identity: certificate_identity(
-                cert.ok_or_else(|| AppError::Denied("observation transport denied".into()))?,
-            )
-            .map_err(|_| AppError::Denied("observation transport denied".into()))?,
-        })
+    pub(crate) fn new(
+        ip: std::net::IpAddr,
+        cert: Option<&[u8]>,
+        config: &PeerConfig,
+    ) -> Result<Self, AppError> {
+        let cert = cert.ok_or_else(|| AppError::Denied("observation transport denied".into()))?;
+        let identity = if let Some(pin) = &config.pin {
+            let identity = format!("sha256:{}", crate::fed::normalize_pin(pin));
+            if !certificate_matches(cert, &identity) {
+                return Err(AppError::Denied("observation transport denied".into()));
+            }
+            identity
+        } else {
+            certificate_identity(cert)
+                .map_err(|_| AppError::Denied("observation transport denied".into()))?
+        };
+        Ok(Self { ip, identity })
     }
 }
 impl Control {
@@ -844,6 +899,9 @@ fn leaf_admit(
     control: &Control,
 ) -> Result<LeafAdmission, Failure> {
     control.validate()?;
+    if unsupported_leaf(fs, &control.leaf) {
+        return Err(Failure::Unsupported);
+    }
     if !Arc::ptr_eq(&peers, &fs.current_peers())
         || witness.identity != control.hub
         || own_identity(fs)? != control.leaf
@@ -1083,7 +1141,7 @@ async fn post_answer(
         .peer_certificates()
         .and_then(|c| c.first())
         .ok_or(Failure::Denied)?;
-    if certificate_identity(cert.as_ref())? != control.hub {
+    if !certificate_matches(cert.as_ref(), &control.hub) {
         return Err(Failure::Denied);
     }
     let (mut sender, connection) =

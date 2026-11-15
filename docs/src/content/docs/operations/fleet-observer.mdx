@@ -91,6 +91,134 @@ On timeout or unavailability, keep any historical data visibly stale rather than
 reporting a successful empty history. Reconnect after reload and begin a new
 backfill when the policy scope changes.
 
+## Reverse observation through a trusted hub (planned)
+
+This leaf/hub transport is **planned, not yet released**. Collector reverse-source
+configuration, origin storage, and the `via hub` view are a separate planned
+extension. Use only a hub administered by the same owner: the hub is trusted for
+confidentiality and collector-origin attestation and can fabricate observations.
+No independent leaf signature is provided.
+
+The hub's wrapped peers file needs both existing peer trust and a reverse route:
+
+```json
+{
+  "peers": {
+    "leaf.leaves": {
+      "address": "127.0.0.1:1",
+      "ca": "/etc/xmsg/fleet-ca.pem",
+      "identities": ["spiffe://fleet.example/ns/leaves/sa/leaf"],
+      "allow": ["list"],
+      "leaf": true
+    },
+    "owner.collector": {
+      "address": "collector.example.org:7788",
+      "ca": "/etc/xmsg/fleet-ca.pem",
+      "identities": ["spiffe://fleet.example/host/collector/user/owner"],
+      "allow": ["observe"],
+      "observe_labels": false
+    }
+  },
+  "reverse_observe": {
+    "hub_enabled": true,
+    "routes": [{
+      "hub": "spiffe://fleet.example/host/hub/user/owner",
+      "leaf": "spiffe://fleet.example/ns/leaves/sa/leaf",
+      "collector": "spiffe://fleet.example/host/collector/user/owner"
+    }]
+  }
+}
+```
+
+The placeholder leaf address is not dialed for this transport. The leaf's file
+configures its outbound hub connection and grants the end collector separately:
+
+```json
+{
+  "peers": {
+    "owner.hub": {
+      "address": "hub.example.org:7788",
+      "ca": "/etc/xmsg/fleet-ca.pem",
+      "identities": ["spiffe://fleet.example/host/hub/user/owner"],
+      "allow": ["list"],
+      "dial": "outbound"
+    },
+    "owner.collector": {
+      "address": "collector.example.org:7788",
+      "ca": "/etc/xmsg/fleet-ca.pem",
+      "identities": ["spiffe://fleet.example/host/collector/user/owner"],
+      "allow": ["observe"],
+      "observe_labels": false
+    }
+  },
+  "reverse_observe": {
+    "leaf_enabled": true,
+    "routes": [{
+      "hub": "spiffe://fleet.example/host/hub/user/owner",
+      "leaf": "spiffe://fleet.example/ns/leaves/sa/leaf",
+      "collector": "spiffe://fleet.example/host/collector/user/owner"
+    }]
+  }
+}
+```
+
+Both enable flags default to `false`, and routes default empty. Route fields are
+closed and reject duplicates and wildcards. A pinned identity uses exactly
+`sha256:` followed by 64 lowercase hexadecimal digits. Full URI authority is
+significant even when two URIs derive the same display node name.
+In v1, a leaf configured by pin whose certificate carries any URI SAN is explicitly
+`unsupported`; use CA plus a literal URI, or a pinned certificate without URI SANs.
+
+Removing `observe` from either collector entry denies observation even when
+`list`, `leaf`, and the route remain enabled. The leaf's collector `targets`
+select the projected metadata; the hub's collector `targets` independently
+check every returned endpoint. The hub refuses the whole DTO on exclusion
+and never rewrites it. Labels require `labels=true` plus `observe_labels: true`
+on both collector grants. Reconnect after policy reload; in-flight old-policy
+reads are discarded before dispatch, emission, or forwarding.
+
+A collector `from` restriction on the hub checks its actual connected IP. A hub
+`from` restriction on the leaf checks the hub IP witnessed during the outbound
+TLS connection. Do not configure collector `from` on the leaf for reverse export:
+the collector IP is unwitnessed there and such a grant is refused. Forwarded
+origin/IP headers cannot replace either TLS identity or IP witness.
+
+A collector service using its configured mTLS identity may call the hub directly:
+
+```http
+GET /fed/v2/observe/relay/leaf.leaves/events?v=1&after=0&limit=100 HTTP/1.1
+Host: hub.example.org:7788
+
+GET /fed/v2/observe/relay/leaf.leaves/snapshot?v=1&labels=false HTTP/1.1
+Host: hub.example.org:7788
+
+```
+
+Queries have the same closed events/snapshot parameters as direct export and
+no request body. No browser bearer or human assertion crosses this path.
+The leaf advertises capability on each current control-only poll, receives a
+bounded request ID and hub-attested collector identity, then POSTs exact raw DTO
+bytes to `/fed/v2/observe/relay/answer/{id}` with `xmsg-observe-kind` and
+`xmsg-observe-status` routing headers. Answers are bound to the expected TLS leaf,
+read kind, and one live request, and are consumed once.
+
+The hub permits eight waiting reads, one per leaf/collector pair, and at most
+4 MiB of transient buffers. Queries are at most 1024 bytes, control envelopes
+8 KiB, IDs 64 ASCII bytes, routing headers 1 KiB, and DTO bodies 256 KiB. Direct
+and reverse leaf reads share the same eight-read limit and rate budget. Observe,
+List, and Attachment controls are scheduled fairly; observation never reserves
+message-delivery slots. Request deadlines are five seconds; nothing is spooled
+to disk or retried as a custody message.
+
+Fixed failures distinguish `busy` (429, retry after two seconds), `unsupported`
+(501, explicit leaf refusal), `unreachable` (503, no current capable poll or
+expired budget), `denied` (403), and `invalid` (400). A completed advertising
+poll does not authorize a later legacy poll. An offline leaf is not evidence
+of unsupported software, empty traffic, or healthy inactivity. Cancellation
+and timeout discard pending state. A saturated empty-refusal lane can prevent
+a Busy response from arriving; the caller then sees the same truthful deadline
+failure. No direct, custody, or alternate-hub fallback is attempted.
+
 ## Configure the collector
 
 The collector starts separately from `xmsg serve`. It uses its own metadata

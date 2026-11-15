@@ -22,9 +22,31 @@ flowchart LR
   C -->|"Every-request owner introspection"| B["Escaped owner view"]
 ```
 
-Each node must be directly reachable on its existing federation listener.
-Outbound-only nodes and leaves are unsupported: observation does not open an
-inbound listener on them or use custody polling to reach them.
+Direct export uses the node's existing federation listener. **Reverse observation
+through an owner-administered hub is planned, not yet released.** An outbound-only
+leaf can answer metadata reads over its existing control-only polls, without an
+inbound listener, message custody, ACK, or agent wake. This transport extension
+does not yet add reverse sources to the collector configuration or view.
+
+The hub and leaf each opt in through independent default-off switches and the
+same exact `(hub, leaf, collector)` route. Routes name full literal SPIFFE URIs or
+`sha256:` pins; display node names and wildcard patterns are insufficient. Both
+nodes must separately grant the end collector `observe`. Existing `list`, `leaf`,
+`forward`, and outbound transport configuration never imply that grant.
+
+The hub authenticates the collector with mTLS and attests its actual identity to
+the leaf. The leaf authenticates the hub and applies its own current collector
+grant, endpoint targets, and label opt-ins. The hub also checks its collector
+policy and refuses an entire excluded response; it forwards accepted DTO bytes
+unchanged. Caller origin headers and browser bearer tokens are not forwarded.
+The hub is trusted to inspect, withhold, or fabricate its attested metadata;
+this is not an independently signed statement from the leaf. Cross-owner hubs
+are unsupported. See the [planned route example](/operations/fleet-observer/#reverse-observation-through-a-trusted-hub-planned).
+
+Source-IP restrictions use witnessed connections: the hub checks the collector's
+actual IP, and the leaf checks the hub's actual IP. A collector `from` condition
+on the leaf refuses reverse reads because the leaf cannot witness that IP.
+Forwarded IP headers do not supply the missing witness.
 
 ## An individual grant
 

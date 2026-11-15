@@ -92,6 +92,7 @@ impl PostAuthFixture {
             name: config.name.clone(),
             pin: config.pin.clone().unwrap(),
             uri: None,
+            certificate_has_uri: false,
             user: "fixture".into(),
             remote_ip: "127.0.0.1".parse().unwrap(),
         });
