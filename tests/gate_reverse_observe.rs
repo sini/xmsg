@@ -19,6 +19,76 @@ fn reverse_routes_are_explicit_closed_and_exact() {
     }
 }
 
+fn literal_route_config() -> serde_json::Value {
+    serde_json::json!({"peers":{},"reverse_observe":{"routes":[{"hub":"spiffe://test/host/hub/user/owner","leaf":"spiffe://test/ns/leaves/sa/leaf","collector":"spiffe://test/ns/observers/sa/collector"}]}})
+}
+#[test]
+fn reverse_config_absent_fields_default_independently_off_and_empty() {
+    let empty = PeersMap::load_from_json(r#"{"peers":{}}"#).unwrap();
+    assert!(!empty.reverse_observe.hub_enabled);
+    assert!(!empty.reverse_observe.leaf_enabled);
+    assert!(empty.reverse_observe.routes.is_empty());
+    let base = literal_route_config();
+    let peers = PeersMap::load_from_json(&base.to_string()).unwrap();
+    assert!(
+        !peers.reverse_observe.hub_enabled,
+        "missing hub flag defaults off"
+    );
+    assert!(
+        !peers.reverse_observe.leaf_enabled,
+        "missing leaf flag defaults off"
+    );
+    assert_eq!(
+        peers.reverse_observe.routes.len(),
+        1,
+        "matching explicit route survives default-off flags"
+    );
+    let mut leaf_only = base.clone();
+    leaf_only["reverse_observe"]["leaf_enabled"] = serde_json::json!(true);
+    let peers = PeersMap::load_from_json(&leaf_only.to_string()).unwrap();
+    assert!(peers.reverse_observe.leaf_enabled);
+    assert!(
+        !peers.reverse_observe.hub_enabled,
+        "leaf opt-in never supplies absent hub opt-in"
+    );
+    let mut hub_only = base;
+    hub_only["reverse_observe"]["hub_enabled"] = serde_json::json!(true);
+    let peers = PeersMap::load_from_json(&hub_only.to_string()).unwrap();
+    assert!(peers.reverse_observe.hub_enabled);
+    assert!(
+        !peers.reverse_observe.leaf_enabled,
+        "hub opt-in never supplies absent leaf opt-in"
+    );
+    let peers = PeersMap::load_from_json(
+        r#"{"peers":{},"reverse_observe":{"hub_enabled":true,"leaf_enabled":true}}"#,
+    )
+    .unwrap();
+    assert!(peers.reverse_observe.hub_enabled && peers.reverse_observe.leaf_enabled);
+    assert!(
+        peers.reverse_observe.routes.is_empty(),
+        "both opt-ins never supply absent routes"
+    );
+}
+#[test]
+fn each_route_identity_refuses_an_otherwise_valid_spiffe_wildcard() {
+    for (field, wildcard) in [
+        ("hub", "spiffe://test/host/*/user/owner"),
+        ("leaf", "spiffe://test/ns/*/sa/leaf"),
+        ("collector", "spiffe://test/ns/observers/sa/*"),
+    ] {
+        let mut config = literal_route_config();
+        assert!(
+            PeersMap::load_from_json(&config.to_string()).is_ok(),
+            "literal {field} positive"
+        );
+        config["reverse_observe"]["routes"][0][field] = serde_json::json!(wildcard);
+        assert!(
+            PeersMap::load_from_json(&config.to_string()).is_err(),
+            "wildcard {field} identity must refuse independently of URI grammar"
+        );
+    }
+}
+
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use serde_json::{json, Value};
@@ -1119,6 +1189,7 @@ async fn slow_busy_answer_does_not_block_list_or_attachment_controls() {
                 .await
         };
         let controls = async {
+            assert_shared_read_bound(&reads).await;
             gates.before_send.wait_for(1).await;
             let list = xmsg::fed::list_peer(&f.state, &f.leaf.node);
             let attachment = xmsg::fed::fetch_attachment_chunk(
@@ -1157,6 +1228,30 @@ async fn slow_busy_answer_does_not_block_list_or_attachment_controls() {
     })
     .await
     .unwrap();
+}
+
+async fn assert_shared_read_bound(reads: &xmsg::observe_fed::test_hooks::Controls) {
+    let decided = tokio::time::timeout(Duration::from_secs(2), async {
+        while reads
+            .read_decisions
+            .load(std::sync::atomic::Ordering::Acquire)
+            < 9
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        decided.is_ok(),
+        "ninth shared-budget permit decision must complete without waiting for projection or POST"
+    );
+    assert_eq!(
+        reads
+            .read_admissions
+            .load(std::sync::atomic::Ordering::Relaxed),
+        8,
+        "full shared direct+relay budget must not admit a ninth metadata read"
+    );
 }
 
 async fn wait_pending(fs: &Arc<FedState>, expected: usize) {
@@ -1488,53 +1583,59 @@ async fn pinned_leaf_with_uri_san_is_explicitly_unsupported_but_ordinary_control
     assert_eq!(status.status, "ok", "ordinary pinned control is unchanged");
 }
 
+async fn poll_control_body(
+    f: &mut RelayFixture,
+    body: Vec<u8>,
+    chunked: bool,
+) -> Result<Option<xmsg::fed::FedInboxItem>, xmsg::error::AppError> {
+    f.task.abort();
+    let _ = (&mut f.task).await;
+    let listener = tokio::net::TcpListener::bind(f.address).await.unwrap();
+    let acceptor = xmsg::fed::make_tls_acceptor(
+        &f.state.cert_chain(),
+        &f.state.key_der(),
+        f.state.current_peers(),
+    )
+    .unwrap();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let tls = acceptor.accept(tcp).await.unwrap();
+        let service =
+            hyper::service::service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
+                assert_eq!(request.uri().path(), "/fed/v2/inbox");
+                assert!(
+                    request
+                        .uri()
+                        .query()
+                        .unwrap()
+                        .contains("control=true&observe_relay=1"),
+                    "wire poll advertises current capability"
+                );
+                let mut response = hyper::Response::builder().status(200);
+                if chunked {
+                    response = response.header("transfer-encoding", "chunked");
+                }
+                let response = response.body(Full::new(Bytes::from(body.clone()))).unwrap();
+                async move { Ok::<_, std::convert::Infallible>(response) }
+            });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .keep_alive(false)
+            .serve_connection(hyper_util::rt::TokioIo::new(tls), service)
+            .await;
+    });
+    let result = xmsg::observe_relay::test_hooks::poll(&f.leaf_state, &f.hub.node, true).await;
+    server.await.unwrap();
+    result
+}
 #[tokio::test]
 async fn control_envelope_declared_and_streaming_bounds_are_independent_of_json_shape() {
     for chunked in [false, true] {
         for size in [8192, 8193] {
             let mut f = RelayFixture::new().await;
-            f.task.abort();
-            let _ = (&mut f.task).await;
-            let listener = tokio::net::TcpListener::bind(f.address).await.unwrap();
-            let acceptor = xmsg::fed::make_tls_acceptor(
-                &f.state.cert_chain(),
-                &f.state.key_der(),
-                f.state.current_peers(),
-            )
-            .unwrap();
             let mut body=serde_json::to_vec(&json!({"kind":"observe","request":{"id":"opaque123","hub":f.hub.full(),"leaf":f.leaf.full(),"collector":f.collector.full(),"read":"snapshot","query":"","remaining_ms":5000}})).unwrap();
             body.resize(size, b' ');
-            let server = tokio::spawn(async move {
-                let (tcp, _) = listener.accept().await.unwrap();
-                let tls = acceptor.accept(tcp).await.unwrap();
-                let service = hyper::service::service_fn(
-                    move |request: hyper::Request<hyper::body::Incoming>| {
-                        assert_eq!(request.uri().path(), "/fed/v2/inbox");
-                        assert!(
-                            request
-                                .uri()
-                                .query()
-                                .unwrap()
-                                .contains("control=true&observe_relay=1"),
-                            "wire poll advertises current capability"
-                        );
-                        let mut response = hyper::Response::builder().status(200);
-                        if chunked {
-                            response = response.header("transfer-encoding", "chunked");
-                        }
-                        let response = response.body(Full::new(Bytes::from(body.clone()))).unwrap();
-                        async move { Ok::<_, std::convert::Infallible>(response) }
-                    },
-                );
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .keep_alive(false)
-                    .serve_connection(hyper_util::rt::TokioIo::new(tls), service)
-                    .await;
-            });
             let metrics = xmsg::observe_relay::test_hooks::controls(&f.leaf_state);
-            let result =
-                xmsg::observe_relay::test_hooks::poll(&f.leaf_state, &f.hub.node, true).await;
-            server.await.unwrap();
+            let result = poll_control_body(&mut f, body, chunked).await;
             if size == 8192 {
                 assert!(
                     matches!(result, Ok(Some(xmsg::fed::FedInboxItem::Observe { .. }))),
@@ -1560,6 +1661,59 @@ async fn control_envelope_declared_and_streaming_bounds_are_independent_of_json_
                 );
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn authenticated_hub_control_id_grammar_refuses_before_leaf_work() {
+    for (id, valid) in [
+        ("a".repeat(64), true),
+        ("a".repeat(65), false),
+        ("é".into(), false),
+        ("abc/def".into(), false),
+        ("../other".into(), false),
+        (String::new(), false),
+    ] {
+        let mut f = RelayFixture::new().await;
+        let mut request = policy_control(&f);
+        request.id = id;
+        let body = serde_json::to_vec(&json!({"kind":"observe","request":request})).unwrap();
+        let metadata = xmsg::observe_fed::test_hooks::controls(&f.leaf_state);
+        let relay = xmsg::observe_relay::test_hooks::controls(&f.leaf_state);
+        let result = poll_control_body(&mut f, body, false).await;
+        if valid {
+            assert!(
+                matches!(result, Ok(Some(xmsg::fed::FedInboxItem::Observe { .. }))),
+                "valid64-ASCII-id matching control passes real authenticated poll parser"
+            );
+        } else {
+            assert!(
+                result.is_err(),
+                "invalid hub control id {:?} refuses before leaf admission",
+                request.id
+            );
+        }
+        assert_eq!(
+            metadata
+                .snapshot_candidates
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "control parser refuses without metadata read"
+        );
+        assert_eq!(
+            relay
+                .controls_received
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "invalid control never enters answer scheduler"
+        );
+        assert_eq!(
+            relay
+                .post_entries
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "invalid control never starts answer POST"
+        );
     }
 }
 
@@ -1677,16 +1831,19 @@ async fn relay_reads_fill_the_same_leaf_budget_seen_by_direct_export() {
         .expect("sequential TLS admissions reach shared-budget read gate");
     }
     reads.before_read.wait_for(8).await;
-    let response = request_to(
-        address,
-        &f.leaf,
-        &f.collector,
-        "GET",
-        "/fed/v2/observe/snapshot",
-        vec![],
-        &[],
-    )
-    .await;
+    let response = async {
+        request_to(
+            address,
+            &f.leaf,
+            &f.collector,
+            "GET",
+            "/fed/v2/observe/snapshot",
+            vec![],
+            &[],
+        )
+        .await
+    };
+    let (response, ()) = tokio::join!(response, assert_shared_read_bound(&reads));
     reads.before_read.release();
     assert_eq!(
         response.0, 429,
@@ -1783,8 +1940,7 @@ fn ca_identity(
         ca_identity: Some((uri.into(), bundle.to_owned())),
     }
 }
-#[tokio::test]
-async fn literal_ca_uri_routes_export_and_same_node_foreign_authority_refuses() {
+async fn uri_fixture() -> (tempfile::TempDir, RelayFixture) {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let directory = tempfile::tempdir().unwrap();
     let key = rcgen::KeyPair::generate().unwrap();
@@ -1806,6 +1962,11 @@ async fn literal_ca_uri_routes_export_and_same_node_foreign_authority_refuses() 
         &issuer,
     );
     let f = RelayFixture::with_identities(hub, leaf, collector).await;
+    (directory, f)
+}
+#[tokio::test]
+async fn literal_ca_uri_routes_export_and_same_node_foreign_authority_refuses() {
+    let (_directory, f) = uri_fixture().await;
     let worker =
         xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
     for kind in ["events", "snapshot"] {
@@ -2501,4 +2662,225 @@ async fn leaf_default_off_refuses_current_direct_admission_before_any_metadata_r
         wait_pending(&f.state, 0).await;
         wait_reservations(&f.state, (0, 0)).await;
     }
+}
+
+fn policy_control(f: &RelayFixture) -> xmsg::observe_relay::Control {
+    xmsg::observe_relay::Control {
+        id: "policy-probe".into(),
+        hub: f.hub.full(),
+        leaf: f.leaf.full(),
+        collector: f.collector.full(),
+        read: xmsg::observe_relay::Kind::Snapshot,
+        query: "".into(),
+        remaining_ms: 5000,
+    }
+}
+#[tokio::test]
+async fn leaf_request_label_opt_in_is_applied_before_any_hub_filter() {
+    let f = RelayFixture::new().await;
+    reload(&f.leaf_state, |config| {
+        config["peers"][&f.collector.node]["observe_labels"] = json!(true)
+    });
+    let mut control = policy_control(&f);
+    for (query, labels) in [("", false), ("labels=false", false), ("labels=true", true)] {
+        control.query = query.into();
+        let bytes = xmsg::observe_relay::test_hooks::project_control(
+            &f.leaf_state,
+            &f.hub.node,
+            &f.hub.cert,
+            "127.0.0.1".parse().unwrap(),
+            &control,
+        )
+        .await
+        .expect("matching production leaf projection succeeds");
+        let dto: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            !dto["endpoints"].as_array().unwrap().is_empty(),
+            "projection probe actually reads planted registration"
+        );
+        assert_eq!(String::from_utf8_lossy(&bytes).contains("PRIVATE_LABEL"),labels,"leaf request-label suppression is measured before a hub can reject or rewrite it query={query}");
+    }
+}
+#[tokio::test]
+async fn leaf_current_admission_binds_full_collector_hub_and_self_before_reads() {
+    for case in [
+        "foreign collector authority",
+        "wrong attested hub",
+        "wrong leaf self",
+        "unknown collector",
+    ] {
+        let (_directory, f) = uri_fixture().await;
+        let reads = xmsg::observe_fed::test_hooks::controls(&f.leaf_state);
+        let mut control = policy_control(&f);
+        let ip = "127.0.0.1".parse().unwrap();
+        assert_eq!(
+            xmsg::observe_relay::test_hooks::admit_control(
+                &f.leaf_state,
+                &f.hub.node,
+                &f.hub.cert,
+                ip,
+                &control
+            ),
+            200,
+            "matching current-snapshot admission positive"
+        );
+        assert!(xmsg::observe_relay::test_hooks::project_control(
+            &f.leaf_state,
+            &f.hub.node,
+            &f.hub.cert,
+            ip,
+            &control
+        )
+        .await
+        .is_ok());
+        assert!(
+            reads
+                .snapshot_candidates
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0,
+            "matching projection proves metadata read counter"
+        );
+        reads
+            .snapshot_candidates
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        reads
+            .read_decisions
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        reads
+            .read_admissions
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        match case {
+            "foreign collector authority" => {
+                control.collector = "spiffe://realm-two/host/collector/user/owner".into()
+            }
+            "wrong attested hub" => control.hub = "spiffe://realm-two/host/hub/user/owner".into(),
+            "wrong leaf self" => control.leaf = "spiffe://realm-one/ns/leaves/sa/another".into(),
+            _ => control.collector = "spiffe://realm-one/host/unconfigured/user/stranger".into(),
+        }
+        reload(&f.leaf_state, |config| {
+            config["reverse_observe"]["routes"] =
+                json!([{"hub":control.hub,"leaf":control.leaf,"collector":control.collector}])
+        });
+        assert_eq!(
+            xmsg::observe_relay::test_hooks::admit_control(
+                &f.leaf_state,
+                &f.hub.node,
+                &f.hub.cert,
+                ip,
+                &control
+            ),
+            403,
+            "current valid route/grant must not erase {case} binding"
+        );
+        assert_eq!(
+            reads
+                .read_decisions
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "refused {case} never reserves a production read"
+        );
+        assert_eq!(
+            reads
+                .snapshot_candidates
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "refused {case} reads no metadata"
+        );
+    }
+}
+async fn hub_forward_generation_change(change: impl FnOnce(&RelayFixture, &mut Value)) {
+    let f = RelayFixture::new().await;
+    reload(&f.state, |config| {
+        config["peers"][&f.collector.node]["observe_labels"] = json!(true)
+    });
+    let gates = xmsg::observe_relay::test_hooks::controls(&f.state);
+    gates.before_forward.arm(1);
+    let caller = async {
+        f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
+            .await
+    };
+    let narrow = async {
+        let request = control(&f).await;
+        assert_eq!(submit(&f, &request, empty_snapshot(&f)).await.0, 200);
+        gates.before_forward.wait_for(1).await;
+        reload(&f.state, |config| change(&f, config));
+        gates.before_forward.release();
+    };
+    let (response, ()) = tokio::join!(caller, narrow);
+    assert_eq!(response.0,403,"original generation must invalidate prepared response even when fresh grant and empty DTO would permit it");
+}
+#[tokio::test]
+async fn hub_route_removal_before_forward_is_enforced_by_original_generation() {
+    hub_forward_generation_change(|_, config| config["reverse_observe"]["routes"] = json!([]))
+        .await;
+}
+#[tokio::test]
+async fn hub_labels_only_change_with_unlabeled_request_invalidates_original_generation() {
+    hub_forward_generation_change(|f, config| {
+        config["peers"][&f.collector.node]["observe_labels"] = json!(false)
+    })
+    .await;
+}
+#[tokio::test]
+async fn authorized_collector_with_spoofed_origin_still_attests_actual_tls_identity() {
+    let f = RelayFixture::new().await;
+    let identities = collectors(&f, 2);
+    let spoof = identities[1].full();
+    for headers in [vec![], vec![("xmsg-origin", spoof.as_str())]] {
+        let caller = async {
+            f.request(&identities[0], "GET", &f.uri("snapshot"), vec![], &headers)
+                .await
+        };
+        let leaf = async {
+            let request = control(&f).await;
+            assert_eq!(
+                request["collector"],
+                identities[0].full(),
+                "origin header cannot substitute another valid authorized identity"
+            );
+            assert_ne!(request["collector"], spoof);
+            assert_eq!(submit(&f, &request, empty_snapshot(&f)).await.0, 200);
+        };
+        let (response, ()) = tokio::join!(caller, leaf);
+        assert_eq!(
+            response.0, 200,
+            "spoofed origin must not falsely refuse an actual authorized collector"
+        );
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_pair_race_refuses_duplicate_with_global_slots_available() {
+    let f = Arc::new(RelayFixture::new().await);
+    let gates = xmsg::observe_relay::test_hooks::controls(&f.state);
+    gates.before_admission.arm(2);
+    let mut callers = Vec::new();
+    for _ in 0..2 {
+        let f = f.clone();
+        callers.push(tokio::spawn(async move {
+            f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
+                .await
+        }));
+    }
+    gates.before_admission.wait_for(2).await;
+    gates.before_admission.release();
+    let mut right = callers.pop().unwrap();
+    let mut left = callers.pop().unwrap();
+    let (response, waiting) = tokio::select! {response=&mut left=>(response.unwrap(),right),response=&mut right=>(response.unwrap(),left)};
+    assert_eq!(
+        response.0, 429,
+        "same-pair duplicate refuses independently of the global eight-slot cap"
+    );
+    assert_eq!(xmsg::observe_relay::test_hooks::pending(&f.state), 1);
+    assert_eq!(
+        xmsg::observe_relay::test_hooks::reservations(&f.state),
+        (1, 512 * 1024),
+        "seven global slots remain available after pair refusal"
+    );
+    let request = control(&f).await;
+    assert_eq!(submit(&f, &request, empty_snapshot(&f)).await.0, 200);
+    assert_eq!(
+        waiting.await.unwrap().0,
+        200,
+        "sole admitted pair still progresses"
+    );
 }

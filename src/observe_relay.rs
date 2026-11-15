@@ -80,7 +80,10 @@ const MAX_QUERY: usize = 1024;
 const MAX_CONTROL: usize = 8192;
 const MAX_HEADERS: usize = 1024;
 const MAX_WAITERS: usize = 8;
-const MAX_BUFFERS: usize = 4 * 1024 * 1024;
+const PER_WAITER_BYTES: usize = 2 * MAX_BYTES;
+const AGGREGATE_BYTES: usize = 4 * 1024 * 1024;
+// Each retained slot covers the bounded incoming and forwarded DTO buffers.
+const _: () = assert!(MAX_WAITERS * PER_WAITER_BYTES <= AGGREGATE_BYTES);
 const BUDGET: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -277,14 +280,9 @@ fn grant(config: &PeerConfig, labels: bool) -> Result<(), Failure> {
         Ok(())
     }
 }
-fn exact_route(peers: &PeersMap, route: &Route, hub: bool) -> Result<(), Failure> {
+fn leaf_route(peers: &PeersMap, route: &Route) -> Result<(), Failure> {
     let config = &peers.reverse_observe;
-    if !(if hub {
-        config.hub_enabled
-    } else {
-        config.leaf_enabled
-    }) || !config.routes.contains(route)
-    {
+    if !config.leaf_enabled || !config.routes.contains(route) {
         Err(Failure::Denied)
     } else {
         Ok(())
@@ -304,7 +302,7 @@ struct Waiter {
     dispatched: bool,
     answering: bool,
     tx: oneshot::Sender<Result<Vec<u8>, Failure>>,
-    reservations: Option<Arc<Reservations>>,
+    reservations: Option<Arc<OwnedSemaphorePermit>>,
 }
 impl std::ops::Deref for Waiter {
     type Target = Binding;
@@ -322,7 +320,8 @@ struct RelayState {
     fed: Arc<FedState>,
     queue: Mutex<Queue>,
     slots: Arc<Semaphore>,
-    buffers: Arc<Semaphore>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    slot_capacity: usize,
     refusals: Arc<Semaphore>,
     posts: Arc<Semaphore>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -336,11 +335,15 @@ fn shared(fs: &Arc<FedState>) -> Arc<RelayState> {
     if let Some(state) = states.get(&key).and_then(Weak::upgrade) {
         return state;
     }
+    let slots = Arc::new(Semaphore::new(MAX_WAITERS));
+    #[cfg(any(test, feature = "test-hooks"))]
+    let slot_capacity = slots.available_permits();
     let state = Arc::new(RelayState {
         fed: fs.clone(),
         queue: Mutex::default(),
-        slots: Arc::new(Semaphore::new(MAX_WAITERS)),
-        buffers: Arc::new(Semaphore::new(MAX_BUFFERS)),
+        slots,
+        #[cfg(any(test, feature = "test-hooks"))]
+        slot_capacity,
         refusals: Arc::new(Semaphore::new(MAX_WAITERS)),
         posts: Arc::new(Semaphore::new(1)),
         #[cfg(any(test, feature = "test-hooks"))]
@@ -367,15 +370,9 @@ impl RelayState {
             return Err(Failure::Denied);
         }
         let c = &waiter.control;
-        exact_route(
-            &peers,
-            &Route {
-                hub: c.hub.clone(),
-                leaf: c.leaf.clone(),
-                collector: c.collector.clone(),
-            },
-            true,
-        )?;
+        if !peers.reverse_observe.hub_enabled {
+            return Err(Failure::Denied);
+        }
         if !own_matches(&self.fed, &c.hub) || peer_identity(&waiter.collector) != c.collector {
             return Err(Failure::Denied);
         }
@@ -502,15 +499,7 @@ async fn relay_inner(
         .clone()
         .try_acquire_owned()
         .map_err(|_| Failure::Busy)?;
-    let buffers = state
-        .buffers
-        .clone()
-        .try_acquire_many_owned((2 * MAX_BYTES) as u32)
-        .map_err(|_| Failure::Busy)?;
-    let reservations = Arc::new(Reservations {
-        _slot: slot,
-        _buffers: buffers,
-    });
+    let reservations = Arc::new(slot);
     let mut waiter = waiter;
     waiter.reservations = Some(reservations.clone());
     {
@@ -556,13 +545,9 @@ async fn relay_inner(
         }))
         .map_err(|_| Failure::Invalid)
 }
-struct Reservations {
-    _slot: OwnedSemaphorePermit,
-    _buffers: OwnedSemaphorePermit,
-}
 struct HeldBody {
     bytes: Option<bytes::Bytes>,
-    _reservations: Arc<Reservations>,
+    _reservations: Arc<OwnedSemaphorePermit>,
     _forget: Forget,
 }
 impl hyper::body::Body for HeldBody {
@@ -823,9 +808,7 @@ fn validate_dto(body: &[u8], control: &Control, config: &PeerConfig) -> Result<(
             }
             if page.endpoints.iter().any(|e| {
                 !scope.allows(&e.id)
-                    || e.label.is_some()
-                        && (!config.observe_labels
-                            || !control.read.labels(&control.query).unwrap_or(false))
+                    || e.label.is_some() && !control.read.labels(&control.query).unwrap_or(false)
             }) {
                 return Err(Failure::Denied);
             }
@@ -986,10 +969,48 @@ pub mod test_hooks {
     }
     pub fn reservations(fs: &Arc<FedState>) -> (usize, usize) {
         let state = shared(fs);
-        (
-            MAX_WAITERS - state.slots.available_permits(),
-            MAX_BUFFERS - state.buffers.available_permits(),
-        )
+        let held = state.slot_capacity - state.slots.available_permits();
+        (held, held * PER_WAITER_BYTES)
+    }
+    fn control_admission(
+        fs: &Arc<FedState>,
+        hub: &str,
+        cert: &[u8],
+        ip: std::net::IpAddr,
+        control: &Control,
+    ) -> Result<LeafAdmission, Failure> {
+        let peers = fs.current_peers();
+        let peer = peers.get(hub).ok_or(Failure::Denied)?;
+        let witness = PollWitness::new(ip, Some(cert), peer).map_err(|_| Failure::Denied)?;
+        leaf_admit(fs, peers, hub, witness, control)
+    }
+    pub fn admit_control(
+        fs: &Arc<FedState>,
+        hub: &str,
+        cert: &[u8],
+        ip: std::net::IpAddr,
+        control: &Control,
+    ) -> u16 {
+        match control_admission(fs, hub, cert, ip, control) {
+            Ok(_) => 200,
+            Err(error) => error.into_response().status().as_u16(),
+        }
+    }
+    pub async fn project_control(
+        fs: &Arc<FedState>,
+        hub: &str,
+        cert: &[u8],
+        ip: std::net::IpAddr,
+        control: &Control,
+    ) -> Result<Vec<u8>, u16> {
+        let admission = control_admission(fs, hub, cert, ip, control)
+            .map_err(|error| error.into_response().status().as_u16())?;
+        let reservation = crate::observe_fed::read_slots(fs).try_acquire_owned();
+        crate::observe_fed::test_hooks::controls(fs).read_decision(reservation.is_ok());
+        let slot = reservation.map_err(|_| 429_u16)?;
+        leaf_read(fs.clone(), Arc::new(admission), control, Arc::new(slot))
+            .await
+            .map_err(|error| error.into_response().status().as_u16())
     }
     pub async fn deliver_control(
         fs: &Arc<FedState>,
@@ -1070,14 +1091,13 @@ fn leaf_admit(
         return Err(Failure::Denied);
     }
     crate::fed::check_peer_source(&transport, &witness.ip).map_err(|_| Failure::Denied)?;
-    exact_route(
+    leaf_route(
         &peers,
         &Route {
             hub: control.hub.clone(),
             leaf: control.leaf.clone(),
             collector: control.collector.clone(),
         },
-        false,
     )?;
     let config = config_for_identity(&peers, &control.collector).ok_or(Failure::Denied)?;
     grant(&config, false)?;
@@ -1106,14 +1126,13 @@ fn leaf_current(
         return Err(Failure::Denied);
     }
     let peers = fs.current_peers();
-    exact_route(
+    leaf_route(
         &peers,
         &Route {
             hub: control.hub.clone(),
             leaf: control.leaf.clone(),
             collector: control.collector.clone(),
         },
-        false,
     )?;
     let transport = peers
         .get_peer_config(&admission.hub)
@@ -1151,9 +1170,10 @@ pub(crate) async fn spawn_answer(
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let deadline = Instant::now() + Duration::from_millis(control.remaining_ms.min(5000));
     let admission = leaf_admit(fs, peers, hub, witness, &control).and_then(|admission| {
-        slots
-            .clone()
-            .try_acquire_owned()
+        let reservation = slots.clone().try_acquire_owned();
+        #[cfg(any(test, feature = "test-hooks"))]
+        crate::observe_fed::test_hooks::controls(fs).read_decision(reservation.is_ok());
+        reservation
             .map(|slot| (admission, slot))
             .map_err(|_| Failure::Busy)
     });

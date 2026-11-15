@@ -151,11 +151,10 @@ async fn events_inner(state: Arc<ExportState>, request: Request) -> Result<Respo
     )
     .map_err(|_| unavailable())?;
     let journal_query = query.journal_query(&scope).map_err(|_| bad_query())?;
-    let slot = state
-        .slots
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| AppError::RateLimited("observation export busy".into()))?;
+    let reservation = state.slots.clone().try_acquire_owned();
+    #[cfg(any(test, feature = "test-hooks"))]
+    state.controls.read_decision(reservation.is_ok());
+    let slot = reservation.map_err(|_| AppError::RateLimited("observation export busy".into()))?;
     #[cfg(any(test, feature = "test-hooks"))]
     state.controls.before_read.pause().await;
     let observer = crate::observe::for_db(&state.fed.db).ok_or_else(unavailable)?;
@@ -205,11 +204,10 @@ async fn snapshot_inner(state: Arc<ExportState>, request: Request) -> Result<Res
         query.labels && admission.config.observe_labels,
     )
     .map_err(|_| unavailable())?;
-    let slot = state
-        .slots
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| AppError::RateLimited("observation export busy".into()))?;
+    let reservation = state.slots.clone().try_acquire_owned();
+    #[cfg(any(test, feature = "test-hooks"))]
+    state.controls.read_decision(reservation.is_ok());
+    let slot = reservation.map_err(|_| AppError::RateLimited("observation export busy".into()))?;
     #[cfg(any(test, feature = "test-hooks"))]
     state.controls.before_read.pause().await;
     let reader = state.fed.clone();
@@ -329,11 +327,23 @@ pub mod test_hooks {
     #[derive(Default)]
     pub struct Controls {
         pub snapshot_candidates: std::sync::atomic::AtomicUsize,
+        pub read_admissions: std::sync::atomic::AtomicUsize,
+        pub read_decisions: std::sync::atomic::AtomicUsize,
         pub workers_done: Gate,
         pub before_handshake: Gate,
         pub before_read: Gate,
         pub before_io: Gate,
         pub before_emit: Gate,
+    }
+    impl Controls {
+        pub(crate) fn read_decision(&self, admitted: bool) {
+            if admitted {
+                self.read_admissions
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.read_decisions
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
     }
 
     pub(crate) struct Completion(pub(crate) Arc<Controls>);
