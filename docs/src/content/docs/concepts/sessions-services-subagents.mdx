@@ -117,7 +117,11 @@ message/reply correlation. Snapshot age and stale states show when a refresh las
 The timeline is observation, not complete history. Bounded retention, queue drops and writer
 restart appear as counters and gaps; a delivery outcome does not establish that an agent read
 a message or finished a task. Roster and timeline freshness are separate, and an older daemon
-without the journal can still supply the roster if it supports read-only snapshots. A daemon
+without the journal can still supply the roster if it supports read-only snapshots. The planned
+`arrival` event marks the daemon's committed inbox delivery mark, not client receipt, agent-read
+or task completion. A stored/pushed record followed by arrival shows these two observed stages;
+absence of arrival is only missing evidence, because observations can be lost. Pi/service ACKs,
+agy receipt and Codex handoff acceptance do not emit this event. A daemon
 that rejects snapshot mode leaves the roster unavailable; watch never falls back to a listing
 that reconciles state or delivers queued work.
 
