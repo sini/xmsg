@@ -175,3 +175,18 @@ Google device support remains unverified until owner-run real-provider acceptanc
 
 These certificates authenticate a peer. They do not turn its messages into
 instructions or isolate hostile processes within the same UID.
+
+## Planned observation boundary
+
+A [fleet observer](/concepts/fleet-observer/) peer receives stored metadata only
+through an explicit literal `observe` grant on the mTLS listener. Existing bus
+rights and wildcard admission grant no observation authority. Target scope applies
+to every endpoint in an event; labels require both grant and request opt-in.
+The Unix observation API stays private to the node's UID.
+
+This grants trust to the collector peer, not to a forwarded human claim. The
+collector's owner authentication and browser boundary remain planned and
+unimplemented by node export. A compromised authorized node or collector remains
+a trusted-component compromise. Metadata IDs and opted-in labels are not a
+secrecy filter against intentional disclosure. No message body or transcript
+reader is added.
