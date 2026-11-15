@@ -104,3 +104,6 @@ mod observe_snapshot_tests;
 
 #[cfg(all(test, feature = "daemon"))]
 mod observe_collector_unknown_tests;
+
+#[cfg(feature = "daemon")]
+pub mod ca_health;

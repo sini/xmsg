@@ -249,6 +249,10 @@ jobs:
         run: |
           sys=$(nix eval --impure --raw --expr builtins.currentSystem)
           nix build "./ci#checks.$sys.tests.cargoArtifacts" -L --no-link --print-out-paths | tee -a /tmp/attic-paths
+      - name: Native CA health source faults
+        run: |
+          sys=$(nix eval --impure --raw --expr builtins.currentSystem)
+          nix build "./ci#checks.$sys.ca-health" -L --no-link --print-out-paths | tee -a /tmp/attic-paths
       - name: Ordinary tests and exact completion counts
         run: |
           sys=$(nix eval --impure --raw --expr builtins.currentSystem)

@@ -1,6 +1,6 @@
 {
   "baseline": {
-    "linux": "cargo test --locked on immutable 0df3a91a1aaab08fa35aa7223a4728baf32d45a2: exit0; 1213 passed/8 ignored/0 failed/103 summaries; all100 executed targets passed inventory",
+    "linux": "native cargo test --locked: 1221 passed, 0 failed, 8 ignored, 103 summaries; all 100 integration targets executed and matched inventory",
     "darwin": "run 43765072144 job 132968221019 on 0df3a91a1aaab08fa35aa7223a4728baf32d45a2: 1216 passed/10 ignored/0 failed/103 summaries; all100 executed targets passed inventory before stale count guard"
   },
   "integration_targets": [
@@ -107,7 +107,7 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1213,
+      "passed": 1221,
       "failed": 0,
       "ignored": 8,
       "summaries": 103
