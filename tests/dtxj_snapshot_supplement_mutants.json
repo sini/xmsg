@@ -1,0 +1,121 @@
+[
+  {
+    "label": "snapshot-svc-source-cap",
+    "oracle": "E15",
+    "target": "lib",
+    "test": "observe_snapshot_tests::svc_cache_source_work_is_bounded",
+    "test_file": "src/observe_snapshot_tests.rs",
+    "edits": [
+      {
+        "file": "src/observe_snapshot.rs",
+        "start": "    if let Ok(store) = state.svc_store.try_read()",
+        "end": "    if let Ok(store) = state.agy_store.try_read()",
+        "needle": ".take(SOURCE_ROWS)",
+        "replacement": ".take(usize::MAX)"
+      }
+    ],
+    "expected_literal": "svc cache source work exceeded 201 rows"
+  },
+  {
+    "label": "snapshot-svc-nonblocking-read",
+    "oracle": "E15",
+    "target": "lib",
+    "test": "observe_snapshot_tests::svc_cache_read_is_nonblocking",
+    "test_file": "src/observe_snapshot_tests.rs",
+    "edits": [
+      {
+        "file": "src/observe_snapshot.rs",
+        "start": "    if let Ok(store) = state.svc_store.try_read()",
+        "end": "    if let Ok(store) = state.agy_store.try_read()",
+        "needle": "state.svc_store.try_read()",
+        "replacement": "state.svc_store.read()"
+      }
+    ],
+    "expected_literal": "snapshot waited on svc cache write lock"
+  },
+  {
+    "label": "snapshot-agy-source-cap",
+    "oracle": "E15",
+    "target": "lib",
+    "test": "observe_snapshot_tests::agy_cache_source_work_is_bounded",
+    "test_file": "src/observe_snapshot_tests.rs",
+    "edits": [
+      {
+        "file": "src/observe_snapshot.rs",
+        "start": "    if let Ok(store) = state.agy_store.try_read()",
+        "end": "    if let Ok(store) = state.pi_store.try_read()",
+        "needle": ".take(SOURCE_ROWS)",
+        "replacement": ".take(usize::MAX)"
+      }
+    ],
+    "expected_literal": "agy cache source work exceeded 201 rows"
+  },
+  {
+    "label": "snapshot-agy-nonblocking-read",
+    "oracle": "E15",
+    "target": "lib",
+    "test": "observe_snapshot_tests::agy_cache_read_is_nonblocking",
+    "test_file": "src/observe_snapshot_tests.rs",
+    "edits": [
+      {
+        "file": "src/observe_snapshot.rs",
+        "start": "    if let Ok(store) = state.agy_store.try_read()",
+        "end": "    if let Ok(store) = state.pi_store.try_read()",
+        "needle": "state.agy_store.try_read()",
+        "replacement": "state.agy_store.read()"
+      }
+    ],
+    "expected_literal": "snapshot waited on agy cache write lock"
+  },
+  {
+    "label": "snapshot-pi-source-cap",
+    "oracle": "E15",
+    "target": "lib",
+    "test": "observe_snapshot_tests::pi_cache_source_work_is_bounded",
+    "test_file": "src/observe_snapshot_tests.rs",
+    "edits": [
+      {
+        "file": "src/observe_snapshot.rs",
+        "start": "    if let Ok(store) = state.pi_store.try_read()",
+        "end": "    #[cfg(any(test, feature = \"test-hooks\"))]",
+        "needle": ".take(SOURCE_ROWS)",
+        "replacement": ".take(usize::MAX)"
+      }
+    ],
+    "expected_literal": "pi cache source work exceeded 201 rows"
+  },
+  {
+    "label": "snapshot-pi-nonblocking-read",
+    "oracle": "E15",
+    "target": "lib",
+    "test": "observe_snapshot_tests::pi_cache_read_is_nonblocking",
+    "test_file": "src/observe_snapshot_tests.rs",
+    "edits": [
+      {
+        "file": "src/observe_snapshot.rs",
+        "start": "    if let Ok(store) = state.pi_store.try_read()",
+        "end": "    #[cfg(any(test, feature = \"test-hooks\"))]",
+        "needle": "state.pi_store.try_read()",
+        "replacement": "state.pi_store.read()"
+      }
+    ],
+    "expected_literal": "snapshot waited on pi cache write lock"
+  },
+  {
+    "label": "snapshot-version-validation-callsite",
+    "oracle": "E08",
+    "target": "lib",
+    "test": "observe_snapshot_tests::snapshot_rejects_unsupported_versions_after_auth",
+    "test_file": "src/observe_snapshot_tests.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "start": "async fn snapshot_inner(",
+        "end": "#[cfg(any(test, feature = \"test-hooks\"))]\npub mod test_hooks",
+        "needle": "query.validate().map_err(|_| bad_query())?;",
+        "replacement": "let _ = &query;"
+      }
+    ],
+    "expected_literal": "snapshot accepted an unsupported version after authentication"
+  }
+]
