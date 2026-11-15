@@ -19,11 +19,28 @@ fn label(value: &str) -> String {
     value.chars().take(256).collect()
 }
 
-pub(crate) fn collect(state: &FedState) -> (Vec<SnapshotRecord>, bool) {
+pub(crate) fn collect(state: &std::sync::Arc<FedState>) -> (Vec<SnapshotRecord>, bool) {
     let mut records = Vec::new();
     // A cached catalog cannot enumerate filesystem-only registrations.
     let mut partial = true;
-    if let Ok(connection) = state.db.try_lock() {
+    let database = state.db.try_lock().ok().and_then(|connection| {
+        connection
+            .path()
+            .filter(|name| !name.is_empty())
+            .map(std::path::PathBuf::from)
+    });
+    let connection = database.and_then(|database| {
+        let connection = rusqlite::Connection::open_with_flags(
+            database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .ok()?;
+        connection
+            .busy_timeout(std::time::Duration::from_millis(25))
+            .ok()?;
+        Some(connection)
+    });
+    if let Some(connection) = connection {
         for (sql, kind, registration) in [
             (
                 "SELECT substr(id,1,513),substr(harness,1,33),last_live,NULL FROM instance_seen ORDER BY id LIMIT 201",
@@ -34,11 +51,6 @@ pub(crate) fn collect(state: &FedState) -> (Vec<SnapshotRecord>, bool) {
                 "SELECT substr(root_id,1,513),'codex',registered_at,substr(label,1,257) FROM codex_roots ORDER BY root_id LIMIT 201",
                 EndpointKind::Instance,
                 RegistrationState::Seen,
-            ),
-            (
-                "SELECT substr(address,1,513),substr(harness,1,33),registered_at,substr(session,1,257) FROM temp.plugin_sessions ORDER BY address LIMIT 201",
-                EndpointKind::Instance,
-                RegistrationState::Registered,
             ),
         ] {
             let result = (|| -> rusqlite::Result<()> {
@@ -95,5 +107,9 @@ pub(crate) fn collect(state: &FedState) -> (Vec<SnapshotRecord>, bool) {
             });
         }
     }
+    #[cfg(any(test, feature = "test-hooks"))]
+    crate::observe_fed::test_hooks::controls(state)
+        .snapshot_candidates
+        .store(records.len(), std::sync::atomic::Ordering::SeqCst);
     (records, partial)
 }

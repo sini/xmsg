@@ -2804,6 +2804,23 @@ mod initial_peers {
             *self.peers.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
         }
 
+        pub(crate) fn observe_tls_context(
+            &self,
+            fallback: &tokio_rustls::TlsAcceptor,
+        ) -> (tokio_rustls::TlsAcceptor, Arc<PeersMap>) {
+            let guard = self.dynamic_tls.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(ref tls) = *guard {
+                return (tls.acceptor.clone(), tls.peers.clone());
+            }
+            let initial = self.peers.0.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                fallback.clone(),
+                initial
+                    .clone()
+                    .expect("startup peers available before dynamic TLS"),
+            )
+        }
+
         pub fn current_peers(&self) -> Arc<PeersMap> {
             let guard = self.dynamic_tls.read().unwrap_or_else(|e| e.into_inner());
             if let Some(ref dyn_tls) = *guard {
@@ -6406,9 +6423,7 @@ pub async fn run_fed_listener_with_acceptor(
             }
         };
 
-        let current_acceptor = fed_state
-            .get_tls_acceptor()
-            .unwrap_or_else(|| acceptor.clone());
+        let (current_acceptor, tls_peers) = fed_state.observe_tls_context(&acceptor);
         let fed_state = fed_state.clone();
         let router = router.clone();
         let peer_conn_counts = peer_conn_counts.clone();
@@ -6416,6 +6431,11 @@ pub async fn run_fed_listener_with_acceptor(
         tokio::spawn(async move {
             let _permit = permit;
             let unauth_guard = unauth_guard;
+            #[cfg(any(test, feature = "test-hooks"))]
+            crate::observe_fed::test_hooks::controls(&fed_state)
+                .before_handshake
+                .pause()
+                .await;
             let tls_stream = match tokio::time::timeout(
                 Duration::from_secs(3),
                 current_acceptor.accept(tcp_stream),
@@ -6496,7 +6516,8 @@ pub async fn run_fed_listener_with_acceptor(
             let router = router.clone();
             let fed_state_req = fed_state.clone();
             let tls_admission = crate::observe_fed::TlsAdmission {
-                peers: admission_peers,
+                peers: tls_peers,
+                config: peer_config.clone(),
             };
             let service =
                 hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {

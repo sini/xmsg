@@ -16,6 +16,7 @@ const REQUEST_BUDGET: Duration = Duration::from_secs(5);
 #[derive(Clone)]
 pub(crate) struct TlsAdmission {
     pub(crate) peers: Arc<PeersMap>,
+    pub(crate) config: PeerConfig,
 }
 
 struct ExportState {
@@ -56,7 +57,10 @@ fn admit(state: &ExportState, request: &Request) -> Result<Admission, AppError> 
     if !Arc::ptr_eq(&tls.peers, &peers) {
         return Err(denied());
     }
-    let config = peers.get_peer_config(&peer.name).ok_or_else(denied)?;
+    let config = tls.config.clone();
+    if config.name != peer.name {
+        return Err(denied());
+    }
     if !config.allow.iter().any(|right| right == "observe") {
         return Err(denied());
     }
@@ -139,8 +143,12 @@ async fn events_inner(state: Arc<ExportState>, request: Request) -> Result<Respo
     #[cfg(any(test, feature = "test-hooks"))]
     state.controls.before_read.pause().await;
     let observer = crate::observe::for_db(&state.fed.db).ok_or_else(unavailable)?;
+    #[cfg(any(test, feature = "test-hooks"))]
+    let controls = state.controls.clone();
     let page = tokio::task::spawn_blocking(move || {
         let _slot = slot;
+        #[cfg(any(test, feature = "test-hooks"))]
+        controls.before_io.pause_blocking();
         let source = observer.page(journal_query).map_err(|_| unavailable())?;
         crate::observe_export::project_page(
             source,
@@ -187,8 +195,12 @@ async fn snapshot_inner(state: Arc<ExportState>, request: Request) -> Result<Res
     #[cfg(any(test, feature = "test-hooks"))]
     state.controls.before_read.pause().await;
     let reader = state.fed.clone();
+    #[cfg(any(test, feature = "test-hooks"))]
+    let controls = state.controls.clone();
     let page = tokio::task::spawn_blocking(move || {
         let _slot = slot;
+        #[cfg(any(test, feature = "test-hooks"))]
+        controls.before_io.pause_blocking();
         let (records, partial) = crate::observe_snapshot::collect(&reader);
         crate::observe_export::project_snapshot(
             &scope,
@@ -225,6 +237,7 @@ pub mod test_hooks {
     pub struct Gate {
         state: Mutex<GateState>,
         changed: Notify,
+        wake: std::sync::Condvar,
     }
 
     impl Gate {
@@ -251,9 +264,27 @@ pub mod test_hooks {
         pub fn release(&self) {
             self.state.lock().unwrap().released = true;
             self.changed.notify_waiters();
+            self.wake.notify_all();
         }
 
-        pub(super) async fn pause(&self) {
+        pub(crate) fn pause_blocking(&self) {
+            let mut state = self.state.lock().unwrap();
+            if state.remaining == 0 {
+                return;
+            }
+            state.remaining -= 1;
+            state.arrived += 1;
+            self.changed.notify_waiters();
+            let (state, _) = self
+                .wake
+                .wait_timeout_while(state, std::time::Duration::from_secs(10), |state| {
+                    !state.released
+                })
+                .unwrap();
+            assert!(state.released, "blocking fixture gate was not released");
+        }
+
+        pub(crate) async fn pause(&self) {
             {
                 let mut state = self.state.lock().unwrap();
                 if state.remaining == 0 {
@@ -277,7 +308,10 @@ pub mod test_hooks {
 
     #[derive(Default)]
     pub struct Controls {
+        pub snapshot_candidates: std::sync::atomic::AtomicUsize,
+        pub before_handshake: Gate,
         pub before_read: Gate,
+        pub before_io: Gate,
         pub before_emit: Gate,
     }
 
