@@ -120,6 +120,16 @@ correlation, source/capture/persistence times and the actual stored outcome.
 `delivered`, `queued` and `delivery_unknown` retain their bus meanings; none
 asserts that an agent read a message or finished a task.
 
+The planned `arrival` event records that the daemon committed a queued item's delivery mark
+for an inbox result. It does not prove that the client received the response, that an agent
+read it, or that a task completed. It carries message/correlation metadata when known, never
+the queued body, sender label or envelope; missing correlation remains unknown.
+
+This event is emitted by the inbox-pull path only. Pi/service ACKs, agy receipt and Codex
+handoff acceptance do not emit `arrival` in this implementation. Empty or repeated inbox
+reads add no arrival event. Like the other journal events, arrival is best-effort post-commit
+observation: a full or unavailable sidecar cannot change inbox delivery success.
+
 Endpoint references stay absent when their node cannot be established. The
 `body_availability` hint describes capture time: original send bodies are not
 retained, and a retained reply at capture time is no promise that it still exists.
@@ -246,6 +256,8 @@ Each event has `sequence`, `observed_at`, `persisted_at`, `kind` and `available`
 optional fields are `source_at`, `from`, `to`, `message_id`, `reply_id`, `thread_id`,
 `outcome` and `reason`. Timestamps are Unix seconds. Kind, outcome and reason
 are closed enums; unknown internal classes become `unknown`, not arbitrary text.
+The planned `arrival` kind preserves the inbox delivery-mark meaning described above in the
+node export; it adds no content or acknowledgement to the export.
 Endpoint references are canonical `key@node` values. There is no body, text,
 excerpt, path, cwd, environment or token field. Event `available` is the enum
 `not_recorded` or `retained_at_capture`: capture-time history, not a content-fetch
