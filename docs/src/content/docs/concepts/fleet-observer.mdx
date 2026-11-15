@@ -1,12 +1,12 @@
 ---
 title: Fleet Observer
-description: Planned passive fleet metadata, explicit observation grants, and the limits of node history.
+description: Passive fleet metadata, explicit observation grants, owner-only history, and its limits.
 ---
 
-The fleet observer is **planned and not yet released**. The first stage adds a
-node metadata export for explicitly authorized federation peers. The collector,
-owner authentication and browser view are a later stage and are not implemented
-by the node export. A node can carry the export without running a collector.
+Node export is available to explicitly authorized federation peers. The owner
+collector and browser view are **planned, not yet released**. They collect only
+stored metadata into a separate bounded cache; a node can carry the export
+without running a collector.
 
 ## Passive metadata
 
@@ -18,8 +18,8 @@ poll inboxes or replies, acknowledge messages, or wake agents.
 
 ```mermaid
 flowchart LR
-  N["Directly reachable node: stored metadata"] -->|"mTLS and explicit observe grant"| C["Planned collector: bounded cache"]
-  C -->|"Planned owner authentication"| B["Planned browser view"]
+  N["Directly reachable node: stored metadata"] -->|"mTLS and explicit observe grant"| C["Collector: separate bounded cache"]
+  C -->|"Every-request owner introspection"| B["Escaped owner view"]
 ```
 
 Each node must be directly reachable on its existing federation listener.
@@ -57,8 +57,8 @@ no guarantee about content today.
 
 Cached snapshot registration states are not current process liveness. Unknown,
 partial, unavailable, stale, denied and reset states must remain visible rather
-than becoming an empty healthy node. In a future view, shapes and role colors
-can distinguish nodes, sessions and services; those colors must not imply health.
+than becoming an empty healthy node. Shapes distinguish cached nodes, sessions and services; those colors do not imply
+process health. Source time and collector receipt age stay separate.
 
 The journal defaults to seven days, 10,000 events or 16 MiB of logical metadata,
 whichever limit applies first. Export also excludes events older than seven days.
@@ -66,7 +66,10 @@ Capture can lose observations, and eviction or restart can leave gaps. Policy
 filtering is identified separately from source loss. Sequence spacing can reveal
 omission volume even when endpoint identities and correlations are excluded.
 
-The planned collector will keep bounded per-node metadata with visible retention
-and gap boundaries. Body detail and transcript views remain planned and
+The collector keeps bounded per-node metadata with visible retention and gap
+boundaries. Stored history is hidden after restart until its node validates the
+current scope; the view explicitly says “history hidden until this node answers”.
+Once validated in this process, retained metadata may remain visible as stale
+during a temporary outage. Denial and scope changes mask old history before purge. Body detail and transcript views remain planned and
 unimplemented. See [operations](/operations/fleet-observer/) and the
 [wire reference](/reference/http-and-sockets/#planned-node-observation-export).

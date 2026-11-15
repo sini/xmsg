@@ -1,13 +1,12 @@
 ---
 title: Fleet Observer Operations
-description: Planned node observation grants and read requests, with collector deployment still to come.
+description: Node observation grants, owner collector configuration, retention, and deployment prerequisites.
 ---
 
-**Planned, not yet released.** Node observation export is the first stage of the
-[fleet observer](/concepts/fleet-observer/). The collector command, authentication,
-web view and deployment are not implemented in this stage. The examples below
-specify node configuration and protocol requests; they do not install a collector
-or claim a production rollout.
+The node export is available for explicitly authorized federation peers.
+**The collector command and view are planned, not yet released.** They use the
+node protocol below and the configuration described here. Actual ingress, owner
+sign-in and deployment remain operator acceptance steps.
 
 ## Grant a collector access
 
@@ -92,17 +91,131 @@ On timeout or unavailability, keep any historical data visibly stale rather than
 reporting a successful empty history. Reconnect after reload and begin a new
 backfill when the policy scope changes.
 
-## Planned collector and deployment
+## Configure the collector
 
-The later collector will use a configured node inventory and a separate bounded
-metadata database. A browser will read that cache, not connect to bus nodes.
-The intended default retention is seven days, 10,000 events and 16 MiB of logical
-metadata per node, with cursor and page persistence committed together. Gaps,
-resets, partial snapshots, denial and stale data must be visible.
+The collector starts separately from `xmsg serve`. It uses its own metadata
+database and does not initialize bus storage, enrollment or harness registries.
+Provide the client certificate/key and each exporter's existing trust inputs;
+it does not enroll nodes or create credentials.
 
-Owner authentication and the collector web service remain planned. Deployment
-will require an operator-reviewed ingress, owner identity policy and backend TLS;
-node mTLS does not authenticate a browser or prove a forwarded human identity.
-No collector install command or IdP setup is available in this stage. Body-detail
-and transcript access also remain planned and unimplemented. Outbound-only leaves
-remain outside direct observation coverage.
+A JSON configuration has one fixed introspection provider and at most 64 sources:
+
+```json
+{
+  "client_cert": "/run/xmsg-observer/client.pem",
+  "client_key": "/run/xmsg-observer/client.key",
+  "auth": {
+    "issuer": "https://idp.example.org/oauth2/openid/observer",
+    "introspection_url": "https://idp.example.org/oauth2/token/introspect",
+    "subjects": ["owner-subject"],
+    "audience": "observer",
+    "hosted_client": "observer",
+    "lookup_client": "observer-lookup",
+    "lookup_secret_file": "/run/xmsg-observer/lookup-secret"
+  },
+  "sources": [
+    {
+      "node": "owner.node",
+      "address": "node.example.org:7788",
+      "ca": "/run/xmsg-observer/node-ca.pem",
+      "identity": "spiffe://xmsg/host/node/user/owner",
+      "labels": false
+    },
+    {
+      "node": "worker.pod",
+      "outbound_only": true
+    }
+  ]
+}
+```
+
+Use canonical node names. CA identities are literal and must derive the configured
+node name; a pinned source uses `pin` instead of `ca` and `identity`. Relative file
+paths resolve against the configuration file. `outbound_only` entries are shown
+as unsupported and never polled through custody or opened to inbound traffic.
+
+Planned command:
+
+```sh
+xmsg observe-collector --config collector.json --state-dir ./observer-state --listen 127.0.0.1:9428
+```
+
+The default listen address is `127.0.0.1:9428`. Non-loopback listeners require
+`web_tls: { "cert": "server.pem", "key": "server.key" }`; loopback may use it too.
+The state directory must be owned by the running UID and mode 0700, with a regular
+mode-0600 database. Unsafe existing paths are refused rather than repaired.
+
+## Admit the owner
+
+Configure ingress OIDC to enforce the exact issuer/subject allowlist, strip public
+identity headers and forward the original access token as `Authorization: Bearer`.
+The collector independently introspects that token for every request. Direct backend
+requests have the same owner boundary; `X-Forwarded-User` and similar headers do not
+provide identity.
+
+It requires active status, exact issuer, an allowed subject, the configured audience
+as a string or singleton array, and the configured client from `client_id` or `azp`
+(equal when both exist). Expiry must be a future unsigned integer; optional
+not-before must be an unsigned integer at or before now. Missing claims and provider
+failure refuse access. No positive authorization cache or browser token store exists.
+
+Provider TLS uses native roots, with optional `auth.provider_ca` for an operator CA.
+Basic lookup credentials are optional but must be supplied as a pair. Kanidm 1.11.2
+does not authenticate introspection callers: its lookup secret is not the owner
+access boundary. The bearer and verified claims provide that boundary. A provider's
+UI logout is not assumed to invalidate an otherwise active token.
+
+Ingress forwarding/allowlisting, actual owner IDs, client registration, server TLS
+and namespace policy must be verified on the deployed versions by the operator.
+Fixture tests do not claim production compatibility or real owner sign-in.
+
+## Read the view
+
+Only `GET /` returns the owner view. `GET /health` without a query returns fixed
+availability text and no cached node information. The view has numeric `node` and
+`page` filters: nodes use their zero-based position in canonical-name sorted
+inventory, pages are 0–49. Unknown, duplicate or out-of-range fields are refused.
+There is no browser-supplied node address, body-detail route or action control.
+
+The page refreshes every five seconds. Shapes distinguish cached sessions and
+services; an unknown kind stays unknown. Exchange lanes report actual endpoint
+references and outcomes, not network hops or evidence that an agent read a message.
+Source epoch/sequence order, source time and collector receipt age remain separate.
+Partial catalogs, backfill, gaps and truncation are explicit.
+
+After each collector restart, stored history stays hidden until a node returns a
+valid current scope. The view says **“history hidden until this node answers”**;
+an empty timeline is not substituted for that state. Denial or a scope change
+masks old data before attempting a purge, and a failed purge keeps it hidden.
+Once validated in the current process, temporarily unreachable nodes may show
+retained data marked stale.
+
+## Retention and bounds
+
+Per node, the cache retains at most seven days, 10,000 events and 16 MiB of accounted
+metadata, including its latest snapshot. It does not accumulate snapshot archives.
+Page records and their cursor commit together. Replays do not duplicate retained
+rows or refresh their retention age; expiry also runs while polling is idle.
+Retention uses observation time capped by collector receipt time, not a future
+source timestamp that could indefinitely extend an old capture.
+
+The SQLite file has a separate physical ceiling of 32 MiB per configured node plus
+64 MiB reserve. Rollback journaling is separately bounded; memory-only temporary
+storage and disabled cache spill have a RAM cost. These are managed file-length
+bounds, not exact filesystem allocation or forensic erasure guarantees. Physical
+storage exhaustion can stop ingestion before the logical limit; it is visible and
+cannot commit a cursor without its page.
+
+Polling uses at least two seconds between requests to one node, one request in
+flight per node and eight globally, with a five-second whole-RPC deadline. Rate
+limits back off rather than becoming successful empty histories. The HTTP view is
+bounded to 64 connections, eight requests and a five-second preparation budget;
+introspection has a two-second deadline and 64 KiB streamed-response cap. Bearers
+are at most 8 KiB and request headers 16 KiB. HTML, including SVG, is at most 4 MiB;
+rows and endpoint objects are bounded and truncation is shown.
+
+Labels require source grant and collector request opt-in. Dynamic HTML/SVG text is
+escaped, scripts are disabled by CSP, and responses use no-store and nosniff. No
+message body, transcript, cwd, path, environment or credential field is stored or
+rendered. Authorized compromised exporters or collectors remain trusted-component
+compromises; metadata identifiers and opted-in labels are not a covert-data filter.
