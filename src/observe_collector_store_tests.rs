@@ -126,6 +126,16 @@ fn row_and_ttl_retention_are_honest() {
     let v = store.view(None, 100).unwrap().remove(0);
     assert!(v.events.is_empty(), "idle TTL did not expire history");
     assert!(v.truncated, "eviction fabricated continuity");
+    let count: i64 = store
+        .inner
+        .lock()
+        .unwrap()
+        .connection
+        .as_ref()
+        .unwrap()
+        .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0, "idle maintenance retained expired rows");
 }
 fn snapshot() -> ExportSnapshot {
     use crate::observe_export::*;
@@ -374,10 +384,9 @@ fn private_paths_and_preexisting_physical_limits() {
     fs::create_dir(&db).unwrap();
     assert!(open(dir.path()).is_err(), "database substitution accepted");
     fs::remove_dir(&db).unwrap();
+    assert!(open(dir.path()).is_ok());
     OpenOptions::new()
-        .create_new(true)
         .write(true)
-        .mode(0o600)
         .open(&db)
         .unwrap()
         .set_len(128 * 4096 + 1)
@@ -394,4 +403,463 @@ fn private_paths_and_preexisting_physical_limits() {
         .set_len(128 * 4104 + 131073)
         .unwrap();
     assert!(open(dir.path()).is_err(), "oversized journal accepted");
+}
+#[test]
+fn engine_settings_journal_peak_full_abort_and_compaction() {
+    let dir = private_temp();
+    let store = Store::open_limits(
+        dir.path(),
+        vec![NodePolicy {
+            node: "node".into(),
+            labels: false,
+            supported: true,
+        }],
+        Arc::new(|| NOW),
+        Limits {
+            rows: ROWS,
+            bytes: BYTES,
+            pages: 128,
+        },
+    )
+    .unwrap();
+    let mut full = false;
+    for batch in 0..30 {
+        let cursor = store.cursor("node").unwrap();
+        let mut p = page(1);
+        p.events.clear();
+        for n in 1..=200 {
+            let sequence = batch * 200 + n;
+            let mut e = page(sequence).events.remove(0);
+            e.message_id = Some("m".repeat(512));
+            e.thread_id = Some("t".repeat(512));
+            p.events.push(e);
+        }
+        p.next = (batch + 1) * 200;
+        match store.ingest_page("node", &cursor, p) {
+            Ok(_) => (),
+            Err(StoreError::Full) => {
+                assert_eq!(
+                    store.cursor("node").unwrap(),
+                    cursor,
+                    "physical full committed cursor alone"
+                );
+                full = true;
+                break;
+            }
+            Err(e) => panic!("unexpected physical-cap error: {e:?}"),
+        }
+    }
+    assert!(full, "physical page cap not enforced");
+    let db = dir.path().join("collector.sqlite");
+    assert!(
+        fs::metadata(&db).unwrap().len() <= 128 * 4096,
+        "database file exceeded physical cap"
+    );
+    let before = fs::metadata(&db).unwrap().len();
+    {
+        let mut inner = store.inner.lock().unwrap();
+        let peak = transaction(&mut inner, |c| {
+            c.execute("DELETE FROM events WHERE node='node'", [])?;
+            let journal = dir.path().join("collector.sqlite-journal");
+            let length = fs::metadata(journal).unwrap().len();
+            assert!(length > 4096, "journal positive control empty");
+            assert!(
+                length <= 128 * 4104 + 131072,
+                "journal exceeded construction bound"
+            );
+            eprintln!(
+                "sqlite-engine={} max_pages=128 db_before={} journal_peak={} journal_bound={}",
+                rusqlite::version(),
+                before,
+                length,
+                128 * 4104 + 131072
+            );
+            Ok(length)
+        })
+        .unwrap();
+        assert!(peak > 0);
+    }
+    store.maintain().unwrap();
+    let after = fs::metadata(&db).unwrap().len();
+    assert!(after < before, "bounded compaction did not reduce file");
+}
+#[test]
+fn secure_delete_removes_metadata_canary() {
+    let (_dir, store, _) = fixture();
+    let canary = "freshsyntheticmetadatacanaryuniqueforremoval";
+    let mut p = page(1);
+    p.events[0].message_id = Some(canary.into());
+    store.ingest_page("node", &Cursor::default(), p).unwrap();
+    let db = _dir.path().join("collector.sqlite");
+    let contains = |bytes: Vec<u8>| bytes.windows(canary.len()).any(|b| b == canary.as_bytes());
+    assert!(
+        contains(fs::read(&db).unwrap()),
+        "canary positive control missing"
+    );
+    store.deny("node").unwrap();
+    assert!(
+        !contains(fs::read(&db).unwrap()),
+        "deleted metadata persisted in managed database"
+    );
+}
+#[test]
+fn wire_count_and_byte_caps_have_positive_controls() {
+    let (_dir, store, _) = fixture();
+    let policy = NodePolicy {
+        node: "node".into(),
+        labels: false,
+        supported: true,
+    };
+    let mut p = page(1);
+    p.events.clear();
+    for i in 1..=200 {
+        let mut e = page(i).events.remove(0);
+        e.message_id = Some("a".repeat(512));
+        e.thread_id = Some("b".repeat(512));
+        p.events.push(e);
+    }
+    p.next = 200;
+    assert!(
+        validate_page(&policy, &Cursor::default(), &p).is_ok(),
+        "bounded page control rejected"
+    );
+    p.events.push(page(201).events.remove(0));
+    p.next = 201;
+    assert!(
+        validate_page(&policy, &Cursor::default(), &p).is_err(),
+        "event count cap ignored"
+    );
+    p.events.pop();
+    p.next = 200;
+    for e in &mut p.events {
+        e.from = Some(format!("{}@{}", "x".repeat(32), "n".repeat(128)));
+        e.to = Some(format!("{}@{}", "y".repeat(32), "n".repeat(128)));
+    }
+    // Correlations and endpoints independently remain in grammar while aggregate bytes exceed the page cap.
+    assert!(
+        serde_json::to_vec(&p).unwrap().len() > PAGE_BYTES,
+        "aggregate byte positive control too small"
+    );
+    assert!(
+        store.ingest_page("node", &Cursor::default(), p).is_err(),
+        "page byte cap ignored"
+    );
+}
+#[test]
+fn independent_string_ranges_sequence_and_snapshot_guards() {
+    let (_dir, store, _) = fixture();
+    let policy = NodePolicy {
+        node: "node".into(),
+        labels: false,
+        supported: true,
+    };
+    for epoch in ["".into(), "x".repeat(129), "é".into(), "has space".into()] {
+        let mut p = page(1);
+        p.epoch = epoch;
+        assert!(
+            validate_page(&policy, &Cursor::default(), &p).is_err(),
+            "invalid epoch accepted"
+        );
+    }
+    for scope in [
+        "a".repeat(63),
+        "a".repeat(65),
+        "A".repeat(64),
+        "g".repeat(64),
+    ] {
+        let mut p = page(1);
+        p.scope = scope;
+        assert!(
+            validate_page(&policy, &Cursor::default(), &p).is_err(),
+            "invalid scope accepted"
+        );
+    }
+    for id in ["".into(), "a".repeat(513), "/private".into()] {
+        let mut p = page(1);
+        p.events[0].message_id = Some(id);
+        assert!(
+            validate_page(&policy, &Cursor::default(), &p).is_err(),
+            "invalid correlation accepted"
+        );
+    }
+    for value in [-1, MAX_TIME + 1] {
+        for field in ["source_at", "observed_at", "persisted_at"] {
+            let mut p = page(1);
+            match field {
+                "source_at" => p.events[0].source_at = Some(value),
+                "observed_at" => p.events[0].observed_at = value,
+                _ => p.events[0].persisted_at = value,
+            }
+            assert!(
+                validate_page(&policy, &Cursor::default(), &p).is_err(),
+                "invalid timestamp accepted: {field}"
+            );
+        }
+    }
+    let mut p = page(2);
+    p.next = 1;
+    assert!(
+        validate_page(&policy, &Cursor::default(), &p).is_err(),
+        "next before visible sequence accepted"
+    );
+    let mut p = page(1);
+    p.events.clear();
+    p.next = 0;
+    p.has_more = true;
+    assert!(
+        validate_page(&policy, &Cursor::default(), &p).is_err(),
+        "nonprogress has_more accepted"
+    );
+    let mut p = page(1);
+    p.events.push(p.events[0].clone());
+    assert!(
+        validate_page(&policy, &Cursor::default(), &p).is_err(),
+        "unordered sequence accepted"
+    );
+    for field in [
+        "v",
+        "node",
+        "scope",
+        "time",
+        "count",
+        "id",
+        "endpoint_node",
+        "endpoint_time",
+        "label_length",
+        "label_opt_in",
+        "duplicate",
+    ] {
+        let mut s = snapshot();
+        match field {
+            "v" => s.v = 2,
+            "node" => s.node = "foreign".into(),
+            "scope" => s.scope = "bad".into(),
+            "time" => s.observed_at = -1,
+            "count" => {
+                let e = s.endpoints[0].clone();
+                s.endpoints = (0..201)
+                    .map(|i| {
+                        let mut e = e.clone();
+                        e.id = format!("svc{i}@node");
+                        e
+                    })
+                    .collect();
+            }
+            "id" => s.endpoints[0].id = "bot".into(),
+            "endpoint_node" => s.endpoints[0].node = "foreign".into(),
+            "endpoint_time" => s.endpoints[0].source_at = Some(NOW + 1),
+            "label_length" => s.endpoints[0].label = Some("a".repeat(257)),
+            "label_opt_in" => s.endpoints[0].label = Some("label".into()),
+            _ => s.endpoints.push(s.endpoints[0].clone()),
+        }
+        let mut labels = policy.clone();
+        labels.labels = field == "label_length";
+        assert!(
+            validate_snapshot(&labels, &s).is_err(),
+            "invalid snapshot accepted: {field}"
+        );
+    }
+    assert_eq!(store.cursor("node").unwrap(), Cursor::default());
+}
+#[test]
+fn repeated_epoch_records_deduplicate_without_refresh() {
+    let (_dir, store, now) = fixture();
+    store
+        .ingest_page("node", &Cursor::default(), page(1))
+        .unwrap();
+    let current = store.cursor("node").unwrap();
+    let mut p = page(1);
+    p.epoch = "other".into();
+    store.ingest_page("node", &current, p).unwrap();
+    now.store(NOW + 30, Ordering::SeqCst);
+    let current = store.cursor("node").unwrap();
+    let _out = store.ingest_page("node", &current, page(1)).unwrap();
+    let v = store.view(None, 100).unwrap().remove(0);
+    assert_eq!(v.events.len(), 2, "replayed record duplicated");
+    assert!(
+        v.events.iter().all(|e| e.received_at == NOW),
+        "replayed record refreshed retention age"
+    );
+}
+#[test]
+fn rollback_failure_closes_connection_and_restart_revalidates() {
+    use std::ffi::{c_char, c_int, c_void, CStr};
+    unsafe extern "C" fn authorizer(
+        _: *mut c_void,
+        action: c_int,
+        arg: *const c_char,
+        _: *const c_char,
+        _: *const c_char,
+        _: *const c_char,
+    ) -> c_int {
+        if action == rusqlite::ffi::SQLITE_TRANSACTION
+            && !arg.is_null()
+            && unsafe { CStr::from_ptr(arg) }.to_bytes() == b"ROLLBACK"
+        {
+            rusqlite::ffi::SQLITE_DENY
+        } else {
+            rusqlite::ffi::SQLITE_OK
+        }
+    }
+    let (dir, store, _) = fixture();
+    store
+        .ingest_page("node", &Cursor::default(), page(1))
+        .unwrap();
+    let cursor = store.cursor("node").unwrap();
+    {
+        let inner = store.inner.lock().unwrap();
+        let c = inner.connection.as_ref().unwrap();
+        c.execute_batch("CREATE TRIGGER refuse_cursor BEFORE UPDATE OF next ON nodes BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+        assert_eq!(
+            unsafe {
+                rusqlite::ffi::sqlite3_set_authorizer(
+                    c.handle(),
+                    Some(authorizer),
+                    std::ptr::null_mut(),
+                )
+            },
+            rusqlite::ffi::SQLITE_OK
+        );
+    }
+    assert!(store.ingest_page("node", &cursor, page(2)).is_err());
+    assert!(
+        store.inner.lock().unwrap().connection.is_none(),
+        "failed rollback connection remained writable"
+    );
+    drop(store);
+    let store = Store::open(
+        dir.path(),
+        vec![NodePolicy {
+            node: "node".into(),
+            labels: false,
+            supported: true,
+        }],
+        Arc::new(|| NOW),
+    )
+    .unwrap();
+    assert_eq!(
+        store.cursor("node").unwrap(),
+        cursor,
+        "restart retained uncommitted cursor"
+    );
+    assert!(
+        store.view(None, 100).unwrap()[0].history_hidden,
+        "restart bypassed revalidation"
+    );
+}
+#[test]
+fn scope_purge_failure_masks_before_sql_and_restarts_hidden() {
+    let (dir, store, _) = fixture();
+    store
+        .ingest_page("node", &Cursor::default(), page(1))
+        .unwrap();
+    let cursor = store.cursor("node").unwrap();
+    store.inner.lock().unwrap().connection.as_ref().unwrap().execute_batch("CREATE TRIGGER refuse_purge BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+    let mut p = page(1);
+    p.scope = "b".repeat(64);
+    assert!(store.ingest_page("node", &cursor, p).is_err());
+    let v = store.view(None, 100).unwrap().remove(0);
+    assert!(
+        v.history_hidden
+            && v.events.is_empty()
+            && v.latest_snapshot.is_none()
+            && v.cursor.is_none()
+            && v.gaps.is_empty(),
+        "scope purge failure exposed retained history"
+    );
+    drop(store);
+    let store = Store::open(
+        dir.path(),
+        vec![NodePolicy {
+            node: "node".into(),
+            labels: false,
+            supported: true,
+        }],
+        Arc::new(|| NOW),
+    )
+    .unwrap();
+    assert!(
+        store.view(None, 100).unwrap()[0].history_hidden,
+        "failed purge restart exposed history"
+    );
+}
+#[test]
+fn authenticated_cursor_ahead_resets_and_conflicting_replay_refuses() {
+    let (_dir, store, now) = fixture();
+    let mut p = page(1);
+    p.next = 10;
+    store.ingest_page("node", &Cursor::default(), p).unwrap();
+    now.store(NOW + 30, Ordering::SeqCst);
+    let mut p = page(1);
+    p.gaps.push(ExportGap {
+        reason: Reason::CursorAhead,
+        unknown_loss: false,
+    });
+    let cursor = store.cursor("node").unwrap();
+    let result = store.ingest_page("node", &cursor, p.clone());
+    assert!(result.is_ok(), "cursor ahead reset rejected");
+    assert_eq!(store.cursor("node").unwrap().next, 1);
+    assert_eq!(
+        store.view(None, 100).unwrap()[0].events[0].received_at,
+        NOW,
+        "cursor reset refreshed receipt"
+    );
+    p.events[0].message_id = Some("changed".into());
+    let cursor = store.cursor("node").unwrap();
+    assert!(
+        store.ingest_page("node", &cursor, p).is_err(),
+        "conflicting replay accepted"
+    );
+    assert_eq!(
+        store.cursor("node").unwrap(),
+        cursor,
+        "conflicting replay advanced cursor"
+    );
+}
+#[test]
+fn snapshot_budget_and_replay_receipt_are_independent() {
+    let dir = private_temp();
+    let now = Arc::new(AtomicI64::new(NOW));
+    let clock = now.clone();
+    let store = Store::open_limits(
+        dir.path(),
+        vec![NodePolicy {
+            node: "node".into(),
+            labels: true,
+            supported: true,
+        }],
+        Arc::new(move || clock.load(Ordering::SeqCst)),
+        Limits {
+            rows: ROWS,
+            bytes: 1000,
+            pages: 128,
+        },
+    )
+    .unwrap();
+    store
+        .ingest_page("node", &Cursor::default(), page(1))
+        .unwrap();
+    assert_eq!(
+        store.view(None, 100).unwrap()[0].events.len(),
+        1,
+        "snapshot budget positive control missing"
+    );
+    let mut s = snapshot();
+    s.endpoints[0].label = Some("a".repeat(256));
+    store.ingest_snapshot("node", s.clone()).unwrap();
+    assert!(
+        store.view(None, 100).unwrap()[0].events.is_empty(),
+        "snapshot bytes omitted from budget"
+    );
+    now.store(NOW + 30, Ordering::SeqCst);
+    store.ingest_snapshot("node", s).unwrap();
+    assert_eq!(
+        store.view(None, 100).unwrap()[0]
+            .latest_snapshot
+            .as_ref()
+            .unwrap()
+            .received_at,
+        NOW,
+        "snapshot replay refreshed receipt"
+    );
 }

@@ -1,5 +1,5 @@
 use crate::observe_export::{ExportEvent, ExportGap, ExportPage, ExportSnapshot, Reason, Scope};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
@@ -190,7 +190,8 @@ fn validate_page(
     let scope = Scope::new(&policy.node, "collector", None, policy.labels)
         .map_err(|_| StoreError::Invalid)?;
     let reset = requested.epoch.as_deref().is_some_and(|v| v != page.epoch)
-        || requested.scope.as_deref().is_some_and(|v| v != page.scope);
+        || requested.scope.as_deref().is_some_and(|v| v != page.scope)
+        || page.gaps.iter().any(|g| g.reason == Reason::CursorAhead);
     let after = if reset { 0 } else { requested.next };
     let mut previous = after;
     for event in &page.events {
@@ -478,12 +479,25 @@ impl Store {
             let mut inserted = 0;
             for event in &page.events {
                 let json = encoded(event, 4096)?;
-                inserted += c.execute("INSERT OR IGNORE INTO events(node,epoch,sequence,json,receipt,base,bytes) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![node,page.epoch,event.sequence,json,now,event.observed_at.min(now),(json.len()+page.epoch.len()+64) as i64])?;
+                let existing: Option<Vec<u8>> = c
+                    .query_row(
+                        "SELECT json FROM events WHERE node=?1 AND epoch=?2 AND sequence=?3",
+                        params![node, page.epoch, event.sequence],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if existing.as_ref().is_some_and(|old| old != &json) {
+                    return Err(StoreError::Invalid);
+                }
+                inserted += c.execute("INSERT OR IGNORE INTO events(node,epoch,sequence,json,receipt,base,bytes) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![node,page.epoch,event.sequence,json,now,event.observed_at.min(now),(json.len()+page.epoch.len()+node.len()+128) as i64])?;
             }
-            let old_gaps: String =
-                c.query_row("SELECT gaps FROM nodes WHERE node=?1", [node], |r| r.get(0))?;
+            let old_gaps: Vec<u8> = c.query_row(
+                "SELECT CAST(gaps AS BLOB) FROM nodes WHERE node=?1",
+                [node],
+                |r| r.get(0),
+            )?;
             let mut gaps: Vec<ExportGap> =
-                serde_json::from_str(&old_gaps).map_err(|_| StoreError::Storage)?;
+                serde_json::from_slice(&old_gaps).map_err(|_| StoreError::Storage)?;
             for gap in page
                 .gaps
                 .iter()
@@ -528,7 +542,7 @@ impl Store {
             if result.is_ok() {
                 state.validated = true;
                 state.status = NodeStatus::Healthy;
-            } else if matches!(result, Err(StoreError::Full)) && state.validated {
+            } else if matches!(result, Err(StoreError::Full)) {
                 state.status = NodeStatus::StorageFull;
             }
         }
@@ -552,7 +566,7 @@ impl Store {
             if scope_changed {
                 purge(c, node)?;
             }
-            c.execute("UPDATE nodes SET scope=?2,snapshot=?3,snapshot_receipt=?4,snapshot_base=?5 WHERE node=?1",params![node,snapshot.scope,encoded(&snapshot,PAGE_BYTES)?,now,snapshot.observed_at.min(now)])?;
+            c.execute("UPDATE nodes SET scope=?2,snapshot=?3,snapshot_receipt=?4,snapshot_base=?5 WHERE node=?1 AND (snapshot IS NULL OR snapshot != ?3)",params![node,snapshot.scope,encoded(&snapshot,PAGE_BYTES)?,now,snapshot.observed_at.min(now)])?;
             self.retain(c, node, now)?;
             Ok(CommitOutcome {
                 cursor: read_cursor(c, node)?,
@@ -575,7 +589,7 @@ impl Store {
     pub fn unavailable(&self, node: &str, kind: UnavailableKind) -> Result<(), StoreError> {
         let mut inner = self.lock()?;
         let state = inner.nodes.get_mut(node).ok_or(StoreError::Node)?;
-        if state.validated {
+        if state.policy.supported && (state.validated || kind == UnavailableKind::StorageFull) {
             state.status = if kind == UnavailableKind::StorageFull {
                 NodeStatus::StorageFull
             } else {
@@ -635,16 +649,15 @@ impl Store {
         for node in nodes {
             transaction(&mut inner, |c| self.retain(c, &node, now))?;
         }
-        inner
-            .connection
-            .as_ref()
-            .ok_or(StoreError::Storage)?
-            .execute_batch("PRAGMA incremental_vacuum(64)")?;
+        transaction(&mut inner, |c| {
+            c.execute_batch("PRAGMA incremental_vacuum(64)")?;
+            Ok(())
+        })?;
         Ok(())
     }
     pub fn view(&self, node: Option<&str>, limit: usize) -> Result<Vec<NodeView>, StoreError> {
-        self.maintain()?;
         let now = self.now()?;
+        let cutoff = now.checked_sub(TTL).ok_or(StoreError::Invalid)?;
         let inner = self.lock()?;
         let c = inner.connection.as_ref().ok_or(StoreError::Storage)?;
         let mut views = Vec::new();
@@ -665,9 +678,10 @@ impl Store {
             };
             if state.validated {
                 v.cursor = Some(read_cursor(c, name)?);
-                let (snapshot,receipt,gaps,truncated,backfill):(Option<Vec<u8>>,Option<i64>,Vec<u8>,bool,bool)=c.query_row("SELECT snapshot,snapshot_receipt,CAST(gaps AS BLOB),truncated,backfill FROM nodes WHERE node=?1",[name],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+                let (snapshot,receipt,gaps,truncated,backfill):(Option<Vec<u8>>,Option<i64>,Vec<u8>,bool,bool)=c.query_row("SELECT CASE WHEN snapshot_base>=?2 THEN snapshot END,CASE WHEN snapshot_base>=?2 THEN snapshot_receipt END,CAST(gaps AS BLOB),truncated,backfill FROM nodes WHERE node=?1",params![name,cutoff],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
                 v.gaps = serde_json::from_slice(&gaps).map_err(|_| StoreError::Storage)?;
                 v.truncated = truncated;
+                v.truncated |= c.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE node=?1 AND base<?3) OR (SELECT count(*) FROM events WHERE node=?1 AND base>=?3)>?2 OR EXISTS(SELECT 1 FROM nodes WHERE node=?1 AND snapshot_base<?3)",params![name,limit.min(ROWS) as i64,cutoff],|r|r.get::<_,bool>(0))?;
                 v.backfill = backfill;
                 if let (Some(bytes), Some(received_at)) = (snapshot, receipt) {
                     let snapshot: ExportSnapshot =
@@ -679,14 +693,15 @@ impl Store {
                         received_at,
                     });
                 }
-                let mut statement=c.prepare("SELECT epoch,json,receipt FROM events WHERE node=?1 ORDER BY receipt DESC,epoch DESC,sequence DESC LIMIT ?2")?;
-                let events = statement.query_map(params![name, limit.min(ROWS) as i64], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, Vec<u8>>(1)?,
-                        r.get::<_, i64>(2)?,
-                    ))
-                })?;
+                let mut statement=c.prepare("SELECT epoch,json,receipt FROM events WHERE node=?1 AND base>=?3 ORDER BY receipt DESC,epoch DESC,sequence DESC LIMIT ?2")?;
+                let events =
+                    statement.query_map(params![name, limit.min(ROWS) as i64, cutoff], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, Vec<u8>>(1)?,
+                            r.get::<_, i64>(2)?,
+                        ))
+                    })?;
                 for e in events {
                     let (epoch, json, received_at) = e?;
                     let event: ExportEvent =
