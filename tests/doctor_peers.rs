@@ -308,9 +308,14 @@ impl Fixture {
     }
 
     async fn doctor(&self) -> (Output, Value) {
+        self.doctor_with_ca(None).await
+    }
+
+    async fn doctor_with_ca(&self, ca: Option<std::path::PathBuf>) -> (Output, Value) {
         let root = self.root.path().to_owned();
         let output = tokio::task::spawn_blocking(move || {
-            Command::new(env!("CARGO_BIN_EXE_xmsg"))
+            let mut command = Command::new(env!("CARGO_BIN_EXE_xmsg"));
+            command
                 .env_remove("XMSG_PEERS_FILE")
                 .env_remove("XMSG_FED_CERT")
                 .env("HOME", root.join("home"))
@@ -323,9 +328,11 @@ impl Fixture {
                 .arg("--register-sock")
                 .arg(root.join("run/register.sock"))
                 .arg("--db-path")
-                .arg(root.join("primary.sqlite"))
-                .output()
-                .unwrap()
+                .arg(root.join("primary.sqlite"));
+            if let Some(ca) = ca {
+                command.arg("--enroll-ca-dir").arg(ca);
+            }
+            command.output().unwrap()
         })
         .await
         .unwrap();
@@ -568,7 +575,13 @@ async fn ca_diagnostics_is_unix_only_and_distinguishes_disabled_from_unknown() {
         } else {
             assert_eq!(check(&value, "ca.root_expiry")["status"], "warn");
         }
-        let (_, report) = fixture.doctor().await;
+        let (_, report) = fixture
+            .doctor_with_ca(Some(fixture.root.path().join("unused-installed-ca")))
+            .await;
+        assert!(
+            report["checked_paths"].get("enrollment_ca").is_none(),
+            "unused installed fallback path was reported as checked"
+        );
         assert!(check(&report, "ca.source")["message"]
             .as_str()
             .unwrap()

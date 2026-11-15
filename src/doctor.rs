@@ -654,12 +654,12 @@ async fn ca_application(report: &mut Report, socket: Option<&Path>, directory: O
         None
     };
     let ca = live.or_else(|| {
-        directory.map(|directory| xmsg::ca_health::installed(directory, xmsg::ca_health::now()))
+        directory.map(|directory| {
+            report.path("enrollment_ca", directory);
+            xmsg::ca_health::installed(directory, xmsg::ca_health::now())
+        })
     });
     if let Some(ca) = ca {
-        if let Some(directory) = directory {
-            report.path("enrollment_ca", directory);
-        }
         report.add(
             "ca.source",
             Status::Pass,

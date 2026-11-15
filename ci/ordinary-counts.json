@@ -1,7 +1,7 @@
 {
   "baseline": {
     "linux": "native cargo test --locked: 1221 passed, 0 failed, 8 ignored, 103 summaries; all 100 integration targets executed and matched inventory",
-    "darwin": "run 43765072144 job 132968221019 on 0df3a91a1aaab08fa35aa7223a4728baf32d45a2: 1216 passed/10 ignored/0 failed/103 summaries; all100 executed targets passed inventory before stale count guard"
+    "darwin": "native run 43773638038 job 132994847196 on dd4aebc8de14e2b2d94fbd905b710056e08ca4c8: 1223 passed, 0 failed, 10 ignored, 103 summaries; all 100 integration targets executed and matched inventory before stale count guard"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -113,7 +113,7 @@
       "summaries": 103
     },
     "darwin": {
-      "passed": 1216,
+      "passed": 1223,
       "failed": 0,
       "ignored": 10,
       "summaries": 103

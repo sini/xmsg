@@ -135,7 +135,8 @@ unavailable: the bounded public `root.crt` and stat-only `root.key` metadata. Th
 is `installed_not_loaded`; enabled state and pending counts stay unknown. No directory
 is guessed, and file presence does not imply enabled configuration. This differs from
 client `--enroll-state`. The live view takes precedence because loaded and installed
-roots can differ. Key metadata must describe a regular file owned by the current UID,
+roots can differ. An override appears in `checked_paths` only when the installed
+fallback was used. Key metadata must describe a regular file owned by the current UID,
 at most 1 MiB, with owner-read permission and no group/other access. This cannot prove
 key validity, matching, actual readability or issuance; doctor never opens the key or
 issues a test certificate. The CLI's local request has a five-second budget.
