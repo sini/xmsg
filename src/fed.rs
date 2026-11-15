@@ -4371,6 +4371,7 @@ pub struct FedInboxQuery {
 async fn fed_get_inbox_handler(
     State(fed_state): State<Arc<FedState>>,
     Extension(peer): Extension<Arc<AuthenticatedPeer>>,
+    tls: Option<Extension<crate::observe_fed::TlsAdmission>>,
     Query(query): Query<FedInboxQuery>,
 ) -> Result<Response, AppError> {
     let peer_cfg = fed_state
@@ -4408,7 +4409,13 @@ async fn fed_get_inbox_handler(
             for offset in 0..3 {
                 match (turn + offset) % 3 {
                     0 if query.control == Some(true) && query.observe_relay == Some(1) => {
-                        if let Some(item) = crate::observe_relay::next_for(&fed_state, &peer) {
+                        let current_poll = tls.as_ref().is_some_and(|Extension(tls)| {
+                            Arc::ptr_eq(&tls.peers, &fed_state.current_peers())
+                                && tls.config.name == peer.name
+                        });
+                        if let Some(item) =
+                            crate::observe_relay::next_for(&fed_state, &peer, current_poll)
+                        {
                             return Ok(Some(item));
                         }
                     }
@@ -5338,7 +5345,7 @@ async fn get_federated_inbox_mode(
     .0)
 }
 
-async fn get_federated_inbox_witnessed(
+pub(crate) async fn get_federated_inbox_witnessed(
     fed_state: &FedState,
     current_peers: &PeersMap,
     peer_name: &str,
@@ -5437,6 +5444,16 @@ async fn get_federated_inbox_witnessed(
         }) {
             return Err(AppError::BadRequest("invalid control response".into()));
         }
+        #[cfg(any(test, feature = "test-hooks"))]
+        if advertise {
+            if let Some(controls) =
+                crate::observe_relay::test_hooks::controls_for_borrowed(fed_state)
+            {
+                controls
+                    .control_read_attempts
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
         let limited = http_body_util::Limited::new(resp.into_body(), max_limit);
         use http_body_util::BodyExt;
         let body_bytes = limited
@@ -5451,6 +5468,16 @@ async fn get_federated_inbox_witnessed(
         if status.is_success() {
             let msg: Option<FedInboxItem> = serde_json::from_slice(&body_bytes)
                 .map_err(|e| AppError::Internal(format!("failed to parse inbox message: {e}")))?;
+            #[cfg(any(test, feature = "test-hooks"))]
+            if advertise {
+                if let Some(controls) =
+                    crate::observe_relay::test_hooks::controls_for_borrowed(fed_state)
+                {
+                    controls
+                        .max_buffered_control
+                        .fetch_max(body_bytes.len(), Ordering::Relaxed);
+                }
+            }
             if let Some(FedInboxItem::Observe { request }) = &msg {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]

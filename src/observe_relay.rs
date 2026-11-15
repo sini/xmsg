@@ -324,6 +324,7 @@ struct RelayState {
     slots: Arc<Semaphore>,
     buffers: Arc<Semaphore>,
     refusals: Arc<Semaphore>,
+    posts: Arc<Semaphore>,
     #[cfg(any(test, feature = "test-hooks"))]
     controls: Arc<test_hooks::Controls>,
 }
@@ -341,6 +342,7 @@ fn shared(fs: &Arc<FedState>) -> Arc<RelayState> {
         slots: Arc::new(Semaphore::new(MAX_WAITERS)),
         buffers: Arc::new(Semaphore::new(MAX_BUFFERS)),
         refusals: Arc::new(Semaphore::new(MAX_WAITERS)),
+        posts: Arc::new(Semaphore::new(1)),
         #[cfg(any(test, feature = "test-hooks"))]
         controls: test_hooks::controls(fs),
     });
@@ -606,7 +608,11 @@ pub(crate) async fn before_dispatch(fs: &Arc<FedState>) {
     #[cfg(not(any(test, feature = "test-hooks")))]
     let _ = fs;
 }
-pub(crate) fn next_for(fs: &Arc<FedState>, peer: &AuthenticatedPeer) -> Option<FedInboxItem> {
+pub(crate) fn next_for(
+    fs: &Arc<FedState>,
+    peer: &AuthenticatedPeer,
+    current_poll: bool,
+) -> Option<FedInboxItem> {
     let state = shared(fs);
     let mut queue = state.queue.lock().unwrap();
     let mut ids = queue.waiting.keys().cloned().collect::<Vec<_>>();
@@ -614,11 +620,6 @@ pub(crate) fn next_for(fs: &Arc<FedState>, peer: &AuthenticatedPeer) -> Option<F
     for id in ids {
         let w = queue.waiting.get_mut(&id)?;
         if w.expected_leaf != peer.name || w.dispatched {
-            continue;
-        }
-        if w.control.leaf.starts_with("sha256:") && peer.certificate_has_uri {
-            let w = queue.waiting.remove(&id)?;
-            let _ = w.tx.send(Err(Failure::Unsupported));
             continue;
         }
         let valid = state.authorize(w).map(|_| ()).and_then(|()| {
@@ -631,6 +632,14 @@ pub(crate) fn next_for(fs: &Arc<FedState>, peer: &AuthenticatedPeer) -> Option<F
         if let Err(error) = valid {
             let w = queue.waiting.remove(&id)?;
             let _ = w.tx.send(Err(error));
+            continue;
+        }
+        if !current_poll || w.control.leaf != peer_identity(peer) {
+            continue;
+        }
+        if w.control.leaf.starts_with("sha256:") && peer.certificate_has_uri {
+            let w = queue.waiting.remove(&id)?;
+            let _ = w.tx.send(Err(Failure::Unsupported));
             continue;
         }
         w.dispatched = true;
@@ -714,13 +723,10 @@ async fn answer_inner(state: Arc<RelayState>, id: String, request: Request) -> R
     let body = if invalid_length {
         Err(Failure::Invalid)
     } else {
-        tokio::time::timeout_at(
-            deadline,
-            axum::body::to_bytes(request.into_body(), MAX_BYTES),
-        )
-        .await
-        .map_err(|_| Failure::Unreachable)
-        .and_then(|result| result.map_err(|_| Failure::Invalid))
+        tokio::time::timeout_at(deadline, read_answer_body(request.into_body(), &state))
+            .await
+            .map_err(|_| Failure::Unreachable)
+            .and_then(|result| result)
     };
     let mut queue = state.queue.lock().unwrap();
     let w = queue.waiting.remove(&id).ok_or(Failure::Invalid)?;
@@ -733,7 +739,7 @@ async fn answer_inner(state: Arc<RelayState>, id: String, request: Request) -> R
         match status {
             Ok(()) => {
                 validate_dto(&body, &w.control, &config)?;
-                Ok(body.to_vec())
+                Ok(body)
             }
             Err(e) => {
                 if !body.is_empty() {
@@ -749,6 +755,36 @@ async fn answer_inner(state: Arc<RelayState>, id: String, request: Request) -> R
     };
     let _ = w.tx.send(result);
     accepted
+}
+async fn read_answer_body(
+    mut body: axum::body::Body,
+    state: &RelayState,
+) -> Result<Vec<u8>, Failure> {
+    use http_body_util::BodyExt;
+    #[cfg(not(any(test, feature = "test-hooks")))]
+    let _ = state;
+    #[cfg(any(test, feature = "test-hooks"))]
+    state
+        .controls
+        .answer_read_attempts
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut bytes = Vec::with_capacity(MAX_BYTES);
+    while let Some(frame) = body.frame().await {
+        let chunk = frame
+            .map_err(|_| Failure::Invalid)?
+            .into_data()
+            .map_err(|_| Failure::Invalid)?;
+        if chunk.len() > MAX_BYTES - bytes.len() {
+            return Err(Failure::Invalid);
+        }
+        bytes.extend_from_slice(&chunk);
+        #[cfg(any(test, feature = "test-hooks"))]
+        state
+            .controls
+            .max_buffered_answer
+            .fetch_max(bytes.len(), std::sync::atomic::Ordering::Relaxed);
+    }
+    Ok(bytes)
 }
 fn validate_dto(body: &[u8], control: &Control, config: &PeerConfig) -> Result<(), Failure> {
     if body.len() > MAX_BYTES {
@@ -807,15 +843,35 @@ pub mod test_hooks {
         pub before_post: crate::observe_fed::test_hooks::Gate,
         pub before_send: crate::observe_fed::test_hooks::Gate,
         pub clock_offset_ms: std::sync::atomic::AtomicU64,
+        pub max_buffered_answer: std::sync::atomic::AtomicUsize,
+        pub max_buffered_control: std::sync::atomic::AtomicUsize,
+        pub answer_read_attempts: std::sync::atomic::AtomicUsize,
+        pub control_read_attempts: std::sync::atomic::AtomicUsize,
+        pub post_waiters: std::sync::atomic::AtomicUsize,
+        pub post_entries: std::sync::atomic::AtomicUsize,
+        pub post_active: std::sync::atomic::AtomicUsize,
+        pub post_peak: std::sync::atomic::AtomicUsize,
+        pub refusal_active: std::sync::atomic::AtomicUsize,
+        pub refusal_peak: std::sync::atomic::AtomicUsize,
+        pub refusal_spawned: std::sync::atomic::AtomicUsize,
+        pub controls_received: std::sync::atomic::AtomicUsize,
         pub listeners: std::sync::atomic::AtomicUsize,
         pub control_polls: std::sync::atomic::AtomicUsize,
         pub custody_polls: std::sync::atomic::AtomicUsize,
         pub acks: std::sync::atomic::AtomicUsize,
         pub delivery_posts: std::sync::atomic::AtomicUsize,
     }
+    type Registry = HashMap<usize, (Weak<FedState>, Weak<Controls>)>;
+    static CONTROLS: OnceLock<Mutex<Registry>> = OnceLock::new();
+    pub fn controls_for_borrowed(fs: &FedState) -> Option<Arc<Controls>> {
+        CONTROLS
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap()
+            .get(&(fs as *const FedState as usize))
+            .and_then(|(_, c)| c.upgrade())
+    }
     pub fn controls(fs: &Arc<FedState>) -> Arc<Controls> {
-        type Registry = HashMap<usize, (Weak<FedState>, Weak<Controls>)>;
-        static CONTROLS: OnceLock<Mutex<Registry>> = OnceLock::new();
         let mut all = CONTROLS.get_or_init(Mutex::default).lock().unwrap();
         all.retain(|_, (f, c)| f.strong_count() > 0 && c.strong_count() > 0);
         let key = Arc::as_ptr(fs) as usize;
@@ -833,6 +889,71 @@ pub mod test_hooks {
         Worker {
             _worker: crate::fed::spawn_control_worker(fs, peer),
         }
+    }
+    pub fn occupy_reads(fs: &Arc<FedState>, count: usize) -> Vec<OwnedSemaphorePermit> {
+        let slots = crate::observe_fed::read_slots(fs);
+        (0..count)
+            .map(|_| slots.clone().try_acquire_owned().unwrap())
+            .collect()
+    }
+    pub(crate) enum TaskCounter {
+        PostWaiting,
+        PostActive,
+        Refusal,
+    }
+    pub(crate) struct TaskCount(Arc<Controls>, TaskCounter);
+    impl TaskCount {
+        pub(crate) fn new(controls: Arc<Controls>, kind: TaskCounter) -> Self {
+            use std::sync::atomic::Ordering::Relaxed;
+            match kind {
+                TaskCounter::PostWaiting => {
+                    controls.post_waiters.fetch_add(1, Relaxed);
+                    controls.post_entries.fetch_add(1, Relaxed);
+                }
+                TaskCounter::PostActive => {
+                    let n = controls.post_active.fetch_add(1, Relaxed) + 1;
+                    controls.post_peak.fetch_max(n, Relaxed);
+                }
+                TaskCounter::Refusal => {
+                    let n = controls.refusal_active.fetch_add(1, Relaxed) + 1;
+                    controls.refusal_peak.fetch_max(n, Relaxed);
+                    controls.refusal_spawned.fetch_add(1, Relaxed);
+                }
+            }
+            Self(controls, kind)
+        }
+    }
+    impl Drop for TaskCount {
+        fn drop(&mut self) {
+            use std::sync::atomic::Ordering::Relaxed;
+            match self.1 {
+                TaskCounter::PostWaiting => {
+                    self.0.post_waiters.fetch_sub(1, Relaxed);
+                }
+                TaskCounter::PostActive => {
+                    self.0.post_active.fetch_sub(1, Relaxed);
+                }
+                TaskCounter::Refusal => {
+                    self.0.refusal_active.fetch_sub(1, Relaxed);
+                }
+            }
+        }
+    }
+    pub async fn poll(
+        fs: &Arc<FedState>,
+        peer: &str,
+        advertise: bool,
+    ) -> Result<Option<FedInboxItem>, AppError> {
+        crate::fed::get_federated_inbox_witnessed(
+            fs,
+            &fs.current_peers(),
+            peer,
+            0,
+            Some(true),
+            advertise,
+        )
+        .await
+        .map(|(item, _)| item)
     }
     pub fn record_request(fs: &Arc<FedState>, method: &str, route: &str, query: Option<&str>) {
         use std::sync::atomic::Ordering::Relaxed;
@@ -982,6 +1103,12 @@ pub(crate) async fn spawn_answer(
     control: Control,
     slots: &Arc<Semaphore>,
 ) {
+    let scheduler = shared(fs);
+    #[cfg(any(test, feature = "test-hooks"))]
+    scheduler
+        .controls
+        .controls_received
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let deadline = Instant::now() + Duration::from_millis(control.remaining_ms.min(5000));
     let admission = leaf_admit(fs, peers, hub, witness, &control).and_then(|admission| {
         slots
@@ -992,10 +1119,10 @@ pub(crate) async fn spawn_answer(
     });
     let fs = fs.clone();
     let hub = hub.to_owned();
-    // Refusal uses the worker itself; only an admitted read gets a spawned answer task.
     match admission {
         Ok((admission, slot)) => {
             tokio::spawn(async move {
+                let _scheduler = scheduler;
                 let admission = Arc::new(admission);
                 let slot = Arc::new(slot);
                 let result = tokio::time::timeout_at(
@@ -1013,11 +1140,19 @@ pub(crate) async fn spawn_answer(
             });
         }
         Err(error) => {
-            let Ok(refusal) = shared(&fs).refusals.clone().try_acquire_owned() else {
+            let Ok(refusal) = scheduler.refusals.clone().try_acquire_owned() else {
                 return;
             };
+            #[cfg(any(test, feature = "test-hooks"))]
+            let refusal_count = test_hooks::TaskCount::new(
+                test_hooks::controls(&fs),
+                test_hooks::TaskCounter::Refusal,
+            );
             tokio::spawn(async move {
+                let _scheduler = scheduler;
                 let _refusal = refusal;
+                #[cfg(any(test, feature = "test-hooks"))]
+                let _refusal_count = refusal_count;
                 let _ = tokio::time::timeout_at(
                     deadline,
                     post_answer(&fs, &hub, &control, Err(error), None),
@@ -1114,6 +1249,25 @@ async fn post_answer(
 ) -> Result<(), Failure> {
     #[cfg(any(test, feature = "test-hooks"))]
     test_hooks::controls(fs).before_post.pause().await;
+    let scheduler = shared(fs);
+    #[cfg(any(test, feature = "test-hooks"))]
+    let waiting = test_hooks::TaskCount::new(
+        test_hooks::controls(fs),
+        test_hooks::TaskCounter::PostWaiting,
+    );
+    let _post = scheduler
+        .posts
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| Failure::Unreachable)?;
+    #[cfg(any(test, feature = "test-hooks"))]
+    drop(waiting);
+    #[cfg(any(test, feature = "test-hooks"))]
+    let _active = test_hooks::TaskCount::new(
+        test_hooks::controls(fs),
+        test_hooks::TaskCounter::PostActive,
+    );
     let peers = fs.current_peers();
     let peer = peers.get(hub).ok_or(Failure::Denied)?;
     if !config_identity(peer, &control.hub) {

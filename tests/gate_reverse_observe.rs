@@ -33,6 +33,7 @@ struct Identity {
     key: Vec<u8>,
     pin: String,
     node: String,
+    ca_identity: Option<(String, std::path::PathBuf)>,
 }
 impl Identity {
     fn new() -> Self {
@@ -44,13 +45,21 @@ impl Identity {
             cert,
             key: key.signing_key.serialize_der(),
             pin,
+            ca_identity: None,
         }
     }
     fn full(&self) -> String {
-        format!("sha256:{}", self.pin)
+        self.ca_identity.as_ref().map_or_else(
+            || format!("sha256:{}", self.pin),
+            |(identity, _)| identity.clone(),
+        )
     }
     fn peer(&self, address: &str, rights: &[&str], leaf: bool) -> Value {
-        json!({"address":address,"pin":self.pin,"allow":rights,"leaf":leaf})
+        if let Some((identity, ca)) = &self.ca_identity {
+            json!({"address":address,"ca":ca,"identities":[identity],"allow":rights,"leaf":leaf})
+        } else {
+            json!({"address":address,"pin":self.pin,"allow":rights,"leaf":leaf})
+        }
     }
 }
 struct RelayFixture {
@@ -106,11 +115,13 @@ impl RelayFixture {
         Self::with_nodes(hub, Identity::new()).await
     }
     async fn with_nodes(hub: Identity, leaf: Identity) -> Self {
+        Self::with_identities(hub, leaf, Identity::new()).await
+    }
+    async fn with_identities(hub: Identity, leaf: Identity, collector: Identity) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let dir = tempfile::tempdir().unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let collector = Identity::new();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let route = json!({"hub":hub.full(),"leaf":leaf.full(),"collector":collector.full()});
@@ -236,7 +247,16 @@ async fn request_to(
 async fn hub_relays_exact_raw_snapshot_only_via_advertising_control_poll() {
     let f = RelayFixture::new().await;
     let uri = f.uri("snapshot");
-    let collector = f.request(&f.collector, "GET", &uri, vec![], &[]);
+    let collector = f.request(
+        &f.collector,
+        "GET",
+        &uri,
+        vec![],
+        &[
+            ("xmsg-origin", "forged-collector"),
+            ("authorization", "Bearer SYNTHETIC_OWNER_CREDENTIAL"),
+        ],
+    );
     let leaf = async {
         let (status, body) = f
             .request(
@@ -249,6 +269,10 @@ async fn hub_relays_exact_raw_snapshot_only_via_advertising_control_poll() {
             .await;
         assert_eq!(status, 200);
         let control: Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&body).contains("SYNTHETIC_OWNER_CREDENTIAL"),
+            "human bearer never crosses relay control wire"
+        );
         assert_eq!(
             control["kind"], "observe",
             "only an advertising control poll receives Observe"
@@ -286,6 +310,10 @@ async fn hub_relays_exact_raw_snapshot_only_via_advertising_control_poll() {
 #[tokio::test]
 async fn production_leaf_exports_events_and_snapshot_without_listener_or_custody() {
     let f = RelayFixture::new().await;
+    let primary_before = [
+        f.state.db.lock().unwrap().total_changes(),
+        f.leaf_state.db.lock().unwrap().total_changes(),
+    ];
     let _worker =
         xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
     for kind in ["events", "snapshot"] {
@@ -297,6 +325,12 @@ async fn production_leaf_exports_events_and_snapshot_without_listener_or_custody
         assert_eq!(dto["node"], f.leaf.node, "DTO comes from the outbound leaf");
         assert_eq!(dto["v"], 1);
         assert!(!String::from_utf8_lossy(&body).contains("bearer"));
+        for canary in ["PLANTED_TOKEN", "/synthetic/private", "PRIVATE_LABEL"] {
+            assert!(
+                !String::from_utf8_lossy(&body).contains(canary),
+                "minimized metadata excludes {canary}"
+            );
+        }
     }
     let hub = xmsg::observe_relay::test_hooks::controls(&f.state);
     let leaf = xmsg::observe_relay::test_hooks::controls(&f.leaf_state);
@@ -324,8 +358,13 @@ async fn production_leaf_exports_events_and_snapshot_without_listener_or_custody
             "no message/reply wire activity"
         );
     }
-    for fs in [&f.state, &f.leaf_state] {
+    for (index, fs) in [&f.state, &f.leaf_state].into_iter().enumerate() {
         let db = fs.db.lock().unwrap();
+        assert_eq!(
+            db.total_changes(),
+            primary_before[index],
+            "reverse observation never mutates bus primary storage"
+        );
         let rows: i64 = db
             .query_row("SELECT count(*) FROM peer_mailbox", [], |r| r.get(0))
             .unwrap();
@@ -844,6 +883,13 @@ async fn declared_and_streaming_dto_bounds_allow_exact_limit_and_refuse_one_over
     for chunked in [false, true] {
         let f = RelayFixture::new().await;
         for size in [256 * 1024, 256 * 1024 + 1] {
+            let measurements = xmsg::observe_relay::test_hooks::controls(&f.state);
+            measurements
+                .max_buffered_answer
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            measurements
+                .answer_read_attempts
+                .store(0, std::sync::atomic::Ordering::Relaxed);
             let caller = async {
                 f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
                     .await
@@ -873,6 +919,16 @@ async fn declared_and_streaming_dto_bounds_allow_exact_limit_and_refuse_one_over
                 .0
             };
             let (response, answer) = tokio::join!(caller, leaf);
+            assert!(measurements.max_buffered_answer.load(std::sync::atomic::Ordering::Relaxed)<=256*1024,"streaming reader never buffers an oversized answer even if semantic decoder refuses it");
+            if size > 256 * 1024 && !chunked {
+                assert_eq!(
+                    measurements
+                        .answer_read_attempts
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    0,
+                    "declared oversize refuses before invoking body reader"
+                );
+            }
             if size == 256 * 1024 {
                 assert_eq!(answer, 200, "exact body limit chunked={chunked}");
                 assert_eq!(response.0, 200);
@@ -994,6 +1050,7 @@ async fn ordinary_pinned_polling_keeps_accepting_non_spiffe_and_multiple_uri_cer
             cert,
             key: key.serialize_der(),
             pin,
+            ca_identity: None,
         };
         let f = RelayFixture::with_hub(hub).await;
         reload(&f.leaf_state, |c| {
@@ -1378,6 +1435,7 @@ async fn reverse_enable_for_another_route_preserves_unrouted_ordinary_control() 
         cert,
         key: key.serialize_der(),
         pin,
+        ca_identity: None,
     };
     let f = RelayFixture::with_hub(hub).await;
     let routed_hub = Identity::new();
@@ -1410,6 +1468,7 @@ async fn pinned_leaf_with_uri_san_is_explicitly_unsupported_but_ordinary_control
         cert,
         key: key.serialize_der(),
         pin,
+        ca_identity: None,
     };
     let f = RelayFixture::with_nodes(Identity::new(), leaf).await;
     let _worker =
@@ -1427,4 +1486,598 @@ async fn pinned_leaf_with_uri_san_is_explicitly_unsupported_but_ordinary_control
     );
     let (_, status) = xmsg::fed::list_peer(&f.state, &f.leaf.node).await;
     assert_eq!(status.status, "ok", "ordinary pinned control is unchanged");
+}
+
+#[tokio::test]
+async fn control_envelope_declared_and_streaming_bounds_are_independent_of_json_shape() {
+    for chunked in [false, true] {
+        for size in [8192, 8193] {
+            let mut f = RelayFixture::new().await;
+            f.task.abort();
+            let _ = (&mut f.task).await;
+            let listener = tokio::net::TcpListener::bind(f.address).await.unwrap();
+            let acceptor = xmsg::fed::make_tls_acceptor(
+                &f.state.cert_chain(),
+                &f.state.key_der(),
+                f.state.current_peers(),
+            )
+            .unwrap();
+            let mut body=serde_json::to_vec(&json!({"kind":"observe","request":{"id":"opaque123","hub":f.hub.full(),"leaf":f.leaf.full(),"collector":f.collector.full(),"read":"snapshot","query":"","remaining_ms":5000}})).unwrap();
+            body.resize(size, b' ');
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let tls = acceptor.accept(tcp).await.unwrap();
+                let service = hyper::service::service_fn(
+                    move |request: hyper::Request<hyper::body::Incoming>| {
+                        assert_eq!(request.uri().path(), "/fed/v2/inbox");
+                        assert!(
+                            request
+                                .uri()
+                                .query()
+                                .unwrap()
+                                .contains("control=true&observe_relay=1"),
+                            "wire poll advertises current capability"
+                        );
+                        let mut response = hyper::Response::builder().status(200);
+                        if chunked {
+                            response = response.header("transfer-encoding", "chunked");
+                        }
+                        let response = response.body(Full::new(Bytes::from(body.clone()))).unwrap();
+                        async move { Ok::<_, std::convert::Infallible>(response) }
+                    },
+                );
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .keep_alive(false)
+                    .serve_connection(hyper_util::rt::TokioIo::new(tls), service)
+                    .await;
+            });
+            let metrics = xmsg::observe_relay::test_hooks::controls(&f.leaf_state);
+            let result =
+                xmsg::observe_relay::test_hooks::poll(&f.leaf_state, &f.hub.node, true).await;
+            server.await.unwrap();
+            if size == 8192 {
+                assert!(
+                    matches!(result, Ok(Some(xmsg::fed::FedInboxItem::Observe { .. }))),
+                    "valid envelope at exact raw-byte boundary"
+                );
+            } else {
+                assert!(result.is_err(), "one-over control envelope refuses");
+            }
+            assert!(
+                metrics
+                    .max_buffered_control
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    <= 8192,
+                "raw control read never collects over8KiB before semantic validation"
+            );
+            if size > 8192 && !chunked {
+                assert_eq!(
+                    metrics
+                        .control_read_attempts
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    0,
+                    "declared control oversize never invokes body reader"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn witnessed_matching_source_cidrs_allow_actual_connections() {
+    let f = RelayFixture::new().await;
+    reload(&f.state, |c| {
+        c["peers"][&f.collector.node]["from"] = json!(["127.0.0.1/32"])
+    });
+    reload(&f.leaf_state, |c| {
+        c["peers"][&f.hub.node]["from"] = json!(["127.0.0.1/32"])
+    });
+    let _worker =
+        xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
+    assert_eq!(
+        f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
+            .await
+            .0,
+        200,
+        "both witnessed matching source CIDRs pass"
+    );
+}
+
+#[tokio::test]
+async fn leaf_scope_only_narrowing_after_projection_cannot_send_old_bytes() {
+    for labels in [false, true] {
+        let f = RelayFixture::new().await;
+        reload(&f.state, |c| {
+            c["peers"][&f.collector.node]["observe_labels"] = json!(true)
+        });
+        reload(&f.leaf_state, |c| {
+            c["peers"][&f.collector.node]["observe_labels"] = json!(true)
+        });
+        let gates = xmsg::observe_relay::test_hooks::controls(&f.leaf_state);
+        gates.before_post.arm(1);
+        let _worker =
+            xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
+        let caller = async {
+            f.request(
+                &f.collector,
+                "GET",
+                &format!("{}?labels=true", f.uri("snapshot")),
+                vec![],
+                &[],
+            )
+            .await
+        };
+        let narrow = async {
+            gates.before_post.wait_for(1).await;
+            reload(&f.leaf_state, |c| {
+                if labels {
+                    c["peers"][&f.collector.node]["observe_labels"] = json!(false)
+                } else {
+                    c["peers"][&f.collector.node]["targets"] = json!([])
+                }
+            });
+            gates.before_post.release();
+        };
+        let (response, ()) = tokio::join!(caller, narrow);
+        assert_eq!(
+            response.0, 403,
+            "original generation blocks stale scope-only narrowing labels={labels}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn hub_scope_only_change_invalidates_prepared_even_empty_dto() {
+    let f = RelayFixture::new().await;
+    let gates = xmsg::observe_relay::test_hooks::controls(&f.state);
+    gates.before_forward.arm(1);
+    let caller = async {
+        f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
+            .await
+    };
+    let narrow = async {
+        let request = control(&f).await;
+        assert_eq!(submit(&f, &request, empty_snapshot(&f)).await.0, 200);
+        gates.before_forward.wait_for(1).await;
+        reload(&f.state, |c| {
+            c["peers"][&f.collector.node]["targets"] = json!([])
+        });
+        gates.before_forward.release();
+    };
+    let (response, ()) = tokio::join!(caller, narrow);
+    assert_eq!(
+        response.0, 403,
+        "generation fence invalidates old scope even when fresh empty target validation would pass"
+    );
+}
+
+#[tokio::test]
+async fn relay_reads_fill_the_same_leaf_budget_seen_by_direct_export() {
+    let f = Arc::new(RelayFixture::new().await);
+    let identities = collectors(&f, 8);
+    let (address, _listener) = leaf_listener(&f).await;
+    let reads = xmsg::observe_fed::test_hooks::controls(&f.leaf_state);
+    reads.before_read.arm(8);
+    let posts = xmsg::observe_relay::test_hooks::controls(&f.leaf_state);
+    posts.before_send.arm(1);
+    let _worker =
+        xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
+    let mut tasks = Vec::new();
+    for (index, identity) in identities.into_iter().enumerate() {
+        let f = f.clone();
+        tasks.push(tokio::spawn(async move {
+            f.request(&identity, "GET", &f.uri("snapshot"), vec![], &[])
+                .await
+        }));
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            reads.before_read.wait_for(index + 1),
+        )
+        .await
+        .expect("sequential TLS admissions reach shared-budget read gate");
+    }
+    reads.before_read.wait_for(8).await;
+    let response = request_to(
+        address,
+        &f.leaf,
+        &f.collector,
+        "GET",
+        "/fed/v2/observe/snapshot",
+        vec![],
+        &[],
+    )
+    .await;
+    reads.before_read.release();
+    assert_eq!(
+        response.0, 429,
+        "eight admitted relay reads leave no separate direct allowance"
+    );
+    posts.before_send.wait_for(1).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while posts
+            .post_entries
+            .load(std::sync::atomic::Ordering::Relaxed)
+            < 8
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        posts.post_peak.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "all eight admitted answers queue behind exactly one observed POST connection"
+    );
+    posts.before_send.release();
+    for task in tasks {
+        assert_eq!(task.await.unwrap().0, 200);
+    }
+}
+
+#[tokio::test]
+async fn old_tls_poll_cannot_take_new_generation_observe_work() {
+    let f = Arc::new(RelayFixture::new().await);
+    let gates = xmsg::observe_relay::test_hooks::controls(&f.state);
+    gates.before_dispatch.arm(1);
+    let old = {
+        let f = f.clone();
+        tokio::spawn(async move {
+            f.request(
+                &f.leaf,
+                "GET",
+                "/fed/v2/inbox?control=true&wait=1&observe_relay=1",
+                vec![],
+                &[],
+            )
+            .await
+        })
+    };
+    gates.before_dispatch.wait_for(1).await;
+    reload(&f.state, |_| {});
+    let caller = {
+        let f = f.clone();
+        tokio::spawn(async move {
+            f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
+                .await
+        })
+    };
+    wait_pending(&f.state, 1).await;
+    gates.before_dispatch.release();
+    let old = old.await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&old.1).unwrap(),
+        Value::Null,
+        "old TLS poll never receives new-generation collector attestation"
+    );
+    let request = control(&f).await;
+    assert_eq!(submit(&f, &request, empty_snapshot(&f)).await.0, 200);
+    assert_eq!(
+        caller.await.unwrap().0,
+        200,
+        "fresh current TLS poll completes the same waiting request"
+    );
+}
+
+fn ca_identity(
+    uri: &str,
+    bundle: &std::path::Path,
+    issuer: &rcgen::Issuer<'_, &rcgen::KeyPair>,
+) -> Identity {
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
+    params
+        .subject_alt_names
+        .push(rcgen::SanType::URI(uri.try_into().unwrap()));
+    params.extended_key_usages = vec![
+        rcgen::ExtendedKeyUsagePurpose::ClientAuth,
+        rcgen::ExtendedKeyUsagePurpose::ServerAuth,
+    ];
+    let cert = params.signed_by(&key, issuer).unwrap().der().to_vec();
+    let pin = xmsg::fed::spki_sha256_from_der(&cert).unwrap();
+    Identity {
+        cert,
+        key: key.serialize_der(),
+        pin,
+        node: xmsg::node::node_name_from_uri(uri).unwrap(),
+        ca_identity: Some((uri.into(), bundle.to_owned())),
+    }
+}
+#[tokio::test]
+async fn literal_ca_uri_routes_export_and_same_node_foreign_authority_refuses() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let directory = tempfile::tempdir().unwrap();
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::default();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    params.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::DigitalSignature,
+    ];
+    let certificate = params.self_signed(&key).unwrap();
+    let bundle = directory.path().join("synthetic-ca.pem");
+    std::fs::write(&bundle, certificate.pem()).unwrap();
+    let issuer = rcgen::Issuer::from_params(&params, &key);
+    let hub = ca_identity("spiffe://realm-one/host/hub/user/owner", &bundle, &issuer);
+    let leaf = ca_identity("spiffe://realm-one/ns/leaves/sa/leaf", &bundle, &issuer);
+    let collector = ca_identity(
+        "spiffe://realm-one/host/collector/user/owner",
+        &bundle,
+        &issuer,
+    );
+    let f = RelayFixture::with_identities(hub, leaf, collector).await;
+    let worker =
+        xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
+    for kind in ["events", "snapshot"] {
+        let (status, body) = f
+            .request(&f.collector, "GET", &f.uri(kind), vec![], &[])
+            .await;
+        assert_eq!(status, 200, "real CA/URI reverse {kind}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["node"],
+            "leaf.leaves"
+        );
+    }
+    drop(worker);
+    reload(&f.state, |c| {
+        c["reverse_observe"]["routes"][0]["leaf"] = json!("spiffe://realm-two/ns/leaves/sa/leaf")
+    });
+    assert_eq!(
+        f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
+            .await
+            .0,
+        403,
+        "same-derived-node foreign authority cannot substitute configured leaf"
+    );
+}
+
+#[tokio::test]
+async fn refusal_budget_survives_worker_restart_and_full_lane_keeps_controls_progressing() {
+    let f = Arc::new(RelayFixture::new().await);
+    let identities = collectors(&f, 9);
+    let occupied = xmsg::observe_relay::test_hooks::occupy_reads(&f.leaf_state, 8);
+    let metrics = xmsg::observe_relay::test_hooks::controls(&f.leaf_state);
+    metrics.before_post.arm(8);
+    let worker =
+        xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
+    let mut callers = Vec::new();
+    for (index, identity) in identities.iter().take(8).enumerate() {
+        let f = f.clone();
+        let identity = identity.clone();
+        callers.push(tokio::spawn(async move {
+            f.request(&identity, "GET", &f.uri("snapshot"), vec![], &[])
+                .await
+        }));
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            metrics.before_post.wait_for(index + 1),
+        )
+        .await
+        .expect("empty refusal reached pre-POST barrier");
+    }
+    use std::sync::atomic::Ordering::Relaxed;
+    assert_eq!(
+        metrics.refusal_active.load(Relaxed),
+        8,
+        "eight empty refusal tasks occupy the per-node lane"
+    );
+    let (list, attachment) = tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::join!(
+            xmsg::fed::list_peer(&f.state, &f.leaf.node),
+            xmsg::fed::fetch_attachment_chunk(
+                &f.state,
+                &f.leaf.node,
+                "missing-synthetic-item",
+                0,
+                0,
+                16
+            )
+        )
+    })
+    .await
+    .expect("full stalled refusal lane leaves both ordinary controls progressing");
+    assert_eq!(list.1.status, "ok");
+    assert!(matches!(
+        attachment,
+        Err(xmsg::error::AppError::NotFoundDetail(_))
+    ));
+    xmsg::fed::queue_leaf_mailbox_message(
+        &f.state,
+        &f.leaf.node,
+        "demo",
+        &xmsg::fed::FedEnvelope {
+            v: 2,
+            id: "ordinary-positive".into(),
+            origin: xmsg::storage::Origin::service("source", &f.hub.node),
+            to: xmsg::fed::FedTarget {
+                r#ref: "demo".into(),
+            },
+            body: "ordinary-positive-body".into(),
+            thread_id: "ordinary-positive".into(),
+            created_at: xmsg::storage::now_epoch_secs(),
+            forwarded: None,
+            attachments: vec![],
+        },
+        &format!("source@{}", f.hub.node),
+    )
+    .unwrap();
+    let ordinary = f
+        .request(
+            &f.leaf,
+            "GET",
+            "/fed/v2/inbox?wait=0&control=false",
+            vec![],
+            &[],
+        )
+        .await;
+    assert_eq!(ordinary.0, 200);
+    let ordinary: Value = serde_json::from_slice(&ordinary.1).unwrap();
+    assert_eq!(ordinary["kind"], "message");
+    assert_eq!(
+        ordinary["body"], "ordinary-positive-body",
+        "ordinary delivery progresses with all refusal tasks stalled"
+    );
+    assert_eq!(
+        f.request(
+            &f.leaf,
+            "POST",
+            "/fed/v2/inbox/ordinary-positive/ack",
+            vec![],
+            &[]
+        )
+        .await
+        .0,
+        200,
+        "ordinary ACK progresses outside observation lane"
+    );
+    drop(worker);
+    for caller in callers {
+        caller.abort();
+        let _ = caller.await;
+    }
+    wait_pending(&f.state, 0).await;
+    let _worker =
+        xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
+    let last = {
+        let f = f.clone();
+        let identity = identities[8].clone();
+        tokio::spawn(async move {
+            f.request(&identity, "GET", &f.uri("snapshot"), vec![], &[])
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while metrics.controls_received.load(Relaxed) < 9 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        metrics.refusal_spawned.load(Relaxed),
+        8,
+        "worker restart cannot create a ninth refusal task before the original eight finish"
+    );
+    assert_eq!(
+        metrics.refusal_peak.load(Relaxed),
+        8,
+        "per-node refusal bound applies across worker generations"
+    );
+    metrics.before_post.release();
+    drop(occupied);
+    assert_eq!(last.await.unwrap().0,503,"full refusal lane gives truthful hub deadline, never fabricated Busy delivery or empty success");
+    wait_pending(&f.state, 0).await;
+}
+
+#[tokio::test]
+async fn control_scheduler_is_fair_with_observe_backlog_and_preserves_query_bindings() {
+    let f = Arc::new(RelayFixture::new().await);
+    let identities = collectors(&f, 3);
+    let mut callers = Vec::new();
+    for (index, identity) in identities.iter().enumerate() {
+        let f = f.clone();
+        let identity = identity.clone();
+        callers.push(tokio::spawn(async move {
+            f.request(
+                &identity,
+                "GET",
+                &format!("{}?v=1&limit={}", f.uri("events"), index + 1),
+                vec![],
+                &[],
+            )
+            .await
+        }));
+    }
+    wait_pending(&f.state, 3).await;
+    let list = xmsg::fed::list_peer(&f.state, &f.leaf.node);
+    let attachment =
+        xmsg::fed::fetch_attachment_chunk(&f.state, &f.leaf.node, "synthetic-file", 0, 0, 16);
+    let manual = async {
+        let mut first = Vec::new();
+        let mut observes = 0;
+        for index in 0..5 {
+            let (status, body) = f
+                .request(
+                    &f.leaf,
+                    "GET",
+                    "/fed/v2/inbox?control=true&wait=1&observe_relay=1",
+                    vec![],
+                    &[],
+                )
+                .await;
+            assert_eq!(status, 200);
+            let item: Value = serde_json::from_slice(&body).unwrap();
+            let kind = item["kind"].as_str().unwrap();
+            if index < 3 {
+                first.push(kind.to_owned());
+            }
+            match kind {
+                "observe" => {
+                    observes += 1;
+                    let request = &item["request"];
+                    let collector = request["collector"].as_str().unwrap();
+                    let index = identities
+                        .iter()
+                        .position(|i| i.full() == collector)
+                        .unwrap();
+                    assert_eq!(
+                        request["query"],
+                        format!("v=1&limit={}", index + 1),
+                        "each actual collector retains its bound query and route"
+                    );
+                    let body = String::from_utf8(future_page())
+                        .unwrap()
+                        .replace("LEAF_NODE", &f.leaf.node)
+                        .into_bytes();
+                    assert_eq!(submit(&f, request, body).await.0, 200);
+                }
+                "list" => {
+                    assert_eq!(
+                        f.request(
+                            &f.leaf,
+                            "POST",
+                            &format!("/fed/v2/list/{}", item["query"].as_str().unwrap()),
+                            br#"{"status":"ok","entries":[]}"#.to_vec(),
+                            &[("content-type", "application/json")]
+                        )
+                        .await
+                        .0,
+                        200
+                    );
+                }
+                "attachment" => {
+                    assert_eq!(
+                        f.request(
+                            &f.leaf,
+                            "POST",
+                            &format!("/fed/v2/attachment/{}", item["query"].as_str().unwrap()),
+                            b"abc".to_vec(),
+                            &[("content-type", "application/octet-stream")]
+                        )
+                        .await
+                        .0,
+                        200
+                    );
+                }
+                _ => panic!("unexpected consuming control variant"),
+            }
+        }
+        first.sort();
+        assert_eq!(
+            first,
+            vec!["attachment", "list", "observe"],
+            "all existing control classes progress within three dispatches despite observe backlog"
+        );
+        assert_eq!(observes, 3);
+    };
+    let (list, attachment, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(list, attachment, manual)
+    })
+    .await
+    .unwrap();
+    assert_eq!(list.1.status, "ok");
+    assert_eq!(attachment.unwrap(), b"abc");
+    for caller in callers {
+        assert_eq!(caller.await.unwrap().0, 200);
+    }
 }
