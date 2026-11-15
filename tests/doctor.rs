@@ -44,6 +44,7 @@ impl Fixture {
             while !stopping.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
                         stream
                             .set_read_timeout(Some(Duration::from_secs(2)))
                             .unwrap();
@@ -253,11 +254,11 @@ fn missing_register_socket_fails_without_recreating_it() {
 }
 
 #[test]
-fn health_payload_sessions_directory_failure_is_detected() {
+fn missing_optional_sessions_directory_warns_without_failing_node() {
     let fixture = Fixture::new(json!({"status":"ok", "sessions_dir":"sessions_dir_missing"}));
     let (output, report) = fixture.report();
-    assert_eq!(output.status.code(), Some(1));
-    status(&report, "daemon.sessions_directory", "fail");
+    assert_eq!(output.status.code(), Some(0));
+    status(&report, "daemon.sessions_directory", "warn");
     fixture.assert_health_only();
 }
 
@@ -423,4 +424,42 @@ fn malformed_enrollment_metadata_fails_without_creating_identity_files() {
     status(&report, "enrollment.metadata", "fail");
     assert_eq!(snapshot(fixture.root.path()), before);
     assert!(!String::from_utf8_lossy(&output.stdout).contains("not-json-canary"));
+}
+
+#[test]
+fn wal_companion_is_not_opened_or_modified() {
+    let fixture = Fixture::healthy();
+    let wal = PathBuf::from(format!("{}-wal", fixture.db.display()));
+    fs::write(&wal, b"wal-canary").unwrap();
+    let before = snapshot(fixture.root.path());
+    let (output, report) = fixture.report();
+    assert!(output.status.success(), "{report}");
+    status(&report, "database.schema_version", "warn");
+    assert_eq!(snapshot(fixture.root.path()), before);
+}
+
+#[test]
+fn invalid_saved_ca_configuration_fails_without_rewriting_metadata() {
+    let fixture = Fixture::healthy();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let directory = enrollment(&fixture, now - 10, now + 1000);
+    let file = directory.join("enroll.json");
+    let mut state: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    state["url"] = json!("http://invalid.example");
+    fs::write(&file, state.to_string()).unwrap();
+    let before = snapshot(fixture.root.path());
+    let output = fixture
+        .command()
+        .arg("--enroll-state")
+        .arg(directory)
+        .arg("--json")
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    status(&report, "enrollment.ca_tls", "fail");
+    assert_eq!(snapshot(fixture.root.path()), before);
 }

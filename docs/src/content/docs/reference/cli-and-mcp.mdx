@@ -8,7 +8,7 @@ description: Operator commands, optional command-backed services, daemon and har
 The `xmsg` binary exposes `list`, `watch`, `doctor`, `send`, `replies`, `show`, `service`, `serve`, `mcp`,
 `register`, `unregister`, `check-peers`, and `enroll-ca`.
 
-```rust file=<rootDir>/src/main.rs#L20-L72
+```rust file=<rootDir>/src/main.rs#L20-L75
 ```
 
 ### Operator commands
@@ -97,6 +97,8 @@ The command exits `1` if any check fails. Warnings alone exit `0`. `--json` repo
 Optional path overrides are `--http-sock`, `--agent-sock`, `--register-sock`, `--db-path`,
 `--peers-file`, `--fed-cert` and `--enroll-state`. Doctor checks the selected paths; it
 cannot establish that a running daemon loaded those same paths or configuration.
+`--fed-cert` requires `--peers-file`; `--enroll-state` names a directory containing
+the existing private `enroll.json`.
 
 Doctor reads local filesystem metadata, probes the database read-only and makes a bounded
 `GET /healthz` request on the HTTP Unix socket. Optional peer configuration uses the same
