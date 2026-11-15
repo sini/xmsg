@@ -1,0 +1,349 @@
+[
+  {
+    "label": "transport-pin-explicit-right",
+    "oracle": "E01",
+    "target": "gate_dtxj_export",
+    "test": "observe_right_is_explicit_and_exports_only_metadata",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "if !config.allow.iter().any(|right| right == \"observe\") {",
+        "replacement": "if false {"
+      }
+    ],
+    "expected_literal": "peer without explicit observe right must be denied"
+  },
+  {
+    "label": "transport-ca-explicit-right",
+    "oracle": "E01",
+    "target": "gate_dtxj_export",
+    "test": "literal_ca_identity_needs_its_own_observe_grant",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "if !config.allow.iter().any(|right| right == \"observe\") {",
+        "replacement": "if false {"
+      }
+    ],
+    "expected_literal": "CA admission implied observation authority"
+  },
+  {
+    "label": "transport-handshake-policy-arc",
+    "oracle": "E05",
+    "target": "gate_dtxj_export",
+    "test": "reload_invalidates_old_tls_but_fresh_handshake_succeeds",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "if !Arc::ptr_eq(&tls.peers, &peers) {",
+        "replacement": "if false {"
+      }
+    ],
+    "expected_literal": "old TLS policy survived reload"
+  },
+  {
+    "label": "transport-final-policy-current",
+    "oracle": "E06",
+    "target": "gate_dtxj_export",
+    "test": "reload_during_prepared_response_refuses_events_and_snapshot",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "if !Arc::ptr_eq(&state.fed.current_peers(), &admission.peers) {",
+        "replacement": "if false {"
+      }
+    ],
+    "expected_literal": "prepared metadata response survived policy revocation"
+  },
+  {
+    "label": "transport-final-fence-events",
+    "oracle": "E06",
+    "target": "gate_dtxj_export",
+    "test": "reload_during_prepared_response_refuses_events_and_snapshot",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "current(&state, &admission)?;",
+        "replacement": "let _ = (&state, &admission);",
+        "start": "async fn events_inner(",
+        "end": "async fn snapshot("
+      }
+    ],
+    "expected_literal": "prepared metadata response survived policy revocation"
+  },
+  {
+    "label": "transport-final-fence-snapshot",
+    "oracle": "E06",
+    "target": "gate_dtxj_export",
+    "test": "reload_during_prepared_response_refuses_events_and_snapshot",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "current(&state, &admission)?;",
+        "replacement": "let _ = (&state, &admission);",
+        "start": "async fn snapshot_inner(",
+        "end": "#[cfg(any(test, feature = \"test-hooks\"))]\npub mod test_hooks"
+      }
+    ],
+    "expected_literal": "prepared metadata response survived policy revocation"
+  },
+  {
+    "label": "transport-admission-before-cursor",
+    "oracle": "E08",
+    "target": "gate_dtxj_export",
+    "test": "admission_precedes_query_parsing_and_queries_are_bounded",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "    let admission = admit(&state, &request)?;\n    query_shape(&request)?;\n    let Query(query) =\n        Query::<ExportQuery>::try_from_uri(request.uri()).map_err(|_| bad_query())?;",
+        "replacement": "    let Query(query) =\n        Query::<ExportQuery>::try_from_uri(request.uri()).map_err(|_| bad_query())?;\n    let admission = admit(&state, &request)?;\n    query_shape(&request)?;"
+      }
+    ],
+    "expected_literal": "query validation bypassed observe admission"
+  },
+  {
+    "label": "transport-raw-query-byte-limit",
+    "oracle": "E08",
+    "target": "gate_dtxj_export",
+    "test": "admission_precedes_query_parsing_and_queries_are_bounded",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "const MAX_QUERY: usize = 1024;",
+        "replacement": "const MAX_QUERY: usize = 2048;"
+      }
+    ],
+    "expected_literal": "oversized raw query accepted"
+  },
+  {
+    "label": "transport-get-content-length-refusal",
+    "oracle": "E08",
+    "target": "gate_dtxj_export",
+    "test": "request_body_and_disallowed_source_are_refused",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": ".is_some_and(|value| value.to_str().ok() != Some(\"0\"))",
+        "replacement": ".is_some_and(|_| false)"
+      }
+    ],
+    "expected_literal": "GET body accepted by metadata exporter"
+  },
+  {
+    "label": "transport-labels-peer-opt-in",
+    "oracle": "E14",
+    "target": "gate_dtxj_export",
+    "test": "snapshot_is_cached_scoped_and_labels_need_both_opt_ins",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "query.labels && admission.config.observe_labels",
+        "replacement": "query.labels",
+        "start": "async fn snapshot_inner(",
+        "end": "#[cfg(any(test, feature = \"test-hooks\"))]\npub mod test_hooks"
+      }
+    ],
+    "expected_literal": "labels leaked without peer opt-in"
+  },
+  {
+    "label": "transport-labels-request-opt-in",
+    "oracle": "E14",
+    "target": "gate_dtxj_export",
+    "test": "snapshot_is_cached_scoped_and_labels_need_both_opt_ins",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "query.labels && admission.config.observe_labels",
+        "replacement": "admission.config.observe_labels",
+        "start": "async fn snapshot_inner(",
+        "end": "#[cfg(any(test, feature = \"test-hooks\"))]\npub mod test_hooks"
+      }
+    ],
+    "expected_literal": "labels leaked without request opt-in"
+  },
+  {
+    "label": "transport-global-slot-count",
+    "oracle": "E12",
+    "target": "gate_dtxj_export",
+    "test": "read_slots_are_bounded_globally_across_peers_and_routes",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "const MAX_READS: usize = 8;",
+        "replacement": "const MAX_READS: usize = 9;"
+      }
+    ],
+    "expected_literal": "ninth cross-peer read bypassed the global eight-slot cap"
+  },
+  {
+    "label": "transport-shared-slots-events",
+    "oracle": "E12",
+    "target": "gate_dtxj_export",
+    "test": "read_slots_are_bounded_globally_across_peers_and_routes",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "let slot = state\n        .slots\n        .clone()\n        .try_acquire_owned()",
+        "replacement": "let slot = Arc::new(Semaphore::new(MAX_READS))\n        .try_acquire_owned()",
+        "start": "async fn events_inner(",
+        "end": "async fn snapshot("
+      }
+    ],
+    "expected_literal": "ninth cross-peer read bypassed the global eight-slot cap"
+  },
+  {
+    "label": "transport-shared-slots-snapshot",
+    "oracle": "E12",
+    "target": "gate_dtxj_export",
+    "test": "read_slots_are_bounded_globally_across_peers_and_routes",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "let slot = state\n        .slots\n        .clone()\n        .try_acquire_owned()",
+        "replacement": "let slot = Arc::new(Semaphore::new(MAX_READS))\n        .try_acquire_owned()",
+        "start": "async fn snapshot_inner(",
+        "end": "#[cfg(any(test, feature = \"test-hooks\"))]\npub mod test_hooks"
+      }
+    ],
+    "expected_literal": "ninth cross-peer read bypassed the global eight-slot cap"
+  },
+  {
+    "label": "transport-five-second-budget",
+    "oracle": "E12",
+    "target": "gate_dtxj_export",
+    "test": "held_read_expires_inside_the_server_budget",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "const REQUEST_BUDGET: Duration = Duration::from_secs(5);",
+        "replacement": "const REQUEST_BUDGET: Duration = Duration::from_secs(10);"
+      }
+    ],
+    "expected_literal": "held read bypassed the five-second server deadline"
+  },
+  {
+    "label": "transport-peer-rate-check",
+    "oracle": "E12",
+    "target": "gate_dtxj_export",
+    "test": "observe_rate_bucket_is_separate_and_shared_by_both_export_routes",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "if !state\n        .fed\n        .rate_limiter\n        .check_and_consume(&format!(\"observe:{}\", peer.name), None)",
+        "replacement": "if false"
+      }
+    ],
+    "expected_literal": "observation peer rate limit bypassed"
+  },
+  {
+    "label": "transport-observation-bucket-namespace",
+    "oracle": "E12",
+    "target": "gate_dtxj_export",
+    "test": "observe_rate_bucket_is_separate_and_shared_by_both_export_routes",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "&format!(\"observe:{}\", peer.name)",
+        "replacement": "&peer.name"
+      }
+    ],
+    "expected_literal": "normal federation bucket throttled observation"
+  },
+  {
+    "label": "transport-shared-route-rate-bucket",
+    "oracle": "E12",
+    "target": "gate_dtxj_export",
+    "test": "observe_rate_bucket_is_separate_and_shared_by_both_export_routes",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "&format!(\"observe:{}\", peer.name)",
+        "replacement": "&format!(\"observe:{}:{}\", peer.name, request.uri().path())"
+      }
+    ],
+    "expected_literal": "snapshot bypassed shared observation bucket"
+  },
+  {
+    "label": "transport-cached-state-passivity",
+    "oracle": "E17",
+    "target": "gate_dtxj_export",
+    "test": "snapshot_is_cached_scoped_and_labels_need_both_opt_ins",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_snapshot.rs",
+        "needle": "pub(crate) fn collect(state: &FedState) -> (Vec<SnapshotRecord>, bool) {",
+        "replacement": "pub(crate) fn collect(state: &FedState) -> (Vec<SnapshotRecord>, bool) {\n    let _ = crate::codex::for_db(&state.db);"
+      }
+    ],
+    "expected_literal": "snapshot initialized or changed primary state"
+  },
+  {
+    "label": "transport-snapshot-no-path-columns",
+    "oracle": "E13",
+    "target": "gate_dtxj_export",
+    "test": "snapshot_is_cached_scoped_and_labels_need_both_opt_ins",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_snapshot.rs",
+        "needle": "substr(label,1,257)",
+        "replacement": "substr(label||' ('||cwd||')',1,257)"
+      }
+    ],
+    "expected_literal": "snapshot copied a private path"
+  },
+  {
+    "label": "transport-snapshot-no-body-columns",
+    "oracle": "E13",
+    "target": "gate_dtxj_export",
+    "test": "snapshot_is_cached_scoped_and_labels_need_both_opt_ins",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_snapshot.rs",
+        "needle": "substr(label,1,257)",
+        "replacement": "substr(label||' '||(SELECT text FROM replies LIMIT 1),1,257)"
+      }
+    ],
+    "expected_literal": "snapshot copied a reply body"
+  },
+  {
+    "label": "transport-snapshot-honest-partial",
+    "oracle": "E15",
+    "target": "gate_dtxj_export",
+    "test": "snapshot_is_cached_scoped_and_labels_need_both_opt_ins",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_snapshot.rs",
+        "needle": "let mut partial = true;",
+        "replacement": "let mut partial = false;"
+      },
+      {
+        "file": "src/observe_snapshot.rs",
+        "needle": "partial |= result.is_err();",
+        "replacement": "partial |= false;"
+      }
+    ],
+    "expected_literal": "cached catalog must not claim complete discovery"
+  }
+]
