@@ -1,7 +1,7 @@
 {
   "baseline": {
     "linux": "cargo test --locked on kyuj-1-liveness frozen source: exit0, measured {'passed': 1166, 'failed': 0, 'ignored': 8, 'summaries': 100}; all97 integration targets",
-    "darwin": "run 43738022464 job 132884828932 on 54272ea23d64a0454158697b2517eed30068e541: 1157 passed/10 ignored/0 failed/99 summaries; native count guard passed all 96 executed targets before reporting the stale prior count"
+    "darwin": "run 43742854424 job 132899612771 on 06ca0579124edb28958c172819b78c9bfc6a352f: 1169 passed/10 ignored/0 failed/100 summaries; all97 executed targets passed inventory before stale count guard"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -110,10 +110,10 @@
       "summaries": 100
     },
     "darwin": {
-      "passed": 1157,
+      "passed": 1169,
       "failed": 0,
       "ignored": 10,
-      "summaries": 99
+      "summaries": 100
     }
   }
 }
