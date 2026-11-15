@@ -355,6 +355,24 @@ async fn snapshot_filters_known_records_without_discovery_or_admission() {
         format!("{LIVE}/worker@snapshot.example")
     );
     assert_eq!(rows[0]["status"], "seen");
+    fixture
+        .state
+        .agy_store
+        .write()
+        .unwrap()
+        .get_mut("agy-record")
+        .unwrap()
+        .label = Some("  displayed  ".into());
+    let (_, value) = fixture
+        .get("?read_only=true&kind=instance&name=displayed")
+        .await;
+    let rows = value["recipients"].as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "name must filter the displayed normalized label"
+    );
+    assert_eq!(rows[0]["label"], "displayed");
 }
 
 #[tokio::test]

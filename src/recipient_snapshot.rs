@@ -31,6 +31,8 @@ impl Catalog<'_> {
         if row.address.is_empty() || row.address.len() > 512 {
             return;
         }
+        row.label = row.label.as_deref().and_then(crate::inbox::clean_label);
+        row.label = row.label.map(|label| label.chars().take(256).collect());
         if self
             .query
             .kind
@@ -42,8 +44,6 @@ impl Catalog<'_> {
         {
             return;
         }
-        row.label = row.label.as_deref().and_then(crate::inbox::clean_label);
-        row.label = row.label.map(|label| label.chars().take(256).collect());
         row.address = format!("{}@{}", row.address, self.node);
         row.node = self.node.to_owned();
         row.user.clone_from(&self.user);
