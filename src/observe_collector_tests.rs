@@ -151,7 +151,7 @@ impl Fixture {
             verifier: Verifier::new(config.auth.clone(), clock).unwrap(),
             store,
             store_slots: Arc::new(Semaphore::new(1)),
-            requests: Arc::new(Semaphore::new(8)),
+            requests: request_slots(),
             nodes: vec!["fixture.node".into()],
             denied: Mutex::new(BTreeSet::new()),
             scopes: Mutex::new(BTreeMap::from([("fixture.node".into(), "a".repeat(64))])),
@@ -288,7 +288,7 @@ async fn request_saturation_has_no_admission_waiters() {
     assert_eq!(
         fixture.idp_calls.load(Ordering::SeqCst),
         8,
-        "saturated request entered owner lookup queue"
+        "web request admission exceeded eight"
     );
     fixture.hold_idp.store(false, Ordering::SeqCst);
     while let Some(result) = requests.join_next().await {
@@ -474,6 +474,11 @@ async fn scope_change_masks_before_busy_ingest() {
 async fn connection_saturation_refuses_without_an_accept_waiter() {
     let mut fixture = Fixture::new().await;
     let slots = connection_slots();
+    assert_eq!(
+        slots.available_permits(),
+        64,
+        "web connection reservation exceeded 64"
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (state, admission) = (fixture.state.clone(), slots.clone());
@@ -483,12 +488,17 @@ async fn connection_saturation_refuses_without_an_accept_waiter() {
             .unwrap();
     }));
     let mut held = Vec::new();
-    for _ in 0..64 {
+    for _ in 0..63 {
         let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
         stream.write_all(b"GET /health HTTP/1.1\r\n").await.unwrap();
         held.push(stream);
     }
-    eventually(|| slots.available_permits() <= 1).await;
+    eventually(|| slots.available_permits() == 1).await;
+    let mut last = tokio::net::TcpStream::connect(address).await.unwrap();
+    last.write_all(b"GET /health HTTP/1.1\r\n").await.unwrap();
+    held.push(last);
+    eventually(|| slots.available_permits() == 0).await;
+    eprintln!("forced accept transition: 63 occupied then 64 occupied");
     assert_eq!(
         slots.available_permits(),
         0,
@@ -550,4 +560,312 @@ async fn aggregate_header_accounting_has_an_exact_control() {
         "aggregate web header cap bypassed"
     );
     assert_eq!(fixture.idp_calls.load(Ordering::SeqCst), 0);
+}
+
+struct BackpressureIo {
+    stream: tokio::io::DuplexStream,
+    blocked: Arc<AtomicBool>,
+}
+impl tokio::io::AsyncRead for BackpressureIo {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+impl tokio::io::AsyncWrite for BackpressureIo {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let result = std::pin::Pin::new(&mut self.stream).poll_write(cx, bytes);
+        if result.is_pending() {
+            self.blocked.store(true, Ordering::SeqCst);
+        }
+        result
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+async fn duplex_request(
+    fixture: &Fixture,
+) -> (
+    tokio::io::DuplexStream,
+    tokio::task::JoinHandle<()>,
+    Arc<AtomicBool>,
+) {
+    let (mut client, server) = tokio::io::duplex(64);
+    let blocked = Arc::new(AtomicBool::new(false));
+    let io = BackpressureIo {
+        stream: server,
+        blocked: blocked.clone(),
+    };
+    let state = fixture.state.clone();
+    let task = tokio::spawn(async move {
+        serve_stream(io, state).await;
+    });
+    client.write_all(b"GET /?node=0 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer synthetic-owner-fixture\r\n\r\n").await.unwrap();
+    (client, task, blocked)
+}
+
+#[tokio::test]
+async fn admitted_read_deadline_includes_backpressured_delivery() {
+    let fixture = Fixture::new().await;
+    let (mut draining, positive, _) = duplex_request(&fixture).await;
+    let mut bytes = Vec::new();
+    tokio::time::timeout(Duration::from_secs(3), draining.read_to_end(&mut bytes))
+        .await
+        .unwrap()
+        .unwrap();
+    positive.await.unwrap();
+    assert!(
+        String::from_utf8(bytes).unwrap().contains("fixture.node"),
+        "draining delivery positive control failed"
+    );
+    let (_stalled, mut task, blocked) = duplex_request(&fixture).await;
+    eventually(|| blocked.load(Ordering::SeqCst)).await;
+    let permits = fixture.state.requests.available_permits();
+    eprintln!("deterministic response backpressure observed; request permits={permits}");
+    let finished = tokio::time::timeout(Duration::from_millis(5500), &mut task).await;
+    if finished.is_err() {
+        task.abort();
+        let _ = task.await;
+    }
+    assert!(
+        finished.is_ok(),
+        "response transport escaped admitted read budget"
+    );
+    assert_eq!(
+        permits, 7,
+        "response released request admission before delivery"
+    );
+    eventually(|| fixture.state.requests.available_permits() == 8).await;
+}
+
+#[tokio::test]
+async fn admitted_read_deadline_includes_preparation() {
+    let (mut client, server) = tokio::io::duplex(64);
+    let requests = request_slots();
+    let slots = requests.clone();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut task = tokio::spawn(serve_http(server, requests, move |_| async move {
+        entered_tx.send(()).unwrap();
+        let _ = release_rx.await;
+        response(StatusCode::OK, "prepared", false)
+    }));
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    entered_rx.await.unwrap();
+    assert_eq!(
+        slots.available_permits(),
+        7,
+        "held preparation did not own request admission"
+    );
+    let finished = tokio::time::timeout(Duration::from_millis(5500), &mut task).await;
+    if finished.is_err() {
+        task.abort();
+        let _ = task.await;
+    }
+    assert!(finished.is_ok(), "preparation escaped admitted read budget");
+    assert!(
+        release_tx.send(()).is_err(),
+        "expired preparation kept running"
+    );
+    assert_eq!(
+        slots.available_permits(),
+        8,
+        "expired read leaked request admission"
+    );
+}
+
+fn scheduler_state(fixture: &Fixture, node: &str, store: Arc<Store>) -> Arc<State> {
+    Arc::new(State {
+        verifier: Verifier::new(fixture.config.auth.clone(), Arc::new(|| 1000)).unwrap(),
+        store,
+        store_slots: Arc::new(Semaphore::new(1)),
+        requests: request_slots(),
+        nodes: vec![node.into()],
+        denied: Mutex::new(BTreeSet::new()),
+        scopes: Mutex::new(BTreeMap::new()),
+        scope_hidden: Mutex::new(BTreeSet::new()),
+    })
+}
+fn scheduler_page(node: &str) -> crate::observe_export::ExportPage {
+    serde_json::from_value(json!({"v":1,"node":node,"epoch":"fixture-epoch","scope":"a".repeat(64),"events":[{"sequence":1,"observed_at":1000,"persisted_at":1000,"kind":"message_recorded","available":"not_recorded"}],"next":1,"has_more":false,"gaps":[],"available":true})).unwrap()
+}
+async fn backoff_case(snapshot_limited: bool) {
+    let fixture = Fixture::new().await;
+    let exporter = net::tests::Fixture::new().await;
+    let config = exporter.load().unwrap();
+    let node = config.sources[0].node.clone();
+    let store = Arc::new(
+        Store::open(
+            &fixture.files.path().join("scheduler"),
+            vec![NodePolicy {
+                node: node.clone(),
+                labels: false,
+                supported: true,
+            }],
+            Arc::new(|| 1000),
+        )
+        .unwrap(),
+    );
+    let page = scheduler_page(&node);
+    store
+        .ingest_page(&node, &Default::default(), page.clone())
+        .unwrap();
+    let cursor = store.cursor(&node).unwrap();
+    let state = scheduler_state(&fixture, &node, store.clone());
+    if snapshot_limited {
+        exporter.set_response("429 Too Many Requests", "Retry-After: 3\r\n", b"");
+    } else {
+        exporter.set_response(
+            "200 OK",
+            "",
+            &serde_json::to_vec(&ExportSnapshot {
+                v: 1,
+                node: node.clone(),
+                scope: "a".repeat(64),
+                observed_at: 1000,
+                endpoints: vec![],
+                truncated: false,
+                available: SnapshotAvailability::Available,
+            })
+            .unwrap(),
+        );
+    }
+    let client = Arc::new(Client::new(&config).unwrap());
+    let task = tokio::spawn(poll_source(client, state, 0));
+    eventually(|| exporter.requests.load(Ordering::SeqCst) == 1).await;
+    if !snapshot_limited {
+        exporter.set_response("429 Too Many Requests", "Retry-After: 3\r\n", b"");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while exporter.requests.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    let limited_index = usize::from(!snapshot_limited);
+    let mut empty = page;
+    empty.events.clear();
+    exporter.set_response("200 OK", "", &serde_json::to_vec(&empty).unwrap());
+    let previous = exporter.starts.lock().unwrap()[limited_index];
+    let limit = std::time::Instant::now() + Duration::from_secs(4);
+    loop {
+        if exporter.requests.load(Ordering::SeqCst) > limited_index + 1
+            || std::time::Instant::now() >= limit
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    task.abort();
+    let _ = task.await;
+    let starts = exporter.starts.lock().unwrap();
+    assert!(
+        starts.len() > limited_index + 1,
+        "rate limited node stopped retrying"
+    );
+    assert!(
+        starts[limited_index + 1].duration_since(previous) >= Duration::from_secs(3),
+        "rate-limit backoff was not applied: snapshot={snapshot_limited}"
+    );
+    assert_eq!(
+        store.cursor(&node).unwrap(),
+        cursor,
+        "rate-limit retry changed pending cursor"
+    );
+    assert_eq!(
+        store.view(Some(&node), 200).unwrap()[0].events.len(),
+        1,
+        "rate limiting erased retained pending history"
+    );
+}
+#[tokio::test]
+async fn snapshot_backoff_is_applied_to_scheduler() {
+    backoff_case(true).await;
+}
+#[tokio::test]
+async fn events_backoff_is_applied_to_scheduler() {
+    backoff_case(false).await;
+}
+
+#[tokio::test]
+async fn idle_background_maintenance_removes_persisted_rows() {
+    use std::sync::atomic::AtomicI64;
+    let fixture = Fixture::new().await;
+    let mut exporter = net::tests::Fixture::new().await;
+    exporter.config["sources"][0]["outbound_only"] = json!(true);
+    let config = exporter.load().unwrap();
+    let client = Arc::new(Client::new(&config).unwrap());
+    let now = Arc::new(AtomicI64::new(1000));
+    let clock = now.clone();
+    let directory = fixture.files.path().join("maintenance");
+    let store = Arc::new(
+        Store::open(
+            &directory,
+            vec![NodePolicy {
+                node: "fixture.node".into(),
+                labels: false,
+                supported: true,
+            }],
+            Arc::new(move || clock.load(Ordering::SeqCst)),
+        )
+        .unwrap(),
+    );
+    store
+        .ingest_page(
+            "fixture.node",
+            &Default::default(),
+            scheduler_page("fixture.node"),
+        )
+        .unwrap();
+    let count = || {
+        rusqlite::Connection::open(directory.join("collector.sqlite"))
+            .unwrap()
+            .query_row("SELECT count(*) FROM events", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(count(), 1, "physical-row positive control did not fire");
+    now.store(1000 + 7 * 86400 + 1, Ordering::SeqCst);
+    let state = scheduler_state(&fixture, "fixture.node", store);
+    let tasks = background_tasks(client, state);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let remaining = loop {
+        let remaining = count();
+        if remaining == 0 || std::time::Instant::now() >= deadline {
+            break remaining;
+        }
+        tokio::task::yield_now().await;
+    };
+    drop(tasks);
+    assert_eq!(
+        remaining, 0,
+        "idle background maintenance left persisted event rows"
+    );
+    assert_eq!(
+        exporter.requests.load(Ordering::SeqCst),
+        0,
+        "idle maintenance required exporter traffic"
+    );
 }

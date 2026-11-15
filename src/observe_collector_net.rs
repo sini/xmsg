@@ -399,4 +399,4 @@ impl Client {
 
 #[cfg(test)]
 #[path = "observe_collector_net_tests.rs"]
-mod tests;
+pub(crate) mod tests;
