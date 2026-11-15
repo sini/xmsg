@@ -947,7 +947,7 @@
       {
         "file": "src/observe_collector_store.rs",
         "needle": "SET snapshot=NULL WHERE node=?1 AND snapshot IS NOT NULL\"",
-        "replacement": "SET snapshot=NULL,snapshot_fingerprint=NULL WHERE node=?1 AND snapshot IS NOT NULL\""
+        "replacement": "SET snapshot=NULL,snapshot_fingerprint=zeroblob(32) WHERE node=?1 AND snapshot IS NOT NULL\""
       }
     ]
   },
