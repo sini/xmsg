@@ -313,6 +313,7 @@ async fn store_lease_outlives_cancelled_read_without_waiter_growth() {
     let task = tokio::spawn(work);
     started_rx.await.unwrap();
     task.abort();
+    let _ = task.await;
     assert_eq!(
         fixture.state.store_slots.available_permits(),
         0,
@@ -467,4 +468,86 @@ async fn scope_change_masks_before_busy_ingest() {
         .lock()
         .unwrap()
         .contains("fixture.node"));
+}
+
+#[tokio::test]
+async fn connection_saturation_refuses_without_an_accept_waiter() {
+    let mut fixture = Fixture::new().await;
+    let slots = connection_slots();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (state, admission) = (fixture.state.clone(), slots.clone());
+    fixture.tasks.push(tokio::spawn(async move {
+        serve_with_admission(listener, state, None, admission)
+            .await
+            .unwrap();
+    }));
+    let mut held = Vec::new();
+    for _ in 0..64 {
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        stream.write_all(b"GET /health HTTP/1.1\r\n").await.unwrap();
+        held.push(stream);
+    }
+    eventually(|| slots.available_permits() <= 1).await;
+    assert_eq!(
+        slots.available_permits(),
+        0,
+        "web connection reservation exceeded 64"
+    );
+    let mut excess = tokio::net::TcpStream::connect(address).await.unwrap();
+    let mut byte = [0];
+    let read = tokio::time::timeout(Duration::from_secs(1), excess.read(&mut byte)).await;
+    assert!(
+        matches!(read, Ok(Ok(0)) | Ok(Err(_))),
+        "saturated connection was queued instead of refused"
+    );
+    drop(held);
+    eventually(|| slots.available_permits() == 64).await;
+    assert_eq!(fixture.get("/").send().await.unwrap().status(), 200);
+}
+#[tokio::test]
+async fn slow_headers_have_a_finite_read_deadline() {
+    let fixture = Fixture::new().await;
+    let address = fixture.url.strip_prefix("http://").unwrap();
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nAuthorization: Bearer ")
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let mut bytes = Vec::new();
+    let read =
+        tokio::time::timeout(Duration::from_millis(6500), stream.read_to_end(&mut bytes)).await;
+    assert!(
+        read.is_ok(),
+        "slow request headers escaped their read deadline"
+    );
+    assert!(started.elapsed() < Duration::from_millis(6200));
+    assert_eq!(
+        fixture.idp_calls.load(Ordering::SeqCst),
+        0,
+        "partial headers reached provider"
+    );
+}
+
+#[tokio::test]
+async fn aggregate_header_accounting_has_an_exact_control() {
+    let fixture = Fixture::new().await;
+    let request = Request::builder()
+        .uri("/health")
+        .header("x-fixture", "x".repeat(16 * 1024 - 13))
+        .body(())
+        .unwrap();
+    assert_eq!(fixture.state.prepare(request).await.status(), 200);
+    let request = Request::builder()
+        .uri("/health")
+        .header("x-fixture", "x".repeat(16 * 1024 - 12))
+        .body(())
+        .unwrap();
+    assert_eq!(
+        fixture.state.prepare(request).await.status(),
+        431,
+        "aggregate web header cap bypassed"
+    );
+    assert_eq!(fixture.idp_calls.load(Ordering::SeqCst), 0);
 }

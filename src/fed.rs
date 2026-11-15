@@ -282,10 +282,7 @@ pub fn uri_matches_identity(uri: &str, pattern: &str) -> bool {
         let Some(rem) = uri.strip_prefix(&prefix_with_slash) else {
             return false;
         };
-        if rem.is_empty() || rem.ends_with('/') {
-            return false;
-        }
-        true
+        !(rem.is_empty() || rem.ends_with('/'))
     } else {
         uri == pattern
     }

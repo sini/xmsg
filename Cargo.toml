@@ -527,3 +527,8 @@ name = "gate_dtxj_export"
 path = "tests/gate_dtxj_export.rs"
 required-features = ["daemon"]
 
+[[test]]
+name = "gate_dtxj_collector"
+path = "tests/gate_dtxj_collector.rs"
+required-features = ["daemon"]
+
