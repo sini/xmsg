@@ -707,5 +707,22 @@
         "replacement": "        .route(\"/healthz\", get(healthz_handler))\n        .route(\"/fed/v2/observe/snapshot\", get(|| async { axum::Json(serde_json::json!({\"v\":1,\"node\":\"observer.example\",\"scope\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"observed_at\":1,\"endpoints\":[],\"truncated\":false,\"available\":\"partial\"})) }))"
       }
     ]
+  },
+  {
+    "label": "transport-source-policy-default-deny",
+    "oracle": "E05",
+    "target": "gate_dtxj_export",
+    "test": "request_body_and_disallowed_source_are_refused",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "start": "pub fn check_peer_source(",
+        "end": "pub fn uri_matches_identity(",
+        "needle": "let mut allowed = false;",
+        "replacement": "let mut allowed = true;"
+      }
+    ],
+    "expected_literal": "observe ignored peer source policy"
   }
 ]
