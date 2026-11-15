@@ -55,6 +55,8 @@ pub struct PeerConfig {
     pub identities: Option<Vec<String>>,
     #[serde(default)]
     pub allow: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub observe_labels: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<Vec<String>>,
     #[serde(default)]
@@ -65,6 +67,22 @@ pub struct PeerConfig {
     pub targets: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dial: Option<String>,
+}
+
+fn parse_observe_labels(
+    obj: &serde_json::Map<String, Value>,
+    allow: &[String],
+) -> Result<bool, String> {
+    let Some(value) = obj.get("observe_labels") else {
+        return Ok(false);
+    };
+    let labels = value
+        .as_bool()
+        .ok_or("'observe_labels' must be a boolean")?;
+    if !allow.iter().any(|op| op == "observe") {
+        return Err("'observe_labels' requires observe in 'allow'".into());
+    }
+    Ok(labels)
 }
 
 impl PeerConfig {
@@ -281,6 +299,8 @@ pub fn uri_matches_any_identity(uri: &str, patterns: &[String]) -> bool {
 pub struct HubRule {
     pub pattern: String,
     pub allow: Vec<String>,
+    pub observe_labels: bool,
+    pub targets: Option<Vec<String>>,
     pub leaf: bool,
 }
 
@@ -890,7 +910,7 @@ fn parse_hub_config(hub_val: &serde_json::Value) -> Result<HubConfig, String> {
                 .ok_or_else(|| "hub rule must be an object".to_string())?;
             for k in r_obj.keys() {
                 match k.as_str() {
-                    "pattern" | "allow" | "leaf" => {}
+                    "pattern" | "allow" | "leaf" | "targets" | "observe_labels" => {}
                     other => return Err(format!("unknown field '{other}' in hub rule")),
                 }
             }
@@ -918,7 +938,9 @@ fn parse_hub_config(hub_val: &serde_json::Value) -> Result<HubConfig, String> {
                     format!("hub rule for pattern '{pat}': 'allow' items must be strings")
                 })?;
                 match op {
-                    "send" | "reply" | "list" | "forward" | "relayed" => allow.push(op.to_string()),
+                    "send" | "reply" | "list" | "forward" | "relayed" | "observe" => {
+                        allow.push(op.to_string())
+                    }
                     other => {
                         return Err(format!(
                             "unknown operation '{other}' in hub rule for pattern '{pat}'"
@@ -926,6 +948,27 @@ fn parse_hub_config(hub_val: &serde_json::Value) -> Result<HubConfig, String> {
                     }
                 }
             }
+
+            if allow.iter().any(|op| op == "observe") && pat.contains('*') {
+                return Err(format!(
+                    "hub rule for pattern '{pat}': observe requires a literal identity"
+                ));
+            }
+            let observe_labels = parse_observe_labels(r_obj, &allow)
+                .map_err(|e| format!("hub rule for pattern '{pat}': {e}"))?;
+            let targets = if let Some(value) = r_obj.get("targets") {
+                let values = value.as_array().ok_or_else(|| {
+                    format!("hub rule for pattern '{pat}': 'targets' must be an array")
+                })?;
+                Some(values.iter().map(|value| {
+                    let target = value.as_str()
+                        .ok_or_else(|| format!("hub rule for pattern '{pat}': 'targets' elements must be strings"))?;
+                    check_filter_entry(pat, "targets", target)?;
+                    Ok(target.to_string())
+                }).collect::<Result<Vec<_>, String>>()?)
+            } else {
+                None
+            };
 
             // Orphaned rule check (Amendment 7):
             // "Orphaned rule": define it as no admission pattern that could match any URI
@@ -939,6 +982,8 @@ fn parse_hub_config(hub_val: &serde_json::Value) -> Result<HubConfig, String> {
             rules.push(HubRule {
                 pattern: pat.to_string(),
                 allow,
+                observe_labels,
+                targets,
                 leaf: r_obj
                     .get("leaf")
                     .map(|v| v.as_bool().ok_or("hub rule leaf must be boolean"))
@@ -1071,7 +1116,8 @@ impl PeersMap {
             for k in obj.keys() {
                 match k.as_str() {
                     "name" | "address" | "pin" | "ca" | "identities" | "allow" | "from"
-                    | "leaf" | "principals" | "targets" | "dial" | "default_route" => {}
+                    | "leaf" | "principals" | "targets" | "dial" | "default_route"
+                    | "observe_labels" => {}
                     other => {
                         return Err(format!(
                             "unknown field '{other}' in peer config for '{name}'"
@@ -1192,6 +1238,9 @@ impl PeersMap {
             } else {
                 Vec::new()
             };
+
+            let observe_labels =
+                parse_observe_labels(obj, &allow).map_err(|e| format!("peer '{name}': {e}"))?;
 
             // Oracle 3: from: [] is a config ERROR at load (refuse to start), naming the peer
             let from: Option<Vec<String>> = if let Some(fr) = obj.get("from") {
@@ -1328,6 +1377,7 @@ impl PeersMap {
             };
 
             let peer_config = PeerConfig {
+                observe_labels,
                 name: name.clone(),
                 address,
                 pin,
@@ -1509,6 +1559,7 @@ impl PeersMap {
                         let allow = rule.map(|r| r.allow.clone()).unwrap_or_default();
 
                         let peer_config = PeerConfig {
+                            observe_labels: rule.is_some_and(|r| r.observe_labels),
                             name: canonical.clone(),
                             address: String::new(),
                             pin: Some(norm_pin.clone()),
@@ -1518,7 +1569,7 @@ impl PeersMap {
                             from: None,
                             leaf: rule.is_some_and(|r| r.leaf),
                             principals: Vec::new(),
-                            targets: None,
+                            targets: rule.and_then(|r| r.targets.clone()),
                             dial: None,
                         };
 
@@ -7625,3 +7676,7 @@ mod attachment_query_tests {
         assert_eq!(original, value);
     }
 }
+
+#[cfg(test)]
+#[path = "fed_observe_config_tests.rs"]
+mod observe_config_tests;

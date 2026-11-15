@@ -264,6 +264,7 @@ async fn test_oracle_1_attested_cross_host_send() {
         "host-a",
         "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: fed_addr_b.to_string(),
             pin: Some(pin_b.clone()),
@@ -285,6 +286,7 @@ async fn test_oracle_1_attested_cross_host_send() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: node_a.fed_addr.to_string(),
             pin: Some(pin_a),
@@ -359,6 +361,7 @@ async fn test_oracle_2_reply_pushed_back_and_recorded() {
         "host-a",
         "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: fed_addr_b.to_string(),
             pin: Some(pin_b.clone()),
@@ -380,6 +383,7 @@ async fn test_oracle_2_reply_pushed_back_and_recorded() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: fed_addr_a.to_string(),
             pin: Some(pin_a),
@@ -515,6 +519,7 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_a.clone()),
@@ -556,6 +561,7 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
             [(
                 "host-b".to_string(),
                 PeerConfig {
+                    observe_labels: false,
                     name: "host-b".to_string(),
                     address: node_b_allow.fed_addr.to_string(),
                     pin: Some(node_b_allow.pin.clone()),
@@ -613,6 +619,7 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_a.clone()),
@@ -654,6 +661,7 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
             [(
                 "host-b".to_string(),
                 PeerConfig {
+                    observe_labels: false,
                     name: "host-b".to_string(),
                     address: node_b_deny.fed_addr.to_string(),
                     pin: Some(node_b_deny.pin.clone()),
@@ -720,6 +728,7 @@ async fn test_oracle_2_from_absent_pin_only_accepted() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_a.clone()),
@@ -761,6 +770,7 @@ async fn test_oracle_2_from_absent_pin_only_accepted() {
             [(
                 "host-b".to_string(),
                 PeerConfig {
+                    observe_labels: false,
                     name: "host-b".to_string(),
                     address: node_b.fed_addr.to_string(),
                     pin: Some(node_b.pin.clone()),
@@ -856,6 +866,7 @@ async fn test_oracle_4_reply_route_source_check() {
         "host-a",
         "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_b.clone()),
@@ -910,6 +921,7 @@ async fn test_oracle_4_reply_route_source_check() {
             [(
                 "host-a".to_string(),
                 PeerConfig {
+                    observe_labels: false,
                     name: "host-a".to_string(),
                     address: node_a.fed_addr.to_string(),
                     pin: Some(node_a.pin.clone()),
@@ -1019,6 +1031,7 @@ async fn test_oracle_5_host_field_in_body_rejected() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_a.clone()),
@@ -1089,6 +1102,7 @@ async fn test_oracle_6_anonymous_from_with_colon_gives_400() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_a.clone()),
@@ -1130,6 +1144,7 @@ async fn test_oracle_6_anonymous_from_with_colon_gives_400() {
             [(
                 "host-b".to_string(),
                 PeerConfig {
+                    observe_labels: false,
                     name: "host-b".to_string(),
                     address: node_b.fed_addr.to_string(),
                     pin: Some(node_b.pin.clone()),
@@ -1190,6 +1205,7 @@ async fn test_oracle_7_root_harness_rejected_and_badge_spoof_sanitized() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_a.clone()),
@@ -1212,6 +1228,7 @@ async fn test_oracle_7_root_harness_rejected_and_badge_spoof_sanitized() {
             [(
                 "host-b".to_string(),
                 PeerConfig {
+                    observe_labels: false,
                     name: "host-b".to_string(),
                     address: node_b.fed_addr.to_string(),
                     pin: Some(node_b.pin.clone()),
@@ -1323,6 +1340,7 @@ async fn test_n4_attested_name_ascii_only_u0387() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_a.clone()),
@@ -1345,6 +1363,7 @@ async fn test_n4_attested_name_ascii_only_u0387() {
             [(
                 "host-b".to_string(),
                 PeerConfig {
+                    observe_labels: false,
                     name: "host-b".to_string(),
                     address: node_b.fed_addr.to_string(),
                     pin: Some(node_b.pin.clone()),
@@ -1421,6 +1440,7 @@ async fn test_oracle_8_no_forward_rejected() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_a.clone()),
@@ -1443,6 +1463,7 @@ async fn test_oracle_8_no_forward_rejected() {
             [(
                 "host-b".to_string(),
                 PeerConfig {
+                    observe_labels: false,
                     name: "host-b".to_string(),
                     address: node_b.fed_addr.to_string(),
                     pin: Some(node_b.pin.clone()),
@@ -1519,6 +1540,7 @@ async fn test_oracle_9_forged_reply_id_gives_403() {
         "host-a",
         "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_b.clone()),
@@ -1541,6 +1563,7 @@ async fn test_oracle_9_forged_reply_id_gives_403() {
             [(
                 "host-a".to_string(),
                 PeerConfig {
+                    observe_labels: false,
                     name: "host-a".to_string(),
                     address: node_a.fed_addr.to_string(),
                     pin: Some(node_a.pin.clone()),
@@ -1665,6 +1688,7 @@ async fn test_oracle_10_duplicate_id_delivered_once() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_a.clone()),
@@ -1687,6 +1711,7 @@ async fn test_oracle_10_duplicate_id_delivered_once() {
             [(
                 "host-b".to_string(),
                 PeerConfig {
+                    observe_labels: false,
                     name: "host-b".to_string(),
                     address: node_b.fed_addr.to_string(),
                     pin: Some(node_b.pin.clone()),
@@ -1785,6 +1810,7 @@ async fn test_oracle_11_rate_limit_429() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_a.clone()),
@@ -1807,6 +1833,7 @@ async fn test_oracle_11_rate_limit_429() {
             [(
                 "host-b".to_string(),
                 PeerConfig {
+                    observe_labels: false,
                     name: "host-b".to_string(),
                     address: node_b.fed_addr.to_string(),
                     pin: Some(node_b.pin.clone()),
@@ -1908,6 +1935,7 @@ async fn test_oracle_12_router_isolation() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_a.clone()),
@@ -1974,6 +2002,7 @@ async fn test_amendment_a_peer_without_send_gets_403_op_denied() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_a.clone()),
@@ -1996,6 +2025,7 @@ async fn test_amendment_a_peer_without_send_gets_403_op_denied() {
             [(
                 "host-b".to_string(),
                 PeerConfig {
+                    observe_labels: false,
                     name: "host-b".to_string(),
                     address: node_b.fed_addr.to_string(),
                     pin: Some(node_b.pin.clone()),
@@ -2195,6 +2225,7 @@ exit 0
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:0".to_string(),
             pin: Some(pin_a.clone()),
@@ -2234,6 +2265,7 @@ exit 0
         "host-a",
         "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: node_b.fed_addr.to_string(),
             pin: Some(node_b.pin.clone()),
@@ -2358,6 +2390,7 @@ fn make_client_fed_state(
             [(
                 peer_name.to_string(),
                 PeerConfig {
+                    observe_labels: false,
                     name: peer_name.to_string(),
                     address: peer_addr,
                     pin: Some(peer_pin),
@@ -2410,6 +2443,7 @@ async fn test_f2_anon_origin_reply_stored() {
         "host-a",
         "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_b.clone()),
@@ -2505,6 +2539,7 @@ async fn test_f2_session_sender_always_pushed() {
         "host-a",
         "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_b.clone()),
@@ -2605,6 +2640,7 @@ async fn test_f2_unknown_harness_reply_stored() {
         "host-a",
         "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_b.clone()),
@@ -2703,6 +2739,7 @@ async fn test_f3_http_origin_federated_send() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_a.clone()),
@@ -2722,6 +2759,7 @@ async fn test_f3_http_origin_federated_send() {
         "host-a",
         "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: node_b.fed_addr.to_string(),
             pin: Some(node_b.pin.clone()),
@@ -2776,6 +2814,7 @@ async fn test_f4_empty_allow_pin_refused_at_handshake() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_a),
@@ -2823,6 +2862,7 @@ async fn test_f4_one_way_link() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_a.clone()),
@@ -2842,6 +2882,7 @@ async fn test_f4_one_way_link() {
         "host-a",
         "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: node_b.fed_addr.to_string(),
             pin: Some(node_b.pin.clone()),
@@ -2992,6 +3033,7 @@ async fn test_f8_verbatim_remote_outcome_relay_and_dedup() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_a.clone()),
@@ -3063,6 +3105,7 @@ async fn test_f9_kind_qualified_principal_filter() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_a),
@@ -3214,6 +3257,7 @@ async fn test_f10_reply_deduplication_and_rate_limit() {
         "host-a",
         "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: "127.0.0.1:9999".to_string(),
             pin: Some(pin_b.clone()),
@@ -3354,6 +3398,7 @@ async fn test_oracle_server_pin_verified() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9".into(),
             pin: Some(pin_a),
@@ -3431,6 +3476,7 @@ async fn test_oracle_reply_allow_check() {
         "host-a",
         "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: "127.0.0.1:9".into(),
             pin: Some(pin_b.clone()),
@@ -3558,6 +3604,7 @@ async fn test_n1_offsource_replay_known_reply_id_rejected() {
         "host-a",
         "0199cecf-000a-7000-8000-00000000000a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: "127.0.0.1:9".to_string(),
             pin: Some(pin_b.clone()),
@@ -3629,6 +3676,7 @@ async fn test_n1_offsource_flood_leaves_legit_bucket_intact() {
         "host-r",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9".to_string(),
             pin: Some(pin_a.clone()),
@@ -3650,6 +3698,7 @@ async fn test_n1_offsource_flood_leaves_legit_bucket_intact() {
             [(
                 "host-a".to_string(),
                 PeerConfig {
+                    observe_labels: false,
                     name: "host-a".to_string(),
                     address: "127.0.0.1:9".to_string(),
                     pin: Some(pin_a.clone()),
@@ -3776,6 +3825,7 @@ async fn test_n2_idle_authenticated_connection_closed_within_timeout() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9".to_string(),
             pin: Some(pin_a),
@@ -3820,6 +3870,7 @@ async fn test_n3_unauthenticated_socket_bound_leaves_slot_for_peer() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9".to_string(),
             pin: Some(pin_a),
@@ -3965,6 +4016,7 @@ async fn test_n7_mf6_tcp_peer_address_source() {
         "host-b",
         "0199cecf-000b-7000-8000-00000000000b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: "127.0.0.1:9".to_string(),
             pin: Some(pin_a),

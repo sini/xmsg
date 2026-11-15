@@ -250,6 +250,7 @@ async fn c1_connect_timeout_retries_once_and_mcp_send_succeeds() {
         "22222222-2222-4222-8222-222222222222",
         "worker-b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "node-a".to_string(),
             address: "127.0.0.1:1".to_string(),
             pin: Some(creds_a.2.clone()),
@@ -299,6 +300,7 @@ async fn c1_connect_timeout_retries_once_and_mcp_send_succeeds() {
         "11111111-1111-4111-8111-111111111111",
         "orch-a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "peer-b".to_string(),
             address: proxy_addr.to_string(),
             pin: Some(creds_b.2.clone()),
@@ -441,6 +443,7 @@ async fn c2_request_phase_timeout_never_retries_and_records_failed_outbound_and_
         "orch-a",
         vec![
             PeerConfig {
+                observe_labels: false,
                 name: "peer-b".to_string(),
                 address: stall_addr.to_string(),
                 pin: Some(creds_b.2.clone()),
@@ -454,6 +457,7 @@ async fn c2_request_phase_timeout_never_retries_and_records_failed_outbound_and_
                 dial: None,
             },
             PeerConfig {
+                observe_labels: false,
                 name: "peer-c".to_string(),
                 address: eof_addr.to_string(),
                 pin: Some(creds_c.2.clone()),

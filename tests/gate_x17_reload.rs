@@ -297,6 +297,7 @@ async fn test_oracle_1_outbound_presents_reloaded_cert() {
     b_peers.insert(
         "node-a".to_string(),
         PeerConfig {
+            observe_labels: false,
             name: "node-a".to_string(),
             address: "127.0.0.1:1".to_string(),
             pin: None,
@@ -322,6 +323,7 @@ async fn test_oracle_1_outbound_presents_reloaded_cert() {
     a_peers.insert(
         "node-b".to_string(),
         PeerConfig {
+            observe_labels: false,
             name: "node-b".to_string(),
             address: node_b.fed_addr.to_string(),
             pin: None,
@@ -449,6 +451,7 @@ async fn test_oracle_2_peer_ca_bundle_reload_refuses_old_ca() {
     a_peers.insert(
         "node-b".to_string(),
         PeerConfig {
+            observe_labels: false,
             name: "node-b".to_string(),
             address: "127.0.0.1:1".to_string(),
             pin: None,
@@ -474,6 +477,7 @@ async fn test_oracle_2_peer_ca_bundle_reload_refuses_old_ca() {
     b_peers.insert(
         "node-a".to_string(),
         PeerConfig {
+            observe_labels: false,
             name: "node-a".to_string(),
             address: node_a.fed_addr.to_string(),
             pin: None,
@@ -553,6 +557,7 @@ async fn test_oracle_3_garbage_cert_preserves_old_config() {
     b_peers.insert(
         "node-a".to_string(),
         PeerConfig {
+            observe_labels: false,
             name: "node-a".to_string(),
             address: "127.0.0.1:1".to_string(),
             pin: None,
@@ -577,6 +582,7 @@ async fn test_oracle_3_garbage_cert_preserves_old_config() {
     a_peers.insert(
         "node-b".to_string(),
         PeerConfig {
+            observe_labels: false,
             name: "node-b".to_string(),
             address: node_b.fed_addr.to_string(),
             pin: None,

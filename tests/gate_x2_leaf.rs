@@ -178,6 +178,7 @@ async fn test_oracle_2_body_from_ignored_and_attributed_to_leaf_principal() {
     node_b_peers.insert(
         "leaf-node".to_string(),
         PeerConfig {
+            observe_labels: false,
             name: "leaf-node".to_string(),
             address: "127.0.0.1:1".to_string(),
             pin: Some(leaf_pin.clone()),
@@ -276,6 +277,7 @@ async fn test_oracle_2_body_from_ignored_and_attributed_to_leaf_principal() {
     leaf_peers.insert(
         "target-node".to_string(),
         PeerConfig {
+            observe_labels: false,
             name: "target-node".to_string(),
             address: node_b_fed_addr.to_string(),
             pin: Some(node_b_pin.clone()),
@@ -438,6 +440,7 @@ async fn test_oracle_3_leaf_pull_replies_node_zero_outbound_connections() {
     node_b_peers.insert(
         "leaf-node".to_string(),
         PeerConfig {
+            observe_labels: false,
             name: "leaf-node".to_string(),
             address: "127.0.0.1:54321".to_string(), // Unreachable / non-listening
             pin: Some(leaf_pin.clone()),
@@ -577,6 +580,7 @@ async fn test_oracle_3_leaf_pull_replies_node_zero_outbound_connections() {
     leaf_peers.insert(
         "target-node".to_string(),
         PeerConfig {
+            observe_labels: false,
             name: "target-node".to_string(),
             address: node_b_fed_addr.to_string(),
             pin: Some(node_b_pin.clone()),

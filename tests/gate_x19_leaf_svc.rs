@@ -500,6 +500,7 @@ async fn exercise_end_to_end_leaf_svc(unavailable: bool) {
     let hub = create_hub_test_node(
         "hub",
         vec![PeerConfig {
+            observe_labels: false,
             name: "leaf".to_string(),
             address: "127.0.0.1:54321".to_string(), // Leaf doesn't listen on TCP
             pin: Some(creds_leaf.2.clone()),
@@ -519,6 +520,7 @@ async fn exercise_end_to_end_leaf_svc(unavailable: bool) {
     let leaf = create_leaf_test_node(
         "leaf",
         vec![PeerConfig {
+            observe_labels: false,
             name: "hub".to_string(),
             address: hub.fed_addr.to_string(),
             pin: Some(creds_hub.2.clone()),
@@ -676,6 +678,7 @@ async fn test_oracle_2_redelivery_unacked_message() {
     let hub = create_hub_test_node(
         "hub",
         vec![PeerConfig {
+            observe_labels: false,
             name: "leaf".to_string(),
             address: "127.0.0.1:54322".to_string(),
             pin: Some(creds_leaf.2.clone()),
@@ -695,6 +698,7 @@ async fn test_oracle_2_redelivery_unacked_message() {
     let leaf = create_leaf_test_node(
         "leaf",
         vec![PeerConfig {
+            observe_labels: false,
             name: "hub".to_string(),
             address: hub.fed_addr.to_string(),
             pin: Some(creds_hub.2.clone()),
@@ -905,6 +909,7 @@ async fn test_oracle_4_peer_mailbox_isolation_and_non_leaf_denied() {
         "hub",
         vec![
             PeerConfig {
+                observe_labels: false,
                 name: "leaf1".to_string(),
                 address: "127.0.0.1:54323".to_string(),
                 pin: Some(creds_leaf1.2.clone()),
@@ -918,6 +923,7 @@ async fn test_oracle_4_peer_mailbox_isolation_and_non_leaf_denied() {
                 dial: None,
             },
             PeerConfig {
+                observe_labels: false,
                 name: "leaf2".to_string(),
                 address: "127.0.0.1:54324".to_string(),
                 pin: Some(creds_leaf2.2.clone()),
@@ -931,6 +937,7 @@ async fn test_oracle_4_peer_mailbox_isolation_and_non_leaf_denied() {
                 dial: None,
             },
             PeerConfig {
+                observe_labels: false,
                 name: "nonleaf".to_string(),
                 address: "127.0.0.1:54325".to_string(),
                 pin: Some(creds_nonleaf.2.clone()),
@@ -1005,6 +1012,7 @@ async fn test_oracle_4_peer_mailbox_isolation_and_non_leaf_denied() {
     let mut leaf1_peers = PeersMap::empty();
     leaf1_peers
         .insert(PeerConfig {
+            observe_labels: false,
             name: "hub".to_string(),
             address: hub.fed_addr.to_string(),
             pin: Some(creds_hub.2.clone()),
@@ -1081,6 +1089,7 @@ async fn test_oracle_4_peer_mailbox_isolation_and_non_leaf_denied() {
     let mut nonleaf_peers = PeersMap::empty();
     nonleaf_peers
         .insert(PeerConfig {
+            observe_labels: false,
             name: "hub".to_string(),
             address: hub.fed_addr.to_string(),
             pin: Some(creds_hub.2.clone()),
@@ -1140,6 +1149,7 @@ async fn test_oracle_5_targets_filter_on_queue_path() {
     let hub = create_hub_test_node(
         "hub",
         vec![PeerConfig {
+            observe_labels: false,
             name: "leaf".to_string(),
             address: "127.0.0.1:54326".to_string(),
             pin: Some(creds_leaf.2.clone()),
@@ -1243,6 +1253,7 @@ async fn test_oracle_6_delivered_frame_carries_principal_badge() {
     let hub = create_hub_test_node(
         "hub",
         vec![PeerConfig {
+            observe_labels: false,
             name: "leaf".to_string(),
             address: "127.0.0.1:54327".to_string(),
             pin: Some(creds_leaf.2.clone()),
@@ -1262,6 +1273,7 @@ async fn test_oracle_6_delivered_frame_carries_principal_badge() {
     let leaf = create_leaf_test_node(
         "leaf",
         vec![PeerConfig {
+            observe_labels: false,
             name: "hub".to_string(),
             address: hub.fed_addr.to_string(),
             pin: Some(creds_hub.2.clone()),
@@ -1392,6 +1404,7 @@ async fn test_oracle_8_misaddressed_message_does_not_stall_inbox() {
     let hub = create_hub_test_node(
         "hub",
         vec![PeerConfig {
+            observe_labels: false,
             name: "leaf".to_string(),
             address: "127.0.0.1:54328".to_string(),
             pin: Some(creds_leaf.2.clone()),
@@ -1411,6 +1424,7 @@ async fn test_oracle_8_misaddressed_message_does_not_stall_inbox() {
     let leaf = create_leaf_test_node(
         "leaf",
         vec![PeerConfig {
+            observe_labels: false,
             name: "hub".to_string(),
             address: hub.fed_addr.to_string(),
             pin: Some(creds_hub.2.clone()),
@@ -1507,6 +1521,7 @@ async fn test_oracle_9_storage_error_does_not_ack_and_recovers() {
     let hub = create_hub_test_node(
         "hub",
         vec![PeerConfig {
+            observe_labels: false,
             name: "leaf".to_string(),
             address: "127.0.0.1:54329".to_string(),
             pin: Some(creds_leaf.2.clone()),
@@ -1526,6 +1541,7 @@ async fn test_oracle_9_storage_error_does_not_ack_and_recovers() {
     let leaf = create_leaf_test_node(
         "leaf",
         vec![PeerConfig {
+            observe_labels: false,
             name: "hub".to_string(),
             address: hub.fed_addr.to_string(),
             pin: Some(creds_hub.2.clone()),
@@ -1704,6 +1720,7 @@ async fn test_oracle_11_leaf_svc_send_and_reply() {
     let hub = create_hub_test_node(
         "hub",
         vec![PeerConfig {
+            observe_labels: false,
             name: "leaf".to_string(),
             address: "127.0.0.1:54321".to_string(),
             pin: Some(creds_leaf.2.clone()),
@@ -1723,6 +1740,7 @@ async fn test_oracle_11_leaf_svc_send_and_reply() {
     let leaf = create_leaf_test_node(
         "leaf",
         vec![PeerConfig {
+            observe_labels: false,
             name: "hub".to_string(),
             address: hub.fed_addr.to_string(),
             pin: Some(creds_hub.2.clone()),
@@ -1922,6 +1940,7 @@ async fn test_oracle_12_leaf_agent_sock_refuses_mismatched_uid() {
     let hub = create_hub_test_node(
         "hub",
         vec![PeerConfig {
+            observe_labels: false,
             name: "leaf".to_string(),
             address: "127.0.0.1:54321".to_string(),
             pin: Some(creds_leaf.2.clone()),
@@ -1941,6 +1960,7 @@ async fn test_oracle_12_leaf_agent_sock_refuses_mismatched_uid() {
     let leaf = create_leaf_test_node(
         "leaf",
         vec![PeerConfig {
+            observe_labels: false,
             name: "hub".to_string(),
             address: hub.fed_addr.to_string(),
             pin: Some(creds_hub.2.clone()),
@@ -2187,6 +2207,7 @@ async fn test_leaf_reply_oracle_1_hub_agent_replies_to_leaf_svc() {
     let hub = create_hub_test_node(
         "hub",
         vec![PeerConfig {
+            observe_labels: false,
             name: "leaf".to_string(),
             address: "127.0.0.1:54321".to_string(),
             pin: Some(creds_leaf.2.clone()),
@@ -2206,6 +2227,7 @@ async fn test_leaf_reply_oracle_1_hub_agent_replies_to_leaf_svc() {
     let leaf = create_leaf_test_node(
         "leaf",
         vec![PeerConfig {
+            observe_labels: false,
             name: "hub".to_string(),
             address: hub.fed_addr.to_string(),
             pin: Some(creds_hub.2.clone()),
@@ -2366,6 +2388,7 @@ async fn test_leaf_reply_oracle_2_idempotent_redelivered_or_retried_reply() {
     let hub = create_hub_test_node(
         "hub",
         vec![PeerConfig {
+            observe_labels: false,
             name: "leaf".to_string(),
             address: "127.0.0.1:54321".to_string(),
             pin: Some(creds_leaf.2.clone()),
@@ -2385,6 +2408,7 @@ async fn test_leaf_reply_oracle_2_idempotent_redelivered_or_retried_reply() {
     let leaf = create_leaf_test_node(
         "leaf",
         vec![PeerConfig {
+            observe_labels: false,
             name: "hub".to_string(),
             address: hub.fed_addr.to_string(),
             pin: Some(creds_hub.2.clone()),
@@ -2519,6 +2543,7 @@ async fn test_leaf_reply_oracle_3_non_leaf_origin_uses_push_path() {
     let hub = create_hub_test_node(
         "hub",
         vec![PeerConfig {
+            observe_labels: false,
             name: "peer-b".to_string(),
             address: peer_b_addr.to_string(),
             pin: Some(creds_peer.2.clone()),
@@ -2538,6 +2563,7 @@ async fn test_leaf_reply_oracle_3_non_leaf_origin_uses_push_path() {
     let peer_b = create_hub_test_node_with_listener(
         "peer-b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "hub".to_string(),
             address: hub.fed_addr.to_string(),
             pin: Some(creds_hub.2.clone()),
@@ -2658,6 +2684,7 @@ async fn test_leaf_reply_oracle_4_targets_ceiling_applies_to_queued_replies() {
     let hub = create_hub_test_node(
         "hub",
         vec![PeerConfig {
+            observe_labels: false,
             name: "leaf".to_string(),
             address: "127.0.0.1:54321".to_string(),
             pin: Some(creds_leaf.2.clone()),
@@ -2761,6 +2788,7 @@ async fn test_leaf_reply_oracle_5_service_reply_preserves_service_origin_either_
         let hub = create_hub_test_node(
             "hub",
             vec![PeerConfig {
+                observe_labels: false,
                 name: "leaf".to_string(),
                 address: "127.0.0.1:54321".to_string(),
                 pin: Some(creds_leaf.2.clone()),
@@ -2780,6 +2808,7 @@ async fn test_leaf_reply_oracle_5_service_reply_preserves_service_origin_either_
         let leaf = create_leaf_test_node(
             "leaf",
             vec![PeerConfig {
+                observe_labels: false,
                 name: "hub".to_string(),
                 address: hub.fed_addr.to_string(),
                 pin: Some(creds_hub.2.clone()),
@@ -2857,6 +2886,7 @@ async fn test_leaf_reply_oracle_5_service_reply_preserves_service_origin_either_
         let hub = create_hub_test_node(
             "hub",
             vec![PeerConfig {
+                observe_labels: false,
                 name: "leaf".to_string(),
                 address: "127.0.0.1:54321".to_string(),
                 pin: Some(creds_leaf.2.clone()),
@@ -2878,6 +2908,7 @@ async fn test_leaf_reply_oracle_5_service_reply_preserves_service_origin_either_
         let leaf = create_leaf_test_node_opts(
             "leaf",
             vec![PeerConfig {
+                observe_labels: false,
                 name: "hub".to_string(),
                 address: hub.fed_addr.to_string(),
                 pin: Some(creds_hub.2.clone()),
@@ -2971,6 +3002,7 @@ async fn test_leaf_reply_oracle_6_both_paths_deliver_once_with_attested_service_
     let hub = create_hub_test_node(
         "hub",
         vec![PeerConfig {
+            observe_labels: false,
             name: "leaf".to_string(),
             address: "127.0.0.1:54321".to_string(),
             pin: Some(creds_leaf.2.clone()),
@@ -2992,6 +3024,7 @@ async fn test_leaf_reply_oracle_6_both_paths_deliver_once_with_attested_service_
     let leaf = create_leaf_test_node(
         "leaf",
         vec![PeerConfig {
+            observe_labels: false,
             name: "hub".to_string(),
             address: hub.fed_addr.to_string(),
             pin: Some(creds_hub.2.clone()),

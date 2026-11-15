@@ -438,6 +438,7 @@ async fn start_pair() -> Pair {
         "node_a",
         "sess-a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "node_b".to_string(),
             address: format!("127.0.0.1:{port_b}"),
             pin: Some(pin_b),

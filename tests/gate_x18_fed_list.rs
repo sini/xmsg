@@ -338,6 +338,7 @@ async fn test_oracle_1_peer_with_list_allowed() {
     let node_a = create_fed_test_node(
         "host-a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: b_addr.to_string(),
             pin: Some(creds_b.2.clone()),
@@ -360,6 +361,7 @@ async fn test_oracle_1_peer_with_list_allowed() {
     let node_b = create_fed_test_node(
         "host-b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: a_addr.to_string(),
             pin: Some(creds_a.2.clone()),
@@ -450,6 +452,7 @@ async fn test_oracle_2_peer_without_list_allowed_403() {
     let node_a = create_fed_test_node(
         "host-a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: b_addr.to_string(),
             pin: Some(creds_b.2.clone()),
@@ -473,6 +476,7 @@ async fn test_oracle_2_peer_without_list_allowed_403() {
     let node_b = create_fed_test_node(
         "host-b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: a_addr.to_string(),
             pin: Some(creds_a.2.clone()),
@@ -540,6 +544,7 @@ async fn test_oracle_3_peer_with_targets() {
     let node_a = create_fed_test_node(
         "host-a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: b_addr.to_string(),
             pin: Some(creds_b.2.clone()),
@@ -562,6 +567,7 @@ async fn test_oracle_3_peer_with_targets() {
     let node_b = create_fed_test_node(
         "host-b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: a_addr.to_string(),
             pin: Some(creds_a.2.clone()),
@@ -646,6 +652,7 @@ async fn test_oracle_4_no_cwd_or_pid() {
     let node_a = create_fed_test_node(
         "host-a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: b_addr.to_string(),
             pin: Some(creds_b.2.clone()),
@@ -668,6 +675,7 @@ async fn test_oracle_4_no_cwd_or_pid() {
     let node_b = create_fed_test_node(
         "host-b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: a_addr.to_string(),
             pin: Some(creds_a.2.clone()),
@@ -786,6 +794,7 @@ async fn test_oracle_5_mcp_list_host() {
     let node_a = create_fed_test_node(
         "host-a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: b_addr.to_string(),
             pin: Some(creds_b.2.clone()),
@@ -808,6 +817,7 @@ async fn test_oracle_5_mcp_list_host() {
     let node_b = create_fed_test_node(
         "host-b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: a_addr.to_string(),
             pin: Some(creds_a.2.clone()),
@@ -915,6 +925,7 @@ async fn test_oracle_6_source_outside_from_cidr_refused() {
     let node_a = create_fed_test_node(
         "host-a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: b_addr.to_string(),
             pin: Some(creds_b.2.clone()),
@@ -937,6 +948,7 @@ async fn test_oracle_6_source_outside_from_cidr_refused() {
     let node_b = create_fed_test_node(
         "host-b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: a_addr.to_string(),
             pin: Some(creds_a.2.clone()),

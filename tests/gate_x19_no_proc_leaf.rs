@@ -364,6 +364,7 @@ async fn leaf_svc_without_proc_and_pidfd_dead_controls() {
     let hub = start_hub_with_svc_receiver(
         "hub",
         vec![PeerConfig {
+            observe_labels: false,
             name: "leaf".to_string(),
             address: "127.0.0.1:54321".to_string(),
             pin: Some(creds_leaf.2.clone()),
@@ -384,6 +385,7 @@ async fn leaf_svc_without_proc_and_pidfd_dead_controls() {
     let leaf = start_leaf_with_unavailable_proc(
         "leaf",
         vec![PeerConfig {
+            observe_labels: false,
             name: "hub".to_string(),
             address: hub.fed_addr.to_string(),
             pin: Some(creds_hub.2.clone()),

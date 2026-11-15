@@ -788,6 +788,7 @@ async fn test_oracle_4_federated_send_queues_unregistered_and_checks_starttime()
     let node_a = create_fed_test_node(
         "host-a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: b_addr.to_string(),
             pin: Some(creds_b.2.clone()),
@@ -809,6 +810,7 @@ async fn test_oracle_4_federated_send_queues_unregistered_and_checks_starttime()
     let node_b = create_fed_test_node(
         "host-b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: node_a.fed_addr.to_string(),
             pin: Some(creds_a.2.clone()),

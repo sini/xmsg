@@ -280,6 +280,7 @@ async fn test_oracle_1_h0_hub_off_by_default() {
     hub_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "client-a.test".to_string(),
                 address: "127.0.0.1:0".to_string(),
                 pin: None,
@@ -305,6 +306,7 @@ async fn test_oracle_1_h0_hub_off_by_default() {
     a_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "hub-server.test".to_string(),
                 address: hub_node.fed_addr.to_string(),
                 pin: None,
@@ -344,6 +346,7 @@ async fn test_oracle_1_h0_hub_off_by_default() {
     unlisted_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "hub-server.test".to_string(),
                 address: hub_node.fed_addr.to_string(),
                 pin: None,
