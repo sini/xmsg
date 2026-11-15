@@ -97,3 +97,6 @@ mod enroll_device_consumer_tests;
 mod observe_export_gap_tests;
 #[cfg(all(test, feature = "daemon"))]
 mod observe_snapshot_tests;
+
+#[cfg(all(test, feature = "daemon"))]
+mod observe_collector_unknown_tests;

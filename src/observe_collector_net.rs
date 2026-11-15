@@ -272,6 +272,16 @@ impl Client {
         scope: Option<&str>,
         after: i64,
     ) -> Result<crate::observe_export::ExportPage, Error> {
+        Ok(self.events_decoded(index, epoch, scope, after).await?.page)
+    }
+
+    pub(crate) async fn events_decoded(
+        &self,
+        index: usize,
+        epoch: Option<&str>,
+        scope: Option<&str>,
+        after: i64,
+    ) -> Result<crate::observe_collector_decode::DecodedPage, Error> {
         let source = self.sources.get(index).ok_or(Error::Configuration)?;
         let mut url = reqwest::Url::parse("https://collector.invalid/fed/v2/observe/events")
             .map_err(|_| Error::Configuration)?;
@@ -291,7 +301,7 @@ impl Client {
         }
         let path = format!("{}?{}", url.path(), url.query().unwrap_or_default());
         let bytes = self.get(index, path).await?;
-        serde_json::from_slice(&bytes).map_err(|_| Error::Malformed)
+        crate::observe_collector_decode::decode_page(&bytes).map_err(|_| Error::Malformed)
     }
 
     async fn get(&self, index: usize, path: String) -> Result<Vec<u8>, Error> {
