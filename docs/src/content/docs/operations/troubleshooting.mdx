@@ -68,6 +68,7 @@ identity, only when doctor requests them over the Unix socket. The CLI never loa
 private key or dials a peer as a fallback. Probes may update normal connection counters
 or admission caches during a handshake, but make no persistent or application-state
 writes. An older or unavailable daemon leaves the result unknown.
+The response deadline is bounded, but the system DNS resolver may finish an in-flight lookup after its request is cancelled.
 
 ## What remains unchecked
 

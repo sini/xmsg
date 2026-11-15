@@ -1,7 +1,7 @@
 {
   "baseline": {
     "linux": "cargo test --locked on kyuj-1-peers frozen source: exit0, measured {'passed': 1176, 'failed': 0, 'ignored': 8, 'summaries': 101}; all98 integration targets",
-    "darwin": "run 43742854424 job 132899612771 on 06ca0579124edb28958c172819b78c9bfc6a352f: 1169 passed/10 ignored/0 failed/100 summaries; all97 executed targets passed inventory before stale count guard"
+    "darwin": "run 43749772191 job 132920929336 on 1cff26adecb3a23a797e1c06010ef84338ad17d4: 1179 passed/10 ignored/0 failed/101 summaries; all98 executed targets passed inventory before stale count guard"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -111,10 +111,10 @@
       "summaries": 101
     },
     "darwin": {
-      "passed": 1169,
+      "passed": 1179,
       "failed": 0,
       "ignored": 10,
-      "summaries": 100
+      "summaries": 101
     }
   }
 }
