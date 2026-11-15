@@ -368,6 +368,15 @@ also refuse cross-domain patterns that can derive one name.
 The queue for a subagent during its active turn. The subagent reads it with the `inbox` tool.
 When the turn is not active, messages go to the parent session.
 
+## U
+
+### unknown event kind
+
+In the planned collector fallback, a valid bounded kind name from a newer node
+that the collector does not recognize. It displays as “unknown event kind (newer
+node)” while its original name stays private for replay comparison; see
+[fleet observation](/concepts/fleet-observer/#new-event-kinds-planned).
+
 ## V
 
 ### view
