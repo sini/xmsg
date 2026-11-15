@@ -594,6 +594,10 @@ fn wire_count_and_byte_caps_have_positive_controls() {
         "aggregate byte positive control too small"
     );
     assert!(
+        validate_page(&policy, &Cursor::default(), &p).is_err(),
+        "page byte cap ignored"
+    );
+    assert!(
         store.ingest_page("node", &Cursor::default(), p).is_err(),
         "page byte cap ignored"
     );

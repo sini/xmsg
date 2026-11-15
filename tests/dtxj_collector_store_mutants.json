@@ -844,7 +844,7 @@
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
-        "needle": "existing.as_ref().is_some_and(|old| old != &json)",
+        "needle": "previous.canonical != *json",
         "replacement": "{ let _ = &existing; false }"
       }
     ]
