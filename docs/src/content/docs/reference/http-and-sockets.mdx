@@ -263,6 +263,12 @@ excerpt, path, cwd, environment or token field. Event `available` is the enum
 `not_recorded` or `retained_at_capture`: capture-time history, not a content-fetch
 API or a guarantee that content remains today.
 
+For the planned `arrival` rollout, upgrade the collector to an arrival-capable binary before
+upgrading nodes that emit it. An older collector strictly rejects an export page containing
+that kind; it does not silently accept unknown kinds. After collecting arrival events, avoid
+downgrading the collector to a version without arrival support: its strict readback also
+cannot decode those persisted rows. The collector is not deployed today.
+
 `GET /fed/v2/observe/snapshot?v=1&labels=false` accepts only `v` and `labels`.
 Its object has `v`, `node`, `scope`, `observed_at`, `endpoints`, `truncated` and
 `available`. Here `available` is the enum `available`, `partial` or `unavailable`.
