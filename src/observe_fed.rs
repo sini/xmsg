@@ -146,6 +146,8 @@ async fn events_inner(state: Arc<ExportState>, request: Request) -> Result<Respo
     #[cfg(any(test, feature = "test-hooks"))]
     let controls = state.controls.clone();
     let page = tokio::task::spawn_blocking(move || {
+        #[cfg(any(test, feature = "test-hooks"))]
+        let _completion = test_hooks::Completion(controls.clone());
         let _slot = slot;
         #[cfg(any(test, feature = "test-hooks"))]
         controls.before_io.pause_blocking();
@@ -198,6 +200,8 @@ async fn snapshot_inner(state: Arc<ExportState>, request: Request) -> Result<Res
     #[cfg(any(test, feature = "test-hooks"))]
     let controls = state.controls.clone();
     let page = tokio::task::spawn_blocking(move || {
+        #[cfg(any(test, feature = "test-hooks"))]
+        let _completion = test_hooks::Completion(controls.clone());
         let _slot = slot;
         #[cfg(any(test, feature = "test-hooks"))]
         controls.before_io.pause_blocking();
@@ -309,10 +313,20 @@ pub mod test_hooks {
     #[derive(Default)]
     pub struct Controls {
         pub snapshot_candidates: std::sync::atomic::AtomicUsize,
+        pub workers_done: Gate,
         pub before_handshake: Gate,
         pub before_read: Gate,
         pub before_io: Gate,
         pub before_emit: Gate,
+    }
+
+    pub(crate) struct Completion(pub(crate) Arc<Controls>);
+
+    impl Drop for Completion {
+        fn drop(&mut self) {
+            self.0.workers_done.state.lock().unwrap().arrived += 1;
+            self.0.workers_done.changed.notify_waiters();
+        }
     }
 
     pub fn controls(fed: &Arc<FedState>) -> Arc<Controls> {
