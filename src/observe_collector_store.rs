@@ -253,18 +253,20 @@ fn validate_snapshot(policy: &NodePolicy, snapshot: &ExportSnapshot) -> Result<(
     }
     Ok(())
 }
+fn private_file_metadata(m: &fs::Metadata, expected_uid: u32, cap: u64) -> Result<(), StoreError> {
+    if !m.is_file()
+        || m.file_type().is_symlink()
+        || m.uid() != expected_uid
+        || m.mode() & 0o7777 != 0o600
+        || m.len() > cap
+    {
+        return Err(StoreError::UnsafePath);
+    }
+    Ok(())
+}
 fn private_file(file: &Path, cap: u64, required: bool) -> Result<(), StoreError> {
     match fs::symlink_metadata(file) {
-        Ok(m) => {
-            if !m.is_file()
-                || m.file_type().is_symlink()
-                || m.uid() != unsafe { libc::geteuid() }
-                || m.mode() & 0o7777 != 0o600
-                || m.len() > cap
-            {
-                return Err(StoreError::UnsafePath);
-            }
-        }
+        Ok(m) => private_file_metadata(&m, unsafe { libc::geteuid() }, cap)?,
         Err(e) if !required && e.kind() == std::io::ErrorKind::NotFound => (),
         Err(_) => return Err(StoreError::UnsafePath),
     }
