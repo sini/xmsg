@@ -136,12 +136,23 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 struct LocalHealth;
 
 pub fn build_unix_router(state: Arc<AppState>) -> Router {
+    build_unix_router_with_enrollment(state, crate::ca_health::Config::default())
+}
+
+pub fn build_unix_router_with_enrollment(
+    state: Arc<AppState>,
+    config: crate::ca_health::Config,
+) -> Router {
     build_router(state.clone())
         .merge(
             Router::new()
                 .route(
                     "/v1/diagnostics/federation",
                     get(federation_diagnostics_handler),
+                )
+                .route(
+                    "/v1/diagnostics/enrollment",
+                    get(enrollment_diagnostics_handler),
                 )
                 .route("/v1/observe/events", get(observe_events_handler))
                 .route("/v1/enrollment/pending", get(enrollment_pending_handler))
@@ -154,6 +165,29 @@ pub fn build_unix_router(state: Arc<AppState>) -> Router {
                 .with_state(state),
         )
         .layer(Extension(LocalHealth))
+        .layer(Extension(config))
+}
+
+async fn enrollment_diagnostics_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(config): Extension<crate::ca_health::Config>,
+    peer: PeerInfo,
+) -> Result<Json<crate::ca_health::Report>, AppError> {
+    let credential = peer.as_ref().and_then(|value| value.0 .0.peer.as_ref());
+    if !credential.is_some_and(|credential| credential.uid == crate::agent::current_uid()) {
+        return Err(AppError::Denied(
+            "enrollment diagnostics requires a same-UID Unix connection".into(),
+        ));
+    }
+    let service = state
+        .fed_state
+        .as_ref()
+        .and_then(crate::enroll::Service::local_for_fed);
+    Ok(Json(crate::ca_health::live(
+        &config,
+        service.as_ref(),
+        crate::ca_health::now(),
+    )))
 }
 
 async fn federation_diagnostics_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {

@@ -412,3 +412,32 @@ old and new roots during a deliberate overlap. Re-enroll each machine with the
 new fingerprint and switch its state directory. Do not copy `root.key` to clients
 or reuse the fleet/cluster CA key. Enrollment-root compromise affects its admitted
 users and the patterns bound to that bundle, not unrelated fleet bundles.
+
+## Planned: read-only CA application diagnostics
+
+As the CA's Unix user, run `xmsg doctor --json`. Its local view reports actual parsed
+enrollment configuration, expiry of the **loaded public root**, policy-reload degradation,
+stat-only signing-key checks and a pending device approval **count**. Pending identities
+and codes are never returned; counting does not prune or cancel expired sessions.
+Zero pending approvals passes; nonzero or unavailable counts warn. Disabled configuration
+is reported as disabled; unavailable configuration is unknown. Legacy leaf authorities
+without a local approval service have unknown authority availability.
+
+An expired root fails. The warning window is the smaller of seven days or one-third
+of the root lifetime. A degraded policy reload warns without reloading policy. These
+checks never open the key, issue test certificates, write state or change approvals.
+
+When the daemon is down, explicitly select installed files:
+
+```sh
+xmsg doctor --enroll-ca-dir /absolute/path/to/ca --json
+```
+
+This reads bounded public `root.crt` without following a symlink and uses only
+`symlink_metadata` for `root.key`. Key metadata must describe a regular file owned by
+the current UID, at most 1 MiB, with owner-read permission and no group/other access.
+It does not establish key validity, matching or issuance. The source is labeled
+`installed_not_loaded`; runtime enabled state, policy reload and pending counts stay
+unknown. The live view takes precedence over disk. No directory is guessed.
+`--enroll-state` still selects client enrollment state and is a different option.
+See [troubleshooting](/operations/troubleshooting/#ca-application-health-planned).

@@ -233,6 +233,18 @@ impl Service {
             .ok_or(Failure(StatusCode::GONE, "gone"))
     }
 
+    pub(crate) fn pending_device_approval_count(&self) -> usize {
+        let sessions = self.sessions.lock().unwrap();
+        sessions
+            .values()
+            .filter(|session| {
+                session.request_id.is_some()
+                    && matches!(*session.phase.lock().unwrap(), Phase::AwaitingApproval(_))
+                    && !session.expired(self.clock.as_ref())
+            })
+            .count()
+    }
+
     pub(crate) fn pending_device_requests(&self) -> Vec<PendingDevice> {
         let sessions = {
             let mut sessions = self.sessions.lock().unwrap();

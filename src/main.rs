@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use xmsg::http::{build_router, build_unix_router, AppState};
+use xmsg::http::{build_router, build_unix_router_with_enrollment, AppState};
 use xmsg::mcp::{run_mcp_loop, McpConfig};
 use xmsg::registry::resolve_sessions_dirs;
 use xmsg::storage;
@@ -1897,7 +1897,13 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         Some(listener) => xmsg::http::adopt_ucred_unix_listener(listener, my_uid, None),
         None => xmsg::http::bind_ucred_unix_listener(&http_sock_path, my_uid, None)?,
     };
-    let unix_app = build_unix_router(state.clone());
+    let unix_app = build_unix_router_with_enrollment(
+        state.clone(),
+        xmsg::ca_health::Config {
+            enabled: Some(args.enroll_listen.is_some()),
+            ca_dir: args.enroll_ca_dir.clone(),
+        },
+    );
     let mut shutdown_rx_unix = shutdown_rx.clone();
     server_tasks.push(tokio::spawn(async move {
         // A15: only http.sock carries the peer credentials a caller is traced by.

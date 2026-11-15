@@ -33,6 +33,8 @@ pub struct DoctorArgs {
     #[arg(long)]
     enroll_state: Option<PathBuf>,
     #[arg(long)]
+    enroll_ca_dir: Option<PathBuf>,
+    #[arg(long)]
     json: bool,
 }
 
@@ -77,7 +79,7 @@ impl Report {
             warnings: 0,
             failed: 0,
             checked_paths: BTreeMap::new(),
-            not_checked: vec!["loaded_configuration", "ca_application_health"],
+            not_checked: vec!["loaded_configuration"],
         }
     }
     fn add(
@@ -637,6 +639,46 @@ async fn enrollment(report: &mut Report, directory: &Path) {
         Err(_)=>report.add("enrollment.ca_tls",Status::Warn,"CA TLS endpoint could not be verified; current identity expiry is unchanged.",Some("Check the saved CA URL, trust pin and network; TLS reachability is not enrollment-service readiness.")),
     }
 }
+async fn ca_application(report: &mut Report, socket: Option<&Path>, directory: Option<&Path>) {
+    let live = if let Some(socket) = socket {
+        read_json(
+            socket,
+            "http://localhost/v1/diagnostics/enrollment",
+            MAX_HEALTH,
+            Duration::from_secs(5),
+        )
+        .await
+        .ok()
+        .and_then(|value| serde_json::from_value::<xmsg::ca_health::Report>(value).ok())
+    } else {
+        None
+    };
+    let ca = live.or_else(|| {
+        directory.map(|directory| xmsg::ca_health::installed(directory, xmsg::ca_health::now()))
+    });
+    if let Some(ca) = ca {
+        if let Some(directory) = directory {
+            report.path("enrollment_ca", directory);
+        }
+        report.add(
+            "ca.source",
+            Status::Pass,
+            format!("CA diagnostics source: {}.", ca.source),
+            None,
+        );
+        for check in ca.checks {
+            let status = match check.status.as_str() {
+                "pass" => Status::Pass,
+                "fail" => Status::Fail,
+                _ => Status::Warn,
+            };
+            report.add(check.id, status, check.message, None);
+        }
+    } else {
+        report.add("ca.application", Status::Warn, "CA application health, enabled state and pending approval count are unknown.", Some("Use a current daemon's private HTTP socket, or --enroll-ca-dir PATH for installed public-root and signing-key metadata only."));
+    }
+}
+
 async fn inspect(args: &DoctorArgs) -> Report {
     let mut report = Report::new();
     let http = args
@@ -721,6 +763,12 @@ async fn inspect(args: &DoctorArgs) -> Report {
         &mut report,
         http.as_deref().filter(|_| http_good),
         &configured_peers,
+    )
+    .await;
+    ca_application(
+        &mut report,
+        http.as_deref().filter(|_| http_good),
+        args.enroll_ca_dir.as_deref(),
     )
     .await;
     let default = xmsg::enroll_client::default_state_directory();
