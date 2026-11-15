@@ -228,10 +228,14 @@ Each descriptor has `id`, `node`, `kind`, `harness` and `state`, with optional
 harnesses are `claude`, `codex`, `agy`, `pi`, `opencode`, `hermes` or `unknown`;
 states are `registered`, `released`, `seen` or `unknown`. These are cached facts,
 not current process liveness. Labels are at most 256 UTF-8 bytes and require
-both opt-ins. Incomplete catalogs are explicit rather than invented as complete.
+both opt-ins. This implementation always reports a successful cached snapshot as
+`partial`, even when `truncated` is false: filesystem-only registrations cannot
+be enumerated from the cache.
 
 Both routes reject request bodies, unknown query fields and unsupported versions.
-Queries are at most 1 KiB and the whole processing/request budget is five seconds.
+Queries are at most 1 KiB. The export handler has a five-second response-preparation
+deadline; timeout returns unavailable. This excludes TLS setup and transmission
+time. Blocking work can outlive the timeout while retaining its read slot.
 An event page holds at most 200 events, each source event at most 4 KiB, and
 at most 256 KiB for the complete encoded page. A snapshot holds at most 200 cached
 descriptors and 256 KiB. Busy or unavailable storage returns an unavailable error,
