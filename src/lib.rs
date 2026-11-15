@@ -78,3 +78,6 @@ mod enroll_consumer_tests;
 
 #[cfg(all(test, feature = "daemon"))]
 mod enroll_device_consumer_tests;
+
+#[cfg(all(test, feature = "daemon"))]
+mod observe_snapshot_tests;
