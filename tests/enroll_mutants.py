@@ -211,6 +211,11 @@ def main():
     if args.case:
         cases = [c for c in cases if c["label"] in args.case]
         assert len(cases) == len(set(args.case)), "unknown case"
+    if any(case.get("browser_required") for case in cases):
+        for name in ("XMSG_COLLECTOR_BROWSER_PYTHON", "XMSG_COLLECTOR_BROWSER_CHROMIUM"):
+            executable = os.environ.get(name)
+            assert executable and Path(executable).is_file() and os.access(executable, os.X_OK), (
+                "browser-required case needs an executable", name)
     args.evidence.mkdir(parents=True, exist_ok=True)
     tracked = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-z"]).decode().strip("\0").split("\0")
     source_hashes = {name: digest(ROOT / name) for name in tracked}
