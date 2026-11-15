@@ -1,6 +1,6 @@
 {
   "baseline": {
-    "linux": "cargo test --locked on d07c2f88cdce4401b52df7cdc842308fadaeaff0: exit 0, 1150 passed/8 ignored/99 summaries; all 96 integration targets",
+    "linux": "cargo test --locked on kyuj-1-version candidate: exit 0, 1154 passed/8 ignored/99 summaries; all 96 integration targets; log retained with version metadata evidence",
     "darwin": "run 43722456912 job 132837174511 on d07c2f88cdce4401b52df7cdc842308fadaeaff0: 1153 passed/10 ignored/0 failed/99 summaries; canonical derivation lines exclude Nix error-tail replay; all 96 targets"
   },
   "integration_targets": [
@@ -103,7 +103,7 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1150,
+      "passed": 1154,
       "failed": 0,
       "ignored": 8,
       "summaries": 99

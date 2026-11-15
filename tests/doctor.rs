@@ -477,3 +477,75 @@ fn unsafe_socket_mode_fails_with_private_runtime() {
     status(&report, "runtime.directory", "pass");
     status(&report, "socket.agent", "fail");
 }
+
+#[test]
+fn daemon_build_metadata_is_reported_without_guessing() {
+    let fixture = Fixture::new(
+        json!({"status":"ok", "sessions_dir":"ok", "version":"0.1.7", "build_revision":"fixture-other-revision"}),
+    );
+    let (output, report) = fixture.report();
+    assert!(output.status.success());
+    status(&report, "daemon.version", "pass");
+    assert!(check(&report, "daemon.version")["message"]
+        .as_str()
+        .unwrap()
+        .contains("0.1.7"));
+    status(&report, "daemon.build_revision", "warn");
+    assert!(check(&report, "daemon.build_revision")["message"]
+        .as_str()
+        .unwrap()
+        .contains("fixture-other-revision"));
+    assert_eq!(
+        report["client_build_revision"],
+        option_env!("XMSG_BUILD_REVISION").unwrap_or("unknown")
+    );
+    let text = fixture.command().output().unwrap();
+    assert!(text.status.success());
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(text.contains("fixture-other-revision") && text.contains("0.1.7"));
+    fixture.assert_health_only();
+}
+
+#[test]
+fn missing_or_invalid_daemon_metadata_warns_without_failing_health() {
+    for metadata in [
+        json!({}),
+        json!({"version":12,"build_revision":false}),
+        json!({"version":"","build_revision":"unknown"}),
+    ] {
+        let mut health = json!({"status":"ok", "sessions_dir":"ok"});
+        health
+            .as_object_mut()
+            .unwrap()
+            .extend(metadata.as_object().unwrap().clone());
+        let fixture = Fixture::new(health);
+        let (output, report) = fixture.report();
+        assert!(output.status.success());
+        status(&report, "daemon.health", "pass");
+        status(&report, "daemon.version", "warn");
+        status(&report, "daemon.build_revision", "warn");
+        assert!(check(&report, "daemon.build_revision")["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown"));
+    }
+}
+
+#[test]
+fn matching_build_revision_passes_only_when_known() {
+    let revision = option_env!("XMSG_BUILD_REVISION").unwrap_or("unknown");
+    let fixture = Fixture::new(
+        json!({"status":"ok", "sessions_dir":"ok", "version":env!("CARGO_PKG_VERSION"), "build_revision":revision}),
+    );
+    let (output, report) = fixture.report();
+    assert!(output.status.success());
+    status(
+        &report,
+        "daemon.build_revision",
+        if revision == "unknown" {
+            "warn"
+        } else {
+            "pass"
+        },
+    );
+}

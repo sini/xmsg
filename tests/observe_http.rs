@@ -448,3 +448,41 @@ async fn exercise_delivery(unavailable: bool) {
     server.abort();
     let _ = server.await;
 }
+
+#[tokio::test]
+async fn health_revision_is_unix_only() {
+    use tower::ServiceExt;
+    let directory = TempDir::new().unwrap();
+    let state = state(directory.path());
+    for (router, local) in [
+        (build_unix_router(state.clone()), true),
+        (build_router(state), false),
+    ] {
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/healthz")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let health: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(health["version"], env!("CARGO_PKG_VERSION"));
+        if local {
+            assert_eq!(
+                health["build_revision"],
+                option_env!("XMSG_BUILD_REVISION").unwrap_or("unknown")
+            );
+        } else {
+            assert!(
+                health.get("build_revision").is_none(),
+                "revision exposed over TCP"
+            );
+        }
+    }
+}

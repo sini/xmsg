@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -132,19 +132,24 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+#[derive(Clone)]
+struct LocalHealth;
+
 pub fn build_unix_router(state: Arc<AppState>) -> Router {
-    build_router(state.clone()).merge(
-        Router::new()
-            .route("/v1/observe/events", get(observe_events_handler))
-            .route("/v1/enrollment/pending", get(enrollment_pending_handler))
-            .route(
-                "/v1/enrollment/{id}/approve",
-                post(enrollment_approve_handler),
-            )
-            .route("/v1/enrollment/{id}/deny", post(enrollment_deny_handler))
-            .layer(DefaultBodyLimit::max(4096))
-            .with_state(state),
-    )
+    build_router(state.clone())
+        .merge(
+            Router::new()
+                .route("/v1/observe/events", get(observe_events_handler))
+                .route("/v1/enrollment/pending", get(enrollment_pending_handler))
+                .route(
+                    "/v1/enrollment/{id}/approve",
+                    post(enrollment_approve_handler),
+                )
+                .route("/v1/enrollment/{id}/deny", post(enrollment_deny_handler))
+                .layer(DefaultBodyLimit::max(4096))
+                .with_state(state),
+        )
+        .layer(Extension(LocalHealth))
 }
 
 async fn observe_events_handler(
@@ -235,17 +240,22 @@ async fn retired_sessions_handler() -> impl IntoResponse {
     )
 }
 
-async fn healthz_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn healthz_handler(
+    State(state): State<Arc<AppState>>,
+    local: Option<Extension<LocalHealth>>,
+) -> impl IntoResponse {
     let dir_ok = !state.sessions_dirs.is_empty()
         && state.sessions_dirs.iter().any(|d| d.exists() && d.is_dir());
     let status_str = if dir_ok { "ok" } else { "sessions_dir_missing" };
-    (
-        StatusCode::OK,
-        Json(json!({
-            "status": "ok",
-            "sessions_dir": status_str,
-        })),
-    )
+    let mut health = json!({
+        "status": "ok",
+        "sessions_dir": status_str,
+        "version": env!("CARGO_PKG_VERSION"),
+    });
+    if local.is_some() {
+        health["build_revision"] = json!(option_env!("XMSG_BUILD_REVISION").unwrap_or("unknown"));
+    }
+    (StatusCode::OK, Json(health))
 }
 
 pub enum ResolvedTarget {

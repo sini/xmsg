@@ -108,7 +108,15 @@ xmsg doctor --http-sock /absolute/path/to/http.sock --db-path /absolute/path/to/
 
 The command exits `1` if any check fails. Warnings alone exit `0`. `--json` reports
 `checks` (each with `id`, `status`, `message` and `hint`), `passed`, `warnings`, `failed`,
-`client_version` and `not_checked`.
+`client_version`, `client_build_revision` (planned) and `not_checked`.
+
+Doctor displays the client and daemon crate versions and build revisions (planned).
+The daemon metadata comes from the bounded Unix-socket health response, not a process
+or image-name guess. Nix builds embed the source revision; a plain Cargo build without
+`XMSG_BUILD_REVISION` reports `unknown`. Missing metadata from an older daemon or an
+unknown client or daemon revision produces a warning. Different known client and daemon revisions also
+warn, rather than fail: check the intended deployment pin before deciding whether to
+restart or upgrade. Matching crate versions such as `0.1.0` do not prove matching builds.
 
 Optional path overrides are `--http-sock`, `--agent-sock`, `--register-sock`, `--db-path`,
 `--peers-file`, `--fed-cert` and `--enroll-state`. Doctor checks the selected paths; it

@@ -65,6 +65,7 @@
             // {
               inherit cargoArtifacts;
               doCheck = false;
+              XMSG_BUILD_REVISION = self.rev or self.dirtyRev or "unknown";
               meta = {
                 description = "Fast, lightweight local HTTP bridge into live agent sessions";
                 mainProgram = "xmsg";

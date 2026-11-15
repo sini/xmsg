@@ -49,6 +49,7 @@ struct Check {
 #[derive(Serialize)]
 struct Report {
     client_version: &'static str,
+    client_build_revision: &'static str,
     checks: Vec<Check>,
     passed: usize,
     warnings: usize,
@@ -60,13 +61,13 @@ impl Report {
     fn new() -> Self {
         Self {
             client_version: env!("CARGO_PKG_VERSION"),
+            client_build_revision: option_env!("XMSG_BUILD_REVISION").unwrap_or("unknown"),
             checks: vec![],
             passed: 0,
             warnings: 0,
             failed: 0,
             checked_paths: BTreeMap::new(),
             not_checked: vec![
-                "daemon_version",
                 "loaded_configuration",
                 "additive_migration_readiness",
                 "journal_hotness",
@@ -202,6 +203,30 @@ async fn health(report: &mut Report, path: &Path) {
                 "Daemon answered the read-only health endpoint.",
                 None,
             );
+            let version = value["version"].as_str().filter(|v| !v.is_empty());
+            report.add(
+                "daemon.version",
+                if version.is_some() {
+                    Status::Pass
+                } else {
+                    Status::Warn
+                },
+                format!("Daemon version: {}.", version.unwrap_or("unknown")),
+                version
+                    .is_none()
+                    .then_some("Update the daemon to report its version."),
+            );
+            let revision = value["build_revision"]
+                .as_str()
+                .filter(|v| !v.is_empty() && *v != "unknown");
+            let client = report.client_build_revision;
+            let known = revision.is_some() && client != "unknown";
+            let matches = revision == Some(client);
+            report.add("daemon.build_revision", if known && matches { Status::Pass } else { Status::Warn },
+                format!("Daemon build revision: {}; client build revision: {client}.", revision.unwrap_or("unknown")),
+                if !known { Some("Use builds with revision metadata to compare client and daemon.") }
+                else if !matches { Some("Client and daemon revisions differ; check the installed pins and restart the intended daemon.") }
+                else { None });
             let good = value["sessions_dir"] == "ok";
             report.add("daemon.sessions_directory",if good {Status::Pass}else{Status::Warn},if good {"A configured sessions directory exists."}else{"Sessions directory is missing or this daemon does not report it."},if good {None}else{Some("Check --sessions-dir if using a harness; a service-only node may not need one.")});
         }
@@ -416,7 +441,11 @@ pub fn run(args: DoctorArgs) -> Result<bool> {
         serde_json::to_writer(&mut out, &report)?;
         writeln!(out)?;
     } else {
-        writeln!(out, "xmsg doctor (client {})", report.client_version)?;
+        writeln!(
+            out,
+            "xmsg doctor (client {}, revision {})",
+            report.client_version, report.client_build_revision
+        )?;
         for (name, path) in &report.checked_paths {
             writeln!(out, "checked {name}: {}", inert(path))?;
         }

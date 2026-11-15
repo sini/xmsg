@@ -35,13 +35,30 @@ curl -s --unix-socket "$sock" "http://localhost/v1/messages/<message_id>/replies
 
 | Method & Route | Description |
 |---|---|
-| `GET /healthz` | Server health check (`200 OK`). |
+| `GET /healthz` | Server health check (`200 OK`); the Unix socket also reports daemon build metadata (planned). |
 | `GET /v1/recipients?name=&node=&kind=&status=&within=` | Lists recipients across this node and reachable peers (`{"recipients": [...], "nodes": [...]}`). Reconciles claims and registrations and can deliver queued work or fork notices. |
 | `GET /v1/recipients?read_only=true` (planned) | Returns an explicitly partial, read-only local registration snapshot; no reconciliation, pruning, delivery or federation requests. |
 | `POST /v1/messages` | Sends `{ "to", "text", "from"?, "idempotency_key"? }`. Returns `202 Accepted` with `{ "message_id", "address", "outcome" }`. |
 | `POST /v1/messages/{id}/replies` | Replies to `{id}` with `{ "text", "idempotency_key"? }`. Requires traced session/service caller (or leaf principal). Returns `200 OK` with `{ "seq", "messageId", "createdAt", "replierSessionId", "text", "pushOutcome", "pushedMessageId" }`. |
 | `GET /v1/messages/{id}/replies?after={seq}&wait={seconds}` | Reads stored replies to `{id}`, waiting up to `wait` seconds (max `60`, max `128` concurrent waiters). |
 | `GET /v1/messages/{id}` | Returns the stored message record and its replies. |
+
+### Local daemon build metadata (planned)
+
+On `http.sock`, `GET /healthz` includes `version` (the crate version) and
+`build_revision` (the compiled source revision), alongside the existing health fields:
+
+```json
+{"status":"ok","sessions_dir":"ok","version":"0.1.0","build_revision":"unknown"}
+```
+
+Nix builds set `XMSG_BUILD_REVISION` from the flake's `self.rev`, or `self.dirtyRev` for
+a dirty tree. A plain Cargo build without that compile-time value reports `unknown`;
+the crate version alone does not identify a source revision. Build metadata is read-only.
+The optional local TCP health response does not expose the build revision, and the
+federation listener does not serve `/healthz`. Use
+[`xmsg doctor`](/reference/cli-and-mcp/#xmsg-doctor-planned) on the node to compare the
+running daemon with the client.
 
 ### Read-only local recipient snapshot (planned)
 
