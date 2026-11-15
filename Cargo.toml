@@ -526,4 +526,8 @@ required-features = ["daemon"]
 name = "gate_dtxj_export"
 path = "tests/gate_dtxj_export.rs"
 required-features = ["daemon"]
+[[test]]
+name = "doctor"
+path = "tests/doctor.rs"
+required-features = ["daemon"]
 
