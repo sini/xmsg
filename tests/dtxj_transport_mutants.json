@@ -1,5 +1,20 @@
 [
   {
+    "label": "transport-five-second-budget",
+    "oracle": "E12",
+    "target": "gate_dtxj_export",
+    "test": "held_read_expires_inside_the_server_budget",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "const REQUEST_BUDGET: Duration = Duration::from_secs(5);",
+        "replacement": "const REQUEST_BUDGET: Duration = Duration::from_secs(10);"
+      }
+    ],
+    "expected_literal": "held read bypassed the five-second server deadline"
+  },
+  {
     "label": "transport-pin-explicit-right",
     "oracle": "E01",
     "target": "gate_dtxj_export",
@@ -222,21 +237,6 @@
     "expected_literal": "ninth cross-peer read bypassed the global eight-slot cap"
   },
   {
-    "label": "transport-five-second-budget",
-    "oracle": "E12",
-    "target": "gate_dtxj_export",
-    "test": "held_read_expires_inside_the_server_budget",
-    "test_file": "tests/gate_dtxj_export.rs",
-    "edits": [
-      {
-        "file": "src/observe_fed.rs",
-        "needle": "const REQUEST_BUDGET: Duration = Duration::from_secs(5);",
-        "replacement": "const REQUEST_BUDGET: Duration = Duration::from_secs(10);"
-      }
-    ],
-    "expected_literal": "held read bypassed the five-second server deadline"
-  },
-  {
     "label": "transport-peer-rate-check",
     "oracle": "E12",
     "target": "gate_dtxj_export",
@@ -290,8 +290,8 @@
     "edits": [
       {
         "file": "src/observe_snapshot.rs",
-        "needle": "pub(crate) fn collect(state: &FedState) -> (Vec<SnapshotRecord>, bool) {",
-        "replacement": "pub(crate) fn collect(state: &FedState) -> (Vec<SnapshotRecord>, bool) {\n    let _ = crate::codex::for_db(&state.db);"
+        "needle": "pub(crate) fn collect(state: &std::sync::Arc<FedState>) -> (Vec<SnapshotRecord>, bool) {",
+        "replacement": "pub(crate) fn collect(state: &std::sync::Arc<FedState>) -> (Vec<SnapshotRecord>, bool) {\n    let _ = crate::codex::for_db(&state.db);"
       }
     ],
     "expected_literal": "snapshot initialized or changed primary state"
@@ -337,13 +337,343 @@
         "file": "src/observe_snapshot.rs",
         "needle": "let mut partial = true;",
         "replacement": "let mut partial = false;"
-      },
-      {
-        "file": "src/observe_snapshot.rs",
-        "needle": "partial |= result.is_err();",
-        "replacement": "partial |= false;"
       }
     ],
     "expected_literal": "cached catalog must not claim complete discovery"
+  },
+  {
+    "label": "transport-immutable-handshake-config",
+    "oracle": "E05",
+    "target": "gate_dtxj_export",
+    "test": "stale_hub_resolver_cannot_restore_revoked_observe_authority",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "let config = tls.config.clone();",
+        "replacement": "let config = peers.get_peer_config(&peer.name).ok_or_else(denied)?;"
+      }
+    ],
+    "expected_literal": "old shared hub cache restored revoked observe authority"
+  },
+  {
+    "label": "transport-tls-context-witness",
+    "oracle": "E05",
+    "target": "gate_dtxj_export",
+    "test": "handshake_spanning_reload_does_not_acquire_the_new_policy_witness",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "peers: tls_peers,",
+        "replacement": "peers: admission_peers,"
+      }
+    ],
+    "expected_literal": "handshake spanning reload acquired the new policy witness"
+  },
+  {
+    "label": "transport-get-transfer-encoding-refusal",
+    "oracle": "E08",
+    "target": "gate_dtxj_export",
+    "test": "request_body_and_disallowed_source_are_refused",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "request.headers().contains_key(\"transfer-encoding\")",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "chunked GET body accepted by metadata exporter"
+  },
+  {
+    "label": "transport-query-body-shape-events",
+    "oracle": "E08",
+    "target": "gate_dtxj_export",
+    "test": "request_body_and_disallowed_source_are_refused",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "query_shape(&request)?;",
+        "replacement": "let _ = &request;",
+        "start": "async fn events_inner(",
+        "end": "async fn snapshot("
+      }
+    ],
+    "expected_literal": "GET body accepted by metadata exporter"
+  },
+  {
+    "label": "transport-target-scope-events",
+    "oracle": "E07",
+    "target": "gate_dtxj_export",
+    "test": "target_scope_omission_and_empty_are_distinct",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "admission.config.targets.as_deref(),",
+        "replacement": "None,",
+        "start": "async fn events_inner(",
+        "end": "async fn snapshot("
+      }
+    ],
+    "expected_literal": "excluded destination leaked through a correlation"
+  },
+  {
+    "label": "transport-blocking-io-slot-lifetime-events",
+    "oracle": "E12",
+    "target": "gate_dtxj_export",
+    "test": "read_slots_are_bounded_globally_across_peers_and_routes",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "let _slot = slot;",
+        "replacement": "drop(slot);",
+        "start": "async fn events_inner(",
+        "end": "async fn snapshot("
+      }
+    ],
+    "expected_literal": "ninth cross-peer read bypassed the global eight-slot cap"
+  },
+  {
+    "label": "transport-timed-out-blocking-slot-lifetime-events",
+    "oracle": "E12",
+    "target": "gate_dtxj_export",
+    "test": "timed_out_blocking_reads_keep_their_slots_until_io_finishes",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "let _slot = slot;",
+        "replacement": "drop(slot);",
+        "start": "async fn events_inner(",
+        "end": "async fn snapshot("
+      }
+    ],
+    "expected_literal": "ninth cross-peer read bypassed the global eight-slot cap"
+  },
+  {
+    "label": "transport-query-body-shape-snapshot",
+    "oracle": "E08",
+    "target": "gate_dtxj_export",
+    "test": "request_body_and_disallowed_source_are_refused",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "query_shape(&request)?;",
+        "replacement": "let _ = &request;",
+        "start": "async fn snapshot_inner(",
+        "end": "#[cfg(any(test, feature = \"test-hooks\"))]\npub mod test_hooks"
+      }
+    ],
+    "expected_literal": "GET body accepted by metadata exporter"
+  },
+  {
+    "label": "transport-target-scope-snapshot",
+    "oracle": "E07",
+    "target": "gate_dtxj_export",
+    "test": "target_scope_omission_and_empty_are_distinct",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "admission.config.targets.as_deref(),",
+        "replacement": "None,",
+        "start": "async fn snapshot_inner(",
+        "end": "#[cfg(any(test, feature = \"test-hooks\"))]\npub mod test_hooks"
+      }
+    ],
+    "expected_literal": "empty targets widened to all registrations"
+  },
+  {
+    "label": "transport-blocking-io-slot-lifetime-snapshot",
+    "oracle": "E12",
+    "target": "gate_dtxj_export",
+    "test": "read_slots_are_bounded_globally_across_peers_and_routes",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "let _slot = slot;",
+        "replacement": "drop(slot);",
+        "start": "async fn snapshot_inner(",
+        "end": "#[cfg(any(test, feature = \"test-hooks\"))]\npub mod test_hooks"
+      }
+    ],
+    "expected_literal": "ninth cross-peer read bypassed the global eight-slot cap"
+  },
+  {
+    "label": "transport-timed-out-blocking-slot-lifetime-snapshot",
+    "oracle": "E12",
+    "target": "gate_dtxj_export",
+    "test": "timed_out_blocking_reads_keep_their_slots_until_io_finishes",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "let _slot = slot;",
+        "replacement": "drop(slot);",
+        "start": "async fn snapshot_inner(",
+        "end": "#[cfg(any(test, feature = \"test-hooks\"))]\npub mod test_hooks"
+      }
+    ],
+    "expected_literal": "ninth cross-peer read bypassed the global eight-slot cap"
+  },
+  {
+    "label": "transport-handler-deadline-events",
+    "oracle": "E12",
+    "target": "gate_dtxj_export",
+    "test": "held_read_expires_inside_the_server_budget",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "tokio::time::timeout(REQUEST_BUDGET, events_inner(state, request))",
+        "replacement": "tokio::time::timeout(Duration::from_secs(10), events_inner(state, request))"
+      }
+    ],
+    "expected_literal": "held read bypassed the five-second server deadline"
+  },
+  {
+    "label": "transport-handler-deadline-snapshot",
+    "oracle": "E12",
+    "target": "gate_dtxj_export",
+    "test": "held_read_expires_inside_the_server_budget",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_fed.rs",
+        "needle": "tokio::time::timeout(REQUEST_BUDGET, snapshot_inner(state, request))",
+        "replacement": "tokio::time::timeout(Duration::from_secs(10), snapshot_inner(state, request))"
+      }
+    ],
+    "expected_literal": "held read bypassed the five-second server deadline"
+  },
+  {
+    "label": "transport-primary-sql-mutex",
+    "oracle": "E15",
+    "target": "gate_dtxj_export",
+    "test": "external_database_lock_cannot_stall_the_primary_bus_mutex",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_snapshot.rs",
+        "needle": "    let database = state.db.try_lock().ok().and_then(|connection| {\n        connection\n            .path()\n            .filter(|name| !name.is_empty())\n            .map(std::path::PathBuf::from)\n    });\n    let connection = database.and_then(|database| {\n        let connection = rusqlite::Connection::open_with_flags(\n            database,\n            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,\n        )\n        .ok()?;\n        connection\n            .busy_timeout(std::time::Duration::from_millis(25))\n            .ok()?;\n        Some(connection)\n    });\n",
+        "replacement": "    let connection = state.db.lock().ok();\n"
+      }
+    ],
+    "expected_literal": "snapshot SQL retained the primary bus mutex while externally busy"
+  },
+  {
+    "label": "transport-primary-sql-lock-wait",
+    "oracle": "E15",
+    "target": "gate_dtxj_export",
+    "test": "primary_lock_contention_returns_partial_without_waiting",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_snapshot.rs",
+        "needle": "    let database = state.db.try_lock().ok().and_then(|connection| {\n        connection\n            .path()\n            .filter(|name| !name.is_empty())\n            .map(std::path::PathBuf::from)\n    });\n    let connection = database.and_then(|database| {\n        let connection = rusqlite::Connection::open_with_flags(\n            database,\n            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,\n        )\n        .ok()?;\n        connection\n            .busy_timeout(std::time::Duration::from_millis(25))\n            .ok()?;\n        Some(connection)\n    });\n",
+        "replacement": "    let connection = state.db.lock().ok();\n"
+      }
+    ],
+    "expected_literal": "snapshot waited on primary bus lock"
+  },
+  {
+    "label": "transport-metadata-path-nonblocking-lock",
+    "oracle": "E15",
+    "target": "gate_dtxj_export",
+    "test": "primary_lock_contention_returns_partial_without_waiting",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_snapshot.rs",
+        "needle": "state.db.try_lock()",
+        "replacement": "state.db.lock()"
+      }
+    ],
+    "expected_literal": "snapshot waited on primary bus lock"
+  },
+  {
+    "label": "transport-read-only-sql-busy-budget",
+    "oracle": "E15",
+    "target": "gate_dtxj_export",
+    "test": "external_database_lock_cannot_stall_the_primary_bus_mutex",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_snapshot.rs",
+        "needle": "busy_timeout(std::time::Duration::from_millis(25))",
+        "replacement": "busy_timeout(std::time::Duration::from_secs(5))"
+      }
+    ],
+    "expected_literal": "snapshot did not return partial promptly under an external database lock"
+  },
+  {
+    "label": "transport-source-row-bound-instance-seen",
+    "oracle": "E15",
+    "target": "gate_dtxj_export",
+    "test": "snapshot_bounds_source_work_before_projecting_the_catalog",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_snapshot.rs",
+        "needle": "FROM instance_seen ORDER BY id LIMIT 201",
+        "replacement": "FROM instance_seen ORDER BY id LIMIT 1000"
+      }
+    ],
+    "expected_literal": "snapshot exceeded bounded metadata-source work"
+  },
+  {
+    "label": "transport-source-row-bound-codex-roots",
+    "oracle": "E15",
+    "target": "gate_dtxj_export",
+    "test": "snapshot_bounds_source_work_before_projecting_the_catalog",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_snapshot.rs",
+        "needle": "FROM codex_roots ORDER BY root_id LIMIT 201",
+        "replacement": "FROM codex_roots ORDER BY root_id LIMIT 1000"
+      }
+    ],
+    "expected_literal": "snapshot exceeded bounded metadata-source work"
+  },
+  {
+    "label": "transport-instance-seen-state",
+    "oracle": "E15",
+    "target": "gate_dtxj_export",
+    "test": "snapshot_bounds_source_work_before_projecting_the_catalog",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_snapshot.rs",
+        "needle": "RegistrationState::Seen,",
+        "replacement": "RegistrationState::Registered,",
+        "start": "\"SELECT substr(id,1,513)",
+        "end": "\"SELECT substr(root_id,1,513)"
+      }
+    ],
+    "expected_literal": "stored registration metadata was promoted to current liveness"
+  },
+  {
+    "label": "transport-codex-seen-state",
+    "oracle": "E15",
+    "target": "gate_dtxj_export",
+    "test": "snapshot_bounds_source_work_before_projecting_the_catalog",
+    "test_file": "tests/gate_dtxj_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_snapshot.rs",
+        "needle": "RegistrationState::Seen,",
+        "replacement": "RegistrationState::Registered,",
+        "start": "\"SELECT substr(root_id,1,513)",
+        "end": "        ] {"
+      }
+    ],
+    "expected_literal": "stored registration metadata was promoted to current liveness"
   }
 ]
