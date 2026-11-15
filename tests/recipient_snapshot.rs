@@ -1,7 +1,7 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
-use std::io::Read;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
@@ -9,12 +9,39 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
+use tokio::io::AsyncReadExt;
 use tower::ServiceExt;
 use xmsg::http::{build_router, AppState};
 
 const LIVE: &str = "11111111-1111-4111-8111-111111111111";
 const NEW: &str = "22222222-2222-4222-8222-222222222222";
 const STALE: &str = "33333333-3333-4333-8333-333333333333";
+
+async fn delivery_body(socket: std::os::unix::net::UnixStream) -> std::io::Result<String> {
+    socket.set_nonblocking(true)?;
+    let mut socket = tokio::net::UnixStream::from_std(socket)?;
+    let mut body = String::new();
+    tokio::time::timeout(Duration::from_secs(2), socket.read_to_string(&mut body))
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "fixture delivery read exceeded two seconds",
+            )
+        })??;
+    Ok(body)
+}
+
+#[tokio::test]
+async fn queued_payload_is_read_after_sender_closes_before_receive_setup() {
+    let (mut sender, receiver) = std::os::unix::net::UnixStream::pair().unwrap();
+    sender.write_all(b"closed-peer queued canary").unwrap();
+    drop(sender);
+    assert_eq!(
+        delivery_body(receiver).await.unwrap(),
+        "closed-peer queued canary"
+    );
+}
 
 struct Fixture {
     root: TempDir,
@@ -180,6 +207,21 @@ async fn snapshot_leaves_claims_queues_database_and_registration_stores_untouche
         assert_eq!(status, StatusCode::OK, "{value}");
         assert_eq!(value["read_only"], true);
         assert_eq!(value["partial"], true);
+        assert_eq!(
+            fixture.state.db.lock().unwrap().total_changes(),
+            changes,
+            "snapshot wrote to the database"
+        );
+        assert_eq!(
+            std::fs::read(fixture.root.path().join("primary.sqlite")).unwrap(),
+            before,
+            "snapshot changed database bytes"
+        );
+        assert_eq!(
+            fixture.store_snapshot(),
+            stores,
+            "snapshot evicted or changed registration stores"
+        );
         let rows = value["recipients"].as_array().unwrap();
         assert!(rows
             .iter()
@@ -204,21 +246,6 @@ async fn snapshot_leaves_claims_queues_database_and_registration_stores_untouche
                 "missing {id}: {value}"
             );
         }
-        assert_eq!(
-            fixture.state.db.lock().unwrap().total_changes(),
-            changes,
-            "snapshot wrote to the database"
-        );
-        assert_eq!(
-            std::fs::read(fixture.root.path().join("primary.sqlite")).unwrap(),
-            before,
-            "snapshot changed database bytes"
-        );
-        assert_eq!(
-            fixture.store_snapshot(),
-            stores,
-            "snapshot evicted or changed registration stores"
-        );
         assert_eq!(
             fixture.inbox.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock,
@@ -266,7 +293,7 @@ async fn legacy_listing_still_reconciles_and_delivers_parent_and_child_queues() 
     assert!(fixture.state.pi_store.read().unwrap().is_empty());
     assert!(fixture.state.svc_store.read().unwrap().is_empty());
     for _ in 0..2 {
-        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(2), async {
+        let (socket, _) = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match fixture.inbox.accept() {
                     Ok(value) => break value,
@@ -279,12 +306,7 @@ async fn legacy_listing_still_reconciles_and_delivers_parent_and_child_queues() 
         })
         .await
         .unwrap();
-        socket.set_nonblocking(false).unwrap();
-        socket
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        let mut body = String::new();
-        socket.read_to_string(&mut body).unwrap();
+        let body = delivery_body(socket).await.unwrap();
         assert!(body.contains("queued canary"));
     }
 }
@@ -524,7 +546,11 @@ async fn snapshot_last_seen_comes_only_from_recorded_seen_evidence() {
     }
     let (_, value) = fixture.get("?read_only=true").await;
     let rows = value["recipients"].as_array().unwrap();
-    for id in ["44444444-4444-4444-8444-444444444444~2", "inactive-codex"] {
+    for id in [
+        "44444444-4444-4444-8444-444444444444~2",
+        "inactive-codex",
+        "unseen-parent/child",
+    ] {
         let row = rows
             .iter()
             .find(|r| r["address"] == format!("{id}@snapshot.example"))
