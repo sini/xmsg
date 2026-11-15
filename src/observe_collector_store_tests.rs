@@ -333,9 +333,8 @@ fn independent_row_and_byte_limits_include_snapshot() {
             },
         )
         .unwrap();
-        store
-            .ingest_page("node", &Cursor::default(), page(1))
-            .unwrap();
+        let result = store.ingest_page("node", &Cursor::default(), page(1));
+        assert!(result.is_ok(), "logical eviction refused safe ingest");
         let cursor = store.cursor("node").unwrap();
         store.ingest_page("node", &cursor, page(2)).unwrap();
         if bytes == 500 {
@@ -862,4 +861,262 @@ fn snapshot_budget_and_replay_receipt_are_independent() {
         NOW,
         "snapshot replay refreshed receipt"
     );
+}
+#[test]
+fn identical_future_snapshot_cannot_renew_after_idle_expiry() {
+    let (_dir, store, now) = fixture();
+    let mut s = snapshot();
+    s.observed_at = NOW + 100 * 86400;
+    store.ingest_snapshot("node", s.clone()).unwrap();
+    now.store(NOW + TTL + 1, Ordering::SeqCst);
+    store.maintain().unwrap();
+    assert!(
+        store.view(None, 100).unwrap()[0].latest_snapshot.is_none(),
+        "snapshot expiry control failed"
+    );
+    store.ingest_snapshot("node", s.clone()).unwrap();
+    assert!(
+        store.view(None, 100).unwrap()[0].latest_snapshot.is_none(),
+        "expired future snapshot replay resurrected cache"
+    );
+    s.observed_at += 1;
+    store.ingest_snapshot("node", s).unwrap();
+    assert!(
+        store.view(None, 100).unwrap()[0].latest_snapshot.is_some(),
+        "new observation reused expired watermark"
+    );
+    assert_eq!(
+        store.view(None, 100).unwrap()[0]
+            .latest_snapshot
+            .as_ref()
+            .unwrap()
+            .received_at,
+        NOW + TTL + 1,
+        "new observation reused old snapshot receipt"
+    );
+}
+#[test]
+fn removed_inventory_is_purged_on_restart_and_retained_nodes_expire() {
+    for keep_old in [true, false] {
+        let dir = private_temp();
+        let policies = vec![
+            NodePolicy {
+                node: "node".into(),
+                labels: false,
+                supported: true,
+            },
+            NodePolicy {
+                node: "other".into(),
+                labels: false,
+                supported: true,
+            },
+        ];
+        let store = Store::open(dir.path(), policies.clone(), Arc::new(|| NOW)).unwrap();
+        store
+            .ingest_page("node", &Cursor::default(), page(1))
+            .unwrap();
+        store.ingest_snapshot("node", snapshot()).unwrap();
+        drop(store);
+        let configured = if keep_old {
+            policies
+        } else {
+            vec![policies[1].clone()]
+        };
+        let store = Store::open(dir.path(), configured, Arc::new(|| NOW + TTL + 1)).unwrap();
+        store.maintain().unwrap();
+        let inner = store.inner.lock().unwrap();
+        let c = inner.connection.as_ref().unwrap();
+        let events: i64 = c
+            .query_row("SELECT count(*) FROM events WHERE node='node'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let snapshots: i64 = c
+            .query_row(
+                "SELECT count(*) FROM nodes WHERE node='node' AND snapshot IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            events, 0,
+            "removed inventory events persisted keep_old={keep_old}"
+        );
+        assert_eq!(
+            snapshots, 0,
+            "removed inventory snapshot persisted keep_old={keep_old}"
+        );
+    }
+}
+#[test]
+fn startup_replaces_full_inventory_and_refuses_oversized_legacy_inventory() {
+    let dir = private_temp();
+    let policies = |offset| {
+        (offset..offset + 64)
+            .map(|i| NodePolicy {
+                node: format!("node{i}"),
+                labels: false,
+                supported: true,
+            })
+            .collect()
+    };
+    let store = Store::open(dir.path(), policies(0), Arc::new(|| NOW)).unwrap();
+    let mut p = page(1);
+    p.node = "node0".into();
+    store.ingest_page("node0", &Cursor::default(), p).unwrap();
+    let mut s = snapshot();
+    s.node = "node0".into();
+    store.ingest_snapshot("node0", s).unwrap();
+    drop(store);
+    let store = Store::open(dir.path(), policies(64), Arc::new(|| NOW)).unwrap();
+    {
+        let inner = store.inner.lock().unwrap();
+        let c = inner.connection.as_ref().unwrap();
+        let nodes: i64 = c
+            .query_row("SELECT count(*) FROM nodes", [], |r| r.get(0))
+            .unwrap();
+        let events: i64 = c
+            .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(nodes, 64, "replaced inventory retained old control rows");
+        assert_eq!(events, 0, "replaced inventory retained old events");
+        c.execute("INSERT INTO nodes(node) VALUES('extra')", [])
+            .unwrap();
+    }
+    drop(store);
+    assert!(
+        matches!(
+            Store::open(dir.path(), policies(64), Arc::new(|| NOW)),
+            Err(StoreError::Storage)
+        ),
+        "oversized stored inventory accepted"
+    );
+}
+#[test]
+fn snapshot_watermark_survives_restart_and_authority_changes_reset_it() {
+    let (dir, store, now) = fixture();
+    let mut s = snapshot();
+    s.observed_at = NOW + 100 * 86400;
+    store.ingest_snapshot("node", s.clone()).unwrap();
+    now.store(NOW + TTL + 1, Ordering::SeqCst);
+    store.maintain().unwrap();
+    drop(store);
+    let clock = now.clone();
+    let store = Store::open(
+        dir.path(),
+        vec![NodePolicy {
+            node: "node".into(),
+            labels: false,
+            supported: true,
+        }],
+        Arc::new(move || clock.load(Ordering::SeqCst)),
+    )
+    .unwrap();
+    assert!(
+        store.view(None, 100).unwrap()[0].history_hidden,
+        "watermark restart unmasked history"
+    );
+    store.ingest_snapshot("node", s.clone()).unwrap();
+    assert!(
+        store.view(None, 100).unwrap()[0].latest_snapshot.is_none(),
+        "restart forgot expired snapshot watermark"
+    );
+    now.fetch_add(30, Ordering::SeqCst);
+    s.scope = "b".repeat(64);
+    store.ingest_snapshot("node", s.clone()).unwrap();
+    assert_eq!(
+        store.view(None, 100).unwrap()[0]
+            .latest_snapshot
+            .as_ref()
+            .unwrap()
+            .received_at,
+        NOW + TTL + 31,
+        "scope change retained old snapshot receipt"
+    );
+    store.deny("node").unwrap();
+    let count: i64 = store
+        .inner
+        .lock()
+        .unwrap()
+        .connection
+        .as_ref()
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM nodes WHERE snapshot_fingerprint IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0, "denial retained snapshot watermark");
+    now.fetch_add(30, Ordering::SeqCst);
+    store.ingest_snapshot("node", s).unwrap();
+    assert_eq!(
+        store.view(None, 100).unwrap()[0]
+            .latest_snapshot
+            .as_ref()
+            .unwrap()
+            .received_at,
+        NOW + TTL + 61,
+        "denial retained old snapshot receipt"
+    );
+}
+#[test]
+fn snapshot_control_counts_toward_bytes_and_survives_blob_byte_eviction() {
+    for cap in [270, 500] {
+        let dir = private_temp();
+        let now = Arc::new(AtomicI64::new(NOW));
+        let clock = now.clone();
+        let store = Store::open_limits(
+            dir.path(),
+            vec![NodePolicy {
+                node: "node".into(),
+                labels: true,
+                supported: true,
+            }],
+            Arc::new(move || clock.load(Ordering::SeqCst)),
+            Limits {
+                rows: ROWS,
+                bytes: cap,
+                pages: 128,
+            },
+        )
+        .unwrap();
+        let mut s = snapshot();
+        s.observed_at = NOW + 100 * 86400;
+        s.endpoints[0].label = Some("a".repeat(256));
+        let result = store.ingest_snapshot("node", s.clone());
+        if cap == 270 {
+            assert!(
+                matches!(result, Err(StoreError::Full)),
+                "snapshot control bytes omitted from budget"
+            );
+            assert_eq!(
+                store.cursor("node").unwrap(),
+                Cursor::default(),
+                "control full advanced cursor"
+            );
+        } else {
+            result.unwrap();
+            assert!(
+                store.view(None, 100).unwrap()[0].latest_snapshot.is_none(),
+                "snapshot byte eviction control failed"
+            );
+            now.store(NOW + 30, Ordering::SeqCst);
+            store.ingest_snapshot("node", s).unwrap();
+            let receipt: i64 = store
+                .inner
+                .lock()
+                .unwrap()
+                .connection
+                .as_ref()
+                .unwrap()
+                .query_row(
+                    "SELECT snapshot_receipt FROM nodes WHERE node='node'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(receipt, NOW, "byte eviction forgot snapshot first receipt");
+        }
+    }
 }
