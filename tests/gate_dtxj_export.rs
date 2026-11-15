@@ -491,6 +491,20 @@ async fn admission_precedes_query_parsing_and_queries_are_bounded() {
         400,
         "oversized raw query accepted"
     );
+    let version = format!("{zeroes}1");
+    assert_eq!(
+        version.parse::<u8>().unwrap(),
+        1,
+        "oversize snapshot fixture must remain a valid version"
+    );
+    assert_eq!(
+        fixture
+            .request(&format!("/fed/v2/observe/snapshot?v={version}"))
+            .await
+            .0,
+        400,
+        "oversized snapshot query accepted"
+    );
     assert_eq!(
         fixture.request("/fed/v2/observe/snapshot?after=0").await.0,
         400,
