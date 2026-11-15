@@ -16,8 +16,10 @@ def prepare(source, destination, newer):
         text = file.read_text()
         needle = "closed_enum!(EventKind {\n"
         assert text.count(needle) == 1 and "FutureWriterFixture" not in text
+        file.chmod(0o600)
         file.write_text(text.replace(needle, needle + "    FutureWriterFixture,\n", 1))
     manifest = destination / "Cargo.toml"
+    manifest.chmod(0o600)
     manifest.write_text(manifest.read_text() + '''
 [[bin]]
 name = "dtxj2-store-compat"
