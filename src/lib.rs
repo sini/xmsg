@@ -41,6 +41,10 @@ pub mod observe_effects;
 #[cfg(feature = "daemon")]
 pub mod observe_export;
 #[cfg(feature = "daemon")]
+pub mod observe_fed;
+#[cfg(feature = "daemon")]
+mod observe_snapshot;
+#[cfg(feature = "daemon")]
 pub mod pi;
 #[cfg(feature = "daemon")]
 pub mod plugin;

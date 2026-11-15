@@ -522,3 +522,8 @@ required-features = ["daemon"]
 name = "gate_svlt_device_cli"
 path = "tests/gate_svlt_device_cli.rs"
 required-features = ["daemon"]
+[[test]]
+name = "gate_dtxj_export"
+path = "tests/gate_dtxj_export.rs"
+required-features = ["daemon"]
+
