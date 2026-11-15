@@ -1,0 +1,194 @@
+[
+  {
+    "label": "decode-unknown-fallback",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::unknown_preserves_identifier_and_replay_bytes",
+    "expected_literal": "called `Result::unwrap()` on an `Err` value: DecodeError",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "            value[\"kind\"] = Value::String(\"unknown\".into());",
+        "replacement": "            value[\"kind\"] = Value::String(kind.clone());"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "Existing valid future-string control must decode. The existing unwrap is the failure site; no custom assertion message exists."
+  },
+  {
+    "label": "decode-unknown-kind-max64",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::unknown_identifier_grammar_and_length_are_closed",
+    "expected_literal": "accepted invalid identifier",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "kind.len() > 64",
+        "replacement": "false"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "The65-byte unknown string is independently reachable at the codec and semantic store boundary."
+  },
+  {
+    "label": "decode-unknown-kind-first-lowercase",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::unknown_identifier_grammar_and_length_are_closed",
+    "expected_literal": "accepted invalid identifier",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "!kind.as_bytes().first().is_some_and(u8::is_ascii_lowercase)",
+        "replacement": "false"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "Empty string or digit/underscore-leading identifier passes the remaining all-character predicate."
+  },
+  {
+    "label": "decode-unknown-kind-rest-characters",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::unknown_identifier_grammar_and_length_are_closed",
+    "expected_literal": "accepted invalid identifier",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "!kind\n                    .bytes()\n                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')",
+        "replacement": "false"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "Lowercase-leading a-b/a/b/a b fail only this character predicate."
+  },
+  {
+    "label": "decode-unknown-kind-string-only",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::unknown_identifier_grammar_and_length_are_closed",
+    "expected_literal": "assertion failed: decode_event(&bytes(&value)).is_err()",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "let kind = original.as_str().ok_or(DecodeError)?;",
+        "replacement": "let kind = original.as_str().unwrap_or(\"future_delivery\");"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "Unknown map/number/null/array representations must not be converted into accepted strings. Known unit maps remain admitted by the existing EventKind decoder."
+  },
+  {
+    "label": "decode-duplicate-json",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::duplicate_fields_and_unknown_fields_remain_errors",
+    "expected_literal": "assertion failed: decode_event(duplicate.as_bytes()).is_err()",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "values.contains_key(&key)",
+        "replacement": "false"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "JSON duplicate rejection precedes normalization. The valid final future-kind duplicate must not become accepted."
+  },
+  {
+    "label": "decode-known-kind-map-parity",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::collector_preserves_shared_known_kind_map_representation",
+    "expected_literal": "called `Result::unwrap()` on an `Err` value: DecodeError",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "    let kind = match serde_json::from_value::<EventKind>(original.clone()) {",
+        "replacement": "    if !original.is_string() { return Err(DecodeError); }\n    let kind = match serde_json::from_value::<EventKind>(original.clone()) {"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "Known unit-map parity is established by the unchanged shared DTO. The existing unwrap is the failure site; no custom assertion message exists."
+  },
+  {
+    "label": "decode-original-kind-identity",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::unknown_preserves_identifier_and_replay_bytes",
+    "expected_literal": "assertion `left == right` failed",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "let canonical = canonical_event(&event, &kind)?;",
+        "replacement": "let canonical = canonical_event(&event, if event.kind == EventKind::Unknown { \"unknown\" } else { &kind })?;"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "The existing equality assertion compares canonical JSON kind against the original unknown identifier."
+  },
+  {
+    "label": "decode-canonical-event-budget-codec-only",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::canonical_event_and_page_bounds_remain_enforced",
+    "expected_literal": "assertion failed: decode_event(&bytes(&value)).is_err()",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "if canonical.len() > MAX_EVENT_BYTES {",
+        "replacement": "if canonical.len() > usize::MAX {"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "Codec-only reachable size case uses a4096-byte message_id. This is invalid under later semantic correlation validation; it is not a fully validated4KiB independent store kill. The conservative2659-byte derivation still applies after semantic envelope validation."
+  },
+  {
+    "label": "decode-page-event-count",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::canonical_event_and_page_bounds_remain_enforced",
+    "expected_literal": "assertion failed: decode_page(&bytes(&page(vec![event(\"arrival\"); 201]))).is_err()",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "if raw.len() > MAX_EVENTS {",
+        "replacement": "if raw.len() > usize::MAX {"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "The201-event page is independently reachable;200-event positive control precedes it."
+  },
+  {
+    "label": "decode-canonical-page-budget-codec-only",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::canonical_event_and_page_bounds_remain_enforced",
+    "expected_literal": "assertion failed: decode_page(&bytes(&value)).is_err()",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "if canonical_len > MAX_BYTES {",
+        "replacement": "if canonical_len > usize::MAX {"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "Codec-only oversized node fixture reaches this budget. Later semantic node validation refuses that fixture; do not credit it as a semantically valid store-page budget kill."
+  },
+  {
+    "label": "decode-original-kind-page-accounting",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::mixed_page_length_accounts_for_original_names",
+    "expected_literal": "assertion `left == right` failed",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": ".and_then(|n| n.checked_add(event.canonical.len()))",
+        "replacement": ".and_then(|n| n.checked_add(typed_len))"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "The existing canonical_len equality requires the original64-byte kind delta. This proves accounting, not admission of a semantically valid page at the exact256KiB threshold."
+  }
+]
