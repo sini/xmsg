@@ -353,3 +353,24 @@ Supply the first three flags together with federation credentials, a peers file
 and `--fed-listen`. `--enroll-state` conflicts with explicit `--fed-cert` and
 `--fed-key`; it still needs the peers file and federation listener. See the
 [setup and renewal example](/operations/enrollment-ca/#enroll-the-machine).
+
+## Planned: observation collector
+
+```sh
+xmsg observe-collector --config collector.json --state-dir ./observer-state --listen 127.0.0.1:9428
+```
+
+The collector is planned and not yet released. `--config` and `--state-dir` are
+required; `--listen` defaults to `127.0.0.1:9428`. A non-loopback listener requires
+`web_tls.cert` and `web_tls.key` in configuration. It dispatches independently of
+`serve` and does not initialize the bus, enrollment or harness stores.
+
+The JSON configuration supplies client mTLS files, one fixed owner introspection
+provider and a static inventory of at most 64 canonical nodes. `sources[].labels`
+and `sources[].outbound_only` default false. Outbound-only sources are visibly
+unsupported. The private cache and every-request owner checks are described in
+[collector setup](/operations/fleet-observer/#configure-the-collector).
+
+`GET /` is the authenticated view, with numeric `node` and `page` filters;
+`GET /health` is a fixed metadata-free availability response. There is no MCP
+observation tool, browser token store, body route or action control.

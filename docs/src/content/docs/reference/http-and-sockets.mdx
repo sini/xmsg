@@ -315,3 +315,31 @@ A mailbox control item with `kind: "attachment"` carries `query`, `item_id`, `in
 and `length`. Only the authenticated queried peer can answer, once. Raw ranges use the
 message-body limit and the separate `attach:<peer>` rate bucket. See
 [file attachments](/concepts/attachments/) for staging, read permissions, expiry and an example.
+
+## Planned collector HTTP view
+
+The separate `observe-collector` listener is planned, not yet released. It never
+exposes the exporter routes on ordinary bus HTTP or initializes bus state.
+
+| Method and path | Boundary and result |
+| --- | --- |
+| `GET /health` without query | Fixed `available` text only; no cached metadata |
+| `GET /` | Every-request bearer introspection and exact owner binding before reading the collector cache |
+
+Only numeric `node` (zero-based canonical-name sorted inventory index) and `page`
+(0–49) are accepted view queries. A page without a node can only be zero. Unknown,
+duplicate, nondecimal and out-of-range fields return 400. Other paths return 404;
+non-GET metadata requests return 405 after owner admission. Identity headers do
+not authorize any route.
+
+Malformed/invalid bearer claims return 401, an otherwise valid non-owner returns
+403, and an unavailable provider returns 503. These responses contain no history
+or credential detail. Bearer bytes are at most 8192, headers 16384, introspection
+body 65536 and HTML 4 MiB. Introspection has a two-second deadline inside the
+five-second request budget. Connections and active requests are capped at 64 and
+eight respectively, without an unbounded admission queue.
+
+The view sends CSP with scripts disabled, no-store and nosniff. Its static CSS and
+HTML/SVG have no browser bearer store or action routes. A non-loopback listener
+requires configured server TLS. See [collector operations](/operations/fleet-observer/)
+for configuration, cache retention and restart revalidation states.
