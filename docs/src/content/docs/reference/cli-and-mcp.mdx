@@ -8,7 +8,7 @@ description: Operator commands, optional command-backed services, daemon and har
 The `xmsg` binary exposes `list`, `watch`, `doctor`, `send`, `replies`, `show`, `service`, `serve`, `mcp`,
 `register`, `unregister`, `check-peers`, and `enroll-ca`.
 
-```rust file=<rootDir>/src/main.rs#L20-L75
+```rust file=<rootDir>/src/main.rs#L21-L76
 ```
 
 ### Operator commands
@@ -163,7 +163,7 @@ enablement for each user are deployment configuration.
 
 Starts the local IPC and optional mTLS federation daemon:
 
-```rust file=<rootDir>/src/main.rs#L211-L344
+```rust file=<rootDir>/src/main.rs#L232-L365
 ```
 
 Planned: federation reload (`SIGHUP` or `--fed-reload-interval-secs`) accepts only
@@ -182,7 +182,7 @@ for accounting, duplicates and cleanup cadence.
 
 Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
 
-```rust file=<rootDir>/src/main.rs#L346-L371
+```rust file=<rootDir>/src/main.rs#L367-L392
 ```
 
 ### `xmsg register`
@@ -190,7 +190,7 @@ Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
 Registers credentials or handles lifecycle hooks for [Antigravity](/harnesses/antigravity/),
 [Claude Code](/harnesses/claude-code/), and [Codex](/harnesses/codex/):
 
-```rust file=<rootDir>/src/main.rs#L121-L209
+```rust file=<rootDir>/src/main.rs#L142-L230
 ```
 
 ### `xmsg check-peers`
