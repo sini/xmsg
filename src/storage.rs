@@ -136,7 +136,7 @@ const MESSAGE_STATE_TABLES: &[&str] = &[
     "codex_roots",
 ];
 
-const SCHEMA_N: &str = r#"
+pub(crate) const SCHEMA_N: &str = r#"
         CREATE TABLE IF NOT EXISTS blobs (
             sha256 TEXT PRIMARY KEY, size INTEGER NOT NULL, utf8 INTEGER NOT NULL,
             data BLOB NOT NULL, created_at INTEGER NOT NULL

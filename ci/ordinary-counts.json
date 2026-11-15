@@ -1,6 +1,6 @@
 {
   "baseline": {
-    "linux": "cargo test --locked on kyuj-1-peers frozen source: exit0, measured {'passed': 1176, 'failed': 0, 'ignored': 8, 'summaries': 101}; all98 integration targets",
+    "linux": "cargo test --locked on kyuj-1-schema frozen source: exit0; measured {'passed': 1190, 'failed': 0, 'ignored': 8, 'summaries': 102}; all 99 integration targets executed",
     "darwin": "run 43749772191 job 132920929336 on 1cff26adecb3a23a797e1c06010ef84338ad17d4: 1179 passed/10 ignored/0 failed/101 summaries; all98 executed targets passed inventory before stale count guard"
   },
   "integration_targets": [
@@ -11,6 +11,7 @@
     "tests/doctor.rs",
     "tests/doctor_liveness.rs",
     "tests/doctor_peers.rs",
+    "tests/doctor_schema.rs",
     "tests/e2e_agy_delivery.rs",
     "tests/e2e_http.rs",
     "tests/e2e_mcp.rs",
@@ -105,10 +106,10 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1176,
+      "passed": 1190,
       "failed": 0,
       "ignored": 8,
-      "summaries": 101
+      "summaries": 102
     },
     "darwin": {
       "passed": 1179,

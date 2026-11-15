@@ -44,8 +44,8 @@ local defaults; it cannot prove that the running daemon uses the same configurat
 | Daemon build revision warning (planned) | The daemon and client report different known revisions, or revision metadata is unavailable. | Check the intended source pin and the selected Unix socket. Nix builds embed the revision; plain Cargo builds may report `unknown`. The crate version alone is insufficient. A warning does not fail the health check or prove the daemon needs restarting. |
 | Registered process liveness warning (planned) | A registration has gone/stale process evidence, or bounded read-only diagnostics cannot establish liveness. | Inspect the named local process and registration deliberately. `live` is only process evidence; it does not prove the harness is addressable or a message can be delivered. Missing `/proc` or denied platform inspection may leave evidence unknown and produces one portability warning per run. |
 | Sessions directory warning | Health reports that the sessions directory is missing. | Check the harness path if this node hosts sessions. A service-only node may not need one. |
-| Database schema fails or is unknown | The read-only probe cannot establish the expected global schema version. | Check the database path and use the documented upgrade procedure. A passing global version check does not prove every additive migration is installed. |
-| Journal or WAL warning | Database state cannot be fully interpreted from a read-only diagnostic. | Inspect the daemon and its logs before taking action. File presence alone does not establish hotness or corruption; do not delete a journal merely because doctor mentions it. |
+| Database schema or additive requirements (planned) | Newer schemas fail because startup refuses them; older schemas fail with a destructive schema-3 message-state rebuild warning. Missing same-version tables, indexes or additive columns warn by operation name. | Check the selected DB path, preserve a backup and follow the normal upgrade procedure. Version equality is not backfill or integrity certification; optional enrollment schema is conditional. |
+| Journal/WAL/SHM state (planned) | Doctor reports stat-only type and size. Live WAL/SHM can be expected; down or unknown daemon state with sidecars warns about an unclean or uncertain shutdown. | Keep the sidecars. The next normal SQLite start handles recovery; doctor does not open sidecars, recover or checkpoint. Presence/size does not prove journal hotness or corruption. |
 | Observation sidecar warning | The expected `<database>.observe.sqlite` file is absent or its metadata needs attention. | Check the observer setup and file ownership. Doctor does not open the journal writer or initialize a sidecar. |
 | Peer configuration fails | The selected configuration fails the existing `check-peers` parser or certificate consistency check. | Correct the named configuration issue, then run doctor again. Parsing does not prove peer reachability or the daemon's loaded configuration. |
 | Enrollment expiry fails | Saved metadata says the enrolled certificate has expired. | Follow the enrollment renewal procedure. Doctor does not renew it. |
@@ -70,11 +70,26 @@ or admission caches during a handshake, but make no persistent or application-st
 writes. An older or unavailable daemon leaves the result unknown.
 The response deadline is bounded, but the system DNS resolver may finish an in-flight lookup after its request is cancelled.
 
+## Primary schema views (planned)
+
+A live daemon with an existing regular WAL and SHM permits an ordinary read-only metadata
+reader. Main DB and WAL bytes remain unchanged; SQLite's reader marks can update the SHM.
+Without that live view, doctor reports unknown instead of creating missing sidecars. With
+the daemon down or unresponsive and sidecars present, it uses stat only and leaves SQLite
+recovery to startup. With no sidecars, it opens `mode=ro&immutable=1`, then rechecks metadata
+for concurrent changes. No mode is an integrity or live-backup guarantee.
+
+Results from a different or unknown client/daemon revision are labelled `next start of THIS
+binary`. They describe this binary's startup requirements for the selected DB, whose path
+may differ from the running daemon's. Named requirements describe structural table/index/
+column additions; no migration ledger exists to certify historical backfills. Enrollment
+schema is conditional, and no migration, checkpoint, VACUUM or recovery is run by doctor.
+
 ## What remains unchecked
 
 Doctor reports the running daemon's version and build revision when its Unix health
 response supplies them; missing metadata remains unknown. It does not establish loaded
-configuration, full migration readiness, actual journal hotness, CA application health
+configuration, historical backfill completion, actual journal hotness, CA application health
 or harness addressability. The bounded federation probe reports mTLS reachability,
 leaf expiry and observed offset with uncertainty; it is not a complete peer-health or
 clock-correctness guarantee.

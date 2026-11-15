@@ -234,12 +234,16 @@ fn healthy_json_is_read_only_and_requests_only_read_only_sources() {
         "socket.register",
         "daemon.health",
         "daemon.sessions_directory",
-        "database.schema_version",
         "database.journal",
         "observe.file",
     ] {
         status(&report, id, "pass");
     }
+    status(&report, "database.schema_version", "warn");
+    assert!(check(&report, "database.schema_view")["message"]
+        .as_str()
+        .unwrap()
+        .contains("mode unopened"));
     assert_eq!(report["failed"], 0);
     assert!(report["client_version"]
         .as_str()
@@ -307,7 +311,7 @@ fn missing_optional_sessions_directory_warns_without_failing_node() {
 
 #[test]
 fn future_schema_fails_without_modifying_database() {
-    let fixture = Fixture::healthy();
+    let fixture = Fixture::new(json!({"status":"not-ok","sessions_dir":"ok"}));
     rusqlite::Connection::open(&fixture.db)
         .unwrap()
         .execute_batch("PRAGMA user_version=999;")
@@ -323,14 +327,18 @@ fn future_schema_fails_without_modifying_database() {
 fn journal_is_uncertainty_not_a_recovery_or_hot_journal_claim() {
     let fixture = Fixture::healthy();
     let journal = PathBuf::from(format!("{}-journal", fixture.db.display()));
-    fs::write(&journal, b"unknown-journal-canary").unwrap();
+    let writer = rusqlite::Connection::open(&fixture.db).unwrap();
+    writer
+        .execute_batch("BEGIN IMMEDIATE; UPDATE planted SET value='journal-canary';")
+        .unwrap();
+    assert!(journal.exists());
     let before = snapshot(fixture.root.path());
     let (output, report) = fixture.report();
     assert!(output.status.success(), "{report}");
     status(&report, "database.journal", "warn");
     status(&report, "database.schema_version", "warn");
     assert_eq!(snapshot(fixture.root.path()), before);
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("unknown-journal-canary"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("journal-canary"));
 }
 
 #[test]
@@ -470,15 +478,22 @@ fn malformed_enrollment_metadata_fails_without_creating_identity_files() {
 }
 
 #[test]
-fn wal_companion_is_not_opened_or_modified() {
-    let fixture = Fixture::healthy();
+fn wal_companion_is_stat_only_when_daemon_liveness_is_unknown() {
+    let fixture = Fixture::new(json!({"status":"not-ok","sessions_dir":"ok"}));
+    let writer = rusqlite::Connection::open(&fixture.db).unwrap();
+    writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+    writer
+        .execute_batch("UPDATE planted SET value='wal-row-canary';")
+        .unwrap();
     let wal = PathBuf::from(format!("{}-wal", fixture.db.display()));
-    fs::write(&wal, b"wal-canary").unwrap();
+    assert!(wal.exists());
     let before = snapshot(fixture.root.path());
     let (output, report) = fixture.report();
-    assert!(output.status.success(), "{report}");
+    assert_eq!(output.status.code(), Some(1));
+    status(&report, "daemon.health", "fail");
     status(&report, "database.schema_version", "warn");
     assert_eq!(snapshot(fixture.root.path()), before);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("wal-row-canary"));
 }
 
 #[test]

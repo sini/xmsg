@@ -54,6 +54,10 @@ struct Check {
 struct Report {
     client_version: &'static str,
     client_build_revision: &'static str,
+    #[serde(skip)]
+    daemon_liveness: &'static str,
+    #[serde(skip)]
+    daemon_revision: Option<String>,
     checks: Vec<Check>,
     passed: usize,
     warnings: usize,
@@ -66,17 +70,14 @@ impl Report {
         Self {
             client_version: env!("CARGO_PKG_VERSION"),
             client_build_revision: option_env!("XMSG_BUILD_REVISION").unwrap_or("unknown"),
+            daemon_liveness: "unknown",
+            daemon_revision: None,
             checks: vec![],
             passed: 0,
             warnings: 0,
             failed: 0,
             checked_paths: BTreeMap::new(),
-            not_checked: vec![
-                "loaded_configuration",
-                "additive_migration_readiness",
-                "journal_hotness",
-                "ca_application_health",
-            ],
+            not_checked: vec!["loaded_configuration", "ca_application_health"],
         }
     }
     fn add(
@@ -205,6 +206,11 @@ async fn health(report: &mut Report, path: &Path) {
     .await;
     match result {
         Ok(value) if value["status"] == "ok" => {
+            report.daemon_liveness = "live";
+            report.daemon_revision = value["build_revision"]
+                .as_str()
+                .filter(|v| !v.is_empty() && *v != "unknown")
+                .map(str::to_owned);
             report.add(
                 "daemon.health",
                 Status::Pass,
@@ -313,46 +319,132 @@ async fn sessions(report: &mut Report, path: &Path) {
     }
 }
 
-fn database(report: &mut Report, path: &Path) {
-    let journal = fs::symlink_metadata(suffix(path, "-journal")).is_ok();
-    report.add("database.journal",if journal {Status::Warn}else{Status::Pass},if journal {"Rollback journal is present; hotness is not determined."}else{"No rollback journal was found at the checked path."},if journal {Some("Do not delete a journal by hand. Stop the node safely, back up its files, and inspect normal SQLite recovery.")}else{None});
-    let mut header = [0u8; 100];
-    let read = state_file(path).and_then(|mut f| f.read_exact(&mut header));
-    if read.is_err() || &header[..16] != b"SQLite format 3\0" {
-        report.add(
-            "database.schema_version",
-            Status::Fail,
-            "Database is missing, unreadable, or has no SQLite header.",
-            Some(
-                "Check --db-path and node-user access; preserve a backup before attempting repair.",
-            ),
-        );
-        return;
-    }
-    let wal = header[18] == 2
-        || header[19] == 2
-        || fs::symlink_metadata(suffix(path, "-wal")).is_ok()
-        || fs::symlink_metadata(suffix(path, "-shm")).is_ok();
-    if journal || wal {
-        report.add("database.schema_version",Status::Warn,"Global schema probe skipped because journal/WAL state requires inspection.",Some("Use a stopped-node backup and the normal daemon upgrade/recovery procedure; doctor does not recover state."));
-        return;
-    }
-    let version = (|| -> rusqlite::Result<i64> {
-        let db = rusqlite::Connection::open_with_flags(
-            path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
-        db.busy_timeout(Duration::from_millis(250))?;
-        db.pragma_query_value(None, "user_version", |row| row.get(0))
-    })();
-    match version {
-        Ok(v) if v==xmsg::storage::SCHEMA_VERSION=>report.add("database.schema_version",Status::Pass,format!("Read-only global schema version is {v}; additive readiness is not certified."),None),
-        Ok(v)=>report.add("database.schema_version",Status::Fail,format!("Global schema version {v} differs from this binary's {}.",xmsg::storage::SCHEMA_VERSION),Some("Use a matching node binary; stop and back up before the normal startup migration procedure.")),
-        Err(_)=>report.add("database.schema_version",Status::Fail,"Cannot read the global schema with a read-only SQLite connection.",Some("Check access and a stopped-node backup; doctor never opens the database for writes or recovery.")),
+fn requirement_label(name: &str) -> String {
+    if let Some(name) = name.strip_prefix("table:") {
+        format!("ensure table {name}")
+    } else if let Some(name) = name.strip_prefix("index:") {
+        format!("ensure index {name}")
+    } else if let Some(name) = name.strip_prefix("column:") {
+        format!("add column {name}")
+    } else {
+        name.to_owned()
     }
 }
+
+fn database(report: &mut Report, path: &Path) {
+    use xmsg::schema_status::DaemonState;
+    let state = match report.daemon_liveness {
+        "live" => DaemonState::Live,
+        "down" => DaemonState::Down,
+        _ => DaemonState::Unknown,
+    };
+    let view = xmsg::schema_status::inspect(path, state);
+    let same_revision = report.client_build_revision != "unknown"
+        && report.daemon_revision.as_deref() == Some(report.client_build_revision);
+    let interpretation = if same_revision {
+        "startup requirements of the matching reported binary"
+    } else {
+        "next start of THIS binary; client/daemon revisions differ or cannot be compared"
+    };
+    report.add(
+        "database.schema_view",
+        if view.consistent {
+            Status::Pass
+        } else {
+            Status::Warn
+        },
+        format!(
+            "mode {}; daemon {}; {interpretation}. {}",
+            view.mode, report.daemon_liveness, view.note
+        ),
+        None,
+    );
+    for sidecar in &view.sidecars {
+        let id = match sidecar.suffix {
+            "-journal" => "database.journal",
+            "-wal" => "database.wal",
+            "-shm" => "database.shm",
+            _ => continue,
+        };
+        let size = sidecar
+            .size
+            .map(|size| format!("{size} bytes"))
+            .unwrap_or_else(|| "size unknown".into());
+        let expected_live = report.daemon_liveness == "live"
+            && view.mode == "ro"
+            && view.consistent
+            && sidecar.kind == "regular"
+            && sidecar.suffix != "-journal";
+        let (status, message) = if !sidecar.present {
+            (Status::Pass, format!("{} absent.", sidecar.suffix))
+        } else if expected_live {
+            (Status::Pass,format!("{} present, {}, {size}; expected live WAL metadata. Existing SHM read marks may change.",sidecar.suffix,sidecar.kind))
+        } else if report.daemon_liveness != "live" && sidecar.suffix != "-shm" {
+            (Status::Warn,format!("Unclean shutdown or uncertain daemon state: {} present, {}, {size}; daemon {}. The next start runs normal SQLite recovery; hotness is not inferred from stat.",sidecar.suffix,sidecar.kind,report.daemon_liveness))
+        } else {
+            (Status::Warn,format!("{} present, {}, {size}; metadata view is unknown. No sidecar contents were read.",sidecar.suffix,sidecar.kind))
+        };
+        report.add(id,status,message,sidecar.present.then_some("Keep the sidecars; use the normal startup/backup procedure. Doctor never recovers, checkpoints or deletes them."));
+    }
+    let Some(stored) = view.stored_version else {
+        let fail = matches!(
+            view.error_class,
+            Some("missing" | "invalid_target" | "not_sqlite")
+        );
+        report.add("database.schema_version",if fail {Status::Fail}else{Status::Warn},format!("Primary schema version unknown; {}.",view.error_class.unwrap_or("unavailable")),Some("Check the selected DB path and daemon state; preserve a backup before the normal startup procedure."));
+        report.add(
+            "database.additive",
+            Status::Warn,
+            "Core structural additive requirements unknown; no migration was run.",
+            None,
+        );
+        report.add("database.enrollment_schema",Status::Warn,"Optional enrollment schema is conditional/unknown; loaded enrollment configuration was not established.",None);
+        return;
+    };
+    let newest = view.newest_version;
+    if stored < newest {
+        report.add("database.schema_version",Status::Fail,format!("Stored schema {stored}; binary newest {newest}: schema 3 message-state rebuild (destructive) is required for the {interpretation}."),Some("Stop deliberately and preserve a complete backup before starting this binary; its legacy startup path recreates message-state tables. Doctor never performs that rebuild."));
+        report.add(
+            "database.additive",
+            Status::Warn,
+            "Pending operation: schema 3 message-state rebuild (destructive).",
+            None,
+        );
+    } else if stored > newest {
+        report.add("database.schema_version",Status::Fail,format!("Stored schema {stored} is newer than binary schema {newest}; this binary refuses startup."),Some("Use a compatible binary; preserve a backup and do not downgrade the store."));
+        report.add(
+            "database.additive",
+            Status::Warn,
+            "Core additive requirements unknown for a schema newer than this binary.",
+            None,
+        );
+    } else {
+        report.add(
+            "database.schema_version",
+            Status::Pass,
+            format!("Primary schema {stored} matches this binary's newest schema {newest}."),
+            None,
+        );
+        if view.pending.is_empty() {
+            report.add("database.additive",Status::Pass,"Core structural additive requirements are present; data-backfill history and integrity are not certified.",None);
+        } else {
+            let pending = view
+                .pending
+                .iter()
+                .map(|name| requirement_label(name))
+                .collect::<Vec<_>>()
+                .join("; ");
+            report.add("database.additive",Status::Warn,format!("Pending core structural requirements: {pending}."),Some("Preserve a backup and use the normal startup migration procedure; doctor never runs these operations."));
+        }
+    }
+    let optional = if view.optional_enrollment.is_empty() {
+        "Optional enrollment tables are structurally present; loaded enrollment configuration remains unknown.".to_owned()
+    } else {
+        format!("Optional enrollment schema is conditional/unknown: {} would be required if enrollment is configured.",view.optional_enrollment.iter().map(|name|requirement_label(name)).collect::<Vec<_>>().join("; "))
+    };
+    report.add("database.enrollment_schema", Status::Warn, optional, None);
+}
+
 fn observe(report: &mut Report, path: &Path) {
     match fs::symlink_metadata(path) {
         Err(e) if e.kind()==io::ErrorKind::NotFound=>report.add("observe.file",Status::Warn,"Observation sidecar is absent; no history health is inferred.",Some("Check node logs if observation is wanted; doctor does not create the sidecar.")),
@@ -563,6 +655,9 @@ async fn inspect(args: &DoctorArgs) -> Report {
     report.path("database", &db);
     let mut http_good = false;
     if let Some(path) = &http {
+        if fs::symlink_metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
+            report.daemon_liveness = "down";
+        }
         report.path("http_socket", path);
         let valid = path.parent().is_some_and(private_directory);
         report.add("runtime.directory",if valid{Status::Pass}else{Status::Fail},if valid{"HTTP socket directory is private and owned by this user."}else{"HTTP socket directory is missing or not private for this user."},if valid{None}else{Some("Run as the node user and use its actual private runtime directory; doctor does not create or chmod it.")});
