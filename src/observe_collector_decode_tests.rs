@@ -158,3 +158,46 @@ fn canonical_event_and_page_bounds_remain_enforced() {
     value["node"] = json!(name);
     assert!(decode_page(&bytes(&value)).is_err());
 }
+
+#[test]
+fn measure_shared_known_kind_representation() {
+    for (kind, accepted) in [
+        (json!({"message_recorded":null}), true),
+        (json!({"arrival":null}), true),
+        (json!({"future_delivery":null}), false),
+        (json!({"arrival":1}), false),
+        (json!({"arrival":null,"gap":null}), false),
+        (json!(1), false),
+        (json!(true), false),
+    ] {
+        let mut value = event("arrival");
+        value["kind"] = kind.clone();
+        let result = serde_json::from_value::<crate::observe_export::ExportEvent>(value);
+        println!("shared kind {kind}: accepted={}", result.is_ok());
+        assert_eq!(result.is_ok(), accepted);
+    }
+}
+
+#[test]
+fn collector_preserves_shared_known_kind_map_representation() {
+    for kind in ["message_recorded", "arrival", "unknown"] {
+        let mut value = event(kind);
+        value["kind"] = json!({kind:null});
+        let expected: ExportEvent = serde_json::from_value(value.clone()).unwrap();
+        let decoded = decode_event(&bytes(&value)).unwrap();
+        assert_eq!(decoded.event.kind, expected.kind);
+        assert_eq!(decoded.canonical, serde_json::to_vec(&expected).unwrap());
+    }
+    for kind in [
+        json!({"future_delivery":null}),
+        json!({"arrival":1}),
+        json!({"arrival":null,"gap":null}),
+        json!({}),
+        json!(1),
+        json!(true),
+    ] {
+        let mut value = event("arrival");
+        value["kind"] = kind;
+        assert!(decode_event(&bytes(&value)).is_err());
+    }
+}
