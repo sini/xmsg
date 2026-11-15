@@ -76,22 +76,28 @@ impl<'de> Deserialize<'de> for Unique {
 }
 
 fn decode_value(mut value: Value) -> Result<DecodedEvent, DecodeError> {
-    let kind = value
-        .get("kind")
-        .and_then(Value::as_str)
-        .ok_or(DecodeError)?
-        .to_owned();
-    if serde_json::from_value::<EventKind>(Value::String(kind.clone())).is_err() {
-        if kind.len() > 64
-            || !kind.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
-            || !kind
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-        {
-            return Err(DecodeError);
+    let original = value.get("kind").ok_or(DecodeError)?;
+    let kind = match serde_json::from_value::<EventKind>(original.clone()) {
+        Ok(known) => serde_json::to_value(known)
+            .map_err(|_| DecodeError)?
+            .as_str()
+            .ok_or(DecodeError)?
+            .to_owned(),
+        Err(_) => {
+            let kind = original.as_str().ok_or(DecodeError)?;
+            if kind.len() > 64
+                || !kind.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+                || !kind
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            {
+                return Err(DecodeError);
+            }
+            let kind = kind.to_owned();
+            value["kind"] = Value::String("unknown".into());
+            kind
         }
-        value["kind"] = Value::String("unknown".into());
-    }
+    };
     let event: ExportEvent = serde_json::from_value(value).map_err(|_| DecodeError)?;
     let canonical = canonical_event(&event, &kind)?;
     if canonical.len() > MAX_EVENT_BYTES {
