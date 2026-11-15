@@ -3,16 +3,17 @@ use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-struct Fixture {
+pub(crate) struct Fixture {
     _directory: tempfile::TempDir,
     config_file: PathBuf,
-    config: serde_json::Value,
+    pub(crate) config: serde_json::Value,
     task: tokio::task::JoinHandle<()>,
-    requests: Arc<AtomicUsize>,
+    pub(crate) requests: Arc<AtomicUsize>,
     reply: Arc<Mutex<Vec<u8>>>,
     hold: Arc<AtomicBool>,
-    ledger: Arc<Mutex<Vec<String>>>,
+    pub(crate) ledger: Arc<Mutex<Vec<String>>>,
     closed: Arc<AtomicUsize>,
+    pub(crate) starts: Arc<Mutex<Vec<Instant>>>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -20,10 +21,13 @@ impl Drop for Fixture {
     }
 }
 impl Fixture {
-    async fn new() -> Self {
+    pub(crate) async fn new() -> Self {
+        Self::with_server(rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap())
+            .await
+    }
+    async fn with_server(server: rcgen::CertifiedKey<rcgen::KeyPair>) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let directory = tempfile::tempdir().unwrap();
-        let server = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let client = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let server_pin = crate::fed::spki_sha256_from_der(server.cert.der()).unwrap();
         let client_pin = crate::fed::spki_sha256_from_der(client.cert.der()).unwrap();
@@ -70,6 +74,8 @@ impl Fixture {
         let hold = Arc::new(AtomicBool::new(false));
         let ledger = Arc::new(Mutex::new(Vec::new()));
         let closed = Arc::new(AtomicUsize::new(0));
+        let starts = Arc::new(Mutex::new(Vec::new()));
+        let request_starts = starts.clone();
         let (responses, held, paths, disconnects) =
             (reply.clone(), hold.clone(), ledger.clone(), closed.clone());
         let task = tokio::spawn(async move {
@@ -77,6 +83,7 @@ impl Fixture {
                 let (tcp, _) = listener.accept().await.unwrap();
                 let acceptor = acceptor.clone();
                 let observed = observed.clone();
+                let starts = request_starts.clone();
                 let (reply, hold, ledger, closed) = (
                     responses.clone(),
                     held.clone(),
@@ -102,6 +109,7 @@ impl Fixture {
                         .lock()
                         .unwrap()
                         .push(String::from_utf8(request).unwrap());
+                    starts.lock().unwrap().push(Instant::now());
                     observed.fetch_add(1, Ordering::SeqCst);
                     while hold.load(Ordering::SeqCst) {
                         tokio::task::yield_now().await;
@@ -127,9 +135,10 @@ impl Fixture {
             hold,
             ledger,
             closed,
+            starts,
         }
     }
-    fn set_response(&self, status: &str, headers: &str, body: &[u8]) {
+    pub(crate) fn set_response(&self, status: &str, headers: &str, body: &[u8]) {
         let mut response = format!(
             "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
@@ -138,7 +147,7 @@ impl Fixture {
         response.extend_from_slice(body);
         *self.reply.lock().unwrap() = response;
     }
-    fn load(&self) -> Result<Config, Error> {
+    pub(crate) fn load(&self) -> Result<Config, Error> {
         std::fs::write(&self.config_file, self.config.to_string()).unwrap();
         Config::load(&self.config_file)
     }
@@ -245,7 +254,11 @@ async fn node_and_global_reservations_survive_forced_races() {
         requests.spawn(async move { client.snapshot(index).await });
     }
     observed(&fixture, 8).await;
-    assert_eq!(client.slots.available_permits(), 0);
+    assert_eq!(
+        client.slots.available_permits(),
+        0,
+        "global request reservation exceeded eight"
+    );
     assert!(
         matches!(client.snapshot(0).await, Err(Error::Pending)),
         "per-node request reservation bypassed"
@@ -484,4 +497,266 @@ async fn one_node_reservation_is_independent_of_global_capacity() {
     );
     fixture.hold.store(false, Ordering::SeqCst);
     first.await.unwrap().unwrap();
+}
+
+struct CaFixture {
+    net: Fixture,
+    ca_file: PathBuf,
+    wrong_ca_file: PathBuf,
+}
+impl CaFixture {
+    async fn new(uris: &[&str], kind: &str) -> Self {
+        let mut ca = rcgen::CertificateParams::default();
+        ca.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::DigitalSignature,
+        ];
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let ca_pem = ca.self_signed(&ca_key).unwrap().pem();
+        let wrong_pem = ca
+            .self_signed(&rcgen::KeyPair::generate().unwrap())
+            .unwrap()
+            .pem();
+        let mut leaf = rcgen::CertificateParams::default();
+        leaf.subject_alt_names = uris
+            .iter()
+            .map(|uri| rcgen::SanType::URI((*uri).try_into().unwrap()))
+            .collect();
+        leaf.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
+        leaf.extended_key_usages = vec![if kind == "client-only" {
+            rcgen::ExtendedKeyUsagePurpose::ClientAuth
+        } else {
+            rcgen::ExtendedKeyUsagePurpose::ServerAuth
+        }];
+        match kind {
+            "expired" => {
+                leaf.not_before = rcgen::date_time_ymd(2020, 1, 1);
+                leaf.not_after = rcgen::date_time_ymd(2021, 1, 1);
+            }
+            "future" => {
+                leaf.not_before = rcgen::date_time_ymd(2040, 1, 1);
+                leaf.not_after = rcgen::date_time_ymd(2041, 1, 1);
+            }
+            _ => {}
+        }
+        let signing_key = rcgen::KeyPair::generate().unwrap();
+        let cert = leaf
+            .signed_by(&signing_key, &rcgen::Issuer::from_params(&ca, &ca_key))
+            .unwrap();
+        let net = Fixture::with_server(rcgen::CertifiedKey { cert, signing_key }).await;
+        let ca_file = net._directory.path().join("ca.pem");
+        let wrong_ca_file = net._directory.path().join("wrong-ca.pem");
+        std::fs::write(&ca_file, ca_pem).unwrap();
+        std::fs::write(&wrong_ca_file, wrong_pem).unwrap();
+        Self {
+            net,
+            ca_file,
+            wrong_ca_file,
+        }
+    }
+    fn source(&self, identity: &str, foreign_ca: bool) -> serde_json::Value {
+        json!({"node":crate::node::node_name_from_uri(identity).unwrap(),"address":self.net.config["sources"][0]["address"],"ca":if foreign_ca {&self.wrong_ca_file} else {&self.ca_file},"identity":identity})
+    }
+    fn ca_client(&self, identity: &str, foreign_ca: bool) -> Client {
+        let mut config = self.net.config.clone();
+        config["sources"] = json!([self.source(identity, foreign_ca)]);
+        std::fs::write(&self.net.config_file, config.to_string()).unwrap();
+        Client::new(&Config::load(&self.net.config_file).unwrap()).unwrap()
+    }
+}
+const SERVER_IDENTITY: &str = "spiffe://xmsg/host/node/user/owner";
+async fn trusted_ca_positive() {
+    let fixture = CaFixture::new(&[SERVER_IDENTITY], "valid").await;
+    fixture
+        .ca_client(SERVER_IDENTITY, false)
+        .get(0, "/fed/v2/observe/snapshot".into())
+        .await
+        .unwrap();
+}
+#[tokio::test]
+async fn wrong_pin_refuses_after_valid_pin_control() {
+    let mut fixture = Fixture::new().await;
+    Client::new(&fixture.load().unwrap())
+        .unwrap()
+        .snapshot(0)
+        .await
+        .unwrap();
+    let other = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let pin = crate::fed::spki_sha256_from_der(other.cert.der()).unwrap();
+    fixture.config["sources"][0]["node"] = json!(crate::node::node_name_from_pin(&pin).unwrap());
+    fixture.config["sources"][0]["pin"] = json!(pin);
+    let result = Client::new(&fixture.load().unwrap())
+        .unwrap()
+        .snapshot(0)
+        .await;
+    assert!(
+        matches!(result, Err(Error::Unavailable)),
+        "foreign pinned exporter was admitted"
+    );
+}
+#[tokio::test]
+async fn foreign_ca_refuses_after_trusted_chain_control() {
+    trusted_ca_positive().await;
+    let fixture = CaFixture::new(&[SERVER_IDENTITY], "valid").await;
+    let result = fixture.ca_client(SERVER_IDENTITY, true).snapshot(0).await;
+    assert!(
+        matches!(result, Err(Error::Unavailable)),
+        "foreign CA exporter was admitted"
+    );
+}
+#[tokio::test]
+async fn invalid_ca_validity_and_eku_refuse() {
+    trusted_ca_positive().await;
+    for kind in ["expired", "future", "client-only"] {
+        let fixture = CaFixture::new(&[SERVER_IDENTITY], kind).await;
+        assert!(
+            matches!(
+                fixture.ca_client(SERVER_IDENTITY, false).snapshot(0).await,
+                Err(Error::Unavailable)
+            ),
+            "invalid CA validity or server EKU admitted: {kind}"
+        );
+    }
+}
+#[tokio::test]
+async fn ca_uri_cardinality_refuses_zero_and_multiple() {
+    trusted_ca_positive().await;
+    for uris in [
+        vec![],
+        vec![SERVER_IDENTITY, "spiffe://xmsg/host/other/user/owner"],
+    ] {
+        let fixture = CaFixture::new(&uris, "valid").await;
+        assert!(
+            matches!(
+                fixture.ca_client(SERVER_IDENTITY, false).snapshot(0).await,
+                Err(Error::Unavailable)
+            ),
+            "CA exporter with wrong URI cardinality was admitted"
+        );
+    }
+}
+#[tokio::test]
+async fn ca_uri_match_is_literal() {
+    trusted_ca_positive().await;
+    let fixture = CaFixture::new(&[SERVER_IDENTITY], "valid").await;
+    assert!(
+        matches!(
+            fixture
+                .ca_client("spiffe://xmsg/host/other/user/owner", false)
+                .snapshot(0)
+                .await,
+            Err(Error::Unavailable)
+        ),
+        "CA exporter with unlisted literal URI was admitted"
+    );
+}
+async fn ambiguity(pin_first: bool) {
+    let fixture = CaFixture::new(&[SERVER_IDENTITY], "valid").await;
+    let pin = fixture.net.config["sources"][0].clone();
+    let ca = fixture.source(SERVER_IDENTITY, false);
+    Client::new(&fixture.net.load().unwrap())
+        .unwrap()
+        .snapshot(0)
+        .await
+        .unwrap();
+    fixture
+        .ca_client(SERVER_IDENTITY, false)
+        .snapshot(0)
+        .await
+        .unwrap();
+    let mut config = fixture.net.config.clone();
+    config["sources"] = if pin_first {
+        json!([pin, ca])
+    } else {
+        json!([ca, pin])
+    };
+    std::fs::write(&fixture.net.config_file, config.to_string()).unwrap();
+    let result = Client::new(&Config::load(&fixture.net.config_file).unwrap())
+        .unwrap()
+        .snapshot(0)
+        .await;
+    assert!(
+        matches!(result, Err(Error::Unavailable)),
+        "outgoing collector pin/CA ambiguity was admitted"
+    );
+}
+#[tokio::test]
+async fn pinned_collector_dial_refuses_ca_membership() {
+    ambiguity(true).await;
+}
+#[tokio::test]
+async fn ca_collector_dial_refuses_pinned_membership() {
+    ambiguity(false).await;
+}
+
+async fn closed_wire_object(which: &str) {
+    let fixture = Fixture::new().await;
+    let client = Client::new(&fixture.load().unwrap()).unwrap();
+    let node = fixture.config["sources"][0]["node"].as_str().unwrap();
+    let mut snapshot = json!({"v":1,"node":node,"scope":"a".repeat(64),"observed_at":1000,"endpoints":[{"id":format!("fixture@{node}"),"node":node,"kind":"service","harness":"unknown","state":"registered"}],"truncated":false,"available":"available"});
+    let mut page = json!({"v":1,"node":node,"epoch":"fixture-epoch","scope":"a".repeat(64),"events":[{"sequence":1,"observed_at":1000,"persisted_at":1000,"kind":"message_recorded","available":"not_recorded"}],"next":1,"has_more":false,"gaps":[{"reason":"queue_loss","unknown_loss":true}],"available":true});
+    let is_snapshot = matches!(which, "snapshot" | "endpoint");
+    let positive = if is_snapshot { &snapshot } else { &page };
+    fixture.set_response("200 OK", "", &serde_json::to_vec(positive).unwrap());
+    if is_snapshot {
+        client.snapshot(0).await.unwrap();
+    } else {
+        client.events(0, None, None, 0).await.unwrap();
+    }
+    match which {
+        "event" => page["events"][0]["unexpected"] = json!("synthetic-wire-extra"),
+        "gap" => page["gaps"][0]["unexpected"] = json!("synthetic-wire-extra"),
+        "page" => page["unexpected"] = json!("synthetic-wire-extra"),
+        "endpoint" => snapshot["endpoints"][0]["unexpected"] = json!("synthetic-wire-extra"),
+        "snapshot" => snapshot["unexpected"] = json!("synthetic-wire-extra"),
+        _ => panic!("unknown fixture object"),
+    }
+    reset_spacing(&client);
+    fixture.set_response(
+        "200 OK",
+        "",
+        &serde_json::to_vec(if is_snapshot { &snapshot } else { &page }).unwrap(),
+    );
+    let refused = if is_snapshot {
+        matches!(client.snapshot(0).await, Err(Error::Malformed))
+    } else {
+        matches!(client.events(0, None, None, 0).await, Err(Error::Malformed))
+    };
+    assert!(refused, "incoming unknown field was accepted: {which}");
+}
+#[tokio::test]
+async fn incoming_unknown_event_refuses() {
+    closed_wire_object("event").await;
+}
+#[tokio::test]
+async fn incoming_unknown_gap_refuses() {
+    closed_wire_object("gap").await;
+}
+#[tokio::test]
+async fn incoming_unknown_page_refuses() {
+    closed_wire_object("page").await;
+}
+#[tokio::test]
+async fn incoming_unknown_endpoint_refuses() {
+    closed_wire_object("endpoint").await;
+}
+#[tokio::test]
+async fn incoming_unknown_snapshot_refuses() {
+    closed_wire_object("snapshot").await;
+}
+#[tokio::test]
+async fn closed_wire_enum_spellings_refuse() {
+    let fixture = Fixture::new().await;
+    let client = Client::new(&fixture.load().unwrap()).unwrap();
+    let mut page = json!({"v":1,"node":fixture.config["sources"][0]["node"],"epoch":"fixture-epoch","scope":"a".repeat(64),"events":[],"next":0,"has_more":false,"gaps":[],"available":true});
+    fixture.set_response("200 OK", "", &serde_json::to_vec(&page).unwrap());
+    client.events(0, None, None, 0).await.unwrap();
+    page["events"] = json!([{"sequence":1,"observed_at":1000,"persisted_at":1000,"kind":"agent_read_completed","available":"not_recorded"}]);
+    reset_spacing(&client);
+    fixture.set_response("200 OK", "", &serde_json::to_vec(&page).unwrap());
+    assert!(
+        matches!(client.events(0, None, None, 0).await, Err(Error::Malformed)),
+        "unrepresentable event enum spelling was accepted"
+    );
 }

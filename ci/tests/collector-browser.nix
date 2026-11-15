@@ -22,6 +22,10 @@
           ];
           preCheck = ''
             export XMSG_COLLECTOR_BROWSER_FIXTURE_DIR="$TMPDIR/collector-browser"
+            export XMSG_COLLECTOR_BROWSER_PYTHON="${
+              pkgs.python3.withPackages (ps: [ ps.playwright ])
+            }/bin/python3"
+            export XMSG_COLLECTOR_BROWSER_CHROMIUM="${lib.getExe pkgs.chromium}"
             export HOME="$TMPDIR/browser-home"
             mkdir -p "$HOME"
           '';

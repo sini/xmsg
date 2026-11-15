@@ -60,6 +60,8 @@ def main():
             )
             try:
                 total_requests = 0
+                mode_failures = []
+                unexpected_requests = 0
                 for bypass in (False, True):
                     context = browser.new_context(bypass_csp=bypass)
                     requests = []
@@ -78,10 +80,14 @@ def main():
                     assert response.status == 200
                     for key, value in headers.items():
                         assert response.headers[key] == value, f"response header changed: {key}"
-                    inspect(page)
-                    assert all(resource in (origin + "/", origin + "/favicon.ico") for resource in requests), (
-                        "hostile label attempted a resource request"
-                    )
+                    try:
+                        inspect(page)
+                    except AssertionError as error:
+                        mode_failures.append(f"bypass={bypass}: {error}")
+                    unexpected = [resource for resource in requests if resource not in (origin + "/", origin + "/favicon.ico")]
+                    unexpected_requests += len(unexpected)
+                    if unexpected:
+                        mode_failures.append(f"bypass={bypass}: hostile label attempted a resource request")
                     total_requests += len(requests)
                     if bypass:
                         page.goto(origin + "/dom-positive", wait_until="networkidle")
@@ -98,7 +104,9 @@ def main():
                         )
                     context.close()
                 print(json.dumps({"browser": browser.version, "CSP_modes": 2, "fixture_requests": total_requests,
-                                  "DOM_positive": 1, "network_positive": 1, "unexpected_fixture_requests": 0}))
+                                  "DOM_positive": 1, "network_positive": 1, "unexpected_fixture_requests": unexpected_requests,
+                                  "mode_failures": len(mode_failures)}), flush=True)
+                assert not mode_failures, "; ".join(mode_failures)
             finally:
                 browser.close()
     finally:
