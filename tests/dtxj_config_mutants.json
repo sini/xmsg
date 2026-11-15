@@ -1,0 +1,142 @@
+[
+  {
+    "label": "literal-hub-observe",
+    "target": "lib",
+    "test": "fed::observe_config_tests::wildcard_observe_rules_are_refused_but_other_wildcard_rules_work",
+    "test_file": "src/fed_observe_config_tests.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if allow.iter().any(|op| op == \"observe\") && pat.contains('*') {",
+        "replacement": "if false {"
+      }
+    ],
+    "expected_literal": "wildcard observe rule must be refused"
+  },
+  {
+    "label": "hub-observe-operation",
+    "target": "lib",
+    "test": "fed::observe_config_tests::literal_observe_hub_rule_loads_and_admits",
+    "test_file": "src/fed_observe_config_tests.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "\"send\" | \"reply\" | \"list\" | \"forward\" | \"relayed\" | \"observe\" => {",
+        "replacement": "\"send\" | \"reply\" | \"list\" | \"forward\" | \"relayed\" => {"
+      }
+    ],
+    "expected_literal": "literal observe hub rule must load"
+  },
+  {
+    "label": "labels-require-observe",
+    "target": "lib",
+    "test": "fed::observe_config_tests::labels_require_explicit_observe_even_when_false",
+    "test_file": "src/fed_observe_config_tests.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if !allow.iter().any(|op| op == \"observe\") {",
+        "replacement": "if false && !allow.iter().any(|op| op == \"observe\") {"
+      }
+    ],
+    "expected_literal": "concrete labels field requires observe even when false"
+  },
+  {
+    "label": "hub-labels-validation",
+    "target": "lib",
+    "test": "fed::observe_config_tests::labels_require_explicit_observe_even_when_false",
+    "test_file": "src/fed_observe_config_tests.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "parse_observe_labels(r_obj, &allow)",
+        "replacement": "Ok::<bool, String>(false)"
+      }
+    ],
+    "expected_literal": "hub labels field requires observe even when false"
+  },
+  {
+    "label": "hub-first-match",
+    "target": "lib",
+    "test": "fed::observe_config_tests::first_matching_rule_does_not_union_a_later_observe_grant",
+    "test_file": "src/fed_observe_config_tests.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": ".find(|r| spiffe_uri_matches_pattern(uri, &r.pattern))",
+        "replacement": ".rfind(|r| spiffe_uri_matches_pattern(uri, &r.pattern))"
+      }
+    ],
+    "expected_literal": "first matching rule must not gain later observe authority"
+  },
+  {
+    "label": "hub-no-grant-union",
+    "target": "lib",
+    "test": "fed::observe_config_tests::first_matching_rule_does_not_union_a_later_observe_grant",
+    "test_file": "src/fed_observe_config_tests.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "let allow = rule.map(|r| r.allow.clone()).unwrap_or_default();",
+        "replacement": "let allow = hub.rules.iter().filter(|r| spiffe_uri_matches_pattern(uri, &r.pattern)).flat_map(|r| r.allow.clone()).collect();"
+      }
+    ],
+    "expected_literal": "first matching rule must not gain later observe authority"
+  },
+  {
+    "label": "hub-target-propagation",
+    "target": "lib",
+    "test": "fed::observe_config_tests::hub_target_omission_empty_and_explicit_scopes_survive_admission",
+    "test_file": "src/fed_observe_config_tests.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "targets: rule.and_then(|r| r.targets.clone()),",
+        "replacement": "targets: None,"
+      }
+    ],
+    "expected_literal": "hub target scope must survive admission exactly"
+  },
+  {
+    "label": "hub-label-propagation",
+    "target": "lib",
+    "test": "fed::observe_config_tests::labels_require_explicit_observe_even_when_false",
+    "test_file": "src/fed_observe_config_tests.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "observe_labels: rule.is_some_and(|r| r.observe_labels),",
+        "replacement": "observe_labels: false,"
+      }
+    ],
+    "expected_literal": "hub label permission must survive admission"
+  },
+  {
+    "label": "legacy-label-serialization",
+    "target": "lib",
+    "test": "fed::observe_config_tests::default_labels_omit_field_for_legacy_peer_roundtrip",
+    "test_file": "src/fed_observe_config_tests.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "#[serde(default, skip_serializing_if = \"std::ops::Not::not\")]",
+        "replacement": "#[serde(default)]"
+      }
+    ],
+    "expected_literal": "default false labels must not serialize into legacy config"
+  },
+  {
+    "label": "hub-null-targets",
+    "target": "lib",
+    "test": "fed::observe_config_tests::new_fields_keep_unknown_and_type_validation_strict",
+    "test_file": "src/fed_observe_config_tests.rs",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "r_obj.get(\"targets\")",
+        "replacement": "r_obj.get(\"targets\").filter(|value| !value.is_null())"
+      }
+    ],
+    "expected_literal": "hub field must be rejected: targets=null"
+  }
+]

@@ -270,6 +270,7 @@ async fn test_oracle_1_ca_peer_accepted_and_delivered() {
     b_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "client-a".to_string(),
                 address: "127.0.0.1:0".to_string(),
                 pin: None,
@@ -294,6 +295,7 @@ async fn test_oracle_1_ca_peer_accepted_and_delivered() {
     a_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "server-b".to_string(),
                 address: node_b.fed_addr.to_string(),
                 pin: None,
@@ -353,6 +355,7 @@ async fn test_oracle_2_different_ca_refused() {
     b_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "client-a".to_string(),
                 address: "127.0.0.1:0".to_string(),
                 pin: None,
@@ -377,6 +380,7 @@ async fn test_oracle_2_different_ca_refused() {
     a_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "server-b".to_string(),
                 address: node_b.fed_addr.to_string(),
                 pin: None,
@@ -447,6 +451,7 @@ async fn test_oracle_3_uri_not_in_identities_refused() {
     b_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "client-a".to_string(),
                 address: "127.0.0.1:0".to_string(),
                 pin: None,
@@ -471,6 +476,7 @@ async fn test_oracle_3_uri_not_in_identities_refused() {
     a_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "server-b".to_string(),
                 address: node_b.fed_addr.to_string(),
                 pin: None,
@@ -556,6 +562,7 @@ async fn test_oracle_4_expired_and_not_yet_valid_refused() {
     b_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "client-a".to_string(),
                 address: "127.0.0.1:0".to_string(),
                 pin: None,
@@ -580,6 +587,7 @@ async fn test_oracle_4_expired_and_not_yet_valid_refused() {
     a_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "server-b".to_string(),
                 address: node_b.fed_addr.to_string(),
                 pin: None,
@@ -711,6 +719,7 @@ async fn test_oracle_5_zero_and_two_uri_sans_refused() {
     b_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "client-a".to_string(),
                 address: "127.0.0.1:0".to_string(),
                 pin: None,
@@ -735,6 +744,7 @@ async fn test_oracle_5_zero_and_two_uri_sans_refused() {
     a_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "server-b".to_string(),
                 address: node_b.fed_addr.to_string(),
                 pin: None,
@@ -893,6 +903,7 @@ async fn test_oracle_6_prefix_wildcard_matching() {
     b_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "client-a".to_string(),
                 address: "127.0.0.1:0".to_string(),
                 pin: None,
@@ -917,6 +928,7 @@ async fn test_oracle_6_prefix_wildcard_matching() {
     a_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "server-b".to_string(),
                 address: node_b.fed_addr.to_string(),
                 pin: None,
@@ -1041,6 +1053,7 @@ async fn test_oracle_7_overlapping_ca_peers_refused() {
     b_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "peer-1".to_string(),
                 address: "127.0.0.1:0".to_string(),
                 pin: None,
@@ -1060,6 +1073,7 @@ async fn test_oracle_7_overlapping_ca_peers_refused() {
     b_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "peer-2".to_string(),
                 address: "127.0.0.1:0".to_string(),
                 pin: None,
@@ -1084,6 +1098,7 @@ async fn test_oracle_7_overlapping_ca_peers_refused() {
     a_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "server-b".to_string(),
                 address: node_b.fed_addr.to_string(),
                 pin: None,
@@ -1153,6 +1168,7 @@ async fn test_oracle_8_outbound_wrong_uri_fails() {
     b_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "client-a".to_string(),
                 address: "127.0.0.1:0".to_string(),
                 pin: None,
@@ -1178,6 +1194,7 @@ async fn test_oracle_8_outbound_wrong_uri_fails() {
     a_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "server-b".to_string(),
                 address: node_b.fed_addr.to_string(),
                 pin: None,
@@ -1241,6 +1258,7 @@ async fn test_oracle_8b_outbound_different_ca_fails() {
     b_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "client-a".to_string(),
                 address: "127.0.0.1:0".to_string(),
                 pin: None,
@@ -1266,6 +1284,7 @@ async fn test_oracle_8b_outbound_different_ca_fails() {
     a_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "server-b".to_string(),
                 address: node_b.fed_addr.to_string(),
                 pin: None,
@@ -1330,6 +1349,7 @@ async fn test_oracle_9_ca_peer_policy_targets_enforced() {
     b_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "client-a".to_string(),
                 address: "127.0.0.1:0".to_string(),
                 pin: None,
@@ -1359,6 +1379,7 @@ async fn test_oracle_9_ca_peer_policy_targets_enforced() {
     a_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "server-b".to_string(),
                 address: node_b.fed_addr.to_string(),
                 pin: None,
@@ -1632,6 +1653,7 @@ fn test_oracle_11_duplicate_peer_name_refused() {
     // 3. Programmatic insert duplicate check
     let mut map = PeersMap::empty();
     let p1 = PeerConfig {
+        observe_labels: false,
         name: "peer-prog".to_string(),
         address: "127.0.0.1:9000".to_string(),
         pin: Some("sha256:abcd".to_string()),
@@ -1645,6 +1667,7 @@ fn test_oracle_11_duplicate_peer_name_refused() {
         dial: None,
     };
     let p2 = PeerConfig {
+        observe_labels: false,
         name: "peer-prog".to_string(),
         address: "127.0.0.1:9001".to_string(),
         pin: Some("sha256:ef01".to_string()),
@@ -1697,6 +1720,7 @@ async fn test_oracle_12_outbound_only_pin_and_ca_double_match_refused() {
     // 1. Pinned peer with client A's pin, but empty allow (outbound only)
     b_peers
         .insert(PeerConfig {
+            observe_labels: false,
             name: "pin-outbound-only".to_string(),
             address: "127.0.0.1:0".to_string(),
             pin: Some(pin_a),
@@ -1715,6 +1739,7 @@ async fn test_oracle_12_outbound_only_pin_and_ca_double_match_refused() {
     b_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "ca-peer".to_string(),
                 address: "127.0.0.1:0".to_string(),
                 pin: None,
@@ -1739,6 +1764,7 @@ async fn test_oracle_12_outbound_only_pin_and_ca_double_match_refused() {
     a_peers
         .insert_with_anchors(
             PeerConfig {
+                observe_labels: false,
                 name: "server-b".to_string(),
                 address: node_b.fed_addr.to_string(),
                 pin: None,

@@ -356,6 +356,7 @@ async fn test_oracle_1_peer_with_targets_delivers_to_allowed_target() {
     let node_a = create_fed_test_node(
         "host-a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: b_addr.to_string(),
             pin: Some(creds_b.2.clone()),
@@ -378,6 +379,7 @@ async fn test_oracle_1_peer_with_targets_delivers_to_allowed_target() {
     let node_b = create_fed_test_node(
         "host-b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: node_a.fed_addr.to_string(),
             pin: Some(creds_a.2.clone()),
@@ -477,6 +479,7 @@ async fn test_oracle_2_peer_with_targets_refused_for_other_svc_and_claude_sessio
     let node_a = create_fed_test_node(
         "host-a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: b_addr.to_string(),
             pin: Some(creds_b.2.clone()),
@@ -499,6 +502,7 @@ async fn test_oracle_2_peer_with_targets_refused_for_other_svc_and_claude_sessio
     let node_b = create_fed_test_node(
         "host-b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: node_a.fed_addr.to_string(),
             pin: Some(creds_a.2.clone()),
@@ -627,6 +631,7 @@ async fn test_oracle_3_peer_without_targets_reaches_session_and_svc() {
     let node_a = create_fed_test_node(
         "host-a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: b_addr.to_string(),
             pin: Some(creds_b.2.clone()),
@@ -650,6 +655,7 @@ async fn test_oracle_3_peer_without_targets_reaches_session_and_svc() {
     let node_b = create_fed_test_node(
         "host-b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: node_a.fed_addr.to_string(),
             pin: Some(creds_a.2.clone()),
@@ -779,6 +785,7 @@ async fn test_oracle_4_refused_target_does_not_consume_rate_limit_or_create_stor
     let node_a = create_fed_test_node(
         "host-a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-b".to_string(),
             address: b_addr.to_string(),
             pin: Some(creds_b.2.clone()),
@@ -804,6 +811,7 @@ async fn test_oracle_4_refused_target_does_not_consume_rate_limit_or_create_stor
     let node_b = create_fed_test_node(
         "host-b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "host-a".to_string(),
             address: node_a.fed_addr.to_string(),
             pin: Some(creds_a.2.clone()),

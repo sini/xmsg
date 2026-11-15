@@ -664,6 +664,7 @@ async fn test_gate3_symmetric_reply_federated() {
     let node_a = create_node(
         "node_a",
         vec![PeerConfig {
+            observe_labels: false,
             name: "node_b".to_string(),
             address: node_b_addr.to_string(),
             pin: Some(pin_b.clone()),
@@ -684,6 +685,7 @@ async fn test_gate3_symmetric_reply_federated() {
     let node_b = create_node(
         "node_b",
         vec![PeerConfig {
+            observe_labels: false,
             name: "node_a".to_string(),
             address: node_a_addr.to_string(),
             pin: Some(pin_a.clone()),
@@ -1300,6 +1302,7 @@ async fn test_ng1_37_bare_host_nickname_and_unknown_node_candidates() {
     let node_vic = create_node(
         "vic.cortex",
         vec![PeerConfig {
+            observe_labels: false,
             name: "sini.cortex".to_string(),
             address: addr_sini2.to_string(),
             pin: Some(creds_sini.2.clone()),
@@ -1332,6 +1335,7 @@ async fn test_ng1_37_bare_host_nickname_and_unknown_node_candidates() {
     let node_nick = create_node(
         &nick_canonical,
         vec![PeerConfig {
+            observe_labels: false,
             name: "sini.cortex".to_string(),
             address: addr_sini2.to_string(),
             pin: Some(creds_sini.2.clone()),
@@ -1371,6 +1375,7 @@ async fn test_ng1_37_bare_host_nickname_and_unknown_node_candidates() {
         "sini.cortex",
         vec![
             PeerConfig {
+                observe_labels: false,
                 name: "vic.cortex".to_string(),
                 address: addr_vic.to_string(),
                 pin: Some(creds_vic.2.clone()),
@@ -1384,6 +1389,7 @@ async fn test_ng1_37_bare_host_nickname_and_unknown_node_candidates() {
                 dial: None,
             },
             PeerConfig {
+                observe_labels: false,
                 name: "uplink".to_string(),
                 address: addr_nick.to_string(),
                 pin: Some(creds_nick.2.clone()),

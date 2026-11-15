@@ -328,6 +328,7 @@ async fn build_sender_fed_state(
     peers.insert(
         peer_name.to_string(),
         PeerConfig {
+            observe_labels: false,
             name: peer_name.to_string(),
             address: peer_addr.to_string(),
             pin: None,
