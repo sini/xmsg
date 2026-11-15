@@ -171,9 +171,30 @@ invocation, never periodically. Normal connection counters or admission caches c
 as part of a handshake; probes make no persistent or application-state writes and call no
 listing, observation or reconciliation route.
 
-A database schema check covers the global schema version, not every additive migration.
-A journal or WAL file is not proof of a hot journal; uncertainty produces a warning rather
-than a recovery attempt. The observation sidecar is checked by filesystem metadata only.
+The planned primary-database check reports the stored version against this binary's schema
+and names structural additions as `ensure table`, `ensure index` or `add column TABLE.COLUMN`.
+Missing same-version additions warn. A schema newer than the binary fails because startup
+refuses it. An older version fails with `schema 3 message-state rebuild (destructive)` and a
+backup hint: that startup path recreates message state. Doctor never performs that work.
+These are structural requirements from startup declarations, not a chronological migration
+ledger or certification of data backfills. Optional enrollment tables are reported separately
+as conditional while the loaded enrollment configuration is unknown. Other databases and
+integrity are outside this check.
+
+Reader mode depends on the health response. With a live daemon and existing regular WAL and
+SHM files, an ordinary read-only connection observes committed WAL metadata. It creates no
+new entry and does not change the main database or WAL; SQLite's normal SHM read marks may
+change. A missing or inconsistent live view stays unknown. When the daemon is down or its
+liveness is unknown and sidecars exist, doctor reports their presence/type/size by stat only,
+warns about an unclean/uncertain shutdown and leaves recovery to the next normal SQLite
+startup. It does not open or read those sidecars. With no sidecars, the offline probe uses
+`mode=ro&immutable=1` and rechecks for changes; uncertainty stays visible.
+
+When client and daemon revisions differ or cannot be compared, the result is labelled
+`next start of THIS binary`, not a claim about the running daemon's upgrade behavior.
+Use the actual selected `--db-path`; health alone does not prove the daemon uses that path.
+Doctor never migrates, checkpoints, vacuums or performs automatic recovery. The observation
+sidecar is checked by filesystem metadata only.
 See [troubleshooting](/operations/troubleshooting/) for the checks and their limits.
 
 ### `xmsg service exec`

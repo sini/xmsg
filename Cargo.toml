@@ -556,3 +556,7 @@ required-features = ["daemon"]
 name = "gate_dtxj_unknown_wire"
 path = "tests/gate_dtxj_unknown_wire.rs"
 required-features = ["daemon"]
+[[test]]
+name = "doctor_schema"
+path = "tests/doctor_schema.rs"
+required-features = ["daemon"]
