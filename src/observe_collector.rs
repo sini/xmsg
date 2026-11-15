@@ -105,7 +105,7 @@ impl State {
         }))
     }
 
-    async fn prepare(&self, request: Request<Incoming>) -> Response<Full<Bytes>> {
+    async fn prepare<B>(&self, request: Request<B>) -> Response<Full<Bytes>> {
         let header_bytes = request
             .headers()
             .iter()
@@ -232,12 +232,24 @@ fn tls_config(
     Ok(Some(tokio_rustls::TlsAcceptor::from(Arc::new(config))))
 }
 
+fn connection_slots() -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(64))
+}
+
 async fn serve(
     listener: tokio::net::TcpListener,
     state: Arc<State>,
     tls: Option<tokio_rustls::TlsAcceptor>,
 ) -> Result<(), Error> {
-    let connections = Arc::new(Semaphore::new(64));
+    serve_with_admission(listener, state, tls, connection_slots()).await
+}
+
+async fn serve_with_admission(
+    listener: tokio::net::TcpListener,
+    state: Arc<State>,
+    tls: Option<tokio_rustls::TlsAcceptor>,
+    connections: Arc<Semaphore>,
+) -> Result<(), Error> {
     let mut tasks = tokio::task::JoinSet::new();
     loop {
         tokio::select! {

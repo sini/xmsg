@@ -59,7 +59,7 @@ fn hostile_view() -> NodeView {
             persisted_at: 101,
             kind: EventKind::MessageRecorded,
             from: Some("svc:one@fixture.node".into()),
-            to: None,
+            to: Some("svc:one@fixture.node".into()),
             message_id: Some("message".into()),
             reply_id: None,
             thread_id: None,
@@ -261,4 +261,24 @@ fn csp_hash_covers_only_the_static_stylesheet() {
     ] {
         assert!(csp.contains(policy), "missing policy: {policy}");
     }
+}
+
+#[test]
+fn records_without_reported_endpoints_do_not_invent_lanes() {
+    let mut node = hostile_view();
+    node.events[0].event.from = None;
+    node.events[0].event.to = None;
+    let html = render(
+        &[node.clone()],
+        Some(&node),
+        Filter {
+            node: Some(0),
+            page: 0,
+        },
+    );
+    assert!(
+        !html.contains("class=\"lane\""),
+        "record without endpoints gained a decorative exchange"
+    );
+    assert!(html.contains("No exchange endpoints reported"));
 }
