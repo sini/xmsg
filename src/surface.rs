@@ -3744,10 +3744,12 @@ pub async fn inbox(state: &AppState, caller: &Session, wait: u64) -> Result<Inbo
     let drain = |state: &AppState| -> Result<Vec<InboxMessageItem>, AppError> {
         let now = storage::now_epoch_secs();
         let db = state.db.lock().map_err(db_err)?;
+        let capture = crate::observe_effects::Batch::begin(&state.db, &db);
         let queued = storage::take_queued(&db, &caller.session_id, now).map_err(db_err)?;
         let mut out = Vec::with_capacity(queued.len());
         for m in queued {
             let _ = storage::update_message_outcome(&db, &m.id, "delivered");
+            crate::observe_effects::inbox_arrived(&db, &m.id, &caller.session_id, &address);
             out.push(InboxMessageItem {
                 id: m.id,
                 from: m.from_name,
@@ -3755,6 +3757,7 @@ pub async fn inbox(state: &AppState, caller: &Session, wait: u64) -> Result<Inbo
                 created_at: m.created_at,
             });
         }
+        capture.settled(&db);
         Ok(out)
     };
 
@@ -3776,8 +3779,6 @@ pub async fn inbox(state: &AppState, caller: &Session, wait: u64) -> Result<Inbo
         }
     })
     .await;
-    Ok(InboxResult {
-        address,
-        messages: drain(state)?,
-    })
+    let messages = drain(state)?;
+    Ok(InboxResult { address, messages })
 }

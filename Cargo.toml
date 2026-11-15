@@ -536,3 +536,8 @@ required-features = ["daemon"]
 name = "recipient_snapshot"
 path = "tests/recipient_snapshot.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "observe_arrival"
+path = "tests/observe_arrival.rs"
+required-features = ["daemon"]

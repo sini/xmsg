@@ -68,6 +68,7 @@ impl Observation {
         matches!(
             self.kind.as_str(),
             "message_recorded"
+                | "arrival"
                 | "recipient_resolved"
                 | "outcome_changed"
                 | "reply_recorded"
