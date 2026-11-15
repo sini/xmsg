@@ -626,5 +626,103 @@
         "replacement": "to.to_owned()"
       }
     ]
+  },
+  {
+    "label": "collector-csp-script",
+    "target": "lib",
+    "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "script-src 'none'",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "script-src 'none'",
+        "replacement": "script-src 'self'"
+      }
+    ]
+  },
+  {
+    "label": "collector-csp-style",
+    "target": "lib",
+    "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "style-src 'sha256-",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "style-src 'sha256-{hash}'",
+        "replacement": "style-src 'unsafe-inline'"
+      }
+    ]
+  },
+  {
+    "label": "collector-csp-self-assets",
+    "target": "lib",
+    "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "missing policy: default-src 'self'",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "default-src 'self'",
+        "replacement": "default-src *"
+      }
+    ]
+  },
+  {
+    "label": "collector-csp-frame",
+    "target": "lib",
+    "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "missing policy: frame-src 'none'",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "frame-src 'none'",
+        "replacement": "frame-src 'self'"
+      }
+    ]
+  },
+  {
+    "label": "collector-csp-frame-ancestors",
+    "target": "lib",
+    "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "missing policy: frame-ancestors 'none'",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "frame-ancestors 'none'",
+        "replacement": "frame-ancestors 'self'"
+      }
+    ]
+  },
+  {
+    "label": "collector-csp-object",
+    "target": "lib",
+    "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "missing policy: object-src 'none'",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "object-src 'none'",
+        "replacement": "object-src 'self'"
+      }
+    ]
+  },
+  {
+    "label": "collector-csp-base",
+    "target": "lib",
+    "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "missing policy: base-uri 'none'",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "base-uri 'none'",
+        "replacement": "base-uri 'self'"
+      }
+    ]
   }
 ]

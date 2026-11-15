@@ -102,7 +102,7 @@ fn numeric_filters_never_become_network_destinations() {
 fn hostile_html_label_is_text() {
     let node = hostile_view();
     let html = render(
-        &[node.clone()],
+        std::slice::from_ref(&node),
         Some(&node),
         Filter {
             node: Some(0),
@@ -130,7 +130,7 @@ fn hostile_html_label_is_text() {
 fn hostile_svg_label_and_lane_are_text() {
     let node = hostile_view();
     let html = render(
-        &[node.clone()],
+        std::slice::from_ref(&node),
         Some(&node),
         Filter {
             node: Some(0),
@@ -150,7 +150,7 @@ fn hostile_svg_label_and_lane_are_text() {
 fn presentation_preserves_boundaries_and_separate_clocks() {
     let node = hostile_view();
     let html = render(
-        &[node.clone()],
+        std::slice::from_ref(&node),
         Some(&node),
         Filter {
             node: Some(0),
@@ -175,7 +175,7 @@ fn presentation_preserves_boundaries_and_separate_clocks() {
     let mut hidden = node;
     hidden.history_hidden = true;
     let html = render(
-        &[hidden.clone()],
+        std::slice::from_ref(&hidden),
         Some(&hidden),
         Filter {
             node: Some(0),
@@ -192,7 +192,7 @@ fn rows_objects_and_response_bytes_are_bounded() {
     let endpoint = node.latest_snapshot.as_ref().unwrap().snapshot.endpoints[0].clone();
     node.latest_snapshot.as_mut().unwrap().snapshot.endpoints = vec![endpoint; 201];
     let html = render(
-        &[node.clone()],
+        std::slice::from_ref(&node),
         Some(&node),
         Filter {
             node: Some(0),
@@ -212,7 +212,7 @@ fn rows_objects_and_response_bytes_are_bounded() {
     assert!(html.contains("Endpoint objects truncated to 200"));
     assert!(html.contains("Next page"));
     let html = render_with_cap(
-        &[node.clone()],
+        std::slice::from_ref(&node),
         Some(&node),
         Filter {
             node: Some(0),
@@ -269,7 +269,7 @@ fn records_without_reported_endpoints_do_not_invent_lanes() {
     node.events[0].event.from = None;
     node.events[0].event.to = None;
     let html = render(
-        &[node.clone()],
+        std::slice::from_ref(&node),
         Some(&node),
         Filter {
             node: Some(0),
