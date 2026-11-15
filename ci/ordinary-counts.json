@@ -1,13 +1,14 @@
 {
   "baseline": {
-    "linux": "cargo test --locked at 56f5d205b00ae4b15d89240c56cdad6f4dd3244a: exit0,993 passed/8 ignored/95 summaries/all92 integration paths; b63b saturation included",
-    "darwin": "workflow43687936714 job132732250929 at 56f5d205b00ae4b15d89240c56cdad6f4dd3244a:996 passed/10 ignored/0 failed/95 summaries/all92 integration paths; static census corrected from executed log"
+    "linux": "cargo test --locked on rebased6831b2442bfcd68234ef46c6b269943270ee2122: exit0,1010passed/8ignored/96summaries, all93integrationtargets",
+    "darwin": "macOS run43693560466 job132749100957 on6831b2442bfcd68234ef46c6b269943270ee2122:1013passed/10ignored/0failed/96summaries; canonical xmsg-ordinary-tests-test log lines exclude repeated Nix error-tail summaries"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
     "tests/agy_proc_locks.rs",
     "tests/ancestor_walk.rs",
     "tests/claude_lstart_macos.rs",
+    "tests/doctor.rs",
     "tests/e2e_agy_delivery.rs",
     "tests/e2e_http.rs",
     "tests/e2e_mcp.rs",
@@ -99,16 +100,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 993,
+      "passed": 1010,
       "failed": 0,
       "ignored": 8,
-      "summaries": 95
+      "summaries": 96
     },
     "darwin": {
-      "passed": 996,
+      "passed": 1013,
       "failed": 0,
       "ignored": 10,
-      "summaries": 95
+      "summaries": 96
     }
   }
 }
