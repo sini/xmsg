@@ -153,6 +153,7 @@ loopback routes:
 | `/fed/v2/messages` | `POST` | Delivers a federated message (or relays a single-hop forward when the peer has `"forward"`). |
 | `/fed/v2/replies` | `POST` | Delivers a reply back to the originating node. |
 | `/fed/v2/messages/{id}/replies` | `GET` | Pulls stored replies for a message sent by an outbound-linked or leaf node. |
+| `/fed/v2/observe/events`, `/fed/v2/observe/snapshot` | `GET` | Planned: bounded stored metadata for a peer with an explicit `observe` grant. |
 | `/fed/v2/sessions` | `GET` | Returns this node's filtered recipient list for mesh `list`. |
 | `/fed/v2/inbox`, `/fed/v2/inbox/{id}/ack` | `GET`, `POST` | Long-polls and acknowledges items in a leaf or outbound-linked peer's hub mailbox. |
 | `/fed/v2/attachments/{item_id}/{index}?offset=&length=` | `GET` | Planned: reads a bounded raw file range; requires the item's downstream peer and its current hop permission. |
@@ -177,6 +178,71 @@ not the hub's canonical node name. A refused item gets a strict
 later mailbox items. Mail that starts on the hub itself is delivered without this grant. The
 check uses the existing origin fields and does not change the wire shape. It is on the main
 branch and is not yet in a release.
+
+### Planned node observation export
+
+**Planned, not yet released.** These read-only routes require the literal
+`observe` peer right over the mTLS federation listener. They are absent from
+normal HTTP, leaf TCP and MCP. They do not call discovery, inbox, reply polling,
+ACK or body/transcript readers. Outbound-only leaves are unsupported. See
+[scope semantics](/concepts/fleet-observer/#an-individual-grant) and the
+[configuration and request example](/operations/fleet-observer/).
+
+| Events query field | Default | Bounds |
+|---|---|---|
+| `v` | `1` | Only version `1`. |
+| `epoch` | absent | If present, 1–128 bytes; required with positive `after`. |
+| `after` | `0` | Nonnegative signed 64-bit sequence. |
+| `limit` | `100` | `1..200`. |
+| `scope` | absent | If present, 64 lowercase hex characters; required with positive `after`. |
+| `labels` | `false` | Labels require both request opt-in and `observe_labels` on the grant. |
+
+`GET /fed/v2/observe/events?v=1&after=0&limit=100` starts a retained-history
+backfill, including when `after` is omitted. Continue with the response's `epoch`,
+`scope` and `next` as the next `epoch`, `scope` and `after`. An old epoch or cursor
+ahead resets the read; changed scope resets backfill with `scope_changed`.
+Reconnect after peer-policy reload. A scope value detects changes; it grants no
+rights. `next` advances through scanned records, including filtered records,
+but never past a visible event excluded by the response byte limit.
+
+The strict page object contains only `v`, `node`, `epoch`, `scope`, `events`,
+`next`, `has_more`, `gaps` and boolean `available`. Node and epoch apply to every
+event. The export omits raw journal `head`, `floor` and global loss totals.
+A gap has `reason` and `unknown_loss`, with no arbitrary detail or loss count.
+`policy_filtered` distinguishes scope filtering from source loss.
+
+Each event has `sequence`, `observed_at`, `persisted_at`, `kind` and `available`;
+optional fields are `source_at`, `from`, `to`, `message_id`, `reply_id`, `thread_id`,
+`outcome` and `reason`. Timestamps are Unix seconds. Kind, outcome and reason
+are closed enums; unknown internal classes become `unknown`, not arbitrary text.
+Endpoint references are canonical `key@node` values. There is no body, text,
+excerpt, path, cwd, environment or token field. Event `available` is the enum
+`not_recorded` or `retained_at_capture`: capture-time history, not a content-fetch
+API or a guarantee that content remains today.
+
+`GET /fed/v2/observe/snapshot?v=1&labels=false` accepts only `v` and `labels`.
+Its object has `v`, `node`, `scope`, `observed_at`, `endpoints`, `truncated` and
+`available`. Here `available` is the enum `available`, `partial` or `unavailable`.
+Each descriptor has `id`, `node`, `kind`, `harness` and `state`, with optional
+`source_at` and `label`. Kinds are `instance`, `subagent`, `service` or `unknown`;
+harnesses are `claude`, `codex`, `agy`, `pi`, `opencode`, `hermes` or `unknown`;
+states are `registered`, `released`, `seen` or `unknown`. These are cached facts,
+not current process liveness. Labels are at most 256 UTF-8 bytes and require
+both opt-ins. Incomplete catalogs are explicit rather than invented as complete.
+
+Both routes reject request bodies, unknown query fields and unsupported versions.
+Queries are at most 1 KiB and the whole processing/request budget is five seconds.
+An event page holds at most 200 events, each source event at most 4 KiB, and
+at most 256 KiB for the complete encoded page. A snapshot holds at most 200 cached
+descriptors and 256 KiB. Busy or unavailable storage returns an unavailable error,
+not an empty successful history. Reads share eight node-wide slots without an
+unbounded wait queue, and use an `observe:<peer>` rate bucket. Expired source
+events are excluded even before journal cleanup.
+
+Sequence order is per node, not a global clock or proof of agent reads. Preserve
+gaps, reset and partial states when displaying results. A scoped event with an
+unknown or disallowed endpoint is omitted in full. Ordinal spacing may still
+reveal omitted activity volume.
 
 ---
 
