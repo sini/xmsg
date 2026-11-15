@@ -1,0 +1,47 @@
+[
+  {
+    "label": "real-source-gap-forwarding",
+    "oracle": "E10",
+    "target": "lib",
+    "test": "observe_export_gap_tests::real_queue_loss_crosses_projection_without_exporting_raw_counters",
+    "test_file": "src/observe_export_gap_tests.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "    for gap in &source.gaps {\n        add_gap(&mut output.gaps, reason(&gap.reason), gap.unknown_loss);\n    }",
+        "replacement": "    let _ = &source.gaps;"
+      }
+    ],
+    "expected_literal": "real queue-loss source gap was not forwarded"
+  },
+  {
+    "label": "real-epoch-unknown-loss",
+    "oracle": "E10",
+    "target": "lib",
+    "test": "observe_export_gap_tests::real_epoch_mismatch_preserves_unknown_loss_on_reset",
+    "test_file": "src/observe_export_gap_tests.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "add_gap(&mut output.gaps, reason(&gap.reason), gap.unknown_loss);",
+        "replacement": "add_gap(&mut output.gaps, reason(&gap.reason), false);"
+      }
+    ],
+    "expected_literal": "real epoch reset unknown-loss flag was erased"
+  },
+  {
+    "label": "real-queue-loss-reason",
+    "oracle": "E10",
+    "target": "lib",
+    "test": "observe_export_gap_tests::real_queue_loss_crosses_projection_without_exporting_raw_counters",
+    "test_file": "src/observe_export_gap_tests.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "add_gap(&mut output.gaps, reason(&gap.reason), gap.unknown_loss);",
+        "replacement": "add_gap(&mut output.gaps, Reason::Unknown, gap.unknown_loss);"
+      }
+    ],
+    "expected_literal": "real queue-loss reason was not preserved"
+  }
+]
