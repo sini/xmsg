@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "cargo test --locked on kyuj-1-peers frozen source: exit0, measured {'passed': 1176, 'failed': 0, 'ignored': 8, 'summaries': 101}; all98 integration targets",
-    "darwin": "run 43749772191 job 132920929336 on 1cff26adecb3a23a797e1c06010ef84338ad17d4: 1179 passed/10 ignored/0 failed/101 summaries; all98 executed targets passed inventory before stale count guard"
+    "linux": "run 43753658056 on 75eb08000b5a78b4cb42274766bfdae0ee26ab23; measured native completed suites, all 99 integration targets; prior census guard rejected stale inventory",
+    "darwin": "run 43753657995 on 75eb08000b5a78b4cb42274766bfdae0ee26ab23; measured native completed suites, all 99 integration targets; prior census guard rejected stale inventory"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -27,6 +27,7 @@
     "tests/gate_delivered_acked.rs",
     "tests/gate_dtxj_collector.rs",
     "tests/gate_dtxj_export.rs",
+    "tests/gate_dtxj_unknown_wire.rs",
     "tests/gate_h5_hub_admission.rs",
     "tests/gate_h6_default_route.rs",
     "tests/gate_ha8_reclaim.rs",
@@ -105,16 +106,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1176,
+      "passed": 1199,
       "failed": 0,
       "ignored": 8,
-      "summaries": 101
+      "summaries": 102
     },
     "darwin": {
-      "passed": 1179,
+      "passed": 1202,
       "failed": 0,
       "ignored": 10,
-      "summaries": 101
+      "summaries": 102
     }
   }
 }
