@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "run 43753658056 on 75eb08000b5a78b4cb42274766bfdae0ee26ab23; measured native completed suites, all 99 integration targets; prior census guard rejected stale inventory; schema diagnostics additions await actual rebased native census",
-    "darwin": "run 43753657995 on 75eb08000b5a78b4cb42274766bfdae0ee26ab23; measured native completed suites, all 99 integration targets; prior census guard rejected stale inventory; schema diagnostics additions await actual rebased macOS census"
+    "linux": "cargo test --locked on immutable 0df3a91a1aaab08fa35aa7223a4728baf32d45a2: exit0; 1213 passed/8 ignored/0 failed/103 summaries; all100 executed targets passed inventory",
+    "darwin": "run 43765072144 job 132968221019 on 0df3a91a1aaab08fa35aa7223a4728baf32d45a2: 1216 passed/10 ignored/0 failed/103 summaries; all100 executed targets passed inventory before stale count guard"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -107,16 +107,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1199,
+      "passed": 1213,
       "failed": 0,
       "ignored": 8,
-      "summaries": 102
+      "summaries": 103
     },
     "darwin": {
-      "passed": 1202,
+      "passed": 1216,
       "failed": 0,
       "ignored": 10,
-      "summaries": 102
+      "summaries": 103
     }
   }
 }
