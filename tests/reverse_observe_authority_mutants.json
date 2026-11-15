@@ -1,0 +1,336 @@
+[
+  {
+    "label": "reverse-auth-config-duplicate-route",
+    "target": "gate_reverse_observe",
+    "test": "reverse_routes_are_explicit_closed_and_exact",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "invalid route must refuse:",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "|| self.routes[..index].contains(route)",
+        "replacement": "|| false"
+      }
+    ]
+  },
+  {
+    "label": "reverse-auth-config-closed-config",
+    "target": "gate_reverse_observe",
+    "test": "reverse_routes_are_explicit_closed_and_exact",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "invalid route must refuse:",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct Config",
+        "replacement": "pub struct Config"
+      }
+    ]
+  },
+  {
+    "label": "reverse-auth-config-closed-route",
+    "target": "gate_reverse_observe",
+    "test": "reverse_routes_are_explicit_closed_and_exact",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "invalid route must refuse:",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct Route",
+        "replacement": "pub struct Route"
+      }
+    ]
+  },
+  {
+    "label": "reverse-auth-config-wildcard-grant",
+    "target": "lib",
+    "test": "fed::observe_config_tests::wildcard_observe_rules_are_refused_but_other_wildcard_rules_work",
+    "test_file": "src/fed_observe_config_tests.rs",
+    "expected_literal": "wildcard observe rule must be refused",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if allow.iter().any(|op| op == \"observe\") && pat.contains('*') {",
+        "replacement": "if false {"
+      }
+    ]
+  },
+  {
+    "label": "reverse-auth-hub-enabled",
+    "target": "gate_reverse_observe",
+    "test": "hub_switch_is_required",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "independent policy refusal:",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "config.hub_enabled",
+        "replacement": "true",
+        "start": "fn exact_route(",
+        "end": "#[derive(Clone)]"
+      }
+    ]
+  },
+  {
+    "label": "reverse-auth-leaf-enabled",
+    "target": "gate_reverse_observe",
+    "test": "leaf_default_off_refuses_current_direct_admission_before_any_metadata_read",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "current-snapshot leaf enable guard",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "config.leaf_enabled",
+        "replacement": "true",
+        "start": "fn exact_route(",
+        "end": "#[derive(Clone)]"
+      }
+    ]
+  },
+  {
+    "label": "reverse-auth-leaf-route",
+    "target": "gate_reverse_observe",
+    "test": "leaf_exact_route_is_required",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "independent policy refusal:",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "!config.routes.contains(route)",
+        "replacement": "false",
+        "start": "fn exact_route(",
+        "end": "#[derive(Clone)]"
+      }
+    ]
+  },
+  {
+    "label": "reverse-auth-hub-observe-right",
+    "target": "gate_reverse_observe",
+    "test": "hub_observe_right_is_not_implied_by_list",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "independent policy refusal:",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "!config.allow.iter().any(|v| v == \"observe\")",
+        "replacement": "false",
+        "start": "fn grant(",
+        "end": "fn exact_route("
+      }
+    ],
+    "rationale": "The same production grant helper serves hub authorization and leaf admission/current checks; each side has its own refusal scenario."
+  },
+  {
+    "label": "reverse-auth-leaf-observe-right",
+    "target": "gate_reverse_observe",
+    "test": "leaf_observe_right_is_not_implied_by_list",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "independent policy refusal:",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "!config.allow.iter().any(|v| v == \"observe\")",
+        "replacement": "false",
+        "start": "fn grant(",
+        "end": "fn exact_route("
+      }
+    ],
+    "rationale": "The same production grant helper serves hub authorization and leaf admission/current checks; each side has its own refusal scenario."
+  },
+  {
+    "label": "reverse-auth-hub-label-admission",
+    "target": "gate_reverse_observe",
+    "test": "hub_labels_require_policy_before_dispatch",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "independent policy refusal:",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "(labels && !config.observe_labels)",
+        "replacement": "false",
+        "start": "fn grant(",
+        "end": "fn exact_route("
+      }
+    ]
+  },
+  {
+    "label": "reverse-auth-hub-source-cidr",
+    "target": "gate_reverse_observe",
+    "test": "hub_checks_actual_collector_ip_not_forwarded_ip",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "independent policy refusal:",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if !allowed {",
+        "replacement": "if false {",
+        "start": "pub fn check_peer_source(",
+        "end": "pub fn uri_matches_identity("
+      }
+    ],
+    "rationale": "Mutate the shared CIDR predicate: TLS request admission and relay authorize both call it; bypassing just the latter is masked by the former. Matching-CIDR positive neighbor is witnessed_matching_source_cidrs_allow_actual_connections."
+  },
+  {
+    "label": "reverse-auth-leaf-source-cidr",
+    "target": "gate_reverse_observe",
+    "test": "leaf_checks_actual_hub_ip",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "independent policy refusal:",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if !allowed {",
+        "replacement": "if false {",
+        "start": "pub fn check_peer_source(",
+        "end": "pub fn uri_matches_identity("
+      }
+    ],
+    "rationale": "Shared CIDR predicate covers original poll witness, current check, and answer connection witness; matching-CIDR positive neighbor is witnessed_matching_source_cidrs_allow_actual_connections."
+  },
+  {
+    "label": "reverse-auth-leaf-unwitnessed-collector-ip",
+    "target": "gate_reverse_observe",
+    "test": "leaf_refuses_unwitnessed_collector_ip",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "independent policy refusal:",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "if config.from.is_some() {",
+        "replacement": "if false {",
+        "start": "fn leaf_admit(",
+        "end": "fn leaf_current("
+      },
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "if config.from.is_some() {",
+        "replacement": "if false {",
+        "start": "fn leaf_current(",
+        "end": "pub(crate) async fn spawn_answer("
+      }
+    ],
+    "rationale": "Same unavailable collector-IP witness predicate is repeated in admission and current policy; both copies must be removed to avoid masking."
+  },
+  {
+    "label": "reverse-auth-hub-returned-target",
+    "target": "gate_reverse_observe",
+    "test": "hub_target_exclusion_refuses_whole_leaf_dto",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "excluded returned endpoints refuse the complete DTO",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "!scope.allows(&e.id)",
+        "replacement": "false",
+        "start": "fn validate_dto(",
+        "end": "pub mod test_hooks"
+      }
+    ]
+  },
+  {
+    "label": "reverse-auth-leaf-target-projection",
+    "target": "gate_reverse_observe",
+    "test": "both_label_opt_ins_and_leaf_target_projection_apply",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "leaf narrows targets before export",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "admission.config.targets.as_deref()",
+        "replacement": "None",
+        "start": "async fn leaf_read(",
+        "end": "async fn post_answer("
+      }
+    ]
+  },
+  {
+    "label": "reverse-auth-leaf-label-policy",
+    "target": "gate_reverse_observe",
+    "test": "both_label_opt_ins_and_leaf_target_projection_apply",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "leaf policy conjunction suppresses labels",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "control.read.labels(&control.query)? && admission.config.observe_labels",
+        "replacement": "control.read.labels(&control.query)?",
+        "start": "async fn leaf_read(",
+        "end": "async fn post_answer("
+      }
+    ]
+  },
+  {
+    "label": "reverse-auth-hub-returned-label-request",
+    "target": "gate_reverse_observe",
+    "test": "returned_labels_and_targets_are_independently_refused",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "label-bearing DTO must satisfy policy and request opt-in separately",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "(!config.observe_labels\n                            || !control.read.labels(&control.query).unwrap_or(false))",
+        "replacement": "(!config.observe_labels)",
+        "start": "fn validate_dto(",
+        "end": "pub mod test_hooks"
+      }
+    ],
+    "rationale": "First policy-denied iteration stays GREEN; second permits policy labels but has no request opt-in, isolating the request predicate."
+  },
+  {
+    "label": "reverse-auth-hub-original-generation",
+    "target": "gate_reverse_observe",
+    "test": "hub_scope_only_change_invalidates_prepared_even_empty_dto",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "generation fence invalidates old scope even when fresh empty target validation would pass",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "if !Arc::ptr_eq(&peers, &waiter.peers) {",
+        "replacement": "if false {",
+        "start": "fn authorize(",
+        "end": "pub(crate) fn router("
+      }
+    ]
+  },
+  {
+    "label": "reverse-auth-leaf-original-generation",
+    "target": "gate_reverse_observe",
+    "test": "leaf_scope_only_narrowing_after_projection_cannot_send_old_bytes",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "original generation blocks stale scope-only narrowing",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "!Arc::ptr_eq(&admission.peers, &fs.current_peers()) || own_identity(fs)? != control.leaf",
+        "replacement": "own_identity(fs)? != control.leaf",
+        "start": "fn leaf_current(",
+        "end": "pub(crate) async fn spawn_answer("
+      },
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "if !Arc::ptr_eq(&peers, &fs.current_peers()) {",
+        "replacement": "if false {",
+        "start": "async fn post_answer(",
+        "end": "pub(crate) fn keep_scheduler("
+      }
+    ],
+    "rationale": "Original policy generation is checked in leaf_current and again after the POST connection. Remove these copies of the same fence together; scope-only narrowing keeps current rights/routes enabled."
+  },
+  {
+    "label": "reverse-auth-pinned-uri-unsupported-dispatch",
+    "target": "gate_reverse_observe",
+    "test": "pinned_leaf_with_uri_san_is_explicitly_unsupported_but_ordinary_control_works",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "pinned leaf with any URI SAN is unsupported v1",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "let _ = w.tx.send(Err(Failure::Unsupported));",
+        "replacement": "let _ = w.tx.send(Err(Failure::Denied));",
+        "start": "pub(crate) fn next_for(",
+        "end": "fn header<'a>"
+      }
+    ],
+    "rationale": "Change the pinned+URI route-admission outcome to Denied, isolating required explicit Unsupported from ordinary control compatibility."
+  }
+]
