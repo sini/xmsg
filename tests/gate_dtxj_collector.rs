@@ -314,11 +314,18 @@ async fn cli_fixture(ca_mode: bool) {
     if !ca_mode {
         let retained = xmsg::observe_collector_store::Store::open(
             &state_dir,
-            vec![xmsg::observe_collector_store::NodePolicy {
-                node: node.clone(),
-                labels: true,
-                supported: true,
-            }],
+            vec![
+                xmsg::observe_collector_store::NodePolicy {
+                    node: node.clone(),
+                    labels: true,
+                    supported: true,
+                },
+                xmsg::observe_collector_store::NodePolicy {
+                    node: "outbound.leaf".into(),
+                    labels: false,
+                    supported: false,
+                },
+            ],
             Arc::new(xmsg::storage::now_epoch_secs),
         )
         .unwrap();
