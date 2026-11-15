@@ -1,6 +1,7 @@
 use crate::observe_export::{ExportEvent, ExportGap, ExportPage, ExportSnapshot, Reason, Scope};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -284,8 +285,12 @@ fn read_cursor(c: &Connection, node: &str) -> Result<Cursor, StoreError> {
 }
 fn purge(c: &Connection, node: &str) -> Result<(), StoreError> {
     c.execute("DELETE FROM events WHERE node=?1", [node])?;
-    c.execute("UPDATE nodes SET epoch=NULL,scope=NULL,next=0,snapshot=NULL,snapshot_receipt=NULL,snapshot_base=NULL,gaps='[]',truncated=1,backfill=1 WHERE node=?1",[node])?;
+    c.execute("UPDATE nodes SET epoch=NULL,scope=NULL,next=0,snapshot=NULL,snapshot_receipt=NULL,snapshot_base=NULL,snapshot_fingerprint=NULL,gaps='[]',truncated=1,backfill=1 WHERE node=?1",[node])?;
     Ok(())
+}
+fn accounted_bytes(c: &Connection, node: &str) -> Result<i64, StoreError> {
+    let (metadata,events):(i64,i64)=c.query_row("SELECT coalesce(length(snapshot),0)+coalesce(length(snapshot_fingerprint),0)+coalesce(length(epoch),0)+coalesce(length(scope),0)+length(gaps)+192,(SELECT coalesce(sum(bytes),0) FROM events WHERE node=?1) FROM nodes WHERE node=?1",[node],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    metadata.checked_add(events).ok_or(StoreError::Full)
 }
 fn transaction<T>(
     inner: &mut Inner,
@@ -413,15 +418,38 @@ impl Store {
         if mode != "delete" || rusqlite::version() != "3.53.2" {
             return Err(StoreError::Storage);
         }
-        c.execute_batch("CREATE TABLE IF NOT EXISTS nodes(node TEXT PRIMARY KEY,epoch TEXT,scope TEXT,next INTEGER NOT NULL DEFAULT 0,snapshot BLOB,snapshot_receipt INTEGER,snapshot_base INTEGER,gaps TEXT NOT NULL DEFAULT '[]',truncated INTEGER NOT NULL DEFAULT 0,backfill INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS events(node TEXT NOT NULL,epoch TEXT NOT NULL,sequence INTEGER NOT NULL,json BLOB NOT NULL,receipt INTEGER NOT NULL,base INTEGER NOT NULL,bytes INTEGER NOT NULL,PRIMARY KEY(node,epoch,sequence)); CREATE INDEX IF NOT EXISTS retention ON events(node,base,receipt,epoch,sequence);")?;
-        for node in inventory.keys() {
-            c.execute("INSERT OR IGNORE INTO nodes(node) VALUES(?1)", [node])?;
+        c.execute_batch("CREATE TABLE IF NOT EXISTS nodes(node TEXT PRIMARY KEY,epoch TEXT,scope TEXT,next INTEGER NOT NULL DEFAULT 0,snapshot BLOB,snapshot_receipt INTEGER,snapshot_base INTEGER,snapshot_fingerprint BLOB,gaps TEXT NOT NULL DEFAULT '[]',truncated INTEGER NOT NULL DEFAULT 0,backfill INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS events(node TEXT NOT NULL,epoch TEXT NOT NULL,sequence INTEGER NOT NULL,json BLOB NOT NULL,receipt INTEGER NOT NULL,base INTEGER NOT NULL,bytes INTEGER NOT NULL,PRIMARY KEY(node,epoch,sequence)); CREATE INDEX IF NOT EXISTS retention ON events(node,base,receipt,epoch,sequence);")?;
+        c.prepare("SELECT snapshot_fingerprint FROM nodes LIMIT 0")?;
+        let persisted = c
+            .prepare("SELECT node FROM nodes ORDER BY node LIMIT 65")?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        // a valid previous inventory has at most 64 rows, including removed nodes.
+        if persisted.len() > 64 {
+            return Err(StoreError::Storage);
+        }
+        let mut inner = Inner {
+            connection: Some(c),
+            nodes: inventory,
+        };
+        for node in persisted {
+            if !inner.nodes.contains_key(&node) {
+                transaction(&mut inner, |c| {
+                    c.execute("DELETE FROM events WHERE node=?1", [&node])?;
+                    c.execute("DELETE FROM nodes WHERE node=?1", [&node])?;
+                    Ok(())
+                })?;
+            }
+        }
+        let configured: Vec<String> = inner.nodes.keys().cloned().collect();
+        for node in configured {
+            transaction(&mut inner, |c| {
+                c.execute("INSERT OR IGNORE INTO nodes(node) VALUES(?1)", [node])?;
+                Ok(())
+            })?;
         }
         let store = Self {
-            inner: Mutex::new(Inner {
-                connection: Some(c),
-                nodes: inventory,
-            }),
+            inner: Mutex::new(inner),
             clock,
             limits,
         };
@@ -555,6 +583,8 @@ impl Store {
         let now = self.now()?;
         let mut inner = self.lock()?;
         validate_snapshot(Self::policy(&inner, node)?, &snapshot)?;
+        let bytes = encoded(&snapshot, PAGE_BYTES)?;
+        let fingerprint = Sha256::digest(&bytes).to_vec();
         let old = read_cursor(inner.connection.as_ref().ok_or(StoreError::Storage)?, node)?;
         let scope_changed = old.scope.as_deref().is_some_and(|s| s != snapshot.scope);
         if scope_changed {
@@ -566,7 +596,17 @@ impl Store {
             if scope_changed {
                 purge(c, node)?;
             }
-            c.execute("UPDATE nodes SET scope=?2,snapshot=?3,snapshot_receipt=?4,snapshot_base=?5 WHERE node=?1 AND (snapshot IS NULL OR snapshot != ?3)",params![node,snapshot.scope,encoded(&snapshot,PAGE_BYTES)?,now,snapshot.observed_at.min(now)])?;
+            let (old_fingerprint,old_receipt,old_base):(Option<Vec<u8>>,Option<i64>,Option<i64>)=c.query_row("SELECT snapshot_fingerprint,snapshot_receipt,snapshot_base FROM nodes WHERE node=?1",[node],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+            // retain first capture age even after the snapshot blob expires or is evicted.
+            let (receipt, base) = if old_fingerprint.as_ref() == Some(&fingerprint) {
+                (
+                    old_receipt.ok_or(StoreError::Storage)?,
+                    old_base.ok_or(StoreError::Storage)?,
+                )
+            } else {
+                (now, snapshot.observed_at.min(now))
+            };
+            c.execute("UPDATE nodes SET scope=?2,snapshot=?3,snapshot_receipt=?4,snapshot_base=?5,snapshot_fingerprint=?6 WHERE node=?1",params![node,snapshot.scope,bytes,receipt,base,fingerprint])?;
             self.retain(c, node, now)?;
             Ok(CommitOutcome {
                 cursor: read_cursor(c, node)?,
@@ -604,22 +644,14 @@ impl Store {
             "DELETE FROM events WHERE node=?1 AND base<?2",
             params![node, cutoff],
         )?;
-        removed += c.execute("UPDATE nodes SET snapshot=NULL,snapshot_receipt=NULL,snapshot_base=NULL WHERE node=?1 AND snapshot_base<?2",params![node,cutoff])?;
+        removed += c.execute("UPDATE nodes SET snapshot=NULL WHERE node=?1 AND snapshot IS NOT NULL AND snapshot_base<?2",params![node,cutoff])?;
         let rows: i64 = c.query_row("SELECT count(*) FROM events WHERE node=?1", [node], |r| {
             r.get(0)
         })?;
         if rows > self.limits.rows as i64 {
             removed += c.execute("DELETE FROM events WHERE rowid IN (SELECT rowid FROM events WHERE node=?1 ORDER BY base,receipt,epoch,sequence LIMIT ?2)",params![node,rows-self.limits.rows as i64])?;
         }
-        let snapshot_bytes: i64 = c.query_row("SELECT coalesce(length(snapshot),0)+coalesce(length(epoch),0)+coalesce(length(scope),0)+length(gaps)+128 FROM nodes WHERE node=?1",[node],|r|r.get(0))?;
-        let event_bytes: i64 = c.query_row(
-            "SELECT coalesce(sum(bytes),0) FROM events WHERE node=?1",
-            [node],
-            |r| r.get(0),
-        )?;
-        let mut total = snapshot_bytes
-            .checked_add(event_bytes)
-            .ok_or(StoreError::Full)?;
+        let mut total = accounted_bytes(c, node)?;
         if total > self.limits.bytes as i64 {
             let mut statement = c.prepare("SELECT rowid,bytes FROM events WHERE node=?1 ORDER BY base,receipt,epoch,sequence LIMIT 10200")?;
             let rows = statement
@@ -634,8 +666,14 @@ impl Store {
                 total = total.saturating_sub(bytes);
             }
             if total > self.limits.bytes as i64 {
-                removed += c.execute("UPDATE nodes SET snapshot=NULL,snapshot_receipt=NULL,snapshot_base=NULL WHERE node=?1 AND snapshot IS NOT NULL",[node])?;
+                removed += c.execute(
+                    "UPDATE nodes SET snapshot=NULL WHERE node=?1 AND snapshot IS NOT NULL",
+                    [node],
+                )?;
             }
+        }
+        if accounted_bytes(c, node)? > self.limits.bytes as i64 {
+            return Err(StoreError::Full);
         }
         if removed > 0 {
             c.execute("UPDATE nodes SET truncated=1 WHERE node=?1", [node])?;
