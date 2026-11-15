@@ -2893,6 +2893,7 @@ impl FedState {
 // -----------------------------------------------------------------------------
 
 pub fn build_fed_router(fed_state: Arc<FedState>) -> Router {
+    let observe = crate::observe_fed::router(fed_state.clone());
     let max_body_limit = fed_state.max_body + 4096 + 8 * 330;
     Router::new()
         .route(
@@ -2917,6 +2918,7 @@ pub fn build_fed_router(fed_state: Arc<FedState>) -> Router {
         .route("/fed/v2/handoff/ack", post(crate::handoff::ack_handler))
         .layer(DefaultBodyLimit::max(max_body_limit))
         .with_state(fed_state)
+        .merge(observe)
 }
 
 async fn fed_send_message_handler(
@@ -6446,16 +6448,15 @@ pub async fn run_fed_listener_with_acceptor(
             let leaf = &certs[0];
             let intermediates = &certs[1..];
 
-            let (peer_config, verified_uri) = match fed_state
-                .current_peers()
-                .resolve_incoming_peer(leaf, intermediates)
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    debug!("Failed to resolve peer from TLS certificate: {e}");
-                    return;
-                }
-            };
+            let admission_peers = fed_state.current_peers();
+            let (peer_config, verified_uri) =
+                match admission_peers.resolve_incoming_peer(leaf, intermediates) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        debug!("Failed to resolve peer from TLS certificate: {e}");
+                        return;
+                    }
+                };
 
             if let Some(ref uri) = verified_uri {
                 info!(
@@ -6494,11 +6495,15 @@ pub async fn run_fed_listener_with_acceptor(
 
             let router = router.clone();
             let fed_state_req = fed_state.clone();
+            let tls_admission = crate::observe_fed::TlsAdmission {
+                peers: admission_peers,
+            };
             let service =
                 hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                     let mut router = router.clone();
                     let peer_info = peer_info.clone();
                     let fed_state_req = fed_state_req.clone();
+                    let tls_admission = tls_admission.clone();
                     async move {
                         use axum::response::IntoResponse;
                         // Re-verify peer membership and source-IP CIDR policy (N1) on every
@@ -6519,6 +6524,7 @@ pub async fn run_fed_listener_with_acceptor(
                         }
                         let mut req = req.map(axum::body::Body::new);
                         req.extensions_mut().insert(peer_info);
+                        req.extensions_mut().insert(tls_admission);
                         use tower::Service;
                         router.call(req).await
                     }
