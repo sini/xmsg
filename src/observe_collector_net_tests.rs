@@ -746,7 +746,7 @@ async fn incoming_unknown_snapshot_refuses() {
     closed_wire_object("snapshot").await;
 }
 #[tokio::test]
-async fn closed_wire_enum_spellings_refuse() {
+async fn unknown_event_kinds_preserve_other_enum_refusals() {
     let fixture = Fixture::new().await;
     let client = Client::new(&fixture.load().unwrap()).unwrap();
     let mut page = json!({"v":1,"node":fixture.config["sources"][0]["node"],"epoch":"fixture-epoch","scope":"a".repeat(64),"events":[],"next":0,"has_more":false,"gaps":[],"available":true});
@@ -755,8 +755,16 @@ async fn closed_wire_enum_spellings_refuse() {
     page["events"] = json!([{"sequence":1,"observed_at":1000,"persisted_at":1000,"kind":"agent_read_completed","available":"not_recorded"}]);
     reset_spacing(&client);
     fixture.set_response("200 OK", "", &serde_json::to_vec(&page).unwrap());
-    assert!(
-        matches!(client.events(0, None, None, 0).await, Err(Error::Malformed)),
-        "unrepresentable event enum spelling was accepted"
+    let decoded = client.events(0, None, None, 0).await.unwrap();
+    assert_eq!(
+        decoded.events[0].kind,
+        crate::observe_export::EventKind::Unknown
     );
+    page["events"][0]["outcome"] = json!("future_outcome");
+    reset_spacing(&client);
+    fixture.set_response("200 OK", "", &serde_json::to_vec(&page).unwrap());
+    assert!(matches!(
+        client.events(0, None, None, 0).await,
+        Err(Error::Malformed)
+    ));
 }
