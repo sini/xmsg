@@ -602,7 +602,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::independent_row_and_byte_limits_include_snapshot",
-    "expected_literal": "retention cap ignored rows=10000",
+    "expected_literal": "logical eviction refused safe ingest",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
@@ -858,8 +858,8 @@
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
-        "needle": "coalesce(length(snapshot),0)+coalesce(length(epoch),0)",
-        "replacement": "0+coalesce(length(epoch),0)"
+        "needle": "coalesce(length(snapshot),0)+",
+        "replacement": ""
       }
     ]
   },
@@ -872,8 +872,138 @@
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
-        "needle": "AND (snapshot IS NULL OR snapshot != ?3)",
+        "needle": "old_fingerprint.as_ref() == Some(&fingerprint)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "removed-inventory-events",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::removed_inventory_is_purged_on_restart_and_retained_nodes_expire",
+    "expected_literal": "removed inventory events persisted keep_old=false",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "c.execute(\"DELETE FROM events WHERE node=?1\", [&node])?;",
+        "replacement": "let _ = &node;",
+        "start": "fn open_limits",
+        "end": "fn lock("
+      }
+    ]
+  },
+  {
+    "label": "removed-inventory-snapshot",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::removed_inventory_is_purged_on_restart_and_retained_nodes_expire",
+    "expected_literal": "removed inventory snapshot persisted keep_old=false",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "c.execute(\"DELETE FROM nodes WHERE node=?1\", [&node])?;",
+        "replacement": "let _ = &node;",
+        "start": "fn open_limits",
+        "end": "fn lock("
+      }
+    ]
+  },
+  {
+    "label": "stored-inventory-cap",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::startup_replaces_full_inventory_and_refuses_oversized_legacy_inventory",
+    "expected_literal": "oversized stored inventory accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "persisted.len() > 64",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "snapshot-watermark-ttl",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::identical_future_snapshot_cannot_renew_after_idle_expiry",
+    "expected_literal": "expired future snapshot replay resurrected cache",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "SET snapshot=NULL WHERE node=?1 AND snapshot IS NOT NULL AND snapshot_base<?2",
+        "replacement": "SET snapshot=NULL,snapshot_fingerprint=NULL WHERE node=?1 AND snapshot IS NOT NULL AND snapshot_base<?2"
+      }
+    ]
+  },
+  {
+    "label": "snapshot-watermark-byte-eviction",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::snapshot_control_counts_toward_bytes_and_survives_blob_byte_eviction",
+    "expected_literal": "byte eviction forgot snapshot first receipt",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "SET snapshot=NULL WHERE node=?1 AND snapshot IS NOT NULL\"",
+        "replacement": "SET snapshot=NULL,snapshot_fingerprint=NULL WHERE node=?1 AND snapshot IS NOT NULL\""
+      }
+    ]
+  },
+  {
+    "label": "snapshot-watermark-denial",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::snapshot_watermark_survives_restart_and_authority_changes_reset_it",
+    "expected_literal": "denial retained snapshot watermark",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "snapshot_fingerprint=NULL,gaps=",
+        "replacement": "gaps="
+      }
+    ]
+  },
+  {
+    "label": "snapshot-control-accounting",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::snapshot_control_counts_toward_bytes_and_survives_blob_byte_eviction",
+    "expected_literal": "snapshot control bytes omitted from budget",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "coalesce(length(snapshot_fingerprint),0)+",
         "replacement": ""
+      }
+    ]
+  },
+  {
+    "label": "snapshot-control-ceiling",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::snapshot_control_counts_toward_bytes_and_survives_blob_byte_eviction",
+    "expected_literal": "snapshot control bytes omitted from budget",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "accounted_bytes(c, node)? > self.limits.bytes as i64",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "snapshot-fingerprint-capture",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::identical_future_snapshot_cannot_renew_after_idle_expiry",
+    "expected_literal": "new observation reused expired watermark",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "Sha256::digest(&bytes).to_vec()",
+        "replacement": "Sha256::digest(snapshot.scope.as_bytes()).to_vec()"
       }
     ]
   }
