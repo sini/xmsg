@@ -91,7 +91,7 @@ jobs:
           nix --version
           echo "sandbox = $(nix config show sandbox)"
           sys=$(nix eval --impure --raw --expr builtins.currentSystem)
-          nix build "./ci#checks.$sys.package" "./ci#checks.$sys.shared-client" -L --no-link --print-out-paths | tee -a /tmp/attic-paths
+          nix build "./ci#checks.$sys.package" "./ci#checks.$sys.clippy" "./ci#checks.$sys.shared-client" -L --no-link --print-out-paths | tee -a /tmp/attic-paths
 
       - name: checks.codex-hook
         run: |

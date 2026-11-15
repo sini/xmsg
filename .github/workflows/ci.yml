@@ -26,6 +26,7 @@ env:
     ordinary-counts
     treefmt-tree-root
   PACKAGE_CHECKS: >-
+    clippy
     agy-hook
     codex-hook
     hermes-plugin
