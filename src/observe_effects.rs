@@ -82,11 +82,21 @@ impl Transfer {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct Arrival {
+    id: String,
+    recipient: String,
+    destination: String,
+    delivered_at: i64,
+    message: Option<Message>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Key {
     Message(String),
     Reply(i64),
     Transfer(String),
+    Arrival(String, String, String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -94,6 +104,7 @@ pub(crate) enum Projection {
     Message(Message),
     Reply(Reply),
     Transfer(Transfer),
+    Arrival(Arrival),
 }
 
 #[derive(Clone)]
@@ -232,6 +243,21 @@ impl Capture {
                         event.reason = Some("queue_transfer".into());
                         events.push(event);
                     }
+                }
+                (_, Some(Projection::Arrival(after))) => {
+                    let mut event = after
+                        .message
+                        .as_ref()
+                        .map(|message| message.event(&self.node, "arrival"))
+                        .unwrap_or_else(|| Observation {
+                            kind: "arrival".into(),
+                            message_id: Some(after.id.clone()),
+                            body_availability: "not_recorded".into(),
+                            ..Default::default()
+                        });
+                    event.source_at = Some(after.delivered_at);
+                    event.to = Some(after.destination.clone());
+                    events.push(event);
                 }
                 _ => {}
             }
@@ -435,6 +461,10 @@ impl Batch {
                     Key::Transfer(id) => {
                         read_transfer(conn, id).map(|t| Some(Projection::Transfer(t)))
                     }
+                    Key::Arrival(id, recipient, destination) => {
+                        read_arrival(conn, id, recipient, destination)
+                            .map(|value| value.map(Projection::Arrival))
+                    }
                 };
                 match actual {
                     Ok(actual) => change.after = actual,
@@ -513,6 +543,42 @@ fn settle_operation<T>(capture: Batch, conn: &Connection, operation: impl FnOnce
     let result = operation();
     capture.settled(conn);
     result
+}
+
+fn read_arrival(
+    conn: &Connection,
+    id: &str,
+    recipient: &str,
+    destination: &str,
+) -> rusqlite::Result<Option<Arrival>> {
+    let delivered_at: Option<i64> = conn.query_row(
+        "SELECT delivered_at FROM instance_queue WHERE id=?1 AND instance_id=?2 AND delivered_at IS NOT NULL",
+        rusqlite::params![id, recipient], |row| row.get(0),
+    ).optional()?;
+    delivered_at
+        .map(|delivered_at| {
+            Ok(Arrival {
+                id: id.to_owned(),
+                recipient: recipient.to_owned(),
+                destination: destination.to_owned(),
+                delivered_at,
+                message: read_message(conn, id)?,
+            })
+        })
+        .transpose()
+}
+
+pub(crate) fn inbox_arrived(conn: &Connection, id: &str, recipient: &str, destination: &str) {
+    let Some(capture) = active(conn) else { return };
+    match read_arrival(conn, id, recipient, destination) {
+        Ok(Some(arrival)) => capture.borrow_mut().record(
+            Key::Arrival(id.to_owned(), recipient.to_owned(), destination.to_owned()),
+            None,
+            Some(Projection::Arrival(arrival)),
+        ),
+        Ok(None) => {}
+        Err(_) => capture.borrow_mut().unavailable = true,
+    }
 }
 
 pub(crate) fn message_before(conn: &Connection, id: &str) -> Option<Option<Message>> {
@@ -1147,5 +1213,110 @@ mod tests {
                 Some("push_failed")
             );
         }
+    }
+    fn queued_arrival(conn: &Connection, id: &str) {
+        storage::insert_message(conn, &message(id, "queued")).unwrap();
+        storage::insert_queued(
+            conn,
+            &storage::QueuedMessage {
+                id: id.into(),
+                instance_id: "recipient".into(),
+                created_at: 1,
+                expires_at: i64::MAX,
+                from_name: "ARRIVAL_LABEL_CANARY".into(),
+                body: "ARRIVAL_BODY_CANARY".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn arrival_is_invisible_before_commit_and_rollback_discards_it() {
+        let (conn, sink) = fixture();
+        queued_arrival(&conn, "committed-arrival");
+        let tx = Transaction {
+            transaction: conn.unchecked_transaction().unwrap(),
+            capture: batch(&conn, &sink),
+            connection: &conn,
+        };
+        storage::take_queued(&tx, "recipient", 7).unwrap();
+        inbox_arrived(
+            &tx,
+            "committed-arrival",
+            "recipient",
+            "recipient@local.example",
+        );
+        assert!(
+            sink.0.lock().unwrap().is_empty(),
+            "arrival published before commit"
+        );
+        tx.commit().unwrap();
+        assert_eq!(sink.0.lock().unwrap().len(), 1);
+        assert_eq!(sink.0.lock().unwrap()[0].kind, "arrival");
+        assert_eq!(sink.0.lock().unwrap()[0].source_at, Some(7));
+
+        queued_arrival(&conn, "rolled-back-arrival");
+        let capture = batch(&conn, &sink);
+        let tx = conn.unchecked_transaction().unwrap();
+        storage::take_queued(&tx, "recipient", 8).unwrap();
+        inbox_arrived(
+            &tx,
+            "rolled-back-arrival",
+            "recipient",
+            "recipient@local.example",
+        );
+        assert_eq!(
+            sink.0.lock().unwrap().len(),
+            1,
+            "uncommitted arrival leaked"
+        );
+        tx.rollback().unwrap();
+        capture.settled(&conn);
+        assert_eq!(
+            sink.0.lock().unwrap().len(),
+            1,
+            "rolled-back arrival leaked"
+        );
+    }
+
+    #[test]
+    fn failed_commit_and_missing_stamp_publish_no_arrival() {
+        let (conn, sink) = fixture();
+        queued_arrival(&conn, "failed-arrival");
+        conn.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE arrival_parent(id INTEGER PRIMARY KEY); CREATE TABLE arrival_fk(id INTEGER REFERENCES arrival_parent(id) DEFERRABLE INITIALLY DEFERRED);").unwrap();
+        let tx = Transaction {
+            transaction: conn.unchecked_transaction().unwrap(),
+            capture: batch(&conn, &sink),
+            connection: &conn,
+        };
+        storage::take_queued(&tx, "recipient", 9).unwrap();
+        inbox_arrived(
+            &tx,
+            "failed-arrival",
+            "recipient",
+            "recipient@local.example",
+        );
+        tx.execute("INSERT INTO arrival_fk VALUES(1)", []).unwrap();
+        assert!(
+            sink.0.lock().unwrap().is_empty(),
+            "arrival published before failed commit"
+        );
+        assert!(tx.commit().is_err());
+        assert!(
+            sink.0.lock().unwrap().is_empty(),
+            "failed commit published arrival"
+        );
+        let capture = batch(&conn, &sink);
+        inbox_arrived(
+            &conn,
+            "failed-arrival",
+            "recipient",
+            "recipient@local.example",
+        );
+        capture.settled(&conn);
+        assert!(
+            sink.0.lock().unwrap().is_empty(),
+            "pending queue row claimed arrival"
+        );
     }
 }
