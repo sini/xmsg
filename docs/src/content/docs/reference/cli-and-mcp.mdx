@@ -5,7 +5,7 @@ description: Operator commands, optional command-backed services, daemon and har
 
 ## Command-line interface (`src/main.rs`)
 
-The `xmsg` binary exposes `list`, `watch`, `send`, `replies`, `show`, `service`, `serve`, `mcp`,
+The `xmsg` binary exposes `list`, `watch`, `doctor`, `send`, `replies`, `show`, `service`, `serve`, `mcp`,
 `register`, `unregister`, `check-peers`, and `enroll-ca`.
 
 ```rust file=<rootDir>/src/main.rs#L20-L72
@@ -79,6 +79,36 @@ and writer restart is an explicit unknown-loss gap. Stored delivery outcomes do 
 agent-read or task-complete. Watch reads no bodies or transcripts and does not send,
 acknowledge or consume messages or open a listener. Use `xmsg show MESSAGE_ID` for deliberate
 known-ID inspection. Existing caller-attribution rules still apply.
+
+### `xmsg doctor` (planned)
+
+Checks local setup once and prints `pass`, `warn` or `fail` lines with fix hints:
+
+```sh
+xmsg doctor
+xmsg doctor --json
+xmsg doctor --http-sock /absolute/path/to/http.sock --db-path /absolute/path/to/xmsg.db
+```
+
+The command exits `1` if any check fails. Warnings alone exit `0`. `--json` reports
+`checks` (each with `id`, `status`, `message` and `hint`), `passed`, `warnings`, `failed`,
+`client_version` and `not_checked`.
+
+Optional path overrides are `--http-sock`, `--agent-sock`, `--register-sock`, `--db-path`,
+`--peers-file`, `--fed-cert` and `--enroll-state`. Doctor checks the selected paths; it
+cannot establish that a running daemon loaded those same paths or configuration.
+
+Doctor reads local filesystem metadata, probes the database read-only and makes a bounded
+`GET /healthz` request on the HTTP Unix socket. Optional peer configuration uses the same
+parser as `check-peers`. Optional saved enrollment metadata supplies expiry and renewal
+checks; its CA probe makes a TLS handshake only. Doctor does not repair files, initialize
+or migrate a database, register a service, renew credentials or send messages. It does not
+call recipient listing or enrollment-pending endpoints, which can change daemon state.
+
+A database schema check covers the global schema version, not every additive migration.
+A journal or WAL file is not proof of a hot journal; uncertainty produces a warning rather
+than a recovery attempt. The observation sidecar is checked by filesystem metadata only.
+See [troubleshooting](/operations/troubleshooting/) for the checks and their limits.
 
 ### `xmsg service exec`
 

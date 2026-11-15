@@ -1,0 +1,64 @@
+---
+title: Troubleshooting
+description: Check local node setup with read-only diagnostics and interpret the results.
+---
+
+## Start with doctor (planned)
+
+Run these as the user who runs the daemon:
+
+```sh
+xmsg doctor
+xmsg doctor --json
+```
+
+Doctor checks setup without changing it. Each result has a status and a fix hint. A
+`pass` applies only to the named check; it is not a guarantee that the whole node works.
+A `warn` needs interpretation, and a `fail` means a checked requirement failed. Only a
+failure makes the command exit `1`; warnings alone exit `0`. JSON includes the checks,
+summary counts, the CLI's `client_version` and a `not_checked` list.
+
+For a custom installation, select the paths you want checked:
+
+```sh
+xmsg doctor \
+  --http-sock /run/user/1000/xmsg/http.sock \
+  --agent-sock /run/user/1000/xmsg/agent.sock \
+  --register-sock /run/user/1000/xmsg/register.sock \
+  --db-path /home/USER/.local/state/xmsg/xmsg.db \
+  --peers-file /home/USER/.config/xmsg/peers.json
+```
+
+These are examples, not paths to copy unchanged. Doctor checks explicit paths or its
+local defaults; it cannot prove that the running daemon uses the same configuration.
+`--fed-cert` can supply the public federation certificate for peer-config consistency.
+`--enroll-state` selects saved enrollment state for optional credential checks.
+
+## Interpret a result
+
+| Check or symptom | What it means | What to do next |
+| --- | --- | --- |
+| Runtime directory or socket fails | A selected path is missing, has the wrong type, owner or permissions. | Check the daemon user, runtime directory and socket flags. Correct the installation deliberately; doctor does not create directories or change modes. |
+| Daemon health fails | The bounded request to `GET /healthz` did not give the expected health response. | Check that the daemon is running and that `--http-sock` selects its socket. Read the service logs. |
+| Sessions directory warning | Health reports that the sessions directory is missing. | Check the harness path if this node hosts sessions. A service-only node may not need one. |
+| Database schema fails or is unknown | The read-only probe cannot establish the expected global schema version. | Check the database path and use the documented upgrade procedure. A passing global version check does not prove every additive migration is installed. |
+| Journal or WAL warning | Database state cannot be fully interpreted from a read-only diagnostic. | Inspect the daemon and its logs before taking action. File presence alone does not establish hotness or corruption; do not delete a journal merely because doctor mentions it. |
+| Observation sidecar warning | The expected `<database>.observe.sqlite` file is absent or its metadata needs attention. | Check the observer setup and file ownership. Doctor does not open the journal writer or initialize a sidecar. |
+| Peer configuration fails | The selected configuration fails the existing `check-peers` parser or certificate consistency check. | Correct the named configuration issue, then run doctor again. Parsing does not prove peer reachability or the daemon's loaded configuration. |
+| Enrollment expiry fails | Saved metadata says the enrolled certificate has expired. | Follow the enrollment renewal procedure. Doctor does not renew it. |
+| Enrollment renewal warns | The certificate has reached two-thirds of its recorded lifetime. | Schedule renewal. For a 24-hour certificate this is 16 hours after issuance; a fixed seven-day threshold would be misleading. |
+| CA TLS warning | The optional CA TLS handshake did not succeed. | Check connectivity and configured trust. A successful handshake establishes TLS reachability, not enrollment application health or login readiness. |
+
+Doctor never calls recipient listing to diagnose sessions: listing can synchronize claims
+and deliver queued work. It also avoids enrollment-pending APIs and commands that initialize
+stores. It does not send, acknowledge or consume a message, mint a token or load a private
+key for a diagnostic repair.
+
+## What remains unchecked
+
+The current command does not establish the running daemon's version or loaded configuration,
+full migration readiness, actual journal hotness, per-peer mTLS connectivity, remote certificate
+expiry, clock skew, CA application health or session liveness. Treat these as separate
+investigations, not implied successes. Doctor offers no automatic database recovery or
+integrity guarantee. See the [CLI reference](/reference/cli-and-mcp/#xmsg-doctor-planned)
+for its options and output contract.
