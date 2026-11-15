@@ -269,7 +269,7 @@ async fn fetch_timeline(
             return Ok(TimelineFetch::Unsupported);
         }
         if !response.status().is_success() {
-            return Err(format!("HTTP {}", response.status()).into());
+            return Err(HttpStatus(response.status()).into());
         }
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await? {
@@ -298,7 +298,7 @@ pub struct WatchArgs {
     /// HTTP Unix socket (defaults to the daemon's runtime directory)
     #[arg(long, env = "XMSG_HTTP_SOCK")]
     http_sock: Option<PathBuf>,
-    /// Filter the roster to this node (the observation timeline stays local)
+    /// Select local or this daemon's canonical node name (remote nodes are unsupported)
     #[arg(long)]
     node: Option<String>,
     /// Seconds between completed refreshes
@@ -322,10 +322,28 @@ fn client(socket: &Path) -> Result<reqwest::Client> {
         .build()?)
 }
 
+#[derive(Debug)]
+struct HttpStatus(reqwest::StatusCode);
+impl std::fmt::Display for HttpStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP {}", self.0)
+    }
+}
+impl std::error::Error for HttpStatus {}
+
+#[derive(Debug)]
+struct SnapshotUnsupported;
+impl std::fmt::Display for SnapshotUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Local read-only snapshot unavailable: upgrade the daemon or select --node local (or its canonical name). For a live remote listing use xmsg list --node NODE, which can reconcile claims and deliver queued messages; use the fleet observer view once deployed for remote observation.")
+    }
+}
+impl std::error::Error for SnapshotUnsupported {}
+
 async fn get(client: &reqwest::Client, url: reqwest::Url) -> Result<Value> {
     let mut response = client.get(url).send().await?;
     if !response.status().is_success() {
-        return Err(format!("HTTP {}", response.status()).into());
+        return Err(HttpStatus(response.status()).into());
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await? {
@@ -345,6 +363,7 @@ struct Snapshot {
     node_count: usize,
     partial: bool,
     health: String,
+    truncated: bool,
 }
 
 async fn fetch(client: &reqwest::Client, node: Option<&str>) -> Result<Snapshot> {
@@ -355,31 +374,43 @@ async fn fetch(client: &reqwest::Client, node: Option<&str>) -> Result<Snapshot>
         string(&health["status"]),
         string(&health["sessions_dir"])
     );
-    for (index, status) in ["live", "inactive"].iter().enumerate() {
-        let mut url = reqwest::Url::parse("http://localhost/v1/recipients")?;
-        url.query_pairs_mut().append_pair("status", status);
-        if let Some(node) = node {
-            url.query_pairs_mut().append_pair("node", node);
+    let mut url = reqwest::Url::parse("http://localhost/v1/recipients")?;
+    url.query_pairs_mut().append_pair("read_only", "true");
+    if let Some(node) = node {
+        url.query_pairs_mut().append_pair("node", node);
+    }
+    let mut value = match get(client, url).await {
+        Ok(value) => value,
+        Err(error)
+            if error
+                .downcast_ref::<HttpStatus>()
+                .is_some_and(|s| matches!(s.0.as_u16(), 400 | 404)) =>
+        {
+            return Err(SnapshotUnsupported.into())
         }
-        let mut value = get(client, url).await?;
-        let rows = value["recipients"]
-            .as_array_mut()
-            .ok_or("missing recipients array")?;
-        snapshot.counts[index] = rows.len();
-        for row in rows.drain(..) {
-            if snapshot.rows.len() < MAX_ROWS {
-                snapshot.rows.push(serde_json::from_value(row)?);
-            }
+        Err(error) => return Err(error),
+    };
+    if value["read_only"] != true || value["partial"] != true {
+        return Err(SnapshotUnsupported.into());
+    }
+    snapshot.partial = true;
+    snapshot.truncated = value["truncated"].as_bool().unwrap_or(false);
+    let rows = value["recipients"]
+        .as_array_mut()
+        .ok_or("missing recipients array")?;
+    for row in rows.drain(..) {
+        let row: Recipient = serde_json::from_value(row)?;
+        snapshot.counts[usize::from(row.status != "registered")] += 1;
+        if snapshot.rows.len() < MAX_ROWS {
+            snapshot.rows.push(row);
         }
-        let nodes = value["nodes"].as_array_mut().ok_or("missing nodes array")?;
-        snapshot.node_count += nodes.len();
-        for node in nodes.drain(..) {
-            let node: NodeStatus = serde_json::from_value(node)?;
-            snapshot.partial |= node.status != "ok";
-            if snapshot.nodes.len() < MAX_ROWS {
-                snapshot.nodes.push((status.to_string(), node));
-            }
-        }
+    }
+    let nodes = value["nodes"].as_array_mut().ok_or("missing nodes array")?;
+    snapshot.node_count = nodes.len();
+    for node in nodes.drain(..).take(MAX_ROWS) {
+        snapshot
+            .nodes
+            .push(("snapshot".to_string(), serde_json::from_value(node)?));
     }
     snapshot.rows.sort_by(|a, b| {
         (&a.node, &a.kind, &a.harness, &a.address).cmp(&(&b.node, &b.kind, &b.harness, &b.address))
@@ -396,6 +427,7 @@ struct State {
     snapshot: Option<Snapshot>,
     updated: Option<Instant>,
     error: Option<String>,
+    fatal: bool,
 }
 
 impl State {
@@ -405,8 +437,12 @@ impl State {
                 self.snapshot = Some(snapshot);
                 self.updated = Some(now);
                 self.error = None;
+                self.fatal = false;
             }
-            Err(error) => self.error = Some(error.to_string()),
+            Err(error) => {
+                self.fatal = error.is::<SnapshotUnsupported>();
+                self.error = Some(error.to_string());
+            }
         }
     }
 }
@@ -453,17 +489,18 @@ fn render(state: &State, now: Instant, epoch: i64) -> String {
     let _ = writeln!(out, "Health: {}", terminal_text(&snapshot.health));
     let _ = writeln!(
         out,
-        "{} | source counts: live={} inactive={} | shown={}",
+        "{} | source counts: registered={} last_seen={} | shown={}",
         if snapshot.partial {
-            "PARTIAL: node errors"
+            "PARTIAL: registered / last seen; not live attestation"
         } else {
-            "Complete node responses"
+            "Registered / last seen snapshot"
         },
         snapshot.counts[0],
         snapshot.counts[1],
         snapshot.rows.len()
     );
-    if snapshot.counts.iter().sum::<usize>() > snapshot.rows.len()
+    if snapshot.truncated
+        || snapshot.counts.iter().sum::<usize>() > snapshot.rows.len()
         || snapshot.node_count > snapshot.nodes.len()
     {
         let _ = writeln!(out, "TRUNCATED: limit {MAX_ROWS} recipient rows / {MAX_ROWS} node responses; source node responses={}", snapshot.node_count);
@@ -495,7 +532,7 @@ fn render(state: &State, now: Instant, epoch: i64) -> String {
             );
             group = Some(key);
         }
-        let timestamp = if row.status == "live" {
+        let timestamp = if row.status == "registered" {
             row.registered_at
         } else {
             row.last_seen
@@ -605,6 +642,9 @@ async fn refresh(
         .await
         .unwrap_or_else(|_| Err("refresh deadline exceeded".into()));
     state.apply(result, Instant::now());
+    if state.fatal {
+        return;
+    }
     let result = tokio::time::timeout_at(deadline, fetch_timeline(client, timeline.cursor.clone()))
         .await
         .unwrap_or_else(|_| Err("observation refresh deadline exceeded".into()));
@@ -629,6 +669,13 @@ pub async fn run(args: WatchArgs) -> Result<()> {
             _ = tokio::signal::ctrl_c() => return Ok(()),
             _ = refresh(&client, args.node.as_deref(), &mut state, &mut timeline) => {},
         };
+        if state.fatal {
+            return Err(state
+                .error
+                .as_deref()
+                .unwrap_or("read-only snapshot unavailable")
+                .into());
+        }
         let epoch = SystemTime::now()
             .duration_since(UNIX_EPOCH)?
             .as_secs()
@@ -704,13 +751,12 @@ mod tests {
     }
 
     fn roster(rows: usize) -> String {
-        json!({"recipients": (0..rows).map(|i| json!({"address":format!("id{i}"),"kind":"instance","harness":"codex","label":"hello","status":"live","node":"local","user":"user","registered_at":90})).collect::<Vec<_>>(), "nodes":[{"node":"local","status":"ok"}]}).to_string()
+        json!({"read_only":true,"partial":true,"recipients": (0..rows).map(|i| json!({"address":format!("id{i}"),"kind":"instance","harness":"codex","label":"hello","status":"registered","node":"local","user":"user","registered_at":90})).collect::<Vec<_>>(), "nodes":[{"node":"local","status":"ok"}]}).to_string()
     }
 
     #[tokio::test]
     async fn request_allowlist_and_node_encoding() {
-        let (_dir, client, task) =
-            server(vec![(200, "{}".into()), (200, roster(1)), (200, roster(0))]).await;
+        let (_dir, client, task) = server(vec![(200, "{}".into()), (200, roster(1))]).await;
         let snapshot = tokio::time::timeout(DEADLINE, fetch(&client, Some("local&status=other")))
             .await
             .unwrap()
@@ -720,10 +766,57 @@ mod tests {
             task.await.unwrap(),
             [
                 "GET /healthz HTTP/1.1",
-                "GET /v1/recipients?status=live&node=local%26status%3Dother HTTP/1.1",
-                "GET /v1/recipients?status=inactive&node=local%26status%3Dother HTTP/1.1"
+                "GET /v1/recipients?read_only=true&node=local%26status%3Dother HTTP/1.1"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn unavailable_snapshot_and_remote_selection_never_fall_back() {
+        for node in [None, Some("remote.example")] {
+            let (_dir, client, task) = server(vec![(200, "{}".into()), (400, "{}".into())]).await;
+            let mut state = State::default();
+            let mut timeline = TimelineState::default();
+            refresh(&client, node, &mut state, &mut timeline).await;
+            assert!(state.fatal);
+            let message = state.error.unwrap();
+            assert!(message.contains("xmsg list --node NODE"));
+            assert!(message.contains("fleet observer"));
+            assert!(timeline.cursor.is_none());
+            let requests = task.await.unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(requests[1].contains("read_only=true"));
+            assert!(!requests[1].contains("status="));
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_snapshot_markers_are_required() {
+        for field in ["read_only", "partial"] {
+            let mut response: Value = serde_json::from_str(&roster(1)).unwrap();
+            response.as_object_mut().unwrap().remove(field);
+            let (_dir, client, task) =
+                server(vec![(200, "{}".into()), (200, response.to_string())]).await;
+            let error = fetch(&client, None).await.unwrap_err();
+            assert!(error.is::<SnapshotUnsupported>());
+            assert_eq!(task.await.unwrap().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn server_truncation_is_visible_even_below_client_bound() {
+        let mut response: Value = serde_json::from_str(&roster(1)).unwrap();
+        response["truncated"] = json!(true);
+        let (_dir, client, task) =
+            server(vec![(200, "{}".into()), (200, response.to_string())]).await;
+        let now = Instant::now();
+        let mut state = State::default();
+        state.apply(fetch(&client, None).await, now);
+        let text = render(&state, now, 100);
+        assert!(text.contains("TRUNCATED"));
+        assert!(text.contains("registered=1 last_seen=0"));
+        assert!(text.contains("not live attestation"));
+        task.await.unwrap();
     }
 
     #[tokio::test]
@@ -742,7 +835,6 @@ mod tests {
         let (_dir, client, task) = server(vec![
             (200, "{}".into()),
             (200, roster(1)),
-            (200, roster(0)),
             (200, "{}".into()),
             (500, "{}".into()),
         ])
@@ -754,28 +846,32 @@ mod tests {
         let text = render(&state, now + Duration::from_secs(25), 100);
         assert!(text.contains("STALE | roster age: 25s"));
         assert!(text.contains("hello"));
-        assert_eq!(task.await.unwrap().len(), 5);
+        assert_eq!(task.await.unwrap().len(), 4);
     }
 
     #[tokio::test]
     async fn truncation_and_partial_nodes_visible() {
-        let mut partial: Value = serde_json::from_str(&roster(3)).unwrap();
-        partial["nodes"] = json!([{"node":"remote","status":"timeout","detail":"offline"}]);
-        let (_dir, client, task) = server(vec![
-            (200, "{}".into()),
-            (200, roster(1002)),
-            (200, partial.to_string()),
-        ])
-        .await;
+        let mut partial: Value = serde_json::from_str(&roster(1002)).unwrap();
+        let mut seen: Value = serde_json::from_str(&roster(3)).unwrap();
+        for row in seen["recipients"].as_array_mut().unwrap() {
+            row["status"] = json!("seen");
+        }
+        partial["recipients"]
+            .as_array_mut()
+            .unwrap()
+            .extend(seen["recipients"].as_array().unwrap().clone());
+        partial["nodes"] = json!([{"node":"local","status":"timeout","detail":"offline"}]);
+        let (_dir, client, task) =
+            server(vec![(200, "{}".into()), (200, partial.to_string())]).await;
         let mut state = State::default();
         let now = Instant::now();
         state.apply(fetch(&client, None).await, now);
         assert_eq!(state.snapshot.as_ref().unwrap().rows.len(), 1000);
         let text = render(&state, now, 100);
         assert!(text.contains("TRUNCATED"));
-        assert!(text.contains("live=1002 inactive=3 | shown=1000"));
-        assert!(text.contains("PARTIAL: node errors"));
-        assert!(text.contains("remote: timeout offline"));
+        assert!(text.contains("registered=1002 last_seen=3 | shown=1000"));
+        assert!(text.contains("PARTIAL: registered / last seen; not live attestation"));
+        assert!(text.contains("local: timeout offline"));
         task.await.unwrap();
     }
 
@@ -793,7 +889,6 @@ mod tests {
                 json!({"status":hostile,"sessions_dir":hostile}).to_string(),
             ),
             (200, response.to_string()),
-            (200, roster(0)),
         ])
         .await;
         let mut state = State::default();
@@ -863,7 +958,6 @@ mod tests {
         let (_dir, client, task) = server(vec![
             (200, "{}".into()),
             (200, roster(1)),
-            (200, roster(0)),
             (200, serde_json::to_string(&page(1, 1, 1)).unwrap()),
         ])
         .await;
@@ -883,8 +977,7 @@ mod tests {
             task.await.unwrap(),
             [
                 "GET /healthz HTTP/1.1",
-                "GET /v1/recipients?status=live&node=local%26status%3Dother HTTP/1.1",
-                "GET /v1/recipients?status=inactive&node=local%26status%3Dother HTTP/1.1",
+                "GET /v1/recipients?read_only=true&node=local%26status%3Dother HTTP/1.1",
                 "GET /v1/observe/events?limit=100 HTTP/1.1"
             ]
         );
@@ -950,11 +1043,9 @@ mod tests {
         let (_dir, client, task) = server(vec![
             (200, "{}".into()),
             (200, roster(1)),
-            (200, roster(0)),
             (404, "{}".into()),
             (200, "{}".into()),
             (200, roster(1)),
-            (200, roster(0)),
             (500, "{}".into()),
         ])
         .await;
@@ -966,7 +1057,7 @@ mod tests {
         refresh(&client, None, &mut state, &mut timeline).await;
         assert!(render(&state, Instant::now(), 100).contains("CURRENT | roster age: 0s"));
         assert!(render_timeline(&timeline, Instant::now()).contains("STALE"));
-        assert_eq!(task.await.unwrap().len(), 8);
+        assert_eq!(task.await.unwrap().len(), 6);
     }
 
     #[test]
