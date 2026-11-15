@@ -1,0 +1,339 @@
+[
+  {
+    "label": "reverse-resource-answer-kind",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "live_waiter_is_bound_to_expected_leaf_kind_and_id_and_consumed_once",
+    "expected_literal": "wrong read kind refuses without consuming waiter",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "start": "async fn answer_inner",
+        "end": "async fn read_answer_body",
+        "needle": "|| w.control.read != kind",
+        "replacement": "|| false"
+      }
+    ],
+    "scope_note": "Kind check is independently reachable with a live snapshot waiter and events routing header."
+  },
+  {
+    "label": "reverse-resource-query-bytes",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "exact_query_bound_and_closed_query_fields_apply_before_dispatch",
+    "expected_literal": "oversized/duplicate/unknown query refuses",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "start": "fn labels(self",
+        "end": "#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]",
+        "needle": "query.len() > MAX_QUERY",
+        "replacement": "query.len() > MAX_QUERY + 1"
+      }
+    ],
+    "scope_note": "The first invalid query is 1025 bytes and remains semantically valid. Shared Kind::labels is used by hub and leaf."
+  },
+  {
+    "label": "reverse-resource-routing-headers",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "answer_routing_header_limit_and_id_shape_are_enforced",
+    "expected_literal": "exact routing-header limit over=true",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "start": "async fn answer_inner",
+        "end": "async fn read_answer_body",
+        "needle": "> MAX_HEADERS",
+        "replacement": "> MAX_HEADERS + 1"
+      }
+    ],
+    "scope_note": ""
+  },
+  {
+    "label": "reverse-resource-answer-declared-length",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "declared_and_streaming_dto_bounds_allow_exact_limit_and_refuse_one_over",
+    "expected_literal": "declared oversize refuses before invoking body reader",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "start": "async fn answer_inner",
+        "end": "async fn read_answer_body",
+        "needle": ".is_none_or(|n| n > MAX_BYTES)",
+        "replacement": ".is_none_or(|_| false)"
+      }
+    ],
+    "scope_note": "The independent read-attempt assertion discriminates this declared-length gate from the streaming and DTO decoder gates."
+  },
+  {
+    "label": "reverse-resource-answer-stream-limit",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "declared_and_streaming_dto_bounds_allow_exact_limit_and_refuse_one_over",
+    "expected_literal": "streaming reader never buffers an oversized answer even if semantic decoder refuses it",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "start": "async fn read_answer_body",
+        "end": "fn validate_dto",
+        "needle": "if chunk.len() > MAX_BYTES - bytes.len() {",
+        "replacement": "if false {"
+      }
+    ],
+    "scope_note": "Allocation high-water assertion detects this fault even though semantic DTO validation still refuses the over-limit body."
+  },
+  {
+    "label": "reverse-resource-control-declared-length",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "control_envelope_declared_and_streaming_bounds_are_independent_of_json_shape",
+    "expected_literal": "declared control oversize never invokes body reader",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "start": "let max_limit = if advertise",
+        "end": "let limited = http_body_util::Limited",
+        "needle": ".is_none_or(|n| n > max_limit)",
+        "replacement": ".is_none_or(|_| false)"
+      }
+    ],
+    "scope_note": "Read-attempt assertion detects the missing declared gate independently of the Limited reader."
+  },
+  {
+    "label": "reverse-resource-control-stream-limit",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "control_envelope_declared_and_streaming_bounds_are_independent_of_json_shape",
+    "expected_literal": "raw control read never collects over8KiB before semantic validation",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "start": "let max_limit = if advertise",
+        "end": "Ok((msg, witness))",
+        "needle": "Limited::new(resp.into_body(), max_limit)",
+        "replacement": "Limited::new(resp.into_body(), max_limit + 1)"
+      }
+    ],
+    "scope_note": "Only the raw streaming cap is widened; the independent semantic body_bytes length check remains and the buffering assertion discriminates it."
+  },
+  {
+    "label": "reverse-resource-forward-deadline",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "injected_deadline_rejects_prepared_response_and_removes_pending",
+    "expected_literal": "expired prepared response is unreachable, never empty success",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "start": "async fn relay_inner",
+        "end": "struct Reservations",
+        "needle": "if state.now() >= deadline {",
+        "replacement": "if false {"
+      }
+    ],
+    "scope_note": ""
+  },
+  {
+    "label": "reverse-resource-answer-final-deadline",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "actual_streamed_answer_obeys_deadline_after_its_first_chunk",
+    "expected_literal": "completed late stream is refused at the answer hop",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "start": "let w = queue.waiting.remove(&id).ok_or(Failure::Invalid)?;",
+        "end": "async fn read_answer_body",
+        "needle": "if state.now() >= w.deadline {",
+        "replacement": "if false {"
+      }
+    ],
+    "scope_note": "Clock advances after the first chunk; initial answer admission is still timely. Final collector deadline remains but answer-hop status independently detects this fault."
+  },
+  {
+    "label": "reverse-resource-answer-read-deadline",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "stalled_partial_answer_terminates_at_original_five_second_deadline",
+    "expected_literal": "stalled answer did not terminate at its original five-second deadline while producer stayed open",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "start": "async fn answer_inner",
+        "end": "async fn read_answer_body",
+        "needle": "tokio::time::timeout_at(deadline, read_answer_body(request.into_body(), &state))",
+        "replacement": "tokio::time::timeout_at(deadline + Duration::from_secs(30), read_answer_body(request.into_body(), &state))"
+      }
+    ],
+    "scope_note": "The discriminating assertion explicitly observes a still-open producer at the original deadline; this is an assertion failure, not harness timeout."
+  },
+  {
+    "label": "reverse-resource-answer-stream-reservation-lifetime",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "cancellation_during_answer_read_retains_reservations_until_stream_drops",
+    "expected_literal": "cancelled collector cannot release resources still owned by its live answer read",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "start": "async fn answer_inner",
+        "end": "async fn read_answer_body",
+        "needle": "(w.deadline, w.reservations.clone())",
+        "replacement": "(w.deadline, None::<Arc<Reservations>>)"
+      }
+    ],
+    "scope_note": "Only the answer stream ownership clone is removed; after collector cancellation the stream must still own the original permits."
+  },
+  {
+    "label": "reverse-resource-pair-forward-lifetime",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "pair_reservation_lasts_through_final_forward_check",
+    "expected_literal": "same pair stays reserved while a completed DTO awaits forwarding",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "start": "async fn relay_inner",
+        "end": "struct Reservations",
+        "needle": ".map_err(|_| Failure::Unreachable)??;",
+        "replacement": ".map_err(|_| Failure::Unreachable)??;\n    state.queue.lock().unwrap().pairs.remove(&(control.leaf.clone(), control.collector.clone()));"
+      }
+    ],
+    "scope_note": "Releases only the pair reservation after the answer is ready, before final forwarding; slot and buffer reservations remain."
+  },
+  {
+    "label": "reverse-resource-post-connection-lane",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "relay_reads_fill_the_same_leaf_budget_seen_by_direct_export",
+    "expected_literal": "all eight admitted answers queue behind exactly one observed POST connection",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "start": "fn shared(",
+        "end": "impl RelayState",
+        "needle": "posts: Arc::new(Semaphore::new(1))",
+        "replacement": "posts: Arc::new(Semaphore::new(2))"
+      }
+    ],
+    "scope_note": "All eight valid projected answers reach post_answer; observed connection peak independently distinguishes one from two simultaneous POSTs."
+  },
+  {
+    "label": "reverse-resource-refusal-lane-across-restart",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "refusal_budget_survives_worker_restart_and_full_lane_keeps_controls_progressing",
+    "expected_literal": "worker restart cannot create a ninth refusal task before the original eight finish",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "start": "fn shared(",
+        "end": "impl RelayState",
+        "needle": "refusals: Arc::new(Semaphore::new(MAX_WAITERS))",
+        "replacement": "refusals: Arc::new(Semaphore::new(MAX_WAITERS + 1))"
+      }
+    ],
+    "scope_note": "Original eight refusal tasks remain stalled across worker restart. Ninth dispatch must not spawn a new refusal task."
+  },
+  {
+    "label": "reverse-resource-control-class-fairness",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "control_scheduler_is_fair_with_observe_backlog_and_preserves_query_bindings",
+    "expected_literal": "all existing control classes progress within three dispatches despite observe backlog",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "start": "pub(crate) fn control_turn",
+        "end": "pub(crate) async fn before_dispatch",
+        "needle": "*turn = (*turn + 1) % 3;",
+        "replacement": "*turn = 0;"
+      }
+    ],
+    "scope_note": "Three Observe items stay queued; a nonrotating scheduler dispatches all three before existing Attachment and List work."
+  },
+  {
+    "label": "reverse-resource-bound-query",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "control_scheduler_is_fair_with_observe_backlog_and_preserves_query_bindings",
+    "expected_literal": "each actual collector retains its bound query and route",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "start": "async fn relay_inner",
+        "end": "struct Reservations",
+        "needle": "query,\n        remaining_ms: 5000,",
+        "replacement": "query: String::new(),\n        remaining_ms: 5000,"
+      }
+    ],
+    "scope_note": "Three authenticated collectors use distinct limits; actual control envelope must retain each original collector query."
+  },
+  {
+    "label": "reverse-resource-fresh-id-after-restart",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "old_answer_after_worker_restart_cannot_satisfy_fresh_waiter",
+    "expected_literal": "fresh waiter gets a fresh opaque id",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "start": "async fn relay_inner",
+        "end": "struct Reservations",
+        "needle": "id: ulid::Ulid::new().to_string(),",
+        "replacement": "id: \"reused-opaque-id\".to_owned(),"
+      }
+    ],
+    "scope_note": "Fresh waiter after cancelled old worker request must use a distinct opaque id; constant id makes replay possible without modifying test fixtures."
+  },
+  {
+    "label": "reverse-resource-answer-live-id",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "live_waiter_is_bound_to_expected_leaf_kind_and_id_and_consumed_once",
+    "expected_literal": "unknown id refuses",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "start": "async fn answer_inner",
+        "end": "async fn read_answer_body",
+        "needle": "queue.waiting.get_mut(&id).ok_or(Failure::Invalid)?",
+        "replacement": "queue.waiting.values_mut().next().ok_or(Failure::Invalid)?"
+      },
+      {
+        "file": "src/observe_relay.rs",
+        "start": "async fn answer_inner",
+        "end": "async fn read_answer_body",
+        "needle": "queue.waiting.remove(&id).ok_or(Failure::Invalid)?",
+        "replacement": "queue.waiting.drain().next().map(|(_, waiter)| waiter).ok_or(Failure::Invalid)?"
+      }
+    ],
+    "scope_note": "Both accesses implement the same live request-id binding. Fault chooses an arbitrary live waiter for both answer admission and consumption, so unknown id is independently refused only by the original lookups."
+  },
+  {
+    "label": "reverse-resource-answer-leaf-binding",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "live_waiter_is_bound_to_expected_leaf_kind_and_id_and_consumed_once",
+    "expected_literal": "authenticated wrong leaf refuses without consuming live waiter",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "start": "async fn answer_inner",
+        "end": "async fn read_answer_body",
+        "needle": "|| w.expected_leaf != peer.name",
+        "replacement": "|| false"
+      },
+      {
+        "file": "src/observe_relay.rs",
+        "start": "async fn answer_inner",
+        "end": "async fn read_answer_body",
+        "needle": "|| w.control.leaf != peer_identity(&peer)",
+        "replacement": "|| false"
+      }
+    ],
+    "scope_note": "Node name and full authenticated identity are duplicated representations of the same expected answer leaf binding. Both are removed together; stored collector/route authorization remains unchanged. This does not independently claim coverage for each representation."
+  }
+]
