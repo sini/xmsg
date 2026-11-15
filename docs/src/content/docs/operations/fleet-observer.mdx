@@ -1,0 +1,108 @@
+---
+title: Fleet Observer Operations
+description: Planned node observation grants and read requests, with collector deployment still to come.
+---
+
+**Planned, not yet released.** Node observation export is the first stage of the
+[fleet observer](/concepts/fleet-observer/). The collector command, authentication,
+web view and deployment are not implemented in this stage. The examples below
+specify node configuration and protocol requests; they do not install a collector
+or claim a production rollout.
+
+## Grant a collector access
+
+A directly reachable exporter can grant one existing CA identity metadata-only
+access in its peers file. This example allows only two endpoints on `owner.node`:
+
+```json
+{
+  "peers": {
+    "owner.collector": {
+      "address": "collector.example.org:7788",
+      "ca": "/etc/xmsg/collector-ca.pem",
+      "identities": ["spiffe://xmsg/host/collector/user/owner"],
+      "allow": ["observe"],
+      "targets": [
+        "11111111-1111-4111-8111-111111111111@owner.node",
+        "guard@owner.node"
+      ],
+      "observe_labels": false
+    }
+  }
+}
+```
+
+Use the exporter's real canonical node name in `targets`. The CA bundle and
+collector certificate are existing operator-provided inputs. This grant does
+not authorize send, reply or recipient discovery. Omit `targets` only when
+node-wide export is intended; an empty array permits no event or descriptor data.
+To permit labels, set `observe_labels: true` and request `labels=true`.
+
+A hub can instead use a literal rule under its existing bundle-bound admission
+patterns:
+
+```json
+{
+  "pattern": "spiffe://xmsg/host/collector/user/owner",
+  "allow": ["observe"],
+  "targets": ["guard@owner.node"],
+  "observe_labels": false
+}
+```
+
+Place it before a broader matching rule: the first matching rule wins, with no
+union of later grants. A wildcard observe rule is refused. Follow the existing
+[peer reload procedure](/operations/runtime-and-systemd/) and reconnect the
+observer after a peer-policy reload. A pre-reload TLS connection cannot continue
+exporting under its old grant; a reload during a read discards the prepared page.
+
+## Read retained metadata
+
+Send these HTTP/1.1 requests over verified mTLS to `owner.node`'s existing
+`--fed-listen` listener, using the authorized collector identity:
+
+```http
+GET /fed/v2/observe/events?v=1&after=0&limit=100 HTTP/1.1
+Host: owner.node:7788
+
+```
+
+This begins at retained history, rather than selecting the local Unix API's
+recent tail. Omitted `after` also means `0` on the export. To continue, take
+`epoch`, `scope` and `next` from the response and send them as `epoch`, `scope`
+and `after`. Positive `after` requires both cursor fields; `scope` is 64 lowercase
+hexadecimal characters. A scope fingerprint detects policy changes and is not
+an authorization token. Keep `labels` consistent across continuation requests.
+
+```http
+GET /fed/v2/observe/snapshot?v=1&labels=false HTTP/1.1
+Host: owner.node:7788
+
+```
+
+The snapshot describes bounded cached registrations, not current process health
+or a complete fleet inventory. Neither request has a body. Normal HTTP and MCP
+do not expose these routes. The existing Unix `/v1/observe/events` remains private
+to the node's UID.
+
+See the [wire reference](/reference/http-and-sockets/#planned-node-observation-export)
+for schemas and bounds. Preserve `gaps`, epoch resets and `scope_changed` visibly.
+An empty event list can mean policy filtering; it is not proof of inactivity.
+On timeout or unavailability, keep any historical data visibly stale rather than
+reporting a successful empty history. Reconnect after reload and begin a new
+backfill when the policy scope changes.
+
+## Planned collector and deployment
+
+The later collector will use a configured node inventory and a separate bounded
+metadata database. A browser will read that cache, not connect to bus nodes.
+The intended default retention is seven days, 10,000 events and 16 MiB of logical
+metadata per node, with cursor and page persistence committed together. Gaps,
+resets, partial snapshots, denial and stale data must be visible.
+
+Owner authentication and the collector web service remain planned. Deployment
+will require an operator-reviewed ingress, owner identity policy and backend TLS;
+node mTLS does not authenticate a browser or prove a forwarded human identity.
+No collector install command or IdP setup is available in this stage. Body-detail
+and transcript access also remain planned and unimplemented. Outbound-only leaves
+remain outside direct observation coverage.

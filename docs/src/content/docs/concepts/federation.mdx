@@ -157,7 +157,8 @@ it and acknowledges it.
 | `pin` | `string` (optional) | Expected SHA-256 certificate fingerprint (`sha256:...`). Mutually exclusive with `ca`. |
 | `ca` | `string` (optional) | Path to PEM trust anchor bundle. Mutually exclusive with `pin`; requires `identities`. |
 | `identities` | `list[string]` (optional) | Single concrete SPIFFE URI SAN (`["spiffe://..."]`). Required with `ca`. |
-| `allow` | `list[string]` | Permitted capabilities (`"send"`, `"reply"`, `"list"`, `"inbox"`, `"forward"`, `"relayed"`). |
+| `allow` | `list[string]` | Permitted capabilities (`"send"`, `"reply"`, `"list"`, `"inbox"`, `"forward"`, `"relayed"`; planned `"observe"`). |
+| `observe_labels` | `bool` (optional, planned) | Default `false`; even an explicit `false` requires `"observe"` in `allow`. Labels also require request opt-in. |
 | `from` | `list[string]` (optional) | Permitted source IP addresses or CIDR blocks for inbound connections. Empty `[]` is refused. |
 | `leaf` | `bool` (optional) | When `true`, this node does not dial the peer. Messages and `list` queries for the peer wait in this node's durable `peer_mailbox` until the peer collects them by long-polling. A send to the peer returns `outcome: "queued"`. Default `false`. |
 | `dial` | `"outbound"` (optional) | Starts a background pull loop on this node. The loop connects to `address`. It pulls messages, answers `list` queries and polls replies. Not permitted with `leaf: true`. |
@@ -239,6 +240,8 @@ and a rule may grant a durable leaf mailbox:
   `leaf: true`. Allowed operations are `send`, `reply`, `list`, `forward` and `relayed`.
   `leaf` defaults to false. A rule compatible with patterns of different bundles is refused;
   split it rather than sharing a fleet rule with enrollment identities.
+  Planned observation rules also accept `observe`, optional `targets` and
+  `observe_labels`; an observe rule must name one literal SPIFFE identity.
 - **Closed by default.** An admitted client that matches no rule gets no operations.
 - **Load checks.** xmsg refuses a duplicate rule pattern. It also refuses a rule that no admission
   pattern can match.
@@ -311,3 +314,18 @@ wildcards in keyword segments or different trust domains. A rule compatible with
 patterns of multiple bundles is refused. See
 [enrolled hub mailboxes](/concepts/hubs-and-leaves/#planned-enrolled-nodes-and-bounded-hub-mailboxes)
 for the rule's `leaf` field and a configuration example.
+
+## Planned observation grants
+
+The literal `observe` capability permits bounded stored metadata reads on the
+federation listener. It is never implied by other rights, `"*"`, `leaf: true` or
+a wildcard admission pattern. Concrete CA identities remain literal-only; hub
+rules granting observe must also be literal. First-match rules never union grants.
+For observation, omitted `targets` is node-wide after the explicit grant, `[]`
+permits no endpoint/event data, unqualified keys mean local endpoints and qualified
+keys match exactly. Every endpoint must pass the scope check. Labels require
+both grant and request opt-in. Reconnect after peer-policy reload.
+
+See [fleet observer concepts](/concepts/fleet-observer/) and the
+[grant and request example](/operations/fleet-observer/). The collector, owner
+authentication and web view remain planned and unimplemented.
