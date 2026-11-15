@@ -24,7 +24,7 @@
       {
         "file": "src/observe_collector_auth.rs",
         "needle": "claims.get(\"active\").and_then(Value::as_bool) != Some(true)",
-        "replacement": "claims.get(\"active\").is_none()"
+        "replacement": "claims.get(\"active\").and_then(|value| value.as_bool().or_else(|| value.as_str().map(|s| s == \"true\"))) != Some(true)"
       }
     ],
     "test_macro": "denied_claim"
@@ -263,8 +263,19 @@
     "edits": [
       {
         "file": "src/observe_collector_auth.rs",
-        "needle": "self.introspect(token)",
-        "replacement": "async { let _ = token; Ok(VerifiedOwner { subject: self.config.subjects[0].clone(), expires_at: 2000 }) }"
+        "start": "pub struct Verifier {",
+        "needle": "    clock: EpochClock,",
+        "replacement": "    clock: EpochClock,\n    cached_owner: std::sync::Mutex<Option<(String, u64)>>,"
+      },
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "            clock,\n",
+        "replacement": "            clock,\n            cached_owner: std::sync::Mutex::new(None),\n"
+      },
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "        tokio::time::timeout(Duration::from_secs(2), self.introspect(token))\n            .await\n            .map_err(|_| AuthError::Unavailable)?",
+        "replacement": "        let cached = { self.cached_owner.lock().unwrap().clone() };\n        if let Some((subject, expires_at)) = cached {\n            return Ok(VerifiedOwner { subject, expires_at });\n        }\n        let owner = tokio::time::timeout(Duration::from_secs(2), self.introspect(token))\n            .await.map_err(|_| AuthError::Unavailable)??;\n        *self.cached_owner.lock().unwrap() = Some((owner.subject.clone(), owner.expires_at));\n        Ok(owner)"
       }
     ]
   },
@@ -447,6 +458,48 @@
         "file": "src/observe_collector_auth.rs",
         "needle": "bytes.len() as u64 > limit",
         "replacement": "bytes.len() as u64 > limit + 1"
+      }
+    ]
+  },
+  {
+    "label": "owner-audience-array",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::audience_array",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "foreign singleton audience must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "aud[0].as_str() == Some(self.config.audience.as_str())",
+        "replacement": "true"
+      }
+    ]
+  },
+  {
+    "label": "owner-audience-array-type",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::audience_array_type",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "nonstring singleton audience must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "aud[0].as_str() == Some(self.config.audience.as_str())",
+        "replacement": "aud[0].as_str().or(Some(self.config.audience.as_str())) == Some(self.config.audience.as_str())"
+      }
+    ]
+  },
+  {
+    "label": "owner-bearer-separator",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::bearer_syntax",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "ASCII separator spaces must be accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "token.trim_start_matches(' ')",
+        "replacement": "token"
       }
     ]
   }

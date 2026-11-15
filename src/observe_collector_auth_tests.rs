@@ -359,8 +359,9 @@ async fn bearer_syntax() {
         "Basic foo",
         "Bearer",
         "Bearer ",
-        "Bearer  foo",
         "Bearer foo bar",
+        "Bearer foo ",
+        "Bearer\tfoo",
         "Bearer foo\tbar",
         "Bearer =foo",
         "Bearer foo=bar",
@@ -383,6 +384,11 @@ async fn bearer_syntax() {
     let mut h = headers();
     h.insert("authorization", "bEaReR abc-._~+/==".parse().unwrap());
     assert!(v.authorize(&h).await.is_ok());
+    h.insert("authorization", "Bearer  fixture-token".parse().unwrap());
+    assert!(
+        v.authorize(&h).await.is_ok(),
+        "ASCII separator spaces must be accepted"
+    );
 }
 #[tokio::test]
 async fn bearer_bound() {
@@ -572,4 +578,41 @@ async fn https_configuration() {
         Verifier::new(config, Arc::new(|| 1000)).is_err(),
         "plaintext provider configuration must refuse"
     );
+}
+
+#[tokio::test]
+async fn audience_array() {
+    let idp = Idp::new().await;
+    let mut c = claims();
+    c["aud"] = json!(["collector"]);
+    idp.set(c.clone());
+    assert!(idp.verifier().authorize(&headers()).await.is_ok());
+    c["aud"] = json!(["other"]);
+    assert_denied(&idp, c, "foreign singleton audience must refuse").await;
+}
+#[tokio::test]
+async fn audience_array_type() {
+    let idp = Idp::new().await;
+    let mut c = claims();
+    c["aud"] = json!(["collector"]);
+    idp.set(c.clone());
+    assert!(idp.verifier().authorize(&headers()).await.is_ok());
+    c["aud"] = json!([null]);
+    assert_denied(&idp, c, "nonstring singleton audience must refuse").await;
+}
+#[tokio::test]
+async fn malformed_azp() {
+    let idp = Idp::new().await;
+    for bad in [Value::Null, json!(false), json!(1), json!([]), json!({})] {
+        let mut c = claims();
+        c["azp"] = bad.clone();
+        assert_denied(
+            &idp,
+            c.clone(),
+            "malformed additional client binding must refuse",
+        )
+        .await;
+        c.as_object_mut().unwrap().remove("client_id");
+        assert_denied(&idp, c, "malformed sole client binding must refuse").await;
+    }
 }
