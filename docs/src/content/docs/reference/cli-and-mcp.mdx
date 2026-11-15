@@ -173,6 +173,20 @@ xmsg check-peers /path/to/peers.json --fed-cert /path/to/node.crt
 
 ---
 
+## Hosted gateway discovery (planned)
+
+The separate HTTP [gateway](/extensions/gateway/#protocol-bootstrap) provides
+`server/discover` as an authenticated bootstrap RPC. Its parameters are omitted,
+empty, or contain only standard `_meta`. The result contains the implemented legacy
+`supportedVersions`, caller-scoped `capabilities`, server identity under
+`_meta["io.modelcontextprotocol/serverInfo"]`, `instructions`, `resultType: "complete"`,
+`ttlMs: 0` and `cacheScope: "private"`.
+
+This planned discovery-only version-header exception lets modern clients choose a
+legacy `initialize` revision. The supported transport versions remain the three
+2025 revisions; every other gateway method retains its version gate. The following
+section documents the local harness-associated stdio adapter's tools.
+
 ## MCP server tools (`xmsg mcp`)
 
 `xmsg mcp` gives five tools over stdio JSON-RPC. With `--reply-only` / `XMSG_REPLY_ONLY=1`, it

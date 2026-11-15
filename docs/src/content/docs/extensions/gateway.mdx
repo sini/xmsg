@@ -40,6 +40,30 @@ or deployment is connected. Follow the gateway's own
 [hosted setup guide](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/hosted-dots-setup.md)
 and provider requirements. Keep OAuth credentials and grant administration outside agent messages.
 
+## Protocol bootstrap
+
+**Planned, not yet released.** An authenticated hosted client can call
+`server/discover` before `initialize`, without an `Mcp-Session-Id`. The answer lists
+only the gateway's implemented transport revisions: `2025-03-26`, `2025-06-18` and
+`2025-11-25`. It is a bootstrap compatibility answer, not 2026-07-28 transport support.
+
+For example, POST this request to the gateway's MCP endpoint after OAuth:
+
+```json
+{"jsonrpc":"2.0","id":"discover-1","method":"server/discover"}
+```
+
+Only discovery accepts an otherwise unsupported textual `MCP-Protocol-Version`
+header to learn those versions. The client then selects a supported legacy version
+and continues with `initialize` and `tools/list`. Discovery uses the catalog's
+bearer and live-grant checks; a valid probe without a bearer receives `401`.
+
+The response includes server identity metadata, initialization instructions and
+caller-scoped capabilities. Events appears only for its selected grant, as during
+`initialize`. Its cache hints are `ttlMs: 0` and `cacheScope: "private"`; cached
+capabilities must not cross authorization contexts. See the gateway's
+[protocol reference](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/serving.md#supported-protocol-revisions-and-discovery).
+
 ## Authentication profiles and issuer cutover
 
 **Planned, not yet released.** The gateway can be configured with exact issuer, hosted-client and audience profiles for a common resource URL. Each keeps its own subject, scopes, provider restrictions and enabled grant. Profiles select authentication; they do not create separate bus addresses or mailboxes.
