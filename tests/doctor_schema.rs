@@ -168,6 +168,9 @@ impl Fixture {
                                     200,
                                     json!({"read_only":true,"partial":true,"truncated":false,"recipients":[]}),
                                 ),
+                                "GET /v1/diagnostics/enrollment HTTP/1.1" => {
+                                    (503, json!({"error":"authority unavailable"}))
+                                }
                                 "GET /v1/diagnostics/federation HTTP/1.1" => {
                                     (200, json!({"available":false}))
                                 }

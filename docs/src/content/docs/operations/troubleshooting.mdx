@@ -70,6 +70,28 @@ or admission caches during a handshake, but make no persistent or application-st
 writes. An older or unavailable daemon leaves the result unknown.
 The response deadline is bounded, but the system DNS resolver may finish an in-flight lookup after its request is cancelled.
 
+## CA application health (planned)
+
+```sh
+xmsg doctor --enroll-ca-dir /absolute/path/to/ca --json
+```
+
+The running authority reports its loaded public root, policy-reload status and pending
+device approval count through a same-UID Unix-only read-only view. Configured disabled
+CA enrollment passes its configuration check; missing configuration evidence is unknown.
+An expired root fails. A root within the smaller of seven days or one-third of its
+lifetime warns. A degraded policy reload warns while the last accepted policy remains
+loaded. Pending approvals warn when nonzero; zero passes and unavailable counts warn.
+Counting does not prune expired sessions or cancel approvals.
+
+Without that view, `--enroll-ca-dir` checks explicitly selected installed public-root
+and signing-key metadata, labeled installed, not loaded. Enabled state and pending
+counts stay unknown. A missing or unsuitable signing key warns: the daemon may retain its loaded signer.
+Doctor never opens, reads, loads or tests the key and cannot prove it matches the root
+or can issue certificates. It neither approves nor denies requests. Use normal CA
+operations for any fix. The client enrollment TLS probe remains separate and does not
+establish application readiness. See [CA operations](/operations/enrollment-ca/).
+
 ## Primary schema views (planned)
 
 A live daemon with an existing regular WAL and SHM permits an ordinary read-only metadata

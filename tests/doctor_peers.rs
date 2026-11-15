@@ -193,6 +193,14 @@ struct Fixture {
 
 impl Fixture {
     async fn new(identity: Identity, peers: Vec<PeerConfig>) -> Self {
+        Self::with_ca_config(identity, peers, None).await
+    }
+
+    async fn with_ca_config(
+        identity: Identity,
+        peers: Vec<PeerConfig>,
+        config: Option<xmsg::ca_health::Config>,
+    ) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let root = tempfile::tempdir().unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -264,7 +272,10 @@ impl Fixture {
         let listener =
             bind_ucred_unix_listener(&run.join("http.sock"), xmsg::agent::current_uid(), None)
                 .unwrap();
-        let router = build_unix_router(state.clone());
+        let router = match config {
+            Some(config) => xmsg::http::build_unix_router_with_enrollment(state.clone(), config),
+            None => build_unix_router(state.clone()),
+        };
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
@@ -521,4 +532,68 @@ async fn addressless_peers_are_unknown_and_the_peer_inventory_is_bounded() {
         .unwrap()
         .iter()
         .all(|peer| peer["reachability"] == "unknown"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ca_diagnostics_is_unix_only_and_distinguishes_disabled_from_unknown() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+    for enabled in [Some(false), Some(true), None] {
+        let fixture = Fixture::with_ca_config(
+            Identity::new(NODE, 24, 48),
+            vec![],
+            Some(xmsg::ca_health::Config {
+                enabled,
+                ca_dir: None,
+            }),
+        )
+        .await;
+        let client = reqwest::Client::builder()
+            .unix_socket(fixture.root.path().join("run/http.sock"))
+            .no_proxy()
+            .build()
+            .unwrap();
+        let response = client
+            .get("http://localhost/v1/diagnostics/enrollment")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let value: Value = response.json().await.unwrap();
+        assert_eq!(value["enabled"], serde_json::to_value(enabled).unwrap());
+        assert_eq!(value["pending_approvals"], Value::Null);
+        if enabled == Some(false) {
+            assert_eq!(value["checks"].as_array().unwrap().len(), 1);
+            assert_eq!(value["checks"][0]["status"], "pass");
+        } else {
+            assert_eq!(check(&value, "ca.root_expiry")["status"], "warn");
+        }
+        let (_, report) = fixture.doctor().await;
+        assert!(check(&report, "ca.source")["message"]
+            .as_str()
+            .unwrap()
+            .contains("runtime"));
+        let request = || {
+            Request::builder()
+                .uri("/v1/diagnostics/enrollment")
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            build_router(fixture.state.clone())
+                .oneshot(request())
+                .await
+                .unwrap()
+                .status(),
+            404
+        );
+        assert_eq!(
+            build_unix_router(fixture.state.clone())
+                .oneshot(request())
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+    }
 }

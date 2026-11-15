@@ -119,10 +119,26 @@ warn, rather than fail: check the intended deployment pin before deciding whethe
 restart or upgrade. Matching crate versions such as `0.1.0` do not prove matching builds.
 
 Optional path overrides are `--http-sock`, `--agent-sock`, `--register-sock`, `--db-path`,
-`--peers-file`, `--fed-cert` and `--enroll-state`. Doctor checks the selected paths; it
+`--peers-file`, `--fed-cert`, `--enroll-state` and `--enroll-ca-dir` (planned). Doctor checks the selected paths; it
 cannot establish that a running daemon loaded those same paths or configuration.
 `--fed-cert` requires `--peers-file`; `--enroll-state` names a directory containing
 the existing private `enroll.json`.
+
+Planned CA application diagnostics use `GET /v1/diagnostics/enrollment` on the
+same-UID Unix socket only. They report parsed enrollment enabled state, the loaded
+public root's expiry, policy-reload degradation, signing-key metadata and a count of
+pending device approvals. No pending request identities or codes are included. Missing
+authority evidence does not establish that enrollment is disabled.
+
+`--enroll-ca-dir DIR` explicitly selects installed CA files when the live view is
+unavailable: the bounded public `root.crt` and stat-only `root.key` metadata. The source
+is `installed_not_loaded`; enabled state and pending counts stay unknown. No directory
+is guessed, and file presence does not imply enabled configuration. This differs from
+client `--enroll-state`. The live view takes precedence because loaded and installed
+roots can differ. Key metadata must describe a regular file owned by the current UID,
+at most 1 MiB, with owner-read permission and no group/other access. This cannot prove
+key validity, matching, actual readability or issuance; doctor never opens the key or
+issues a test certificate. The CLI's local request has a five-second budget.
 
 Doctor reads local filesystem metadata, probes the database read-only and makes a bounded
 `GET /healthz` request on the HTTP Unix socket. It also requests the explicit local
