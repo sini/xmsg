@@ -75,7 +75,60 @@ jobs:
             echo "extra-substituters = https://cache.numtide.com https://attic.json64.dev/ci"
             echo "extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g= ${ATTIC_PUBLIC_KEY}"
           } | sudo tee -a /etc/nix/nix.conf >/dev/null
-          sudo launchctl kickstart -k system/org.nixos.nix-daemon || true
+          sudo launchctl kickstart -k system/org.nixos.nix-daemon
+
+
+      - &daemon_readiness
+        name: Require daemon readiness with forced startup controls
+        run: |
+          wait_for_daemon() {
+            local budget="$1" interval="$2"
+            shift 2
+            local deadline=$((SECONDS + budget)) probe_pid
+            while [ "$SECONDS" -lt "$deadline" ]; do
+              "$@" > "$probe_log" 2>&1 &
+              probe_pid=$!
+              while kill -0 "$probe_pid" 2>/dev/null; do
+                if [ "$SECONDS" -ge "$deadline" ]; then
+                  kill -KILL "$probe_pid" 2>/dev/null || true
+                  wait "$probe_pid" 2>/dev/null || true
+                  echo "nix-daemon readiness timed out after ${budget}s" >&2
+                  cat "$probe_log" >&2
+                  return 1
+                fi
+                sleep 0.1
+              done
+              if wait "$probe_pid"; then
+                return 0
+              fi
+              sleep "$interval"
+            done
+            echo "nix-daemon readiness timed out after ${budget}s" >&2
+            cat "$probe_log" >&2
+            return 1
+          }
+          control_dir=$(mktemp -d)
+          trap 'rm -rf "$control_dir"' EXIT
+          probe_log="$control_dir/probe.log"
+          fake_ping() {
+            echo probe >> "$control_dir/probes"
+            [ "$(wc -l < "$control_dir/probes")" -ge 3 ]
+          }
+          if fake_ping; then
+            echo "startup control failed: immediate probe unexpectedly passed" >&2
+            exit 1
+          fi
+          wait_for_daemon 5 0.1 fake_ping
+          echo "startup control: immediate probe failed; readiness wait passed"
+          never_ready() { return 1; }
+          start=$SECONDS
+          if wait_for_daemon 1 0.1 never_ready; then
+            echo "startup control failed: never-ready probe passed" >&2
+            exit 1
+          fi
+          test "$((SECONDS - start))" -le 3
+          echo "startup control: never-ready probe failed within its bound"
+          wait_for_daemon 60 1 nix store ping --store daemon
 
       # Release packaging and client checks stay separate from the ordinary dev-profile suite.
       - name: Warm release and dev dependency seeds
@@ -168,7 +221,9 @@ jobs:
             echo "extra-substituters = https://cache.numtide.com https://attic.json64.dev/ci"
             echo "extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g= ${ATTIC_PUBLIC_KEY}"
           } | sudo tee -a /etc/nix/nix.conf >/dev/null
-          sudo launchctl kickstart -k system/org.nixos.nix-daemon || true
+          sudo launchctl kickstart -k system/org.nixos.nix-daemon
+
+      - *daemon_readiness
 
       - name: Warm dev-profile test artifacts
         run: |
