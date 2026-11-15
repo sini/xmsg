@@ -56,6 +56,7 @@ The response includes `read_only: true`, `partial: true`, `truncated`, `recipien
 It reports
 already-observed registrations and last-seen metadata. Recipient states `registered` and
 `seen` describe stored metadata; they do not certify current liveness or reachability.
+A missing last-seen timestamp remains unknown; registration time is not substituted for it.
 Unreconciled or filesystem-only sessions may be absent. Reading the snapshot does not assign
 or release claims, evict or prune registrations, admit subagents, deliver queued messages or
 fork notices, or contact a federation peer. A `503` response means the daemon has not
