@@ -52,6 +52,60 @@ fn page(sequence: i64) -> ExportPage {
     }
 }
 #[test]
+fn arrival_wire_page_survives_ingest_and_view_without_payload() {
+    let (_dir, store, _) = fixture();
+    let wire = serde_json::json!({
+        "v": 1,
+        "node": "node",
+        "epoch": "epoch",
+        "scope": "a".repeat(64),
+        "events": [{
+            "sequence": 1,
+            "source_at": NOW,
+            "observed_at": NOW,
+            "persisted_at": NOW,
+            "kind": "arrival",
+            "to": "bot@node",
+            "message_id": "message-1",
+            "available": "not_recorded"
+        }],
+        "next": 1,
+        "has_more": false,
+        "gaps": [],
+        "available": true
+    });
+    let page: ExportPage = serde_json::from_slice(&serde_json::to_vec(&wire).unwrap()).unwrap();
+    store.ingest_page("node", &Cursor::default(), page).unwrap();
+
+    let view = store.view(None, 100).unwrap();
+    assert_eq!(view[0].events.len(), 1);
+    let event = serde_json::to_value(&view[0].events[0].event).unwrap();
+    assert_eq!(event["kind"], "arrival");
+    assert_eq!(event["message_id"], "message-1");
+    assert_eq!(event["to"], "bot@node");
+    let keys: std::collections::BTreeSet<_> = event
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "available",
+            "kind",
+            "message_id",
+            "observed_at",
+            "persisted_at",
+            "sequence",
+            "source_at",
+            "to"
+        ]
+        .into_iter()
+        .collect()
+    );
+}
+#[test]
 fn startup_hidden_and_denial_hide_before_failed_purge() {
     let (dir, store, _) = fixture();
     store
