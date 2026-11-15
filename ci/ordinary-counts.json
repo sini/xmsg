@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "cargo test --locked on rebased6831b2442bfcd68234ef46c6b269943270ee2122: exit0,1010passed/8ignored/96summaries, all93integrationtargets",
-    "darwin": "macOS run43693560466 job132749100957 on6831b2442bfcd68234ef46c6b269943270ee2122:1013passed/10ignored/0failed/96summaries; canonical xmsg-ordinary-tests-test log lines exclude repeated Nix error-tail summaries"
+    "linux": "cargo test --locked at6224fffd8aa4c6167372b407d3546410459da03f:1024passed/8ignored/0failed/97summaries, all94integrationtargets",
+    "darwin": "run43702639740 job132776893095 at6224fffd8aa4c6167372b407d3546410459da03f:1027passed/10ignored/0failed/97summaries; canonical derivation lines exclude Nix error-tail replay; all11 snapshot fixtures passed"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -92,6 +92,7 @@
     "tests/operator_cli.rs",
     "tests/pi_proc.rs",
     "tests/pi_queue.rs",
+    "tests/recipient_snapshot.rs",
     "tests/registry_fixtures.rs",
     "tests/service_exec.rs",
     "tests/shared_client.rs",
@@ -100,16 +101,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1010,
+      "passed": 1024,
       "failed": 0,
       "ignored": 8,
-      "summaries": 96
+      "summaries": 97
     },
     "darwin": {
-      "passed": 1013,
+      "passed": 1027,
       "failed": 0,
       "ignored": 10,
-      "summaries": 96
+      "summaries": 97
     }
   }
 }
