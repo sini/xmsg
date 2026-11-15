@@ -113,6 +113,37 @@ returns `503` instead of initializing it. Missing rows or a truncated response d
 establish that a process is gone. A client whose daemon rejects this opt-in must report
 unknown rather than fall back to the ordinary listing.
 
+### Invocation-only federation diagnostics (planned)
+
+`GET /v1/diagnostics/federation` is available only over `http.sock`, not the optional
+local TCP or federation listener. For example:
+
+```bash
+curl -fsS --max-time 9 --unix-socket "$sock" \
+  'http://localhost/v1/diagnostics/federation'
+```
+
+The daemon uses its existing loaded mTLS identity and pin/CA verifiers to probe at most
+32 sorted configured peers, four concurrently, with two seconds per peer and an eight-second
+global deadline. It does not invent dial addresses for addressless or outbound-only client
+entries. Unattempted entries stay unknown. A down or older daemon leaves the diagnostic
+unknown; doctor does not load private keys or directly dial peers as a fallback.
+
+The probe is `HEAD /` on the existing federation listener, with
+`User-Agent: xmsg-doctor/<version>`. Its normal `404` response and standard HTTP `Date`
+allow an observed offset relative to the local clock to be reported with uncertainty and
+a 120-second tolerance. Missing/invalid dates, unexpected status or a local wall-clock
+jump make the offset unknown. It is not a diagnosis that the peer clock is wrong.
+A successful handshake proves mTLS reachability, not application permissions or delivery
+readiness. Certificate metadata is limited to subject, issuer and `notAfter`; no DER,
+SANs, pins or keys are returned.
+
+These probes run only when invoked. They add no federation route, protocol or peer right
+and do not list recipients, read observation data or reconcile registrations. Normal
+connection counters or admission caches may update during a handshake, but diagnostics
+make no persistent or application-state writes. See
+[`xmsg doctor`](/reference/cli-and-mcp/#xmsg-doctor-planned) for warning and expiry results.
+
 ### Local observation journal (planned)
 
 `GET /v1/observe/events` reads bounded message metadata over `http.sock` from the

@@ -50,6 +50,10 @@ local defaults; it cannot prove that the running daemon uses the same configurat
 | Peer configuration fails | The selected configuration fails the existing `check-peers` parser or certificate consistency check. | Correct the named configuration issue, then run doctor again. Parsing does not prove peer reachability or the daemon's loaded configuration. |
 | Enrollment expiry fails | Saved metadata says the enrolled certificate has expired. | Follow the enrollment renewal procedure. Doctor does not renew it. |
 | Enrollment renewal warns | The certificate has reached two-thirds of its recorded lifetime. | Schedule renewal. For a 24-hour certificate this is 16 hours after issuance; a fixed seven-day threshold would be misleading. |
+| Loaded leaf certificate expired (planned) | The running daemon's actually loaded leaf certificate has expired. | Renew and reload that node's identity through the normal procedure. This is a failure; a certificate file selected by the CLI is not substituted for the loaded certificate. |
+| Loaded leaf expiry warning (planned) | The loaded certificate expires within the smaller of seven days or one-third of its lifetime. | Schedule renewal. This threshold also covers short-lived certificates: a 24-hour leaf warns within its final eight hours. |
+| Peer mTLS diagnostic warning (planned) | A bounded daemon-side probe could not establish reachability, or the peer was addressless, unattempted or an outbound-only client. | Inspect the peer's intended configuration and connectivity. Unknown is not evidence of a bad peer, and TLS success does not establish application permissions or delivery readiness. Peer results warn at most. |
+| Observed clock offset warning (planned) | The peer HTTP date differs from the local clock beyond the 120-second tolerance, accounting for uncertainty. | Compare both clocks with a trusted time source. The diagnostic cannot say which clock is wrong. Missing/bad dates, unexpected status or local clock jumps leave the offset unknown. |
 | CA TLS warning | The optional CA TLS handshake did not succeed. | Check connectivity and configured trust. A successful handshake establishes TLS reachability, not enrollment application health or login readiness. |
 
 Doctor uses only the explicit Unix read-only liveness snapshot to inspect registrations.
@@ -59,14 +63,20 @@ leaves uncertain evidence unknown; a gone/stale registration warns rather than f
 rows lack process evidence, and a missing row does not prove a process is gone. Doctor also
 avoids enrollment-pending APIs and commands that initialize
 stores. It does not send, acknowledge or consume a message, mint a token or load a private
-key for a diagnostic repair.
+key for a diagnostic repair. Federation probes run inside the daemon using its loaded
+identity, only when doctor requests them over the Unix socket. The CLI never loads a
+private key or dials a peer as a fallback. Probes may update normal connection counters
+or admission caches during a handshake, but make no persistent or application-state
+writes. An older or unavailable daemon leaves the result unknown.
 
 ## What remains unchecked
 
 Doctor reports the running daemon's version and build revision when its Unix health
 response supplies them; missing metadata remains unknown. It does not establish loaded
-configuration, full migration readiness, actual journal hotness, per-peer mTLS connectivity,
-remote certificate expiry, clock skew, CA application health or harness addressability.
+configuration, full migration readiness, actual journal hotness, CA application health
+or harness addressability. The bounded federation probe reports mTLS reachability,
+leaf expiry and observed offset with uncertainty; it is not a complete peer-health or
+clock-correctness guarantee.
 Registered owner-process liveness does not prove a usable Codex writer lease, message
 delivery or task completion. Treat these as separate investigations, not implied successes. Doctor offers no automatic database recovery or
 integrity guarantee. See the [CLI reference](/reference/cli-and-mcp/#xmsg-doctor-planned)

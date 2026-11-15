@@ -548,3 +548,7 @@ required-features = ["daemon"]
 name = "doctor_liveness"
 path = "tests/doctor_liveness.rs"
 required-features = ["daemon"]
+[[test]]
+name = "doctor_peers"
+path = "tests/doctor_peers.rs"
+required-features = ["daemon"]

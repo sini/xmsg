@@ -139,6 +139,10 @@ pub fn build_unix_router(state: Arc<AppState>) -> Router {
     build_router(state.clone())
         .merge(
             Router::new()
+                .route(
+                    "/v1/diagnostics/federation",
+                    get(federation_diagnostics_handler),
+                )
                 .route("/v1/observe/events", get(observe_events_handler))
                 .route("/v1/enrollment/pending", get(enrollment_pending_handler))
                 .route(
@@ -150,6 +154,10 @@ pub fn build_unix_router(state: Arc<AppState>) -> Router {
                 .with_state(state),
         )
         .layer(Extension(LocalHealth))
+}
+
+async fn federation_diagnostics_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(crate::doctor_peers::collect(state.fed_state.clone()).await)
 }
 
 async fn observe_events_handler(

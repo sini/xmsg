@@ -31,6 +31,32 @@ impl Fixture {
     }
 
     fn with_snapshot(health: Value, snapshot_status: u16, snapshot: Value) -> Self {
+        Self::with_sources(
+            health,
+            snapshot_status,
+            snapshot,
+            200,
+            json!({"available":false}),
+        )
+    }
+
+    fn with_federation(code: u16, value: Value) -> Self {
+        Self::with_sources(
+            json!({"status":"ok","sessions_dir":"ok"}),
+            200,
+            json!({"read_only":true,"partial":true,"truncated":false,"recipients":[]}),
+            code,
+            value,
+        )
+    }
+
+    fn with_sources(
+        health: Value,
+        snapshot_status: u16,
+        snapshot: Value,
+        fed_status: u16,
+        federation: Value,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let run = root.path().join("run");
         fs::create_dir(&run).unwrap();
@@ -66,13 +92,13 @@ impl Fixture {
                                 break;
                             }
                         }
-                        let is_health = captured
-                            .lock()
-                            .unwrap()
-                            .last()
-                            .is_some_and(|request| request == "GET /healthz HTTP/1.1");
-                        let body = if is_health { &health } else { &snapshot }.to_string();
-                        let status = if is_health { 200 } else { snapshot_status };
+                        let request = captured.lock().unwrap().last().unwrap().clone();
+                        let (value, status) = match request.as_str() {
+                            "GET /healthz HTTP/1.1" => (&health, 200),
+                            "GET /v1/diagnostics/federation HTTP/1.1" => (&federation, fed_status),
+                            _ => (&snapshot, snapshot_status),
+                        };
+                        let body = value.to_string();
                         let _ = write!(stream, "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -144,6 +170,7 @@ impl Fixture {
                 request.as_str(),
                 "GET /healthz HTTP/1.1"
                     | "GET /v1/recipients?read_only=true&liveness=true HTTP/1.1"
+                    | "GET /v1/diagnostics/federation HTTP/1.1"
             )),
             "unexpected requests: {requests:?}"
         );
@@ -584,7 +611,7 @@ fn unsupported_or_cold_process_source_warns_without_live_listing_fallback() {
         fixture.assert_read_only_requests();
         assert_eq!(
             fixture.requests.lock().unwrap().len(),
-            2,
+            3,
             "doctor retried through another route"
         );
     }
@@ -666,4 +693,99 @@ fn registration_status_without_process_evidence_stays_unknown() {
                     && row["status"] == "pass"
             ));
     }
+}
+
+fn federation_data(own_expiry: &str, peers: Vec<Value>) -> Value {
+    json!({"available":true,"own_leaf":{"subject":"our subject","issuer":"our issuer","not_after":4102444800_i64},"own_expiry":own_expiry,"peers":peers,"partial":false,"truncated":false,"budget_exhausted":false})
+}
+fn federation_peer(name: &str, reach: &str, expiry: &str, offset: &str) -> Value {
+    json!({"name":name,"reachability":reach,"reason":"fixture","leaf":{"subject":"peer subject","issuer":"peer issuer","not_after":4102444800_i64},"expiry":expiry,"offset_state":offset,"observed_offset_seconds":600.0,"offset_uncertainty_seconds":1.25})
+}
+
+#[test]
+fn federation_metadata_only_warns_for_peers_and_fails_only_expired_loaded_leaf() {
+    let data = federation_data(
+        "valid",
+        vec![federation_peer(
+            "peer.example",
+            "reachable",
+            "expiring",
+            "beyond_tolerance",
+        )],
+    );
+    let fixture = Fixture::with_federation(200, data);
+    let (output, report) = fixture.report();
+    assert!(output.status.success());
+    status(&report, "federation.local_certificate", "pass");
+    status(&report, "peer.federation.peer.example", "warn");
+    let message = check(&report, "peer.federation.peer.example")["message"]
+        .as_str()
+        .unwrap();
+    assert!(message.contains("expiring") && message.contains("observed offset +600.000 ± 1.250 s"));
+    let fixture = Fixture::with_federation(200, federation_data("expired", vec![]));
+    let (output, report) = fixture.report();
+    assert_eq!(output.status.code(), Some(1));
+    status(&report, "federation.local_certificate", "fail");
+}
+
+#[test]
+fn unavailable_federation_source_never_falls_back_to_direct_peer_dials() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    for code in [400, 404, 503] {
+        let fixture = Fixture::with_federation(code, json!({"error":"unsupported"}));
+        let peers = fixture.root.path().join("peers.json");
+        fs::write(&peers,json!([{"name":"peer","address":listener.local_addr().unwrap().to_string(),"pin":format!("sha256:{}","0".repeat(64)),"allow":["list"]}]).to_string()).unwrap();
+        let output = fixture
+            .command()
+            .arg("--peers-file")
+            .arg(&peers)
+            .arg("--json")
+            .output()
+            .unwrap();
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(output.status.success(), "{report}");
+        status(&report, "peer.federation.peer", "warn");
+        assert!(check(&report, "peer.federation.peer")["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown"));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "doctor dialled a peer itself"
+        );
+        fixture.assert_read_only_requests();
+        assert_eq!(fixture.requests.lock().unwrap().len(), 3);
+    }
+}
+
+#[test]
+fn federation_peer_results_are_bounded_and_terminal_safe() {
+    let rows = (0..33)
+        .map(|i| {
+            federation_peer(
+                &format!("peer-{i}\u{1b}[31m.example"),
+                "unreachable",
+                "expired",
+                "unknown",
+            )
+        })
+        .collect();
+    let fixture = Fixture::with_federation(200, federation_data("valid", rows));
+    let (output, report) = fixture.report();
+    assert!(output.status.success());
+    assert_eq!(
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["id"].as_str().unwrap().starts_with("peer.federation."))
+            .count(),
+        32
+    );
+    status(&report, "federation.probe", "warn");
+    let text = fixture.command().output().unwrap();
+    assert!(text.status.success());
+    assert!(!String::from_utf8_lossy(&text.stdout).contains('\u{1b}'));
 }

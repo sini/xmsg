@@ -147,6 +147,30 @@ when process evidence cannot be obtained, rather than repeating it for every row
 witnesses can still establish liveness where supported. Default snapshots and `xmsg watch`
 do not opt into these probes.
 
+Doctor also requests planned federation diagnostics from the running daemon over the
+Unix socket: `GET /v1/diagnostics/federation`. The CLI never loads a private key or dials
+a peer directly. The daemon reuses its loaded identity and existing pin/CA verifiers;
+there is no fallback to CLI peer dials if the daemon is down or lacks this endpoint.
+
+The invocation probes at most 32 configured peers in sorted order, with at most four
+concurrent attempts, two seconds per peer and an eight-second total deadline. Doctor's
+IPC deadline is nine seconds. Addressless, unattempted or outbound-only client entries
+remain unknown; no address is guessed. Peer failures and uncertain observations warn,
+rather than fail. An already-expired leaf certificate actually loaded by this daemon
+fails; an approaching expiry warns within the smaller of seven days or one-third of that
+certificate's lifetime. Only subject, issuer and `notAfter` certificate metadata is exposed,
+not certificates, keys, SANs or pins.
+
+A successful probe establishes mTLS reachability, not application permissions or delivery
+readiness. The daemon sends `HEAD /` to the existing federation listener, expecting its
+ordinary `404` and standard HTTP `Date`, with `User-Agent: xmsg-doctor/<version>`. The
+observed offset is relative to the local clock, with reported uncertainty and a 120-second
+tolerance; it does not identify which clock is wrong. Missing or invalid dates, unexpected
+status codes or a local wall-clock jump leave the offset unknown. Probes run only for this
+invocation, never periodically. Normal connection counters or admission caches can change
+as part of a handshake; probes make no persistent or application-state writes and call no
+listing, observation or reconciliation route.
+
 A database schema check covers the global schema version, not every additive migration.
 A journal or WAL file is not proof of a hot journal; uncertainty produces a warning rather
 than a recovery attempt. The observation sidecar is checked by filesystem metadata only.

@@ -13,6 +13,8 @@ const MAX_FILE: u64 = 1_048_576;
 const MAX_HEALTH: usize = 65_536;
 const MAX_SESSION_BODY: usize = 2 * 1024 * 1024;
 const MAX_SESSIONS: usize = 1000;
+const MAX_FED_BODY: usize = 512 * 1024;
+const MAX_PEERS: usize = 32;
 
 #[derive(Args, Debug)]
 pub struct DoctorArgs {
@@ -73,9 +75,6 @@ impl Report {
                 "loaded_configuration",
                 "additive_migration_readiness",
                 "journal_hotness",
-                "peer_mtls",
-                "remote_certificate_expiry",
-                "peer_clock_skew",
                 "ca_application_health",
             ],
         }
@@ -160,14 +159,19 @@ fn bounded_file(path: &Path, private: bool) -> io::Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-async fn read_json(path: &Path, url: &str, maximum: usize) -> std::result::Result<Value, ()> {
-    tokio::time::timeout(Duration::from_secs(5), async {
+async fn read_json(
+    path: &Path,
+    url: &str,
+    maximum: usize,
+    budget: Duration,
+) -> std::result::Result<Value, ()> {
+    tokio::time::timeout(budget, async {
         let client = reqwest::Client::builder()
             .unix_socket(path.to_path_buf())
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(5))
+            .timeout(budget)
             .build()
             .map_err(|_| ())?;
         let mut response = client.get(url).send().await.map_err(|_| ())?;
@@ -192,7 +196,13 @@ async fn read_json(path: &Path, url: &str, maximum: usize) -> std::result::Resul
     .map_err(|_| ())?
 }
 async fn health(report: &mut Report, path: &Path) {
-    let result = read_json(path, "http://localhost/healthz", MAX_HEALTH).await;
+    let result = read_json(
+        path,
+        "http://localhost/healthz",
+        MAX_HEALTH,
+        Duration::from_secs(5),
+    )
+    .await;
     match result {
         Ok(value) if value["status"] == "ok" => {
             report.add(
@@ -241,6 +251,7 @@ async fn sessions(report: &mut Report, path: &Path) {
         path,
         "http://localhost/v1/recipients?read_only=true&liveness=true",
         MAX_SESSION_BODY,
+        Duration::from_secs(5),
     )
     .await;
     let Ok(snapshot) = snapshot else {
@@ -349,16 +360,145 @@ fn observe(report: &mut Report, path: &Path) {
         _=>report.add("observe.file",Status::Fail,"Observation sidecar type, owner, or permissions are wrong.",Some("Use the node user and a regular private 0600 sidecar; inspect the node's observation setup.")),
     }
 }
-fn peers(report: &mut Report, path: &Path, cert: Option<&Path>) {
-    let result = (|| -> Result<()> {
+fn peers(report: &mut Report, path: &Path, cert: Option<&Path>) -> Vec<String> {
+    let result = (|| -> Result<Vec<String>> {
         let own = cert.map(super::own_node_from_cert_file).transpose()?;
         let bytes = bounded_file(path, false)?;
         let text = std::str::from_utf8(&bytes)?;
-        xmsg::fed::PeersMap::load_from_json_for(text, own.as_ref())?;
-        Ok(())
+        let peers = xmsg::fed::PeersMap::load_from_json_for(text, own.as_ref())?;
+        let mut names: Vec<_> = peers.iter().map(|(_, peer)| peer.name.clone()).collect();
+        names.sort();
+        names.dedup();
+        Ok(names)
     })();
-    report.add("peers.file",if result.is_ok(){Status::Pass}else{Status::Fail},if result.is_ok(){"Peers file passes the existing check-peers parser; connectivity was not tested."}else{"Peers file or supplied node certificate fails check-peers validation."},if result.is_ok(){None}else{Some("Run xmsg check-peers PEERS_JSON with the same optional --fed-cert to see the failing configuration rule.")});
+    report.add("peers.file",if result.is_ok(){Status::Pass}else{Status::Fail},if result.is_ok(){"Peers file passes the existing check-peers parser; connectivity is checked separately by the daemon."}else{"Peers file or supplied node certificate fails check-peers validation."},if result.is_ok(){None}else{Some("Run xmsg check-peers PEERS_JSON with the same optional --fed-cert to see the failing configuration rule.")});
+    result.unwrap_or_default()
 }
+
+fn certificate_text(value: &Value) -> Option<String> {
+    let subject = value["subject"].as_str().filter(|v| v.len() <= 4096)?;
+    let issuer = value["issuer"].as_str().filter(|v| v.len() <= 4096)?;
+    let not_after = value["not_after"].as_i64()?;
+    let not_after = chrono::DateTime::from_timestamp(not_after, 0).map(|date| date.to_rfc3339())?;
+    Some(format!(
+        "subject {subject}; issuer {issuer}; notAfter {not_after}"
+    ))
+}
+
+fn unknown_federation(report: &mut Report, names: &[String]) {
+    report.add("federation.probe",Status::Warn,"Federation diagnostics: unknown; the daemon is unavailable, older, or has no loaded federation identity. No peers were dialled by doctor.",Some("Check the daemon's Unix socket and federation configuration; doctor does not load private keys or fall back to direct peer probes."));
+    report.add(
+        "federation.local_certificate",
+        Status::Warn,
+        "Loaded federation leaf expiry: unknown.",
+        None,
+    );
+    for name in names.iter().take(MAX_PEERS) {
+        report.add(
+            format!("peer.federation.{name}"),
+            Status::Warn,
+            "TLS reachability unknown; leaf expiry unknown; observed offset unknown.",
+            None,
+        );
+    }
+    if names.len() > MAX_PEERS {
+        report.add(
+            "federation.coverage",
+            Status::Warn,
+            "Configured peers exceed the 32-peer diagnostic bound; remaining peers are unknown.",
+            None,
+        );
+    }
+}
+
+async fn federation(report: &mut Report, path: Option<&Path>, configured_names: &[String]) {
+    let Some(path) = path else {
+        unknown_federation(report, configured_names);
+        return;
+    };
+    let result = read_json(
+        path,
+        "http://localhost/v1/diagnostics/federation",
+        MAX_FED_BODY,
+        Duration::from_secs(9),
+    )
+    .await;
+    let Ok(value) = result else {
+        unknown_federation(report, configured_names);
+        return;
+    };
+    let rows = value["peers"].as_array();
+    if value["available"] != true
+        || rows.is_none()
+        || !value["partial"].is_boolean()
+        || !value["truncated"].is_boolean()
+        || !value["budget_exhausted"].is_boolean()
+    {
+        unknown_federation(report, configured_names);
+        return;
+    }
+    let local = certificate_text(&value["own_leaf"]);
+    let expiry = if local.is_some() {
+        value["own_expiry"].as_str().unwrap_or("unknown")
+    } else {
+        "unknown"
+    };
+    let local_status = match expiry {
+        "expired" => Status::Fail,
+        "valid" => Status::Pass,
+        _ => Status::Warn,
+    };
+    report.add("federation.local_certificate",local_status,format!("Loaded federation leaf {expiry}; {}.",local.unwrap_or_else(||"certificate metadata unknown".into())),
+        (expiry!="valid").then_some("Check the normal identity renewal workflow; doctor never renews or writes credentials."));
+    let rows = rows.unwrap();
+    let mut partial = value["partial"] == true
+        || value["truncated"] == true
+        || value["budget_exhausted"] == true
+        || rows.len() > MAX_PEERS;
+    let mut shown = 0;
+    for row in rows.iter().take(MAX_PEERS) {
+        let Some(name) = row["name"]
+            .as_str()
+            .filter(|v| !v.is_empty() && v.len() <= 4096)
+        else {
+            partial = true;
+            continue;
+        };
+        let reach = match row["reachability"].as_str() {
+            Some("reachable") => "reachable",
+            Some("unreachable") => "unreachable",
+            _ => "unknown",
+        };
+        let leaf = certificate_text(&row["leaf"]);
+        let expiry = if leaf.is_some() {
+            row["expiry"].as_str().unwrap_or("unknown")
+        } else {
+            "unknown"
+        };
+        let sample = row["observed_offset_seconds"]
+            .as_f64()
+            .zip(row["offset_uncertainty_seconds"].as_f64())
+            .filter(|(offset, uncertainty)| {
+                offset.is_finite() && uncertainty.is_finite() && *uncertainty >= 0.0
+            });
+        let offset_state = row["offset_state"].as_str().unwrap_or("unknown");
+        let offset = match sample {
+            Some((offset, uncertainty)) => {
+                format!("observed offset {offset:+.3} ± {uncertainty:.3} s ({offset_state})")
+            }
+            None => "observed offset unknown".into(),
+        };
+        let good = reach == "reachable"
+            && expiry == "valid"
+            && offset_state == "within_tolerance"
+            && sample.is_some();
+        report.add(format!("peer.federation.{name}"),if good {Status::Pass}else{Status::Warn},format!("TLS {reach}; leaf {expiry}; {}; {offset}.",leaf.unwrap_or_else(||"certificate metadata unknown".into())),
+            (!good).then_some("Check the peer network, configured identity and normal renewal workflow; compare time synchronization on both nodes using the observed offset and uncertainty."));
+        shown += 1;
+    }
+    report.add("federation.probe",if partial {Status::Warn}else{Status::Pass},format!("Daemon-only federation diagnostics returned {shown} configured peers; {}. Bounds: 32 peers, 4 concurrent, 2 s per peer, 8 s total; doctor IPC 9 s.",if partial {"partial coverage; unobserved peers are unknown"}else{"configured catalogue sampled"}),None);
+}
+
 async fn enrollment(report: &mut Report, directory: &Path) {
     let result = (|| -> Result<xmsg::enroll_client::SavedState> {
         if !private_directory(directory) {
@@ -421,6 +561,7 @@ async fn inspect(args: &DoctorArgs) -> Report {
         .or_else(|| xmsg::agent::default_register_sock_path().ok());
     let db = super::resolve_db_path(args.db_path.clone());
     report.path("database", &db);
+    let mut http_good = false;
     if let Some(path) = &http {
         report.path("http_socket", path);
         let valid = path.parent().is_some_and(private_directory);
@@ -451,6 +592,7 @@ async fn inspect(args: &DoctorArgs) -> Report {
     }
     if let Some(path) = &http {
         if socket(&mut report, "socket.http", path) {
+            http_good = true;
             health(&mut report, path).await;
             sessions(&mut report, path).await;
         } else {
@@ -473,12 +615,19 @@ async fn inspect(args: &DoctorArgs) -> Report {
     let sidecar = suffix(&db, ".observe.sqlite");
     report.path("observation_sidecar", &sidecar);
     observe(&mut report, &sidecar);
-    if let Some(path) = &args.peers_file {
+    let configured_peers = if let Some(path) = &args.peers_file {
         report.path("peers", path);
-        peers(&mut report, path, args.fed_cert.as_deref());
+        peers(&mut report, path, args.fed_cert.as_deref())
     } else {
         report.not_checked.push("peers_configuration");
-    }
+        Vec::new()
+    };
+    federation(
+        &mut report,
+        http.as_deref().filter(|_| http_good),
+        &configured_peers,
+    )
+    .await;
     let default = xmsg::enroll_client::default_state_directory();
     let enrolled = args
         .enroll_state

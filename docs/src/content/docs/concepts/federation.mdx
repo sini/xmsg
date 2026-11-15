@@ -293,6 +293,30 @@ recipient does not enforce the forwarded target limit. This is a known limitatio
 The empty-list rules are in
 [`PeerConfig` parsing and inbound checks](https://github.com/sini/xmsg/blob/76f8f1e8249777cfb63c4d0287431cbbf6b2ce76/src/fed.rs).
 
+## Diagnose peer connectivity (planned)
+
+Run `xmsg doctor --json` on the node to inspect bounded federation diagnostics. Doctor
+asks the daemon through its Unix socket; it does not load private keys or dial peers.
+The daemon reuses its loaded identity and existing pin/CA verifiers. No periodic probe,
+new federation route or new peer right is introduced.
+
+Each invocation considers at most 32 sorted configured peers, with four concurrent probes,
+a two-second peer deadline and an eight-second total deadline. Addressless, unattempted
+and outbound-only client entries remain unknown rather than acquiring guessed addresses.
+Peer failures warn at most. An expired leaf actually loaded by the local daemon fails;
+an approaching expiry warns within the smaller of seven days or one-third of its lifetime.
+Certificate output contains only subject, issuer and `notAfter`, not DER, SANs, pins or keys.
+
+The daemon requests `HEAD /` on the existing federation listener and observes the normal
+`404` response's HTTP `Date`. The reported offset is relative to the local clock, with
+uncertainty and a 120-second tolerance. Neither side is declared wrong; missing/invalid
+dates, unexpected status or a local wall-clock jump leave it unknown. mTLS reachability
+does not prove application permissions or delivery readiness. Normal connection counters
+or admission caches may update during the handshake, but this diagnostic makes no
+persistent or application-state writes, listing requests or reconciliation calls. See
+[troubleshooting](/operations/troubleshooting/) and the
+[Unix endpoint reference](/reference/http-and-sockets/#invocation-only-federation-diagnostics-planned).
+
 ## Identity during credential renewal
 
 Planned: live credential reload preserves the running node's derived name. Renewing
