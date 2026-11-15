@@ -775,6 +775,12 @@ async fn slot_bound_control(wait_for_timeout: bool) {
         .await
         .0;
     fixture.controls.before_io.release();
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        fixture.controls.workers_done.wait_for(8),
+    )
+    .await
+    .expect("released blocking workers did not finish");
     for read in reads {
         assert_eq!(
             read.await.unwrap(),
