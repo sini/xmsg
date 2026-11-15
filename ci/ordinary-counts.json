@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "cargo test --locked at d9103048e0a74cd702c47846b238507cfc9e3a5a: exit0,935 passed/8 ignored/94 summaries",
-    "darwin": "927/10 from job132541573029 plus the unchanged service-liveness 11-test delta; native PR CI must verify938/10"
+    "linux": "all-targets936/8/93 summaries plus doc0/0/1 at c283cd77ddb6f23e3a8b8eb15eecbf23c493d1f6; separate commands, default CI verifies94",
+    "darwin": "prior native938/10 plus one platform-independent saturation test;939/10 awaiting native CI"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -98,13 +98,13 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 935,
+      "passed": 936,
       "failed": 0,
       "ignored": 8,
       "summaries": 94
     },
     "darwin": {
-      "passed": 938,
+      "passed": 939,
       "failed": 0,
       "ignored": 10,
       "summaries": 94
