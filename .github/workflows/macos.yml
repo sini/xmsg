@@ -169,10 +169,14 @@ jobs:
           nix build "./ci#checks.$sys.pre-xl1-compat" -L --no-link --print-out-paths | tee -a /tmp/attic-paths
 
       - name: Push to Attic cache
+        id: attic_publish
+        timeout-minutes: 10
+        continue-on-error: true
         if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
         env:
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
         run: |
+          echo "attempts=0" >> "$GITHUB_OUTPUT"
           if [ -z "${ATTIC_TOKEN:-}" ]; then
             echo "ATTIC_TOKEN is not set; skipping Attic cache push"
             exit 0
@@ -182,7 +186,11 @@ jobs:
             exit 0
           fi
           nix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev "$ATTIC_TOKEN"
-          for i in 1 2 3; do nix shell --inputs-from . nixpkgs#attic-client -c sh -c 'xargs attic push ci < /tmp/attic-paths' && exit 0; echo "attic push ci failed (attempt $i)" >&2; sleep $((i * 10)); done; exit 1
+          for i in 1 2 3; do echo "attempts=$i" >> "$GITHUB_OUTPUT"; nix shell --inputs-from . nixpkgs#attic-client -c sh -c 'xargs attic push ci < /tmp/attic-paths' && exit 0; echo "attic push ci failed (attempt $i)" >&2; sleep $((i * 10)); done; exit 1
+      - name: Warn on Attic cache publication failure
+        if: ${{ always() && steps.attic_publish.outcome == 'failure' }}
+        run: |
+          echo "::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}"
 
   tests:
     if: ${{ !inputs.lock_probe }}
@@ -246,10 +254,14 @@ jobs:
           sys=$(nix eval --impure --raw --expr builtins.currentSystem)
           nix build "./ci#checks.$sys.tests" -L --no-link --print-out-paths | tee -a /tmp/attic-paths
       - name: Push to Attic cache
+        id: attic_publish
+        timeout-minutes: 10
+        continue-on-error: true
         if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
         env:
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
         run: |
+          echo "attempts=0" >> "$GITHUB_OUTPUT"
           if [ -z "${ATTIC_TOKEN:-}" ]; then
             echo "ATTIC_TOKEN is not set; skipping Attic cache push"
             exit 0
@@ -259,7 +271,11 @@ jobs:
             exit 0
           fi
           nix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev "$ATTIC_TOKEN"
-          for i in 1 2 3; do nix shell --inputs-from . nixpkgs#attic-client -c sh -c 'xargs attic push ci < /tmp/attic-paths' && exit 0; echo "attic push ci failed (attempt $i)" >&2; sleep $((i * 10)); done; exit 1
+          for i in 1 2 3; do echo "attempts=$i" >> "$GITHUB_OUTPUT"; nix shell --inputs-from . nixpkgs#attic-client -c sh -c 'xargs attic push ci < /tmp/attic-paths' && exit 0; echo "attic push ci failed (attempt $i)" >&2; sleep $((i * 10)); done; exit 1
+      - name: Warn on Attic cache publication failure
+        if: ${{ always() && steps.attic_publish.outcome == 'failure' }}
+        run: |
+          echo "::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}"
 
   lock-probe:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.lock_probe }}
