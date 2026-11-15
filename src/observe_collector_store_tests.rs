@@ -615,6 +615,10 @@ fn independent_string_ranges_sequence_and_snapshot_guards() {
         validate_page(&policy, &Cursor::default(), &p).is_err(),
         "unordered sequence accepted"
     );
+    assert!(
+        validate_snapshot(&policy, &snapshot()).is_ok(),
+        "valid snapshot control refused"
+    );
     for field in [
         "v",
         "node",
@@ -644,7 +648,14 @@ fn independent_string_ranges_sequence_and_snapshot_guards() {
                     })
                     .collect();
             }
-            "id" => s.endpoints[0].id = "bot".into(),
+            "id" => {
+                s.endpoints[0].id = "bad name@node".into();
+                assert_eq!(
+                    s.endpoints[0].id.split_once('@').map(|p| p.1),
+                    Some(s.endpoints[0].node.as_str()),
+                    "snapshot id control also violated node binding"
+                );
+            }
             "endpoint_node" => s.endpoints[0].node = "foreign".into(),
             "endpoint_time" => s.endpoints[0].source_at = Some(NOW + 1),
             "label_length" => s.endpoints[0].label = Some("a".repeat(257)),
