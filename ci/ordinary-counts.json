@@ -1,7 +1,7 @@
 {
   "baseline": {
     "linux": "cargo test --locked on kyuj-1-version candidate: exit 0, 1154 passed/8 ignored/99 summaries; all 96 integration targets; log retained with version metadata evidence",
-    "darwin": "run 43722456912 job 132837174511 on d07c2f88cdce4401b52df7cdc842308fadaeaff0: 1153 passed/10 ignored/0 failed/99 summaries; canonical derivation lines exclude Nix error-tail replay; all 96 targets"
+    "darwin": "run 43738022464 job 132884828932 on 54272ea23d64a0454158697b2517eed30068e541: 1157 passed/10 ignored/0 failed/99 summaries; native count guard passed all 96 executed targets before reporting the stale prior count"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -109,7 +109,7 @@
       "summaries": 99
     },
     "darwin": {
-      "passed": 1153,
+      "passed": 1157,
       "failed": 0,
       "ignored": 10,
       "summaries": 99
