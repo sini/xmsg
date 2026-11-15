@@ -434,6 +434,7 @@ pub fn project_page(
             .epoch
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        || (source.has_more && source.next >= source.head)
         || source.events.len() > query.limit
         || source.initial_omitted != 0
         || !source.available
@@ -1168,6 +1169,166 @@ mod tests {
         let w = wire(vec![e], &s);
         assert_eq!(w["events"][0]["message_id"], "safe_message-1");
         assert_eq!(w["events"][0]["thread_id"].as_str().unwrap().len(), 512);
+    }
+    #[test]
+    fn impossible_raw_continuation_is_refused() {
+        let scope = scope(None, false);
+        let query = ExportQuery {
+            limit: 1,
+            ..query()
+        };
+        let mut impossible = page(vec![event(1)]);
+        impossible.has_more = true;
+        assert!(
+            project_page(impossible, &query, &scope, NOW).is_err(),
+            "impossible raw continuation accepted"
+        );
+        let mut valid = page(vec![event(1)]);
+        valid.has_more = true;
+        valid.head = 2;
+        let result = project_page(valid, &query, &scope, NOW).unwrap();
+        assert!(result.has_more);
+        assert_eq!(result.next, 1);
+    }
+    #[test]
+    fn nested_and_envelope_schemas_reject_extra_fields() {
+        let scope = scope(None, false);
+        let base = wire(vec![event(1)], &scope);
+        let mut event_extra = base.clone();
+        event_extra["events"][0]["body"] = json!("private-canary");
+        assert!(
+            serde_json::from_value::<ExportPage>(event_extra).is_err(),
+            "event schema weakened"
+        );
+        let mut page_extra = base;
+        page_extra["path"] = json!("private-canary");
+        assert!(
+            serde_json::from_value::<ExportPage>(page_extra).is_err(),
+            "page schema weakened"
+        );
+        let mut p = page(vec![]);
+        p.gaps.push(Gap {
+            reason: "writer_restart".into(),
+            unknown_loss: true,
+            count: None,
+        });
+        let mut gap_extra =
+            serde_json::to_value(project_page(p, &query(), &scope, NOW).unwrap()).unwrap();
+        gap_extra["gaps"][0]["detail"] = json!("private-canary");
+        assert!(
+            serde_json::from_value::<ExportPage>(gap_extra).is_err(),
+            "gap schema weakened"
+        );
+        let mut snapshot_extra = serde_json::to_value(
+            project_snapshot(&scope, vec![candidate(ID)], NOW, false).unwrap(),
+        )
+        .unwrap();
+        snapshot_extra["environment"] = json!("private-canary");
+        assert!(
+            serde_json::from_value::<ExportSnapshot>(snapshot_extra).is_err(),
+            "snapshot envelope schema weakened"
+        );
+    }
+    #[test]
+    fn known_classes_preserve_named_states() {
+        let scope = scope(None, false);
+        for kind in [
+            "message_recorded",
+            "recipient_resolved",
+            "outcome_changed",
+            "reply_recorded",
+            "reply_push_outcome_changed",
+            "record_removed",
+            "record_transferred",
+            "gap",
+        ] {
+            let mut e = event(1);
+            e.observation.kind = kind.into();
+            let w = wire(vec![e], &scope);
+            assert_eq!(w["events"][0]["kind"], kind, "known kind was lost");
+            assert_eq!(
+                w["events"][0]["available"], "retained_at_capture",
+                "known availability was lost"
+            );
+        }
+        for outcome in [
+            "delivered",
+            "queued",
+            "pending",
+            "failed",
+            "done",
+            "accepted",
+            "relayed",
+            "stored",
+            "pushed",
+            "push_failed",
+            "sender_gone",
+            "expired",
+        ] {
+            let mut e = event(1);
+            e.observation.outcome = Some(outcome.into());
+            assert_eq!(
+                wire(vec![e], &scope)["events"][0]["outcome"],
+                outcome,
+                "known outcome was lost"
+            );
+        }
+        for reason in [
+            "epoch_changed",
+            "cursor_ahead",
+            "cursor_evicted",
+            "queue_loss",
+            "sequence_gap",
+            "writer_restart",
+            "writer_unavailable",
+            "capture_unavailable",
+            "capture_overflow",
+            "outbound",
+            "queue_transfer",
+        ] {
+            let mut e = event(1);
+            e.observation.reason = Some(reason.into());
+            assert_eq!(
+                wire(vec![e], &scope)["events"][0]["reason"],
+                reason,
+                "known reason was lost"
+            );
+        }
+    }
+    #[test]
+    fn first_page_uses_explicit_zero_journal_cursor() {
+        assert_eq!(
+            query().journal_query(&scope(None, false)).unwrap().after,
+            Some(0),
+            "initial journal query selected implicit tail"
+        );
+    }
+    #[test]
+    fn canonical_endpoint_grammar_and_bounds_are_closed() {
+        let scope = scope(None, false);
+        for value in [
+            "/private/path".into(),
+            "bot@node/path".into(),
+            format!("{ID}/with space"),
+            format!("{ID}/ child"),
+            format!("{ID}/child/other"),
+            format!("{ID}/{}", "c".repeat(129)),
+            format!("{ID}~{}2", "0".repeat(480)),
+        ] {
+            assert!(
+                scope.canonical_endpoint(&value).is_none(),
+                "invalid endpoint accepted: {value}"
+            );
+        }
+        assert_eq!(
+            scope.canonical_endpoint("svc:bot").as_deref(),
+            Some("bot@local.node"),
+            "service endpoint normalization failed"
+        );
+        assert_eq!(
+            scope.canonical_endpoint("bot@remote.node").as_deref(),
+            Some("bot@remote.node")
+        );
     }
     #[test]
     fn invalid_source_times_are_omitted() {
