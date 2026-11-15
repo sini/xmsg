@@ -73,3 +73,19 @@ Once validated in this process, retained metadata may remain visible as stale
 during a temporary outage. Denial and scope changes mask old history before purge. Body detail and transcript views remain planned and
 unimplemented. See [operations](/operations/fleet-observer/) and the
 [wire reference](/reference/http-and-sockets/#planned-node-observation-export).
+
+## New event kinds (planned)
+
+The planned collector [unknown event kind](/glossary/#unknown-event-kind) fallback
+lets a collector read metadata from a newer node without losing known neighboring
+events or cursor progress. It displays **“unknown event kind (newer node)”** in place
+of an unrecognized kind. The original identifier never appears in the view.
+
+This accepts a new kind name within the existing event envelope, not a new payload
+schema. Bodies, extra fields, invalid metadata and unrecognized values in other
+enums remain refused. The node exporter and public event-kind enum stay closed.
+
+The collector keeps the bounded original name only in its private stored event
+JSON so exact replays and later upgrades preserve event identity. Stored newer rows
+use the same fallback after fresh scope validation. This requires a collector with
+the compatibility change; an unpatched older binary can still reject new data.
