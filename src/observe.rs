@@ -251,11 +251,18 @@ impl Shared {
     }
 
     fn lost(&self, count: u64) {
-        let _ = self
-            .dropped
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
-                Some(old.saturating_add(count))
-            });
+        let mut old = self.dropped.load(Ordering::Relaxed);
+        loop {
+            match self.dropped.compare_exchange_weak(
+                old,
+                old.saturating_add(count),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(current) => old = current,
+            }
+        }
     }
 }
 
@@ -1287,6 +1294,22 @@ mod tests {
         assert!(identity.flush_for_test(Duration::from_secs(3)));
         assert_ne!(all(&identity).epoch, first.epoch);
         assert_eq!(all(&identity).head, 1);
+    }
+
+    #[test]
+    fn dropped_counter_saturates_without_wrapping() {
+        let (_directory, _primary, observer) = fixture(Config::default());
+        assert!(observer.set_paused_for_test(true));
+        observer
+            .shared
+            .dropped
+            .store(u64::MAX - 1, Ordering::Relaxed);
+        observer.shared.lost(2);
+        assert_eq!(observer.shared.dropped.load(Ordering::Relaxed), u64::MAX);
+        observer.shared.lost(1);
+        assert_eq!(observer.shared.dropped.load(Ordering::Relaxed), u64::MAX);
+        observer.shared.dropped.store(0, Ordering::Relaxed);
+        assert!(observer.set_paused_for_test(false));
     }
 
     #[test]
