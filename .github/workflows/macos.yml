@@ -118,8 +118,19 @@ jobs:
             echo "startup control failed: immediate probe unexpectedly passed" >&2
             exit 1
           fi
+          fake_build() {
+            if [ "$(wc -l < "$control_dir/probes")" -lt 3 ]; then
+              echo "opening lock file /nix/var/nix/db/big-lock: Permission denied" >&2
+              return 1
+            fi
+          }
+          if fake_build; then
+            echo "startup control failed: unready build unexpectedly passed" >&2
+            exit 1
+          fi
           wait_for_daemon 5 0.1 fake_ping
-          echo "startup control: immediate probe failed; readiness wait passed"
+          fake_build
+          echo "startup control: immediate build fallback failed; waited build passed"
           never_ready() { return 1; }
           start=$SECONDS
           if wait_for_daemon 1 0.1 never_ready; then
@@ -129,6 +140,7 @@ jobs:
           test "$((SECONDS - start))" -le 3
           echo "startup control: never-ready probe failed within its bound"
           wait_for_daemon 60 1 nix store ping --store daemon
+          echo "NIX_REMOTE=daemon" >> "$GITHUB_ENV"
 
       # Release packaging and client checks stay separate from the ordinary dev-profile suite.
       - name: Warm release and dev dependency seeds
