@@ -52,12 +52,14 @@ curl -fsS --unix-socket "$sock" \
   'http://localhost/v1/recipients?read_only=true'
 ```
 
-The response includes `read_only: true`, `partial: true`, `recipients` and `nodes`. It reports
+The response includes `read_only: true`, `partial: true`, `truncated`, `recipients` and `nodes`.
+It reports
 already-observed registrations and last-seen metadata. Recipient states `registered` and
 `seen` describe stored metadata; they do not certify current liveness or reachability.
 Unreconciled or filesystem-only sessions may be absent. Reading the snapshot does not assign
 or release claims, evict or prune registrations, admit subagents, deliver queued messages or
-fork notices, or contact a federation peer.
+fork notices, or contact a federation peer. A `503` response means the daemon has not
+completed registration-runtime initialization; the snapshot request does not initialize it.
 
 The node selection must be omitted, `local`, or this daemon's canonical node name. Remote
 nodes, host selection, `status` (including `live` and `inactive`) and `within` are refused in
