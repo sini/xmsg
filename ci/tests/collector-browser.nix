@@ -26,6 +26,7 @@
             mkdir -p "$HOME"
           '';
           postCheck = ''
+            set -o pipefail
             python3 tests/dtxj_collector_browser.py \
               --fixture-dir "$XMSG_COLLECTOR_BROWSER_FIXTURE_DIR" \
               --chromium ${lib.getExe pkgs.chromium} | tee collector-browser.log
