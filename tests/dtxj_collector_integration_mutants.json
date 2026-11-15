@@ -760,8 +760,8 @@
     "edits": [
       {
         "file": "src/observe_collector.rs",
-        "needle": "const WEB_BUDGET: Duration = Duration::from_secs(5);",
-        "replacement": "const WEB_BUDGET: Duration = Duration::from_secs(6);"
+        "needle": "let _ = tokio::time::timeout_at(deadline, connection).await;",
+        "replacement": "let _ = deadline; let _ = connection.await;"
       }
     ]
   },
