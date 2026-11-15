@@ -783,6 +783,8 @@ async fn read_answer_body(
             .controls
             .max_buffered_answer
             .fetch_max(bytes.len(), std::sync::atomic::Ordering::Relaxed);
+        #[cfg(any(test, feature = "test-hooks"))]
+        state.controls.after_answer_chunk.pause().await;
     }
     Ok(bytes)
 }
@@ -842,6 +844,7 @@ pub mod test_hooks {
         pub before_forward: crate::observe_fed::test_hooks::Gate,
         pub before_post: crate::observe_fed::test_hooks::Gate,
         pub before_send: crate::observe_fed::test_hooks::Gate,
+        pub after_answer_chunk: crate::observe_fed::test_hooks::Gate,
         pub clock_offset_ms: std::sync::atomic::AtomicU64,
         pub max_buffered_answer: std::sync::atomic::AtomicUsize,
         pub max_buffered_control: std::sync::atomic::AtomicUsize,
@@ -855,6 +858,7 @@ pub mod test_hooks {
         pub refusal_peak: std::sync::atomic::AtomicUsize,
         pub refusal_spawned: std::sync::atomic::AtomicUsize,
         pub controls_received: std::sync::atomic::AtomicUsize,
+        pub received_control: Mutex<Option<Control>>,
         pub listeners: std::sync::atomic::AtomicUsize,
         pub control_polls: std::sync::atomic::AtomicUsize,
         pub custody_polls: std::sync::atomic::AtomicUsize,
@@ -884,6 +888,11 @@ pub mod test_hooks {
     }
     pub struct Worker {
         _worker: crate::fed::ControlWorker,
+    }
+    impl Worker {
+        pub async fn stop(self) {
+            self._worker.stop_for_test().await;
+        }
     }
     pub fn start_worker(fs: Arc<FedState>, peer: String) -> Worker {
         Worker {
@@ -974,6 +983,33 @@ pub mod test_hooks {
     }
     pub fn pending(fs: &Arc<FedState>) -> usize {
         shared(fs).queue.lock().unwrap().waiting.len()
+    }
+    pub fn reservations(fs: &Arc<FedState>) -> (usize, usize) {
+        let state = shared(fs);
+        (
+            MAX_WAITERS - state.slots.available_permits(),
+            MAX_BUFFERS - state.buffers.available_permits(),
+        )
+    }
+    pub async fn deliver_control(
+        fs: &Arc<FedState>,
+        hub: &str,
+        cert: &[u8],
+        ip: std::net::IpAddr,
+        control: Control,
+    ) {
+        let peers = fs.current_peers();
+        let peer = peers.get(hub).unwrap();
+        let witness = PollWitness::new(ip, Some(cert), peer).unwrap();
+        spawn_answer(
+            fs,
+            hub,
+            peers,
+            witness,
+            control,
+            &crate::observe_fed::read_slots(fs),
+        )
+        .await;
     }
 }
 
@@ -1104,6 +1140,10 @@ pub(crate) async fn spawn_answer(
     slots: &Arc<Semaphore>,
 ) {
     let scheduler = shared(fs);
+    #[cfg(any(test, feature = "test-hooks"))]
+    {
+        *scheduler.controls.received_control.lock().unwrap() = Some(control.clone());
+    }
     #[cfg(any(test, feature = "test-hooks"))]
     scheduler
         .controls

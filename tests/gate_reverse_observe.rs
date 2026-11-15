@@ -2081,3 +2081,357 @@ async fn control_scheduler_is_fair_with_observe_backlog_and_preserves_query_bind
         assert_eq!(caller.await.unwrap().0, 200);
     }
 }
+
+struct ChunkBody(tokio::sync::mpsc::Receiver<Bytes>);
+impl hyper::body::Body for ChunkBody {
+    type Data = Bytes;
+    type Error = std::convert::Infallible;
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, Self::Error>>> {
+        self.0
+            .poll_recv(context)
+            .map(|chunk| chunk.map(|chunk| Ok(hyper::body::Frame::data(chunk))))
+    }
+}
+fn streamed_answer(
+    f: Arc<RelayFixture>,
+    request: Value,
+    receiver: tokio::sync::mpsc::Receiver<Bytes>,
+) -> tokio::task::JoinHandle<(u16, Vec<u8>)> {
+    tokio::spawn(async move {
+        let connector =
+            xmsg::fed::make_tls_connector(&f.leaf.cert, &f.leaf.key, &f.hub.pin).unwrap();
+        let tcp = tokio::net::TcpStream::connect(f.address).await.unwrap();
+        let tls = connector
+            .connect(
+                rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+                tcp,
+            )
+            .await
+            .unwrap();
+        let (mut sender, connection) =
+            hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls))
+                .await
+                .unwrap();
+        let _connection = AbortTask(tokio::spawn(async move {
+            let _ = connection.await;
+        }));
+        let response = sender
+            .send_request(
+                hyper::Request::post(format!(
+                    "/fed/v2/observe/relay/answer/{}",
+                    request["id"].as_str().unwrap()
+                ))
+                .header("host", "localhost")
+                .header("xmsg-observe-kind", request["read"].as_str().unwrap())
+                .header("xmsg-observe-status", "ok")
+                .body(ChunkBody(receiver))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        (
+            response.status().as_u16(),
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+    })
+}
+async fn wait_reservations(fs: &Arc<FedState>, expected: (usize, usize)) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while xmsg::observe_relay::test_hooks::reservations(fs) != expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("bounded reader resource occupancy reached expected state");
+}
+async fn fresh_snapshot(f: &Arc<RelayFixture>) -> Vec<u8> {
+    let caller = {
+        let f = f.clone();
+        tokio::spawn(async move {
+            f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
+                .await
+        })
+    };
+    let request = control(f).await;
+    let expected = empty_snapshot(f);
+    assert_eq!(
+        submit(f, &request, expected.clone()).await.0,
+        200,
+        "fresh expected-leaf answer succeeds"
+    );
+    let (status, body) = caller.await.unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, expected, "fresh caller receives its exact DTO");
+    wait_reservations(&f.state, (0, 0)).await;
+    body
+}
+
+#[tokio::test]
+async fn actual_streamed_answer_obeys_deadline_after_its_first_chunk() {
+    for late in [false, true] {
+        let f = Arc::new(RelayFixture::new().await);
+        let before = f.state.db.lock().unwrap().total_changes();
+        let gates = xmsg::observe_relay::test_hooks::controls(&f.state);
+        gates.after_answer_chunk.arm(1);
+        let caller = {
+            let f = f.clone();
+            tokio::spawn(async move {
+                f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
+                    .await
+            })
+        };
+        let request = control(&f).await;
+        let body = empty_snapshot(&f);
+        let middle = body.len() / 2;
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        let answer = streamed_answer(f.clone(), request, receiver);
+        sender
+            .send(Bytes::copy_from_slice(&body[..middle]))
+            .await
+            .unwrap();
+        gates.after_answer_chunk.wait_for(1).await;
+        assert_eq!(
+            xmsg::observe_relay::test_hooks::reservations(&f.state),
+            (1, 512 * 1024),
+            "first streamed chunk holds original bounded reservations"
+        );
+        assert_eq!(
+            gates
+                .max_buffered_answer
+                .load(std::sync::atomic::Ordering::Relaxed),
+            middle,
+            "actual partial DTO reached the production reader"
+        );
+        if late {
+            gates
+                .clock_offset_ms
+                .store(5001, std::sync::atomic::Ordering::Relaxed);
+        }
+        gates.after_answer_chunk.release();
+        sender
+            .send(Bytes::copy_from_slice(&body[middle..]))
+            .await
+            .unwrap();
+        drop(sender);
+        let answer = answer.await.unwrap();
+        let response = caller.await.unwrap();
+        if late {
+            assert_eq!(
+                answer.0, 400,
+                "completed late stream is refused at the answer hop"
+            );
+            assert_eq!(response.0, 400, "late DTO never satisfies collector");
+        } else {
+            assert_eq!(answer.0, 200, "on-time neighboring stream succeeds");
+            assert_eq!(response, (200, body), "on-time raw DTO remains unchanged");
+        }
+        assert_eq!(
+            f.state.db.lock().unwrap().total_changes(),
+            before,
+            "late/on-time streaming never writes bus primary"
+        );
+        wait_pending(&f.state, 0).await;
+        wait_reservations(&f.state, (0, 0)).await;
+        gates
+            .clock_offset_ms
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        fresh_snapshot(&f).await;
+    }
+}
+
+#[tokio::test]
+async fn cancellation_during_answer_read_retains_reservations_until_stream_drops() {
+    let f = Arc::new(RelayFixture::new().await);
+    let gates = xmsg::observe_relay::test_hooks::controls(&f.state);
+    gates.after_answer_chunk.arm(1);
+    let caller = {
+        let f = f.clone();
+        tokio::spawn(async move {
+            f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
+                .await
+        })
+    };
+    let request = control(&f).await;
+    let body = empty_snapshot(&f);
+    let (sender, receiver) = tokio::sync::mpsc::channel(2);
+    let answer = streamed_answer(f.clone(), request.clone(), receiver);
+    sender
+        .send(Bytes::copy_from_slice(&body[..body.len() / 2]))
+        .await
+        .unwrap();
+    gates.after_answer_chunk.wait_for(1).await;
+    caller.abort();
+    let _ = caller.await;
+    wait_pending(&f.state, 0).await;
+    assert_eq!(
+        xmsg::observe_relay::test_hooks::reservations(&f.state),
+        (1, 512 * 1024),
+        "cancelled collector cannot release resources still owned by its live answer read"
+    );
+    gates.after_answer_chunk.release();
+    answer.abort();
+    let _ = answer.await;
+    drop(sender);
+    wait_reservations(&f.state, (0, 0)).await;
+    assert_eq!(
+        submit(&f, &request, body).await.0,
+        400,
+        "cancelled id remains dead after answer stream drops"
+    );
+    fresh_snapshot(&f).await;
+}
+
+#[tokio::test]
+async fn old_answer_after_worker_restart_cannot_satisfy_fresh_waiter() {
+    let f = Arc::new(RelayFixture::new().await);
+    let gates = xmsg::observe_relay::test_hooks::controls(&f.leaf_state);
+    gates.before_post.arm(2);
+    let worker =
+        xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
+    let caller = {
+        let f = f.clone();
+        tokio::spawn(async move {
+            f.request(&f.collector, "GET", &f.uri("events"), vec![], &[])
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(2), gates.before_post.wait_for(1))
+        .await
+        .unwrap();
+    let old =
+        serde_json::to_value(gates.received_control.lock().unwrap().clone().unwrap()).unwrap();
+    caller.abort();
+    let _ = caller.await;
+    wait_pending(&f.state, 0).await;
+    wait_reservations(&f.state, (0, 0)).await;
+    tokio::time::timeout(Duration::from_secs(2), worker.stop())
+        .await
+        .unwrap();
+    f._observer.publish(vec![xmsg::observe::Observation {
+        kind: "message_recorded".into(),
+        from: Some(format!("sender@{}", f.leaf.node)),
+        to: Some(format!("receiver@{}", f.leaf.node)),
+        message_id: Some("after-worker-restart".into()),
+        body_availability: "not_recorded".into(),
+        ..Default::default()
+    }]);
+    assert!(f._observer.flush_for_test(Duration::from_secs(3)));
+    let _worker =
+        xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
+    let fresh = {
+        let f = f.clone();
+        tokio::spawn(async move {
+            f.request(&f.collector, "GET", &f.uri("events"), vec![], &[])
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(2), gates.before_post.wait_for(2))
+        .await
+        .unwrap();
+    let current =
+        serde_json::to_value(gates.received_control.lock().unwrap().clone().unwrap()).unwrap();
+    assert_ne!(
+        current["id"], old["id"],
+        "fresh waiter gets a fresh opaque id"
+    );
+    assert_eq!(
+        submit(
+            &f,
+            &old,
+            String::from_utf8(future_page())
+                .unwrap()
+                .replace("LEAF_NODE", &f.leaf.node)
+                .into_bytes()
+        )
+        .await
+        .0,
+        400,
+        "old answer after worker/waiter restart is unsolicited"
+    );
+    assert!(
+        !fresh.is_finished(),
+        "old id cannot satisfy the fresh collector waiter"
+    );
+    assert_eq!(
+        xmsg::observe_relay::test_hooks::pending(&f.state),
+        1,
+        "fresh waiter remains live after old answer refusal"
+    );
+    gates.before_post.release();
+    let (status, body) = fresh.await.unwrap();
+    assert_eq!(
+        status, 200,
+        "fresh production worker still completes its own bound answer"
+    );
+    let page: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        page["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["message_id"] == "after-worker-restart"),
+        "fresh caller receives new projection rather than the old worker's already-prepared bytes"
+    );
+    wait_pending(&f.state, 0).await;
+    wait_reservations(&f.state, (0, 0)).await;
+}
+
+#[tokio::test]
+async fn leaf_default_off_refuses_current_direct_admission_before_any_metadata_read() {
+    for enabled in [false, true] {
+        let f = Arc::new(RelayFixture::new().await);
+        reload(&f.leaf_state, |config| {
+            config["reverse_observe"]["leaf_enabled"] = json!(enabled)
+        });
+        let reads = xmsg::observe_fed::test_hooks::controls(&f.leaf_state);
+        assert_eq!(
+            reads
+                .snapshot_candidates
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        let caller = {
+            let f = f.clone();
+            tokio::spawn(async move {
+                f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
+                    .await
+            })
+        };
+        let request = control(&f).await;
+        xmsg::observe_relay::test_hooks::deliver_control(
+            &f.leaf_state,
+            &f.hub.node,
+            &f.hub.cert,
+            "127.0.0.1".parse().unwrap(),
+            serde_json::from_value(request).unwrap(),
+        )
+        .await;
+        let (status, _) = caller.await.unwrap();
+        assert_eq!(status,if enabled {200} else {403},"current-snapshot leaf enable guard is independent of poll capability and generation enabled={enabled}");
+        let candidates = reads
+            .snapshot_candidates
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if enabled {
+            assert!(
+                candidates > 0,
+                "enabled neighbor actually invokes production metadata projection"
+            );
+        } else {
+            assert_eq!(
+                candidates, 0,
+                "disabled leaf never reads metadata before refusing"
+            );
+        }
+        wait_pending(&f.state, 0).await;
+        wait_reservations(&f.state, (0, 0)).await;
+    }
+}

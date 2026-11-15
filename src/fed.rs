@@ -7687,6 +7687,15 @@ pub(crate) struct ControlWorker {
     _owner: Arc<ControlOwner>,
 }
 impl ControlWorker {
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) async fn stop_for_test(self) {
+        let mut owner = match Arc::try_unwrap(self._owner) {
+            Ok(owner) => owner,
+            Err(_) => panic!("test worker has another owner"),
+        };
+        owner.task.abort();
+        let _ = (&mut owner.task).await;
+    }
     pub(crate) fn legacy(&self) -> bool {
         self._owner.legacy.load(Ordering::Relaxed)
     }
