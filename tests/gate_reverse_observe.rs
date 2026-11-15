@@ -2249,6 +2249,73 @@ async fn actual_streamed_answer_obeys_deadline_after_its_first_chunk() {
 }
 
 #[tokio::test]
+async fn stalled_partial_answer_terminates_at_original_five_second_deadline() {
+    let f = Arc::new(RelayFixture::new().await);
+    let before = f.state.db.lock().unwrap().total_changes();
+    let gates = xmsg::observe_relay::test_hooks::controls(&f.state);
+    gates.after_answer_chunk.arm(1);
+    let caller = {
+        let f = f.clone();
+        tokio::spawn(async move {
+            f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
+                .await
+        })
+    };
+    let request = control(&f).await;
+    let body = empty_snapshot(&f);
+    let middle = body.len() / 2;
+    let (sender, receiver) = tokio::sync::mpsc::channel(2);
+    let mut answer = streamed_answer(f.clone(), request, receiver);
+    sender
+        .send(Bytes::copy_from_slice(&body[..middle]))
+        .await
+        .unwrap();
+    gates.after_answer_chunk.wait_for(1).await;
+    assert_eq!(
+        xmsg::observe_relay::test_hooks::reservations(&f.state),
+        (1, 512 * 1024),
+        "stalled partial reader owns its original slot and buffers"
+    );
+    gates.after_answer_chunk.release();
+    let terminated = tokio::time::timeout(Duration::from_secs(5), &mut answer).await;
+    assert!(terminated.is_ok(),"stalled answer did not terminate at its original five-second deadline while producer stayed open");
+    assert_eq!(xmsg::observe_relay::test_hooks::reservations(&f.state),(0,0),"production read deadline releases original slot and buffers without producer EOF or client abort");
+    assert_eq!(
+        xmsg::observe_relay::test_hooks::pending(&f.state),
+        0,
+        "expired stalled answer leaves no pending waiter"
+    );
+    assert_eq!(
+        gates
+            .max_buffered_answer
+            .load(std::sync::atomic::Ordering::Relaxed),
+        middle,
+        "producer supplied exactly one partial DTO chunk"
+    );
+    assert_eq!(
+        gates
+            .clock_offset_ms
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "deadline uses the real monotonic timer"
+    );
+    let answer = terminated.unwrap().unwrap();
+    assert_ne!(answer.0, 200, "partial stalled answer never succeeds");
+    drop(sender);
+    let response = caller.await.unwrap();
+    assert_ne!(
+        response.0, 200,
+        "collector receives a fixed refusal, never a partial success"
+    );
+    assert_eq!(
+        f.state.db.lock().unwrap().total_changes(),
+        before,
+        "stalled read never mutates bus primary"
+    );
+    fresh_snapshot(&f).await;
+}
+
+#[tokio::test]
 async fn cancellation_during_answer_read_retains_reservations_until_stream_drops() {
     let f = Arc::new(RelayFixture::new().await);
     let gates = xmsg::observe_relay::test_hooks::controls(&f.state);
