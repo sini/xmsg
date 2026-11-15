@@ -45,6 +45,10 @@ pub mod observe_fed;
 #[cfg(feature = "daemon")]
 mod observe_snapshot;
 #[cfg(feature = "daemon")]
+pub mod observe_collector_auth;
+#[cfg(feature = "daemon")]
+pub mod observe_collector_store;
+#[cfg(feature = "daemon")]
 pub mod pi;
 #[cfg(feature = "daemon")]
 pub mod plugin;
