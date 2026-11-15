@@ -675,5 +675,37 @@
       }
     ],
     "expected_literal": "stored registration metadata was promoted to current liveness"
+  },
+  {
+    "label": "E16-ordinary-events",
+    "target": "observe_http",
+    "test_file": "tests/observe_http.rs",
+    "test": "observe_is_available_only_through_authenticated_unix_requests",
+    "expected_literal": "federation export /fed/v2/observe/events must be absent from authenticated Unix HTTP",
+    "edits": [
+      {
+        "file": "src/http.rs",
+        "start": "pub fn build_router",
+        "end": "pub fn build_unix_router",
+        "needle": "        .route(\"/healthz\", get(healthz_handler))",
+        "replacement": "        .route(\"/healthz\", get(healthz_handler))\n        .route(\"/fed/v2/observe/events\", get(|| async { axum::Json(serde_json::json!({\"v\":1,\"node\":\"observer.example\",\"epoch\":\"fixture\",\"scope\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"events\":[],\"next\":0,\"has_more\":false,\"gaps\":[],\"available\":true})) }))"
+      }
+    ]
+  },
+  {
+    "label": "E16-ordinary-snapshot",
+    "target": "observe_http",
+    "test_file": "tests/observe_http.rs",
+    "test": "observe_is_available_only_through_authenticated_unix_requests",
+    "expected_literal": "federation export /fed/v2/observe/snapshot must be absent from authenticated Unix HTTP",
+    "edits": [
+      {
+        "file": "src/http.rs",
+        "start": "pub fn build_router",
+        "end": "pub fn build_unix_router",
+        "needle": "        .route(\"/healthz\", get(healthz_handler))",
+        "replacement": "        .route(\"/healthz\", get(healthz_handler))\n        .route(\"/fed/v2/observe/snapshot\", get(|| async { axum::Json(serde_json::json!({\"v\":1,\"node\":\"observer.example\",\"scope\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"observed_at\":1,\"endpoints\":[],\"truncated\":false,\"available\":\"partial\"})) }))"
+      }
+    ]
   }
 ]
