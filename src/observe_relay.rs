@@ -286,6 +286,7 @@ struct Waiter {
     dispatched: bool,
     answering: bool,
     tx: oneshot::Sender<Result<Vec<u8>, Failure>>,
+    reservations: Option<Arc<Reservations>>,
 }
 impl std::ops::Deref for Waiter {
     type Target = Binding;
@@ -304,6 +305,7 @@ struct RelayState {
     queue: Mutex<Queue>,
     slots: Arc<Semaphore>,
     buffers: Arc<Semaphore>,
+    refusals: Arc<Semaphore>,
     #[cfg(any(test, feature = "test-hooks"))]
     controls: Arc<test_hooks::Controls>,
 }
@@ -320,6 +322,7 @@ fn shared(fs: &Arc<FedState>) -> Arc<RelayState> {
         queue: Mutex::default(),
         slots: Arc::new(Semaphore::new(MAX_WAITERS)),
         buffers: Arc::new(Semaphore::new(MAX_BUFFERS)),
+        refusals: Arc::new(Semaphore::new(MAX_WAITERS)),
         #[cfg(any(test, feature = "test-hooks"))]
         controls: test_hooks::controls(fs),
     });
@@ -463,6 +466,7 @@ async fn relay_inner(
         dispatched: false,
         answering: false,
         tx,
+        reservations: None,
     };
     state.authorize(&waiter)?;
     if !state
@@ -484,6 +488,12 @@ async fn relay_inner(
         .clone()
         .try_acquire_many_owned((2 * MAX_BYTES) as u32)
         .map_err(|_| Failure::Busy)?;
+    let reservations = Arc::new(Reservations {
+        _slot: slot,
+        _buffers: buffers,
+    });
+    let mut waiter = waiter;
+    waiter.reservations = Some(reservations.clone());
     {
         let mut queue = state.queue.lock().unwrap();
         if queue
@@ -522,16 +532,18 @@ async fn relay_inner(
         .header("content-type", "application/json")
         .body(axum::body::Body::new(HeldBody {
             bytes: Some(body.into()),
-            _slot: slot,
-            _buffers: buffers,
+            _reservations: reservations,
             _forget: forget,
         }))
         .map_err(|_| Failure::Invalid)?)
 }
-struct HeldBody {
-    bytes: Option<bytes::Bytes>,
+struct Reservations {
     _slot: OwnedSemaphorePermit,
     _buffers: OwnedSemaphorePermit,
+}
+struct HeldBody {
+    bytes: Option<bytes::Bytes>,
+    _reservations: Arc<Reservations>,
     _forget: Forget,
 }
 impl hyper::body::Body for HeldBody {
@@ -663,7 +675,7 @@ async fn answer_inner(state: Arc<RelayState>, id: String, request: Request) -> R
     }) {
         return Err(Failure::Invalid);
     }
-    {
+    let (deadline, _reservations) = {
         let mut queue = state.queue.lock().unwrap();
         let w = queue.waiting.get_mut(&id).ok_or(Failure::Invalid)?;
         if !w.dispatched
@@ -677,10 +689,15 @@ async fn answer_inner(state: Arc<RelayState>, id: String, request: Request) -> R
         }
         state.authorize(w)?;
         w.answering = true;
-    }
-    let body = axum::body::to_bytes(request.into_body(), MAX_BYTES)
-        .await
-        .map_err(|_| Failure::Invalid);
+        (w.deadline, w.reservations.clone())
+    };
+    let body = tokio::time::timeout_at(
+        deadline,
+        axum::body::to_bytes(request.into_body(), MAX_BYTES),
+    )
+    .await
+    .map_err(|_| Failure::Unreachable)
+    .and_then(|result| result.map_err(|_| Failure::Invalid));
     let mut queue = state.queue.lock().unwrap();
     let w = queue.waiting.remove(&id).ok_or(Failure::Invalid)?;
     let result = (|| {
@@ -938,11 +955,17 @@ pub(crate) async fn spawn_answer(
             });
         }
         Err(error) => {
-            let _ = tokio::time::timeout_at(
-                deadline,
-                post_answer(&fs, &hub, &control, Err(error), None),
-            )
-            .await;
+            let Ok(refusal) = shared(&fs).refusals.clone().try_acquire_owned() else {
+                return;
+            };
+            tokio::spawn(async move {
+                let _refusal = refusal;
+                let _ = tokio::time::timeout_at(
+                    deadline,
+                    post_answer(&fs, &hub, &control, Err(error), None),
+                )
+                .await;
+            });
         }
     }
 }
@@ -1117,4 +1140,8 @@ async fn post_answer(
         return Err(Failure::Invalid);
     }
     Ok(())
+}
+
+pub(crate) fn keep_scheduler(fs: &Arc<FedState>) -> impl Send {
+    shared(fs)
 }

@@ -5375,15 +5375,19 @@ async fn get_federated_inbox_witnessed(
             .await
             .map_err(|e| map_tls_connect_error(peer_name, e))?;
 
-        let witness = crate::observe_relay::PollWitness::new(
-            remote_ip,
-            tls_stream
-                .get_ref()
-                .1
-                .peer_certificates()
-                .and_then(|certs| certs.first())
-                .map(|cert| cert.as_ref()),
-        )?;
+        let witness = if advertise {
+            Some(crate::observe_relay::PollWitness::new(
+                remote_ip,
+                tls_stream
+                    .get_ref()
+                    .1
+                    .peer_certificates()
+                    .and_then(|certs| certs.first())
+                    .map(|cert| cert.as_ref()),
+            )?)
+        } else {
+            None
+        };
         let io = hyper_util::rt::TokioIo::new(tls_stream);
         let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
             .await
@@ -5462,7 +5466,7 @@ async fn get_federated_inbox_witnessed(
                     return Err(AppError::BadRequest("invalid observation control".into()));
                 }
             }
-            Ok((msg, Some(witness)))
+            Ok((msg, witness))
         } else {
             if control == Some(true) && status == StatusCode::BAD_REQUEST {
                 return Err(AppError::BadRequest("control inbox unsupported".into()));
@@ -7665,6 +7669,7 @@ pub(crate) fn spawn_control_worker(fs: Arc<FedState>, peer: String) -> ControlWo
     let legacy_task = legacy.clone();
     let task = tokio::spawn(async move {
         let read_slots = crate::observe_fed::read_slots(&fs);
+        let _scheduler = crate::observe_relay::keep_scheduler(&fs);
         loop {
             let peers = fs.current_peers();
             let advertise = peers.reverse_observe.leaf_enabled;
