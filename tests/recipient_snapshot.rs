@@ -180,6 +180,21 @@ async fn snapshot_leaves_claims_queues_database_and_registration_stores_untouche
         assert_eq!(status, StatusCode::OK, "{value}");
         assert_eq!(value["read_only"], true);
         assert_eq!(value["partial"], true);
+        assert_eq!(
+            fixture.state.db.lock().unwrap().total_changes(),
+            changes,
+            "snapshot wrote to the database"
+        );
+        assert_eq!(
+            std::fs::read(fixture.root.path().join("primary.sqlite")).unwrap(),
+            before,
+            "snapshot changed database bytes"
+        );
+        assert_eq!(
+            fixture.store_snapshot(),
+            stores,
+            "snapshot evicted or changed registration stores"
+        );
         let rows = value["recipients"].as_array().unwrap();
         assert!(rows
             .iter()
@@ -204,21 +219,6 @@ async fn snapshot_leaves_claims_queues_database_and_registration_stores_untouche
                 "missing {id}: {value}"
             );
         }
-        assert_eq!(
-            fixture.state.db.lock().unwrap().total_changes(),
-            changes,
-            "snapshot wrote to the database"
-        );
-        assert_eq!(
-            std::fs::read(fixture.root.path().join("primary.sqlite")).unwrap(),
-            before,
-            "snapshot changed database bytes"
-        );
-        assert_eq!(
-            fixture.store_snapshot(),
-            stores,
-            "snapshot evicted or changed registration stores"
-        );
         assert_eq!(
             fixture.inbox.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock,
@@ -524,7 +524,11 @@ async fn snapshot_last_seen_comes_only_from_recorded_seen_evidence() {
     }
     let (_, value) = fixture.get("?read_only=true").await;
     let rows = value["recipients"].as_array().unwrap();
-    for id in ["44444444-4444-4444-8444-444444444444~2", "inactive-codex"] {
+    for id in [
+        "44444444-4444-4444-8444-444444444444~2",
+        "inactive-codex",
+        "unseen-parent/child",
+    ] {
         let row = rows
             .iter()
             .find(|r| r["address"] == format!("{id}@snapshot.example"))
