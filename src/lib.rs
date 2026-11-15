@@ -67,6 +67,8 @@ mod recipient_snapshot;
 #[cfg(feature = "daemon")]
 pub mod registry;
 #[cfg(feature = "daemon")]
+pub mod schema_status;
+#[cfg(feature = "daemon")]
 pub mod storage;
 #[cfg(feature = "daemon")]
 pub mod surface;
