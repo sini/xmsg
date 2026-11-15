@@ -34,10 +34,19 @@
             python3 tests/dtxj_collector_browser.py \
               --fixture-dir "$XMSG_COLLECTOR_BROWSER_FIXTURE_DIR" \
               --chromium ${lib.getExe pkgs.chromium} | tee collector-browser.log
+            python3 tests/fixtures/dtxj2/run_compat.py \
+              --source "$PWD" \
+              --output "$TMPDIR/collector-compat" \
+              --artifact-seed "''${CARGO_TARGET_DIR:-target}" | tee collector-compat.log
           '';
           installPhase = ''
             mkdir -p "$out"
-            cp collector-browser.log "$out/"
+            cp collector-browser.log collector-compat.log "$out/"
+            mkdir -p "$out/collector-compat"
+            cp "$TMPDIR/collector-compat/"*.json \
+              "$TMPDIR/collector-compat/"*.jsonl \
+              "$TMPDIR/collector-compat/"*.stderr \
+              "$TMPDIR/collector-compat/"*.log "$out/collector-compat/"
           '';
         };
       };
