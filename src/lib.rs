@@ -37,6 +37,8 @@ pub mod node;
 #[cfg(feature = "daemon")]
 pub mod observe;
 #[cfg(feature = "daemon")]
+pub mod observe_collector;
+#[cfg(feature = "daemon")]
 pub mod observe_collector_auth;
 #[cfg(feature = "daemon")]
 pub mod observe_collector_net;

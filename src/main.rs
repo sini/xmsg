@@ -31,6 +31,9 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Collect authorized read-only observation metadata
+    ObserveCollector(xmsg::observe_collector::Args),
+
     /// List mesh recipients and node status
     List(operator::ListArgs),
 
@@ -469,6 +472,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::ObserveCollector(args) => {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(xmsg::observe_collector::run(args))?;
+        }
         Commands::List(args) => operator::list(args)?,
         Commands::Watch(args) => {
             let rt = tokio::runtime::Builder::new_multi_thread()
