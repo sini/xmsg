@@ -11,7 +11,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::io::AsyncReadExt;
 use tower::ServiceExt;
-use xmsg::http::{build_router, AppState};
+use xmsg::http::{build_router, build_unix_router, AppState};
 
 const LIVE: &str = "11111111-1111-4111-8111-111111111111";
 const NEW: &str = "22222222-2222-4222-8222-222222222222";
@@ -166,7 +166,20 @@ impl Fixture {
     }
 
     async fn get(&self, query: &str) -> (StatusCode, Value) {
-        let response = build_router(self.state.clone())
+        self.get_on(query, false).await
+    }
+
+    async fn get_unix(&self, query: &str) -> (StatusCode, Value) {
+        self.get_on(query, true).await
+    }
+
+    async fn get_on(&self, query: &str, unix: bool) -> (StatusCode, Value) {
+        let router = if unix {
+            build_unix_router(self.state.clone())
+        } else {
+            build_router(self.state.clone())
+        };
+        let response = router
             .oneshot(
                 Request::builder()
                     .uri(format!("/v1/recipients{query}"))
@@ -579,4 +592,114 @@ async fn snapshot_last_seen_comes_only_from_recorded_seen_evidence() {
             .unwrap();
         assert_eq!(row["last_seen"], seen);
     }
+}
+
+#[tokio::test]
+async fn process_observations_are_opt_in_unix_only_and_read_only() {
+    let fixture = Fixture::new();
+    fixture.seed();
+    fixture
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE instance_claims SET pid=?1,proc_start='different-process-start' WHERE id=?2",
+            rusqlite::params![std::process::id(), STALE],
+        )
+        .unwrap();
+    let before = std::fs::read(fixture.root.path().join("primary.sqlite")).unwrap();
+    let changes = fixture.state.db.lock().unwrap().total_changes();
+    let stores = fixture.store_snapshot();
+    let (_, baseline) = fixture.get_unix("?read_only=true").await;
+    assert!(baseline["recipients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row.get("process_liveness").is_none()));
+    let (status, value) = fixture.get_unix("?read_only=true&liveness=true").await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let observation = |id: &str| {
+        value["recipients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["address"] == format!("{id}@snapshot.example"))
+            .unwrap()["process_liveness"]
+            .clone()
+    };
+    assert_eq!(
+        observation(LIVE),
+        json!({"state":"live","reason":"identity_match"})
+    );
+    assert_eq!(
+        observation(STALE),
+        json!({"state":"gone","reason":"identity_mismatch"})
+    );
+    assert_eq!(
+        observation("expired"),
+        json!({"state":"unknown","reason":"missing_identity"})
+    );
+    assert_eq!(
+        observation("status"),
+        json!({"state":"unknown","reason":"missing_identity"})
+    );
+    assert_eq!(
+        observation("plugin-record"),
+        json!({"state":"unknown","reason":"missing_identity"})
+    );
+    assert_eq!(
+        fixture.state.db.lock().unwrap().total_changes(),
+        changes,
+        "observation wrote to database"
+    );
+    assert_eq!(
+        std::fs::read(fixture.root.path().join("primary.sqlite")).unwrap(),
+        before
+    );
+    assert_eq!(fixture.store_snapshot(), stores);
+    assert_eq!(
+        fixture.inbox.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "observation delivered queued work"
+    );
+    let (status, _) = fixture.get("?read_only=true&liveness=true").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = fixture.get_unix("?liveness=true").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn unavailable_process_backend_is_unknown_and_never_gone() {
+    let mut fixture = Fixture::new();
+    fixture.seed();
+    Arc::get_mut(&mut fixture.state)
+        .unwrap()
+        .agy_config
+        .proc_root = fixture.root.path().join("unavailable-proc");
+    let (status, value) = fixture.get_unix("?read_only=true&liveness=true").await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    for id in [LIVE, STALE, "codex-record", "agy-record", "pi-record"] {
+        let row = value["recipients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["address"] == format!("{id}@snapshot.example"))
+            .unwrap();
+        assert_eq!(
+            row["process_liveness"],
+            json!({"state":"unknown","reason":"backend_unavailable"}),
+            "{id}: {value}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn process_observation_keeps_the_cold_runtime_guard() {
+    let fixture = Fixture::cold();
+    let changes = fixture.state.db.lock().unwrap().total_changes();
+    let (status, value) = fixture.get_unix("?read_only=true&liveness=true").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{value}");
+    assert!(!xmsg::codex::runtime_initialized(&fixture.state.db));
+    assert_eq!(fixture.state.db.lock().unwrap().total_changes(), changes);
 }

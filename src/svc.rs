@@ -158,6 +158,29 @@ pub fn next_svc_token() -> u64 {
     NEXT_SVC_TOKEN.fetch_add(1, Ordering::Relaxed)
 }
 
+pub(crate) fn observe_svc_process(
+    proc_root: &Path,
+    info: &SvcSessionInfo,
+) -> (&'static str, &'static str) {
+    use crate::process::StartTimeProbe;
+    let Some(witness) = &info.liveness else {
+        return ("unknown", "missing_identity");
+    };
+    if !witness.connected.load(Ordering::Acquire) {
+        return ("unknown", "missing_identity");
+    }
+    match probe_service_peer(proc_root, &witness.peer) {
+        Ok(StartTimeProbe::Gone) => ("gone", "identity_gone"),
+        Ok(StartTimeProbe::Unavailable) => ("unknown", "backend_unavailable"),
+        Ok(StartTimeProbe::Known(current)) => match &witness.start {
+            StartTimeProbe::Known(expected) if current == *expected => ("live", "identity_match"),
+            StartTimeProbe::Known(_) => ("gone", "identity_mismatch"),
+            _ => ("unknown", "missing_identity"),
+        },
+        Err(_) => ("unknown", "probe_error"),
+    }
+}
+
 pub fn is_svc_session_alive(proc_root: &Path, info: &SvcSessionInfo) -> bool {
     use crate::process::StartTimeProbe;
     if let Some(witness) = &info.liveness {
@@ -1225,5 +1248,70 @@ mod liveness_tests {
             "stale token must not acquire a new registration"
         );
         assert!(actual.validate(root, &peer).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod process_observation_tests {
+    use super::*;
+
+    fn info() -> SvcSessionInfo {
+        let pid = std::process::id();
+        let start =
+            crate::process::starttime(Path::new(crate::process::LIVE_PROC_ROOT), pid).unwrap();
+        SvcSessionInfo {
+            session_id: "observed-service".into(),
+            name: "observed-service".into(),
+            pid,
+            starttime: start.clone(),
+            cwd: "/".into(),
+            registered_at: 1,
+            token: 1,
+            liveness: Some(Arc::new(SvcLiveness {
+                peer: crate::process::PeerCred::unpinned(crate::agent::current_uid(), pid),
+                start: crate::process::StartTimeProbe::Known(start),
+                connected: AtomicBool::new(true),
+            })),
+        }
+    }
+
+    #[test]
+    fn service_process_observation_uses_only_the_retained_witness() {
+        let mut info = info();
+        let proc_root = Path::new(crate::process::LIVE_PROC_ROOT);
+        assert_eq!(
+            observe_svc_process(proc_root, &info),
+            ("live", "identity_match")
+        );
+        info.liveness
+            .as_ref()
+            .unwrap()
+            .connected
+            .store(false, Ordering::Release);
+        assert_eq!(
+            observe_svc_process(proc_root, &info),
+            ("unknown", "missing_identity")
+        );
+        info.liveness = None;
+        assert_eq!(
+            observe_svc_process(proc_root, &info),
+            ("unknown", "missing_identity")
+        );
+    }
+
+    #[test]
+    fn service_process_observation_does_not_promote_unavailable_probes() {
+        let info = info();
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(
+            observe_svc_process(root.path(), &info),
+            ("unknown", "backend_unavailable")
+        );
+        assert!(info
+            .liveness
+            .as_ref()
+            .unwrap()
+            .connected
+            .load(Ordering::Acquire));
     }
 }

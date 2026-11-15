@@ -1,6 +1,6 @@
 {
   "baseline": {
-    "linux": "cargo test --locked on kyuj-1-version candidate: exit 0, 1154 passed/8 ignored/99 summaries; all 96 integration targets; log retained with version metadata evidence",
+    "linux": "cargo test --locked on kyuj-1-liveness frozen source: exit0, measured {'passed': 1166, 'failed': 0, 'ignored': 8, 'summaries': 100}; all97 integration targets",
     "darwin": "run 43738022464 job 132884828932 on 54272ea23d64a0454158697b2517eed30068e541: 1157 passed/10 ignored/0 failed/99 summaries; native count guard passed all 96 executed targets before reporting the stale prior count"
   },
   "integration_targets": [
@@ -9,6 +9,7 @@
     "tests/ancestor_walk.rs",
     "tests/claude_lstart_macos.rs",
     "tests/doctor.rs",
+    "tests/doctor_liveness.rs",
     "tests/e2e_agy_delivery.rs",
     "tests/e2e_http.rs",
     "tests/e2e_mcp.rs",
@@ -103,10 +104,10 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1154,
+      "passed": 1166,
       "failed": 0,
       "ignored": 8,
-      "summaries": 99
+      "summaries": 100
     },
     "darwin": {
       "passed": 1157,

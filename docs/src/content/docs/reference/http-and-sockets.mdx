@@ -90,6 +90,29 @@ requiring a read-only snapshot must report that failure rather than retry the or
 The planned [`xmsg watch`](/reference/cli-and-mcp/#xmsg-watch-planned) uses this mode exclusively
 for its roster. The local observation journal supplies its separate exchange timeline.
 
+### Registered process liveness (planned)
+
+The Unix socket accepts an explicit diagnostic variant of the read-only snapshot:
+
+```bash
+curl -fsS --unix-socket "$sock" \
+  'http://localhost/v1/recipients?read_only=true&liveness=true'
+```
+
+It adds `live`, `gone` or `unknown` evidence about the registered owner process where an
+existing witness can answer. These are process states, not proof of harness addressability,
+a usable writer lease, delivery or task completion. A service probe reads its existing
+witness without updating registration state. Some harness rows have no usable evidence
+and remain unknown. Missing `/proc`, unavailable native APIs or denied inspection stay
+unknown where no existing witness answers; the endpoint does not require `/proc`.
+
+The liveness flag is Unix-only and requires `read_only=true`; local TCP and federation
+requests do not offer it. The default snapshot and watch roster remain metadata-only.
+The same snapshot bounds and partial-coverage limits apply, and a cold runtime still
+returns `503` instead of initializing it. Missing rows or a truncated response do not
+establish that a process is gone. A client whose daemon rejects this opt-in must report
+unknown rather than fall back to the ordinary listing.
+
 ### Local observation journal (planned)
 
 `GET /v1/observe/events` reads bounded message metadata over `http.sock` from the

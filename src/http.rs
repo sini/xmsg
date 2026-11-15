@@ -697,6 +697,8 @@ fn parse_query<T>(query: Result<Query<T>, QueryRejection>) -> Result<T, AppError
 struct RecipientListQuery {
     #[serde(default)]
     read_only: bool,
+    #[serde(default)]
+    liveness: bool,
     name: Option<String>,
     node: Option<String>,
     kind: Option<String>,
@@ -708,8 +710,16 @@ struct RecipientListQuery {
 async fn list_recipients_handler(
     State(state): State<Arc<AppState>>,
     peer: PeerInfo,
+    local: Option<Extension<LocalHealth>>,
     query: Result<Query<RecipientListQuery>, QueryRejection>,
 ) -> Result<Response, AppError> {
+    if query.as_ref().is_ok_and(|Query(request)| request.liveness)
+        && (local.is_none() || !query.as_ref().is_ok_and(|Query(request)| request.read_only))
+    {
+        return Err(AppError::BadRequest(
+            "process liveness requires a read-only snapshot over the local Unix listener".into(),
+        ));
+    }
     if query.as_ref().is_ok_and(|Query(request)| request.read_only)
         && !crate::codex::runtime_initialized(&state.db)
     {
@@ -738,7 +748,7 @@ async fn list_recipients_handler(
         host: request.host,
     };
     if request.read_only {
-        let entries = crate::recipient_snapshot::collect(&state, &query)?;
+        let entries = crate::recipient_snapshot::collect(&state, &query, request.liveness)?;
         return Ok((StatusCode::OK, Json(entries)).into_response());
     }
     let entries = surface::list(&state, &query).await?;

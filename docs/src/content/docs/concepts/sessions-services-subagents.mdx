@@ -133,3 +133,21 @@ service, then `xmsg watch` to follow recorded registrations and newly observed e
 `xmsg list --node REMOTE`, which can reconcile and deliver queued work; use the
 [fleet observer](/concepts/fleet-observer/) for the planned remote view once deployed. See the
 [CLI reference](/reference/cli-and-mcp/#xmsg-watch-planned) for refresh, socket and limit details.
+
+## Diagnose registered process liveness (planned)
+
+Use `xmsg doctor` when you need a bounded, read-only check of process evidence behind
+local registrations. It asks the Unix socket for the opt-in liveness snapshot and reports
+`live`, `gone` or `unknown`. A gone/stale registration warns; missing or unsupported evidence
+stays unknown. Services use their existing witness, and some harness rows have no usable
+witness. The diagnostic does not reconcile claims, alter registrations or deliver queued work.
+
+For example, run `xmsg doctor --json` while investigating a registration left behind after
+a process exits. Read `live` as evidence about the registered owner process only: it does
+not prove the harness accepts requests, a Codex writer lease is usable, or a message reached
+an agent. Missing `/proc` or a denied native API remains a supported portable mode, with one
+portability warning per run where evidence cannot be obtained. A partial or truncated roster
+cannot establish that an absent process is gone. Watch and default snapshots keep their
+metadata-only behavior. See [troubleshooting](/operations/troubleshooting/) for limits and
+[the HTTP reference](/reference/http-and-sockets/#registered-process-liveness-planned) for the
+explicit opt-in request.

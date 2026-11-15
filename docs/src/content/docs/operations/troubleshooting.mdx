@@ -42,6 +42,7 @@ local defaults; it cannot prove that the running daemon uses the same configurat
 | Runtime directory or socket fails | A selected path is missing, has the wrong type, owner or permissions. | Check the daemon user, runtime directory and socket flags. Correct the installation deliberately; doctor does not create directories or change modes. |
 | Daemon health fails | The bounded request to `GET /healthz` did not give the expected health response. | Check that the daemon is running and that `--http-sock` selects its socket. Read the service logs. |
 | Daemon build revision warning (planned) | The daemon and client report different known revisions, or revision metadata is unavailable. | Check the intended source pin and the selected Unix socket. Nix builds embed the revision; plain Cargo builds may report `unknown`. The crate version alone is insufficient. A warning does not fail the health check or prove the daemon needs restarting. |
+| Registered process liveness warning (planned) | A registration has gone/stale process evidence, or bounded read-only diagnostics cannot establish liveness. | Inspect the named local process and registration deliberately. `live` is only process evidence; it does not prove the harness is addressable or a message can be delivered. Missing `/proc` or denied platform inspection may leave evidence unknown and produces one portability warning per run. |
 | Sessions directory warning | Health reports that the sessions directory is missing. | Check the harness path if this node hosts sessions. A service-only node may not need one. |
 | Database schema fails or is unknown | The read-only probe cannot establish the expected global schema version. | Check the database path and use the documented upgrade procedure. A passing global version check does not prove every additive migration is installed. |
 | Journal or WAL warning | Database state cannot be fully interpreted from a read-only diagnostic. | Inspect the daemon and its logs before taking action. File presence alone does not establish hotness or corruption; do not delete a journal merely because doctor mentions it. |
@@ -51,8 +52,12 @@ local defaults; it cannot prove that the running daemon uses the same configurat
 | Enrollment renewal warns | The certificate has reached two-thirds of its recorded lifetime. | Schedule renewal. For a 24-hour certificate this is 16 hours after issuance; a fixed seven-day threshold would be misleading. |
 | CA TLS warning | The optional CA TLS handshake did not succeed. | Check connectivity and configured trust. A successful handshake establishes TLS reachability, not enrollment application health or login readiness. |
 
-Doctor never calls recipient listing to diagnose sessions: listing can synchronize claims
-and deliver queued work. It also avoids enrollment-pending APIs and commands that initialize
+Doctor uses only the explicit Unix read-only liveness snapshot to inspect registrations.
+It never falls back to ordinary recipient listing, which can synchronize claims and deliver
+queued work. An older daemon, cold runtime, unsupported source or bounded/partial response
+leaves uncertain evidence unknown; a gone/stale registration warns rather than fails. Some
+rows lack process evidence, and a missing row does not prove a process is gone. Doctor also
+avoids enrollment-pending APIs and commands that initialize
 stores. It does not send, acknowledge or consume a message, mint a token or load a private
 key for a diagnostic repair.
 
@@ -61,7 +66,8 @@ key for a diagnostic repair.
 Doctor reports the running daemon's version and build revision when its Unix health
 response supplies them; missing metadata remains unknown. It does not establish loaded
 configuration, full migration readiness, actual journal hotness, per-peer mTLS connectivity,
-remote certificate expiry, clock skew, CA application health or session liveness. Treat these as separate
-investigations, not implied successes. Doctor offers no automatic database recovery or
+remote certificate expiry, clock skew, CA application health or harness addressability.
+Registered owner-process liveness does not prove a usable Codex writer lease, message
+delivery or task completion. Treat these as separate investigations, not implied successes. Doctor offers no automatic database recovery or
 integrity guarantee. See the [CLI reference](/reference/cli-and-mcp/#xmsg-doctor-planned)
 for its options and output contract.

@@ -125,11 +125,27 @@ cannot establish that a running daemon loaded those same paths or configuration.
 the existing private `enroll.json`.
 
 Doctor reads local filesystem metadata, probes the database read-only and makes a bounded
-`GET /healthz` request on the HTTP Unix socket. Optional peer configuration uses the same
+`GET /healthz` request on the HTTP Unix socket. It also requests the explicit local
+read-only process-liveness snapshot (planned):
+`GET /v1/recipients?read_only=true&liveness=true`. Optional peer configuration uses the same
 parser as `check-peers`. Optional saved enrollment metadata supplies expiry and renewal
 checks; its CA probe makes a TLS handshake only. Doctor does not repair files, initialize
 or migrate a database, register a service, renew credentials or send messages. It does not
-call recipient listing or enrollment-pending endpoints, which can change daemon state.
+call the ordinary recipient listing or enrollment-pending endpoints, which can change daemon state.
+
+The liveness check reports registered **process** evidence as `live`, `gone` or `unknown`.
+It does not establish harness addressability, a usable Codex writer lease, message delivery
+or task completion. A gone or stale registration warns rather than fails. An older daemon,
+a cold runtime (`503`), unsupported evidence or a bounded/partial response remains unknown;
+doctor never retries through the ordinary live listing. The roster can omit registrations,
+so absence is not evidence that a process is gone. Services use only their existing stored
+witness, without registration changes. Rows without usable evidence stay unknown.
+
+Process inspection is optional: missing `/proc`, an unavailable platform API or denied
+inspection does not become a hard dependency. Doctor gives one portability warning per run
+when process evidence cannot be obtained, rather than repeating it for every row. Existing
+witnesses can still establish liveness where supported. Default snapshots and `xmsg watch`
+do not opt into these probes.
 
 A database schema check covers the global schema version, not every additive migration.
 A journal or WAL file is not proof of a hot journal; uncertainty produces a warning rather

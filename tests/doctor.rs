@@ -23,6 +23,14 @@ struct Fixture {
 
 impl Fixture {
     fn new(health: Value) -> Self {
+        Self::with_snapshot(
+            health,
+            200,
+            json!({"read_only":true,"partial":true,"truncated":false,"recipients":[]}),
+        )
+    }
+
+    fn with_snapshot(health: Value, snapshot_status: u16, snapshot: Value) -> Self {
         let root = tempfile::tempdir().unwrap();
         let run = root.path().join("run");
         fs::create_dir(&run).unwrap();
@@ -58,8 +66,14 @@ impl Fixture {
                                 break;
                             }
                         }
-                        let body = health.to_string();
-                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+                        let is_health = captured
+                            .lock()
+                            .unwrap()
+                            .last()
+                            .is_some_and(|request| request == "GET /healthz HTTP/1.1");
+                        let body = if is_health { &health } else { &snapshot }.to_string();
+                        let status = if is_health { 200 } else { snapshot_status };
+                        let _ = write!(stream, "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5))
@@ -122,13 +136,15 @@ impl Fixture {
         (output, report)
     }
 
-    fn assert_health_only(&self) {
+    fn assert_read_only_requests(&self) {
         let requests = self.requests.lock().unwrap();
         assert!(!requests.is_empty(), "health detector never ran");
         assert!(
-            requests
-                .iter()
-                .all(|request| request == "GET /healthz HTTP/1.1"),
+            requests.iter().all(|request| matches!(
+                request.as_str(),
+                "GET /healthz HTTP/1.1"
+                    | "GET /v1/recipients?read_only=true&liveness=true HTTP/1.1"
+            )),
             "unexpected requests: {requests:?}"
         );
     }
@@ -179,7 +195,7 @@ fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>, u32)> {
 }
 
 #[test]
-fn healthy_json_is_read_only_and_requests_only_health() {
+fn healthy_json_is_read_only_and_requests_only_read_only_sources() {
     let fixture = Fixture::healthy();
     let before = snapshot(fixture.root.path());
     let (output, report) = fixture.report();
@@ -209,7 +225,7 @@ fn healthy_json_is_read_only_and_requests_only_health() {
         before,
         "doctor created or changed persistent fixture files"
     );
-    fixture.assert_health_only();
+    fixture.assert_read_only_requests();
 }
 
 #[test]
@@ -259,7 +275,7 @@ fn missing_optional_sessions_directory_warns_without_failing_node() {
     let (output, report) = fixture.report();
     assert_eq!(output.status.code(), Some(0));
     status(&report, "daemon.sessions_directory", "warn");
-    fixture.assert_health_only();
+    fixture.assert_read_only_requests();
 }
 
 #[test]
@@ -306,7 +322,7 @@ fn malformed_explicit_peers_file_fails_without_network_or_rewrite() {
     assert_eq!(output.status.code(), Some(1));
     status(&report, "peers.file", "fail");
     assert_eq!(fs::read(peers).unwrap(), b"{not valid JSON");
-    fixture.assert_health_only();
+    fixture.assert_read_only_requests();
 }
 
 fn enrollment(fixture: &Fixture, issued_at: i64, not_after: i64) -> PathBuf {
@@ -503,7 +519,7 @@ fn daemon_build_metadata_is_reported_without_guessing() {
     assert!(text.status.success());
     let text = String::from_utf8(text.stdout).unwrap();
     assert!(text.contains("fixture-other-revision") && text.contains("0.1.7"));
-    fixture.assert_health_only();
+    fixture.assert_read_only_requests();
 }
 
 #[test]
@@ -548,4 +564,106 @@ fn matching_build_revision_passes_only_when_known() {
             "pass"
         },
     );
+}
+
+#[test]
+fn unsupported_or_cold_process_source_warns_without_live_listing_fallback() {
+    for code in [400, 404, 503] {
+        let fixture = Fixture::with_snapshot(
+            json!({"status":"ok","sessions_dir":"ok"}),
+            code,
+            json!({"error":"unsupported"}),
+        );
+        let (output, report) = fixture.report();
+        assert!(output.status.success());
+        status(&report, "sessions.process", "warn");
+        assert!(check(&report, "sessions.process")["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown"));
+        fixture.assert_read_only_requests();
+        assert_eq!(
+            fixture.requests.lock().unwrap().len(),
+            2,
+            "doctor retried through another route"
+        );
+    }
+}
+
+#[test]
+fn unavailable_process_backend_is_explained_once_without_claiming_death() {
+    let fixture = Fixture::with_snapshot(
+        json!({"status":"ok","sessions_dir":"ok"}),
+        200,
+        json!({"read_only":true,"partial":true,"truncated":false,"recipients":[
+            {"address":"one@fixture","process_liveness":{"state":"unknown","reason":"backend_unavailable"}},
+            {"address":"two@fixture","process_liveness":{"state":"unknown","reason":"backend_unavailable"}}
+        ]}),
+    );
+    let (output, report) = fixture.report();
+    assert!(output.status.success());
+    status(&report, "session.process.one@fixture", "warn");
+    status(&report, "session.process.two@fixture", "warn");
+    for address in ["one@fixture", "two@fixture"] {
+        assert_eq!(
+            check(&report, &format!("session.process.{address}"))["message"],
+            "process unknown"
+        );
+    }
+    assert_eq!(
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["id"] == "sessions.process_backend")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn process_rows_are_bounded_and_terminal_ids_are_inert() {
+    let rows: Vec<_> = (0..1001).map(|i| json!({"address":format!("session-{i}\u{1b}[31m@fixture"),"process_liveness":{"state":"live","reason":"identity_match"}})).collect();
+    let fixture = Fixture::with_snapshot(
+        json!({"status":"ok","sessions_dir":"ok"}),
+        200,
+        json!({"read_only":true,"partial":true,"truncated":true,"recipients":rows}),
+    );
+    let (output, report) = fixture.report();
+    assert!(output.status.success());
+    assert_eq!(
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["id"].as_str().unwrap().starts_with("session.process."))
+            .count(),
+        1000
+    );
+    status(&report, "sessions.process", "warn");
+    let text = fixture.command().output().unwrap();
+    assert!(text.status.success());
+    assert!(!String::from_utf8_lossy(&text.stdout).contains('\u{1b}'));
+}
+
+#[test]
+fn registration_status_without_process_evidence_stays_unknown() {
+    for snapshot in [
+        json!({"read_only":false,"partial":true,"truncated":false,"recipients":[{"address":"one@fixture","status":"live"}]}),
+        json!({"read_only":true,"partial":true,"truncated":false,"recipients":[{"address":"one@fixture","status":"registered"}]}),
+    ] {
+        let fixture =
+            Fixture::with_snapshot(json!({"status":"ok","sessions_dir":"ok"}), 200, snapshot);
+        let (output, report) = fixture.report();
+        assert!(output.status.success());
+        status(&report, "sessions.process", "warn");
+        assert!(!report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |row| row["id"].as_str().unwrap().starts_with("session.process.")
+                    && row["status"] == "pass"
+            ));
+    }
 }

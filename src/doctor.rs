@@ -11,6 +11,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const MAX_FILE: u64 = 1_048_576;
 const MAX_HEALTH: usize = 65_536;
+const MAX_SESSION_BODY: usize = 2 * 1024 * 1024;
+const MAX_SESSIONS: usize = 1000;
 
 #[derive(Args, Debug)]
 pub struct DoctorArgs {
@@ -41,7 +43,7 @@ enum Status {
 }
 #[derive(Serialize)]
 struct Check {
-    id: &'static str,
+    id: String,
     status: Status,
     message: String,
     hint: Option<&'static str>,
@@ -75,13 +77,12 @@ impl Report {
                 "remote_certificate_expiry",
                 "peer_clock_skew",
                 "ca_application_health",
-                "session_liveness",
             ],
         }
     }
     fn add(
         &mut self,
-        id: &'static str,
+        id: impl Into<String>,
         status: Status,
         message: impl Into<String>,
         hint: Option<&'static str>,
@@ -92,7 +93,7 @@ impl Report {
             Status::Fail => self.failed += 1,
         }
         self.checks.push(Check {
-            id,
+            id: id.into(),
             status,
             message: message.into(),
             hint,
@@ -159,8 +160,8 @@ fn bounded_file(path: &Path, private: bool) -> io::Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-async fn health(report: &mut Report, path: &Path) {
-    let result = tokio::time::timeout(Duration::from_secs(5), async {
+async fn read_json(path: &Path, url: &str, maximum: usize) -> std::result::Result<Value, ()> {
+    tokio::time::timeout(Duration::from_secs(5), async {
         let client = reqwest::Client::builder()
             .unix_socket(path.to_path_buf())
             .no_proxy()
@@ -169,34 +170,31 @@ async fn health(report: &mut Report, path: &Path) {
             .timeout(Duration::from_secs(5))
             .build()
             .map_err(|_| ())?;
-        let mut response = client
-            .get("http://localhost/healthz")
-            .send()
-            .await
-            .map_err(|_| ())?;
+        let mut response = client.get(url).send().await.map_err(|_| ())?;
         if response.status() != reqwest::StatusCode::OK
             || response
                 .content_length()
-                .is_some_and(|n| n > MAX_HEALTH as u64)
+                .is_some_and(|n| n > maximum as u64)
         {
             return Err(());
         }
         let mut bytes = vec![];
         while let Some(chunk) = response.chunk().await.map_err(|_| ())? {
-            if bytes.len().saturating_add(chunk.len()) > MAX_HEALTH {
+            if bytes.len().saturating_add(chunk.len()) > maximum {
                 return Err(());
             }
             bytes.extend_from_slice(&chunk);
         }
         let value: Value = serde_json::from_slice(&bytes).map_err(|_| ())?;
-        if value["status"] != "ok" {
-            return Err(());
-        }
         Ok(value)
     })
-    .await;
+    .await
+    .map_err(|_| ())?
+}
+async fn health(report: &mut Report, path: &Path) {
+    let result = read_json(path, "http://localhost/healthz", MAX_HEALTH).await;
     match result {
-        Ok(Ok(value)) => {
+        Ok(value) if value["status"] == "ok" => {
             report.add(
                 "daemon.health",
                 Status::Pass,
@@ -238,6 +236,72 @@ async fn health(report: &mut Report, path: &Path) {
         ),
     }
 }
+async fn sessions(report: &mut Report, path: &Path) {
+    let snapshot = read_json(
+        path,
+        "http://localhost/v1/recipients?read_only=true&liveness=true",
+        MAX_SESSION_BODY,
+    )
+    .await;
+    let Ok(snapshot) = snapshot else {
+        report.add("sessions.process", Status::Warn, "Registered process liveness: unknown; the read-only source is unavailable or unsupported.", Some("Use a daemon with the Unix process snapshot; no live listing fallback was attempted."));
+        return;
+    };
+    let rows = snapshot["recipients"].as_array();
+    if snapshot["read_only"] != true
+        || !snapshot["partial"].is_boolean()
+        || !snapshot["truncated"].is_boolean()
+        || rows.is_none()
+    {
+        report.add("sessions.process", Status::Warn, "Registered process liveness: unknown; the daemon did not return a read-only process snapshot.", Some("Update the daemon; registration status alone does not prove process liveness."));
+        return;
+    }
+    let rows = rows.unwrap();
+    let mut live = 0;
+    let mut gone = 0;
+    let mut unknown = 0;
+    let mut unavailable = false;
+    for row in rows.iter().take(MAX_SESSIONS) {
+        let Some(address) = row["address"]
+            .as_str()
+            .filter(|address| !address.is_empty() && address.len() <= 1024)
+        else {
+            unknown += 1;
+            continue;
+        };
+        let observation = &row["process_liveness"];
+        let (state, status) = match observation["state"].as_str() {
+            Some("live") => {
+                live += 1;
+                ("live", Status::Pass)
+            }
+            Some("gone") => {
+                gone += 1;
+                ("gone", Status::Warn)
+            }
+            _ => {
+                unknown += 1;
+                ("unknown", Status::Warn)
+            }
+        };
+        unavailable |= observation["reason"] == "backend_unavailable";
+        report.add(
+            format!("session.process.{address}"),
+            status,
+            format!("process {state}"),
+            None,
+        );
+    }
+    let partial =
+        snapshot["partial"] == true || snapshot["truncated"] == true || rows.len() > MAX_SESSIONS;
+    report.add("sessions.process", if gone > 0 || unknown > 0 || partial { Status::Warn } else { Status::Pass },
+        format!("Registered process snapshot: {live} live, {gone} gone, {unknown} unknown; {}. Process liveness is not harness or delivery readiness.", if partial { "partial coverage; absent rows are unknown" } else { "returned catalogue only" }),
+        (gone > 0).then_some("Check stale registrations; doctor does not reconcile or deliver queued work."));
+    if unavailable {
+        report.add("sessions.process_backend", Status::Warn, "Process inspection is unavailable for some rows on this platform; those processes are unknown, not gone.", Some("Native process inspection is optional; /proc is not required. Retain unknown where the backend is unavailable."));
+    }
+}
+
 fn database(report: &mut Report, path: &Path) {
     let journal = fs::symlink_metadata(suffix(path, "-journal")).is_ok();
     report.add("database.journal",if journal {Status::Warn}else{Status::Pass},if journal {"Rollback journal is present; hotness is not determined."}else{"No rollback journal was found at the checked path."},if journal {Some("Do not delete a journal by hand. Stop the node safely, back up its files, and inspect normal SQLite recovery.")}else{None});
@@ -388,6 +452,7 @@ async fn inspect(args: &DoctorArgs) -> Report {
     if let Some(path) = &http {
         if socket(&mut report, "socket.http", path) {
             health(&mut report, path).await;
+            sessions(&mut report, path).await;
         } else {
             report.add(
                 "daemon.health",
@@ -455,7 +520,12 @@ pub fn run(args: DoctorArgs) -> Result<bool> {
                 Status::Warn => "WARN",
                 Status::Fail => "FAIL",
             };
-            writeln!(out, "{status} {}: {}", check.id, inert(&check.message))?;
+            writeln!(
+                out,
+                "{status} {}: {}",
+                inert(&check.id),
+                inert(&check.message)
+            )?;
             if let Some(hint) = check.hint {
                 writeln!(out, "  Fix: {hint}")?;
             }
