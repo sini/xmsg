@@ -1,0 +1,880 @@
+[
+  {
+    "label": "wire-version",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /v",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "page.v != 1",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "wire-node",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /node",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "page.node != policy.node",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "wire-epoch",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /epoch",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!valid_epoch(&page.epoch)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "wire-scope",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /scope",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!valid_scope(&page.scope)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "wire-available",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /available",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!page.available",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "wire-sequence",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /events/0/sequence",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "event.sequence <= previous",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "wire-observed-time",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /events/0/observed_at",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!valid_time(event.observed_at)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "wire-persisted-time",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /events/0/persisted_at",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!valid_time(event.persisted_at)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "wire-source-time",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /events/0/source_at",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "event.source_at.is_some_and(|t| !valid_time(t))",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "wire-reply-id",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /events/0/reply_id",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "event.reply_id.is_some_and(|id| id <= 0)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "wire-from",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /events/0/from",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "event\n                .from\n                .as_deref()\n                .is_some_and(|id| !identity(&scope, id))",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "wire-to",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /events/0/to",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "event.to.as_deref().is_some_and(|id| !identity(&scope, id))",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "wire-message_id",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /events/0/message_id",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "event\n                .message_id\n                .as_deref()\n                .is_some_and(|id| !correlation(id))",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "wire-thread_id",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /events/0/thread_id",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "event\n                .thread_id\n                .as_deref()\n                .is_some_and(|id| !correlation(id))",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "wire-row-cap",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_count_and_byte_caps_have_positive_controls",
+    "expected_literal": "event count cap ignored",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "page.events.len() > 200",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "wire-page-bytes",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_count_and_byte_caps_have_positive_controls",
+    "expected_literal": "page byte cap ignored",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "encoded(page, PAGE_BYTES)?;",
+        "replacement": "encoded(page, PAGE_BYTES * 2)?;"
+      }
+    ]
+  },
+  {
+    "label": "wire-next",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "next before visible sequence accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "page.next < previous",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "wire-progress",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "nonprogress has_more accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "page.has_more && page.next <= after",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "snapshot-version",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: v",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "snapshot.v != 1",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "snapshot-node",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: node",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "snapshot.node != policy.node",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "snapshot-scope",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: scope",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!valid_scope(&snapshot.scope)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "snapshot-time",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: time",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!valid_time(snapshot.observed_at)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "snapshot-count",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: count",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "snapshot.endpoints.len() > 200",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "snapshot-id",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: id",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!identity(&scope, &e.id)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "snapshot-node-binding",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: endpoint_node",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "e.id.split_once('@').map(|p| p.1) != Some(e.node.as_str())",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "snapshot-source-time",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: endpoint_time",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "e.source_at\n                .is_some_and(|t| !valid_time(t) || t > snapshot.observed_at)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "snapshot-label-optin",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: label_opt_in",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!policy.labels || s.len() > 256",
+        "replacement": "s.len() > 256"
+      }
+    ]
+  },
+  {
+    "label": "snapshot-label-length",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: label_length",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!policy.labels || s.len() > 256",
+        "replacement": "!policy.labels"
+      }
+    ]
+  },
+  {
+    "label": "snapshot-duplicates",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: duplicate",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!ids.insert(&e.id)",
+        "replacement": "{ let _ = ids.insert(&e.id); false }"
+      }
+    ]
+  },
+  {
+    "label": "startup-mask",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::startup_hidden_and_denial_hide_before_failed_purge",
+    "expected_literal": "hidden history contents exposed",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "validated: false,",
+        "replacement": "validated: true,",
+        "start": "fn open_limits",
+        "end": "fn lock("
+      }
+    ]
+  },
+  {
+    "label": "scope-mask",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::scope_purge_failure_masks_before_sql_and_restarts_hidden",
+    "expected_literal": "scope purge failure exposed retained history",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "state.validated = false;",
+        "replacement": "state.validated = true;",
+        "start": "pub fn ingest_page",
+        "end": "fn finish"
+      }
+    ]
+  },
+  {
+    "label": "scope-purge",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::scope_purge_and_epoch_preservation_and_stale",
+    "expected_literal": "scope cache not purged",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "purge(c, node)?;",
+        "replacement": "let _ = node;",
+        "start": "pub fn ingest_page",
+        "end": "fn finish"
+      }
+    ]
+  },
+  {
+    "label": "epoch-preservation",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::scope_purge_and_epoch_preservation_and_stale",
+    "expected_literal": "epoch boundary destroyed history",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "if scope_changed {\n                purge(c, node)?;",
+        "replacement": "if scope_changed || epoch_changed {\n                purge(c, node)?;",
+        "start": "pub fn ingest_page",
+        "end": "fn finish"
+      }
+    ]
+  },
+  {
+    "label": "epoch-marker",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::scope_purge_and_epoch_preservation_and_stale",
+    "expected_literal": "epoch boundary concealed",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "epoch_changed.then_some(ExportGap {",
+        "replacement": "false.then_some(ExportGap {"
+      }
+    ]
+  },
+  {
+    "label": "replay-uniqueness",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::repeated_epoch_records_deduplicate_without_refresh",
+    "expected_literal": "replayed record duplicated",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "PRIMARY KEY(node,epoch,sequence)",
+        "replacement": "UNIQUE(node,epoch,sequence,receipt)"
+      }
+    ]
+  },
+  {
+    "label": "replay-age",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::repeated_epoch_records_deduplicate_without_refresh",
+    "expected_literal": "replayed record refreshed retention age",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "INSERT OR IGNORE INTO events",
+        "replacement": "INSERT OR REPLACE INTO events"
+      }
+    ]
+  },
+  {
+    "label": "atomic-page-cursor",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::transaction_failure_and_replay_never_refresh_or_split",
+    "expected_literal": "failed transaction kept page",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "            c.execute(\n                \"UPDATE nodes SET epoch=?2,scope=?3,next=?4,gaps=?5,backfill=?6 WHERE node=?1\",",
+        "replacement": "            c.execute_batch(\"COMMIT; BEGIN IMMEDIATE\")?;\n            c.execute(\n                \"UPDATE nodes SET epoch=?2,scope=?3,next=?4,gaps=?5,backfill=?6 WHERE node=?1\","
+      }
+    ]
+  },
+  {
+    "label": "rollback-close",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::rollback_failure_closes_connection_and_restart_revalidates",
+    "expected_literal": "failed rollback connection remained writable",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "inner.connection.take();",
+        "replacement": "let _ = &inner.connection;"
+      }
+    ]
+  },
+  {
+    "label": "ttl-idle",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::row_and_ttl_retention_are_honest",
+    "expected_literal": "idle maintenance retained expired rows",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "for node in nodes {",
+        "replacement": "for node in nodes.into_iter().take(0) {",
+        "start": "pub fn maintain",
+        "end": "pub fn view"
+      }
+    ]
+  },
+  {
+    "label": "ttl-source-base",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::future_and_late_observation_ttl",
+    "expected_literal": "late observation renewed TTL",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "event.observed_at.min(now)",
+        "replacement": "now"
+      }
+    ]
+  },
+  {
+    "label": "ttl-future-base",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::future_and_late_observation_ttl",
+    "expected_literal": "future observation extended TTL",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "event.observed_at.min(now)",
+        "replacement": "event.observed_at"
+      }
+    ]
+  },
+  {
+    "label": "row-retention",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_row_and_byte_limits_include_snapshot",
+    "expected_literal": "retention cap ignored rows=1",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "if rows > self.limits.rows as i64 {",
+        "replacement": "if false {"
+      }
+    ]
+  },
+  {
+    "label": "byte-retention",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_row_and_byte_limits_include_snapshot",
+    "expected_literal": "retention cap ignored rows=10000",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "if total > self.limits.bytes as i64 {",
+        "replacement": "if false {",
+        "start": "let mut total =",
+        "end": "let mut statement = c.prepare("
+      }
+    ]
+  },
+  {
+    "label": "physical-cap",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::engine_settings_journal_peak_full_abort_and_compaction",
+    "expected_literal": "physical page cap not enforced",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "c.pragma_update(None, \"max_page_count\", limits.pages)?;",
+        "replacement": "c.pragma_update(None, \"max_page_count\", limits.pages * 100)?;"
+      },
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "(\"max_page_count\", limits.pages)",
+        "replacement": "(\"max_page_count\", limits.pages * 100)"
+      }
+    ]
+  },
+  {
+    "label": "compaction",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::engine_settings_journal_peak_full_abort_and_compaction",
+    "expected_literal": "bounded compaction did not reduce file",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "PRAGMA incremental_vacuum(64)",
+        "replacement": "PRAGMA page_count"
+      }
+    ]
+  },
+  {
+    "label": "secure-deletion",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::secure_delete_removes_metadata_canary",
+    "expected_literal": "deleted metadata persisted in managed database",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "PRAGMA secure_delete=ON;",
+        "replacement": "PRAGMA secure_delete=OFF;"
+      },
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "(\"secure_delete\", 1)",
+        "replacement": "(\"secure_delete\", 0)"
+      }
+    ]
+  },
+  {
+    "label": "database-mode",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::private_paths_and_preexisting_physical_limits",
+    "expected_literal": "unsafe database mode accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "m.mode() & 0o7777 != 0o600",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "database-length",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::private_paths_and_preexisting_physical_limits",
+    "expected_literal": "oversized database accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "m.len() > cap",
+        "replacement": "{ let _ = cap; false }"
+      }
+    ]
+  },
+  {
+    "label": "epoch-empty",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid epoch accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!value.is_empty()",
+        "replacement": "true",
+        "start": "fn valid_epoch",
+        "end": "fn valid_scope"
+      }
+    ]
+  },
+  {
+    "label": "epoch-length",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid epoch accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "value.len() <= 128",
+        "replacement": "true",
+        "start": "fn valid_epoch",
+        "end": "fn valid_scope"
+      }
+    ]
+  },
+  {
+    "label": "epoch-ascii",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid epoch accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')",
+        "replacement": "true",
+        "start": "fn valid_epoch",
+        "end": "fn valid_scope"
+      }
+    ]
+  },
+  {
+    "label": "scope-length",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid scope accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "value.len() == 64",
+        "replacement": "true",
+        "start": "fn valid_scope",
+        "end": "fn encoded"
+      }
+    ]
+  },
+  {
+    "label": "scope-hex",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid scope accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "b.is_ascii_digit() || (b'a'..=b'f').contains(&b)",
+        "replacement": "true",
+        "start": "fn valid_scope",
+        "end": "fn encoded"
+      }
+    ]
+  },
+  {
+    "label": "correlation-empty",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid correlation accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!value.is_empty()",
+        "replacement": "true",
+        "start": "fn correlation",
+        "end": "fn validate_page"
+      }
+    ]
+  },
+  {
+    "label": "correlation-length",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid correlation accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "value.len() <= 512",
+        "replacement": "true",
+        "start": "fn correlation",
+        "end": "fn validate_page"
+      }
+    ]
+  },
+  {
+    "label": "correlation-ascii",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid correlation accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')",
+        "replacement": "true",
+        "start": "fn correlation",
+        "end": "fn validate_page"
+      }
+    ]
+  },
+  {
+    "label": "cursor-ahead-reset",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::authenticated_cursor_ahead_resets_and_conflicting_replay_refuses",
+    "expected_literal": "cursor ahead reset rejected",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "page.gaps.iter().any(|g| g.reason == Reason::CursorAhead)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "conflicting-replay",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::authenticated_cursor_ahead_resets_and_conflicting_replay_refuses",
+    "expected_literal": "conflicting replay accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "existing.as_ref().is_some_and(|old| old != &json)",
+        "replacement": "{ let _ = &existing; false }"
+      }
+    ]
+  },
+  {
+    "label": "snapshot-byte-accounting",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::snapshot_budget_and_replay_receipt_are_independent",
+    "expected_literal": "snapshot bytes omitted from budget",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "coalesce(length(snapshot),0)+coalesce(length(epoch),0)",
+        "replacement": "0+coalesce(length(epoch),0)"
+      }
+    ]
+  },
+  {
+    "label": "snapshot-receipt-replay",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::snapshot_budget_and_replay_receipt_are_independent",
+    "expected_literal": "snapshot replay refreshed receipt",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "AND (snapshot IS NULL OR snapshot != ?3)",
+        "replacement": ""
+      }
+    ]
+  }
+]
