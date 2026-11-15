@@ -1,0 +1,630 @@
+[
+  {
+    "label": "collector-inventory-cap",
+    "target": "lib",
+    "test": "observe_collector_net::tests::inventory_is_bounded_literal_and_unique",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "oversized inventory accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "config.sources.len() > 64",
+        "replacement": "config.sources.len() > 65"
+      }
+    ]
+  },
+  {
+    "label": "collector-inventory-unique",
+    "target": "lib",
+    "test": "observe_collector_net::tests::inventory_is_bounded_literal_and_unique",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "duplicate inventory node accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "!names.insert(source.node.clone())",
+        "replacement": "{ names.insert(source.node.clone()); false }"
+      }
+    ]
+  },
+  {
+    "label": "collector-outbound-visible",
+    "target": "lib",
+    "test": "observe_collector_net::tests::outbound_only_inventory_never_opens_a_connection",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "outbound leaf became directly observable",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "if !source.supported {",
+        "replacement": "if false {"
+      }
+    ]
+  },
+  {
+    "label": "collector-spacing",
+    "target": "lib",
+    "test": "observe_collector_net::tests::configured_pin_collects_without_any_bus_state_and_enforces_spacing",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "minimum node spacing bypassed",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "now.duration_since(last) < Duration::from_secs(2)",
+        "replacement": "now.duration_since(last) < Duration::from_secs(0)"
+      }
+    ]
+  },
+  {
+    "label": "collector-node-reservation",
+    "target": "lib",
+    "test": "observe_collector_net::tests::one_node_reservation_is_independent_of_global_capacity",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "per-node reservation bypassed with global capacity available",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "slot: Arc::new(Semaphore::new(1))",
+        "replacement": "slot: Arc::new(Semaphore::new(2))"
+      }
+    ]
+  },
+  {
+    "label": "collector-global-reservation",
+    "target": "lib",
+    "test": "observe_collector_net::tests::node_and_global_reservations_survive_forced_races",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "global request reservation exceeded eight",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "slots: Arc::new(Semaphore::new(8))",
+        "replacement": "slots: Arc::new(Semaphore::new(9))"
+      }
+    ]
+  },
+  {
+    "label": "collector-wire-byte-cap",
+    "target": "lib",
+    "test": "observe_collector_net::tests::streamed_cap_encoding_status_and_closed_driver_are_independent",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "stream byte cap bypassed",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "Limited::new(response.into_body(), 256 * 1024)",
+        "replacement": "Limited::new(response.into_body(), 257 * 1024)"
+      }
+    ]
+  },
+  {
+    "label": "collector-wire-encoding",
+    "target": "lib",
+    "test": "observe_collector_net::tests::streamed_cap_encoding_status_and_closed_driver_are_independent",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "compressed exporter response accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": ".is_some_and(|v| v != \"identity\")",
+        "replacement": ".is_some_and(|_| false)"
+      }
+    ]
+  },
+  {
+    "label": "collector-wire-denial",
+    "target": "lib",
+    "test": "observe_collector_net::tests::streamed_cap_encoding_status_and_closed_driver_are_independent",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "observe denial became unavailable",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "response.status() == hyper::StatusCode::FORBIDDEN",
+        "replacement": "response.status() == hyper::StatusCode::UNAUTHORIZED"
+      }
+    ]
+  },
+  {
+    "label": "collector-rate-upper",
+    "target": "lib",
+    "test": "observe_collector_net::tests::streamed_cap_encoding_status_and_closed_driver_are_independent",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "rate limit upper bound bypassed",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": ".clamp(2, 60)",
+        "replacement": ".clamp(2, 120)"
+      }
+    ]
+  },
+  {
+    "label": "collector-rate-lower",
+    "target": "lib",
+    "test": "observe_collector_net::tests::streamed_cap_encoding_status_and_closed_driver_are_independent",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "rate limit lower bound bypassed",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": ".clamp(2, 60)",
+        "replacement": ".clamp(0, 60)"
+      }
+    ]
+  },
+  {
+    "label": "collector-redirect-refusal",
+    "target": "lib",
+    "test": "observe_collector_net::tests::streamed_cap_encoding_status_and_closed_driver_are_independent",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "exporter redirect accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "if response.status() != hyper::StatusCode::OK {",
+        "replacement": "if false {"
+      }
+    ]
+  },
+  {
+    "label": "collector-rpc-deadline",
+    "target": "lib",
+    "test": "observe_collector_net::tests::whole_rpc_deadline_aborts_header_and_body_drivers",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "whole exporter request exceeded five-second deadline",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "tokio::time::timeout(Duration::from_secs(5), async move {",
+        "replacement": "tokio::time::timeout(Duration::from_secs(6), async move {"
+      }
+    ]
+  },
+  {
+    "label": "collector-driver-abort",
+    "target": "lib",
+    "test": "observe_collector_net::tests::connection_driver_is_aborted_on_owner_drop",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "connection driver continued after its owner ended",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "self.0.abort();",
+        "replacement": "let _ = &self.0;"
+      }
+    ]
+  },
+  {
+    "label": "collector-dns-lease",
+    "target": "lib",
+    "test": "observe_collector_net::tests::resolver_keeps_node_and_global_leases_after_cancellation",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "cancelled resolver released global permit early",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "    let (resolved, leases) = tokio::task::spawn_blocking(move || (lookup(), leases))\n        .await\n        .map_err(|_| Error::Unavailable)?;",
+        "replacement": "    let resolved = tokio::task::spawn_blocking(lookup)\n        .await\n        .map_err(|_| Error::Unavailable)?;"
+      }
+    ]
+  },
+  {
+    "label": "collector-browser-filter",
+    "target": "lib",
+    "test": "observe_collector_web::tests::numeric_filters_never_become_network_destinations",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "browser authority or invalid paging accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "\"node\" if !seen_node && number < nodes",
+        "replacement": "\"node\" if !seen_node && number <= nodes"
+      }
+    ]
+  },
+  {
+    "label": "collector-browser-page",
+    "target": "lib",
+    "test": "observe_collector_web::tests::numeric_filters_never_become_network_destinations",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "browser authority or invalid paging accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "\"page\" if !seen_page && number < 50",
+        "replacement": "\"page\" if !seen_page && number <= 50"
+      }
+    ]
+  },
+  {
+    "label": "collector-html-escape",
+    "target": "lib",
+    "test": "observe_collector_web::tests::hostile_html_label_is_text",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "HTML label created executable markup",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "    escape(value)",
+        "replacement": "    value.to_owned()",
+        "start": "fn html_text(",
+        "end": "fn svg_text("
+      }
+    ]
+  },
+  {
+    "label": "collector-svg-escape",
+    "target": "lib",
+    "test": "observe_collector_web::tests::hostile_svg_label_and_lane_are_text",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "SVG label or lane created a resource node",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "    escape(value)",
+        "replacement": "    value.to_owned()",
+        "start": "fn svg_text(",
+        "end": "fn escape("
+      }
+    ]
+  },
+  {
+    "label": "collector-row-cap",
+    "target": "lib",
+    "test": "observe_collector_web::tests::rows_objects_and_response_bytes_are_bounded",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "event row cap bypassed",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "pub const PAGE_ROWS: usize = 200;",
+        "replacement": "pub const PAGE_ROWS: usize = 201;"
+      }
+    ]
+  },
+  {
+    "label": "collector-object-cap",
+    "target": "lib",
+    "test": "observe_collector_web::tests::rows_objects_and_response_bytes_are_bounded",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "endpoint cap bypassed",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "pub const MAX_ENDPOINTS: usize = 200;",
+        "replacement": "pub const MAX_ENDPOINTS: usize = 201;"
+      }
+    ]
+  },
+  {
+    "label": "collector-html-byte-cap",
+    "target": "lib",
+    "test": "observe_collector_web::tests::rows_objects_and_response_bytes_are_bounded",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "HTML byte cap bypassed",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "self.html.len() + part.len() + 180 <= self.cap",
+        "replacement": "true"
+      }
+    ]
+  },
+  {
+    "label": "collector-refresh",
+    "target": "lib",
+    "test": "observe_collector_web::tests::presentation_preserves_boundaries_and_separate_clocks",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "missing presentation fact: content=",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "content=\\\"5\\\"",
+        "replacement": "content=\\\"1\\\""
+      }
+    ]
+  },
+  {
+    "label": "collector-hidden-render",
+    "target": "lib",
+    "test": "observe_collector_web::tests::presentation_preserves_boundaries_and_separate_clocks",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "hidden history rendered",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "if node.history_hidden {",
+        "replacement": "if false {"
+      }
+    ]
+  },
+  {
+    "label": "collector-backfill-render",
+    "target": "lib",
+    "test": "observe_collector_web::tests::presentation_preserves_boundaries_and_separate_clocks",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "missing presentation fact: Backfill pending",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "if node.backfill {",
+        "replacement": "if false {"
+      }
+    ]
+  },
+  {
+    "label": "collector-partial-render",
+    "target": "lib",
+    "test": "observe_collector_web::tests::presentation_preserves_boundaries_and_separate_clocks",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "missing presentation fact: Availability: partial",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "name(snapshot.snapshot.available)",
+        "replacement": "\"available\""
+      }
+    ]
+  },
+  {
+    "label": "collector-lane-facts",
+    "target": "lib",
+    "test": "observe_collector_web::tests::records_without_reported_endpoints_do_not_invent_lanes",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "record without endpoints gained a decorative exchange",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "if event.from.is_some() || event.to.is_some() {",
+        "replacement": "if true {"
+      }
+    ]
+  },
+  {
+    "label": "collector-cache-header",
+    "target": "lib",
+    "test": "observe_collector::tests::fixed_response_policy_and_health_contain_no_metadata",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "response caching enabled",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "headers.insert(\"cache-control\", \"no-store\".parse().unwrap());",
+        "replacement": "headers.insert(\"cache-control\", \"public\".parse().unwrap());"
+      }
+    ]
+  },
+  {
+    "label": "collector-nosniff-header",
+    "target": "lib",
+    "test": "observe_collector::tests::fixed_response_policy_and_health_contain_no_metadata",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "response sniffing enabled",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "headers.insert(\"x-content-type-options\", \"nosniff\".parse().unwrap());",
+        "replacement": "headers.insert(\"x-content-type-options\", \"sniff\".parse().unwrap());"
+      }
+    ]
+  },
+  {
+    "label": "collector-header-cap",
+    "target": "lib",
+    "test": "observe_collector::tests::aggregate_header_accounting_has_an_exact_control",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "aggregate web header cap bypassed",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "if header_bytes > 16 * 1024 {",
+        "replacement": "if header_bytes > 17 * 1024 {"
+      }
+    ]
+  },
+  {
+    "label": "collector-request-cap",
+    "target": "lib",
+    "test": "observe_collector::tests::request_saturation_has_no_admission_waiters",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "web request admission exceeded eight",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "requests: Arc::new(Semaphore::new(8))",
+        "replacement": "requests: Arc::new(Semaphore::new(9))"
+      }
+    ]
+  },
+  {
+    "label": "collector-connection-cap",
+    "target": "lib",
+    "test": "observe_collector::tests::connection_saturation_refuses_without_an_accept_waiter",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "web connection reservation exceeded 64",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "Arc::new(Semaphore::new(64))",
+        "replacement": "Arc::new(Semaphore::new(65))"
+      }
+    ]
+  },
+  {
+    "label": "collector-header-deadline",
+    "target": "lib",
+    "test": "observe_collector::tests::slow_headers_have_a_finite_read_deadline",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "slow request headers escaped their read deadline",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": ".header_read_timeout(Duration::from_secs(5))",
+        "replacement": ".header_read_timeout(Duration::from_secs(7))"
+      }
+    ]
+  },
+  {
+    "label": "collector-web-tls",
+    "target": "lib",
+    "test": "observe_collector::tests::nonloopback_listener_requires_tls_and_tls_keeps_owner_boundary",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "public plaintext listener accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "if !listen.ip().is_loopback() {",
+        "replacement": "if false {"
+      }
+    ]
+  },
+  {
+    "label": "collector-denial-overlay",
+    "target": "lib",
+    "test": "observe_collector::tests::denial_masks_before_busy_or_failed_purge",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "denial mask lost while storage busy",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "if error == net::Error::Denied {",
+        "replacement": "if false {",
+        "start": "async fn mark_error(",
+        "end": "    let _ = store_call("
+      }
+    ]
+  },
+  {
+    "label": "collector-scope-overlay",
+    "target": "lib",
+    "test": "observe_collector::tests::scope_change_masks_before_busy_ingest",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "scope mask lost while storage busy",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "if scopes.get(node).is_some_and(|old| old != scope) {",
+        "replacement": "if false {"
+      }
+    ]
+  },
+  {
+    "label": "collector-owner-backend",
+    "target": "lib",
+    "test": "observe_collector::tests::backend_reauthorizes_and_health_has_no_cache_data",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "inactive next request reached cached history",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "self.verifier.authorize(request.headers()).await",
+        "replacement": "async { Ok::<_, crate::observe_collector_auth::AuthError>(crate::observe_collector_auth::VerifiedOwner {subject:\"fixture\".into(),expires_at:2000}) }.await"
+      }
+    ]
+  },
+  {
+    "label": "collector-health-minimization",
+    "target": "lib",
+    "test": "observe_collector::tests::backend_reauthorizes_and_health_has_no_cache_data",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "health exposed metadata",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "return response(StatusCode::OK, \"available\\n\", false);",
+        "replacement": "return response(StatusCode::OK, self.nodes.join(\",\"), false);"
+      }
+    ]
+  },
+  {
+    "label": "collector-entry-passive",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "collector CLI exited during isolated startup",
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": "Commands::ObserveCollector(args) => {",
+        "replacement": "Commands::ObserveCollector(args) => { let connection = rusqlite::Connection::open(resolve_db_path(None))?; storage::init_db(&connection)?;"
+      }
+    ],
+    "binaries": [
+      "xmsg"
+    ]
+  },
+  {
+    "label": "collector-primary-write-passive",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "collector initialized or changed primary/harness/enrollment state",
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": "Commands::ObserveCollector(args) => {",
+        "replacement": "Commands::ObserveCollector(args) => { std::fs::write(\"registration.sock\",b\"source-fault\")?;"
+      }
+    ],
+    "binaries": [
+      "xmsg"
+    ]
+  },
+  {
+    "label": "collector-html-label-context",
+    "target": "lib",
+    "test": "observe_collector_web::tests::hostile_html_label_is_text",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "HTML label created executable markup",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "html_text(endpoint.label.as_deref().unwrap_or(\"label not reported\"))",
+        "replacement": "endpoint.label.as_deref().unwrap_or(\"label not reported\").to_owned()"
+      }
+    ]
+  },
+  {
+    "label": "collector-svg-label-context",
+    "target": "lib",
+    "test": "observe_collector_web::tests::hostile_svg_label_and_lane_are_text",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "SVG label or lane created a resource node",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "svg_text(endpoint.label.as_deref().unwrap_or(\"label not reported\"))",
+        "replacement": "endpoint.label.as_deref().unwrap_or(\"label not reported\").to_owned()"
+      }
+    ]
+  },
+  {
+    "label": "collector-svg-from-context",
+    "target": "lib",
+    "test": "observe_collector_web::tests::hostile_svg_label_and_lane_are_text",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "SVG label or lane created a resource node",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "svg_text(&from)",
+        "replacement": "from.to_owned()"
+      }
+    ]
+  },
+  {
+    "label": "collector-svg-to-context",
+    "target": "lib",
+    "test": "observe_collector_web::tests::hostile_svg_label_and_lane_are_text",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "SVG label or lane created a resource node",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "svg_text(&to)",
+        "replacement": "to.to_owned()"
+      }
+    ]
+  }
+]

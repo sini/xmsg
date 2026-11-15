@@ -193,6 +193,16 @@ impl Drop for Driver {
     }
 }
 
+async fn resolve_with_leases(
+    leases: Leases,
+    lookup: impl FnOnce() -> std::io::Result<Vec<std::net::SocketAddr>> + Send + 'static,
+) -> Result<(Vec<std::net::SocketAddr>, Leases), Error> {
+    let (resolved, leases) = tokio::task::spawn_blocking(move || (lookup(), leases))
+        .await
+        .map_err(|_| Error::Unavailable)?;
+    Ok((resolved.map_err(|_| Error::Unavailable)?, leases))
+}
+
 impl Client {
     pub fn new(config: &Config) -> Result<Self, Error> {
         let (chain, key) = credentials(&config.client_cert, &config.client_key)?;
@@ -313,16 +323,12 @@ impl Client {
             let peer = source.peer.as_ref().ok_or(Error::Configuration)?;
             let address = peer.address.clone();
             // The leases stay with an uncancellable system resolver until it finishes.
-            let (resolved, leases) = tokio::task::spawn_blocking(move || {
-                let addresses = address
+            let (addresses, _leases) = resolve_with_leases(leases, move || {
+                address
                     .to_socket_addrs()
-                    .map(|addresses| addresses.take(16).collect::<Vec<_>>());
-                (addresses, leases)
+                    .map(|addresses| addresses.take(16).collect::<Vec<_>>())
             })
-            .await
-            .map_err(|_| Error::Unavailable)?;
-            let _leases = leases;
-            let addresses = resolved.map_err(|_| Error::Unavailable)?;
+            .await?;
             let mut connected = None;
             for address in addresses {
                 if let Ok(tcp) = tokio::net::TcpStream::connect(address).await {

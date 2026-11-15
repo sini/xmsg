@@ -531,3 +531,8 @@ name = "doctor"
 path = "tests/doctor.rs"
 required-features = ["daemon"]
 
+[[test]]
+name = "gate_dtxj_collector"
+path = "tests/gate_dtxj_collector.rs"
+required-features = ["daemon"]
+
