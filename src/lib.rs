@@ -43,6 +43,8 @@ pub mod observe_collector_net;
 #[cfg(feature = "daemon")]
 pub mod observe_collector_store;
 #[cfg(feature = "daemon")]
+pub mod observe_collector_web;
+#[cfg(feature = "daemon")]
 pub mod observe_effects;
 #[cfg(feature = "daemon")]
 pub mod observe_export;
