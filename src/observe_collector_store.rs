@@ -488,6 +488,21 @@ impl Store {
         requested: &Cursor,
         page: ExportPage,
     ) -> Result<CommitOutcome, StoreError> {
+        let decoded = crate::observe_collector_decode::from_typed_page(page)
+            .map_err(|_| StoreError::Invalid)?;
+        self.ingest_decoded_page(node, requested, decoded)
+    }
+
+    pub(crate) fn ingest_decoded_page(
+        &self,
+        node: &str,
+        requested: &Cursor,
+        decoded: crate::observe_collector_decode::DecodedPage,
+    ) -> Result<CommitOutcome, StoreError> {
+        if decoded.canonical_len > PAGE_BYTES || decoded.events.len() != decoded.page.events.len() {
+            return Err(StoreError::Invalid);
+        }
+        let page = decoded.page;
         let now = self.now()?;
         let mut inner = self.lock()?;
         validate_page(Self::policy(&inner, node)?, requested, &page)?;
@@ -507,8 +522,8 @@ impl Store {
                 purge(c, node)?;
             }
             let mut inserted = 0;
-            for event in &page.events {
-                let json = encoded(event, 4096)?;
+            for (event, original) in page.events.iter().zip(&decoded.events) {
+                let json = &original.canonical;
                 let existing: Option<Vec<u8>> = c
                     .query_row(
                         "SELECT json FROM events WHERE node=?1 AND epoch=?2 AND sequence=?3",
@@ -516,8 +531,12 @@ impl Store {
                         |r| r.get(0),
                     )
                     .optional()?;
-                if existing.as_ref().is_some_and(|old| old != &json) {
-                    return Err(StoreError::Invalid);
+                if let Some(old) = existing {
+                    let previous = crate::observe_collector_decode::decode_event(&old)
+                        .map_err(|_| StoreError::Storage)?;
+                    if previous.canonical != *json {
+                        return Err(StoreError::Invalid);
+                    }
                 }
                 inserted += c.execute("INSERT OR IGNORE INTO events(node,epoch,sequence,json,receipt,base,bytes) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![node,page.epoch,event.sequence,json,now,event.observed_at.min(now),(json.len()+page.epoch.len()+node.len()+128) as i64])?;
             }
@@ -744,8 +763,9 @@ impl Store {
                     })?;
                 for e in events {
                     let (epoch, json, received_at) = e?;
-                    let event: ExportEvent =
-                        serde_json::from_slice(&json).map_err(|_| StoreError::Storage)?;
+                    let event = crate::observe_collector_decode::decode_event(&json)
+                        .map_err(|_| StoreError::Storage)?
+                        .event;
                     v.events.push(CachedEvent {
                         epoch,
                         source_age_seconds: now.saturating_sub(event.observed_at).max(0),

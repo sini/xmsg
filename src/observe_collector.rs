@@ -436,7 +436,7 @@ async fn poll_source(client: Arc<Client>, state: Arc<State>, index: usize) {
             .await
             {
                 match client
-                    .events(
+                    .events_decoded(
                         index,
                         cursor.epoch.as_deref(),
                         cursor.scope.as_deref(),
@@ -445,14 +445,14 @@ async fn poll_source(client: Arc<Client>, state: Arc<State>, index: usize) {
                     .await
                 {
                     Ok(page) => {
-                        let scope = page.scope.clone();
+                        let scope = page.page.scope.clone();
                         observe_scope(&state, &source.node, &scope);
-                        let has_more = page.has_more;
+                        let has_more = page.page.has_more;
                         let node = source.node.clone();
                         match store_call(
                             state.store.clone(),
                             state.store_slots.clone(),
-                            move |store| store.ingest_page(&node, &cursor, page),
+                            move |store| store.ingest_decoded_page(&node, &cursor, page),
                         )
                         .await
                         {

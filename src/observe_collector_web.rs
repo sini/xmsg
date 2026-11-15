@@ -82,6 +82,13 @@ fn name<T: serde::Serialize>(value: T) -> String {
         .and_then(|v| v.as_str().map(str::to_owned))
         .unwrap_or_else(|| "unknown".into())
 }
+fn event_kind(value: crate::observe_export::EventKind) -> String {
+    if value == crate::observe_export::EventKind::Unknown {
+        "unknown event kind (newer node)".into()
+    } else {
+        name(value)
+    }
+}
 fn status(value: NodeStatus) -> &'static str {
     match value {
         NodeStatus::HiddenPendingRevalidation => "pending revalidation",
@@ -207,7 +214,7 @@ fn render_with_cap(
                 } else {
                     "<p>No exchange endpoints reported.</p>".into()
                 };
-                let mut part = format!("<article class=\"event\"><h3>Epoch {} · sequence {}</h3>{lane}<p>{}; outcome: {}; reason: {}; availability at capture: {}.</p><p>Source event time: {}; source observation: {} (age {} s); source persistence: {}. Collector receipt: {} (age {} s).</p>",html_text(&cached.epoch),event.sequence,name(event.kind),event.outcome.map(name).unwrap_or_else(|| "unknown".into()),event.reason.map(name).unwrap_or_else(|| "unknown".into()),name(event.available),event.source_at.map(|v|v.to_string()).unwrap_or_else(||"unknown".into()),event.observed_at,cached.source_age_seconds,event.persisted_at,cached.received_at,cached.receipt_age_seconds);
+                let mut part = format!("<article class=\"event\"><h3>Epoch {} · sequence {}</h3>{lane}<p>{}; outcome: {}; reason: {}; availability at capture: {}.</p><p>Source event time: {}; source observation: {} (age {} s); source persistence: {}. Collector receipt: {} (age {} s).</p>",html_text(&cached.epoch),event.sequence,event_kind(event.kind),event.outcome.map(name).unwrap_or_else(|| "unknown".into()),event.reason.map(name).unwrap_or_else(|| "unknown".into()),name(event.available),event.source_at.map(|v|v.to_string()).unwrap_or_else(||"unknown".into()),event.observed_at,cached.source_age_seconds,event.persisted_at,cached.received_at,cached.receipt_age_seconds);
                 for (label, value) in [
                     ("Message", event.message_id.as_deref()),
                     ("Thread", event.thread_id.as_deref()),
