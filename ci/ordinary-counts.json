@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "cargo test --locked --offline on 61043220ab7868e5cfe3654d3a85be40fa509774: exit0, 1139 passed/8 ignored/98 summaries; all95 integration targets",
-    "darwin": "macOS run43707544950 job132791784970 on61043220ab7868e5cfe3654d3a85be40fa509774: cargo results1142passed/10ignored/0failed/98summaries, all95targets; count guard refused previous baseline; canonical derivation lines exclude Nix error-tail replay"
+    "linux": "cargo test --locked on d07c2f88cdce4401b52df7cdc842308fadaeaff0: exit 0, 1150 passed/8 ignored/99 summaries; all 96 integration targets",
+    "darwin": "run 43722456912 job 132837174511 on d07c2f88cdce4401b52df7cdc842308fadaeaff0: 1153 passed/10 ignored/0 failed/99 summaries; canonical derivation lines exclude Nix error-tail replay; all 96 targets"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -89,6 +89,7 @@
     "tests/gate_xh2_plugin.rs",
     "tests/gate_xl1_list_live_default.rs",
     "tests/gate_xu1_api_ergonomics.rs",
+    "tests/observe_arrival.rs",
     "tests/observe_http.rs",
     "tests/operator_cli.rs",
     "tests/pi_proc.rs",
@@ -102,16 +103,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1139,
+      "passed": 1150,
       "failed": 0,
       "ignored": 8,
-      "summaries": 98
+      "summaries": 99
     },
     "darwin": {
-      "passed": 1142,
+      "passed": 1153,
       "failed": 0,
       "ignored": 10,
-      "summaries": 98
+      "summaries": 99
     }
   }
 }
