@@ -4748,29 +4748,40 @@ pub fn make_tls_connector_for_peer(
     fed_state: &FedState,
     peer: &PeerConfig,
 ) -> Result<tokio_rustls::TlsConnector, AppError> {
-    let client_cert = fed_state.cert_chain();
-    let key = PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+    make_tls_connector_with_credentials(
+        fed_state.cert_chain(),
         fed_state.key_der(),
-    ));
+        peer,
+        fed_state.current_peers(),
+    )
+}
 
-    let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> = if let Some(ref pin) =
-        peer.pin
-    {
-        Arc::new(
-            PinnedServerCertVerifier::new(pin).refusing_ca(&peer.name, fed_state.current_peers()),
-        )
-    } else if let Some(anchors) = fed_state.get_ca_anchors(&peer.name) {
-        let identities = peer.identities.clone().unwrap_or_default();
-        Arc::new(
-            CaServerCertVerifier::new(anchors, identities)
-                .refusing_pinned(&peer.name, fed_state.current_peers().pinned_entries()),
-        )
-    } else {
-        return Err(AppError::Internal(format!(
-            "peer '{}' has neither pin nor valid CA bundle",
-            peer.name
-        )));
-    };
+pub fn make_tls_connector_with_credentials(
+    client_cert: Vec<CertificateDer<'static>>,
+    key_der: Vec<u8>,
+    peer: &PeerConfig,
+    peers: Arc<PeersMap>,
+) -> Result<tokio_rustls::TlsConnector, AppError> {
+    let key = PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(key_der));
+
+    let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> =
+        if let Some(ref pin) = peer.pin {
+            Arc::new(PinnedServerCertVerifier::new(pin).refusing_ca(&peer.name, peers.clone()))
+        } else if let Some(anchors) = peers
+            .get_ca_anchors(&peer.name)
+            .map(|anchors| anchors.to_vec())
+        {
+            let identities = peer.identities.clone().unwrap_or_default();
+            Arc::new(
+                CaServerCertVerifier::new(anchors, identities)
+                    .refusing_pinned(&peer.name, peers.pinned_entries()),
+            )
+        } else {
+            return Err(AppError::Internal(format!(
+                "peer '{}' has neither pin nor valid CA bundle",
+                peer.name
+            )));
+        };
 
     let client_config = rustls::ClientConfig::builder_with_provider(
         rustls::crypto::ring::default_provider().into(),
