@@ -1,0 +1,86 @@
+[
+  {
+    "label": "compat-stored-fallback",
+    "target": "lib",
+    "test": "observe_collector_unknown_tests::unknown_kind_storage_rendering_and_exact_replay",
+    "test_file": "src/observe_collector_unknown_tests.rs",
+    "expected_literal": "stored future kind readback was refused",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "crate::observe_collector_decode::decode_event(&json)\n                        .map_err(|_| StoreError::Storage)?\n                        .event",
+        "replacement": "serde_json::from_slice::<ExportEvent>(&json).map_err(|_| StoreError::Storage)?"
+      }
+    ]
+  },
+  {
+    "label": "compat-private-kind-preserved",
+    "target": "lib",
+    "test": "observe_collector_unknown_tests::unknown_kind_storage_rendering_and_exact_replay",
+    "test_file": "src/observe_collector_unknown_tests.rs",
+    "expected_literal": "stored future kind identity was normalized",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "let json = &original.canonical;",
+        "replacement": "let normalized = encoded(event, 4096)?; let json = &normalized;"
+      }
+    ]
+  },
+  {
+    "label": "compat-kind-in-conflict-identity",
+    "target": "lib",
+    "test": "observe_collector_unknown_tests::unknown_kind_storage_rendering_and_exact_replay",
+    "test_file": "src/observe_collector_unknown_tests.rs",
+    "expected_literal": "changed unknown kind was accepted as duplicate",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "previous.canonical != *json",
+        "replacement": "serde_json::to_vec(&previous.event).ok() != serde_json::to_vec(event).ok()"
+      }
+    ]
+  },
+  {
+    "label": "compat-fixed-caption",
+    "target": "lib",
+    "test": "observe_collector_unknown_tests::unknown_kind_storage_rendering_and_exact_replay",
+    "test_file": "src/observe_collector_unknown_tests.rs",
+    "expected_literal": "unknown caption missing",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "\"unknown event kind (newer node)\".into()",
+        "replacement": "\"unknown\".into()"
+      }
+    ]
+  },
+  {
+    "label": "compat-runtime-retains-envelope",
+    "target": "lib",
+    "test": "observe_collector::tests::runtime_preserves_original_future_kind",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "runtime lost original kind identity",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "move |store| store.ingest_decoded_page(&node, &cursor, page)",
+        "replacement": "move |store| store.ingest_page(&node, &cursor, page.page)"
+      }
+    ]
+  },
+  {
+    "label": "compat-corrupt-row-refuses",
+    "target": "lib",
+    "test": "observe_collector_unknown_tests::malformed_future_stored_row_is_not_skipped",
+    "test_file": "src/observe_collector_unknown_tests.rs",
+    "expected_literal": "malformed stored row was silently skipped",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "let event = crate::observe_collector_decode::decode_event(&json)\n                        .map_err(|_| StoreError::Storage)?\n                        .event;",
+        "replacement": "let event = match crate::observe_collector_decode::decode_event(&json) { Ok(value) => value.event, Err(_) => continue };"
+      }
+    ]
+  }
+]
