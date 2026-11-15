@@ -43,6 +43,8 @@ pub mod observe_collector;
 #[cfg(feature = "daemon")]
 pub mod observe_collector_auth;
 #[cfg(feature = "daemon")]
+pub(crate) mod observe_collector_decode;
+#[cfg(feature = "daemon")]
 pub mod observe_collector_net;
 #[cfg(feature = "daemon")]
 pub mod observe_collector_store;
