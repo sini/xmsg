@@ -157,6 +157,7 @@ macro_rules! closed_enum {
 closed_enum!(EventKind {
     MessageRecorded,
     RecipientResolved,
+    Arrival,
     OutcomeChanged,
     ReplyRecorded,
     ReplyPushOutcomeChanged,
@@ -347,6 +348,7 @@ fn kind(value: &str) -> EventKind {
     match value {
         "message_recorded" => EventKind::MessageRecorded,
         "recipient_resolved" => EventKind::RecipientResolved,
+        "arrival" => EventKind::Arrival,
         "outcome_changed" => EventKind::OutcomeChanged,
         "reply_recorded" => EventKind::ReplyRecorded,
         "reply_push_outcome_changed" => EventKind::ReplyPushOutcomeChanged,
@@ -1230,11 +1232,31 @@ mod tests {
         );
     }
     #[test]
+    fn arrival_preserves_its_typed_export_kind_and_correlation() {
+        let mut arrival = event(1);
+        arrival.observation.kind = "arrival".into();
+        arrival.observation.body_availability = "not_recorded".into();
+        let value = wire(vec![arrival], &scope(None, false));
+        assert_eq!(value["events"][0]["kind"], "arrival");
+        assert_eq!(
+            value["events"][0]["message_id"],
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        );
+        assert_eq!(value["events"][0]["available"], "not_recorded");
+        let typed: ExportPage = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            serde_json::to_value(typed).unwrap()["events"][0]["kind"],
+            "arrival"
+        );
+    }
+
+    #[test]
     fn known_classes_preserve_named_states() {
         let scope = scope(None, false);
         for kind in [
             "message_recorded",
             "recipient_resolved",
+            "arrival",
             "outcome_changed",
             "reply_recorded",
             "reply_push_outcome_changed",

@@ -958,6 +958,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn arrival_timeline_preserves_kind_destination_and_message_id() {
+        let mut observed = page(1, 1, 1);
+        observed.events[0].kind = "arrival".into();
+        observed.events[0].outcome = Some("delivered".into());
+        let mut state = TimelineState::default();
+        let now = Instant::now();
+        state.apply(Ok(TimelineFetch::Pages(vec![observed])), now);
+        assert!(state.error.is_none());
+        let text = render_timeline(&state, now);
+        assert!(text.contains("arrival sender@local -> recipient@local"));
+        assert!(text.contains("message=message"));
+        assert!(text.contains("outcome=delivered"));
+        assert!(text.contains("body=not_recorded"));
+    }
+
     #[tokio::test]
     async fn refresh_requests_only_roster_and_observation_endpoints() {
         let (_dir, client, task) = server(vec![
