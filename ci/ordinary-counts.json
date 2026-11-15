@@ -1,6 +1,6 @@
 {
   "baseline": {
-    "linux": "cargo test --locked on d07c2f88cdce4401b52df7cdc842308fadaeaff0: exit 0, 1150 passed/8 ignored/99 summaries; all 96 integration targets",
+    "linux": "executed cargo test --locked --offline on f4de11bfb7ad29215a6d4b8391fc1430d3c24054:1173passed/8ignored/0failed/100summaries/all97targets",
     "darwin": "run 43722456912 job 132837174511 on d07c2f88cdce4401b52df7cdc842308fadaeaff0: 1153 passed/10 ignored/0 failed/99 summaries; canonical derivation lines exclude Nix error-tail replay; all 96 targets"
   },
   "integration_targets": [
@@ -25,6 +25,7 @@
     "tests/gate_delivered_acked.rs",
     "tests/gate_dtxj_collector.rs",
     "tests/gate_dtxj_export.rs",
+    "tests/gate_dtxj_unknown_wire.rs",
     "tests/gate_h5_hub_admission.rs",
     "tests/gate_h6_default_route.rs",
     "tests/gate_ha8_reclaim.rs",
@@ -103,10 +104,10 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1150,
+      "passed": 1173,
       "failed": 0,
       "ignored": 8,
-      "summaries": 99
+      "summaries": 100
     },
     "darwin": {
       "passed": 1153,
