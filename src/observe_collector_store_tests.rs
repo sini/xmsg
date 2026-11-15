@@ -1120,3 +1120,356 @@ fn snapshot_control_counts_toward_bytes_and_survives_blob_byte_eviction() {
         }
     }
 }
+#[test]
+fn collector_directory_special_mode_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = private_temp();
+    let store = journal_store(dir.path());
+    drop(store);
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o1700)).unwrap();
+    assert!(
+        crate::agent::ensure_secure_socket_dir(dir.path(), unsafe { libc::geteuid() }).is_ok(),
+        "inherited ordinary-mode control rejected sticky directory"
+    );
+    let result = Store::open(
+        dir.path(),
+        vec![NodePolicy {
+            node: "node".into(),
+            labels: false,
+            supported: true,
+        }],
+        Arc::new(|| NOW),
+    );
+    assert!(
+        matches!(result, Err(StoreError::UnsafePath)),
+        "state directory special mode accepted"
+    );
+}
+#[test]
+fn inherited_directory_predicates_use_real_metadata() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = private_temp();
+    let uid = unsafe { libc::geteuid() };
+    assert!(
+        crate::agent::ensure_secure_socket_dir(dir.path(), uid).is_ok(),
+        "secure directory control refused"
+    );
+    assert!(
+        crate::agent::ensure_secure_socket_dir(dir.path(), uid.wrapping_add(1)).is_err(),
+        "inherited directory owner mismatch accepted"
+    );
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        crate::agent::ensure_secure_socket_dir(dir.path(), uid).is_err(),
+        "inherited directory mode accepted"
+    );
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let file = dir.path().join("regular");
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o700)
+        .open(&file)
+        .unwrap();
+    assert!(
+        crate::agent::ensure_secure_socket_dir(&file, uid).is_err(),
+        "inherited directory type accepted"
+    );
+}
+#[test]
+fn private_file_metadata_predicates_use_real_metadata() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = private_temp();
+    let uid = unsafe { libc::geteuid() };
+    let file = dir.path().join("file");
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&file)
+        .unwrap()
+        .set_len(100)
+        .unwrap();
+    let metadata = fs::symlink_metadata(&file).unwrap();
+    assert!(
+        private_file_metadata(&metadata, uid, 100).is_ok(),
+        "private file exact-boundary control refused"
+    );
+    assert!(
+        private_file_metadata(&metadata, uid.wrapping_add(1), 100).is_err(),
+        "private file owner mismatch accepted"
+    );
+    assert!(
+        private_file_metadata(&metadata, uid, 99).is_err(),
+        "private file length accepted"
+    );
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        private_file_metadata(&fs::symlink_metadata(&file).unwrap(), uid, 100).is_err(),
+        "private file mode accepted"
+    );
+    let substitute = dir.path().join("directory");
+    fs::create_dir(&substitute).unwrap();
+    fs::set_permissions(&substitute, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        private_file_metadata(&fs::symlink_metadata(substitute).unwrap(), uid, u64::MAX).is_err(),
+        "private file type accepted"
+    );
+}
+fn journal_store(dir: &Path) -> Store {
+    Store::open_limits(
+        dir,
+        vec![NodePolicy {
+            node: "node".into(),
+            labels: false,
+            supported: true,
+        }],
+        Arc::new(|| NOW),
+        Limits {
+            rows: ROWS,
+            bytes: BYTES,
+            pages: 128,
+        },
+    )
+    .unwrap()
+}
+fn journal_seed(store: &Store) -> Cursor {
+    let mut p = page(1);
+    p.events = (1..=200)
+        .map(|i| {
+            let mut event = page(i).events.remove(0);
+            event.message_id = Some("m".repeat(512));
+            event.thread_id = Some("t".repeat(512));
+            event
+        })
+        .collect();
+    p.next = 200;
+    store.ingest_page("node", &Cursor::default(), p).unwrap();
+    store.ingest_snapshot("node", snapshot()).unwrap();
+    store.cursor("node").unwrap()
+}
+#[test]
+fn journal_failure_barrier_bounds_abort_and_reopen() {
+    use std::ffi::{c_char, c_int, c_void, CStr};
+    struct Barrier {
+        journal: std::path::PathBuf,
+        samples: Mutex<Vec<u64>>,
+        deny_rollback: bool,
+    }
+    unsafe extern "C" fn authorize(
+        ctx: *mut c_void,
+        action: c_int,
+        arg: *const c_char,
+        column: *const c_char,
+        _: *const c_char,
+        _: *const c_char,
+    ) -> c_int {
+        let barrier = unsafe { &*(ctx as *const Barrier) };
+        let value = if arg.is_null() {
+            b"".as_slice()
+        } else {
+            unsafe { CStr::from_ptr(arg) }.to_bytes()
+        };
+        let column = if column.is_null() {
+            b"".as_slice()
+        } else {
+            unsafe { CStr::from_ptr(column) }.to_bytes()
+        };
+        let update =
+            action == rusqlite::ffi::SQLITE_UPDATE && value == b"nodes" && column == b"next";
+        let rollback = action == rusqlite::ffi::SQLITE_TRANSACTION && value == b"ROLLBACK";
+        if update || rollback {
+            let length = fs::metadata(&barrier.journal).map_or(0, |m| m.len());
+            if let Ok(mut samples) = barrier.samples.lock() {
+                samples.push(length);
+            }
+        }
+        if update || (rollback && barrier.deny_rollback) {
+            rusqlite::ffi::SQLITE_DENY
+        } else {
+            rusqlite::ffi::SQLITE_OK
+        }
+    }
+    for deny_rollback in [false, true] {
+        let dir = private_temp();
+        let mut barrier = Box::new(Barrier {
+            journal: dir.path().join("collector.sqlite-journal"),
+            samples: Mutex::new(Vec::new()),
+            deny_rollback,
+        });
+        let store = journal_store(dir.path());
+        let cursor = journal_seed(&store);
+        {
+            let inner = store.inner.lock().unwrap();
+            let c = inner.connection.as_ref().unwrap();
+            assert_eq!(
+                unsafe {
+                    rusqlite::ffi::sqlite3_set_authorizer(
+                        c.handle(),
+                        Some(authorize),
+                        (&mut *barrier as *mut Barrier).cast(),
+                    )
+                },
+                rusqlite::ffi::SQLITE_OK
+            );
+        }
+        for _ in 0..if deny_rollback { 1 } else { 3 } {
+            assert!(
+                store.ingest_page("node", &cursor, page(201)).is_err(),
+                "failure barrier did not reject cursor statement"
+            );
+            let inner = store.inner.lock().unwrap();
+            if deny_rollback {
+                assert!(
+                    inner.connection.is_none(),
+                    "failed rollback retained writable connection"
+                );
+            } else {
+                assert!(
+                    inner.connection.as_ref().unwrap().is_autocommit(),
+                    "error resumed live transaction"
+                );
+            }
+        }
+        let samples = barrier.samples.lock().unwrap().clone();
+        assert!(samples.len() >= 2, "journal failure barrier not reached");
+        assert!(
+            samples.iter().all(|&n| n > 0 && n <= 128 * 4104 + 131072),
+            "journal failure barrier exceeded bound"
+        );
+        assert!(
+            samples.iter().all(|&n| n == samples[0]),
+            "journal accumulated across aborted transactions"
+        );
+        eprintln!("journal-error engine={} deny_rollback={} before_failure_lengths={:?} bound={} observation=authorizer_barrier",rusqlite::version(),deny_rollback,samples,128*4104+131072);
+        {
+            let inner = store.inner.lock().unwrap();
+            if let Some(c) = inner.connection.as_ref() {
+                assert_eq!(
+                    unsafe {
+                        rusqlite::ffi::sqlite3_set_authorizer(
+                            c.handle(),
+                            None,
+                            std::ptr::null_mut(),
+                        )
+                    },
+                    rusqlite::ffi::SQLITE_OK
+                );
+            }
+        }
+        drop(store);
+        drop(barrier);
+        let reopened = journal_store(dir.path());
+        assert_eq!(
+            reopened.cursor("node").unwrap(),
+            cursor,
+            "error reopen changed cursor"
+        );
+        let inner = reopened.inner.lock().unwrap();
+        let c = inner.connection.as_ref().unwrap();
+        let count: i64 = c
+            .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 200, "error reopen changed page");
+        drop(inner);
+        assert!(
+            reopened.view(None, 200).unwrap()[0].history_hidden,
+            "error reopen exposed cached history"
+        );
+    }
+}
+#[test]
+fn journal_crash_child_fixture() {
+    let Some(dir) = std::env::var_os("XMSG_TEST_COLLECTOR_JOURNAL_CRASH_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let store = journal_store(&dir);
+    let inner = store.inner.lock().unwrap();
+    let c = inner.connection.as_ref().unwrap();
+    c.execute_batch("BEGIN IMMEDIATE; DELETE FROM events WHERE node='node'; UPDATE nodes SET next=999,snapshot=NULL WHERE node='node';").unwrap();
+    let length = fs::metadata(dir.join("collector.sqlite-journal"))
+        .unwrap()
+        .len();
+    assert!(length > 0 && length <= 128 * 4104 + 131072);
+    fs::write(dir.join("child-ready"), length.to_string()).unwrap();
+    unsafe { libc::_exit(73) };
+}
+#[test]
+fn uncommitted_child_crash_journal_is_bounded_and_recovers_hidden() {
+    let dir = private_temp();
+    let store = journal_store(dir.path());
+    let cursor = journal_seed(&store);
+    drop(store);
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "observe_collector_store::tests::journal_crash_child_fixture",
+            "--exact",
+            "--nocapture",
+        ])
+        .env("XMSG_TEST_COLLECTOR_JOURNAL_CRASH_DIR", dir.path())
+        .spawn()
+        .unwrap();
+    let child_pid = child.id();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            let cleanup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while child.try_wait().unwrap().is_none()
+                && std::time::Instant::now() < cleanup_deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!("journal fixture child exceeded bounded wait pid={child_pid}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert_eq!(
+        status.code(),
+        Some(73),
+        "child did not stop inside uncommitted transaction"
+    );
+    let journal = dir.path().join("collector.sqlite-journal");
+    let observed = fs::metadata(&journal).unwrap().len();
+    let recorded: u64 = fs::read_to_string(dir.path().join("child-ready"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(observed, recorded, "producer journal marker disagrees");
+    assert!(
+        recorded > 0 && recorded <= 128 * 4104 + 131072,
+        "crash journal exceeded bound"
+    );
+    use std::io::Read;
+    let mut magic = [0u8; 8];
+    fs::File::open(&journal)
+        .unwrap()
+        .read_exact(&mut magic)
+        .unwrap();
+    let magic_valid = magic == [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
+    eprintln!("journal-crash engine={} child_pid={} exit=73 journal_length={} bound={} synced_hot_header={} observation=post_child_exit_preopen",rusqlite::version(),child_pid,recorded,128*4104+131072,magic_valid);
+    let reopened = journal_store(dir.path());
+    assert_eq!(
+        reopened.cursor("node").unwrap(),
+        cursor,
+        "crash recovery changed cursor"
+    );
+    let inner = reopened.inner.lock().unwrap();
+    let c = inner.connection.as_ref().unwrap();
+    let (events,snapshots):(i64,i64)=c.query_row("SELECT (SELECT count(*) FROM events),(SELECT count(*) FROM nodes WHERE snapshot IS NOT NULL)",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!(events, 200, "crash recovery changed page");
+    assert_eq!(snapshots, 1, "crash recovery changed snapshot");
+    drop(inner);
+    assert!(
+        reopened.view(None, 200).unwrap()[0].history_hidden,
+        "crash recovery exposed history before revalidation"
+    );
+    assert!(
+        fs::metadata(&journal).map_or(true, |m| m.len() <= 128 * 4104 + 131072),
+        "recovery grew journal beyond bound"
+    );
+}

@@ -669,8 +669,8 @@
     "label": "database-mode",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
-    "test": "observe_collector_store::tests::private_paths_and_preexisting_physical_limits",
-    "expected_literal": "unsafe database mode accepted",
+    "test": "observe_collector_store::tests::private_file_metadata_predicates_use_real_metadata",
+    "expected_literal": "private file mode accepted",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
@@ -683,8 +683,8 @@
     "label": "database-length",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
-    "test": "observe_collector_store::tests::private_paths_and_preexisting_physical_limits",
-    "expected_literal": "oversized database accepted",
+    "test": "observe_collector_store::tests::private_file_metadata_predicates_use_real_metadata",
+    "expected_literal": "private file length accepted",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
@@ -1004,6 +1004,124 @@
         "file": "src/observe_collector_store.rs",
         "needle": "Sha256::digest(&bytes).to_vec()",
         "replacement": "Sha256::digest(snapshot.scope.as_bytes()).to_vec()"
+      }
+    ]
+  },
+  {
+    "label": "directory-special-mode",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::collector_directory_special_mode_is_refused",
+    "expected_literal": "state directory special mode accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "m.mode() & 0o7777 != 0o700",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "inherited-directory-mode",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::inherited_directory_predicates_use_real_metadata",
+    "expected_literal": "inherited directory mode accepted",
+    "edits": [
+      {
+        "file": "src/agent.rs",
+        "needle": "actual_mode != 0o700",
+        "replacement": "false",
+        "start": "pub fn ensure_secure_socket_dir",
+        "end": "pub fn socket_dir_for_env"
+      }
+    ]
+  },
+  {
+    "label": "inherited-directory-owner",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::inherited_directory_predicates_use_real_metadata",
+    "expected_literal": "inherited directory owner mismatch accepted",
+    "edits": [
+      {
+        "file": "src/agent.rs",
+        "needle": "actual_uid != expected_uid",
+        "replacement": "false",
+        "start": "pub fn ensure_secure_socket_dir",
+        "end": "pub fn socket_dir_for_env"
+      }
+    ]
+  },
+  {
+    "label": "inherited-directory-type",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::inherited_directory_predicates_use_real_metadata",
+    "expected_literal": "inherited directory type accepted",
+    "edits": [
+      {
+        "file": "src/agent.rs",
+        "needle": "!meta.is_dir()",
+        "replacement": "false",
+        "start": "pub fn ensure_secure_socket_dir",
+        "end": "pub fn socket_dir_for_env"
+      }
+    ]
+  },
+  {
+    "label": "private-file-owner",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::private_file_metadata_predicates_use_real_metadata",
+    "expected_literal": "private file owner mismatch accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "m.uid() != expected_uid",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "private-file-type",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::private_file_metadata_predicates_use_real_metadata",
+    "expected_literal": "private file type accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!m.is_file()",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "journal-admission",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::private_paths_and_preexisting_physical_limits",
+    "expected_literal": "oversized journal accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "private_file(&journal, journal_cap, false)?;",
+        "replacement": "let _ = (&journal, journal_cap);"
+      }
+    ]
+  },
+  {
+    "label": "journal-error-abort",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::journal_failure_barrier_bounds_abort_and_reopen",
+    "expected_literal": "error resumed live transaction",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "c.execute_batch(\"ROLLBACK\").is_err()",
+        "replacement": "false"
       }
     ]
   }
