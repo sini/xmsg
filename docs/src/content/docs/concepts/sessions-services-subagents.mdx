@@ -106,18 +106,26 @@ subagent. `list` shows live bound subagents with `kind: "subagent"`.
 
 ## Watch recipients and exchanges (planned)
 
-Run `xmsg watch` from your local owner terminal to follow live and inactive recipients and
-node reachability. The view groups identities by node, kind and harness, using the website
-demo's participant vocabulary. Its exchange timeline comes from committed local metadata,
-with explicit source/destination references and message/reply correlation. Refresh age and
-partial/stale states distinguish an old snapshot from a currently reachable session.
+Run `xmsg watch` from your local owner terminal to follow a read-only local registration
+snapshot. The partial roster reports `registered` and `seen` metadata; it does not attest
+current session liveness or reachability. Newly presented or filesystem-only sessions may be
+absent until normal activity reconciles them. The view groups recorded identities by node,
+kind and harness, using the website demo's participant vocabulary. Its exchange timeline
+comes from committed local metadata, with explicit source/destination references and
+message/reply correlation. Snapshot age and stale states show when a refresh last succeeded.
 
 The timeline is observation, not complete history. Bounded retention, queue drops and writer
 restart appear as counters and gaps; a delivery outcome does not establish that an agent read
 a message or finished a task. Roster and timeline freshness are separate, and an older daemon
-without the journal still supplies the roster.
+without the journal can still supply the roster if it supports read-only snapshots. A daemon
+that rejects snapshot mode leaves the roster unavailable; watch never falls back to a listing
+that reconciles state or delivers queued work.
 
-Watch uses local read endpoints over `http.sock`; it records no bodies and reads no harness
-transcripts. For example, run `xmsg watch --once --plain` before restarting a local service,
-then `xmsg watch` to follow its roster state and newly observed exchanges. See the
+Watch uses local read endpoints over `http.sock`; it does not reconcile claims, prune
+registrations, drive delivery or contact federation peers. It records no bodies and reads no
+harness transcripts. For example, run `xmsg watch --once --plain` before restarting a local
+service, then `xmsg watch` to follow recorded registrations and newly observed exchanges.
+`--node` accepts only `local` or this daemon's canonical name. For a live remote listing use
+`xmsg list --node REMOTE`, which can reconcile and deliver queued work; use the
+[fleet observer](/concepts/fleet-observer/) for the planned remote view once deployed. See the
 [CLI reference](/reference/cli-and-mcp/#xmsg-watch-planned) for refresh, socket and limit details.

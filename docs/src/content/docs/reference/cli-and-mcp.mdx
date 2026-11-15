@@ -26,7 +26,9 @@ xmsg show MESSAGE_ID [--json]
 
 - `list` prints a recipient table with the address, kind, label, status and node. Then it
   prints the status of the nodes. By default, it shows live recipients. Filters make the
-  daemon's view smaller.
+  daemon's view smaller. Listing reconciles claims and registrations, and can deliver queued
+  messages or fork notices on this node and on peers it asks. Use the planned local snapshot
+  mode below when observation must not drive reconciliation.
 - `send` prints the message ID, the outcome and the resolved recipient address. With `-`, or with
   no text, it reads stdin until EOF and keeps the newlines. An idempotency key uses the same send
   again for the same sender, recipient and text. The CLI does not retry requests automatically.
@@ -48,11 +50,11 @@ use their own reply interfaces.
 
 ### `xmsg watch` (planned)
 
-A local recipient roster and metadata exchange timeline:
+A read-only local registration snapshot and metadata exchange timeline:
 
 ```sh
 xmsg watch
-xmsg watch --node YOUR_NODE --interval 5
+xmsg watch --node local --interval 5
 xmsg watch --once --plain --http-sock /absolute/path/to/http.sock
 ```
 
@@ -60,11 +62,23 @@ xmsg watch --once --plain --http-sock /absolute/path/to/http.sock
 interval is two seconds; `--interval` accepts 1–60 seconds. Ctrl-C exits. `--once` prints one
 snapshot; `--plain` disables terminal redraw styling. Non-terminal output is plain.
 
-The roster polls health and live/inactive recipients. It shows reported state, node errors,
-partial results, truncation and the age of its last successful refresh. A failed refresh keeps
-old rows visibly stale; a successful health check alone does not make the roster fresh. It
-retains at most 1,000 rows and rejects response bodies over 4 MiB. Server-supplied names,
-labels and other fields have terminal controls escaped before display.
+The roster polls health and the [read-only local snapshot](/reference/http-and-sockets/#read-only-local-recipient-snapshot-planned).
+It shows already-observed registrations and last-seen metadata, marked partial. `registered`
+and `seen` are recorded states, not an attestation that a session is currently alive or
+reachable. Filesystem-only sessions and newly presented sessions may be absent until normal
+activity reconciles them. Watch does not assign claims, prune registrations or drive delivery.
+
+`--node` may select `local` or this daemon's canonical node name. A remote selection fails;
+use `xmsg list --node REMOTE` for a live remote listing, with its reconciliation and delivery
+side effects. The [fleet observer](/concepts/fleet-observer/) is the planned remote view once
+its collector is deployed. Watch does not contact federation peers.
+
+The roster shows truncation and the age of its last successful snapshot. A failed refresh
+keeps old rows visibly stale; a successful health check alone does not make the roster fresh.
+An older daemon that rejects the snapshot query leaves the roster unavailable: watch never
+retries with the ordinary, mutating listing. It retains at most 1,000 rows and rejects response
+bodies over 4 MiB. Server-supplied names, labels and other fields have terminal controls escaped
+before display.
 
 The timeline reads the local [observation journal](/reference/http-and-sockets/#local-observation-journal-planned)
 through `GET /v1/observe/events`. It shows source/destination references, message and reply
