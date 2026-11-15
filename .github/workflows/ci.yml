@@ -37,7 +37,7 @@ env:
     pre-xl1-compat
     shared-client
     shared-client-release-compat
-  TEST_CHECKS: tests
+  TEST_CHECKS: tests collector-browser
   COMPAT_CHECKS: >-
     shared-client-compat-0
     shared-client-compat-1
@@ -212,6 +212,8 @@ jobs:
         run: nix build -L --no-link --print-out-paths ./ci#checks.x86_64-linux.tests.cargoArtifacts | tee -a /tmp/attic-paths
       - name: Ordinary tests and exact completion counts
         run: nix build -L --no-link --print-out-paths ./ci#checks.x86_64-linux.tests | tee -a /tmp/attic-paths
+      - name: Collector DOM and resource-request gate
+        run: nix build -L --no-link --print-out-paths ./ci#checks.x86_64-linux.collector-browser | tee -a /tmp/attic-paths
       - name: Push to Attic cache
         if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
         env:
