@@ -13,6 +13,7 @@ use xmsg::mcp::{run_mcp_loop, McpConfig};
 use xmsg::registry::resolve_sessions_dirs;
 use xmsg::storage;
 
+mod doctor;
 mod operator;
 mod service_exec;
 mod watch;
@@ -32,6 +33,9 @@ struct Cli {
 enum Commands {
     /// List mesh recipients and node status
     List(operator::ListArgs),
+
+    /// Inspect local setup without repairing state
+    Doctor(doctor::DoctorArgs),
 
     /// Watch recipients and local message observations
     Watch(watch::WatchArgs),
@@ -471,6 +475,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .enable_all()
                 .build()?;
             rt.block_on(watch::run(args))?;
+        }
+        Commands::Doctor(args) => {
+            if doctor::run(args)? {
+                std::process::exit(1);
+            }
         }
         Commands::Send(args) => operator::send(args)?,
         Commands::Replies(args) => operator::replies(args)?,
