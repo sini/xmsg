@@ -51,6 +51,8 @@ pub mod plugin;
 #[cfg(feature = "daemon")]
 pub mod process;
 #[cfg(feature = "daemon")]
+mod recipient_snapshot;
+#[cfg(feature = "daemon")]
 pub mod registry;
 #[cfg(feature = "daemon")]
 pub mod storage;

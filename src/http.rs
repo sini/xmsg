@@ -682,11 +682,31 @@ fn parse_query<T>(query: Result<Query<T>, QueryRejection>) -> Result<T, AppError
         .map_err(|e| AppError::BadRequest(e.body_text()))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecipientListQuery {
+    #[serde(default)]
+    read_only: bool,
+    name: Option<String>,
+    node: Option<String>,
+    kind: Option<String>,
+    status: Option<String>,
+    within: Option<u64>,
+    host: Option<String>,
+}
+
 async fn list_recipients_handler(
     State(state): State<Arc<AppState>>,
     peer: PeerInfo,
-    query: Result<Query<surface::ListQuery>, QueryRejection>,
+    query: Result<Query<RecipientListQuery>, QueryRejection>,
 ) -> Result<Response, AppError> {
+    if query.as_ref().is_ok_and(|Query(request)| request.read_only)
+        && !crate::codex::runtime_initialized(&state.db)
+    {
+        return Err(AppError::Unavailable(
+            "read-only recipient snapshot requires initialized daemon runtime; wait for node startup".into(),
+        ));
+    }
     if let Some(cred) = peer.as_ref().and_then(|p| (p.0).0.peer.as_ref()) {
         if matches!(
             crate::agent::trace_caller_or_codex_owner(&state, cred),
@@ -698,7 +718,19 @@ async fn list_recipients_handler(
             ));
         }
     }
-    let query = parse_query(query)?;
+    let request = parse_query(query)?;
+    let query = surface::ListQuery {
+        name: request.name,
+        node: request.node,
+        kind: request.kind,
+        status: request.status,
+        within: request.within,
+        host: request.host,
+    };
+    if request.read_only {
+        let entries = crate::recipient_snapshot::collect(&state, &query)?;
+        return Ok((StatusCode::OK, Json(entries)).into_response());
+    }
     let entries = surface::list(&state, &query).await?;
     Ok((StatusCode::OK, Json(entries)).into_response())
 }

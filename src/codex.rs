@@ -2602,6 +2602,16 @@ pub fn init_for_db(
     rt
 }
 
+/// Inspect the runtime registry without initializing it or invalidating persisted state.
+pub fn runtime_initialized(db: &Arc<Mutex<rusqlite::Connection>>) -> bool {
+    let key = Arc::as_ptr(db) as usize;
+    let weak = Arc::downgrade(db);
+    registry().lock().is_ok_and(|map| {
+        map.get(&key)
+            .is_some_and(|slot| Weak::ptr_eq(&slot.weak_db, &weak))
+    })
+}
+
 /// Obtain the `CodexRuntime` associated with `db`, lazily initializing a default
 /// disabled runtime (with startup DB invalidation) if `init_for_db` was not called.
 pub fn for_db(db: &Arc<Mutex<rusqlite::Connection>>) -> Arc<Mutex<CodexRuntime>> {
