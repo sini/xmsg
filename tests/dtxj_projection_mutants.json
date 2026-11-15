@@ -997,7 +997,7 @@
         "replacement": "&(1, node, peer, effective_labels)"
       }
     ],
-    "expected_literal": "target scope hash did not change"
+    "expected_literal": "assertion `left != right` failed"
   },
   {
     "label": "projection-fingerprint-node",
@@ -1013,5 +1013,215 @@
       }
     ],
     "expected_literal": "exporter scope hash did not change"
+  },
+  {
+    "label": "projection-source-continuation",
+    "oracle": "E09",
+    "target": "lib",
+    "test": "observe_export::tests::impossible_raw_continuation_is_refused",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "|| (source.has_more && source.next >= source.head)",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "impossible raw continuation accepted"
+  },
+  {
+    "label": "projection-event-nested-schema",
+    "oracle": "E13",
+    "target": "lib",
+    "test": "observe_export::tests::nested_and_envelope_schemas_reject_extra_fields",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct ExportEvent",
+        "replacement": "pub struct ExportEvent"
+      }
+    ],
+    "expected_literal": "event schema weakened"
+  },
+  {
+    "label": "projection-gap-nested-schema",
+    "oracle": "E13",
+    "target": "lib",
+    "test": "observe_export::tests::nested_and_envelope_schemas_reject_extra_fields",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct ExportGap",
+        "replacement": "pub struct ExportGap"
+      }
+    ],
+    "expected_literal": "gap schema weakened"
+  },
+  {
+    "label": "projection-page-envelope-schema",
+    "oracle": "E13",
+    "target": "lib",
+    "test": "observe_export::tests::nested_and_envelope_schemas_reject_extra_fields",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct ExportPage",
+        "replacement": "pub struct ExportPage"
+      }
+    ],
+    "expected_literal": "page schema weakened"
+  },
+  {
+    "label": "projection-snapshot-envelope-schema",
+    "oracle": "E13",
+    "target": "lib",
+    "test": "observe_export::tests::nested_and_envelope_schemas_reject_extra_fields",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct ExportSnapshot",
+        "replacement": "pub struct ExportSnapshot"
+      }
+    ],
+    "expected_literal": "snapshot envelope schema weakened"
+  },
+  {
+    "label": "projection-explicit-initial-cursor",
+    "oracle": "E10",
+    "target": "lib",
+    "test": "observe_export::tests::first_page_uses_explicit_zero_journal_cursor",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "after: Some(if self.scope_changed(scope) {\n                0\n            } else {\n                self.after\n            }),",
+        "replacement": "after: None,"
+      }
+    ],
+    "expected_literal": "initial journal query selected implicit tail"
+  },
+  {
+    "label": "projection-fingerprint-peer",
+    "oracle": "E10",
+    "target": "lib",
+    "test": "observe_export::tests::scope_is_stable_and_policy_sensitive",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "&(1, node, peer, &targets, effective_labels)",
+        "replacement": "&(1, node, &targets, effective_labels)"
+      }
+    ],
+    "expected_literal": "assertion `left != right` failed"
+  },
+  {
+    "label": "projection-fingerprint-labels",
+    "oracle": "E10",
+    "target": "lib",
+    "test": "observe_export::tests::scope_is_stable_and_policy_sensitive",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "&(1, node, peer, &targets, effective_labels)",
+        "replacement": "&(1, node, peer, &targets)"
+      }
+    ],
+    "expected_literal": "assertion `left != right` failed"
+  },
+  {
+    "label": "projection-endpoint-length",
+    "oracle": "E07",
+    "target": "lib",
+    "test": "observe_export::tests::canonical_endpoint_grammar_and_bounds_are_closed",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "if value.len() > 512 {",
+        "replacement": "if false {"
+      }
+    ],
+    "expected_literal": "invalid endpoint accepted"
+  },
+  {
+    "label": "projection-endpoint-node",
+    "oracle": "E07",
+    "target": "lib",
+    "test": "observe_export::tests::canonical_endpoint_grammar_and_bounds_are_closed",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "if !valid_node(node) {",
+        "replacement": "if false {"
+      }
+    ],
+    "expected_literal": "invalid endpoint accepted"
+  },
+  {
+    "label": "projection-endpoint-service-key",
+    "oracle": "E07",
+    "target": "lib",
+    "test": "observe_export::tests::canonical_endpoint_grammar_and_bounds_are_closed",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "|| crate::client::validate_service_name(key).is_ok()",
+        "replacement": "|| true"
+      }
+    ],
+    "expected_literal": "invalid endpoint accepted"
+  },
+  {
+    "label": "projection-endpoint-child",
+    "oracle": "E07",
+    "target": "lib",
+    "test": "observe_export::tests::canonical_endpoint_grammar_and_bounds_are_closed",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "crate::claim::validate_subagent_id(child).is_ok_and(|checked| checked == child)",
+        "replacement": "true"
+      }
+    ],
+    "expected_literal": "invalid endpoint accepted"
+  },
+  {
+    "label": "projection-endpoint-child-trim",
+    "oracle": "E07",
+    "target": "lib",
+    "test": "observe_export::tests::canonical_endpoint_grammar_and_bounds_are_closed",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "crate::claim::validate_subagent_id(child).is_ok_and(|checked| checked == child)",
+        "replacement": "crate::claim::validate_subagent_id(child).is_ok_and(|_| true)"
+      }
+    ],
+    "expected_literal": "invalid endpoint accepted"
+  },
+  {
+    "label": "projection-endpoint-service-normalization",
+    "oracle": "E07",
+    "target": "lib",
+    "test": "observe_export::tests::canonical_endpoint_grammar_and_bounds_are_closed",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "let key = key.strip_prefix(\"svc:\").unwrap_or(key);",
+        "replacement": "let key = key;"
+      }
+    ],
+    "expected_literal": "service endpoint normalization failed"
   }
 ]
