@@ -1,0 +1,1017 @@
+[
+  {
+    "label": "projection-query-version",
+    "oracle": "E08",
+    "target": "lib",
+    "test": "observe_export::tests::query_is_strict_bounded_and_explicit",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "if self.v != 1",
+        "replacement": "if false",
+        "start": "impl ExportQuery",
+        "end": "pub fn journal_query"
+      }
+    ],
+    "expected_literal": "accepted invalid query"
+  },
+  {
+    "label": "projection-query-negative-after",
+    "oracle": "E08",
+    "target": "lib",
+    "test": "observe_export::tests::query_is_strict_bounded_and_explicit",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "|| self.after < 0",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "accepted invalid query"
+  },
+  {
+    "label": "projection-query-limit",
+    "oracle": "E08",
+    "target": "lib",
+    "test": "observe_export::tests::query_is_strict_bounded_and_explicit",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "|| !(1..=MAX_EVENTS).contains(&self.limit)",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "accepted invalid query"
+  },
+  {
+    "label": "projection-query-epoch-empty",
+    "oracle": "E08",
+    "target": "lib",
+    "test": "observe_export::tests::query_is_strict_bounded_and_explicit",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "epoch.is_empty() || epoch.len() > 128",
+        "replacement": "epoch.len() > 128"
+      }
+    ],
+    "expected_literal": "accepted invalid query"
+  },
+  {
+    "label": "projection-query-epoch-size",
+    "oracle": "E08",
+    "target": "lib",
+    "test": "observe_export::tests::query_is_strict_bounded_and_explicit",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "epoch.is_empty() || epoch.len() > 128",
+        "replacement": "epoch.is_empty()"
+      }
+    ],
+    "expected_literal": "accepted invalid query"
+  },
+  {
+    "label": "projection-query-scope-size",
+    "oracle": "E08",
+    "target": "lib",
+    "test": "observe_export::tests::query_is_strict_bounded_and_explicit",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "scope.len() != 64",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "accepted invalid query"
+  },
+  {
+    "label": "projection-query-scope-alphabet",
+    "oracle": "E08",
+    "target": "lib",
+    "test": "observe_export::tests::query_is_strict_bounded_and_explicit",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": ".all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))",
+        "replacement": ".all(|_| true)"
+      }
+    ],
+    "expected_literal": "accepted invalid query"
+  },
+  {
+    "label": "projection-query-cursor-epoch",
+    "oracle": "E08",
+    "target": "lib",
+    "test": "observe_export::tests::query_is_strict_bounded_and_explicit",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "self.epoch.is_none() || self.scope.is_none()",
+        "replacement": "self.scope.is_none()"
+      }
+    ],
+    "expected_literal": "accepted invalid query"
+  },
+  {
+    "label": "projection-query-cursor-scope",
+    "oracle": "E08",
+    "target": "lib",
+    "test": "observe_export::tests::query_is_strict_bounded_and_explicit",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "self.epoch.is_none() || self.scope.is_none()",
+        "replacement": "self.epoch.is_none()"
+      }
+    ],
+    "expected_literal": "accepted invalid query"
+  },
+  {
+    "label": "projection-query-unknown-fields",
+    "oracle": "E08",
+    "target": "lib",
+    "test": "observe_export::tests::query_is_strict_bounded_and_explicit",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct ExportQuery",
+        "replacement": "pub struct ExportQuery"
+      }
+    ],
+    "expected_literal": "event query accepted unknown field"
+  },
+  {
+    "label": "projection-snapshot-query-unknown-fields",
+    "oracle": "E08",
+    "target": "lib",
+    "test": "observe_export::tests::query_is_strict_bounded_and_explicit",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct SnapshotQuery",
+        "replacement": "pub struct SnapshotQuery"
+      }
+    ],
+    "expected_literal": "snapshot query accepted unknown field"
+  },
+  {
+    "label": "projection-snapshot-version",
+    "oracle": "E08",
+    "target": "lib",
+    "test": "observe_export::tests::query_is_strict_bounded_and_explicit",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "if self.v != 1",
+        "replacement": "if false",
+        "start": "impl SnapshotQuery",
+        "end": "macro_rules!"
+      }
+    ],
+    "expected_literal": "SnapshotQuery"
+  },
+  {
+    "label": "projection-from-allowed",
+    "oracle": "E07",
+    "target": "lib",
+    "test": "observe_export::tests::scoped_events_require_both_valid_allowed_endpoints",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "!from.as_ref().is_some_and(|id| targets.contains(id))",
+        "replacement": "!from.as_ref().is_some_and(|_| true)"
+      }
+    ],
+    "expected_literal": "excluded endpoint leaked"
+  },
+  {
+    "label": "projection-from-present",
+    "oracle": "E07",
+    "target": "lib",
+    "test": "observe_export::tests::scoped_events_require_both_valid_allowed_endpoints",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "!from.as_ref().is_some_and(|id| targets.contains(id))",
+        "replacement": "from.as_ref().is_some_and(|id| !targets.contains(id))"
+      }
+    ],
+    "expected_literal": "excluded endpoint leaked"
+  },
+  {
+    "label": "projection-to-allowed",
+    "oracle": "E07",
+    "target": "lib",
+    "test": "observe_export::tests::scoped_events_require_both_valid_allowed_endpoints",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "!to.as_ref().is_some_and(|id| targets.contains(id))",
+        "replacement": "!to.as_ref().is_some_and(|_| true)"
+      }
+    ],
+    "expected_literal": "excluded endpoint leaked"
+  },
+  {
+    "label": "projection-to-present",
+    "oracle": "E07",
+    "target": "lib",
+    "test": "observe_export::tests::scoped_events_require_both_valid_allowed_endpoints",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "!to.as_ref().is_some_and(|id| targets.contains(id))",
+        "replacement": "to.as_ref().is_some_and(|id| !targets.contains(id))"
+      }
+    ],
+    "expected_literal": "excluded endpoint leaked"
+  },
+  {
+    "label": "projection-empty-targets",
+    "oracle": "E07",
+    "target": "lib",
+    "test": "observe_export::tests::scoped_events_require_both_valid_allowed_endpoints",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "let targets = targets\n            .map",
+        "replacement": "let targets = targets.filter(|values| !values.is_empty())\n            .map"
+      }
+    ],
+    "expected_literal": "empty targets leaked"
+  },
+  {
+    "label": "projection-scope-reset",
+    "oracle": "E10",
+    "target": "lib",
+    "test": "observe_export::tests::reset_and_zero_visible_pages_have_truthful_cursors",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "after: Some(if self.scope_changed(scope)",
+        "replacement": "after: Some(if false"
+      }
+    ],
+    "expected_literal": "scope mismatch did not reset"
+  },
+  {
+    "label": "projection-epoch-reset",
+    "oracle": "E10",
+    "target": "lib",
+    "test": "observe_export::tests::epoch_and_ahead_resets_are_independent",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": ".is_some_and(|epoch| epoch != &source.epoch)",
+        "replacement": ".is_some_and(|_| false)"
+      }
+    ],
+    "expected_literal": "reset did not backfill"
+  },
+  {
+    "label": "projection-ahead-reset",
+    "oracle": "E10",
+    "target": "lib",
+    "test": "observe_export::tests::epoch_and_ahead_resets_are_independent",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "|| requested_after > source.head",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "reset did not backfill"
+  },
+  {
+    "label": "projection-scope-change-marker",
+    "oracle": "E10",
+    "target": "lib",
+    "test": "observe_export::tests::reset_and_zero_visible_pages_have_truthful_cursors",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "if query.scope_changed(scope) {",
+        "replacement": "if false {"
+      }
+    ],
+    "expected_literal": "scope_changed"
+  },
+  {
+    "label": "projection-source-node",
+    "oracle": "E09",
+    "target": "lib",
+    "test": "observe_export::tests::source_identity_order_rows_and_bytes_are_validated",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "|| source.node != scope.node",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "invalid source accepted"
+  },
+  {
+    "label": "projection-source-epoch-empty",
+    "oracle": "E09",
+    "target": "lib",
+    "test": "observe_export::tests::source_identity_order_rows_and_bytes_are_validated",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "|| source.epoch.is_empty()",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "invalid source accepted"
+  },
+  {
+    "label": "projection-source-epoch-size",
+    "oracle": "E09",
+    "target": "lib",
+    "test": "observe_export::tests::source_identity_order_rows_and_bytes_are_validated",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "|| source.epoch.len() > 128",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "invalid source accepted"
+  },
+  {
+    "label": "projection-source-row-limit",
+    "oracle": "E09",
+    "target": "lib",
+    "test": "observe_export::tests::source_identity_order_rows_and_bytes_are_validated",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "|| source.events.len() > query.limit",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "invalid source accepted"
+  },
+  {
+    "label": "projection-source-initial-tail",
+    "oracle": "E09",
+    "target": "lib",
+    "test": "observe_export::tests::source_identity_order_rows_and_bytes_are_validated",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "|| source.initial_omitted != 0",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "invalid source accepted"
+  },
+  {
+    "label": "projection-source-availability",
+    "oracle": "E09",
+    "target": "lib",
+    "test": "observe_export::tests::source_identity_order_rows_and_bytes_are_validated",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "|| !source.available",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "invalid source accepted"
+  },
+  {
+    "label": "projection-source-floor-min",
+    "oracle": "E09",
+    "target": "lib",
+    "test": "observe_export::tests::source_identity_order_rows_and_bytes_are_validated",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "|| source.floor < 1",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "invalid source accepted"
+  },
+  {
+    "label": "projection-source-floor-max",
+    "oracle": "E09",
+    "target": "lib",
+    "test": "observe_export::tests::source_identity_order_rows_and_bytes_are_validated",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "|| source.floor > source.head.saturating_add(1)",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "invalid source accepted"
+  },
+  {
+    "label": "projection-event-node",
+    "oracle": "E09",
+    "target": "lib",
+    "test": "observe_export::tests::source_identity_order_rows_and_bytes_are_validated",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "event.node != source.node",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "invalid source accepted"
+  },
+  {
+    "label": "projection-event-epoch",
+    "oracle": "E09",
+    "target": "lib",
+    "test": "observe_export::tests::source_identity_order_rows_and_bytes_are_validated",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "|| event.epoch != source.epoch",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "invalid source accepted"
+  },
+  {
+    "label": "projection-event-order",
+    "oracle": "E09",
+    "target": "lib",
+    "test": "observe_export::tests::source_identity_order_rows_and_bytes_are_validated",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "|| event.sequence <= previous",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "invalid source accepted"
+  },
+  {
+    "label": "projection-event-floor",
+    "oracle": "E09",
+    "target": "lib",
+    "test": "observe_export::tests::source_identity_order_rows_and_bytes_are_validated",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "|| event.sequence < source.floor",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "invalid source accepted"
+  },
+  {
+    "label": "projection-event-head",
+    "oracle": "E09",
+    "target": "lib",
+    "test": "observe_export::tests::source_identity_order_rows_and_bytes_are_validated",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "|| event.sequence > source.head",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "invalid source accepted"
+  },
+  {
+    "label": "projection-source-cursor",
+    "oracle": "E09",
+    "target": "lib",
+    "test": "observe_export::tests::source_identity_order_rows_and_bytes_are_validated",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "if source.next != previous {",
+        "replacement": "if false {"
+      }
+    ],
+    "expected_literal": "invalid source accepted"
+  },
+  {
+    "label": "projection-source-page-bytes",
+    "oracle": "E09",
+    "target": "lib",
+    "test": "observe_export::tests::source_identity_order_rows_and_bytes_are_validated",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "encoded_size(&source, MAX_BYTES)?;",
+        "replacement": "encoded_size(&source, usize::MAX)?;"
+      }
+    ],
+    "expected_literal": "invalid source accepted"
+  },
+  {
+    "label": "projection-source-event-bytes",
+    "oracle": "E09",
+    "target": "lib",
+    "test": "observe_export::tests::source_identity_order_rows_and_bytes_are_validated",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "encoded_size(event, MAX_EVENT_BYTES)?;",
+        "replacement": "encoded_size(event, usize::MAX)?;"
+      }
+    ],
+    "expected_literal": "invalid source accepted"
+  },
+  {
+    "label": "projection-export-ttl",
+    "oracle": "E11",
+    "target": "lib",
+    "test": "observe_export::tests::ttl_and_extreme_times_never_extend_retention",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "if event.observed_at < cutoff {",
+        "replacement": "if false {"
+      }
+    ],
+    "expected_literal": "expired metadata leaked"
+  },
+  {
+    "label": "projection-unknown-outcome",
+    "oracle": "E13",
+    "target": "lib",
+    "test": "observe_export::tests::wire_is_closed_and_excludes_internal_details",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "pub outcome: Option<Outcome>,",
+        "replacement": "pub outcome: Option<String>,"
+      },
+      {
+        "file": "src/observe_export.rs",
+        "needle": "outcome: observation.outcome.as_deref().map(outcome),",
+        "replacement": "outcome: observation.outcome.as_deref().map(str::to_owned),"
+      }
+    ],
+    "expected_literal": "unknown outcome leaked"
+  },
+  {
+    "label": "projection-unknown-reason",
+    "oracle": "E13",
+    "target": "lib",
+    "test": "observe_export::tests::wire_is_closed_and_excludes_internal_details",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "pub reason: Option<Reason>,",
+        "replacement": "pub reason: Option<String>,"
+      },
+      {
+        "file": "src/observe_export.rs",
+        "needle": "reason: observation.reason.as_deref().map(reason),",
+        "replacement": "reason: observation.reason.as_deref().map(str::to_owned),"
+      }
+    ],
+    "expected_literal": "unknown reason leaked"
+  },
+  {
+    "label": "projection-unknown-kind",
+    "oracle": "E13",
+    "target": "lib",
+    "test": "observe_export::tests::wire_is_closed_and_excludes_internal_details",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "pub kind: EventKind,",
+        "replacement": "pub kind: String,"
+      },
+      {
+        "file": "src/observe_export.rs",
+        "needle": "kind: kind(&observation.kind),",
+        "replacement": "kind: observation.kind.clone(),"
+      }
+    ],
+    "expected_literal": "unknown kind leaked"
+  },
+  {
+    "label": "projection-correlation-safety",
+    "oracle": "E13",
+    "target": "lib",
+    "test": "observe_export::tests::wire_is_closed_and_excludes_internal_details",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": ".all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))",
+        "replacement": ".all(|_| true)",
+        "start": "fn correlation(",
+        "end": "fn kind("
+      }
+    ],
+    "expected_literal": "forbidden event field"
+  },
+  {
+    "label": "projection-reply-id-positive",
+    "oracle": "E13",
+    "target": "lib",
+    "test": "observe_export::tests::wire_is_closed_and_excludes_internal_details",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "reply_id: observation.reply_id.filter(|id| *id > 0),",
+        "replacement": "reply_id: observation.reply_id,"
+      }
+    ],
+    "expected_literal": "forbidden event field"
+  },
+  {
+    "label": "projection-event-availability-key",
+    "oracle": "E13",
+    "target": "lib",
+    "test": "observe_export::tests::wire_is_closed_and_excludes_internal_details",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "pub available: Availability,",
+        "replacement": "#[serde(rename=\"body_availability\")]\n    pub available: Availability,"
+      }
+    ],
+    "expected_literal": "availability schema changed"
+  },
+  {
+    "label": "projection-event-page-byte-bound",
+    "oracle": "E09",
+    "target": "lib",
+    "test": "observe_export::tests::output_byte_boundary_preserves_unscanned_visible_record",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "if encoded_size(&output, MAX_BYTES - reserve_bytes).is_err() {",
+        "replacement": "if false {"
+      }
+    ],
+    "expected_literal": "InvalidSource"
+  },
+  {
+    "label": "projection-event-prefix-cursor",
+    "oracle": "E10",
+    "target": "lib",
+    "test": "observe_export::tests::output_byte_boundary_preserves_unscanned_visible_record",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "output.next = previous_next;",
+        "replacement": "output.next = source.next;"
+      }
+    ],
+    "expected_literal": "cursor skipped visible record"
+  },
+  {
+    "label": "projection-label-effective-gate",
+    "oracle": "E14",
+    "target": "lib",
+    "test": "observe_export::tests::snapshot_labels_require_effective_opt_in_and_utf8_bound",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "let label = if scope.effective_labels {",
+        "replacement": "let label = if true {"
+      }
+    ],
+    "expected_literal": "label leaked without opt-in"
+  },
+  {
+    "label": "projection-label-byte-bound",
+    "oracle": "E14",
+    "target": "lib",
+    "test": "observe_export::tests::snapshot_labels_require_effective_opt_in_and_utf8_bound",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "let mut end = value.len().min(256);",
+        "replacement": "let mut end = value.len();"
+      }
+    ],
+    "expected_literal": "label byte limit exceeded"
+  },
+  {
+    "label": "projection-snapshot-work-bound",
+    "oracle": "E15",
+    "target": "lib",
+    "test": "observe_export::tests::snapshot_is_bounded_sorted_partial_and_conservative_on_duplicates",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "candidates.len() > MAX_CANDIDATES",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "candidate work limit exceeded"
+  },
+  {
+    "label": "projection-snapshot-row-bound",
+    "oracle": "E15",
+    "target": "lib",
+    "test": "observe_export::tests::snapshot_is_bounded_sorted_partial_and_conservative_on_duplicates",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "if output.endpoints.len() >= MAX_EVENTS {",
+        "replacement": "if false {"
+      }
+    ],
+    "expected_literal": "snapshot row limit exceeded"
+  },
+  {
+    "label": "projection-snapshot-byte-bound",
+    "oracle": "E15",
+    "target": "lib",
+    "test": "observe_export::tests::snapshot_byte_boundary_is_partial_without_oversized_wire",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "if encoded_size(&output, MAX_BYTES).is_err() {",
+        "replacement": "if false {"
+      }
+    ],
+    "expected_literal": "snapshot byte boundary must truncate"
+  },
+  {
+    "label": "projection-snapshot-scope-bound",
+    "oracle": "E07",
+    "target": "lib",
+    "test": "observe_export::tests::snapshot_labels_require_effective_opt_in_and_utf8_bound",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "if !scope.allows(&id) {",
+        "replacement": "if false {"
+      }
+    ],
+    "expected_literal": "left: 1"
+  },
+  {
+    "label": "projection-snapshot-schema",
+    "oracle": "E13",
+    "target": "lib",
+    "test": "observe_export::tests::snapshot_is_bounded_sorted_partial_and_conservative_on_duplicates",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct EndpointDescriptor",
+        "replacement": "pub struct EndpointDescriptor"
+      }
+    ],
+    "expected_literal": "snapshot schema weakened"
+  },
+  {
+    "label": "projection-snapshot-conflict-kind",
+    "oracle": "E15",
+    "target": "lib",
+    "test": "observe_export::tests::snapshot_conflicts_are_independently_conservative",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "previous.kind != descriptor.kind",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "snapshot conflict was ignored"
+  },
+  {
+    "label": "projection-snapshot-conflict-harness",
+    "oracle": "E15",
+    "target": "lib",
+    "test": "observe_export::tests::snapshot_conflicts_are_independently_conservative",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "previous.harness != descriptor.harness",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "snapshot conflict was ignored"
+  },
+  {
+    "label": "projection-snapshot-conflict-state",
+    "oracle": "E15",
+    "target": "lib",
+    "test": "observe_export::tests::snapshot_conflicts_are_independently_conservative",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "previous.state != descriptor.state",
+        "replacement": "false"
+      }
+    ],
+    "expected_literal": "snapshot conflict was ignored"
+  },
+  {
+    "label": "projection-snapshot-conflict-label",
+    "oracle": "E14",
+    "target": "lib",
+    "test": "observe_export::tests::snapshot_conflicts_are_independently_conservative",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "previous.label = None;\n                partial = true;",
+        "replacement": "previous.label = descriptor.label;\n                partial = true;"
+      }
+    ],
+    "expected_literal": "conflict label leaked"
+  },
+  {
+    "label": "projection-snapshot-duplicate-label",
+    "oracle": "E14",
+    "target": "lib",
+    "test": "observe_export::tests::snapshot_conflicts_are_independently_conservative",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "} else if previous.label != descriptor.label {",
+        "replacement": "} else if false {"
+      }
+    ],
+    "expected_literal": "duplicate labels fabricated"
+  },
+  {
+    "label": "projection-correlation-empty",
+    "oracle": "E13",
+    "target": "lib",
+    "test": "observe_export::tests::correlation_ids_are_bounded_opaque_bus_tokens",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "!value.is_empty()",
+        "replacement": "true",
+        "start": "fn correlation(",
+        "end": "fn kind("
+      }
+    ],
+    "expected_literal": "invalid correlation id leaked"
+  },
+  {
+    "label": "projection-correlation-length",
+    "oracle": "E13",
+    "target": "lib",
+    "test": "observe_export::tests::correlation_ids_are_bounded_opaque_bus_tokens",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "&& value.len() <= 512",
+        "replacement": "&& true",
+        "start": "fn correlation(",
+        "end": "fn kind("
+      }
+    ],
+    "expected_literal": "invalid correlation id leaked"
+  },
+  {
+    "label": "projection-timestamp-range",
+    "oracle": "E11",
+    "target": "lib",
+    "test": "observe_export::tests::invalid_source_times_are_omitted",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "(0..=MAX_TIME).contains(&value)",
+        "replacement": "true"
+      }
+    ],
+    "expected_literal": "invalid source timestamp leaked"
+  },
+  {
+    "label": "projection-future-observed-time",
+    "oracle": "E11",
+    "target": "lib",
+    "test": "observe_export::tests::ttl_and_extreme_times_never_extend_retention",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "|| event.observed_at > now",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "expired metadata leaked"
+  },
+  {
+    "label": "projection-future-persisted-time",
+    "oracle": "E11",
+    "target": "lib",
+    "test": "observe_export::tests::ttl_and_extreme_times_never_extend_retention",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "|| event.persisted_at > now",
+        "replacement": "|| false"
+      }
+    ],
+    "expected_literal": "expired metadata leaked"
+  },
+  {
+    "label": "projection-node-length",
+    "oracle": "E08",
+    "target": "lib",
+    "test": "observe_export::tests::scope_is_stable_and_policy_sensitive",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "&& value.len() <= 128",
+        "replacement": "&& true"
+      }
+    ],
+    "expected_literal": "oversized node accepted"
+  },
+  {
+    "label": "projection-fingerprint-targets",
+    "oracle": "E10",
+    "target": "lib",
+    "test": "observe_export::tests::scope_is_stable_and_policy_sensitive",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "&(1, node, peer, &targets, effective_labels)",
+        "replacement": "&(1, node, peer, effective_labels)"
+      }
+    ],
+    "expected_literal": "target scope hash did not change"
+  },
+  {
+    "label": "projection-fingerprint-node",
+    "oracle": "E10",
+    "target": "lib",
+    "test": "observe_export::tests::scope_is_stable_and_policy_sensitive",
+    "test_file": "src/observe_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "&(1, node, peer, &targets, effective_labels)",
+        "replacement": "&(1, peer, &targets, effective_labels)"
+      }
+    ],
+    "expected_literal": "exporter scope hash did not change"
+  }
+]
