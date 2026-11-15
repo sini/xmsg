@@ -144,11 +144,11 @@ pub(crate) fn collect(state: &AppState, query: &ListQuery) -> Result<Snapshot, A
             .lock()
             .map_err(|e| AppError::Internal(e.to_string()))?;
         for sql in [
-            "SELECT substr(id,1,513) || CASE WHEN suffix>1 THEN '~'||suffix ELSE '' END, 'instance', 'claude', NULL, CASE WHEN released=0 THEN created_at END, CASE WHEN released!=0 THEN created_at END FROM instance_claims ORDER BY 1,created_at DESC LIMIT ?1",
+            "SELECT substr(id,1,513) || CASE WHEN suffix>1 THEN '~'||suffix ELSE '' END, 'instance', 'claude', NULL, CASE WHEN released=0 THEN created_at END, NULL FROM instance_claims ORDER BY 1,created_at DESC LIMIT ?1",
             "SELECT substr(id,1,513), 'instance', substr(harness,1,32), NULL, NULL, last_live FROM instance_seen ORDER BY id LIMIT ?1",
-            "SELECT substr(root_id,1,513), 'instance', 'codex', substr(label,1,257), CASE WHEN active=1 AND revoked=0 THEN registered_at END, CASE WHEN active!=1 OR revoked!=0 THEN registered_at END FROM codex_roots ORDER BY root_id LIMIT ?1",
+            "SELECT substr(root_id,1,513), 'instance', 'codex', substr(label,1,257), CASE WHEN active=1 AND revoked=0 THEN registered_at END, NULL FROM codex_roots ORDER BY root_id LIMIT ?1",
             "SELECT substr(address,1,513), 'instance', substr(harness,1,32), substr(session,1,257), registered_at, NULL FROM plugin_sessions ORDER BY address LIMIT ?1",
-            "SELECT substr(parent||'/'||COALESCE(name,agent_id),1,513), 'subagent', COALESCE((SELECT substr(harness,1,32) FROM instance_seen WHERE id=parent),'unknown'), substr(name,1,257), NULL, MAX(bound_at,last_active,COALESCE(stopped_at,0)) FROM subagents ORDER BY parent,agent_id LIMIT ?1",
+            "SELECT substr(parent||'/'||COALESCE(name,agent_id),1,513), 'subagent', COALESCE((SELECT substr(harness,1,32) FROM instance_seen WHERE id=parent),'unknown'), substr(name,1,257), NULL, NULLIF(MAX(last_active,COALESCE(stopped_at,0)),0) FROM subagents ORDER BY parent,agent_id LIMIT ?1",
         ] {
             let mut statement = db.prepare(sql).map_err(|e| AppError::Internal(e.to_string()))?;
             let records = statement.query_map([(MAX_ROWS + 1) as i64], |record| {

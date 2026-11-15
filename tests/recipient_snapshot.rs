@@ -494,3 +494,45 @@ async fn cold_legacy_listing_keeps_its_existing_initialization_and_delivery_beha
         .unwrap();
     assert_eq!(queued, 0);
 }
+
+#[tokio::test]
+async fn snapshot_last_seen_comes_only_from_recorded_seen_evidence() {
+    let fixture = Fixture::new();
+    {
+        let db = fixture.state.db.lock().unwrap();
+        db.execute("INSERT INTO instance_claims VALUES ('44444444-4444-4444-8444-444444444444',4294967295,'gone',2,1,123)",[]).unwrap();
+        db.execute("INSERT INTO codex_roots (root_id,codex_home,owner_pid,owner_starttime,generation,label,registered_at,active) VALUES ('inactive-codex','/nonexistent',4294967295,'gone',1,'prior label',456,0)",[]).unwrap();
+        db.execute("INSERT INTO subagents (parent,agent_id,bound_at,last_active) VALUES ('unseen-parent','child',789,0)",[]).unwrap();
+    }
+    let (_, value) = fixture.get("?read_only=true").await;
+    let rows = value["recipients"].as_array().unwrap();
+    for id in ["44444444-4444-4444-8444-444444444444~2", "inactive-codex"] {
+        let row = rows
+            .iter()
+            .find(|r| r["address"] == format!("{id}@snapshot.example"))
+            .unwrap();
+        assert_eq!(row["status"], "seen");
+        assert!(
+            row["last_seen"].is_null(),
+            "registration time is not last seen: {row}"
+        );
+    }
+    {
+        let db = fixture.state.db.lock().unwrap();
+        db.execute("INSERT INTO instance_seen (id,harness,last_live) VALUES ('44444444-4444-4444-8444-444444444444~2','claude',789),('inactive-codex','codex',987)",[]).unwrap();
+        db.execute("UPDATE subagents SET last_active=555 WHERE parent='unseen-parent' AND agent_id='child'",[]).unwrap();
+    }
+    let (_, value) = fixture.get("?read_only=true").await;
+    let rows = value["recipients"].as_array().unwrap();
+    for (id, seen) in [
+        ("44444444-4444-4444-8444-444444444444~2", 789),
+        ("inactive-codex", 987),
+        ("unseen-parent/child", 555),
+    ] {
+        let row = rows
+            .iter()
+            .find(|r| r["address"] == format!("{id}@snapshot.example"))
+            .unwrap();
+        assert_eq!(row["last_seen"], seen);
+    }
+}
