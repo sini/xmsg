@@ -58,7 +58,9 @@ fn unknown_kind_storage_rendering_and_exact_replay() {
     let (directory, store, now) = fixture();
     let input = packet("future_delivery");
     assert_eq!(ingest(&store, input.clone()).unwrap().inserted, 3);
-    let views = store.view(Some(NODE), 200).unwrap();
+    let result = store.view(Some(NODE), 200);
+    assert!(result.is_ok(), "stored future kind readback was refused");
+    let views = result.unwrap();
     assert_eq!(views[0].events.len(), 3);
     let unknown = views[0]
         .events
@@ -89,7 +91,8 @@ fn unknown_kind_storage_rendering_and_exact_replay() {
     let before = stored(&directory);
     assert_eq!(
         serde_json::from_slice::<Value>(&before.0).unwrap()["kind"],
-        "future_delivery"
+        "future_delivery",
+        "stored future kind identity was normalized"
     );
     now.store(1010, Ordering::SeqCst);
     let mut replay = input;
@@ -129,4 +132,25 @@ fn unknown_kind_does_not_bypass_semantic_envelope_validation() {
         assert_eq!(store.cursor(NODE).unwrap().next, 0);
         assert!(store.view(Some(NODE), 200).unwrap()[0].history_hidden);
     }
+}
+
+#[test]
+fn malformed_future_stored_row_is_not_skipped() {
+    let (directory, store, _) = fixture();
+    ingest(&store, packet("future_delivery")).unwrap();
+    let mut value: Value = serde_json::from_slice(&stored(&directory).0).unwrap();
+    value["body"] = json!("forbidden fixture payload");
+    let connection =
+        rusqlite::Connection::open(directory.path().join("state/collector.sqlite")).unwrap();
+    connection
+        .execute(
+            "UPDATE events SET json=?1 WHERE sequence=2",
+            [serde_json::to_vec(&value).unwrap()],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(
+        matches!(store.view(Some(NODE), 200), Err(StoreError::Storage)),
+        "malformed stored row was silently skipped"
+    );
 }

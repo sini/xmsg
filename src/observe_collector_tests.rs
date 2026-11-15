@@ -809,6 +809,77 @@ async fn events_backoff_is_applied_to_scheduler() {
 }
 
 #[tokio::test]
+async fn runtime_preserves_original_future_kind() {
+    let fixture = Fixture::new().await;
+    let exporter = net::tests::Fixture::new().await;
+    let config = exporter.load().unwrap();
+    let node = config.sources[0].node.clone();
+    let directory = fixture.files.path().join("future-runtime");
+    let store = Arc::new(
+        Store::open(
+            &directory,
+            vec![NodePolicy {
+                node: node.clone(),
+                labels: false,
+                supported: true,
+            }],
+            Arc::new(|| 1000),
+        )
+        .unwrap(),
+    );
+    exporter.set_response(
+        "200 OK",
+        "",
+        &serde_json::to_vec(&ExportSnapshot {
+            v: 1,
+            node: node.clone(),
+            scope: "a".repeat(64),
+            observed_at: 1000,
+            endpoints: vec![],
+            truncated: false,
+            available: SnapshotAvailability::Available,
+        })
+        .unwrap(),
+    );
+    let state = scheduler_state(&fixture, &node, store.clone());
+    let task = tokio::spawn(poll_source(
+        Arc::new(Client::new(&config).unwrap()),
+        state,
+        0,
+    ));
+    eventually(|| exporter.requests.load(Ordering::SeqCst) == 1).await;
+    let mut packet = serde_json::to_value(scheduler_page(&node)).unwrap();
+    packet["events"][0]["kind"] = json!("future_delivery");
+    exporter.set_response("200 OK", "", &serde_json::to_vec(&packet).unwrap());
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    while store.cursor(&node).unwrap().next == 0 && std::time::Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+    task.abort();
+    let _ = task.await;
+    assert_eq!(
+        store.cursor(&node).unwrap().next,
+        1,
+        "runtime rejected future event page"
+    );
+    let connection = rusqlite::Connection::open_with_flags(
+        directory.join("collector.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let bytes: Vec<u8> = connection
+        .query_row("SELECT json FROM events WHERE sequence=1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["kind"],
+        "future_delivery",
+        "runtime lost original kind identity"
+    );
+}
+
+#[tokio::test]
 async fn idle_background_maintenance_removes_persisted_rows() {
     use std::sync::atomic::AtomicI64;
     let fixture = Fixture::new().await;
