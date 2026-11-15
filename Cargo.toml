@@ -544,3 +544,7 @@ required-features = ["daemon"]
 name = "observe_arrival"
 path = "tests/observe_arrival.rs"
 required-features = ["daemon"]
+[[test]]
+name = "gate_dtxj_unknown_wire"
+path = "tests/gate_dtxj_unknown_wire.rs"
+required-features = ["daemon"]
