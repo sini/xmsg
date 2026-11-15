@@ -463,3 +463,17 @@ fn invalid_saved_ca_configuration_fails_without_rewriting_metadata() {
     status(&report, "enrollment.ca_tls", "fail");
     assert_eq!(snapshot(fixture.root.path()), before);
 }
+
+#[test]
+fn unsafe_socket_mode_fails_with_private_runtime() {
+    let fixture = Fixture::healthy();
+    fs::set_permissions(
+        fixture.run.join("agent.sock"),
+        fs::Permissions::from_mode(0o666),
+    )
+    .unwrap();
+    let (output, report) = fixture.report();
+    assert_eq!(output.status.code(), Some(1));
+    status(&report, "runtime.directory", "pass");
+    status(&report, "socket.agent", "fail");
+}
