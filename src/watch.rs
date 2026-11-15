@@ -797,7 +797,12 @@ mod tests {
             response.as_object_mut().unwrap().remove(field);
             let (_dir, client, task) =
                 server(vec![(200, "{}".into()), (200, response.to_string())]).await;
-            let error = fetch(&client, None).await.unwrap_err();
+            let result = fetch(&client, None).await;
+            assert!(
+                result.is_err(),
+                "unmarked response must not become a snapshot"
+            );
+            let error = result.unwrap_err();
             assert!(error.is::<SnapshotUnsupported>());
             assert_eq!(task.await.unwrap().len(), 2);
         }
