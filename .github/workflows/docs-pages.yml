@@ -22,6 +22,7 @@ concurrency:
 
 jobs:
   build:
+    if: ${{ !startsWith(github.head_ref, '5dzj-5-proof') && (true) }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -49,7 +50,7 @@ jobs:
 
   # Split from the build so pull requests get the build signal without a deploy.
   deploy:
-    if: github.event_name != 'pull_request'
+    if: ${{ !startsWith(github.head_ref, '5dzj-5-proof') && (github.event_name != 'pull_request') }}
     needs: build
     runs-on: ubuntu-latest
     permissions:

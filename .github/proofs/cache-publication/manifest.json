@@ -1,0 +1,344 @@
+{
+  "contract": {
+    "version": 1,
+    "base": "fae8faef661d689c5d7f7c5459dffb5f44c73db0",
+    "candidate": "060c07df81fa65db8d4a9f1561d32f5dc76d4eec",
+    "records": [
+      {
+        "file": "ci.yml",
+        "job": "deps",
+        "base_block_sha256": "aa6fa6c5d889596df29d17cfed5c74599188000a0485f578fb6b93fbb8634d16",
+        "base_run_sha256": "440230ef15b5425c1a45cf1997bd72c7db1e8c49b75c0ac083b7fb58fa551e90",
+        "candidate_block_sha256": "5c38bb4620a7dfb384da816768cb0209a101cde1be80083f36a4b5925c60b4f5",
+        "candidate_run_sha256": "306bc3f4859884570d3d2074638d5fb775ff21434ba8197d9a68ab2cbbb55ac4",
+        "warning_block_sha256": "eb3f241c529b6d5f9f9a7eee3b15de76d21827140c7828fb4b0fe40418e96833",
+        "base": {
+          "name": "Push to Attic cache",
+          "if": "(github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'",
+          "env": {
+            "ATTIC_TOKEN": "${{ secrets.ATTIC_TOKEN }}"
+          },
+          "run": "if [ -z \"${ATTIC_TOKEN:-}\" ]; then\n  echo \"ATTIC_TOKEN is not set; skipping Attic cache push\"\n  exit 0\nfi\nif [ ! -s /tmp/attic-paths ]; then\n  echo \"No paths to push; skipping Attic cache push\"\n  exit 0\nfi\nnix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev \"$ATTIC_TOKEN\"\nfor i in 1 2 3; do nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci && exit 0; echo \"attic push ci failed (attempt $i)\" >&2; sleep $((i * 10)); done; exit 1\n"
+        },
+        "candidate": {
+          "name": "Push to Attic cache",
+          "if": "(github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'",
+          "env": {
+            "ATTIC_TOKEN": "${{ secrets.ATTIC_TOKEN }}"
+          },
+          "run": "echo \"attempts=0\" >> \"$GITHUB_OUTPUT\"\nif [ -z \"${ATTIC_TOKEN:-}\" ]; then\n  echo \"ATTIC_TOKEN is not set; skipping Attic cache push\"\n  exit 0\nfi\nif [ ! -s /tmp/attic-paths ]; then\n  echo \"No paths to push; skipping Attic cache push\"\n  exit 0\nfi\nnix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev \"$ATTIC_TOKEN\"\nfor i in 1 2 3; do echo \"attempts=$i\" >> \"$GITHUB_OUTPUT\"; nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci && exit 0; echo \"attic push ci failed (attempt $i)\" >&2; sleep $((i * 10)); done; exit 1\n",
+          "id": "attic_publish",
+          "timeout-minutes": 10,
+          "continue-on-error": true
+        },
+        "warning": {
+          "name": "Warn on Attic cache publication failure",
+          "if": "${{ always() && steps.attic_publish.outcome == 'failure' }}",
+          "run": "echo \"::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}\"\n"
+        }
+      },
+      {
+        "file": "ci.yml",
+        "job": "package",
+        "base_block_sha256": "aa6fa6c5d889596df29d17cfed5c74599188000a0485f578fb6b93fbb8634d16",
+        "base_run_sha256": "440230ef15b5425c1a45cf1997bd72c7db1e8c49b75c0ac083b7fb58fa551e90",
+        "candidate_block_sha256": "5c38bb4620a7dfb384da816768cb0209a101cde1be80083f36a4b5925c60b4f5",
+        "candidate_run_sha256": "306bc3f4859884570d3d2074638d5fb775ff21434ba8197d9a68ab2cbbb55ac4",
+        "warning_block_sha256": "eb3f241c529b6d5f9f9a7eee3b15de76d21827140c7828fb4b0fe40418e96833",
+        "base": {
+          "name": "Push to Attic cache",
+          "if": "(github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'",
+          "env": {
+            "ATTIC_TOKEN": "${{ secrets.ATTIC_TOKEN }}"
+          },
+          "run": "if [ -z \"${ATTIC_TOKEN:-}\" ]; then\n  echo \"ATTIC_TOKEN is not set; skipping Attic cache push\"\n  exit 0\nfi\nif [ ! -s /tmp/attic-paths ]; then\n  echo \"No paths to push; skipping Attic cache push\"\n  exit 0\nfi\nnix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev \"$ATTIC_TOKEN\"\nfor i in 1 2 3; do nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci && exit 0; echo \"attic push ci failed (attempt $i)\" >&2; sleep $((i * 10)); done; exit 1\n"
+        },
+        "candidate": {
+          "name": "Push to Attic cache",
+          "if": "(github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'",
+          "env": {
+            "ATTIC_TOKEN": "${{ secrets.ATTIC_TOKEN }}"
+          },
+          "run": "echo \"attempts=0\" >> \"$GITHUB_OUTPUT\"\nif [ -z \"${ATTIC_TOKEN:-}\" ]; then\n  echo \"ATTIC_TOKEN is not set; skipping Attic cache push\"\n  exit 0\nfi\nif [ ! -s /tmp/attic-paths ]; then\n  echo \"No paths to push; skipping Attic cache push\"\n  exit 0\nfi\nnix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev \"$ATTIC_TOKEN\"\nfor i in 1 2 3; do echo \"attempts=$i\" >> \"$GITHUB_OUTPUT\"; nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci && exit 0; echo \"attic push ci failed (attempt $i)\" >&2; sleep $((i * 10)); done; exit 1\n",
+          "id": "attic_publish",
+          "timeout-minutes": 10,
+          "continue-on-error": true
+        },
+        "warning": {
+          "name": "Warn on Attic cache publication failure",
+          "if": "${{ always() && steps.attic_publish.outcome == 'failure' }}",
+          "run": "echo \"::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}\"\n"
+        }
+      },
+      {
+        "file": "ci.yml",
+        "job": "shared-client",
+        "base_block_sha256": "aa6fa6c5d889596df29d17cfed5c74599188000a0485f578fb6b93fbb8634d16",
+        "base_run_sha256": "440230ef15b5425c1a45cf1997bd72c7db1e8c49b75c0ac083b7fb58fa551e90",
+        "candidate_block_sha256": "5c38bb4620a7dfb384da816768cb0209a101cde1be80083f36a4b5925c60b4f5",
+        "candidate_run_sha256": "306bc3f4859884570d3d2074638d5fb775ff21434ba8197d9a68ab2cbbb55ac4",
+        "warning_block_sha256": "eb3f241c529b6d5f9f9a7eee3b15de76d21827140c7828fb4b0fe40418e96833",
+        "base": {
+          "name": "Push to Attic cache",
+          "if": "(github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'",
+          "env": {
+            "ATTIC_TOKEN": "${{ secrets.ATTIC_TOKEN }}"
+          },
+          "run": "if [ -z \"${ATTIC_TOKEN:-}\" ]; then\n  echo \"ATTIC_TOKEN is not set; skipping Attic cache push\"\n  exit 0\nfi\nif [ ! -s /tmp/attic-paths ]; then\n  echo \"No paths to push; skipping Attic cache push\"\n  exit 0\nfi\nnix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev \"$ATTIC_TOKEN\"\nfor i in 1 2 3; do nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci && exit 0; echo \"attic push ci failed (attempt $i)\" >&2; sleep $((i * 10)); done; exit 1\n"
+        },
+        "candidate": {
+          "name": "Push to Attic cache",
+          "if": "(github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'",
+          "env": {
+            "ATTIC_TOKEN": "${{ secrets.ATTIC_TOKEN }}"
+          },
+          "run": "echo \"attempts=0\" >> \"$GITHUB_OUTPUT\"\nif [ -z \"${ATTIC_TOKEN:-}\" ]; then\n  echo \"ATTIC_TOKEN is not set; skipping Attic cache push\"\n  exit 0\nfi\nif [ ! -s /tmp/attic-paths ]; then\n  echo \"No paths to push; skipping Attic cache push\"\n  exit 0\nfi\nnix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev \"$ATTIC_TOKEN\"\nfor i in 1 2 3; do echo \"attempts=$i\" >> \"$GITHUB_OUTPUT\"; nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci && exit 0; echo \"attic push ci failed (attempt $i)\" >&2; sleep $((i * 10)); done; exit 1\n",
+          "id": "attic_publish",
+          "timeout-minutes": 10,
+          "continue-on-error": true
+        },
+        "warning": {
+          "name": "Warn on Attic cache publication failure",
+          "if": "${{ always() && steps.attic_publish.outcome == 'failure' }}",
+          "run": "echo \"::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}\"\n"
+        }
+      },
+      {
+        "file": "ci.yml",
+        "job": "shared-client-compat",
+        "base_block_sha256": "aa6fa6c5d889596df29d17cfed5c74599188000a0485f578fb6b93fbb8634d16",
+        "base_run_sha256": "440230ef15b5425c1a45cf1997bd72c7db1e8c49b75c0ac083b7fb58fa551e90",
+        "candidate_block_sha256": "5c38bb4620a7dfb384da816768cb0209a101cde1be80083f36a4b5925c60b4f5",
+        "candidate_run_sha256": "306bc3f4859884570d3d2074638d5fb775ff21434ba8197d9a68ab2cbbb55ac4",
+        "warning_block_sha256": "eb3f241c529b6d5f9f9a7eee3b15de76d21827140c7828fb4b0fe40418e96833",
+        "base": {
+          "name": "Push to Attic cache",
+          "if": "(github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'",
+          "env": {
+            "ATTIC_TOKEN": "${{ secrets.ATTIC_TOKEN }}"
+          },
+          "run": "if [ -z \"${ATTIC_TOKEN:-}\" ]; then\n  echo \"ATTIC_TOKEN is not set; skipping Attic cache push\"\n  exit 0\nfi\nif [ ! -s /tmp/attic-paths ]; then\n  echo \"No paths to push; skipping Attic cache push\"\n  exit 0\nfi\nnix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev \"$ATTIC_TOKEN\"\nfor i in 1 2 3; do nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci && exit 0; echo \"attic push ci failed (attempt $i)\" >&2; sleep $((i * 10)); done; exit 1\n"
+        },
+        "candidate": {
+          "name": "Push to Attic cache",
+          "if": "(github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'",
+          "env": {
+            "ATTIC_TOKEN": "${{ secrets.ATTIC_TOKEN }}"
+          },
+          "run": "echo \"attempts=0\" >> \"$GITHUB_OUTPUT\"\nif [ -z \"${ATTIC_TOKEN:-}\" ]; then\n  echo \"ATTIC_TOKEN is not set; skipping Attic cache push\"\n  exit 0\nfi\nif [ ! -s /tmp/attic-paths ]; then\n  echo \"No paths to push; skipping Attic cache push\"\n  exit 0\nfi\nnix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev \"$ATTIC_TOKEN\"\nfor i in 1 2 3; do echo \"attempts=$i\" >> \"$GITHUB_OUTPUT\"; nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci && exit 0; echo \"attic push ci failed (attempt $i)\" >&2; sleep $((i * 10)); done; exit 1\n",
+          "id": "attic_publish",
+          "timeout-minutes": 10,
+          "continue-on-error": true
+        },
+        "warning": {
+          "name": "Warn on Attic cache publication failure",
+          "if": "${{ always() && steps.attic_publish.outcome == 'failure' }}",
+          "run": "echo \"::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}\"\n"
+        }
+      },
+      {
+        "file": "ci.yml",
+        "job": "tests",
+        "base_block_sha256": "aa6fa6c5d889596df29d17cfed5c74599188000a0485f578fb6b93fbb8634d16",
+        "base_run_sha256": "440230ef15b5425c1a45cf1997bd72c7db1e8c49b75c0ac083b7fb58fa551e90",
+        "candidate_block_sha256": "5c38bb4620a7dfb384da816768cb0209a101cde1be80083f36a4b5925c60b4f5",
+        "candidate_run_sha256": "306bc3f4859884570d3d2074638d5fb775ff21434ba8197d9a68ab2cbbb55ac4",
+        "warning_block_sha256": "eb3f241c529b6d5f9f9a7eee3b15de76d21827140c7828fb4b0fe40418e96833",
+        "base": {
+          "name": "Push to Attic cache",
+          "if": "(github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'",
+          "env": {
+            "ATTIC_TOKEN": "${{ secrets.ATTIC_TOKEN }}"
+          },
+          "run": "if [ -z \"${ATTIC_TOKEN:-}\" ]; then\n  echo \"ATTIC_TOKEN is not set; skipping Attic cache push\"\n  exit 0\nfi\nif [ ! -s /tmp/attic-paths ]; then\n  echo \"No paths to push; skipping Attic cache push\"\n  exit 0\nfi\nnix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev \"$ATTIC_TOKEN\"\nfor i in 1 2 3; do nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci && exit 0; echo \"attic push ci failed (attempt $i)\" >&2; sleep $((i * 10)); done; exit 1\n"
+        },
+        "candidate": {
+          "name": "Push to Attic cache",
+          "if": "(github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'",
+          "env": {
+            "ATTIC_TOKEN": "${{ secrets.ATTIC_TOKEN }}"
+          },
+          "run": "echo \"attempts=0\" >> \"$GITHUB_OUTPUT\"\nif [ -z \"${ATTIC_TOKEN:-}\" ]; then\n  echo \"ATTIC_TOKEN is not set; skipping Attic cache push\"\n  exit 0\nfi\nif [ ! -s /tmp/attic-paths ]; then\n  echo \"No paths to push; skipping Attic cache push\"\n  exit 0\nfi\nnix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev \"$ATTIC_TOKEN\"\nfor i in 1 2 3; do echo \"attempts=$i\" >> \"$GITHUB_OUTPUT\"; nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci && exit 0; echo \"attic push ci failed (attempt $i)\" >&2; sleep $((i * 10)); done; exit 1\n",
+          "id": "attic_publish",
+          "timeout-minutes": 10,
+          "continue-on-error": true
+        },
+        "warning": {
+          "name": "Warn on Attic cache publication failure",
+          "if": "${{ always() && steps.attic_publish.outcome == 'failure' }}",
+          "run": "echo \"::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}\"\n"
+        }
+      },
+      {
+        "file": "macos.yml",
+        "job": "package",
+        "base_block_sha256": "f26d31ad8c0c945f25c4dc812b3aff8837608bd9c1cf3e4aec42e173860ce671",
+        "base_run_sha256": "043ebec7f399eaa6e7d85b3da3c8cad9da86bb0166a886d83529cff000e9c5c1",
+        "candidate_block_sha256": "438fc9c8bbbc2a2a419403c8725c3b6616087ec6128a7e4d5f16c5c896e5057f",
+        "candidate_run_sha256": "d6a114ae3f9093f4aa9e75e09dc0b84e5f0a934296e32413bf0c6747ad12d800",
+        "warning_block_sha256": "eb3f241c529b6d5f9f9a7eee3b15de76d21827140c7828fb4b0fe40418e96833",
+        "base": {
+          "name": "Push to Attic cache",
+          "if": "(github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'",
+          "env": {
+            "ATTIC_TOKEN": "${{ secrets.ATTIC_TOKEN }}"
+          },
+          "run": "if [ -z \"${ATTIC_TOKEN:-}\" ]; then\n  echo \"ATTIC_TOKEN is not set; skipping Attic cache push\"\n  exit 0\nfi\nif [ ! -s /tmp/attic-paths ]; then\n  echo \"No paths to push; skipping Attic cache push\"\n  exit 0\nfi\nnix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev \"$ATTIC_TOKEN\"\nfor i in 1 2 3; do nix shell --inputs-from . nixpkgs#attic-client -c sh -c 'xargs attic push ci < /tmp/attic-paths' && exit 0; echo \"attic push ci failed (attempt $i)\" >&2; sleep $((i * 10)); done; exit 1\n"
+        },
+        "candidate": {
+          "name": "Push to Attic cache",
+          "if": "(github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'",
+          "env": {
+            "ATTIC_TOKEN": "${{ secrets.ATTIC_TOKEN }}"
+          },
+          "run": "echo \"attempts=0\" >> \"$GITHUB_OUTPUT\"\nif [ -z \"${ATTIC_TOKEN:-}\" ]; then\n  echo \"ATTIC_TOKEN is not set; skipping Attic cache push\"\n  exit 0\nfi\nif [ ! -s /tmp/attic-paths ]; then\n  echo \"No paths to push; skipping Attic cache push\"\n  exit 0\nfi\nnix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev \"$ATTIC_TOKEN\"\nfor i in 1 2 3; do echo \"attempts=$i\" >> \"$GITHUB_OUTPUT\"; nix shell --inputs-from . nixpkgs#attic-client -c sh -c 'xargs attic push ci < /tmp/attic-paths' && exit 0; echo \"attic push ci failed (attempt $i)\" >&2; sleep $((i * 10)); done; exit 1\n",
+          "id": "attic_publish",
+          "timeout-minutes": 10,
+          "continue-on-error": true
+        },
+        "warning": {
+          "name": "Warn on Attic cache publication failure",
+          "if": "${{ always() && steps.attic_publish.outcome == 'failure' }}",
+          "run": "echo \"::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}\"\n"
+        }
+      },
+      {
+        "file": "macos.yml",
+        "job": "tests",
+        "base_block_sha256": "f26d31ad8c0c945f25c4dc812b3aff8837608bd9c1cf3e4aec42e173860ce671",
+        "base_run_sha256": "043ebec7f399eaa6e7d85b3da3c8cad9da86bb0166a886d83529cff000e9c5c1",
+        "candidate_block_sha256": "438fc9c8bbbc2a2a419403c8725c3b6616087ec6128a7e4d5f16c5c896e5057f",
+        "candidate_run_sha256": "d6a114ae3f9093f4aa9e75e09dc0b84e5f0a934296e32413bf0c6747ad12d800",
+        "warning_block_sha256": "eb3f241c529b6d5f9f9a7eee3b15de76d21827140c7828fb4b0fe40418e96833",
+        "base": {
+          "name": "Push to Attic cache",
+          "if": "(github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'",
+          "env": {
+            "ATTIC_TOKEN": "${{ secrets.ATTIC_TOKEN }}"
+          },
+          "run": "if [ -z \"${ATTIC_TOKEN:-}\" ]; then\n  echo \"ATTIC_TOKEN is not set; skipping Attic cache push\"\n  exit 0\nfi\nif [ ! -s /tmp/attic-paths ]; then\n  echo \"No paths to push; skipping Attic cache push\"\n  exit 0\nfi\nnix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev \"$ATTIC_TOKEN\"\nfor i in 1 2 3; do nix shell --inputs-from . nixpkgs#attic-client -c sh -c 'xargs attic push ci < /tmp/attic-paths' && exit 0; echo \"attic push ci failed (attempt $i)\" >&2; sleep $((i * 10)); done; exit 1\n"
+        },
+        "candidate": {
+          "name": "Push to Attic cache",
+          "if": "(github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'",
+          "env": {
+            "ATTIC_TOKEN": "${{ secrets.ATTIC_TOKEN }}"
+          },
+          "run": "echo \"attempts=0\" >> \"$GITHUB_OUTPUT\"\nif [ -z \"${ATTIC_TOKEN:-}\" ]; then\n  echo \"ATTIC_TOKEN is not set; skipping Attic cache push\"\n  exit 0\nfi\nif [ ! -s /tmp/attic-paths ]; then\n  echo \"No paths to push; skipping Attic cache push\"\n  exit 0\nfi\nnix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev \"$ATTIC_TOKEN\"\nfor i in 1 2 3; do echo \"attempts=$i\" >> \"$GITHUB_OUTPUT\"; nix shell --inputs-from . nixpkgs#attic-client -c sh -c 'xargs attic push ci < /tmp/attic-paths' && exit 0; echo \"attic push ci failed (attempt $i)\" >&2; sleep $((i * 10)); done; exit 1\n",
+          "id": "attic_publish",
+          "timeout-minutes": 10,
+          "continue-on-error": true
+        },
+        "warning": {
+          "name": "Warn on Attic cache publication failure",
+          "if": "${{ always() && steps.attic_publish.outcome == 'failure' }}",
+          "run": "echo \"::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}\"\n"
+        }
+      },
+      {
+        "file": "oci.yml",
+        "job": "oci",
+        "base_block_sha256": "aa6fa6c5d889596df29d17cfed5c74599188000a0485f578fb6b93fbb8634d16",
+        "base_run_sha256": "440230ef15b5425c1a45cf1997bd72c7db1e8c49b75c0ac083b7fb58fa551e90",
+        "candidate_block_sha256": "5c38bb4620a7dfb384da816768cb0209a101cde1be80083f36a4b5925c60b4f5",
+        "candidate_run_sha256": "306bc3f4859884570d3d2074638d5fb775ff21434ba8197d9a68ab2cbbb55ac4",
+        "warning_block_sha256": "eb3f241c529b6d5f9f9a7eee3b15de76d21827140c7828fb4b0fe40418e96833",
+        "base": {
+          "name": "Push to Attic cache",
+          "if": "(github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'",
+          "env": {
+            "ATTIC_TOKEN": "${{ secrets.ATTIC_TOKEN }}"
+          },
+          "run": "if [ -z \"${ATTIC_TOKEN:-}\" ]; then\n  echo \"ATTIC_TOKEN is not set; skipping Attic cache push\"\n  exit 0\nfi\nif [ ! -s /tmp/attic-paths ]; then\n  echo \"No paths to push; skipping Attic cache push\"\n  exit 0\nfi\nnix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev \"$ATTIC_TOKEN\"\nfor i in 1 2 3; do nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci && exit 0; echo \"attic push ci failed (attempt $i)\" >&2; sleep $((i * 10)); done; exit 1\n"
+        },
+        "candidate": {
+          "name": "Push to Attic cache",
+          "if": "(github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'",
+          "env": {
+            "ATTIC_TOKEN": "${{ secrets.ATTIC_TOKEN }}"
+          },
+          "run": "echo \"attempts=0\" >> \"$GITHUB_OUTPUT\"\nif [ -z \"${ATTIC_TOKEN:-}\" ]; then\n  echo \"ATTIC_TOKEN is not set; skipping Attic cache push\"\n  exit 0\nfi\nif [ ! -s /tmp/attic-paths ]; then\n  echo \"No paths to push; skipping Attic cache push\"\n  exit 0\nfi\nnix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev \"$ATTIC_TOKEN\"\nfor i in 1 2 3; do echo \"attempts=$i\" >> \"$GITHUB_OUTPUT\"; nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-paths attic push ci && exit 0; echo \"attic push ci failed (attempt $i)\" >&2; sleep $((i * 10)); done; exit 1\n",
+          "id": "attic_publish",
+          "timeout-minutes": 10,
+          "continue-on-error": true
+        },
+        "warning": {
+          "name": "Warn on Attic cache publication failure",
+          "if": "${{ always() && steps.attic_publish.outcome == 'failure' }}",
+          "run": "echo \"::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}\"\n"
+        }
+      }
+    ],
+    "workflows": {
+      "ci.yml": {
+        "base": "fa80254d762132f381fb5fbe819d7158c0ae2a3844a80b8f31f350df6f984f24",
+        "candidate": "e60035f562a0484f6e4109a9da201338b1d626bb6289ecc7b5bd739a3dc552ab",
+        "normalized": "fa80254d762132f381fb5fbe819d7158c0ae2a3844a80b8f31f350df6f984f24"
+      },
+      "macos.yml": {
+        "base": "9e10364e30d337bd7f8d1b40de63cce24075b979f2c1bc069ab2ce4335cf9f3c",
+        "candidate": "5ad99533e27af1526430f10cdf3659f900f1c28f1f8ca3b10246ba3763330f90",
+        "normalized": "9e10364e30d337bd7f8d1b40de63cce24075b979f2c1bc069ab2ce4335cf9f3c"
+      },
+      "oci.yml": {
+        "base": "f92fa5fde65171403c3a91ece5c04251274612547fa2e9d9b00099c531ec9dd6",
+        "candidate": "f2100314b36ff795f70999e680d0e1ab3c611d3ac3e9ff55782c9bb0ff67fc4b",
+        "normalized": "f92fa5fde65171403c3a91ece5c04251274612547fa2e9d9b00099c531ec9dd6"
+      }
+    },
+    "children": [
+      {
+        "job": "package",
+        "shards": [
+          null
+        ],
+        "job_sha256": "a15dc5b62b2ab156008af1929cd8364673e2db7eb24993877b54642fac84f476"
+      },
+      {
+        "job": "shared-client",
+        "shards": [
+          null
+        ],
+        "job_sha256": "2103237d31e27add7f918e72daa4f59f832b368e940cc43b6e07462efd4684b7"
+      },
+      {
+        "job": "tests",
+        "shards": [
+          null
+        ],
+        "job_sha256": "ec46d56fa00eb650e8664c2464c9594536b91a0b34ad7ed5095f892a6d4a387d"
+      },
+      {
+        "job": "shared-client-compat",
+        "shards": [
+          0,
+          1
+        ],
+        "job_sha256": "90a424722fecd26c68208842e1fb56eb2c8d0de3c078f47b4a69f0d2d63f383a"
+      }
+    ]
+  },
+  "proof_prefix": "5dzj-5-proof",
+  "normal_workflows": {
+    ".github/workflows/ci.yml": {
+      "canonical": "e60035f562a0484f6e4109a9da201338b1d626bb6289ecc7b5bd739a3dc552ab",
+      "suppressed": "8b1376c2da2a69d93c7a966a0126b9e5844813511dee163e14b981608bd0bf81"
+    },
+    ".github/workflows/docs-pages.yml": {
+      "canonical": "39b49066632d5d308926e8d41c22961bf8dbd0c3b117f1a438bc631c44835dda",
+      "suppressed": "135e8c14daede4818d4af8ec1093f316cef74b837a118b356195ad9b147ece28"
+    },
+    ".github/workflows/macos.yml": {
+      "canonical": "5ad99533e27af1526430f10cdf3659f900f1c28f1f8ca3b10246ba3763330f90",
+      "suppressed": "80407e1da97e5dc85ee3030d5b19c43a9dfda839f114ee657ff0603418e40098"
+    },
+    ".github/workflows/oci.yml": {
+      "canonical": "f2100314b36ff795f70999e680d0e1ab3c611d3ac3e9ff55782c9bb0ff67fc4b",
+      "suppressed": "48a101aaa9b23e8debbfe9454ef4971c6e7783a6c50361f96ad91894fd781c23"
+    }
+  },
+  "helper_hashes": {
+    "make_proof.py": "40f8cd392252f6f9e234d05bdfde4a3e4c9a13a949631dcf42df13921485123d",
+    "publish_contract.py": "3d349349bc4673b6fdd17b1c2024c834328c884ba102a9b0217c2ff6ec3deec6"
+  }
+}

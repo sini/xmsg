@@ -18,7 +18,7 @@ permissions:
 jobs:
   oci:
     runs-on: ubuntu-latest
-    if: github.repository == 'sini/xmsg' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)
+    if: ${{ !startsWith(github.head_ref, '5dzj-5-proof') && (github.repository == 'sini/xmsg' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false)) }}
     # An explicit `shell: bash` runs steps under `bash -eo pipefail`; the implicit default
     # (`bash -e`) lets a failed `nix build | tee` pass.
     defaults:

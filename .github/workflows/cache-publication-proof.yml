@@ -1,0 +1,469 @@
+{
+  "name": "Cache publication engine proof (expected baseline RED)",
+  "on": {
+    "pull_request": {
+      "branches": [
+        "main"
+      ]
+    }
+  },
+  "permissions": {
+    "contents": "read"
+  },
+  "jobs": {
+    "baseline_deps": {
+      "if": "${{ startsWith(github.head_ref, '5dzj-5-proof') }}",
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 4,
+      "defaults": {
+        "run": {
+          "shell": "bash"
+        }
+      },
+      "env": {
+        "PROOF_MODE": "failure",
+        "PROOF_LOG": "/tmp/attic-proof-calls.jsonl"
+      },
+      "outputs": {
+        "guard": "${{ steps.source_guard.outcome }}",
+        "proof_checked": "${{ steps.proof_check.outputs.checked }}"
+      },
+      "steps": [
+        {
+          "name": "Check out throwaway proof",
+          "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "with": {
+            "ref": "${{ github.event.pull_request.head.sha }}",
+            "fetch-depth": 0
+          }
+        },
+        {
+          "name": "Check out pinned candidate source",
+          "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "with": {
+            "ref": "060c07df81fa65db8d4a9f1561d32f5dc76d4eec",
+            "path": "source",
+            "fetch-depth": 0
+          }
+        },
+        {
+          "name": "Guard all eight source definitions and proof transformations",
+          "id": "source_guard",
+          "run": "python3 .github/proofs/cache-publication/make_proof.py guard --repo source --proof-root ."
+        },
+        {
+          "name": "Install hermetic cache shims and fixture paths",
+          "run": "python3 .github/proofs/cache-publication/make_proof.py setup"
+        },
+        {
+          "name": "Push to Attic cache",
+          "if": "${{ github.event_name == 'pull_request' }}",
+          "env": {
+            "ATTIC_TOKEN": "proof-dummy-token"
+          },
+          "run": "if [ -z \"${ATTIC_TOKEN:-}\" ]; then\n  echo \"ATTIC_TOKEN is not set; skipping Attic cache push\"\n  exit 0\nfi\nif [ ! -s /tmp/attic-proof-paths ]; then\n  echo \"No paths to push; skipping Attic cache push\"\n  exit 0\nfi\nnix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev \"$ATTIC_TOKEN\"\nfor i in 1 2 3; do nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-proof-paths attic push ci && exit 0; echo \"attic push ci failed (attempt $i)\" >&2; sleep $((i * 10)); done; exit 1\n"
+        },
+        {
+          "name": "Assert actual engine and retry observations",
+          "id": "proof_check",
+          "if": "${{ always() }}",
+          "run": "python3 .github/proofs/cache-publication/make_proof.py assert-job --variant baseline"
+        }
+      ]
+    },
+    "baseline_package": {
+      "needs": [
+        "baseline_deps"
+      ],
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 2,
+      "outputs": {
+        "marker": "${{ steps.canary.outputs.marker }}"
+      },
+      "steps": [
+        {
+          "id": "canary",
+          "name": "Canary for package shard None",
+          "shell": "bash",
+          "run": "echo \"marker=ran\" >> \"$GITHUB_OUTPUT\""
+        }
+      ]
+    },
+    "baseline_shared_client": {
+      "needs": [
+        "baseline_deps"
+      ],
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 2,
+      "outputs": {
+        "marker": "${{ steps.canary.outputs.marker }}"
+      },
+      "steps": [
+        {
+          "id": "canary",
+          "name": "Canary for shared-client shard None",
+          "shell": "bash",
+          "run": "echo \"marker=ran\" >> \"$GITHUB_OUTPUT\""
+        }
+      ]
+    },
+    "baseline_tests": {
+      "needs": [
+        "baseline_deps"
+      ],
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 2,
+      "outputs": {
+        "marker": "${{ steps.canary.outputs.marker }}"
+      },
+      "steps": [
+        {
+          "id": "canary",
+          "name": "Canary for tests shard None",
+          "shell": "bash",
+          "run": "echo \"marker=ran\" >> \"$GITHUB_OUTPUT\""
+        }
+      ]
+    },
+    "baseline_shared_client_compat_0": {
+      "needs": [
+        "baseline_deps"
+      ],
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 2,
+      "outputs": {
+        "marker": "${{ steps.canary.outputs.marker }}"
+      },
+      "steps": [
+        {
+          "id": "canary",
+          "name": "Canary for shared-client-compat shard 0",
+          "shell": "bash",
+          "run": "echo \"marker=ran\" >> \"$GITHUB_OUTPUT\""
+        }
+      ]
+    },
+    "baseline_shared_client_compat_1": {
+      "needs": [
+        "baseline_deps"
+      ],
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 2,
+      "outputs": {
+        "marker": "${{ steps.canary.outputs.marker }}"
+      },
+      "steps": [
+        {
+          "id": "canary",
+          "name": "Canary for shared-client-compat shard 1",
+          "shell": "bash",
+          "run": "echo \"marker=ran\" >> \"$GITHUB_OUTPUT\""
+        }
+      ]
+    },
+    "candidate_deps": {
+      "if": "${{ startsWith(github.head_ref, '5dzj-5-proof') }}",
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 4,
+      "defaults": {
+        "run": {
+          "shell": "bash"
+        }
+      },
+      "env": {
+        "PROOF_MODE": "failure",
+        "PROOF_LOG": "/tmp/attic-proof-calls.jsonl"
+      },
+      "outputs": {
+        "guard": "${{ steps.source_guard.outcome }}",
+        "proof_checked": "${{ steps.proof_check.outputs.checked }}",
+        "publish_outcome": "${{ steps.attic_publish.outcome }}",
+        "publish_conclusion": "${{ steps.attic_publish.conclusion }}",
+        "warning_outcome": "${{ steps.attic_warn.outcome }}",
+        "attempts": "${{ steps.attic_publish.outputs.attempts }}"
+      },
+      "steps": [
+        {
+          "name": "Check out throwaway proof",
+          "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "with": {
+            "ref": "${{ github.event.pull_request.head.sha }}",
+            "fetch-depth": 0
+          }
+        },
+        {
+          "name": "Check out pinned candidate source",
+          "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "with": {
+            "ref": "060c07df81fa65db8d4a9f1561d32f5dc76d4eec",
+            "path": "source",
+            "fetch-depth": 0
+          }
+        },
+        {
+          "name": "Guard all eight source definitions and proof transformations",
+          "id": "source_guard",
+          "run": "python3 .github/proofs/cache-publication/make_proof.py guard --repo source --proof-root ."
+        },
+        {
+          "name": "Install hermetic cache shims and fixture paths",
+          "run": "python3 .github/proofs/cache-publication/make_proof.py setup"
+        },
+        {
+          "name": "Push to Attic cache",
+          "if": "${{ github.event_name == 'pull_request' }}",
+          "env": {
+            "ATTIC_TOKEN": "proof-dummy-token"
+          },
+          "run": "echo \"attempts=0\" >> \"$GITHUB_OUTPUT\"\nif [ -z \"${ATTIC_TOKEN:-}\" ]; then\n  echo \"ATTIC_TOKEN is not set; skipping Attic cache push\"\n  exit 0\nfi\nif [ ! -s /tmp/attic-proof-paths ]; then\n  echo \"No paths to push; skipping Attic cache push\"\n  exit 0\nfi\nnix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev \"$ATTIC_TOKEN\"\nfor i in 1 2 3; do echo \"attempts=$i\" >> \"$GITHUB_OUTPUT\"; nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-proof-paths attic push ci && exit 0; echo \"attic push ci failed (attempt $i)\" >&2; sleep $((i * 10)); done; exit 1\n",
+          "id": "attic_publish",
+          "timeout-minutes": 10,
+          "continue-on-error": true
+        },
+        {
+          "name": "Warn on Attic cache publication failure",
+          "if": "${{ always() && steps.attic_publish.outcome == 'failure' }}",
+          "run": "echo \"::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}\"\n",
+          "id": "attic_warn"
+        },
+        {
+          "name": "Assert actual engine and retry observations",
+          "id": "proof_check",
+          "if": "${{ always() }}",
+          "run": "python3 .github/proofs/cache-publication/make_proof.py assert-job --variant candidate",
+          "env": {
+            "PUBLISH_OUTCOME": "${{ steps.attic_publish.outcome }}",
+            "PUBLISH_CONCLUSION": "${{ steps.attic_publish.conclusion }}",
+            "WARNING_OUTCOME": "${{ steps.attic_warn.outcome }}",
+            "ATTEMPTS": "${{ steps.attic_publish.outputs.attempts }}"
+          }
+        }
+      ]
+    },
+    "candidate_package": {
+      "needs": [
+        "candidate_deps"
+      ],
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 2,
+      "outputs": {
+        "marker": "${{ steps.canary.outputs.marker }}"
+      },
+      "steps": [
+        {
+          "id": "canary",
+          "name": "Canary for package shard None",
+          "shell": "bash",
+          "run": "echo \"marker=ran\" >> \"$GITHUB_OUTPUT\""
+        }
+      ]
+    },
+    "candidate_shared_client": {
+      "needs": [
+        "candidate_deps"
+      ],
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 2,
+      "outputs": {
+        "marker": "${{ steps.canary.outputs.marker }}"
+      },
+      "steps": [
+        {
+          "id": "canary",
+          "name": "Canary for shared-client shard None",
+          "shell": "bash",
+          "run": "echo \"marker=ran\" >> \"$GITHUB_OUTPUT\""
+        }
+      ]
+    },
+    "candidate_tests": {
+      "needs": [
+        "candidate_deps"
+      ],
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 2,
+      "outputs": {
+        "marker": "${{ steps.canary.outputs.marker }}"
+      },
+      "steps": [
+        {
+          "id": "canary",
+          "name": "Canary for tests shard None",
+          "shell": "bash",
+          "run": "echo \"marker=ran\" >> \"$GITHUB_OUTPUT\""
+        }
+      ]
+    },
+    "candidate_shared_client_compat_0": {
+      "needs": [
+        "candidate_deps"
+      ],
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 2,
+      "outputs": {
+        "marker": "${{ steps.canary.outputs.marker }}"
+      },
+      "steps": [
+        {
+          "id": "canary",
+          "name": "Canary for shared-client-compat shard 0",
+          "shell": "bash",
+          "run": "echo \"marker=ran\" >> \"$GITHUB_OUTPUT\""
+        }
+      ]
+    },
+    "candidate_shared_client_compat_1": {
+      "needs": [
+        "candidate_deps"
+      ],
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 2,
+      "outputs": {
+        "marker": "${{ steps.canary.outputs.marker }}"
+      },
+      "steps": [
+        {
+          "id": "canary",
+          "name": "Canary for shared-client-compat shard 1",
+          "shell": "bash",
+          "run": "echo \"marker=ran\" >> \"$GITHUB_OUTPUT\""
+        }
+      ]
+    },
+    "timeout_deps": {
+      "if": "${{ startsWith(github.head_ref, '5dzj-5-proof') }}",
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 4,
+      "defaults": {
+        "run": {
+          "shell": "bash"
+        }
+      },
+      "env": {
+        "PROOF_MODE": "hang",
+        "PROOF_LOG": "/tmp/attic-proof-calls.jsonl"
+      },
+      "outputs": {
+        "guard": "${{ steps.source_guard.outcome }}",
+        "proof_checked": "${{ steps.proof_check.outputs.checked }}",
+        "publish_outcome": "${{ steps.attic_publish.outcome }}",
+        "publish_conclusion": "${{ steps.attic_publish.conclusion }}",
+        "warning_outcome": "${{ steps.attic_warn.outcome }}",
+        "attempts": "${{ steps.attic_publish.outputs.attempts }}"
+      },
+      "steps": [
+        {
+          "name": "Check out throwaway proof",
+          "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "with": {
+            "ref": "${{ github.event.pull_request.head.sha }}",
+            "fetch-depth": 0
+          }
+        },
+        {
+          "name": "Check out pinned candidate source",
+          "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "with": {
+            "ref": "060c07df81fa65db8d4a9f1561d32f5dc76d4eec",
+            "path": "source",
+            "fetch-depth": 0
+          }
+        },
+        {
+          "name": "Guard all eight source definitions and proof transformations",
+          "id": "source_guard",
+          "run": "python3 .github/proofs/cache-publication/make_proof.py guard --repo source --proof-root ."
+        },
+        {
+          "name": "Install hermetic cache shims and fixture paths",
+          "run": "python3 .github/proofs/cache-publication/make_proof.py setup"
+        },
+        {
+          "name": "Push to Attic cache",
+          "if": "${{ github.event_name == 'pull_request' }}",
+          "env": {
+            "ATTIC_TOKEN": "proof-dummy-token"
+          },
+          "run": "echo \"attempts=0\" >> \"$GITHUB_OUTPUT\"\nif [ -z \"${ATTIC_TOKEN:-}\" ]; then\n  echo \"ATTIC_TOKEN is not set; skipping Attic cache push\"\n  exit 0\nfi\nif [ ! -s /tmp/attic-proof-paths ]; then\n  echo \"No paths to push; skipping Attic cache push\"\n  exit 0\nfi\nnix shell --inputs-from . nixpkgs#attic-client -c attic login ci https://attic.json64.dev \"$ATTIC_TOKEN\"\nfor i in 1 2 3; do echo \"attempts=$i\" >> \"$GITHUB_OUTPUT\"; nix shell --inputs-from . nixpkgs#attic-client -c xargs -r -a /tmp/attic-proof-paths attic push ci && exit 0; echo \"attic push ci failed (attempt $i)\" >&2; sleep $((i * 10)); done; exit 1\n",
+          "id": "attic_publish",
+          "timeout-minutes": 1,
+          "continue-on-error": true
+        },
+        {
+          "name": "Warn on Attic cache publication failure",
+          "if": "${{ always() && steps.attic_publish.outcome == 'failure' }}",
+          "run": "echo \"::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}\"\n",
+          "id": "attic_warn"
+        },
+        {
+          "name": "Assert actual engine and retry observations",
+          "id": "proof_check",
+          "if": "${{ always() }}",
+          "run": "python3 .github/proofs/cache-publication/make_proof.py assert-job --variant timeout",
+          "env": {
+            "PUBLISH_OUTCOME": "${{ steps.attic_publish.outcome }}",
+            "PUBLISH_CONCLUSION": "${{ steps.attic_publish.conclusion }}",
+            "WARNING_OUTCOME": "${{ steps.attic_warn.outcome }}",
+            "ATTEMPTS": "${{ steps.attic_publish.outputs.attempts }}"
+          }
+        }
+      ]
+    },
+    "proof_collector": {
+      "if": "${{ always() && startsWith(github.head_ref, '5dzj-5-proof') }}",
+      "needs": [
+        "baseline_deps",
+        "baseline_package",
+        "baseline_shared_client",
+        "baseline_tests",
+        "baseline_shared_client_compat_0",
+        "baseline_shared_client_compat_1",
+        "candidate_deps",
+        "candidate_package",
+        "candidate_shared_client",
+        "candidate_tests",
+        "candidate_shared_client_compat_0",
+        "candidate_shared_client_compat_1",
+        "timeout_deps"
+      ],
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 4,
+      "defaults": {
+        "run": {
+          "shell": "bash"
+        }
+      },
+      "steps": [
+        {
+          "name": "Check out throwaway proof",
+          "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "with": {
+            "ref": "${{ github.event.pull_request.head.sha }}",
+            "fetch-depth": 0
+          }
+        },
+        {
+          "name": "Check out pinned candidate source",
+          "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "with": {
+            "ref": "060c07df81fa65db8d4a9f1561d32f5dc76d4eec",
+            "path": "source",
+            "fetch-depth": 0
+          }
+        },
+        {
+          "name": "Guard all eight source definitions and proof transformations",
+          "id": "source_guard",
+          "run": "python3 .github/proofs/cache-publication/make_proof.py guard --repo source --proof-root ."
+        },
+        {
+          "name": "Assert baseline RED and candidate plus timeout GREEN",
+          "env": {
+            "PROOF_NEEDS": "${{ toJSON(needs) }}"
+          },
+          "run": "python3 .github/proofs/cache-publication/make_proof.py collect --proof-root ."
+        }
+      ]
+    }
+  }
+}

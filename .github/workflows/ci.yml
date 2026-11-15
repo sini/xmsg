@@ -46,6 +46,7 @@ env:
 # evaluator divergence is not what its CI tests.
 jobs:
   msrv:
+    if: ${{ !startsWith(github.head_ref, '5dzj-5-proof') && (true) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -59,7 +60,7 @@ jobs:
           cargo +"$msrv" build --locked
 
   deps:
-    if: ${{ !inputs.client_build_probe }}
+    if: ${{ !startsWith(github.head_ref, '5dzj-5-proof') && (!inputs.client_build_probe) }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -143,7 +144,7 @@ jobs:
           echo "::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}"
 
   package:
-    if: ${{ !inputs.client_build_probe }}
+    if: ${{ !startsWith(github.head_ref, '5dzj-5-proof') && (!inputs.client_build_probe) }}
     needs: [deps]
     runs-on: ubuntu-latest
     timeout-minutes: 180
@@ -201,7 +202,7 @@ jobs:
           echo "::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}"
 
   shared-client:
-    if: ${{ !inputs.client_build_probe }}
+    if: ${{ !startsWith(github.head_ref, '5dzj-5-proof') && (!inputs.client_build_probe) }}
     needs: [deps]
     runs-on: ubuntu-latest
     timeout-minutes: 180
@@ -260,7 +261,7 @@ jobs:
           echo "::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}"
 
   tests:
-    if: ${{ !inputs.client_build_probe }}
+    if: ${{ !startsWith(github.head_ref, '5dzj-5-proof') && (!inputs.client_build_probe) }}
     needs: [deps]
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -315,7 +316,7 @@ jobs:
           echo "::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}"
 
   shared-client-compat:
-    if: ${{ !inputs.client_build_probe }}
+    if: ${{ !startsWith(github.head_ref, '5dzj-5-proof') && (!inputs.client_build_probe) }}
     needs: [deps]
     runs-on: ubuntu-latest
     timeout-minutes: 180
@@ -379,7 +380,7 @@ jobs:
           echo "::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}"
 
   shared-client-compat-completion:
-    if: ${{ always() && !inputs.client_build_probe }}
+    if: ${{ !startsWith(github.head_ref, '5dzj-5-proof') && (always() && !inputs.client_build_probe) }}
     needs: [shared-client-compat]
     runs-on: ubuntu-latest
     steps:
@@ -399,7 +400,7 @@ jobs:
             compat-results/shared-client-compat-1/completion.json
 
   fmt:
-    if: ${{ !inputs.client_build_probe }}
+    if: ${{ !startsWith(github.head_ref, '5dzj-5-proof') && (!inputs.client_build_probe) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -410,7 +411,7 @@ jobs:
         working-directory: ci
 
   client-build-probe:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.client_build_probe }}
+    if: ${{ !startsWith(github.head_ref, '5dzj-5-proof') && (github.event_name == 'workflow_dispatch' && inputs.client_build_probe) }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:

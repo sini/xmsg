@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   package:
-    if: ${{ !inputs.lock_probe }}
+    if: ${{ !startsWith(github.head_ref, '5dzj-5-proof') && (!inputs.lock_probe) }}
     # Apple Silicon. `-latest` tracks the macOS users run and follows the
     # repository's `ubuntu-latest`; an image migration is the breakage this job
     # exists to catch.
@@ -193,7 +193,7 @@ jobs:
           echo "::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}"
 
   tests:
-    if: ${{ !inputs.lock_probe }}
+    if: ${{ !startsWith(github.head_ref, '5dzj-5-proof') && (!inputs.lock_probe) }}
     runs-on: macos-latest
     timeout-minutes: 90
     defaults:
@@ -278,7 +278,7 @@ jobs:
           echo "::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}"
 
   lock-probe:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.lock_probe }}
+    if: ${{ !startsWith(github.head_ref, '5dzj-5-proof') && (github.event_name == 'workflow_dispatch' && inputs.lock_probe) }}
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
