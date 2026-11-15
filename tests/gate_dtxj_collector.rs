@@ -3,6 +3,7 @@ use hyper::body::Bytes;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::convert::Infallible;
+use std::io::Read;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -93,6 +94,30 @@ async fn operations_example_ca_and_lookup_fields_start_the_real_cli() {
 async fn cli_fixture(ca_mode: bool) {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let files = tempfile::tempdir().unwrap();
+    let canaries = [
+        format!("synthetic-body-{}", ulid::Ulid::new()),
+        format!("/synthetic/path/{}", ulid::Ulid::new()),
+        format!("SYNTHETIC_ENV={}", ulid::Ulid::new()),
+        format!("synthetic-bearer-{}", ulid::Ulid::new()),
+    ];
+    let scan = |bytes: &[u8]| {
+        canaries
+            .iter()
+            .map(|canary| {
+                bytes
+                    .windows(canary.len())
+                    .filter(|window| *window == canary.as_bytes())
+                    .count()
+            })
+            .sum::<usize>()
+    };
+    let planted = canaries.join("\n");
+    assert_eq!(
+        scan(planted.as_bytes()),
+        4,
+        "fresh leak scanner positive control did not fire"
+    );
+    let mut metadata_matches = 0usize;
     let untouched = files.path().join("untouched");
     std::fs::create_dir_all(untouched.join("harness")).unwrap();
     for name in [
@@ -101,7 +126,14 @@ async fn cli_fixture(ca_mode: bool) {
         "registration.sock",
         "harness/session.json",
     ] {
-        std::fs::write(untouched.join(name), format!("synthetic-unread-{name}")).unwrap();
+        let index = if name == "primary.db" {
+            0
+        } else if name == "enroll-ca" {
+            1
+        } else {
+            2
+        };
+        std::fs::write(untouched.join(name), canaries[index].as_bytes()).unwrap();
     }
     let before = files_under(&untouched);
     let server = if ca_mode {
@@ -184,7 +216,7 @@ async fn cli_fixture(ca_mode: bool) {
             persisted_at: now,
             kind: EventKind::MessageRecorded,
             from: Some(endpoint.clone()),
-            to: None,
+            to: Some(endpoint.clone()),
             message_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".into()),
             reply_id: None,
             thread_id: None,
@@ -268,6 +300,7 @@ async fn cli_fixture(ca_mode: bool) {
             .env("XMSG_DB_PATH", untouched.join("primary.db"))
             .env("XMSG_ENROLL_CA_DIR", untouched.join("enroll-ca"))
             .env("CODEX_HOME", untouched.join("harness"))
+            .env("XMSG_COLLECTOR_FIXTURE_LEAK", &canaries[2])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
@@ -287,12 +320,13 @@ async fn cli_fixture(ca_mode: bool) {
         );
         if let Ok(reply) = client
             .get(format!("{url}/?node={index}"))
-            .bearer_auth("synthetic-browser-fixture")
+            .bearer_auth(&canaries[3])
             .send()
             .await
         {
             let headers = reply.headers().clone();
             let html = reply.text().await.unwrap();
+            metadata_matches += scan(html.as_bytes());
             if html.contains("sequence 1") {
                 assert_eq!(headers["cache-control"], "no-store");
                 assert_eq!(headers["x-content-type-options"], "nosniff");
@@ -319,13 +353,46 @@ async fn cli_fixture(ca_mode: bool) {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
+    if !ca_mode {
+        if let (Some(python), Some(chromium)) = (
+            std::env::var_os("XMSG_COLLECTOR_BROWSER_PYTHON"),
+            std::env::var_os("XMSG_COLLECTOR_BROWSER_CHROMIUM"),
+        ) {
+            let output = files.path().join("browser-fixture");
+            std::fs::create_dir_all(&output).unwrap();
+            std::fs::write(output.join("page.html"), &html).unwrap();
+            std::fs::write(output.join("headers.json"),json!({"content-security-policy":xmsg::observe_collector_web::content_security_policy(),"cache-control":"no-store","x-content-type-options":"nosniff"}).to_string()).unwrap();
+            std::fs::write(
+                output.join("expect.json"),
+                json!({"label":LABEL,"endpoint":endpoint,"events":1,"endpoints":1}).to_string(),
+            )
+            .unwrap();
+            let browser = Command::new(python)
+                .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/dtxj_collector_browser.py"))
+                .arg("--fixture-dir")
+                .arg(&output)
+                .arg("--chromium")
+                .arg(chromium)
+                .output()
+                .unwrap();
+            eprintln!("{}", String::from_utf8_lossy(&browser.stdout));
+            if !browser.status.success() {
+                eprintln!("{}", String::from_utf8_lossy(&browser.stderr));
+            }
+            assert!(
+                browser.status.success(),
+                "collector browser DOM/network gate failed"
+            );
+        }
+    }
     assert!(html.contains("unsupported: outbound-only source"));
     if !ca_mode {
         assert!(html.contains("&lt;image"));
     }
-    assert!(
-        !html.contains("synthetic-browser-fixture"),
-        "browser bearer entered HTML"
+    assert_eq!(
+        scan(html.as_bytes()),
+        0,
+        "browser HTML leaked a synthetic canary"
     );
     assert_eq!(
         client
@@ -370,11 +437,37 @@ async fn cli_fixture(ca_mode: bool) {
         !provider_ledger.lock().unwrap().is_empty(),
         "owner introspection positive ledger missing"
     );
-    assert_eq!(
-        files_under(&untouched),
-        before,
+    assert!(
+        files_under(&untouched) == before,
         "collector initialized or changed primary/harness/enrollment state"
     );
+    assert_eq!(
+        metadata_matches, 0,
+        "collector metadata response leaked a synthetic canary"
+    );
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    let mut diagnostics = Vec::new();
+    child
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_end(&mut diagnostics)
+        .unwrap();
+    assert_eq!(
+        scan(&diagnostics),
+        0,
+        "collector diagnostics leaked a synthetic canary"
+    );
+    for bytes in files_under(&files.path().join("collector-state")).values() {
+        assert_eq!(
+            scan(bytes),
+            0,
+            "collector database leaked a synthetic canary"
+        );
+    }
+    println!("fresh synthetic canaries generated=4; planted positive matches=4; unexpected metadata/DB/diagnostic matches=0");
     println!(
         "collector CLI ledger: exporter calls={}, owner lookups={}, untouched files={}",
         ledger.len(),

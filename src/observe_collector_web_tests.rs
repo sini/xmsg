@@ -86,6 +86,7 @@ fn numeric_filters_never_become_network_destinations() {
         "node=1",
         "node=0&node=0",
         "page=50",
+        "node=0&page=50",
         "page=1",
         "node=-1",
         "node=0&address=1",

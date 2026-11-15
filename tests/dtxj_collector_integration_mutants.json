@@ -239,10 +239,10 @@
   },
   {
     "label": "collector-html-escape",
-    "target": "lib",
-    "test": "observe_collector_web::tests::hostile_html_label_is_text",
-    "test_file": "src/observe_collector_web_tests.rs",
-    "expected_literal": "HTML label created executable markup",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "hostile label added DOM resource or executable nodes",
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
@@ -251,14 +251,18 @@
         "start": "fn html_text(",
         "end": "fn svg_text("
       }
-    ]
+    ],
+    "binaries": [
+      "xmsg"
+    ],
+    "browser_required": true
   },
   {
     "label": "collector-svg-escape",
-    "target": "lib",
-    "test": "observe_collector_web::tests::hostile_svg_label_and_lane_are_text",
-    "test_file": "src/observe_collector_web_tests.rs",
-    "expected_literal": "SVG label or lane created a resource node",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "hostile label added DOM resource or executable nodes",
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
@@ -267,7 +271,11 @@
         "start": "fn svg_text(",
         "end": "fn escape("
       }
-    ]
+    ],
+    "binaries": [
+      "xmsg"
+    ],
+    "browser_required": true
   },
   {
     "label": "collector-row-cap",
@@ -432,8 +440,10 @@
     "edits": [
       {
         "file": "src/observe_collector.rs",
-        "needle": "requests: Arc::new(Semaphore::new(8))",
-        "replacement": "requests: Arc::new(Semaphore::new(9))"
+        "needle": "Arc::new(Semaphore::new(8))",
+        "replacement": "Arc::new(Semaphore::new(9))",
+        "start": "fn request_slots()",
+        "end": "fn connection_slots()"
       }
     ]
   },
@@ -573,59 +583,75 @@
   },
   {
     "label": "collector-html-label-context",
-    "target": "lib",
-    "test": "observe_collector_web::tests::hostile_html_label_is_text",
-    "test_file": "src/observe_collector_web_tests.rs",
-    "expected_literal": "HTML label created executable markup",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "hostile label added DOM resource or executable nodes",
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
         "needle": "html_text(endpoint.label.as_deref().unwrap_or(\"label not reported\"))",
         "replacement": "endpoint.label.as_deref().unwrap_or(\"label not reported\").to_owned()"
       }
-    ]
+    ],
+    "binaries": [
+      "xmsg"
+    ],
+    "browser_required": true
   },
   {
     "label": "collector-svg-label-context",
-    "target": "lib",
-    "test": "observe_collector_web::tests::hostile_svg_label_and_lane_are_text",
-    "test_file": "src/observe_collector_web_tests.rs",
-    "expected_literal": "SVG label or lane created a resource node",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "hostile label added DOM resource or executable nodes",
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
         "needle": "svg_text(endpoint.label.as_deref().unwrap_or(\"label not reported\"))",
         "replacement": "endpoint.label.as_deref().unwrap_or(\"label not reported\").to_owned()"
       }
-    ]
+    ],
+    "binaries": [
+      "xmsg"
+    ],
+    "browser_required": true
   },
   {
     "label": "collector-svg-from-context",
-    "target": "lib",
-    "test": "observe_collector_web::tests::hostile_svg_label_and_lane_are_text",
-    "test_file": "src/observe_collector_web_tests.rs",
-    "expected_literal": "SVG label or lane created a resource node",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "hostile label added DOM resource or executable nodes",
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
         "needle": "svg_text(&from)",
         "replacement": "from.to_owned()"
       }
-    ]
+    ],
+    "binaries": [
+      "xmsg"
+    ],
+    "browser_required": true
   },
   {
     "label": "collector-svg-to-context",
-    "target": "lib",
-    "test": "observe_collector_web::tests::hostile_svg_label_and_lane_are_text",
-    "test_file": "src/observe_collector_web_tests.rs",
-    "expected_literal": "SVG label or lane created a resource node",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "hostile label added DOM resource or executable nodes",
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
         "needle": "svg_text(&to)",
         "replacement": "to.to_owned()"
       }
-    ]
+    ],
+    "binaries": [
+      "xmsg"
+    ],
+    "browser_required": true
   },
   {
     "label": "collector-csp-script",
@@ -722,6 +748,336 @@
         "file": "src/observe_collector_web.rs",
         "needle": "base-uri 'none'",
         "replacement": "base-uri 'self'"
+      }
+    ]
+  },
+  {
+    "label": "collector-web-transport-deadline",
+    "target": "lib",
+    "test": "observe_collector::tests::admitted_read_deadline_includes_backpressured_delivery",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "response transport escaped admitted read budget",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "const WEB_BUDGET: Duration = Duration::from_secs(5);",
+        "replacement": "const WEB_BUDGET: Duration = Duration::from_secs(6);"
+      }
+    ]
+  },
+  {
+    "label": "collector-web-preparation-deadline",
+    "target": "lib",
+    "test": "observe_collector::tests::admitted_read_deadline_includes_preparation",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "preparation escaped admitted read budget",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "const WEB_BUDGET: Duration = Duration::from_secs(5);",
+        "replacement": "const WEB_BUDGET: Duration = Duration::from_secs(6);"
+      }
+    ]
+  },
+  {
+    "label": "collector-snapshot-backoff-application",
+    "target": "lib",
+    "test": "observe_collector::tests::snapshot_backoff_is_applied_to_scheduler",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "rate-limit backoff was not applied",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "next_start = tokio::time::Instant::now() + Duration::from_secs(seconds);",
+        "replacement": "next_start = tokio::time::Instant::now() + Duration::from_secs(0);"
+      }
+    ]
+  },
+  {
+    "label": "collector-events-backoff-application",
+    "target": "lib",
+    "test": "observe_collector::tests::events_backoff_is_applied_to_scheduler",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "rate-limit backoff was not applied",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "next_start = tokio::time::Instant::now() + Duration::from_secs(seconds);",
+        "replacement": "next_start = tokio::time::Instant::now() + Duration::from_secs(0);"
+      }
+    ]
+  },
+  {
+    "label": "collector-idle-maintenance-wiring",
+    "target": "lib",
+    "test": "observe_collector::tests::idle_background_maintenance_removes_persisted_rows",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "idle background maintenance left persisted event rows",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "tasks.spawn(maintain(state));",
+        "replacement": "drop(state);"
+      }
+    ]
+  },
+  {
+    "label": "collector-idle-maintenance-call",
+    "target": "lib",
+    "test": "observe_collector::tests::idle_background_maintenance_removes_persisted_rows",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "idle background maintenance left persisted event rows",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "store.maintain()",
+        "replacement": "Ok(())"
+      }
+    ]
+  },
+  {
+    "label": "collector-trust-pin",
+    "target": "lib",
+    "test": "observe_collector_net::tests::wrong_pin_refuses_after_valid_pin_control",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "foreign pinned exporter was admitted",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if norm_pin != self.expected_pin {",
+        "replacement": "if false {",
+        "start": "impl rustls::client::danger::ServerCertVerifier for PinnedServerCertVerifier",
+        "end": "fn verify_tls12_signature("
+      }
+    ]
+  },
+  {
+    "label": "collector-trust-ca-chain",
+    "target": "lib",
+    "test": "observe_collector_net::tests::foreign_ca_refuses_after_trusted_chain_control",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "foreign CA exporter was admitted",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "        verify_cert_chain(\n            end_entity,\n            intermediates,\n            &self.anchors,\n            now,\n            webpki::KeyUsage::server_auth(),\n        )?;\n\n",
+        "replacement": "",
+        "start": "impl rustls::client::danger::ServerCertVerifier for CaServerCertVerifier",
+        "end": "fn verify_tls12_signature("
+      }
+    ]
+  },
+  {
+    "label": "collector-trust-ca-uri-count",
+    "target": "lib",
+    "test": "observe_collector_net::tests::ca_uri_cardinality_refuses_zero_and_multiple",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "CA exporter with wrong URI cardinality was admitted",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if uris.len() != 1 {",
+        "replacement": "if uris.is_empty() {",
+        "start": "impl rustls::client::danger::ServerCertVerifier for CaServerCertVerifier",
+        "end": "fn verify_tls12_signature("
+      }
+    ]
+  },
+  {
+    "label": "collector-trust-ca-uri-match",
+    "target": "lib",
+    "test": "observe_collector_net::tests::ca_uri_match_is_literal",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "CA exporter with unlisted literal URI was admitted",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if !uri_matches_any_identity(&uris[0], &self.allowed_identities) {",
+        "replacement": "if false {",
+        "start": "impl rustls::client::danger::ServerCertVerifier for CaServerCertVerifier",
+        "end": "fn verify_tls12_signature("
+      }
+    ]
+  },
+  {
+    "label": "collector-am6-pin-hookup",
+    "target": "lib",
+    "test": "observe_collector_net::tests::pinned_collector_dial_refuses_ca_membership",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "outgoing collector pin/CA ambiguity was admitted",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": ".refusing_ca(&peer.name, peers.clone())",
+        "replacement": "",
+        "start": "pub fn make_tls_connector_with_credentials(",
+        "end": "pub fn make_tls_acceptor("
+      }
+    ]
+  },
+  {
+    "label": "collector-am6-pin-refusal",
+    "target": "lib",
+    "test": "observe_collector_net::tests::pinned_collector_dial_refuses_ca_membership",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "outgoing collector pin/CA ambiguity was admitted",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if !ca.is_empty() {",
+        "replacement": "if false {",
+        "start": "impl rustls::client::danger::ServerCertVerifier for PinnedServerCertVerifier",
+        "end": "fn verify_tls12_signature("
+      }
+    ]
+  },
+  {
+    "label": "collector-am6-ca-hookup",
+    "target": "lib",
+    "test": "observe_collector_net::tests::ca_collector_dial_refuses_pinned_membership",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "outgoing collector pin/CA ambiguity was admitted",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": ".refusing_pinned(&peer.name, peers.pinned_entries())",
+        "replacement": "",
+        "start": "pub fn make_tls_connector_with_credentials(",
+        "end": "pub fn make_tls_acceptor("
+      }
+    ]
+  },
+  {
+    "label": "collector-am6-ca-refusal",
+    "target": "lib",
+    "test": "observe_collector_net::tests::ca_collector_dial_refuses_pinned_membership",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "outgoing collector pin/CA ambiguity was admitted",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "self.pinned.get(&normalize_pin(&pin))",
+        "replacement": "self.pinned.get(\"source-fault-no-pin\")",
+        "start": "impl rustls::client::danger::ServerCertVerifier for CaServerCertVerifier",
+        "end": "fn verify_tls12_signature("
+      }
+    ]
+  },
+  {
+    "label": "collector-configured-node-binding",
+    "target": "lib",
+    "test": "observe_collector_net::tests::inventory_is_bounded_literal_and_unique",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "foreign inventory identity accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "!= source.node",
+        "replacement": "!= source.node && false"
+      }
+    ]
+  },
+  {
+    "label": "collector-wire-unknown-event",
+    "target": "lib",
+    "test": "observe_collector_net::tests::incoming_unknown_event_refuses",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "incoming unknown field was accepted: event",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct ExportEvent",
+        "replacement": "pub struct ExportEvent"
+      }
+    ]
+  },
+  {
+    "label": "collector-wire-unknown-gap",
+    "target": "lib",
+    "test": "observe_collector_net::tests::incoming_unknown_gap_refuses",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "incoming unknown field was accepted: gap",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct ExportGap",
+        "replacement": "pub struct ExportGap"
+      }
+    ]
+  },
+  {
+    "label": "collector-wire-unknown-page",
+    "target": "lib",
+    "test": "observe_collector_net::tests::incoming_unknown_page_refuses",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "incoming unknown field was accepted: page",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct ExportPage",
+        "replacement": "pub struct ExportPage"
+      }
+    ]
+  },
+  {
+    "label": "collector-wire-unknown-endpoint",
+    "target": "lib",
+    "test": "observe_collector_net::tests::incoming_unknown_endpoint_refuses",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "incoming unknown field was accepted: endpoint",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct EndpointDescriptor",
+        "replacement": "pub struct EndpointDescriptor"
+      }
+    ]
+  },
+  {
+    "label": "collector-wire-unknown-snapshot",
+    "target": "lib",
+    "test": "observe_collector_net::tests::incoming_unknown_snapshot_refuses",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "incoming unknown field was accepted: snapshot",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct ExportSnapshot",
+        "replacement": "pub struct ExportSnapshot"
+      }
+    ]
+  },
+  {
+    "label": "collector-diagnostics-minimization",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "collector diagnostics leaked a synthetic canary",
+    "binaries": [
+      "xmsg"
+    ],
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": "Commands::ObserveCollector(args) => {",
+        "replacement": "Commands::ObserveCollector(args) => { eprintln!(\"{}\",std::env::var(\"XMSG_COLLECTOR_FIXTURE_LEAK\").unwrap_or_default());"
+      }
+    ]
+  },
+  {
+    "label": "collector-html-token-minimization",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "browser HTML leaked a synthetic canary",
+    "binaries": [
+      "xmsg"
+    ],
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "web::render(&summaries, detail.as_ref(), filter)",
+        "replacement": "format!(\"{}{}\",web::render(&summaries, detail.as_ref(), filter),request.headers().get(\"authorization\").and_then(|h|h.to_str().ok()).unwrap_or_default())"
       }
     ]
   }

@@ -84,27 +84,6 @@ fn response(status: StatusCode, body: impl Into<Bytes>, html: bool) -> Response<
 }
 
 impl State {
-    async fn handle(
-        self: Arc<Self>,
-        request: Request<Incoming>,
-    ) -> Result<Response<Full<Bytes>>, Infallible> {
-        let Ok(_lease) = self.requests.clone().try_acquire_owned() else {
-            return Ok(response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "collector busy\n",
-                false,
-            ));
-        };
-        let result = tokio::time::timeout(Duration::from_secs(5), self.prepare(request)).await;
-        Ok(result.unwrap_or_else(|_| {
-            response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "collector unavailable\n",
-                false,
-            )
-        }))
-    }
-
     async fn prepare<B>(&self, request: Request<B>) -> Response<Full<Bytes>> {
         let header_bytes = request
             .headers()
@@ -232,6 +211,10 @@ fn tls_config(
     Ok(Some(tokio_rustls::TlsAcceptor::from(Arc::new(config))))
 }
 
+fn request_slots() -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(8))
+}
+
 fn connection_slots() -> Arc<Semaphore> {
     Arc::new(Semaphore::new(64))
 }
@@ -260,22 +243,86 @@ async fn serve_with_admission(
                 let tls = tls.clone();
                 tasks.spawn(async move {
                     let _lease = lease;
-                    let service = hyper::service::service_fn(move |request| state.clone().handle(request));
-                    let mut builder = hyper::server::conn::http1::Builder::new();
-                    builder.keep_alive(false).max_buf_size(16 * 1024)
-                        .timer(hyper_util::rt::TokioTimer::new())
-                        .header_read_timeout(Duration::from_secs(5));
                     if let Some(tls) = tls {
                         if let Ok(Ok(stream)) = tokio::time::timeout(Duration::from_secs(5), tls.accept(tcp)).await {
-                            let _ = builder.serve_connection(hyper_util::rt::TokioIo::new(stream), service).await;
+                            serve_stream(stream, state).await;
                         }
-                    } else {
-                        let _ = builder.serve_connection(hyper_util::rt::TokioIo::new(tcp), service).await;
-                    }
+                    } else { serve_stream(tcp, state).await; }
                 });
             }
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
         }
+    }
+}
+
+const WEB_BUDGET: Duration = Duration::from_secs(5);
+
+async fn serve_stream<I>(stream: I, state: Arc<State>)
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    serve_http(stream, state.requests.clone(), move |request| async move {
+        state.prepare(request).await
+    })
+    .await;
+}
+
+async fn serve_http<I, F, Fut>(stream: I, requests: Arc<Semaphore>, prepare: F)
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    F: FnOnce(Request<Incoming>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Response<Full<Bytes>>> + Send + 'static,
+{
+    let (admission_tx, admission_rx) = tokio::sync::oneshot::channel();
+    let preparation = Mutex::new(Some((admission_tx, prepare)));
+    let service = hyper::service::service_fn(move |request| {
+        let operation = preparation
+            .lock()
+            .ok()
+            .and_then(|mut operation| operation.take());
+        let requests = requests.clone();
+        async move {
+            let lease = requests.try_acquire_owned().ok();
+            let admitted = lease.is_some();
+            let deadline = tokio::time::Instant::now() + WEB_BUDGET;
+            let Some((admission, prepare)) = operation else {
+                return Ok::<_, Infallible>(response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "collector unavailable\n",
+                    false,
+                ));
+            };
+            if admission.send((deadline, lease)).is_err() {
+                return Ok::<_, Infallible>(response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "collector unavailable\n",
+                    false,
+                ));
+            }
+            let response = if admitted {
+                prepare(request).await
+            } else {
+                response(StatusCode::SERVICE_UNAVAILABLE, "collector busy\n", false)
+            };
+            Ok::<_, Infallible>(response)
+        }
+    });
+    let mut builder = hyper::server::conn::http1::Builder::new();
+    builder
+        .keep_alive(false)
+        .max_buf_size(16 * 1024)
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(Duration::from_secs(5));
+    let connection = builder.serve_connection(hyper_util::rt::TokioIo::new(stream), service);
+    tokio::pin!(connection);
+    let admission = tokio::select! {
+        _ = &mut connection => return,
+        admission = admission_rx => admission,
+    };
+    if let Ok((deadline, lease)) = admission {
+        // HTTP keepalive is disabled, so this lease and deadline cover the one response's flush.
+        let _lease = lease;
+        let _ = tokio::time::timeout_at(deadline, connection).await;
     }
 }
 
@@ -354,6 +401,7 @@ async fn poll_source(client: Arc<Client>, state: Arc<State>, index: usize) {
     loop {
         let started = tokio::time::Instant::now();
         let mut next_start = started + Duration::from_secs(2);
+        let mut failure = None;
         if snapshot_due || (!backfill && started >= snapshot_at) {
             snapshot_due = false;
             snapshot_at = started + Duration::from_secs(30);
@@ -375,12 +423,7 @@ async fn poll_source(client: Arc<Client>, state: Arc<State>, index: usize) {
                     }
                 }
                 Err(error) => {
-                    if let net::Error::RateLimited(seconds) = error {
-                        next_start = tokio::time::Instant::now() + Duration::from_secs(seconds);
-                    }
-                    if error != net::Error::Pending {
-                        mark_error(&state, source.node.clone(), error).await;
-                    }
+                    failure = Some(error);
                 }
             }
         } else {
@@ -423,14 +466,17 @@ async fn poll_source(client: Arc<Client>, state: Arc<State>, index: usize) {
                         }
                     }
                     Err(error) => {
-                        if let net::Error::RateLimited(seconds) = error {
-                            next_start = tokio::time::Instant::now() + Duration::from_secs(seconds);
-                        }
-                        if error != net::Error::Pending {
-                            mark_error(&state, source.node.clone(), error).await;
-                        }
+                        failure = Some(error);
                     }
                 }
+            }
+        }
+        if let Some(error) = failure {
+            if let net::Error::RateLimited(seconds) = error {
+                next_start = tokio::time::Instant::now() + Duration::from_secs(seconds);
+            }
+            if error != net::Error::Pending {
+                mark_error(&state, source.node.clone(), error).await;
             }
         }
         tokio::time::sleep_until(next_start).await;
@@ -447,6 +493,15 @@ async fn maintain(state: Arc<State>) {
         })
         .await;
     }
+}
+
+fn background_tasks(client: Arc<Client>, state: Arc<State>) -> tokio::task::JoinSet<()> {
+    let mut tasks = tokio::task::JoinSet::new();
+    for index in 0..client.sources.len() {
+        tasks.spawn(poll_source(client.clone(), state.clone(), index));
+    }
+    tasks.spawn(maintain(state));
+    tasks
 }
 
 pub async fn run(args: Args) -> Result<(), Error> {
@@ -483,7 +538,7 @@ pub async fn run(args: Args) -> Result<(), Error> {
         verifier,
         store: Arc::new(store),
         store_slots: Arc::new(Semaphore::new(1)),
-        requests: Arc::new(Semaphore::new(8)),
+        requests: request_slots(),
         nodes,
         denied: Mutex::new(BTreeSet::new()),
         scopes: Mutex::new(BTreeMap::new()),
@@ -492,11 +547,7 @@ pub async fn run(args: Args) -> Result<(), Error> {
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
         .map_err(|_| Error::Listener)?;
-    let mut tasks = tokio::task::JoinSet::new();
-    for index in 0..client.sources.len() {
-        tasks.spawn(poll_source(client.clone(), state.clone(), index));
-    }
-    tasks.spawn(maintain(state.clone()));
+    let _tasks = background_tasks(client, state.clone());
     tokio::select! {
         result = serve(listener, state, tls) => result,
         _ = tokio::signal::ctrl_c() => Ok(()),
