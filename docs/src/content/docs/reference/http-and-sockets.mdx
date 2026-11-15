@@ -334,11 +334,24 @@ excerpt, path, cwd, environment or token field. Event `available` is the enum
 `not_recorded` or `retained_at_capture`: capture-time history, not a content-fetch
 API or a guarantee that content remains today.
 
-For the planned `arrival` rollout, upgrade the collector to an arrival-capable binary before
-upgrading nodes that emit it. An older collector strictly rejects an export page containing
-that kind; it does not silently accept unknown kinds. After collecting arrival events, avoid
-downgrading the collector to a version without arrival support: its strict readback also
-cannot decode those persisted rows. The collector is not deployed today.
+The planned collector [unknown event kind](/glossary/#unknown-event-kind) fallback
+accepts an unrecognized `kind` string only when it matches `[a-z][a-z0-9_]*` and is
+at most 64 ASCII bytes. It maps that kind to the unit `Unknown` value for validation
+and the fixed caption **“unknown event kind (newer node)”** for display. Known
+neighbors, gaps and cursor progress remain intact. `arrival` is a known kind.
+
+The original kind name is retained only in private stable event-envelope JSON for
+exact replay comparison and later upgrades, within the existing 4,096-byte event,
+256 KiB page and 200-event limits. It is never displayed. No kind-specific payload
+is retained: duplicate keys, extra fields, bodies, invalid metadata and unrecognized
+other enum values remain refused. The node exporter and public DTO enum remain
+closed; this is a collector receive rule, not a payload-schema extension.
+
+Stored newer rows use the same fallback after fresh scope validation, without a
+database migration. This compatibility change is planned and requires an updated
+collector. An unpatched older binary may reject newer pages or stored rows; a
+downgrade to one does not gain the fallback. See the
+[mixed-kind example](/operations/fleet-observer/#read-newer-event-kinds-planned).
 
 `GET /fed/v2/observe/snapshot?v=1&labels=false` accepts only `v` and `labels`.
 Its object has `v`, `node`, `scope`, `observed_at`, `endpoints`, `truncated` and
