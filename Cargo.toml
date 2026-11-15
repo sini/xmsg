@@ -531,3 +531,8 @@ name = "doctor"
 path = "tests/doctor.rs"
 required-features = ["daemon"]
 
+
+[[test]]
+name = "recipient_snapshot"
+path = "tests/recipient_snapshot.rs"
+required-features = ["daemon"]
