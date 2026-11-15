@@ -206,10 +206,16 @@ bounds, not exact filesystem allocation or forensic erasure guarantees. Physical
 storage exhaustion can stop ingestion before the logical limit; it is visible and
 cannot commit a cursor without its page.
 
+Crash recovery after the configured capacity is lowered has not been measured.
+The physical database and journal ceilings and the visible storage-full state
+remain the protections; this limit does not promise recovery within a newly
+lowered ceiling.
+
 Polling uses at least two seconds between requests to one node, one request in
 flight per node and eight globally, with a five-second whole-RPC deadline. Rate
 limits back off rather than becoming successful empty histories. The HTTP view is
-bounded to 64 connections, eight requests and a five-second preparation budget;
+bounded to 64 connections, eight requests and a five-second admitted-request budget,
+including response delivery;
 introspection has a two-second deadline and 64 KiB streamed-response cap. Bearers
 are at most 8 KiB and request headers 16 KiB. HTML, including SVG, is at most 4 MiB;
 rows and endpoint objects are bounded and truncation is shown.
