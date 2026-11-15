@@ -91,25 +91,86 @@ async fn operations_example_ca_and_lookup_fields_start_the_real_cli() {
     cli_fixture(true).await;
 }
 
-fn fixture_view_ready(html: &str) -> bool {
-    html.contains("sequence 1") && html.contains("<h3>Latest source inventory</h3>")
+fn fixture_view_ready(html: &str, ca_mode: bool) -> bool {
+    html.contains("sequence 1") && (ca_mode || html.contains("<h3>Latest source inventory</h3>"))
 }
 
 fn fixture_arrival_controls() {
-    let events = "<h3>Epoch fixture · sequence 1</h3>";
-    let catalog = "<h3>Latest source inventory</h3>";
-    let complete = format!("{events}{catalog}");
-    for (order, replies) in [
-        ("events-first", [events, complete.as_str()]),
-        ("catalog-first", [catalog, complete.as_str()]),
-    ] {
-        let selected = replies
-            .into_iter()
-            .find(|reply| fixture_view_ready(reply))
-            .unwrap();
+    use xmsg::observe_collector_store::{NodePolicy, Store};
+    use xmsg::observe_collector_web::{render, Filter};
+    for events_first in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let node = "fixture.node";
+        let store = Store::open(
+            &directory.path().join("state"),
+            vec![NodePolicy {
+                node: node.into(),
+                labels: true,
+                supported: true,
+            }],
+            Arc::new(|| 1000),
+        )
+        .unwrap();
+        let page: ExportPage = serde_json::from_value(json!({"v":1,"node":node,"epoch":"fixture-epoch","scope":"a".repeat(64),"events":[{"sequence":1,"observed_at":1000,"persisted_at":1000,"kind":"message_recorded","available":"not_recorded"}],"next":1,"has_more":false,"gaps":[],"available":true})).unwrap();
+        let catalog = ExportSnapshot {
+            v: 1,
+            node: node.into(),
+            scope: "a".repeat(64),
+            observed_at: 1000,
+            endpoints: vec![EndpointDescriptor {
+                id: format!("fixture@{node}"),
+                node: node.into(),
+                kind: EndpointKind::Service,
+                harness: Harness::Unknown,
+                state: RegistrationState::Registered,
+                source_at: Some(1000),
+                label: Some("catalog label".into()),
+            }],
+            truncated: false,
+            available: SnapshotAvailability::Partial,
+        };
+        let view = || {
+            let nodes = store.view(Some(node), 200).unwrap();
+            render(
+                &nodes,
+                nodes.first(),
+                Filter {
+                    node: Some(0),
+                    page: 0,
+                },
+            )
+        };
+        if events_first {
+            store
+                .ingest_page(node, &store.cursor(node).unwrap(), page.clone())
+                .unwrap();
+        } else {
+            store.ingest_snapshot(node, catalog.clone()).unwrap();
+        }
+        let partial = view();
         assert!(
-            selected == complete,
-            "event/catalog readiness accepted {order} partial response"
+            !fixture_view_ready(&partial, false),
+            "pin readiness accepted a partial cache: events_first={events_first}"
+        );
+        if events_first {
+            assert!(
+                fixture_view_ready(&partial, true),
+                "CA readiness rejected an event-only cache"
+            );
+            store.ingest_snapshot(node, catalog).unwrap();
+        } else {
+            assert!(
+                !fixture_view_ready(&partial, true),
+                "CA readiness accepted a catalog-only cache"
+            );
+            store
+                .ingest_page(node, &store.cursor(node).unwrap(), page)
+                .unwrap();
+        }
+        let complete = view();
+        assert!(
+            fixture_view_ready(&complete, false) && fixture_view_ready(&complete, true),
+            "complete cache did not release both fixture modes"
         );
     }
 }
@@ -379,7 +440,7 @@ async fn cli_fixture(ca_mode: bool) {
                 let headers = reply.headers().clone();
                 let html = reply.text().await.unwrap();
                 metadata_matches += scan(html.as_bytes());
-                if fixture_view_ready(&html) {
+                if fixture_view_ready(&html, ca_mode) {
                     assert_eq!(headers["cache-control"], "no-store");
                     assert_eq!(headers["x-content-type-options"], "nosniff");
                     if let Some(output) =
