@@ -190,6 +190,31 @@ masks old data before attempting a purge, and a failed purge keeps it hidden.
 Once validated in the current process, temporarily unreachable nodes may show
 retained data marked stale.
 
+## Read newer event kinds (planned)
+
+A collector with the planned [unknown event kind](/glossary/#unknown-event-kind)
+fallback can read a newer node's kind within the existing metadata envelope. For
+example, a page with `message_recorded`, `future_delivery` and `reply_recorded`
+keeps the first and last events and their sequence order. The middle row displays
+**“unknown event kind (newer node)”**; cursor progress continues through the page.
+`arrival` is a known kind, so it does not use this fallback.
+
+A newly tolerated name must match `[a-z][a-z0-9_]*` and fit in 64 ASCII bytes.
+The existing 4,096-byte canonical event, 256 KiB page and 200-event limits still
+apply. This does not accept bodies, extra fields, invalid metadata or new values
+in other enums.
+
+The bounded original name stays only in private stored event JSON for exact replay
+comparison and later upgrades; it is never interpolated into the view. An identical
+replay does not refresh receipt time or retention age, and a changed kind name is
+an event conflict. After restart, stored rows from a newer writer use the same
+fallback only after the node validates its current scope. There is no database
+migration or new configuration switch.
+
+Upgrade to a collector with this compatibility change before relying on the
+fallback. It does not make unpatched older binaries able to read newer events or
+stored rows. See the [wire contract](/reference/http-and-sockets/#planned-node-observation-export).
+
 ## Retention and bounds
 
 Per node, the cache retains at most seven days, 10,000 events and 16 MiB of accounted
