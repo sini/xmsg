@@ -235,6 +235,7 @@ fn bearer(headers: &HeaderMap) -> Result<&str, AuthError> {
     }
     let value = value.to_str().map_err(|_| AuthError::Unauthorized)?;
     let (scheme, token) = value.split_once(' ').ok_or(AuthError::Unauthorized)?;
+    let token = token.trim_start_matches(' ');
     if !scheme.eq_ignore_ascii_case("Bearer") || token.is_empty() || token.len() > 8192 {
         return Err(AuthError::Unauthorized);
     }
