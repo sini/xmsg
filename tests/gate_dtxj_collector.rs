@@ -91,7 +91,31 @@ async fn operations_example_ca_and_lookup_fields_start_the_real_cli() {
     cli_fixture(true).await;
 }
 
+fn fixture_view_ready(html: &str) -> bool {
+    html.contains("sequence 1") && html.contains("<h3>Latest source inventory</h3>")
+}
+
+fn fixture_arrival_controls() {
+    let events = "<h3>Epoch fixture · sequence 1</h3>";
+    let catalog = "<h3>Latest source inventory</h3>";
+    let complete = format!("{events}{catalog}");
+    for (order, replies) in [
+        ("events-first", [events, complete.as_str()]),
+        ("catalog-first", [catalog, complete.as_str()]),
+    ] {
+        let selected = replies
+            .into_iter()
+            .find(|reply| fixture_view_ready(reply))
+            .unwrap();
+        assert!(
+            selected == complete,
+            "event/catalog readiness accepted {order} partial response"
+        );
+    }
+}
+
 async fn cli_fixture(ca_mode: bool) {
+    fixture_arrival_controls();
     let _ = rustls::crypto::ring::default_provider().install_default();
     let files = tempfile::tempdir().unwrap();
     let canaries = [
@@ -232,6 +256,7 @@ async fn cli_fixture(ca_mode: bool) {
         }],
         available: true,
     };
+    let retained_catalog = snapshot.clone();
     let source_ledger = Arc::new(Mutex::new(Vec::new()));
     let (source_addr, _source) = serve(
         acceptor,
@@ -285,12 +310,26 @@ async fn cli_fixture(ca_mode: bool) {
     let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = reservation.local_addr().unwrap();
     drop(reservation);
+    let state_dir = files.path().join("collector-state");
+    if !ca_mode {
+        let retained = xmsg::observe_collector_store::Store::open(
+            &state_dir,
+            vec![xmsg::observe_collector_store::NodePolicy {
+                node: node.clone(),
+                labels: true,
+                supported: true,
+            }],
+            Arc::new(xmsg::storage::now_epoch_secs),
+        )
+        .unwrap();
+        retained.ingest_snapshot(&node, retained_catalog).unwrap();
+    }
     let mut child = Process(
         Command::new(env!("CARGO_BIN_EXE_xmsg"))
             .args(["observe-collector", "--config"])
             .arg(&config_file)
             .arg("--state-dir")
-            .arg(files.path().join("collector-state"))
+            .arg(&state_dir)
             .arg("--listen")
             .arg(address.to_string())
             .current_dir(&untouched)
@@ -318,33 +357,40 @@ async fn cli_fixture(ca_mode: bool) {
             child.0.try_wait().unwrap().is_none(),
             "collector CLI exited during isolated startup"
         );
-        if let Ok(reply) = client
-            .get(format!("{url}/?node={index}"))
-            .bearer_auth(&canaries[3])
-            .send()
-            .await
-        {
-            let headers = reply.headers().clone();
-            let html = reply.text().await.unwrap();
-            metadata_matches += scan(html.as_bytes());
-            if html.contains("sequence 1") {
-                assert_eq!(headers["cache-control"], "no-store");
-                assert_eq!(headers["x-content-type-options"], "nosniff");
-                if let Some(output) =
-                    std::env::var_os("XMSG_COLLECTOR_BROWSER_FIXTURE_DIR").filter(|_| !ca_mode)
-                {
-                    let output = std::path::PathBuf::from(output);
-                    std::fs::create_dir_all(&output).unwrap();
-                    std::fs::write(output.join("page.html"), &html).unwrap();
-                    std::fs::write(output.join("headers.json"),json!({"content-security-policy":headers["content-security-policy"].to_str().unwrap(),"cache-control":"no-store","x-content-type-options":"nosniff"}).to_string()).unwrap();
-                    std::fs::write(
-                        output.join("expect.json"),
-                        json!({"label":LABEL,"endpoint":endpoint,"events":1,"endpoints":1})
-                            .to_string(),
-                    )
-                    .unwrap();
+        let events_started = source_ledger
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.starts_with("GET /fed/v2/observe/events?"));
+        if events_started {
+            if let Ok(reply) = client
+                .get(format!("{url}/?node={index}"))
+                .bearer_auth(&canaries[3])
+                .send()
+                .await
+            {
+                let headers = reply.headers().clone();
+                let html = reply.text().await.unwrap();
+                metadata_matches += scan(html.as_bytes());
+                if fixture_view_ready(&html) {
+                    assert_eq!(headers["cache-control"], "no-store");
+                    assert_eq!(headers["x-content-type-options"], "nosniff");
+                    if let Some(output) =
+                        std::env::var_os("XMSG_COLLECTOR_BROWSER_FIXTURE_DIR").filter(|_| !ca_mode)
+                    {
+                        let output = std::path::PathBuf::from(output);
+                        std::fs::create_dir_all(&output).unwrap();
+                        std::fs::write(output.join("page.html"), &html).unwrap();
+                        std::fs::write(output.join("headers.json"),json!({"content-security-policy":headers["content-security-policy"].to_str().unwrap(),"cache-control":"no-store","x-content-type-options":"nosniff"}).to_string()).unwrap();
+                        std::fs::write(
+                            output.join("expect.json"),
+                            json!({"label":LABEL,"endpoint":endpoint,"events":1,"endpoints":1})
+                                .to_string(),
+                        )
+                        .unwrap();
+                    }
+                    break html;
                 }
-                break html;
             }
         }
         assert!(
