@@ -72,6 +72,18 @@ async fn observe_is_available_only_through_authenticated_unix_requests() {
     let page: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(page["node"], "observer.example");
     assert!(!page["events"].as_array().unwrap().is_empty());
+    for route in ["/fed/v2/observe/events", "/fed/v2/observe/snapshot"] {
+        assert_eq!(
+            client
+                .get(format!("http://localhost{route}"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            404,
+            "federation export {route} must be absent from authenticated Unix HTTP"
+        );
+    }
     for query in [
         "limit=0",
         "limit=201",
@@ -103,6 +115,18 @@ async fn observe_is_available_only_through_authenticated_unix_requests() {
             .await
             .unwrap();
         assert_eq!(response.status(), expected);
+        for route in ["/fed/v2/observe/events", "/fed/v2/observe/snapshot"] {
+            assert_eq!(
+                reqwest::Client::new()
+                    .get(format!("http://{address}{route}"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                404,
+                "federation export {route} must be absent from ordinary HTTP"
+            );
+        }
         tcp.abort();
         let _ = tcp.await;
     }
