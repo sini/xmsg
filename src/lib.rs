@@ -57,6 +57,8 @@ pub mod observe_export;
 #[cfg(feature = "daemon")]
 pub mod observe_fed;
 #[cfg(feature = "daemon")]
+pub mod observe_relay;
+#[cfg(feature = "daemon")]
 mod observe_snapshot;
 #[cfg(feature = "daemon")]
 pub mod pi;
