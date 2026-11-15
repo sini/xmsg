@@ -39,6 +39,8 @@ pub mod observe;
 #[cfg(feature = "daemon")]
 pub mod observe_collector_auth;
 #[cfg(feature = "daemon")]
+pub mod observe_collector_net;
+#[cfg(feature = "daemon")]
 pub mod observe_collector_store;
 #[cfg(feature = "daemon")]
 pub mod observe_effects;
