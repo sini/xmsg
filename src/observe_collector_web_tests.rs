@@ -313,3 +313,23 @@ fn relay_origin_is_escaped_in_event_snapshot_and_stale_view() {
     );
     assert!(!html.contains(hub));
 }
+
+#[test]
+fn dynamic_relay_unsupported_retains_hidden_history_warning_in_tiles() {
+    let mut node = view();
+    node.events.clear();
+    node.latest_snapshot = None;
+    node.history_hidden = true;
+    node.status = NodeStatus::Unsupported;
+    node.failure = Some(UnavailableKind::Unsupported);
+    node.origin_hub = Some("spiffe://fleet/host/hub/user/owner".into());
+    let html = render(std::slice::from_ref(&node), None, Filter::default());
+    assert!(html.contains("history hidden until this node answers"));
+    node.origin_hub = None;
+    node.failure = None;
+    let html = render(&[node], None, Filter::default());
+    assert!(
+        !html.contains("history hidden until this node answers"),
+        "static direct unsupported presentation changed"
+    );
+}

@@ -41,6 +41,7 @@ struct State {
     requests: Arc<Semaphore>,
     nodes: Vec<String>,
     denied: Mutex<BTreeSet<String>>,
+    failures: Mutex<BTreeMap<String, UnavailableKind>>,
     scopes: Mutex<BTreeMap<String, String>>,
     scope_hidden: Mutex<BTreeSet<String>>,
 }
@@ -139,11 +140,32 @@ impl State {
         .await;
         match result {
             Ok((mut summaries, mut detail)) => {
+                if let Ok(failures) = self.failures.lock() {
+                    for view in summaries.iter_mut().chain(detail.iter_mut()) {
+                        if let Some(kind) = failures.get(&view.node) {
+                            view.failure = Some(*kind);
+                            view.status = match kind {
+                                UnavailableKind::Unsupported => crate::observe_collector_store::NodeStatus::Unsupported,
+                                UnavailableKind::StorageFull => crate::observe_collector_store::NodeStatus::StorageFull,
+                                _ if view.history_hidden => crate::observe_collector_store::NodeStatus::HiddenPendingRevalidation,
+                                _ => crate::observe_collector_store::NodeStatus::Stale,
+                            };
+                        }
+                    }
+                } else {
+                    return response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "collector unavailable\n",
+                        false,
+                    );
+                }
+
                 if let Ok(denied) = self.denied.lock() {
                     for view in summaries.iter_mut().chain(detail.iter_mut()) {
                         if denied.contains(&view.node) {
                             view.history_hidden = true;
                             view.status = crate::observe_collector_store::NodeStatus::Denied;
+                            view.failure = None;
                             view.events.clear();
                             view.latest_snapshot = None;
                             view.cursor = None;
@@ -326,11 +348,29 @@ where
     }
 }
 
+fn remember_failure(state: &State, node: &str, kind: UnavailableKind) {
+    if state.nodes.iter().any(|known| known == node) {
+        if let Ok(mut failures) = state.failures.lock() {
+            failures.insert(node.to_owned(), kind);
+        }
+    }
+}
+
 async fn mark_error(state: &State, node: String, error: net::Error) {
     if error == net::Error::Denied {
         if let Ok(mut denied) = state.denied.lock() {
             denied.insert(node.clone());
         }
+    }
+    let kind = match error {
+        net::Error::Unsupported => UnavailableKind::Unsupported,
+        net::Error::Timeout => UnavailableKind::Timeout,
+        net::Error::Malformed => UnavailableKind::Malformed,
+        net::Error::RateLimited(_) => UnavailableKind::RateLimited,
+        _ => UnavailableKind::Unreachable,
+    };
+    if error != net::Error::Denied {
+        remember_failure(state, &node, kind);
     }
     let _ = store_call(
         state.store.clone(),
@@ -339,13 +379,6 @@ async fn mark_error(state: &State, node: String, error: net::Error) {
             if error == net::Error::Denied {
                 return store.deny(&node);
             }
-            let kind = match error {
-                net::Error::Unsupported => UnavailableKind::Unsupported,
-                net::Error::Timeout => UnavailableKind::Timeout,
-                net::Error::Malformed => UnavailableKind::Malformed,
-                net::Error::RateLimited(_) => UnavailableKind::RateLimited,
-                _ => UnavailableKind::Unreachable,
-            };
             store.unavailable(&node, kind)
         },
     )
@@ -358,6 +391,7 @@ async fn mark_storage_error(state: &State, node: String, error: StoreError) {
     } else {
         UnavailableKind::Malformed
     };
+    remember_failure(state, &node, kind);
     let _ = store_call(
         state.store.clone(),
         state.store_slots.clone(),
@@ -380,6 +414,9 @@ fn observe_scope(state: &State, node: &str, scope: &str) {
 }
 
 fn accepted_scope(state: &State, node: &str, scope: String) {
+    if let Ok(mut failures) = state.failures.lock() {
+        failures.remove(node);
+    }
     if let Ok(mut scopes) = state.scopes.lock() {
         scopes.insert(node.to_owned(), scope);
     }
@@ -543,6 +580,7 @@ pub async fn run(args: Args) -> Result<(), Error> {
         requests: request_slots(),
         nodes,
         denied: Mutex::new(BTreeSet::new()),
+        failures: Mutex::new(BTreeMap::new()),
         scopes: Mutex::new(BTreeMap::new()),
         scope_hidden: Mutex::new(BTreeSet::new()),
     });
