@@ -964,23 +964,33 @@ async fn idle_background_maintenance_removes_persisted_rows() {
 async fn relay_owner_claim_refusal(field: &str, value: serde_json::Value) {
     let fixture = Fixture::with_relay(true).await;
     let positive = fixture.get("/?node=0").send().await.unwrap();
-    assert_eq!(positive.status(), 200);
-    assert!(positive
-        .text()
-        .await
-        .unwrap()
-        .contains("via spiffe://fleet/host/hub/user/owner"));
+    assert_eq!(
+        positive.status(),
+        200,
+        "relay authorized owner positive refused before claim test: {field}"
+    );
+    assert!(
+        positive
+            .text()
+            .await
+            .unwrap()
+            .contains("via spiffe://fleet/host/hub/user/owner"),
+        "relay authorized owner positive lacked configured hub provenance: {field}"
+    );
     fixture.idp_claims.lock().unwrap()[field] = value;
     let refusal = fixture.get("/?node=0").send().await.unwrap();
     assert!(
         refusal.status() == 401 || refusal.status() == 403,
         "relay owner predicate bypassed: {field}"
     );
-    assert!(!refusal
-        .text()
-        .await
-        .unwrap()
-        .contains("via spiffe://fleet/host/hub/user/owner"));
+    assert!(
+        !refusal
+            .text()
+            .await
+            .unwrap()
+            .contains("via spiffe://fleet/host/hub/user/owner"),
+        "refused relay owner received cached hub-attested metadata: {field}"
+    );
 }
 #[tokio::test]
 async fn relay_owner_allowlist_refuses_valid_nonowner() {
@@ -1005,7 +1015,11 @@ async fn relay_owner_expiry_is_current() {
 #[tokio::test]
 async fn relay_owner_headers_are_not_identity() {
     let fixture = Fixture::with_relay(true).await;
-    assert_eq!(fixture.get("/?node=0").send().await.unwrap().status(), 200);
+    assert_eq!(
+        fixture.get("/?node=0").send().await.unwrap().status(),
+        200,
+        "relay owner positive refused before forged-header control"
+    );
     let reply = reqwest::Client::new()
         .get(format!("{}/?node=0", fixture.url))
         .header("x-auth-request-user", "owner")
@@ -1014,7 +1028,11 @@ async fn relay_owner_headers_are_not_identity() {
         .send()
         .await
         .unwrap();
-    assert_eq!(reply.status(), 401);
+    assert_eq!(
+        reply.status(),
+        401,
+        "relay identity headers authorized owner view"
+    );
 }
 
 #[tokio::test]
@@ -1045,16 +1063,33 @@ async fn relay_failure_overlay_survives_busy_store_slot_and_clears_on_fresh_inge
         );
         drop(held);
         let reply = fixture.get("/?node=0").send().await.unwrap();
-        assert_eq!(reply.status(), 200);
+        assert_eq!(
+            reply.status(),
+            200,
+            "validated relay failure overlay view became unavailable: {error:?}"
+        );
         let html = reply.text().await.unwrap();
         assert!(
             html.contains(caption),
             "busy store dropped known failure: {error:?}"
         );
-        assert!(html.contains("Previously validated history is stale."));
-        assert!(!html.contains("<p>healthy</p>"));
-        assert!(html.contains("via spiffe://fleet/host/hub/user/owner (hub-attested)"));
-        assert_eq!(fixture.state.failures.lock().unwrap().len(), 1);
+        assert!(
+            html.contains("Previously validated history is stale."),
+            "busy-store relay failure omitted explicit stale-history caption: {error:?}"
+        );
+        assert!(
+            !html.contains("<p>healthy</p>"),
+            "known relay network failure remained healthy after busy store slot: {error:?}"
+        );
+        assert!(
+            html.contains("via spiffe://fleet/host/hub/user/owner (hub-attested)"),
+            "busy-store relay failure dropped validated hub provenance: {error:?}"
+        );
+        assert_eq!(
+            fixture.state.failures.lock().unwrap().len(),
+            1,
+            "known relay network failure was not retained in bounded overlay: {error:?}"
+        );
         fixture
             .state
             .store
@@ -1072,7 +1107,10 @@ async fn relay_failure_overlay_survives_busy_store_slot_and_clears_on_fresh_inge
             )
             .unwrap();
         accepted_scope(&fixture.state, "fixture.node", "a".repeat(64));
-        assert!(fixture.state.failures.lock().unwrap().is_empty());
+        assert!(
+            fixture.state.failures.lock().unwrap().is_empty(),
+            "fresh relay ingest retained failure overlay"
+        );
         let html = fixture
             .get("/?node=0")
             .send()
@@ -1081,8 +1119,14 @@ async fn relay_failure_overlay_survives_busy_store_slot_and_clears_on_fresh_inge
             .text()
             .await
             .unwrap();
-        assert!(html.contains("<p>healthy</p>"));
-        assert!(!html.contains(caption));
+        assert!(
+            html.contains("<p>healthy</p>"),
+            "fresh validated relay ingestion did not recover healthy view: {error:?}"
+        );
+        assert!(
+            !html.contains(caption),
+            "fresh validated relay ingestion retained obsolete failure caption: {error:?}"
+        );
     }
     for (error, caption) in [
         (StoreError::Full, "Collector storage full."),
@@ -1105,8 +1149,14 @@ async fn relay_failure_overlay_survives_busy_store_slot_and_clears_on_fresh_inge
             .text()
             .await
             .unwrap();
-        assert!(html.contains(caption));
-        assert!(!html.contains("<p>healthy</p>"));
+        assert!(
+            html.contains(caption),
+            "busy store dropped storage failure: {error:?}"
+        );
+        assert!(
+            !html.contains("<p>healthy</p>"),
+            "known relay storage failure remained healthy after busy store slot: {error:?}"
+        );
     }
     remember_failure(&fixture.state, "unconfigured", UnavailableKind::Timeout);
     assert_eq!(
@@ -1136,9 +1186,18 @@ async fn relay_failure_overlay_preserves_scope_and_denial_masks() {
         .text()
         .await
         .unwrap();
-    assert!(html.contains("pending revalidation"));
-    assert!(html.contains("history hidden until this node answers"));
-    assert!(!html.contains("Latest source inventory"));
+    assert!(
+        html.contains("pending revalidation"),
+        "failure overlay weakened relay scope-change pending-revalidation mask"
+    );
+    assert!(
+        html.contains("history hidden until this node answers"),
+        "failure overlay omitted relay scope-change hidden-history explanation"
+    );
+    assert!(
+        !html.contains("Latest source inventory"),
+        "failure overlay exposed snapshot despite relay scope-change mask"
+    );
     let held = fixture
         .state
         .store_slots
@@ -1157,7 +1216,16 @@ async fn relay_failure_overlay_preserves_scope_and_denial_masks() {
         .text()
         .await
         .unwrap();
-    assert!(html.contains("<p>denied</p>"));
-    assert!(!html.contains("Latest source inventory"));
-    assert!(!html.contains("Observation request timed out."));
+    assert!(
+        html.contains("<p>denied</p>"),
+        "failure overlay overrode authenticated relay denial status"
+    );
+    assert!(
+        !html.contains("Latest source inventory"),
+        "failure overlay exposed snapshot despite authenticated relay denial mask"
+    );
+    assert!(
+        !html.contains("Observation request timed out."),
+        "failure overlay caption overrode authenticated relay denial caption"
+    );
 }
