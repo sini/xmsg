@@ -4,7 +4,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_config_closed_full_identity_and_no_mixed_mode",
-    "expected_literal": "mixed relay/direct address accepted",
+    "expected_literal": "mixed relay/direct ",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
@@ -13,14 +13,18 @@
         "start": "if let Some(relay) = &mut source.relay {",
         "end": "if source.outbound_only {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 815,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-net-mixed-pin",
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_config_closed_full_identity_and_no_mixed_mode",
-    "expected_literal": "mixed relay/direct pin accepted",
+    "expected_literal": "mixed relay/direct ",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
@@ -29,14 +33,18 @@
         "start": "if let Some(relay) = &mut source.relay {",
         "end": "if source.outbound_only {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 815,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-net-mixed-ca",
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_config_closed_full_identity_and_no_mixed_mode",
-    "expected_literal": "mixed relay/direct ca accepted",
+    "expected_literal": "mixed relay/direct ",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
@@ -45,14 +53,18 @@
         "start": "if let Some(relay) = &mut source.relay {",
         "end": "if source.outbound_only {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 815,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-net-mixed-identity",
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_config_closed_full_identity_and_no_mixed_mode",
-    "expected_literal": "mixed relay/direct identity accepted",
+    "expected_literal": "mixed relay/direct ",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
@@ -61,35 +73,47 @@
         "start": "if let Some(relay) = &mut source.relay {",
         "end": "if source.outbound_only {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 815,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-net-canonical-hub",
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_config_closed_full_identity_and_no_mixed_mode",
-    "expected_literal": "noncanonical identity accepted: hub hub.node",
+    "expected_literal": "noncanonical identity accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
         "needle": "crate::observe_relay::identity_node(&relay.hub).ok_or(Error::Configuration)?;",
         "replacement": "let _ = &relay.hub;"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 829,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-net-canonical-leaf",
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_config_closed_full_identity_and_no_mixed_mode",
-    "expected_literal": "noncanonical identity accepted: leaf hub.node",
+    "expected_literal": "noncanonical identity accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
         "needle": "crate::observe_relay::identity_node(&relay.leaf).ok_or(Error::Configuration)?",
         "replacement": "source.node.clone()"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 829,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-net-leaf-node-binding",
@@ -103,7 +127,11 @@
         "needle": "|| leaf != source.node",
         "replacement": "|| (false && leaf != source.node)"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 837,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-unchanged"
   },
   {
     "label": "reverse-collector-net-uri-ca-mode",
@@ -117,7 +145,11 @@
         "needle": "|| relay.hub.starts_with(\"spiffe://\") != relay.ca.is_some()",
         "replacement": "|| (!relay.hub.starts_with(\"spiffe://\") && relay.ca.is_some())"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 872,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-unchanged"
   },
   {
     "label": "reverse-collector-net-closed-relay-object",
@@ -131,7 +163,11 @@
         "needle": "#[serde(deny_unknown_fields)]\npub struct RelayConfig",
         "replacement": "pub struct RelayConfig"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 843,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-unchanged"
   },
   {
     "label": "reverse-collector-net-supported-explicit-relay",
@@ -145,77 +181,101 @@
         "needle": "config_source.relay.is_some() || !config_source.outbound_only",
         "replacement": "!config_source.outbound_only"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 915,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-unchanged"
   },
   {
     "label": "reverse-collector-net-fixed-relay-path",
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_transport_fixed_status_path_and_no_bearer",
-    "expected_literal": "relay request did not use configured leaf snapshot path:",
+    "expected_literal": "relay request did not use configured leaf snapshot path: ",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
         "needle": "&format!(\"/fed/v2/observe/relay/{}/\", source.node)",
         "replacement": "&format!(\"/fed/v2/observe/other/{}/\", source.node)"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 893,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-net-status-501",
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_transport_fixed_status_path_and_no_bearer",
-    "expected_literal": "relay HTTP status misclassified: 501 Not Implemented",
+    "expected_literal": "relay HTTP status misclassified: ",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
         "needle": "if response.status() == hyper::StatusCode::NOT_IMPLEMENTED {",
         "replacement": "if false && response.status() == hyper::StatusCode::NOT_IMPLEMENTED {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 887,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-net-status-400",
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_transport_fixed_status_path_and_no_bearer",
-    "expected_literal": "relay HTTP status misclassified: 400 Bad Request",
+    "expected_literal": "relay HTTP status misclassified: ",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
         "needle": "if response.status() == hyper::StatusCode::BAD_REQUEST {",
         "replacement": "if false && response.status() == hyper::StatusCode::BAD_REQUEST {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 887,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-net-wire-no-bearer",
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_transport_fixed_status_path_and_no_bearer",
-    "expected_literal": "human bearer crossed relay polling wire:",
+    "expected_literal": "human bearer crossed relay polling wire: ",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
         "needle": ".header(\"host\", &source.server_name)",
         "replacement": ".header(\"host\", &source.server_name)\n                .header(\"authorization\", \"Bearer synthetic-source-fault\")"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 897,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-net-wire-no-origin",
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_transport_fixed_status_path_and_no_bearer",
-    "expected_literal": "caller origin header crossed relay polling wire:",
+    "expected_literal": "caller origin header crossed relay polling wire: ",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
         "needle": ".header(\"host\", &source.server_name)",
         "replacement": ".header(\"host\", &source.server_name)\n                .header(\"x-origin-hub\", \"synthetic-source-fault\")"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 901,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-net-full-uri-binding",
@@ -229,91 +289,119 @@
         "needle": "entry[\"identities\"] = serde_json::json!([relay.hub]);",
         "replacement": "entry[\"identities\"] = serde_json::json!([config.sources[0].relay.as_ref().ok_or(Error::Configuration)?.hub]);"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 956,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-unchanged"
   },
   {
     "label": "reverse-collector-net-address-binding",
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_equal_display_hubs_at_distinct_addresses_both_succeed",
-    "expected_literal": "configured distinct relay hub address TLS positive refused: hub 1",
+    "expected_literal": "configured distinct relay hub address TLS positive refused: hub ",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
         "needle": "entry[\"address\"] = serde_json::json!(relay.address);",
         "replacement": "entry[\"address\"] = serde_json::json!(config.sources[0].relay.as_ref().ok_or(Error::Configuration)?.address);"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 1232,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-owner-allowlist",
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_owner_allowlist_refuses_valid_nonowner",
-    "expected_literal": "relay owner predicate bypassed: sub",
+    "expected_literal": "relay owner predicate bypassed: ",
     "edits": [
       {
         "file": "src/observe_collector_auth.rs",
         "needle": ".any(|allowed| allowed == subject)",
         "replacement": ".any(|_allowed| true)"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 991,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-owner-issuer",
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_owner_issuer_is_exact",
-    "expected_literal": "relay owner predicate bypassed: iss",
+    "expected_literal": "relay owner predicate bypassed: ",
     "edits": [
       {
         "file": "src/observe_collector_auth.rs",
         "needle": "if claims.get(\"iss\").and_then(Value::as_str) != Some(self.config.issuer.as_str()) {",
         "replacement": "if false && claims.get(\"iss\").and_then(Value::as_str) != Some(self.config.issuer.as_str()) {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 991,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-owner-audience",
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_owner_audience_is_exact",
-    "expected_literal": "relay owner predicate bypassed: aud",
+    "expected_literal": "relay owner predicate bypassed: ",
     "edits": [
       {
         "file": "src/observe_collector_auth.rs",
         "needle": "Some(Value::String(aud)) => aud == &self.config.audience",
         "replacement": "Some(Value::String(_aud)) => true"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 991,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-owner-client",
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_owner_client_is_exact",
-    "expected_literal": "relay owner predicate bypassed: client_id",
+    "expected_literal": "relay owner predicate bypassed: ",
     "edits": [
       {
         "file": "src/observe_collector_auth.rs",
         "needle": "if client != &self.config.hosted_client {",
         "replacement": "if false && client != &self.config.hosted_client {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 991,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-owner-expiry",
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_owner_expiry_is_current",
-    "expected_literal": "relay owner predicate bypassed: exp",
+    "expected_literal": "relay owner predicate bypassed: ",
     "edits": [
       {
         "file": "src/observe_collector_auth.rs",
         "needle": "if expires_at <= now {",
         "replacement": "if false && expires_at <= now {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 991,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-owner-headers",
@@ -327,14 +415,18 @@
         "needle": "let token = bearer(headers)?;",
         "replacement": "if headers.contains_key(\"x-auth-request-user\") { return Ok(VerifiedOwner { subject: self.config.subjects[0].clone(), expires_at: 2000 }); }\n        let token = bearer(headers)?;"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 1040,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-unchanged"
   },
   {
     "label": "reverse-collector-runtime-failure-before-store",
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_failure_overlay_survives_busy_store_slot_and_clears_on_fresh_ingest",
-    "expected_literal": "busy store dropped known failure: Timeout",
+    "expected_literal": "busy store dropped known failure: ",
     "edits": [
       {
         "file": "src/observe_collector.rs",
@@ -343,7 +435,11 @@
         "start": "async fn mark_error(",
         "end": "async fn mark_storage_error("
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 1081,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-runtime-failure-inventory-bound",
@@ -357,7 +453,11 @@
         "needle": "if state.nodes.iter().any(|known| known == node) {",
         "replacement": "if true {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 1171,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-unchanged"
   },
   {
     "label": "reverse-collector-runtime-failure-clear-on-fresh",
@@ -372,14 +472,18 @@
         "replacement": "let _ = node;",
         "start": "fn accepted_scope("
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 1119,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-unchanged"
   },
   {
     "label": "reverse-collector-runtime-storage-failure-before-store",
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_failure_overlay_survives_busy_store_slot_and_clears_on_fresh_ingest",
-    "expected_literal": "busy store dropped known failure: Timeout",
+    "expected_literal": "busy store dropped storage failure: ",
     "edits": [
       {
         "file": "src/observe_collector.rs",
@@ -388,7 +492,11 @@
         "start": "async fn mark_storage_error(",
         "end": "fn observe_scope("
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 1161,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-runtime-denial-clears-failure",
@@ -402,7 +510,11 @@
         "needle": "view.failure = None;",
         "replacement": "let _ = &view.failure;"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 1236,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-unchanged"
   },
   {
     "label": "reverse-collector-runtime-denial-priority",
@@ -416,7 +528,11 @@
         "needle": "if denied.contains(&view.node) {",
         "replacement": "if false && denied.contains(&view.node) {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 1228,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-unchanged"
   },
   {
     "label": "reverse-collector-runtime-scope-priority",
@@ -430,7 +546,11 @@
         "needle": "if hidden.contains(&view.node) {",
         "replacement": "if false && hidden.contains(&view.node) {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 1198,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-unchanged"
   },
   {
     "label": "reverse-collector-net-relay-body-bound",
@@ -444,7 +564,11 @@
         "needle": "Limited::new(response.into_body(), 256 * 1024)",
         "replacement": "Limited::new(response.into_body(), 256 * 1024 + 1)"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 1190,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-unchanged"
   },
   {
     "label": "reverse-collector-net-spacing",
@@ -458,7 +582,11 @@
         "needle": "now.duration_since(last) < Duration::from_secs(2)",
         "replacement": "now.duration_since(last) < Duration::from_secs(0)"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 919,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-unchanged"
   },
   {
     "label": "reverse-collector-net-mixed-global",
@@ -472,7 +600,11 @@
         "needle": "slots: Arc::new(Semaphore::new(8))",
         "replacement": "slots: Arc::new(Semaphore::new(9))"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 994,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-unchanged"
   },
   {
     "label": "reverse-collector-net-distinct-hub-leaf",
@@ -486,7 +618,11 @@
         "needle": "if relay.hub == relay.leaf",
         "replacement": "if (false && relay.hub == relay.leaf)"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 853,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-unchanged"
   },
   {
     "label": "reverse-collector-net-nonempty-address",
@@ -500,7 +636,11 @@
         "needle": "|| relay.address.is_empty()",
         "replacement": "|| (false && relay.address.is_empty())"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 859,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-unchanged"
   },
   {
     "label": "reverse-collector-net-pin-ca-mode",
@@ -514,14 +654,18 @@
         "needle": "|| relay.hub.starts_with(\"spiffe://\") != relay.ca.is_some()",
         "replacement": "|| (relay.hub.starts_with(\"spiffe://\") && relay.ca.is_none())"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 862,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-unchanged"
   },
   {
     "label": "reverse-collector-net-direct-status-preserved",
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::direct_400_and_501_remain_unavailable",
-    "expected_literal": "direct HTTP status behavior changed: 400 Bad Request",
+    "expected_literal": "direct HTTP status behavior changed: ",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
@@ -529,7 +673,11 @@
         "replacement": "if true {",
         "start": "if response.status() == hyper::StatusCode::TOO_MANY_REQUESTS {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 1278,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-net-spki-binding",
@@ -545,63 +693,83 @@
         "start": "impl rustls::client::danger::ServerCertVerifier for PinnedServerCertVerifier",
         "end": "fn verify_tls12_signature("
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 1028,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-unchanged"
   },
   {
     "label": "reverse-collector-runtime-failure-timeout-class",
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_failure_overlay_survives_busy_store_slot_and_clears_on_fresh_ingest",
-    "expected_literal": "busy store dropped known failure: Timeout",
+    "expected_literal": "busy store dropped known failure: ",
     "edits": [
       {
         "file": "src/observe_collector.rs",
         "needle": "net::Error::Timeout => UnavailableKind::Timeout",
         "replacement": "net::Error::Timeout => UnavailableKind::Unreachable"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 1081,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-runtime-failure-malformed-class",
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_failure_overlay_survives_busy_store_slot_and_clears_on_fresh_ingest",
-    "expected_literal": "busy store dropped known failure: Malformed",
+    "expected_literal": "busy store dropped known failure: ",
     "edits": [
       {
         "file": "src/observe_collector.rs",
         "needle": "net::Error::Malformed => UnavailableKind::Malformed",
         "replacement": "net::Error::Malformed => UnavailableKind::Unreachable"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 1081,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-runtime-failure-rate-limited-class",
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_failure_overlay_survives_busy_store_slot_and_clears_on_fresh_ingest",
-    "expected_literal": "busy store dropped known failure: RateLimited(2)",
+    "expected_literal": "busy store dropped known failure: ",
     "edits": [
       {
         "file": "src/observe_collector.rs",
         "needle": "net::Error::RateLimited(_) => UnavailableKind::RateLimited",
         "replacement": "net::Error::RateLimited(_) => UnavailableKind::Unreachable"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 1081,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-runtime-failure-unsupported-class",
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_failure_overlay_survives_busy_store_slot_and_clears_on_fresh_ingest",
-    "expected_literal": "busy store dropped known failure: Unsupported",
+    "expected_literal": "busy store dropped known failure: ",
     "edits": [
       {
         "file": "src/observe_collector.rs",
         "needle": "net::Error::Unsupported => UnavailableKind::Unsupported",
         "replacement": "net::Error::Unsupported => UnavailableKind::Unreachable"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 1081,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-template-prefix"
   },
   {
     "label": "reverse-collector-runtime-unvalidated-history-priority",
@@ -615,6 +783,10 @@
         "needle": "                                _ if view.history_hidden => crate::observe_collector_store::NodeStatus::HiddenPendingRevalidation,\n",
         "replacement": ""
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 1265,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-unchanged"
   }
 ]
