@@ -104,6 +104,7 @@ fn fixture_arrival_controls() {
         let store = Store::open(
             &directory.path().join("state"),
             vec![NodePolicy {
+                relay: None,
                 node: node.into(),
                 labels: true,
                 supported: true,
@@ -377,11 +378,13 @@ async fn cli_fixture(ca_mode: bool) {
             &state_dir,
             vec![
                 xmsg::observe_collector_store::NodePolicy {
+                    relay: None,
                     node: node.clone(),
                     labels: true,
                     supported: true,
                 },
                 xmsg::observe_collector_store::NodePolicy {
+                    relay: None,
                     node: "outbound.leaf".into(),
                     labels: false,
                     supported: false,

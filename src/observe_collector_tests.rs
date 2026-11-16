@@ -44,6 +44,7 @@ struct Fixture {
     url: String,
     idp_calls: Arc<AtomicUsize>,
     active: Arc<AtomicBool>,
+    idp_claims: Arc<Mutex<serde_json::Value>>,
     hold_idp: Arc<AtomicBool>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
     files: tempfile::TempDir,
@@ -58,6 +59,9 @@ impl Drop for Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::with_relay(false).await
+    }
+    async fn with_relay(relay: bool) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let files = tempfile::tempdir().unwrap();
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
@@ -81,6 +85,10 @@ impl Fixture {
         let idp_calls = Arc::new(AtomicUsize::new(0));
         let active = Arc::new(AtomicBool::new(true));
         let hold_idp = Arc::new(AtomicBool::new(false));
+        let idp_claims = Arc::new(Mutex::new(
+            json!({"active":true,"iss":"https://owner.invalid","sub":"owner","aud":"collector","client_id":"hosted","exp":2000}),
+        ));
+        let returned_claims = idp_claims.clone();
         let (calls, status, hold) = (idp_calls.clone(), active.clone(), hold_idp.clone());
         let idp_task = tokio::spawn(async move {
             let mut tasks = tokio::task::JoinSet::new();
@@ -88,16 +96,18 @@ impl Fixture {
                 tokio::select! {
                     accepted = listener.accept() => {
                         let (tcp,_) = accepted.unwrap();
-                        let (tls,calls,status,hold) = (tls.clone(),calls.clone(),status.clone(),hold.clone());
+                        let (tls,calls,status,hold,claims) = (tls.clone(),calls.clone(),status.clone(),hold.clone(),returned_claims.clone());
                         tasks.spawn(async move {
                             let Ok(tls) = tls.accept(tcp).await else { return };
                             let service = hyper::service::service_fn(move |request: Request<Incoming>| {
                                 assert_eq!(request.uri().path(),"/introspect");
-                                let (calls,status,hold) = (calls.clone(),status.clone(),hold.clone());
+                                let (calls,status,hold,claims) = (calls.clone(),status.clone(),hold.clone(),claims.clone());
                                 async move {
                                     calls.fetch_add(1,Ordering::SeqCst);
                                     while hold.load(Ordering::SeqCst) { tokio::task::yield_now().await; }
-                                    let body = json!({"active":status.load(Ordering::SeqCst),"iss":"https://owner.invalid","sub":"owner","aud":"collector","client_id":"hosted","exp":2000}).to_string();
+                                    let mut body = claims.lock().unwrap().clone();
+                                    body["active"] = json!(status.load(Ordering::SeqCst));
+                                    let body = body.to_string();
                                     Ok::<_,Infallible>(Response::new(Full::new(Bytes::from(body))))
                                 }
                             });
@@ -129,6 +139,10 @@ impl Fixture {
             Store::open(
                 &files.path().join("state"),
                 vec![NodePolicy {
+                    relay: relay.then(|| crate::observe_collector_store::RelayOrigin {
+                        hub: "spiffe://fleet/host/hub/user/owner".into(),
+                        leaf: "spiffe://fleet/ns/node/sa/fixture".into(),
+                    }),
                     node: "fixture.node".into(),
                     labels: true,
                     supported: true,
@@ -168,6 +182,7 @@ impl Fixture {
             url,
             idp_calls,
             active,
+            idp_claims,
             hold_idp,
             tasks: vec![idp_task, web_task],
             files,
@@ -718,6 +733,7 @@ async fn backoff_case(snapshot_limited: bool) {
         Store::open(
             &fixture.files.path().join("scheduler"),
             vec![NodePolicy {
+                relay: None,
                 node: node.clone(),
                 labels: false,
                 supported: true,
@@ -819,6 +835,7 @@ async fn runtime_preserves_original_future_kind() {
         Store::open(
             &directory,
             vec![NodePolicy {
+                relay: None,
                 node: node.clone(),
                 labels: false,
                 supported: true,
@@ -894,6 +911,7 @@ async fn idle_background_maintenance_removes_persisted_rows() {
         Store::open(
             &directory,
             vec![NodePolicy {
+                relay: None,
                 node: "fixture.node".into(),
                 labels: false,
                 supported: true,
@@ -939,4 +957,60 @@ async fn idle_background_maintenance_removes_persisted_rows() {
         0,
         "idle maintenance required exporter traffic"
     );
+}
+
+async fn relay_owner_claim_refusal(field: &str, value: serde_json::Value) {
+    let fixture = Fixture::with_relay(true).await;
+    let positive = fixture.get("/?node=0").send().await.unwrap();
+    assert_eq!(positive.status(), 200);
+    assert!(positive
+        .text()
+        .await
+        .unwrap()
+        .contains("via spiffe://fleet/host/hub/user/owner"));
+    fixture.idp_claims.lock().unwrap()[field] = value;
+    let refusal = fixture.get("/?node=0").send().await.unwrap();
+    assert!(
+        refusal.status() == 401 || refusal.status() == 403,
+        "relay owner predicate bypassed: {field}"
+    );
+    assert!(!refusal
+        .text()
+        .await
+        .unwrap()
+        .contains("via spiffe://fleet/host/hub/user/owner"));
+}
+#[tokio::test]
+async fn relay_owner_allowlist_refuses_valid_nonowner() {
+    relay_owner_claim_refusal("sub", json!("nonowner")).await;
+}
+#[tokio::test]
+async fn relay_owner_issuer_is_exact() {
+    relay_owner_claim_refusal("iss", json!("https://foreign.invalid")).await;
+}
+#[tokio::test]
+async fn relay_owner_audience_is_exact() {
+    relay_owner_claim_refusal("aud", json!("other")).await;
+}
+#[tokio::test]
+async fn relay_owner_client_is_exact() {
+    relay_owner_claim_refusal("client_id", json!("other")).await;
+}
+#[tokio::test]
+async fn relay_owner_expiry_is_current() {
+    relay_owner_claim_refusal("exp", json!(999)).await;
+}
+#[tokio::test]
+async fn relay_owner_headers_are_not_identity() {
+    let fixture = Fixture::with_relay(true).await;
+    assert_eq!(fixture.get("/?node=0").send().await.unwrap().status(), 200);
+    let reply = reqwest::Client::new()
+        .get(format!("{}/?node=0", fixture.url))
+        .header("x-auth-request-user", "owner")
+        .header("x-forwarded-user", "owner")
+        .header("x-origin-hub", "forged")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reply.status(), 401);
 }

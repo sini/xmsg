@@ -439,7 +439,10 @@ required; `--listen` defaults to `127.0.0.1:9428`. A non-loopback listener requi
 The JSON configuration supplies client mTLS files, one fixed owner introspection
 provider and a static inventory of at most 64 canonical nodes. `sources[].labels`
 and `sources[].outbound_only` default false. Outbound-only sources are visibly
-unsupported. The private cache and every-request owner checks are described in
+unsupported unless an explicit `sources[].relay` selects reverse transport. The
+closed relay object supplies `hub`, `leaf`, `address`, and optional `ca`; it
+refuses mixed direct trust/address fields. Hub and leaf are canonical full
+identities; a URI hub requires its CA. Configuration applies on restart. The private cache and every-request owner checks are described in
 [collector setup](/operations/fleet-observer/#configure-the-collector).
 
 `GET /` is the authenticated view, with numeric `node` and `page` filters;

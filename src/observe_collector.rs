@@ -340,6 +340,7 @@ async fn mark_error(state: &State, node: String, error: net::Error) {
                 return store.deny(&node);
             }
             let kind = match error {
+                net::Error::Unsupported => UnavailableKind::Unsupported,
                 net::Error::Timeout => UnavailableKind::Timeout,
                 net::Error::Malformed => UnavailableKind::Malformed,
                 net::Error::RateLimited(_) => UnavailableKind::RateLimited,
@@ -520,6 +521,7 @@ pub async fn run(args: Args) -> Result<(), Error> {
             node: s.node.clone(),
             labels: s.labels,
             supported: s.supported,
+            relay: s.relay.clone(),
         })
         .collect();
     let directory = args.state_dir;
