@@ -100,6 +100,8 @@ Without that live view, doctor reports unknown instead of creating missing sidec
 the daemon down or unresponsive and sidecars present, it uses stat only and leaves SQLite
 recovery to startup. With no sidecars, it opens `mode=ro&immutable=1`, then rechecks metadata
 for concurrent changes. No mode is an integrity or live-backup guarantee.
+Symlinks in the DB path's parent directories are resolved; a DB file that is itself a symlink
+is refused as an invalid target.
 
 Results from a different or unknown client/daemon revision are labelled `next start of THIS
 binary`. They describe this binary's startup requirements for the selected DB, whose path
