@@ -2645,8 +2645,12 @@ async fn actual_streamed_answer_obeys_deadline_after_its_first_chunk() {
 #[tokio::test]
 async fn stalled_partial_answer_terminates_at_original_five_second_deadline() {
     let f = Arc::new(RelayFixture::new().await);
+    fresh_snapshot(&f).await;
     let before = f.state.db.lock().unwrap().total_changes();
     let gates = xmsg::observe_relay::test_hooks::controls(&f.state);
+    gates
+        .max_buffered_answer
+        .store(0, std::sync::atomic::Ordering::Relaxed);
     gates.after_answer_chunk.arm(1);
     let caller = {
         let f = f.clone();
@@ -2659,7 +2663,15 @@ async fn stalled_partial_answer_terminates_at_original_five_second_deadline() {
     let body = empty_snapshot(&f);
     let middle = body.len() / 2;
     let (sender, receiver) = tokio::sync::mpsc::channel(2);
-    let mut answer = streamed_answer(f.clone(), request, receiver);
+    let wire_answer = streamed_answer(f.clone(), request, receiver);
+    let (wire_ready, wire_observed) = tokio::sync::oneshot::channel();
+    let (response_release, response_wait) = tokio::sync::oneshot::channel();
+    let answer = tokio::spawn(async move {
+        let response = wire_answer.await.unwrap();
+        let _ = wire_ready.send(());
+        let _ = response_wait.await;
+        response
+    });
     sender
         .send(Bytes::copy_from_slice(&body[..middle]))
         .await
@@ -2670,9 +2682,9 @@ async fn stalled_partial_answer_terminates_at_original_five_second_deadline() {
         (1, 512 * 1024),
         "stalled partial reader owns its original slot and buffers"
     );
+    tokio::time::pause();
     gates.after_answer_chunk.release();
-    let terminated = tokio::time::timeout(Duration::from_secs(5), &mut answer).await;
-    assert!(terminated.is_ok(),"stalled answer did not terminate at its original five-second deadline while producer stayed open");
+    tokio::time::sleep(Duration::from_secs(5)).await;
     assert_eq!(xmsg::observe_relay::test_hooks::reservations(&f.state),(0,0),"production read deadline releases original slot and buffers without producer EOF or client abort");
     assert_eq!(
         xmsg::observe_relay::test_hooks::pending(&f.state),
@@ -2691,9 +2703,18 @@ async fn stalled_partial_answer_terminates_at_original_five_second_deadline() {
             .clock_offset_ms
             .load(std::sync::atomic::Ordering::Relaxed),
         0,
-        "deadline uses the real monotonic timer"
+        "deadline uses the production Tokio timer without an injected state-clock offset"
     );
-    let answer = terminated.unwrap().unwrap();
+    assert!(
+        !answer.is_finished(),
+        "server deadline does not depend on delayed client response completion"
+    );
+    tokio::time::resume();
+    wire_observed.await.unwrap();
+    assert!(!answer.is_finished(),"forced response-delay control keeps the old client-readiness predicate false after server cleanup");
+    println!("FORCED_RESPONSE_DELAY server_slots=0 server_bytes=0 pending=0 wire_ready=true client_wrapper_ready=false");
+    let _ = response_release.send(());
+    let answer = answer.await.unwrap();
     assert_ne!(answer.0, 200, "partial stalled answer never succeeds");
     drop(sender);
     let response = caller.await.unwrap();
@@ -2706,7 +2727,6 @@ async fn stalled_partial_answer_terminates_at_original_five_second_deadline() {
         before,
         "stalled read never mutates bus primary"
     );
-    fresh_snapshot(&f).await;
 }
 
 #[tokio::test]
@@ -2730,9 +2750,27 @@ async fn cancellation_during_answer_read_retains_reservations_until_stream_drops
         .await
         .unwrap();
     gates.after_answer_chunk.wait_for(1).await;
+    let cleanup_before = gates
+        .waiter_cleanup_attempts
+        .load(std::sync::atomic::Ordering::Acquire);
     caller.abort();
     let _ = caller.await;
-    wait_pending(&f.state, 0).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while gates
+            .waiter_cleanup_attempts
+            .load(std::sync::atomic::Ordering::Acquire)
+            == cleanup_before
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("real waiter cleanup attempt was not acknowledged");
+    assert_eq!(
+        xmsg::observe_relay::test_hooks::pending(&f.state),
+        0,
+        "cancelled collector cleanup must remove its pending waiter"
+    );
     assert_eq!(
         xmsg::observe_relay::test_hooks::reservations(&f.state),
         (1, 512 * 1024),

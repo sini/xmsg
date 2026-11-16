@@ -409,6 +409,11 @@ impl Drop for Forget {
         let mut queue = self.state.queue.lock().unwrap();
         queue.waiting.remove(&self.id);
         queue.pairs.remove(&self.pair);
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.state
+            .controls
+            .waiter_cleanup_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -828,6 +833,7 @@ pub mod test_hooks {
         pub before_post: crate::observe_fed::test_hooks::Gate,
         pub before_send: crate::observe_fed::test_hooks::Gate,
         pub after_answer_chunk: crate::observe_fed::test_hooks::Gate,
+        pub waiter_cleanup_attempts: std::sync::atomic::AtomicUsize,
         pub clock_offset_ms: std::sync::atomic::AtomicU64,
         pub max_buffered_answer: std::sync::atomic::AtomicUsize,
         pub max_buffered_control: std::sync::atomic::AtomicUsize,

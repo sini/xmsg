@@ -59,6 +59,7 @@ daemon = ["client", "dep:openidconnect", "dep:time", "dep:chrono", "dep:axum", "
 test-hooks = []
 
 [dev-dependencies]
+tokio = { version = "1.43", features = ["test-util"] }
 rand = "=0.8.8"
 rsa = "=0.9.10"
 ring = "=0.17.14"
