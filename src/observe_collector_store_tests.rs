@@ -1560,22 +1560,16 @@ fn uncommitted_child_crash_journal_is_bounded_and_recovers_hidden() {
     );
 }
 
-fn relay_policy() -> NodePolicy {
+fn relay_fixture_policy() -> NodePolicy {
     NodePolicy {
-        node: "node".into(),
+        node: "leaf.fleet".into(),
         labels: false,
         supported: true,
         relay: Some(RelayOrigin {
             hub: "spiffe://fleet/host/hub/user/owner".into(),
-            leaf: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+            leaf: "spiffe://fleet/ns/fleet/sa/leaf".into(),
         }),
     }
-}
-fn relay_fixture_policy() -> NodePolicy {
-    let mut policy = relay_policy();
-    policy.relay.as_mut().unwrap().leaf = "spiffe://fleet/ns/fleet/sa/leaf".into();
-    policy.node = "leaf.fleet".into();
-    policy
 }
 fn relay_page(sequence: i64) -> ExportPage {
     let mut p = page(sequence);
@@ -1873,4 +1867,85 @@ fn relay_upgrade_migrates_b0_nullable_columns_twice() {
             assert_eq!((notnull, default), (0, None));
         }
     }
+}
+
+#[test]
+fn relay_scope_and_denial_mask_before_failed_purge() {
+    for denied in [false, true] {
+        let dir = private_temp();
+        let policy = relay_fixture_policy();
+        let store = Store::open(dir.path(), vec![policy.clone()], Arc::new(|| NOW)).unwrap();
+        store
+            .ingest_page(&policy.node, &Cursor::default(), relay_page(1))
+            .unwrap();
+        store
+            .ingest_snapshot(&policy.node, relay_snapshot())
+            .unwrap();
+        let c = Connection::open(dir.path().join("collector.sqlite")).unwrap();
+        c.execute_batch("CREATE TRIGGER fail_purge BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT,'fixture purge abort'); END;").unwrap();
+        if denied {
+            assert!(store.deny(&policy.node).is_err());
+        } else {
+            let mut changed = relay_page(2);
+            changed.scope = "b".repeat(64);
+            assert!(store
+                .ingest_page(&policy.node, &store.cursor(&policy.node).unwrap(), changed)
+                .is_err());
+        }
+        store
+            .unavailable(&policy.node, UnavailableKind::Timeout)
+            .unwrap();
+        let view = store.view(None, 200).unwrap().pop().unwrap();
+        assert!(view.history_hidden && view.events.is_empty() && view.latest_snapshot.is_none());
+        assert_eq!(
+            view.status,
+            if denied {
+                NodeStatus::Denied
+            } else {
+                NodeStatus::HiddenPendingRevalidation
+            }
+        );
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1,
+            "rollback control lost rows"
+        );
+    }
+}
+#[test]
+fn relay_route_replacement_abort_never_commits_over_64_nodes() {
+    let dir = private_temp();
+    let policies = |relay: bool| {
+        (0..64)
+            .map(|i| NodePolicy {
+                node: format!("leaf{i}.fleet"),
+                labels: false,
+                supported: true,
+                relay: relay.then(|| RelayOrigin {
+                    hub: "spiffe://fleet/host/hub/user/owner".into(),
+                    leaf: format!("spiffe://fleet/ns/fleet/sa/leaf{i}"),
+                }),
+            })
+            .collect::<Vec<_>>()
+    };
+    let store = Store::open(dir.path(), policies(false), Arc::new(|| NOW)).unwrap();
+    drop(store);
+    let c = Connection::open(dir.path().join("collector.sqlite")).unwrap();
+    c.execute_batch("CREATE TRIGGER fail_route_insert BEFORE INSERT ON nodes WHEN NEW.node LIKE 'reverse-v1:%' BEGIN SELECT RAISE(ABORT,'fixture replacement abort'); END;").unwrap();
+    assert!(Store::open(dir.path(), policies(true), Arc::new(|| NOW)).is_err());
+    assert_eq!(
+        c.query_row("SELECT count(*) FROM nodes", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "old keys were not purged before first new insert"
+    );
+    c.execute_batch("DROP TRIGGER fail_route_insert").unwrap();
+    let store = Store::open(dir.path(), policies(true), Arc::new(|| NOW)).unwrap();
+    assert_eq!(store.view(None, 0).unwrap().len(), 64);
+    assert_eq!(
+        c.query_row("SELECT count(*) FROM nodes", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        64
+    );
 }
