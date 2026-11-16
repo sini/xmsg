@@ -216,9 +216,7 @@ fn retained_previous_description_cannot_revoke_recreated_writer_lease() {
 }
 
 /// A re-exec'd child that matched no test also exits 0; require exactly one test to have run.
-#[cfg(target_os = "macos")]
-fn assert_child_ran_exactly_one(output: &std::process::Output) {
-    let stdout = String::from_utf8_lossy(&output.stdout);
+fn assert_child_ran_exactly_one(stdout: &str) {
     assert!(
         stdout.contains("test result: ok. 1 passed; 0 failed;"),
         "child did not run exactly one test: {stdout}"
@@ -247,7 +245,7 @@ fn xf6_close_only_handover_before_new_watch() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_child_ran_exactly_one(&output);
+        assert_child_ran_exactly_one(&String::from_utf8_lossy(&output.stdout));
         return;
     }
     let env = CodexTestEnv::new();
@@ -2290,7 +2288,7 @@ async fn relay_ack_fixture_retains_peer_until_client_close() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_child_ran_exactly_one(&output);
+        assert_child_ran_exactly_one(&String::from_utf8_lossy(&output.stdout));
         return;
     }
     for close_after_ack in [true, false] {
@@ -7986,6 +7984,7 @@ async fn va41_repeated_failure_logs_only_class_transition_without_values() {
         std::io::Read::read_to_string(&mut child.0.stdout.take().unwrap(), &mut output).unwrap();
         std::io::Read::read_to_string(&mut child.0.stderr.take().unwrap(), &mut output).unwrap();
         assert!(status.success(), "isolated log oracle failed: {output}");
+        assert_child_ran_exactly_one(&output);
         return;
     }
     use tracing::instrument::WithSubscriber;
