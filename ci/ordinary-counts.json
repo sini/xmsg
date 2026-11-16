@@ -1,7 +1,7 @@
 {
   "baseline": {
     "linux": "cargo test --locked local native on 62c8ee6dfb89eaaa1144808cb75dfddd4ca44192: exit0, measured1270passed/8ignored/0failed,104summaries/all101targets; later changes only refine assertions, final CI must confirm",
-    "darwin": "Prior base native measurement (values retained pending this candidate actual macOS run): run 43765072144 job 132968221019 on 0df3a91a1aaab08fa35aa7223a4728baf32d45a2: 1216 passed/10 ignored/0 failed/103 summaries; all100 executed targets passed inventory before stale count guard"
+    "darwin": "run43786358905 job133034770215 on0fbd378889b4368eed40acfa6b5b2004d8bee8be: measured1273passed/10ignored/0failed,104summaries/all101targets; only prior census guard failed"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -114,10 +114,10 @@
       "summaries": 104
     },
     "darwin": {
-      "passed": 1216,
+      "passed": 1273,
       "failed": 0,
       "ignored": 10,
-      "summaries": 103
+      "summaries": 104
     }
   }
 }
