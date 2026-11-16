@@ -146,12 +146,17 @@ mod tests {
             let (mut reader, mut writer) = UnixStream::pair().unwrap();
             let guard = RegistrationHealth::new(reader.as_raw_fd());
             guard.check().unwrap();
+            // macOS socketpair sets CLOEXEC after creation, so a child spawned by a concurrent
+            // test can inherit the peer; hold such a copy always and close the connection itself.
+            let inherited = writer.try_clone().unwrap();
             writer.write_all(frame).unwrap();
+            writer.shutdown(std::net::Shutdown::Both).unwrap();
             drop(writer);
             assert!(
                 matches!(guard.check(), Err(ClientError::Disconnected)),
                 "shutdown behind data"
             );
+            drop(inherited);
             let mut received = Vec::new();
             reader.read_to_end(&mut received).unwrap();
             assert_eq!(received, frame, "normal reader preserves pre-EOF bytes");
