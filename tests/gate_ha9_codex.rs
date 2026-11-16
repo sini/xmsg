@@ -2260,6 +2260,27 @@ async fn mock_ws_wait_client_close(stream: &mut UnixStream) {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn relay_ack_fixture_retains_peer_until_client_close() {
+    const CHILD: &str = "XMSG_RELAY_ACK_PEER_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // Darwin keeps the peer witness until the last copy of the server fd closes, and a
+        // concurrent test's fork can hold one; run the forced close in its own exec'd process.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "relay_ack_fixture_retains_peer_until_client_close",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "relay ACK child failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     for close_after_ack in [true, false] {
         let env = CodexTestEnv::new();
         let pid = std::process::id();
