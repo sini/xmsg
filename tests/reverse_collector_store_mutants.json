@@ -478,5 +478,19 @@
         "replacement": "        for node in configured {\n            transaction(&mut inner, |c| {\n                c.execute(\"INSERT OR IGNORE INTO nodes(node) VALUES(?1)\", [node])?;\n                Ok(())\n            })?;\n        }\n        for node in persisted {\n            if !configured.contains(&node) {\n                transaction(&mut inner, |c| {\n                    c.execute(\"DELETE FROM events WHERE node=?1\", [&node])?;\n                    c.execute(\"DELETE FROM nodes WHERE node=?1\", [&node])?;\n                    Ok(())\n                })?;\n            }\n        }\n"
       }
     ]
+  },
+  {
+    "label": "reverse-collector-store-nullable-populated-b0-migration",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_upgrade_migrates_b0_nullable_columns_twice",
+    "expected_literal": "B0 nullable-origin migration failed to open on idempotent round 0",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "ADD COLUMN {column} TEXT",
+        "replacement": "ADD COLUMN {column} TEXT NOT NULL"
+      }
+    ]
   }
 ]
