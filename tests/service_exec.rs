@@ -253,27 +253,76 @@ async fn stdout_overflow_is_a_single_typed_failure() {
     );
 }
 
+/// Live and zombie children of `parent`.
+#[cfg(target_os = "macos")]
+fn children(parent: u32) -> Vec<i32> {
+    let mut pids = vec![0i32; 256];
+    let n = unsafe {
+        libc::proc_listchildpids(
+            parent as i32,
+            pids.as_mut_ptr().cast(),
+            (pids.len() * std::mem::size_of::<i32>()) as i32,
+        )
+    };
+    assert!(
+        n >= 0,
+        "proc_listchildpids: {}",
+        std::io::Error::last_os_error()
+    );
+    pids.truncate(n as usize);
+    pids
+}
+
+/// Live and zombie children of `parent`.
+#[cfg(not(target_os = "macos"))]
+fn children(parent: u32) -> Vec<i32> {
+    fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|entry| {
+            let pid: i32 = entry.ok()?.file_name().to_str()?.parse().ok()?;
+            let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            let ppid: u32 = stat
+                .rsplit_once(')')?
+                .1
+                .split_whitespace()
+                .nth(1)?
+                .parse()
+                .ok()?;
+            (ppid == parent).then_some(pid)
+        })
+        .collect()
+}
+
+#[test]
+fn children_lists_a_live_child() {
+    let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+    let listed = children(std::process::id());
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        listed.contains(&(child.id() as i32)),
+        "children() missed {}: {listed:?}",
+        child.id()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn timeout_reaps_the_owned_command() {
     let node = Node::start();
-    let pidfile = node.dir.path().join("command.pid");
-    let script = node.script("printf '%s' \"$$\" > \"$1\"\nexec sleep 30");
-    let mut service = node.service(&script, &[pidfile.to_str().unwrap()], 200, 65536);
+    let script = node.script("exec sleep 30");
+    let mut service = node.service(&script, &[], 200, 65536);
     let id = node.send(&mut service, "ignored").await;
     let reply = node.settled_reply(&id).await;
     assert_eq!(
         serde_json::from_str::<Value>(&reply).unwrap(),
         json!({"status":"unknown", "error":"timeout"})
     );
-    let pid: i32 = fs::read_to_string(pidfile).unwrap().parse().unwrap();
+    assert!(service.0.try_wait().unwrap().is_none(), "service exited");
+    // Any child left (live or zombie) is the unreaped command; a pidfile would race the timeout.
     assert_eq!(
-        unsafe { libc::kill(pid, 0) },
-        -1,
+        children(service.0.id()),
+        Vec::<i32>::new(),
         "owned command still exists after timeout reply"
-    );
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::ESRCH)
     );
 }
 
