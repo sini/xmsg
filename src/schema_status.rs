@@ -270,8 +270,26 @@ fn metadata_uri(path: &Path, immutable: bool) -> String {
     uri
 }
 
+/// SQLite's NOFOLLOW rejects a symlink in any component; resolve the parent so it guards only the file.
+fn resolve_parent(path: &Path) -> io::Result<PathBuf> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    Ok(fs::canonicalize(parent)?.join(name))
+}
+
 fn open_metadata(path: &Path, immutable: bool) -> rusqlite::Result<Connection> {
-    let uri = metadata_uri(path, immutable);
+    let path = resolve_parent(path).map_err(|error| {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+            Some(error.to_string()),
+        )
+    })?;
+    let uri = metadata_uri(&path, immutable);
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
         | OpenFlags::SQLITE_OPEN_URI
         | OpenFlags::SQLITE_OPEN_NOFOLLOW;
@@ -379,6 +397,19 @@ fn sqlite_class(error: &rusqlite::Error) -> &'static str {
 }
 
 pub fn inspect(path: &Path, state: DaemonState) -> Report {
+    let path = &match resolve_parent(path) {
+        Ok(path) => path,
+        Err(error) => {
+            return Report::new(&sidecars(path)).uncertain(
+                if error.kind() == io::ErrorKind::NotFound {
+                    "missing"
+                } else {
+                    "unavailable"
+                },
+                "The main file metadata is unavailable.",
+            )
+        }
+    };
     let before = sidecars(path);
     let mut report = Report::new(&before);
     match fs::symlink_metadata(path) {
@@ -570,6 +601,37 @@ mod tests {
         let path = directory.path().join("main?#%.sqlite");
         drop(fixture(&path, false));
         assert!(inspect(&path, DaemonState::Down).consistent);
+    }
+
+    #[test]
+    fn symlinked_parent_directory_is_resolved() {
+        let directory = tempfile::tempdir().unwrap();
+        let real = directory.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let path = link.join("main.sqlite");
+        drop(fixture(&path, false));
+        open_metadata(&path, true).unwrap();
+        let report = inspect(&path, DaemonState::Down);
+        assert!(report.consistent, "{report:?}");
+    }
+
+    #[test]
+    fn symlinked_database_file_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let real = directory.path().join("real.sqlite");
+        drop(fixture(&real, false));
+        let path = directory.path().join("main.sqlite");
+        std::os::unix::fs::symlink(&real, &path).unwrap();
+        let error = open_metadata(&path, true).unwrap_err();
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::CannotOpen)
+        );
+        let report = inspect(&path, DaemonState::Down);
+        assert_eq!(report.error_class, Some("invalid_target"));
+        assert_eq!(report.mode, "unopened");
     }
 
     #[test]
