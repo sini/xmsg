@@ -814,10 +814,12 @@ async fn raw_answer(
         .unwrap()
         .replace("LEAF_NODE", &f.leaf.node);
     body = text.into_bytes();
-    let caller = async {
-        f.request(&f.collector, "GET", &f.uri(kind), vec![], &[])
-            .await
+    let uri = if kind == "events" {
+        format!("{}?limit=200", f.uri(kind))
+    } else {
+        f.uri(kind)
     };
+    let caller = async { f.request(&f.collector, "GET", &uri, vec![], &[]).await };
     let leaf = async {
         let request = control(&f).await;
         let mut all = vec![("xmsg-observe-kind", kind), ("xmsg-observe-status", "ok")];
@@ -844,8 +846,14 @@ fn future_page() -> Vec<u8> {
 async fn hub_preserves_future_kind_event_bytes_and_refuses_nonmetadata_fields() {
     let expected = future_page();
     let (response, status) = raw_answer(expected.clone(), "events", vec![]).await;
-    assert_eq!(status, 200);
-    assert_eq!(response.0, 200);
+    assert_eq!(
+        status, 200,
+        "valid bounded future-kind page is accepted from the expected leaf"
+    );
+    assert_eq!(
+        response.0, 200,
+        "valid bounded future-kind page reaches the collector unchanged"
+    );
     let normalized = String::from_utf8(response.1).unwrap();
     assert!(
         normalized.contains("\"kind\":\"future_delivery\""),
@@ -906,6 +914,117 @@ async fn hub_preserves_future_kind_event_bytes_and_refuses_nonmetadata_fields() 
         assert_eq!(answer, 400, "invalid {name} refuses at answer hop");
         assert_eq!(response.0, 400, "invalid {name} refuses whole caller DTO");
     }
+}
+fn snapshot_page(count: usize) -> Value {
+    json!({"v":1,"node":"LEAF_NODE","scope":"a".repeat(64),"observed_at":1,"endpoints":(0..count).map(|index|json!({"id":format!("endpoint-{index}@LEAF_NODE"),"node":"LEAF_NODE","kind":"service","harness":"unknown","state":"registered"})).collect::<Vec<_>>(),"truncated":false,"available":"available"})
+}
+async fn assert_raw_dto_status(body: Vec<u8>, kind: &str, status: u16, name: &str) -> Value {
+    assert!(
+        body.len() < 64 * 1024,
+        "{name} fixture remains well below the256KiB transport limit"
+    );
+    let (response, answer) = raw_answer(body, kind, vec![]).await;
+    assert_eq!(answer, status, "{name} DTO answer-hop result");
+    assert_eq!(response.0, status, "{name} DTO collector result");
+    serde_json::from_slice(&response.1).unwrap()
+}
+#[tokio::test]
+async fn snapshot_dto_node_version_count_and_closed_schema_are_independent() {
+    let valid = snapshot_page(200);
+    let response = assert_raw_dto_status(
+        serde_json::to_vec(&valid).unwrap(),
+        "snapshot",
+        200,
+        "valid200-endpoint snapshot",
+    )
+    .await;
+    assert_eq!(
+        response["endpoints"].as_array().unwrap().len(),
+        200,
+        "snapshot exact endpoint-limit neighbor retains all200 valid endpoints"
+    );
+    let mut wrong_node = valid.clone();
+    wrong_node["node"] = json!("unrelated.node");
+    let mut wrong_version = valid.clone();
+    wrong_version["v"] = json!(2);
+    let mut body_field = valid.clone();
+    body_field["body"] = json!("SYNTHETIC_BODY_NOT_METADATA");
+    let mut cwd_field = valid.clone();
+    cwd_field["cwd"] = json!("/synthetic/private");
+    let mut endpoint_cwd = valid.clone();
+    endpoint_cwd["endpoints"][0]["cwd"] = json!("/synthetic/private");
+    for (name, body) in [
+        ("snapshot wrong node", wrong_node),
+        ("snapshot version2", wrong_version),
+        ("snapshot201 endpoints", snapshot_page(201)),
+        ("snapshot body extra field", body_field),
+        ("snapshot cwd extra field", cwd_field),
+        ("snapshot endpoint cwd extra field", endpoint_cwd),
+    ] {
+        assert_raw_dto_status(serde_json::to_vec(&body).unwrap(), "snapshot", 400, name).await;
+    }
+    let duplicate =
+        serde_json::to_string(&valid)
+            .unwrap()
+            .replacen("\"v\":1", "\"v\":1,\"v\":1", 1);
+    assert_raw_dto_status(
+        duplicate.into_bytes(),
+        "snapshot",
+        400,
+        "snapshot duplicate known version field",
+    )
+    .await;
+}
+fn event_page(count: usize) -> Value {
+    let mut page: Value = serde_json::from_slice(&future_page()).unwrap();
+    let event = page["events"][0].clone();
+    page["events"] = Value::Array(
+        (1..=count)
+            .map(|sequence| {
+                let mut event = event.clone();
+                event["sequence"] = json!(sequence);
+                event
+            })
+            .collect(),
+    );
+    page["next"] = json!(count);
+    page
+}
+#[tokio::test]
+async fn events_dto_version_and_count_are_independent_of_transport_bounds() {
+    let valid = event_page(200);
+    let response = assert_raw_dto_status(
+        serde_json::to_vec(&valid).unwrap(),
+        "events",
+        200,
+        "valid200-event future-kind page",
+    )
+    .await;
+    assert_eq!(
+        response["events"].as_array().unwrap().len(),
+        200,
+        "event exact-count neighbor retains all200 sequenced events"
+    );
+    assert_eq!(
+        response["next"], 200,
+        "valid200-event neighbor preserves cursor"
+    );
+    let mut wrong_version = valid;
+    wrong_version["v"] = json!(2);
+    assert_raw_dto_status(
+        serde_json::to_vec(&wrong_version).unwrap(),
+        "events",
+        400,
+        "events version2",
+    )
+    .await;
+    assert_raw_dto_status(
+        serde_json::to_vec(&event_page(201)).unwrap(),
+        "events",
+        400,
+        "events201 sequenced events",
+    )
+    .await;
 }
 #[tokio::test]
 async fn exact_query_bound_and_closed_query_fields_apply_before_dispatch() {
@@ -1713,6 +1832,78 @@ async fn authenticated_hub_control_id_grammar_refuses_before_leaf_work() {
                 .load(std::sync::atomic::Ordering::Relaxed),
             0,
             "invalid control never starts answer POST"
+        );
+    }
+}
+#[tokio::test]
+async fn authenticated_hub_control_schema_is_closed_and_duplicate_free_before_leaf_work() {
+    for case in [
+        "valid",
+        "outer unknown",
+        "nested unknown",
+        "outer duplicate",
+        "nested duplicate",
+    ] {
+        let mut f = RelayFixture::new().await;
+        let request = policy_control(&f);
+        let mut envelope = json!({"kind":"observe","request":request});
+        match case {
+            "outer unknown" => envelope["body"] = json!("SYNTHETIC_BODY_NOT_METADATA"),
+            "nested unknown" => envelope["request"]["cwd"] = json!("/synthetic/private"),
+            _ => {}
+        }
+        let raw = serde_json::to_string(&envelope).unwrap();
+        let raw = match case {
+            "outer duplicate" => raw.replacen(
+                "\"kind\":\"observe\"",
+                "\"kind\":\"observe\",\"kind\":\"observe\"",
+                1,
+            ),
+            "nested duplicate" => raw.replacen(
+                "\"id\":\"policy-probe\"",
+                "\"id\":\"policy-probe\",\"id\":\"policy-probe\"",
+                1,
+            ),
+            _ => raw,
+        };
+        assert!(
+            raw.len() < 8192,
+            "{case} control fixture stays below envelope bound"
+        );
+        let metadata = xmsg::observe_fed::test_hooks::controls(&f.leaf_state);
+        let relay = xmsg::observe_relay::test_hooks::controls(&f.leaf_state);
+        let result = poll_control_body(&mut f, raw.into_bytes(), false).await;
+        if case == "valid" {
+            assert!(
+                matches!(result, Ok(Some(xmsg::fed::FedInboxItem::Observe { .. }))),
+                "valid closed control matching neighbor passes authenticated TLS parser"
+            );
+        } else {
+            assert!(
+                result.is_err(),
+                "{case} control schema refuses before leaf admission"
+            );
+        }
+        assert_eq!(
+            metadata
+                .snapshot_candidates
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "{case} control validation performs no metadata read"
+        );
+        assert_eq!(
+            relay
+                .controls_received
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "{case} control validation never starts answer scheduler"
+        );
+        assert_eq!(
+            relay
+                .post_entries
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "{case} control validation never starts answer POST"
         );
     }
 }
