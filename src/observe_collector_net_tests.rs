@@ -927,3 +927,160 @@ async fn mixed_direct_and_relay_share_global_admission() {
         assert!(result.unwrap().is_ok());
     }
 }
+
+#[tokio::test]
+async fn relay_configured_pin_refuses_other_spki() {
+    let mut fixture = Fixture::new().await;
+    use_relay(&mut fixture);
+    let good = Client::new(&fixture.load().unwrap()).unwrap();
+    assert!(good.get(0, "/fed/v2/observe/snapshot".into()).await.is_ok());
+    let other = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    fixture.config["sources"][0]["relay"]["hub"] = json!(format!(
+        "sha256:{}",
+        crate::fed::spki_sha256_from_der(other.cert.der()).unwrap()
+    ));
+    let wrong = Client::new(&fixture.load().unwrap()).unwrap();
+    assert_eq!(wrong.snapshot(0).await.unwrap_err(), Error::Unavailable);
+    assert_eq!(
+        fixture.requests.load(Ordering::SeqCst),
+        1,
+        "wrong hub pin reached exporter"
+    );
+}
+#[tokio::test]
+async fn relay_dto_binding_and_future_kind_persist_configured_origin() {
+    use crate::observe_collector_store::{NodePolicy, Store, StoreError};
+    let mut fixture = Fixture::new().await;
+    use_relay(&mut fixture);
+    let client = Client::new(&fixture.load().unwrap()).unwrap();
+    let node = "leaf.fleet";
+    let origin = client.sources[0].relay.clone().unwrap();
+    let store = Store::open(
+        &fixture._directory.path().join("relay-state"),
+        vec![NodePolicy {
+            node: node.into(),
+            relay: Some(origin.clone()),
+            labels: false,
+            supported: true,
+        }],
+        Arc::new(|| 1000),
+    )
+    .unwrap();
+    let snapshot = json!({"v":1,"node":node,"scope":"a".repeat(64),"observed_at":1000,"endpoints":[],"truncated":false,"available":"available"});
+    fixture.set_response("200 OK", "", &serde_json::to_vec(&snapshot).unwrap());
+    store
+        .ingest_snapshot(node, client.snapshot(0).await.unwrap())
+        .unwrap();
+    let page = json!({"v":1,"node":node,"epoch":"relay-fixture","scope":"a".repeat(64),"events":[{"sequence":1,"observed_at":1000,"persisted_at":1000,"kind":"future_relay_fixture","available":"not_recorded"}],"next":1,"has_more":false,"gaps":[],"available":true});
+    fixture.set_response("200 OK", "", &serde_json::to_vec(&page).unwrap());
+    reset_spacing(&client);
+    store
+        .ingest_decoded_page(
+            node,
+            &store.cursor(node).unwrap(),
+            client.events_decoded(0, None, None, 0).await.unwrap(),
+        )
+        .unwrap();
+    let view = store.view(Some(node), 200).unwrap().pop().unwrap();
+    assert_eq!(
+        view.events[0].event.kind,
+        crate::observe_export::EventKind::Unknown
+    );
+    assert_eq!(
+        view.events[0].origin_hub.as_deref(),
+        Some(origin.hub.as_str())
+    );
+    assert_eq!(
+        view.latest_snapshot.as_ref().unwrap().origin_hub.as_deref(),
+        Some(origin.hub.as_str())
+    );
+    for actual in ["other.fleet", &client.sources[0].server_name] {
+        let mut forged = snapshot.clone();
+        forged["node"] = json!(actual);
+        fixture.set_response("200 OK", "", &serde_json::to_vec(&forged).unwrap());
+        reset_spacing(&client);
+        assert_eq!(
+            store
+                .ingest_snapshot(node, client.snapshot(0).await.unwrap())
+                .unwrap_err(),
+            StoreError::Invalid,
+            "snapshot DTO node substitution accepted"
+        );
+        let mut forged = page.clone();
+        forged["node"] = json!(actual);
+        fixture.set_response("200 OK", "", &serde_json::to_vec(&forged).unwrap());
+        reset_spacing(&client);
+        assert_eq!(
+            store
+                .ingest_decoded_page(
+                    node,
+                    &store.cursor(node).unwrap(),
+                    client.events_decoded(0, None, None, 1).await.unwrap()
+                )
+                .unwrap_err(),
+            StoreError::Invalid,
+            "events DTO node substitution accepted"
+        );
+    }
+    let mut extra = page.clone();
+    extra["events"][0]["body"] = json!("synthetic-not-metadata");
+    fixture.set_response("200 OK", "", &serde_json::to_vec(&extra).unwrap());
+    reset_spacing(&client);
+    assert!(
+        client.events_decoded(0, None, None, 1).await.is_err(),
+        "relay unknown kind admitted body field"
+    );
+    assert_eq!(store.cursor(node).unwrap().next, 1);
+    assert_eq!(store.view(Some(node), 200).unwrap()[0].events.len(), 1);
+    store
+        .unavailable(
+            node,
+            crate::observe_collector_store::UnavailableKind::Timeout,
+        )
+        .unwrap();
+    let stale = store.view(Some(node), 200).unwrap().pop().unwrap();
+    assert_eq!(
+        stale.status,
+        crate::observe_collector_store::NodeStatus::Stale
+    );
+    assert_eq!(
+        stale.events[0].origin_hub.as_deref(),
+        Some(origin.hub.as_str())
+    );
+    let html = crate::observe_collector_web::render(
+        std::slice::from_ref(&stale),
+        Some(&stale),
+        crate::observe_collector_web::Filter {
+            node: Some(0),
+            page: 0,
+        },
+    );
+    assert!(html.contains(&format!("via {} (hub-attested)", origin.hub)));
+    assert!(html.contains("unknown event kind (newer node)"));
+}
+
+#[tokio::test]
+async fn relay_response_body_bound_has_exact_control() {
+    let mut fixture = Fixture::new().await;
+    use_relay(&mut fixture);
+    let client = Client::new(&fixture.load().unwrap()).unwrap();
+    fixture.set_response("200 OK", "", &vec![b'x'; 256 * 1024]);
+    assert_eq!(
+        client
+            .get(0, "/fed/v2/observe/snapshot".into())
+            .await
+            .unwrap()
+            .len(),
+        256 * 1024
+    );
+    fixture.set_response("200 OK", "", &vec![b'x'; 256 * 1024 + 1]);
+    reset_spacing(&client);
+    assert_eq!(
+        client
+            .get(0, "/fed/v2/observe/snapshot".into())
+            .await
+            .unwrap_err(),
+        Error::Malformed
+    );
+    assert_eq!(fixture.requests.load(Ordering::SeqCst), 2);
+}
