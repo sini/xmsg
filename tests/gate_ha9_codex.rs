@@ -215,6 +215,16 @@ fn retained_previous_description_cannot_revoke_recreated_writer_lease() {
     );
 }
 
+/// A re-exec'd child that matched no test also exits 0; require exactly one test to have run.
+#[cfg(target_os = "macos")]
+fn assert_child_ran_exactly_one(output: &std::process::Output) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("test result: ok. 1 passed; 0 failed;"),
+        "child did not run exactly one test: {stdout}"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn xf6_close_only_handover_before_new_watch() {
@@ -237,6 +247,7 @@ fn xf6_close_only_handover_before_new_watch() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        assert_child_ran_exactly_one(&output);
         return;
     }
     let env = CodexTestEnv::new();
@@ -2279,6 +2290,7 @@ async fn relay_ack_fixture_retains_peer_until_client_close() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        assert_child_ran_exactly_one(&output);
         return;
     }
     for close_after_ack in [true, false] {
