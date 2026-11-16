@@ -156,7 +156,9 @@ fn render_with_cap(
         if node.failure.is_some() && !node.history_hidden {
             tile.push_str("<p>Previously validated history is stale.</p>");
         }
-        if node.history_hidden && node.status != NodeStatus::Unsupported {
+        if node.history_hidden
+            && (node.status != NodeStatus::Unsupported || node.origin_hub.is_some())
+        {
             tile.push_str("<p class=\"warning\">history hidden until this node answers</p>");
         }
         tile.push_str("</article>");
