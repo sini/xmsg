@@ -157,7 +157,7 @@
     "target": "gate_reverse_observe",
     "test_file": "tests/gate_reverse_observe.rs",
     "test": "stalled_partial_answer_terminates_at_original_five_second_deadline",
-    "expected_literal": "stalled answer did not terminate at its original five-second deadline while producer stayed open",
+    "expected_literal": "production read deadline releases original slot and buffers without producer EOF or client abort",
     "edits": [
       {
         "file": "src/observe_relay.rs",
@@ -453,7 +453,7 @@
     "target": "gate_reverse_observe",
     "test_file": "tests/gate_reverse_observe.rs",
     "test": "cancellation_during_answer_read_retains_reservations_until_stream_drops",
-    "expected_literal": "pending state reached expected bounded count",
+    "expected_literal": "cancelled collector cleanup must remove its pending waiter",
     "edits": [
       {
         "file": "src/observe_relay.rs",
