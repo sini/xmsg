@@ -3143,9 +3143,18 @@ pub(crate) async fn stage_codex_reply(
         if let Some(snap) = live {
             let outcome =
                 try_push_codex_queued_message(local, &snap, &reply_id, &queued.envelope).await;
-            // Queue-only is durable but not a handoff. Only accepted updates to `pushed`.
             if matches!(outcome, Ok("delivered")) {
                 record.push_outcome = Some("pushed".into());
+            } else if matches!(outcome, Ok("queued")) {
+                // A live root's queue keeps the reply for its next hook drain.
+                let db = local.db.lock().map_err(db_err)?;
+                if storage::codex_handoff_held_for_live_root(&db, &reply_id).map_err(db_err)? {
+                    crate::observe_effects::autocommit_registered(&db, |observed_connection| {
+                        storage::update_reply_push_outcome(observed_connection, &reply_id, "pushed")
+                    })
+                    .map_err(db_err)?;
+                    record.push_outcome = Some("pushed".into());
+                }
             } else if matches!(outcome, Ok("delivery_unknown")) {
                 record.push_outcome = Some("push_failed".into());
                 crate::observe_effects::autocommit_registered(

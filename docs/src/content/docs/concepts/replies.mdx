@@ -85,8 +85,10 @@ Each envelope that xmsg delivers to a recipient has a reply instruction footer:
   ```
 - **Push outcomes:** xmsg records one on each reply: `pushed`, `sender_gone`, `push_failed` or
   `stored`. `stored` means the origin is a leaf or an outbound-linked node, which pulls its
-  replies. A reply to an anonymous HTTP caller has no push outcome. The caller reads it with
-  `replies`.
+  replies. A reply to a live Codex root reports `pushed` when the relay accepts it. It also
+  reports `pushed` when xmsg holds it in that live root's queue for its next hook, as for an
+  embedded `codex exec` root without an app-server. A revoked root reports `sender_gone`. A
+  reply to an anonymous HTTP caller has no push outcome. The caller reads it with `replies`.
 - **Codex restart custody (planned):** These rules apply to a Codex root after an xmsg daemon restart:
   - A known root that was active before restart and is not revoked stays queueable within the
     reply TTL. xmsg retains its recovery eligibility across repeated restarts. Deliberate

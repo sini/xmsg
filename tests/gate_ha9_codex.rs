@@ -6679,6 +6679,133 @@ async fn gone_codex_reply_reregisters_fifo_once_with_stable_id_and_ttl() {
     );
 }
 
+/// An embedded (`codex exec`) root has no app-server control socket, so the relay is
+/// queue-only. A reply in queue custody that the next hook drains reports `pushed`,
+/// and a reply to an operator-revoked root still reports `sender_gone`.
+#[tokio::test]
+async fn live_embedded_root_queue_only_reply_reports_pushed_and_drains_on_stop() {
+    let env = CodexTestEnv::new();
+    let root = "019a0000-0000-7000-8000-000000000467";
+    let pid = 7467;
+    env.write_fake_proc(pid, 1, "7467", &env.codex_exe);
+    env.create_writer_lock(&env.codex_home, pid, root, 3);
+    env.write_root_rollout(&env.codex_home, root, "/workspace");
+    let peer = env.peer(pid);
+    handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id":root,"source":"startup"}),
+    )
+    .await
+    .unwrap();
+    let mut recipient = xmsg::codex::codex_root_to_session(
+        &xmsg::codex::resolve_codex_root(&env.state.db, root).unwrap(),
+    );
+    recipient.session_id = "019a0000-0000-7000-8000-000000000468".into();
+    recipient.harness = "claude".into();
+    let msg = storage::MessageRecord {
+        id: "EMBEDDED_ORIGINAL".into(),
+        created_at: storage::now_epoch_secs(),
+        session_id: recipient.session_id.clone(),
+        from_name: "sender".into(),
+        bytes: 1,
+        outcome: "delivered".into(),
+        recipient_harness: "claude".into(),
+        return_harness: Some("codex".into()),
+        return_session_id: Some(root.into()),
+        thread_id: "EMBEDDED_ORIGINAL".into(),
+        return_host: None,
+    };
+    storage::insert_message(&env.state.db.lock().unwrap(), &msg).unwrap();
+
+    let live = xmsg::surface::reply(
+        &env.state,
+        &recipient,
+        "EMBEDDED_ORIGINAL",
+        "LIVE_REPLY",
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        live.push_outcome.as_deref(),
+        Some("pushed"),
+        "reply retained in codex queue custody must not report sender_gone"
+    );
+    let reply_id = live.pushed_message_id.clone().unwrap();
+    assert_eq!(
+        storage::get_codex_handoff_state(&env.state.db.lock().unwrap(), &reply_id)
+            .unwrap()
+            .map(|(state, _, _)| state),
+        Some("pending".to_string())
+    );
+
+    let stop = handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "Stop",
+        None,
+        &json!({"session_id":root,"stop_hook_active":true}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(stop.handoff_ids, std::slice::from_ref(&reply_id));
+    assert!(stop.stdout.contains("LIVE_REPLY"));
+    storage::complete_codex_handoff_accepted(
+        &env.state.db.lock().unwrap(),
+        root,
+        &stop.handoff_ids,
+    )
+    .unwrap();
+    let stored =
+        storage::get_all_replies(&env.state.db.lock().unwrap(), "EMBEDDED_ORIGINAL").unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].push_outcome.as_deref(), Some("pushed"));
+
+    // A pending row on a generation other than the root's current one is not held for it.
+    env.state.db.lock().unwrap().execute_batch(
+        "CREATE TRIGGER stale_gen AFTER INSERT ON codex_handoff BEGIN \
+         UPDATE codex_handoff SET root_generation = NEW.root_generation + 1000 WHERE message_id = NEW.message_id; END;",
+    )
+    .unwrap();
+    let stale = xmsg::surface::reply(
+        &env.state,
+        &recipient,
+        "EMBEDDED_ORIGINAL",
+        "STALE_GEN_REPLY",
+        None,
+    )
+    .await
+    .unwrap();
+    env.state
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER stale_gen;")
+        .unwrap();
+    assert_eq!(stale.push_outcome.as_deref(), Some("sender_gone"));
+
+    // Control: an operator-revoked root drops the reply and reports sender_gone.
+    xmsg::codex::for_state(&env.state)
+        .lock()
+        .unwrap()
+        .store
+        .revoke_by_operator(root);
+    storage::invalidate_codex_root(&env.state.db.lock().unwrap(), root).unwrap();
+    let revoked = xmsg::surface::reply(
+        &env.state,
+        &recipient,
+        "EMBEDDED_ORIGINAL",
+        "REVOKED_REPLY",
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(revoked.push_outcome.as_deref(), Some("sender_gone"));
+}
+
 #[tokio::test]
 async fn federated_gone_reply_preserves_attested_return_path_and_stages_once() {
     let env = CodexTestEnv::new();

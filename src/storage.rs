@@ -3552,6 +3552,18 @@ pub fn get_codex_handoff_state(
     .optional()
 }
 
+/// Whether `message_id` is pending or accepted on its root's current generation while the
+/// root is active and not revoked. An `inflight` race reads `false`, which is conservative.
+pub fn codex_handoff_held_for_live_root(conn: &Connection, message_id: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM codex_handoff h JOIN codex_roots r ON r.root_id = h.root_id \
+         WHERE h.message_id = ?1 AND h.state IN ('pending', 'accepted') \
+           AND h.root_generation = r.generation AND r.active = 1 AND r.revoked = 0)",
+        params![message_id],
+        |r| r.get(0),
+    )
+}
+
 /// Move any undelivered messages queued for `<parent_id>/<agent_id>` in `instance_queue`
 /// into `parent_id`'s `pi_pending_messages` + `codex_handoff` queue with `to=<P>/<X> agent_id=<X>`
 /// header when `X`'s turn stops (§2.3, §2.5), returning the messages moved so the caller can
