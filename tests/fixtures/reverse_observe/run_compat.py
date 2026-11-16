@@ -67,6 +67,9 @@ def build(source, output, variant, seed, candidate):
         shutil.copy2(source/name,tree/name)
     for name in ("src","tests"):
         shutil.copytree(source/name,tree/name,ignore=shutil.ignore_patterns("__pycache__","*.pyc"))
+    for directory in tree.rglob("*"):
+        if directory.is_dir():
+            directory.chmod(directory.stat().st_mode | 0o200)
     if not candidate:
         verify_old(tree)
     helper = tree / "tests/fixtures/reverse_observe/store_compat.rs"
@@ -92,11 +95,23 @@ def build(source, output, variant, seed, candidate):
     messages = [json.loads(line) for line in (output/f"{variant}-build.jsonl").read_text().splitlines()]
     binary, library = artifacts(messages,target)
     assert run([binary,"nonce"],tree,env,output/f"{variant}-nonce.log") == nonce, "executed helper nonce differs"
+    cached = subprocess.run(["cargo","build","--profile","dev","-j4","--locked","--offline","--bin","reverse-store-compat","--message-format=json"],
+                            cwd=tree,env=env,capture_output=True,text=True,timeout=120)
+    (output/f"{variant}-cached-build.jsonl").write_text(cached.stdout)
+    (output/f"{variant}-cached-build.stderr").write_text(cached.stderr)
+    assert cached.returncode == 0, "cached-artifact refusal control failed to build"
+    try:
+        artifacts([json.loads(line) for line in cached.stdout.splitlines()],target)
+    except AssertionError as error:
+        assert str(error) == "cached package artifact refused", str(error)
+    else:
+        raise AssertionError("actual cached Cargo build was accepted")
     source_hashes = {str(f.relative_to(tree)):digest(f) for f in (tree/"src").rglob("*") if f.is_file()}
     receipt = {"variant":variant,"production_src_sha256":source_hashes,"helper_sha256":digest(helper),
                "manifest_sha256":digest(manifest),"lock_sha256":digest(tree/"Cargo.lock"),
                "binary_sha256":digest(binary),"library_sha256":{str(Path(f).name):digest(Path(f)) for f in library["filenames"]},
                "binary":str(binary),"nonce":nonce,"library_fresh":False,"helper_fresh":False,
+               "actual_cached_build_refused":True,
                "refusal_controls":controls(binary,library,target)}
     (output/f"{variant}-receipt.json").write_text(json.dumps(receipt,indent=2)+'\n')
     print(f"{variant}: fresh independent library/helper; executed nonce; artifact refusal controls passed",flush=True)
@@ -113,6 +128,27 @@ def census(store):
                 "snapshots":db.execute("SELECT hex(snapshot) FROM nodes WHERE snapshot IS NOT NULL ORDER BY node").fetchall()}
 
 
+def isolation_controls(output):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    barrier = Barrier(2)
+    shared = output / "shared-output-control"
+    def claim(index):
+        private = output / f"isolated-output-control-{index}"
+        private.mkdir(exist_ok=False)
+        barrier.wait(timeout=10)
+        try:
+            shared.mkdir(exist_ok=False)
+            return "created"
+        except FileExistsError:
+            return "refused"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(claim, (0, 1)))
+    assert sorted(results) == ["created", "refused"], "concurrent shared-output refusal failed"
+    receipt = {"concurrent_shared_output": results, "independent_output_roots": 2}
+    (output / "isolation-controls.json").write_text(json.dumps(receipt, indent=2) + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source",type=Path,required=True)
@@ -125,6 +161,7 @@ def main():
     assert source != old and not source.is_relative_to(output) and not old.is_relative_to(output)
     pin = verify_old(old)
     output.mkdir(parents=True,exist_ok=False,mode=0o700)
+    isolation_controls(output)
     seed = args.artifact_seed.resolve(strict=True) if args.artifact_seed else None
     older = build(old,output,"old",seed,False)
     if args.old_build_only:
