@@ -1,5 +1,509 @@
 [
   {
+    "label": "legacy-dtxj-collector-auth-owner-inactive",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::inactive",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "inactive owner must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "claims.get(\"active\").and_then(Value::as_bool) != Some(true)",
+        "replacement": "claims.get(\"active\").and_then(Value::as_bool).is_none()"
+      }
+    ],
+    "test_macro": "denied_claim"
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-active-type",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::active_type",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "nonboolean active must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "claims.get(\"active\").and_then(Value::as_bool) != Some(true)",
+        "replacement": "claims.get(\"active\").and_then(|value| value.as_bool().or_else(|| value.as_str().map(|s| s == \"true\"))) != Some(true)"
+      }
+    ],
+    "test_macro": "denied_claim"
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-issuer",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::issuer",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "foreign issuer must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "claims.get(\"iss\").and_then(Value::as_str) != Some(self.config.issuer.as_str())",
+        "replacement": "false"
+      }
+    ],
+    "test_macro": "denied_claim"
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-missing-issuer",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::missing_issuer",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "missing issuer must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "claims.get(\"iss\").and_then(Value::as_str) != Some(self.config.issuer.as_str())",
+        "replacement": "claims.get(\"iss\").and_then(Value::as_str).unwrap_or(self.config.issuer.as_str()) != self.config.issuer.as_str()"
+      }
+    ],
+    "test_macro": "absent_claim"
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-subject",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::subject",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "nonowner subject must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": ".any(|allowed| allowed == subject)",
+        "replacement": ".any(|_allowed| true)"
+      }
+    ],
+    "test_macro": "denied_claim"
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-missing-subject",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::missing_subject",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "missing subject must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": ".get(\"sub\")\n            .and_then(Value::as_str)\n            .ok_or(AuthError::Unauthorized)?",
+        "replacement": ".get(\"sub\")\n            .and_then(Value::as_str)\n            .unwrap_or(self.config.subjects[0].as_str())"
+      }
+    ],
+    "test_macro": "absent_claim"
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-audience",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::audience",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "foreign audience must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "Some(Value::String(aud)) => aud == &self.config.audience",
+        "replacement": "Some(Value::String(_aud)) => true"
+      }
+    ],
+    "test_macro": "denied_claim"
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-audience-cardinality",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::audience_multiple",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "multiple audiences must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "aud.len() == 1 && aud[0].as_str() == Some(self.config.audience.as_str())",
+        "replacement": "!aud.is_empty() && aud[0].as_str() == Some(self.config.audience.as_str())"
+      }
+    ],
+    "test_macro": "denied_claim"
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-client",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::client",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "foreign client must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "if client != &self.config.hosted_client",
+        "replacement": "if false && client != &self.config.hosted_client"
+      }
+    ],
+    "test_macro": "denied_claim"
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-client-type",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::client_type",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "null client must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "_ => return Err(AuthError::Unauthorized),",
+        "replacement": "_ => &self.config.hosted_client,",
+        "start": "let client = match"
+      }
+    ],
+    "test_macro": "denied_claim"
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-missing-client",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::missing_client",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "missing client must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "_ => return Err(AuthError::Unauthorized),",
+        "replacement": "_ => &self.config.hosted_client,",
+        "start": "let client = match"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-client-conflict",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::conflicting_client",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "conflicting clients must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "if client == azp => client",
+        "replacement": "if true || client == azp => client"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-expiry",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::expired",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "expired owner must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "if expires_at <= now",
+        "replacement": "if false && expires_at <= now"
+      }
+    ],
+    "test_macro": "denied_claim"
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-expiry-type",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::expiry_type",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "bad expiry must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": ".get(\"exp\")\n            .and_then(Value::as_u64)",
+        "replacement": ".get(\"exp\")\n            .and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()))"
+      }
+    ],
+    "test_macro": "denied_claim"
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-missing-expiry",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::missing_expiry",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "missing expiry must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": ".get(\"exp\")\n            .and_then(Value::as_u64)\n            .ok_or(AuthError::Unauthorized)?",
+        "replacement": ".get(\"exp\")\n            .and_then(Value::as_u64)\n            .unwrap_or(u64::MAX)"
+      }
+    ],
+    "test_macro": "absent_claim"
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-not-before",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::not_before",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "future not-before must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "if not_before > now",
+        "replacement": "if false && not_before > now"
+      }
+    ],
+    "test_macro": "denied_claim"
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-not-before-type",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::not_before_type",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "bad not-before must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "value.as_u64().ok_or(AuthError::Unauthorized)?",
+        "replacement": "value.as_u64().unwrap_or(0)"
+      }
+    ],
+    "test_macro": "denied_claim"
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-every-request",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::revalidation",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "every request must revalidate activity",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "start": "pub struct Verifier {",
+        "needle": "    clock: EpochClock,",
+        "replacement": "    clock: EpochClock,\n    cached_owner: std::sync::Mutex<Option<(String, u64)>>,"
+      },
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "            clock,\n",
+        "replacement": "            clock,\n            cached_owner: std::sync::Mutex::new(None),\n"
+      },
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "        tokio::time::timeout(Duration::from_secs(2), self.introspect(token))\n            .await\n            .map_err(|_| AuthError::Unavailable)?",
+        "replacement": "        let cached = { self.cached_owner.lock().unwrap().clone() };\n        if let Some((subject, expires_at)) = cached {\n            return Ok(VerifiedOwner { subject, expires_at });\n        }\n        let owner = tokio::time::timeout(Duration::from_secs(2), self.introspect(token))\n            .await.map_err(|_| AuthError::Unavailable)??;\n        *self.cached_owner.lock().unwrap() = Some((owner.subject.clone(), owner.expires_at));\n        Ok(owner)"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-identity-header",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::identity_header_fallback",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "identity headers must not authorize",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "let token = bearer(headers)?;",
+        "replacement": "if headers.contains_key(\"x-auth-request-user\") { return Ok(VerifiedOwner { subject: self.config.subjects[0].clone(), expires_at: 2000 }); }\n        let token = bearer(headers)?;"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-bearer-limit",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::bearer_bound",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "oversized bearer must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "token.len() > 8192",
+        "replacement": "token.len() > 8193"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-header-limit",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::header_bound",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "oversized headers must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "if size > 16_384",
+        "replacement": "if size > 16_385"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-stream-limit",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::response_bound",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "oversized streamed provider response must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "bytes.len().saturating_add(chunk.len()) > 65_536",
+        "replacement": "bytes.len().saturating_add(chunk.len()) > 65_537"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-provider-status",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::provider_status",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "non-200 provider must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "response.status() != StatusCode::OK",
+        "replacement": "!response.status().is_success()"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-provider-redirect",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::redirect",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "provider redirects must not be followed",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": ".redirect(Policy::none())",
+        "replacement": ".redirect(Policy::limited(1))"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-provider-deadline",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::provider_timeout",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "slow provider must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "Duration::from_secs(2)",
+        "replacement": "Duration::from_secs(60)"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-bearer-scheme",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::bearer_syntax",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "malformed bearer must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "!scheme.eq_ignore_ascii_case(\"Bearer\")",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-bearer-duplicates",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::bearer_syntax",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "duplicate authorization must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "if values.next().is_some()",
+        "replacement": "if false && values.next().is_some()"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-bearer-grammar",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::bearer_syntax",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "malformed bearer must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": ".all(|b| b.is_ascii_alphanumeric() || b\"-._~+/\".contains(&b))",
+        "replacement": ".all(|_b| true)"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-provider-tls",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::verified_tls",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "untrusted provider TLS must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "Client::builder().https_only(true)",
+        "replacement": "Client::builder().danger_accept_invalid_certs(true).https_only(true)"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-provider-https",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::https_configuration",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "plaintext provider configuration must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "endpoint.scheme() != \"https\"",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-mounted-secret-limit",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::configuration_and_privacy",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "oversized mounted secret must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "bytes.len() as u64 > limit",
+        "replacement": "bytes.len() as u64 > limit + 1"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-audience-array",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::audience_array",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "foreign singleton audience must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "aud[0].as_str() == Some(self.config.audience.as_str())",
+        "replacement": "true"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-audience-array-type",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::audience_array_type",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "nonstring singleton audience must refuse",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "aud[0].as_str() == Some(self.config.audience.as_str())",
+        "replacement": "aud[0].as_str().or(Some(self.config.audience.as_str())) == Some(self.config.audience.as_str())"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-auth-owner-bearer-separator",
+    "target": "lib",
+    "test": "observe_collector_auth::tests::bearer_syntax",
+    "test_file": "src/observe_collector_auth_tests.rs",
+    "expected_literal": "ASCII separator spaces must be accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_auth.rs",
+        "needle": "token.trim_start_matches(' ')",
+        "replacement": "token"
+      }
+    ]
+  },
+  {
     "label": "legacy-dtxj-collector-integration-collector-inventory-cap",
     "target": "lib",
     "test": "observe_collector_net::tests::inventory_is_bounded_literal_and_unique",
@@ -2207,6 +2711,198 @@
         "replacement": "false"
       }
     ]
+  },
+  {
+    "label": "legacy-dtxj2-decode-decode-unknown-fallback",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::unknown_preserves_identifier_and_replay_bytes",
+    "expected_literal": "called `Result::unwrap()` on an `Err` value: DecodeError",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "            value[\"kind\"] = Value::String(\"unknown\".into());",
+        "replacement": "            value[\"kind\"] = Value::String(kind.clone());"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "Existing valid future-string control must decode. The existing unwrap is the failure site; no custom assertion message exists."
+  },
+  {
+    "label": "legacy-dtxj2-decode-decode-unknown-kind-max64",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::unknown_identifier_grammar_and_length_are_closed",
+    "expected_literal": "accepted invalid identifier",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "kind.len() > 64",
+        "replacement": "false"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "The65-byte unknown string is independently reachable at the codec and semantic store boundary."
+  },
+  {
+    "label": "legacy-dtxj2-decode-decode-unknown-kind-first-lowercase",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::unknown_identifier_grammar_and_length_are_closed",
+    "expected_literal": "accepted invalid identifier",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "!kind.as_bytes().first().is_some_and(u8::is_ascii_lowercase)",
+        "replacement": "false"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "Empty string or digit/underscore-leading identifier passes the remaining all-character predicate."
+  },
+  {
+    "label": "legacy-dtxj2-decode-decode-unknown-kind-rest-characters",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::unknown_identifier_grammar_and_length_are_closed",
+    "expected_literal": "accepted invalid identifier",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "!kind\n                    .bytes()\n                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')",
+        "replacement": "false"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "Lowercase-leading a-b/a/b/a b fail only this character predicate."
+  },
+  {
+    "label": "legacy-dtxj2-decode-decode-unknown-kind-string-only",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::unknown_identifier_grammar_and_length_are_closed",
+    "expected_literal": "assertion failed: decode_event(&bytes(&value)).is_err()",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "let kind = original.as_str().ok_or(DecodeError)?;",
+        "replacement": "let kind = original.as_str().unwrap_or(\"future_delivery\");"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "Unknown map/number/null/array representations must not be converted into accepted strings. Known unit maps remain admitted by the existing EventKind decoder."
+  },
+  {
+    "label": "legacy-dtxj2-decode-decode-duplicate-json",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::duplicate_fields_and_unknown_fields_remain_errors",
+    "expected_literal": "assertion failed: decode_event(duplicate.as_bytes()).is_err()",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "values.contains_key(&key)",
+        "replacement": "false"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "JSON duplicate rejection precedes normalization. The valid final future-kind duplicate must not become accepted."
+  },
+  {
+    "label": "legacy-dtxj2-decode-decode-known-kind-map-parity",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::collector_preserves_shared_known_kind_map_representation",
+    "expected_literal": "called `Result::unwrap()` on an `Err` value: DecodeError",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "    let kind = match serde_json::from_value::<EventKind>(original.clone()) {",
+        "replacement": "    if !original.is_string() { return Err(DecodeError); }\n    let kind = match serde_json::from_value::<EventKind>(original.clone()) {"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "Known unit-map parity is established by the unchanged shared DTO. The existing unwrap is the failure site; no custom assertion message exists."
+  },
+  {
+    "label": "legacy-dtxj2-decode-decode-original-kind-identity",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::unknown_preserves_identifier_and_replay_bytes",
+    "expected_literal": "assertion `left == right` failed",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "let canonical = canonical_event(&event, &kind)?;",
+        "replacement": "let canonical = canonical_event(&event, if event.kind == EventKind::Unknown { \"unknown\" } else { &kind })?;"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "The existing equality assertion compares canonical JSON kind against the original unknown identifier."
+  },
+  {
+    "label": "legacy-dtxj2-decode-decode-canonical-event-budget-codec-only",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::canonical_event_and_page_bounds_remain_enforced",
+    "expected_literal": "assertion failed: decode_event(&bytes(&value)).is_err()",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "if canonical.len() > MAX_EVENT_BYTES {",
+        "replacement": "if canonical.len() > usize::MAX {"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "Codec-only reachable size case uses a4096-byte message_id. This is invalid under later semantic correlation validation; it is not a fully validated4KiB independent store kill. The conservative2659-byte derivation still applies after semantic envelope validation."
+  },
+  {
+    "label": "legacy-dtxj2-decode-decode-page-event-count",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::canonical_event_and_page_bounds_remain_enforced",
+    "expected_literal": "assertion failed: decode_page(&bytes(&page(vec![event(\"arrival\"); 201]))).is_err()",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "if raw.len() > MAX_EVENTS {",
+        "replacement": "if raw.len() > usize::MAX {"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "The201-event page is independently reachable;200-event positive control precedes it."
+  },
+  {
+    "label": "legacy-dtxj2-decode-decode-canonical-page-budget-codec-only",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::canonical_event_and_page_bounds_remain_enforced",
+    "expected_literal": "assertion failed: decode_page(&bytes(&value)).is_err()",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "if canonical_len > MAX_BYTES {",
+        "replacement": "if canonical_len > usize::MAX {"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "Codec-only oversized node fixture reaches this budget. Later semantic node validation refuses that fixture; do not credit it as a semantically valid store-page budget kill."
+  },
+  {
+    "label": "legacy-dtxj2-decode-decode-original-kind-page-accounting",
+    "target": "lib",
+    "test_file": "src/observe_collector_decode_tests.rs",
+    "test": "observe_collector_decode::tests::mixed_page_length_accounts_for_original_names",
+    "expected_literal": "assertion `left == right` failed",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": ".and_then(|n| n.checked_add(event.canonical.len()))",
+        "replacement": ".and_then(|n| n.checked_add(typed_len))"
+      }
+    ],
+    "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
+    "scope_note": "The existing canonical_len equality requires the original64-byte kind delta. This proves accounting, not admission of a semantically valid page at the exact256KiB threshold."
   },
   {
     "label": "legacy-dtxj2-integration-compat-stored-fallback",
