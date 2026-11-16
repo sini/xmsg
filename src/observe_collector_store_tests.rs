@@ -1930,13 +1930,28 @@ fn relay_key_and_origin_bytes_are_independently_accounted() {
 }
 #[test]
 fn relay_upgrade_migrates_b0_nullable_columns_twice() {
-    let (dir, store, _) = fixture();
-    store
-        .ingest_page("node", &Cursor::default(), page(1))
-        .unwrap();
-    drop(store);
-    let c = Connection::open(dir.path().join("collector.sqlite")).unwrap();
-    c.execute_batch("ALTER TABLE events DROP COLUMN origin_hub; ALTER TABLE nodes DROP COLUMN snapshot_origin_hub;").unwrap();
+    let dir = private_temp();
+    let db = dir.path().join("collector.sqlite");
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&db)
+        .expect("independent B0 migration fixture file creation failed");
+    drop(file);
+    let c = Connection::open(&db).expect("independent B0 migration fixture SQLite open failed");
+    c.execute_batch("PRAGMA page_size=4096; PRAGMA auto_vacuum=INCREMENTAL;")
+        .expect("independent B0 migration fixture engine setup failed");
+    c.execute_batch("CREATE TABLE IF NOT EXISTS nodes(node TEXT PRIMARY KEY,epoch TEXT,scope TEXT,next INTEGER NOT NULL DEFAULT 0,snapshot BLOB,snapshot_receipt INTEGER,snapshot_base INTEGER,snapshot_fingerprint BLOB,gaps TEXT NOT NULL DEFAULT '[]',truncated INTEGER NOT NULL DEFAULT 0,backfill INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS events(node TEXT NOT NULL,epoch TEXT NOT NULL,sequence INTEGER NOT NULL,json BLOB NOT NULL,receipt INTEGER NOT NULL,base INTEGER NOT NULL,bytes INTEGER NOT NULL,PRIMARY KEY(node,epoch,sequence)); CREATE INDEX IF NOT EXISTS retention ON events(node,base,receipt,epoch,sequence);")
+        .expect("independent B0 migration fixture schema creation failed");
+    let json = br#"{"sequence":1,"source_at":1800000000,"observed_at":1800000000,"persisted_at":1800000000,"kind":"message_recorded","from":"bot@node","available":"not_recorded"}"#;
+    c.execute(
+        "INSERT INTO nodes(node,epoch,scope,next,gaps,backfill) VALUES('node','epoch',?1,1,'[]',0)",
+        ["a".repeat(64)],
+    )
+    .expect("independent B0 migration fixture direct node insert failed");
+    c.execute("INSERT INTO events(node,epoch,sequence,json,receipt,base,bytes) VALUES('node','epoch',1,?1,?2,?2,?3)", params![json.as_slice(),NOW,(json.len()+"epoch".len()+"node".len()+128) as i64])
+        .expect("independent B0 migration fixture direct event insert failed");
     drop(c);
     for round in 0..2 {
         let opened = Store::open(
