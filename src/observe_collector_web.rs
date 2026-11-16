@@ -89,12 +89,13 @@ fn event_kind(value: crate::observe_export::EventKind) -> String {
         name(value)
     }
 }
-fn status(value: NodeStatus) -> &'static str {
-    match value {
+fn status(node: &NodeView) -> &'static str {
+    match node.status {
         NodeStatus::HiddenPendingRevalidation => "pending revalidation",
         NodeStatus::Healthy => "healthy",
         NodeStatus::Stale => "stale: exporter unavailable",
         NodeStatus::Denied => "denied",
+        NodeStatus::Unsupported if node.origin_hub.is_none() => "unsupported: outbound-only source",
         NodeStatus::Unsupported => "unsupported: observation transport",
         NodeStatus::StorageFull => "storage full",
     }
@@ -149,7 +150,7 @@ fn render_with_cap(
         let mut tile = format!(
             "<article class=\"tile\"><h2><a href=\"/?node={index}\">{}</a></h2><p>{}</p>",
             html_text(&node.node),
-            status(node.status)
+            status(node)
         );
         tile.push_str(&provenance(node.origin_hub.as_deref()));
         tile.push_str(failure(node));
@@ -169,7 +170,7 @@ fn render_with_cap(
         out.push(&format!(
             "<section><h2>{}</h2><p>{}</p>",
             html_text(&node.node),
-            status(node.status)
+            status(node)
         ));
         out.push(&provenance(node.origin_hub.as_deref()));
         out.push(failure(node));
