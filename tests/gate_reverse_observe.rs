@@ -394,6 +394,25 @@ async fn production_leaf_exports_events_and_snapshot_without_listener_or_custody
         let dto: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(dto["node"], f.leaf.node, "DTO comes from the outbound leaf");
         assert_eq!(dto["v"], 1);
+        if kind == "events" {
+            assert!(
+                dto.get("events").is_some(),
+                "events request returns an event page"
+            );
+            assert!(
+                dto.get("endpoints").is_none(),
+                "events request never becomes a snapshot"
+            );
+        } else {
+            assert!(
+                dto.get("endpoints").is_some(),
+                "snapshot request returns an endpoint snapshot"
+            );
+            assert!(
+                dto.get("events").is_none(),
+                "snapshot request never becomes an event page"
+            );
+        }
         assert!(!String::from_utf8_lossy(&body).contains("bearer"));
         for canary in ["PLANTED_TOKEN", "/synthetic/private", "PRIVATE_LABEL"] {
             assert!(
@@ -503,6 +522,15 @@ async fn hub_switch_is_required() {
 #[tokio::test]
 async fn hub_exact_route_is_required() {
     refusal(true, |_, c| c["reverse_observe"]["routes"] = json!([]), "").await;
+    refusal(
+        true,
+        |_, c| {
+            c["reverse_observe"]["routes"][0]["collector"] =
+                json!(format!("sha256:{}", "a".repeat(64)))
+        },
+        "",
+    )
+    .await;
 }
 #[tokio::test]
 async fn hub_observe_right_is_not_implied_by_list() {
@@ -1025,6 +1053,20 @@ async fn events_dto_version_and_count_are_independent_of_transport_bounds() {
         "events201 sequenced events",
     )
     .await;
+    for (field, value) in [
+        ("body", "SYNTHETIC_BODY_NOT_METADATA"),
+        ("cwd", "/synthetic/private"),
+    ] {
+        let mut forbidden = event_page(1);
+        forbidden[field] = json!(value);
+        assert_raw_dto_status(
+            serde_json::to_vec(&forbidden).unwrap(),
+            "events",
+            400,
+            &format!("events root {field} extra field"),
+        )
+        .await;
+    }
 }
 #[tokio::test]
 async fn exact_query_bound_and_closed_query_fields_apply_before_dispatch() {
@@ -3014,29 +3056,38 @@ async fn hub_labels_only_change_with_unlabeled_request_invalidates_original_gene
 }
 #[tokio::test]
 async fn authorized_collector_with_spoofed_origin_still_attests_actual_tls_identity() {
-    let f = RelayFixture::new().await;
+    let f = Arc::new(RelayFixture::new().await);
     let identities = collectors(&f, 2);
     let spoof = identities[1].full();
     for headers in [vec![], vec![("xmsg-origin", spoof.as_str())]] {
-        let caller = async {
-            f.request(&identities[0], "GET", &f.uri("snapshot"), vec![], &headers)
-                .await
-        };
-        let leaf = async {
-            let request = control(&f).await;
+        let leaf_state = f.clone();
+        let expected = identities[0].full();
+        let other = spoof.clone();
+        let leaf = tokio::spawn(async move {
+            let request = control(&leaf_state).await;
             assert_eq!(
-                request["collector"],
-                identities[0].full(),
+                request["collector"], expected,
                 "origin header cannot substitute another valid authorized identity"
             );
-            assert_ne!(request["collector"], spoof);
-            assert_eq!(submit(&f, &request, empty_snapshot(&f)).await.0, 200);
-        };
-        let (response, ()) = tokio::join!(caller, leaf);
+            assert_ne!(request["collector"], other);
+            assert_eq!(
+                submit(&leaf_state, &request, empty_snapshot(&leaf_state))
+                    .await
+                    .0,
+                200
+            );
+        });
+        let response = f
+            .request(&identities[0], "GET", &f.uri("snapshot"), vec![], &headers)
+            .await;
+        if response.0 != 200 {
+            leaf.abort();
+        }
         assert_eq!(
             response.0, 200,
             "spoofed origin must not falsely refuse an actual authorized collector"
         );
+        leaf.await.unwrap();
     }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
