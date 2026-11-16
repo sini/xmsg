@@ -206,5 +206,191 @@
         "end": "fn transaction"
       }
     ]
+  },
+  {
+    "label": "reverse-collector-store-full-hub-digest",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_storage_keys_hash_full_authorities_and_keep_public_leaf",
+    "expected_literal": "relay SQL key omitted complete hub or leaf authority",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "origin.hub.as_bytes()",
+        "replacement": "origin.hub.rsplit('/').next().unwrap_or(\"\").as_bytes()"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-full-leaf-digest",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_storage_keys_hash_full_authorities_and_keep_public_leaf",
+    "expected_literal": "relay SQL key omitted complete hub or leaf authority",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "origin.leaf.as_bytes()",
+        "replacement": "origin.leaf.rsplit('/').next().unwrap_or(\"\").as_bytes()"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-key-namespace",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_storage_keys_hash_full_authorities_and_keep_public_leaf",
+    "expected_literal": "relay SQL key omitted complete hub or leaf authority",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "\"reverse-v1:{}:{}\"",
+        "replacement": "\"reverse-v0:{}:{}\""
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-public-leaf",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_storage_origin_key_migration_and_tamper",
+    "expected_literal": "relay public view substituted SQL key or hub for configured leaf",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "node: name.clone(),",
+        "replacement": "node: key.clone(),",
+        "start": "pub fn view("
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-event-stamp",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_storage_origin_key_migration_and_tamper",
+    "expected_literal": "relay event row omitted persisted configured full hub origin",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "as i64,origin])?;",
+        "replacement": "as i64,Option::<&str>::None])?;"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-snapshot-stamp",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_storage_origin_key_migration_and_tamper",
+    "expected_literal": "relay snapshot row omitted persisted configured full hub origin",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "base,fingerprint,origin])?;",
+        "replacement": "base,fingerprint,Option::<&str>::None])?;"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-node-view-origin",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_storage_origin_key_migration_and_tamper",
+    "expected_literal": "relay node view lost configured full hub origin",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "origin_hub: origin.map(str::to_owned),",
+        "replacement": "origin_hub: None,",
+        "start": "pub fn view("
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-event-view-origin",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_storage_origin_key_migration_and_tamper",
+    "expected_literal": "relay event readback lost persisted configured full hub origin",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "origin_hub: event_origin,",
+        "replacement": "origin_hub: None,",
+        "start": "pub fn view("
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-snapshot-view-origin",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_storage_origin_key_migration_and_tamper",
+    "expected_literal": "relay snapshot readback lost persisted configured full hub origin",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "origin_hub: snapshot_origin,",
+        "replacement": "origin_hub: None,",
+        "start": "pub fn view("
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-migration-idempotent",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_upgrade_migrates_b0_nullable_columns_twice",
+    "expected_literal": "B0 nullable-origin migration failed to open on idempotent round 1",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "if !columns.iter().any(|name| name == column) {",
+        "replacement": "if true {"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-migration-no-default",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_upgrade_migrates_b0_nullable_columns_twice",
+    "expected_literal": "relay migration column must have no default origin: events.origin_hub",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "ADD COLUMN {column} TEXT",
+        "replacement": "ADD COLUMN {column} TEXT DEFAULT NULL"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-canonical-raw-json",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_future_kind_canonical_bytes_and_replay_identity_are_preserved",
+    "expected_literal": "relay store replaced raw future-kind canonical JSON with unknown enum",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "let json = &original.canonical;",
+        "replacement": "let rewritten = encoded(event, 4096)?;\n                let json = &rewritten;"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-snapshot-origin-atomicity",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_atomic_origin_rows_cursor_and_snapshot_abort",
+    "expected_literal": "relay snapshot bytes origin scope and cursor split across aborted transaction",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "c.execute(\"UPDATE nodes SET scope=?2,snapshot=?3,snapshot_receipt=?4,snapshot_base=?5,snapshot_fingerprint=?6,snapshot_origin_hub=?7 WHERE node=?1\",params![node,snapshot.scope,bytes,receipt,base,fingerprint,origin])?;",
+        "replacement": "c.execute(\"UPDATE nodes SET scope=?2,snapshot=?3,snapshot_receipt=?4,snapshot_base=?5,snapshot_fingerprint=?6 WHERE node=?1\",params![node,snapshot.scope,bytes,receipt,base,fingerprint])?;\n            c.execute_batch(\"COMMIT; BEGIN IMMEDIATE\")?;\n            c.execute(\"UPDATE nodes SET snapshot_origin_hub=?2 WHERE node=?1\",params![node,origin])?;"
+      }
+    ]
   }
 ]
