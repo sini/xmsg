@@ -68,7 +68,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_config_closed_full_identity_and_no_mixed_mode",
-    "expected_literal": "noncanonical identity accepted:",
+    "expected_literal": "noncanonical identity accepted: hub hub.node",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
@@ -82,7 +82,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_config_closed_full_identity_and_no_mixed_mode",
-    "expected_literal": "noncanonical identity accepted:",
+    "expected_literal": "noncanonical identity accepted: leaf hub.node",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
@@ -115,7 +115,7 @@
       {
         "file": "src/observe_collector_net.rs",
         "needle": "|| relay.hub.starts_with(\"spiffe://\") != relay.ca.is_some()",
-        "replacement": "|| (false && relay.hub.starts_with(\"spiffe://\") != relay.ca.is_some())"
+        "replacement": "|| (!relay.hub.starts_with(\"spiffe://\") && relay.ca.is_some())"
       }
     ]
   },
@@ -124,7 +124,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_config_closed_full_identity_and_no_mixed_mode",
-    "expected_literal": "assertion failed: fixture.load().is_err()",
+    "expected_literal": "relay unknown field accepted",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
@@ -138,7 +138,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_snapshot_and_event_share_source_admission",
-    "expected_literal": "assertion `left == right` failed",
+    "expected_literal": "configured relay source unexpectedly unsupported",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
@@ -152,7 +152,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_transport_fixed_status_path_and_no_bearer",
-    "expected_literal": "request.starts_with(",
+    "expected_literal": "relay request did not use configured leaf snapshot path:",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
@@ -166,7 +166,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_transport_fixed_status_path_and_no_bearer",
-    "expected_literal": "assertion `left == right` failed",
+    "expected_literal": "relay HTTP status misclassified: 501 Not Implemented",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
@@ -180,7 +180,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_transport_fixed_status_path_and_no_bearer",
-    "expected_literal": "assertion `left == right` failed",
+    "expected_literal": "relay HTTP status misclassified: 400 Bad Request",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
@@ -194,7 +194,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_transport_fixed_status_path_and_no_bearer",
-    "expected_literal": "!request.to_ascii_lowercase().contains(\"authorization:\")",
+    "expected_literal": "human bearer crossed relay polling wire:",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
@@ -208,7 +208,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_transport_fixed_status_path_and_no_bearer",
-    "expected_literal": "!request.to_ascii_lowercase().contains(\"origin\")",
+    "expected_literal": "caller origin header crossed relay polling wire:",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
@@ -232,16 +232,16 @@
     ]
   },
   {
-    "label": "reverse-collector-net-per-source-binding",
+    "label": "reverse-collector-net-address-binding",
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_equal_display_hubs_at_distinct_addresses_both_succeed",
-    "expected_literal": "configured hub destination was overwritten",
+    "expected_literal": "configured distinct relay hub address TLS positive refused: hub 1",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
-        "needle": "if let Some(relay) = &config_source.relay {",
-        "replacement": "if let Some(relay) = &config.sources[0].relay {"
+        "needle": "entry[\"address\"] = serde_json::json!(relay.address);",
+        "replacement": "entry[\"address\"] = serde_json::json!(config.sources[0].relay.as_ref().ok_or(Error::Configuration)?.address);"
       }
     ]
   },
@@ -250,7 +250,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_owner_allowlist_refuses_valid_nonowner",
-    "expected_literal": "relay owner predicate bypassed:",
+    "expected_literal": "relay owner predicate bypassed: sub",
     "edits": [
       {
         "file": "src/observe_collector_auth.rs",
@@ -264,7 +264,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_owner_issuer_is_exact",
-    "expected_literal": "relay owner predicate bypassed:",
+    "expected_literal": "relay owner predicate bypassed: iss",
     "edits": [
       {
         "file": "src/observe_collector_auth.rs",
@@ -278,7 +278,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_owner_audience_is_exact",
-    "expected_literal": "relay owner predicate bypassed:",
+    "expected_literal": "relay owner predicate bypassed: aud",
     "edits": [
       {
         "file": "src/observe_collector_auth.rs",
@@ -292,7 +292,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_owner_client_is_exact",
-    "expected_literal": "relay owner predicate bypassed:",
+    "expected_literal": "relay owner predicate bypassed: client_id",
     "edits": [
       {
         "file": "src/observe_collector_auth.rs",
@@ -306,7 +306,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_owner_expiry_is_current",
-    "expected_literal": "relay owner predicate bypassed:",
+    "expected_literal": "relay owner predicate bypassed: exp",
     "edits": [
       {
         "file": "src/observe_collector_auth.rs",
@@ -320,7 +320,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_owner_headers_are_not_identity",
-    "expected_literal": "assertion `left == right` failed",
+    "expected_literal": "relay identity headers authorized owner view",
     "edits": [
       {
         "file": "src/observe_collector_auth.rs",
@@ -334,7 +334,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_failure_overlay_survives_busy_store_slot_and_clears_on_fresh_ingest",
-    "expected_literal": "busy store dropped known failure:",
+    "expected_literal": "busy store dropped known failure: Timeout",
     "edits": [
       {
         "file": "src/observe_collector.rs",
@@ -364,7 +364,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_failure_overlay_survives_busy_store_slot_and_clears_on_fresh_ingest",
-    "expected_literal": "assertion failed: fixture.state.failures.lock().unwrap().is_empty()",
+    "expected_literal": "fresh relay ingest retained failure overlay",
     "edits": [
       {
         "file": "src/observe_collector.rs",
@@ -379,7 +379,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_failure_overlay_survives_busy_store_slot_and_clears_on_fresh_ingest",
-    "expected_literal": "assertion failed: html.contains(caption)",
+    "expected_literal": "busy store dropped known failure: Timeout",
     "edits": [
       {
         "file": "src/observe_collector.rs",
@@ -395,7 +395,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_failure_overlay_preserves_scope_and_denial_masks",
-    "expected_literal": "!html.contains(\"Observation request timed out.\")",
+    "expected_literal": "failure overlay caption overrode authenticated relay denial caption",
     "edits": [
       {
         "file": "src/observe_collector.rs",
@@ -409,7 +409,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_failure_overlay_preserves_scope_and_denial_masks",
-    "expected_literal": "html.contains(\"<p>denied</p>\")",
+    "expected_literal": "failure overlay overrode authenticated relay denial status",
     "edits": [
       {
         "file": "src/observe_collector.rs",
@@ -423,7 +423,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_tests.rs",
     "test": "observe_collector::tests::relay_failure_overlay_preserves_scope_and_denial_masks",
-    "expected_literal": "html.contains(\"pending revalidation\")",
+    "expected_literal": "failure overlay weakened relay scope-change pending-revalidation mask",
     "edits": [
       {
         "file": "src/observe_collector.rs",
@@ -437,7 +437,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_response_body_bound_has_exact_control",
-    "expected_literal": "called `Result::unwrap_err()` on an `Ok` value",
+    "expected_literal": "relay oversized body accepted",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
@@ -451,7 +451,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::relay_snapshot_and_event_share_source_admission",
-    "expected_literal": "assertion `left == right` failed",
+    "expected_literal": "relay snapshot/event spacing bypassed",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
@@ -465,12 +465,141 @@
     "target": "lib",
     "test_file": "src/observe_collector_net_tests.rs",
     "test": "observe_collector_net::tests::mixed_direct_and_relay_share_global_admission",
-    "expected_literal": "assertion `left == right` failed",
+    "expected_literal": "mixed direct/relay global admission exceeded eight",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
         "needle": "slots: Arc::new(Semaphore::new(8))",
         "replacement": "slots: Arc::new(Semaphore::new(9))"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-net-distinct-hub-leaf",
+    "target": "lib",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "test": "observe_collector_net::tests::relay_config_closed_full_identity_and_no_mixed_mode",
+    "expected_literal": "relay identical full hub and leaf identities accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "if relay.hub == relay.leaf",
+        "replacement": "if (false && relay.hub == relay.leaf)"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-net-nonempty-address",
+    "target": "lib",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "test": "observe_collector_net::tests::relay_config_closed_full_identity_and_no_mixed_mode",
+    "expected_literal": "relay empty address accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "|| relay.address.is_empty()",
+        "replacement": "|| (false && relay.address.is_empty())"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-net-pin-ca-mode",
+    "target": "lib",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "test": "observe_collector_net::tests::relay_config_closed_full_identity_and_no_mixed_mode",
+    "expected_literal": "relay canonical SPKI hub with unexpected CA accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "|| relay.hub.starts_with(\"spiffe://\") != relay.ca.is_some()",
+        "replacement": "|| (relay.hub.starts_with(\"spiffe://\") && relay.ca.is_none())"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-net-direct-status-preserved",
+    "target": "lib",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "test": "observe_collector_net::tests::direct_400_and_501_remain_unavailable",
+    "expected_literal": "direct HTTP status behavior changed: 400 Bad Request",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "if source.relay.is_some() {",
+        "replacement": "if true {",
+        "start": "if response.status() == hyper::StatusCode::TOO_MANY_REQUESTS {"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-net-spki-binding",
+    "target": "lib",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "test": "observe_collector_net::tests::relay_configured_pin_refuses_other_spki",
+    "expected_literal": "relay wrong configured SPKI was accepted",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if norm_pin != self.expected_pin {",
+        "replacement": "if false {",
+        "start": "impl rustls::client::danger::ServerCertVerifier for PinnedServerCertVerifier",
+        "end": "fn verify_tls12_signature("
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-runtime-failure-timeout-class",
+    "target": "lib",
+    "test_file": "src/observe_collector_tests.rs",
+    "test": "observe_collector::tests::relay_failure_overlay_survives_busy_store_slot_and_clears_on_fresh_ingest",
+    "expected_literal": "busy store dropped known failure: Timeout",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "net::Error::Timeout => UnavailableKind::Timeout",
+        "replacement": "net::Error::Timeout => UnavailableKind::Unreachable"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-runtime-failure-malformed-class",
+    "target": "lib",
+    "test_file": "src/observe_collector_tests.rs",
+    "test": "observe_collector::tests::relay_failure_overlay_survives_busy_store_slot_and_clears_on_fresh_ingest",
+    "expected_literal": "busy store dropped known failure: Malformed",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "net::Error::Malformed => UnavailableKind::Malformed",
+        "replacement": "net::Error::Malformed => UnavailableKind::Unreachable"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-runtime-failure-rate-limited-class",
+    "target": "lib",
+    "test_file": "src/observe_collector_tests.rs",
+    "test": "observe_collector::tests::relay_failure_overlay_survives_busy_store_slot_and_clears_on_fresh_ingest",
+    "expected_literal": "busy store dropped known failure: RateLimited(2)",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "net::Error::RateLimited(_) => UnavailableKind::RateLimited",
+        "replacement": "net::Error::RateLimited(_) => UnavailableKind::Unreachable"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-runtime-failure-unsupported-class",
+    "target": "lib",
+    "test_file": "src/observe_collector_tests.rs",
+    "test": "observe_collector::tests::relay_failure_overlay_survives_busy_store_slot_and_clears_on_fresh_ingest",
+    "expected_literal": "busy store dropped known failure: Unsupported",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "net::Error::Unsupported => UnavailableKind::Unsupported",
+        "replacement": "net::Error::Unsupported => UnavailableKind::Unreachable"
       }
     ]
   }
