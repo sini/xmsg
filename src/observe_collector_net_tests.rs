@@ -804,7 +804,10 @@ fn use_relay(fixture: &mut Fixture) {
 async fn relay_config_closed_full_identity_and_no_mixed_mode() {
     let mut fixture = Fixture::new().await;
     use_relay(&mut fixture);
-    assert!(fixture.load().is_ok());
+    assert!(
+        fixture.load().is_ok(),
+        "canonical pinned relay configuration positive refused"
+    );
     let valid = fixture.config.clone();
     for field in ["address", "pin", "ca", "identity"] {
         fixture.config = valid.clone();
@@ -837,8 +840,34 @@ async fn relay_config_closed_full_identity_and_no_mixed_mode() {
     );
     fixture.config = valid.clone();
     fixture.config["sources"][0]["relay"]["extra"] = json!(true);
-    assert!(fixture.load().is_err());
+    assert!(fixture.load().is_err(), "relay unknown field accepted");
+    fixture.config = valid.clone();
+    fixture.config["sources"][0]["relay"]["leaf"] =
+        fixture.config["sources"][0]["relay"]["hub"].clone();
+    fixture.config["sources"][0]["node"] = json!(crate::node::node_name_from_pin(
+        fixture.config["sources"][0]["relay"]["hub"]
+            .as_str()
+            .unwrap()
+    )
+    .unwrap());
+    assert!(
+        fixture.load().is_err(),
+        "relay identical full hub and leaf identities accepted"
+    );
+    fixture.config = valid.clone();
+    fixture.config["sources"][0]["relay"]["address"] = json!("");
+    assert!(fixture.load().is_err(), "relay empty address accepted");
+    fixture.config = valid.clone();
+    fixture.config["sources"][0]["relay"]["ca"] = json!("unexpected-ca.pem");
+    assert!(
+        fixture.load().is_err(),
+        "relay canonical SPKI hub with unexpected CA accepted"
+    );
     fixture.config = valid;
+    assert!(
+        fixture.load().is_ok(),
+        "canonical pinned relay neighbor positive refused after CA refusal"
+    );
     fixture.config["sources"][0]["relay"]["hub"] = json!("spiffe://fleet/host/hub/user/owner");
     assert!(fixture.load().is_err(), "URI hub without CA accepted");
 }
@@ -855,14 +884,24 @@ async fn relay_transport_fixed_status_path_and_no_bearer() {
     ] {
         fixture.set_response(status, "", b"");
         let client = Client::new(&fixture.load().unwrap()).unwrap();
-        assert_eq!(client.snapshot(0).await.unwrap_err(), expected);
+        assert!(
+            matches!(client.snapshot(0).await, Err(actual) if actual == expected),
+            "relay HTTP status misclassified: {status}"
+        );
         let ledger = fixture.ledger.lock().unwrap();
         let request = ledger.last().unwrap();
         assert!(
-            request.starts_with("GET /fed/v2/observe/relay/leaf.fleet/snapshot?v=1&labels=false ")
+            request.starts_with("GET /fed/v2/observe/relay/leaf.fleet/snapshot?v=1&labels=false "),
+            "relay request did not use configured leaf snapshot path: {status}"
         );
-        assert!(!request.to_ascii_lowercase().contains("authorization:"));
-        assert!(!request.to_ascii_lowercase().contains("origin"));
+        assert!(
+            !request.to_ascii_lowercase().contains("authorization:"),
+            "human bearer crossed relay polling wire: {status}"
+        );
+        assert!(
+            !request.to_ascii_lowercase().contains("origin"),
+            "caller origin header crossed relay polling wire: {status}"
+        );
     }
     let calls = fixture.requests.load(Ordering::SeqCst);
     assert_eq!(calls, 5, "relay failure triggered direct/custody fallback");
@@ -873,12 +912,19 @@ async fn relay_snapshot_and_event_share_source_admission() {
     use_relay(&mut fixture);
     fixture.set_response("503 Service Unavailable", "", b"");
     let client = Client::new(&fixture.load().unwrap()).unwrap();
-    assert_eq!(client.snapshot(0).await.unwrap_err(), Error::Unavailable);
-    assert_eq!(
-        client.events(0, None, None, 0).await.unwrap_err(),
-        Error::Pending
+    assert!(
+        matches!(client.snapshot(0).await, Err(Error::Unavailable)),
+        "configured relay source unexpectedly unsupported"
     );
-    assert_eq!(fixture.requests.load(Ordering::SeqCst), 1);
+    assert!(
+        matches!(client.events(0, None, None, 0).await, Err(Error::Pending)),
+        "relay snapshot/event spacing bypassed"
+    );
+    assert_eq!(
+        fixture.requests.load(Ordering::SeqCst),
+        1,
+        "source spacing refusal reached relay exporter"
+    );
 }
 
 #[tokio::test]
@@ -896,7 +942,10 @@ async fn relay_equal_display_hubs_keep_independent_full_identity_bindings() {
     ]);
     std::fs::write(&fixture.net.config_file, config.to_string()).unwrap();
     let client = Client::new(&Config::load(&fixture.net.config_file).unwrap()).unwrap();
-    assert_eq!(client.sources[0].server_name, client.sources[1].server_name);
+    assert_eq!(
+        client.sources[0].server_name, client.sources[1].server_name,
+        "equal-display hub fixture did not share derived display name"
+    );
     assert!(
         client
             .get(0, "/fed/v2/observe/snapshot".into())
@@ -904,12 +953,11 @@ async fn relay_equal_display_hubs_keep_independent_full_identity_bindings() {
             .is_ok(),
         "second hub overwrote first full identity"
     );
-    assert_eq!(
-        client
-            .get(1, "/fed/v2/observe/snapshot".into())
-            .await
-            .unwrap_err(),
-        Error::Unavailable,
+    assert!(
+        matches!(
+            client.get(1, "/fed/v2/observe/snapshot".into()).await,
+            Err(Error::Unavailable)
+        ),
         "wrong full hub identity accepted"
     );
 }
@@ -943,11 +991,21 @@ async fn mixed_direct_and_relay_share_global_admission() {
         tasks.spawn(async move { client.get(i, "/fed/v2/observe/snapshot".into()).await });
     }
     observed(&direct, 8).await;
-    assert_eq!(client.snapshot(8).await.unwrap_err(), Error::Pending);
-    assert_eq!(direct.requests.load(Ordering::SeqCst), 8);
+    assert!(
+        matches!(client.snapshot(8).await, Err(Error::Pending)),
+        "mixed direct/relay global admission exceeded eight"
+    );
+    assert_eq!(
+        direct.requests.load(Ordering::SeqCst),
+        8,
+        "ninth mixed-mode request reached exporter while global admission was full"
+    );
     direct.hold.store(false, Ordering::SeqCst);
     while let Some(result) = tasks.join_next().await {
-        assert!(result.unwrap().is_ok());
+        assert!(
+            result.unwrap().is_ok(),
+            "admitted mixed direct/relay positive request failed"
+        );
     }
 }
 
@@ -956,14 +1014,22 @@ async fn relay_configured_pin_refuses_other_spki() {
     let mut fixture = Fixture::new().await;
     use_relay(&mut fixture);
     let good = Client::new(&fixture.load().unwrap()).unwrap();
-    assert!(good.get(0, "/fed/v2/observe/snapshot".into()).await.is_ok());
+    assert!(
+        good.get(0, "/fed/v2/observe/snapshot".into()).await.is_ok(),
+        "configured relay SPKI positive refused before wrong-SPKI control"
+    );
     let other = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     fixture.config["sources"][0]["relay"]["hub"] = json!(format!(
         "sha256:{}",
         crate::fed::spki_sha256_from_der(other.cert.der()).unwrap()
     ));
     let wrong = Client::new(&fixture.load().unwrap()).unwrap();
-    assert_eq!(wrong.snapshot(0).await.unwrap_err(), Error::Unavailable);
+    let result = wrong.snapshot(0).await;
+    assert!(result.is_err(), "relay wrong configured SPKI was accepted");
+    assert!(
+        matches!(result, Err(Error::Unavailable)),
+        "relay wrong-SPKI refusal classification changed"
+    );
     assert_eq!(
         fixture.requests.load(Ordering::SeqCst),
         1,
@@ -1007,41 +1073,44 @@ async fn relay_dto_binding_and_future_kind_persist_configured_origin() {
     let view = store.view(Some(node), 200).unwrap().pop().unwrap();
     assert_eq!(
         view.events[0].event.kind,
-        crate::observe_export::EventKind::Unknown
+        crate::observe_export::EventKind::Unknown,
+        "relay future event kind did not use fixed unknown enum"
     );
     assert_eq!(
         view.events[0].origin_hub.as_deref(),
-        Some(origin.hub.as_str())
+        Some(origin.hub.as_str()),
+        "relay event lost configured hub origin"
     );
     assert_eq!(
         view.latest_snapshot.as_ref().unwrap().origin_hub.as_deref(),
-        Some(origin.hub.as_str())
+        Some(origin.hub.as_str()),
+        "relay snapshot lost configured hub origin"
     );
     for actual in ["other.fleet", &client.sources[0].server_name] {
         let mut forged = snapshot.clone();
         forged["node"] = json!(actual);
         fixture.set_response("200 OK", "", &serde_json::to_vec(&forged).unwrap());
         reset_spacing(&client);
-        assert_eq!(
-            store
-                .ingest_snapshot(node, client.snapshot(0).await.unwrap())
-                .unwrap_err(),
-            StoreError::Invalid,
+        assert!(
+            matches!(
+                store.ingest_snapshot(node, client.snapshot(0).await.unwrap()),
+                Err(StoreError::Invalid)
+            ),
             "snapshot DTO node substitution accepted"
         );
         let mut forged = page.clone();
         forged["node"] = json!(actual);
         fixture.set_response("200 OK", "", &serde_json::to_vec(&forged).unwrap());
         reset_spacing(&client);
-        assert_eq!(
-            store
-                .ingest_decoded_page(
+        assert!(
+            matches!(
+                store.ingest_decoded_page(
                     node,
                     &store.cursor(node).unwrap(),
                     client.events_decoded(0, None, None, 1).await.unwrap()
-                )
-                .unwrap_err(),
-            StoreError::Invalid,
+                ),
+                Err(StoreError::Invalid)
+            ),
             "events DTO node substitution accepted"
         );
     }
@@ -1053,8 +1122,16 @@ async fn relay_dto_binding_and_future_kind_persist_configured_origin() {
         client.events_decoded(0, None, None, 1).await.is_err(),
         "relay unknown kind admitted body field"
     );
-    assert_eq!(store.cursor(node).unwrap().next, 1);
-    assert_eq!(store.view(Some(node), 200).unwrap()[0].events.len(), 1);
+    assert_eq!(
+        store.cursor(node).unwrap().next,
+        1,
+        "relay refused DTO changed committed cursor"
+    );
+    assert_eq!(
+        store.view(Some(node), 200).unwrap()[0].events.len(),
+        1,
+        "relay refused DTO changed retained event rows"
+    );
     store
         .unavailable(
             node,
@@ -1064,11 +1141,13 @@ async fn relay_dto_binding_and_future_kind_persist_configured_origin() {
     let stale = store.view(Some(node), 200).unwrap().pop().unwrap();
     assert_eq!(
         stale.status,
-        crate::observe_collector_store::NodeStatus::Stale
+        crate::observe_collector_store::NodeStatus::Stale,
+        "relay timeout invented healthy state instead of validated stale history"
     );
     assert_eq!(
         stale.events[0].origin_hub.as_deref(),
-        Some(origin.hub.as_str())
+        Some(origin.hub.as_str()),
+        "relay stale event lost configured hub origin"
     );
     let html = crate::observe_collector_web::render(
         std::slice::from_ref(&stale),
@@ -1078,8 +1157,18 @@ async fn relay_dto_binding_and_future_kind_persist_configured_origin() {
             page: 0,
         },
     );
-    assert!(html.contains(&format!("via {} (hub-attested)", origin.hub)));
-    assert!(html.contains("unknown event kind (newer node)"));
+    assert!(
+        html.contains(&format!("via {} (hub-attested)", origin.hub)),
+        "relay stale view omitted configured via-hub attestation"
+    );
+    assert!(
+        html.contains("unknown event kind (newer node)"),
+        "relay future kind omitted fixed unknown caption"
+    );
+    assert!(
+        !html.contains("future_relay_fixture"),
+        "relay future wire kind leaked into owner caption"
+    );
 }
 
 #[tokio::test]
@@ -1088,24 +1177,26 @@ async fn relay_response_body_bound_has_exact_control() {
     use_relay(&mut fixture);
     let client = Client::new(&fixture.load().unwrap()).unwrap();
     fixture.set_response("200 OK", "", &vec![b'x'; 256 * 1024]);
+    let exact = client.get(0, "/fed/v2/observe/snapshot".into()).await;
+    assert!(exact.is_ok(), "relay exact body boundary refused");
     assert_eq!(
-        client
-            .get(0, "/fed/v2/observe/snapshot".into())
-            .await
-            .unwrap()
-            .len(),
-        256 * 1024
+        exact.unwrap().len(),
+        256 * 1024,
+        "relay exact body response was truncated"
     );
     fixture.set_response("200 OK", "", &vec![b'x'; 256 * 1024 + 1]);
     reset_spacing(&client);
-    assert_eq!(
-        client
-            .get(0, "/fed/v2/observe/snapshot".into())
-            .await
-            .unwrap_err(),
-        Error::Malformed
+    let oversized = client.get(0, "/fed/v2/observe/snapshot".into()).await;
+    assert!(oversized.is_err(), "relay oversized body accepted");
+    assert!(
+        matches!(oversized, Err(Error::Malformed)),
+        "relay oversized body refusal classification changed"
     );
-    assert_eq!(fixture.requests.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        fixture.requests.load(Ordering::SeqCst),
+        2,
+        "relay body-bound controls did not each reach exporter once"
+    );
 }
 
 #[tokio::test]
@@ -1126,30 +1217,44 @@ async fn relay_equal_display_hubs_at_distinct_addresses_both_succeed() {
         fixture.net.set_response("200 OK","",&serde_json::to_vec(&json!({"v":1,"node":leaf,"scope":"a".repeat(64),"observed_at":1000,"endpoints":[],"truncated":false,"available":"available"})).unwrap());
     }
     assert_ne!(
-        sources[0]["relay"]["address"],
-        sources[1]["relay"]["address"]
+        sources[0]["relay"]["address"], sources[1]["relay"]["address"],
+        "distinct-address hub fixture accidentally reused one endpoint"
     );
     config["sources"] = json!(sources);
     std::fs::write(&first.net.config_file, config.to_string()).unwrap();
     let client = Client::new(&Config::load(&first.net.config_file).unwrap()).unwrap();
-    assert_eq!(client.sources[0].server_name, client.sources[1].server_name);
+    assert_eq!(
+        client.sources[0].server_name, client.sources[1].server_name,
+        "equal-display hub fixture did not share derived display name"
+    );
     for (index, fixture) in fixtures.iter().enumerate() {
+        let response = client.snapshot(index).await;
+        assert!(
+            response.is_ok(),
+            "configured distinct relay hub address TLS positive refused: hub {index}"
+        );
         assert_eq!(
-            client.snapshot(index).await.unwrap().node,
+            response.unwrap().node,
             format!("leaf{index}.fleet"),
             "configured hub destination was overwritten"
         );
-        assert_eq!(fixture.net.requests.load(Ordering::SeqCst), 1);
-        assert!(fixture.net.ledger.lock().unwrap()[0].starts_with(&format!(
-            "GET /fed/v2/observe/relay/leaf{index}.fleet/snapshot?v=1&labels=false "
-        )));
+        assert_eq!(
+            fixture.net.requests.load(Ordering::SeqCst),
+            1,
+            "configured distinct hub destination was not contacted exactly once: hub {index}"
+        );
+        assert!(
+            fixture.net.ledger.lock().unwrap()[0].starts_with(&format!(
+                "GET /fed/v2/observe/relay/leaf{index}.fleet/snapshot?v=1&labels=false "
+            )),
+            "distinct hub destination received wrong configured leaf path: hub {index}"
+        );
     }
     config["sources"][0]["relay"]["hub"] = json!(identities[1]);
     std::fs::write(&first.net.config_file, config.to_string()).unwrap();
     let crossed = Client::new(&Config::load(&first.net.config_file).unwrap()).unwrap();
-    assert_eq!(
-        crossed.snapshot(0).await.unwrap_err(),
-        Error::Unavailable,
+    assert!(
+        matches!(crossed.snapshot(0).await, Err(Error::Unavailable)),
         "crossed full hub URI accepted at first address"
     );
     assert_eq!(
@@ -1157,5 +1262,27 @@ async fn relay_equal_display_hubs_at_distinct_addresses_both_succeed() {
         1,
         "crossed hub URI reached exporter"
     );
-    assert_eq!(second.net.requests.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        second.net.requests.load(Ordering::SeqCst),
+        1,
+        "crossed URI control contacted the second hub unexpectedly"
+    );
+}
+
+#[tokio::test]
+async fn direct_400_and_501_remain_unavailable() {
+    let fixture = Fixture::new().await;
+    for status in ["400 Bad Request", "501 Not Implemented"] {
+        fixture.set_response(status, "", b"");
+        let client = Client::new(&fixture.load().unwrap()).unwrap();
+        assert!(
+            matches!(client.snapshot(0).await, Err(Error::Unavailable)),
+            "direct HTTP status behavior changed: {status}"
+        );
+    }
+    assert_eq!(
+        fixture.requests.load(Ordering::SeqCst),
+        2,
+        "direct status controls did not each reach exporter once"
+    );
 }

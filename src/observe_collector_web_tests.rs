@@ -304,14 +304,70 @@ fn relay_origin_is_escaped_in_event_snapshot_and_stale_view() {
             page: 0,
         },
     );
-    assert!(html.contains("stale: exporter unavailable"));
-    assert!(html.contains("Observation request timed out."));
+    assert!(
+        html.contains("stale: exporter unavailable"),
+        "relay stale provenance view omitted truthful unavailable status"
+    );
+    assert!(
+        html.contains("Observation request timed out."),
+        "relay stale provenance view omitted fixed timeout caption"
+    );
+    assert!(
+        !html.contains(hub),
+        "relay via-hub provenance rendered raw HTML instead of escaped text"
+    );
+    let via = "via spiffe://fleet/host/&lt;hub&gt;&amp;&quot;/user/owner (hub-attested)";
+    let tile = html
+        .split_once("<article class=\"tile\">")
+        .expect("relay provenance tile section missing")
+        .1
+        .split_once("</article>")
+        .unwrap()
+        .0;
+    assert!(
+        tile.contains(via),
+        "relay tile omitted escaped configured via-hub provenance"
+    );
+    let detail = html
+        .split_once("<section><h2>")
+        .expect("relay provenance detail section missing")
+        .1
+        .split_once("<h3>Latest source inventory</h3>")
+        .unwrap()
+        .0;
+    assert!(
+        detail.contains(via),
+        "relay detail omitted escaped configured via-hub provenance"
+    );
+    let snapshot = html
+        .split_once("<h3>Latest source inventory</h3>")
+        .expect("relay provenance snapshot section missing")
+        .1
+        .split_once("<h3>Reported exchanges</h3>")
+        .unwrap()
+        .0;
+    assert!(
+        snapshot.contains(via),
+        "relay snapshot omitted escaped persisted via-hub provenance"
+    );
+    let event = html
+        .split_once("<article class=\"event\">")
+        .expect("relay provenance event section missing")
+        .1
+        .split_once("</article>")
+        .unwrap()
+        .0;
+    assert!(
+        event.contains(via),
+        "relay event omitted escaped persisted via-hub provenance"
+    );
+
     assert_eq!(
         html.matches("via spiffe://fleet/host/&lt;hub&gt;&amp;&quot;/user/owner (hub-attested)")
             .count(),
-        4
+        4,
+        "relay escaped via-hub provenance count changed across tile detail snapshot and event"
     );
-    assert!(!html.contains(hub));
 }
 
 #[test]
@@ -324,13 +380,25 @@ fn dynamic_relay_unsupported_retains_hidden_history_warning_in_tiles() {
     node.failure = Some(UnavailableKind::Unsupported);
     node.origin_hub = Some("spiffe://fleet/host/hub/user/owner".into());
     let html = render(std::slice::from_ref(&node), None, Filter::default());
-    assert!(html.contains("history hidden until this node answers"));
-    assert!(html.contains("unsupported: observation transport"));
-    assert!(!html.contains("unsupported: outbound-only source"));
+    assert!(
+        html.contains("history hidden until this node answers"),
+        "dynamic relay unsupported tile omitted startup hidden-history explanation"
+    );
+    assert!(
+        html.contains("unsupported: observation transport"),
+        "dynamic relay unsupported tile omitted relay transport caption"
+    );
+    assert!(
+        !html.contains("unsupported: outbound-only source"),
+        "dynamic relay unsupported tile claimed static outbound-only transport"
+    );
     node.origin_hub = None;
     node.failure = None;
     let html = render(&[node], None, Filter::default());
-    assert!(html.contains("unsupported: outbound-only source"));
+    assert!(
+        html.contains("unsupported: outbound-only source"),
+        "static direct unsupported tile lost inherited outbound-only caption"
+    );
     assert!(
         !html.contains("history hidden until this node answers"),
         "static direct unsupported presentation changed"
