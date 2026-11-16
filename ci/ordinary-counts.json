@@ -1,6 +1,6 @@
 {
   "baseline": {
-    "linux": "native cargo test --locked on 0db68b76f54107ad8a2bbbc8148b2a890d44855c: exit0, measured 1279 passed/8 ignored/0 failed, 104 summaries/all 101 targets",
+    "linux": "native pinned Rust1.98.1 cargo test --locked on d84bb939071c043490c7d13e2740b248b59c3c2d: exit0, measured1310passed/8ignored/0failed,104summaries/all101targets",
     "darwin": "run 43900579585 job 133415743956 on 3401e1e16c2139fb4fc3339c6c9d22e4c0690bcb: measured 1281 passed/10 ignored/0 failed, 104 summaries; only the prior census guard failed"
   },
   "integration_targets": [
@@ -108,7 +108,7 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1279,
+      "passed": 1310,
       "failed": 0,
       "ignored": 8,
       "summaries": 104
