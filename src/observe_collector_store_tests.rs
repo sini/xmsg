@@ -1560,6 +1560,8 @@ fn uncommitted_child_crash_journal_is_bounded_and_recovers_hidden() {
     );
 }
 
+const RELAY_STORAGE_KEY: &str = "reverse-v1:a4c0f94c93e38598c013dcadeb08e6c96dba245447400f1b4713fdb2755d0460:5ff479a0de95d4a031aed526d2f4b7d8451d391db2b98150530913b77794c84a";
+
 fn relay_fixture_policy() -> NodePolicy {
     NodePolicy {
         node: "leaf.fleet".into(),
@@ -1592,18 +1594,48 @@ fn relay_storage_origin_key_migration_and_tamper() {
     let policy = relay_fixture_policy();
     let key = policy.storage_key();
     let hub = policy.relay.as_ref().unwrap().hub.clone();
-    assert_ne!(key, policy.node);
-    assert!(key.starts_with("reverse-v1:"));
+    assert_ne!(
+        key, policy.node,
+        "relay SQL key collided with direct public leaf node"
+    );
+    assert_eq!(
+        key, RELAY_STORAGE_KEY,
+        "relay SQL key did not hash complete configured hub and leaf identities"
+    );
+    assert!(
+        key.starts_with("reverse-v1:"),
+        "relay SQL key omitted reverse-v1 namespace"
+    );
     for round in 0..2 {
         let store = Store::open(dir.path(), vec![policy.clone()], Arc::new(|| NOW)).unwrap();
-        assert!(store.view(None, 200).unwrap()[0].history_hidden);
+        assert!(
+            store.view(None, 200).unwrap()[0].history_hidden,
+            "relay startup exposed persisted history before revalidation: round {round}"
+        );
         if round == 0 {
             store
                 .ingest_page(&policy.node, &Cursor::default(), relay_page(1))
-                .unwrap();
+                .expect("relay event-origin positive ingestion refused");
+            let c = Connection::open(dir.path().join("collector.sqlite")).unwrap();
+            let origin: Option<String> = c
+                .query_row("SELECT origin_hub FROM events", [], |r| r.get(0))
+                .expect("relay event origin column missing after migration");
+            assert_eq!(
+                origin.as_deref(),
+                Some(hub.as_str()),
+                "relay event row omitted persisted configured full hub origin"
+            );
             store
                 .ingest_snapshot(&policy.node, relay_snapshot())
-                .unwrap();
+                .expect("relay snapshot-origin positive ingestion refused");
+            let origin: Option<String> = c
+                .query_row("SELECT snapshot_origin_hub FROM nodes", [], |r| r.get(0))
+                .expect("relay snapshot origin column missing after migration");
+            assert_eq!(
+                origin.as_deref(),
+                Some(hub.as_str()),
+                "relay snapshot row omitted persisted configured full hub origin"
+            );
         } else {
             let mut p = relay_page(2);
             p.events.clear();
@@ -1613,30 +1645,45 @@ fn relay_storage_origin_key_migration_and_tamper() {
                 .unwrap();
         }
         let view = store.view(None, 200).unwrap().pop().unwrap();
-        assert_eq!(view.node, policy.node);
-        assert_eq!(view.origin_hub.as_deref(), Some(hub.as_str()));
-        assert_eq!(view.events[0].origin_hub.as_deref(), Some(hub.as_str()));
+        assert_eq!(
+            view.node, "leaf.fleet",
+            "relay public view substituted SQL key or hub for configured leaf"
+        );
+        assert_eq!(
+            view.origin_hub.as_deref(),
+            Some(hub.as_str()),
+            "relay node view lost configured full hub origin"
+        );
+        assert_eq!(
+            view.events[0].origin_hub.as_deref(),
+            Some(hub.as_str()),
+            "relay event readback lost persisted configured full hub origin"
+        );
         assert_eq!(
             view.latest_snapshot.unwrap().origin_hub.as_deref(),
-            Some(hub.as_str())
+            Some(hub.as_str()),
+            "relay snapshot readback lost persisted configured full hub origin"
         );
         let inner = store.lock().unwrap();
         let c = inner.connection.as_ref().unwrap();
         assert_eq!(
             c.query_row("SELECT node FROM nodes", [], |r| r.get::<_, String>(0))
                 .unwrap(),
-            key
+            RELAY_STORAGE_KEY,
+            "relay persisted SQL node did not match independent full-identity digest key"
         );
         assert_eq!(
             c.query_row("SELECT origin_hub FROM events", [], |r| r
                 .get::<_, String>(0))
                 .unwrap(),
-            hub
+            hub,
+            "relay event row omitted persisted configured full hub origin"
         );
         assert_eq!(
             c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            0
+            0,
+            "nullable relay migration changed global schema version"
         );
     }
     for column in ["origin_hub", "snapshot_origin_hub"] {
@@ -1655,7 +1702,10 @@ fn relay_storage_origin_key_migration_and_tamper() {
                 .is_err(),
             "missing relay origin accepted: {column}"
         );
-        assert!(store.view(None, 200).unwrap()[0].history_hidden);
+        assert!(
+            store.view(None, 200).unwrap()[0].history_hidden,
+            "missing relay origin exposed unvalidated history: {column}"
+        );
         c.execute(&format!("UPDATE {table} SET {column}=?1"), [&hub])
             .unwrap();
     }
@@ -1674,15 +1724,53 @@ fn relay_atomic_origin_rows_cursor_and_snapshot_abort() {
     let c = Connection::open(dir.path().join("collector.sqlite")).unwrap();
     c.execute_batch("CREATE TRIGGER fail_cursor BEFORE UPDATE OF next ON nodes BEGIN SELECT RAISE(ABORT,'fixture abort'); END;").unwrap();
     let cursor = store.cursor(&policy.node).unwrap();
-    assert!(store
-        .ingest_page(&policy.node, &cursor, relay_page(2))
-        .is_err());
-    assert_eq!(store.cursor(&policy.node).unwrap(), cursor);
-    assert_eq!(store.view(None, 200).unwrap()[0].events.len(), 1);
+    assert!(
+        store
+            .ingest_page(&policy.node, &cursor, relay_page(2))
+            .is_err(),
+        "relay cursor-abort control unexpectedly committed page"
+    );
+    assert_eq!(
+        store.cursor(&policy.node).unwrap(),
+        cursor,
+        "relay aborted transaction changed committed cursor"
+    );
+    assert_eq!(
+        store.view(None, 200).unwrap()[0].events.len(),
+        1,
+        "relay aborted transaction retained inserted event rows"
+    );
+    let (rows, origins, next):(i64,i64,i64)=c.query_row("SELECT (SELECT count(*) FROM events),(SELECT count(*) FROM events WHERE origin_hub=?1),(SELECT next FROM nodes)",[policy.origin_hub()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    assert_eq!(
+        (rows, origins, next),
+        (1, 1, 1),
+        "relay event rows origin and cursor split across aborted transaction"
+    );
+    let before: (Vec<u8>, String, String, i64) = c
+        .query_row(
+            "SELECT snapshot,snapshot_origin_hub,scope,next FROM nodes",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
     c.execute_batch("DROP TRIGGER fail_cursor; CREATE TRIGGER fail_origin BEFORE UPDATE OF snapshot_origin_hub ON nodes BEGIN SELECT RAISE(ABORT,'fixture abort'); END;").unwrap();
     let mut changed = relay_snapshot();
     changed.observed_at -= 1;
-    assert!(store.ingest_snapshot(&policy.node, changed).is_err());
+    assert!(
+        store.ingest_snapshot(&policy.node, changed).is_err(),
+        "relay snapshot-origin abort control unexpectedly committed snapshot"
+    );
+    let after: (Vec<u8>, String, String, i64) = c
+        .query_row(
+            "SELECT snapshot,snapshot_origin_hub,scope,next FROM nodes",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        after, before,
+        "relay snapshot bytes origin scope and cursor split across aborted transaction"
+    );
     assert_eq!(
         store.view(None, 200).unwrap()[0]
             .latest_snapshot
@@ -1690,7 +1778,8 @@ fn relay_atomic_origin_rows_cursor_and_snapshot_abort() {
             .unwrap()
             .snapshot
             .observed_at,
-        NOW
+        NOW,
+        "relay aborted snapshot replaced retained source observation time"
     );
 }
 #[test]
@@ -1716,13 +1805,16 @@ fn relay_and_direct_inventory_switches_never_exceed_64() {
             .collect::<Vec<_>>()
     };
     for (relay, alternate) in [(false, false), (true, false), (true, true), (false, false)] {
-        let store = Store::open(dir.path(), policies(relay, alternate), Arc::new(|| NOW)).unwrap();
-        assert_eq!(store.view(None, 0).unwrap().len(), 64);
+        let opened = Store::open(dir.path(), policies(relay, alternate), Arc::new(|| NOW));
+        assert!(opened.is_ok(), "64-source direct/relay/hub transition refused complete inventory: relay={relay} alternate={alternate}");
+        let store = opened.unwrap();
+        assert_eq!(store.view(None, 0).unwrap().len(), 64, "64-source transition dropped configured unsupported node: relay={relay} alternate={alternate}");
         let c = Connection::open(dir.path().join("collector.sqlite")).unwrap();
         assert_eq!(
             c.query_row("SELECT count(*) FROM nodes", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            64
+            64,
+            "64-source route transition retained extra SQL keys or dropped configured nodes: relay={relay} alternate={alternate}"
         );
         assert_eq!(
             c.query_row(
@@ -1731,7 +1823,8 @@ fn relay_and_direct_inventory_switches_never_exceed_64() {
                 |r| r.get::<_, i64>(0)
             )
             .unwrap(),
-            if relay { 64 } else { 0 }
+            if relay { 64 } else { 0 },
+            "64-source route transition retained old direct or relay SQL keys: relay={relay} alternate={alternate}"
         );
     }
 }
@@ -1761,7 +1854,11 @@ fn relay_and_direct_origins_refuse_foreign_values() {
         c.execute(&format!("UPDATE {table} SET {column}=NULL"), [])
             .unwrap();
         drop(inner);
-        assert_eq!(store.view(None, 200).unwrap()[0].events.len(), 1);
+        assert_eq!(
+            store.view(None, 200).unwrap()[0].events.len(),
+            1,
+            "direct NULL-origin repair did not restore direct history positive: {column}"
+        );
     }
     let dir = private_temp();
     let policy = relay_fixture_policy();
@@ -1841,8 +1938,8 @@ fn relay_upgrade_migrates_b0_nullable_columns_twice() {
     let c = Connection::open(dir.path().join("collector.sqlite")).unwrap();
     c.execute_batch("ALTER TABLE events DROP COLUMN origin_hub; ALTER TABLE nodes DROP COLUMN snapshot_origin_hub;").unwrap();
     drop(c);
-    for _ in 0..2 {
-        let store = Store::open(
+    for round in 0..2 {
+        let opened = Store::open(
             dir.path(),
             vec![NodePolicy {
                 node: "node".into(),
@@ -1851,21 +1948,34 @@ fn relay_upgrade_migrates_b0_nullable_columns_twice() {
                 relay: None,
             }],
             Arc::new(|| NOW),
-        )
-        .unwrap();
+        );
+        assert!(
+            opened.is_ok(),
+            "B0 nullable-origin migration failed to open on idempotent round {round}"
+        );
+        let store = opened.unwrap();
+        let inner = store.lock().unwrap();
+        let c = inner.connection.as_ref().unwrap();
+        for (table, column) in [("events", "origin_hub"), ("nodes", "snapshot_origin_hub")] {
+            let (notnull,default):(i64,Option<String>)=c.query_row(&format!("SELECT [notnull],dflt_value FROM pragma_table_info('{table}') WHERE name=?1"),[column],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+            assert_eq!(
+                notnull, 0,
+                "relay migration column must remain nullable: {table}.{column}, round {round}"
+            );
+            assert_eq!(default,None,"relay migration column must have no default origin: {table}.{column}, round {round}");
+        }
+        drop(inner);
         let mut empty = page(2);
         empty.events.clear();
         empty.next = 1;
         store
             .ingest_page("node", &store.cursor("node").unwrap(), empty)
             .unwrap();
-        assert_eq!(store.view(None, 200).unwrap()[0].events.len(), 1);
-        let inner = store.lock().unwrap();
-        let c = inner.connection.as_ref().unwrap();
-        for (table, column) in [("events", "origin_hub"), ("nodes", "snapshot_origin_hub")] {
-            let (notnull,default):(i64,Option<String>)=c.query_row(&format!("SELECT [notnull],dflt_value FROM pragma_table_info('{table}') WHERE name=?1"),[column],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
-            assert_eq!((notnull, default), (0, None));
-        }
+        assert_eq!(
+            store.view(None, 200).unwrap()[0].events.len(),
+            1,
+            "B0 nullable-origin migration lost retained direct event: round {round}"
+        );
     }
 }
 
@@ -1884,26 +1994,36 @@ fn relay_scope_and_denial_mask_before_failed_purge() {
         let c = Connection::open(dir.path().join("collector.sqlite")).unwrap();
         c.execute_batch("CREATE TRIGGER fail_purge BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT,'fixture purge abort'); END;").unwrap();
         if denied {
-            assert!(store.deny(&policy.node).is_err());
+            assert!(
+                store.deny(&policy.node).is_err(),
+                "relay denial purge-abort control unexpectedly succeeded"
+            );
         } else {
             let mut changed = relay_page(2);
             changed.scope = "b".repeat(64);
-            assert!(store
-                .ingest_page(&policy.node, &store.cursor(&policy.node).unwrap(), changed)
-                .is_err());
+            assert!(
+                store
+                    .ingest_page(&policy.node, &store.cursor(&policy.node).unwrap(), changed)
+                    .is_err(),
+                "relay scope-change purge-abort control unexpectedly succeeded"
+            );
         }
         store
             .unavailable(&policy.node, UnavailableKind::Timeout)
             .unwrap();
         let view = store.view(None, 200).unwrap().pop().unwrap();
-        assert!(view.history_hidden && view.events.is_empty() && view.latest_snapshot.is_none());
+        assert!(
+            view.history_hidden && view.events.is_empty() && view.latest_snapshot.is_none(),
+            "relay failed purge exposed history despite pre-purge mask: denied={denied}"
+        );
         assert_eq!(
             view.status,
             if denied {
                 NodeStatus::Denied
             } else {
                 NodeStatus::HiddenPendingRevalidation
-            }
+            },
+            "relay failed purge lost denial or pending-revalidation status: denied={denied}"
         );
         assert_eq!(
             c.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
@@ -1933,7 +2053,10 @@ fn relay_route_replacement_abort_never_commits_over_64_nodes() {
     drop(store);
     let c = Connection::open(dir.path().join("collector.sqlite")).unwrap();
     c.execute_batch("CREATE TRIGGER fail_route_insert BEFORE INSERT ON nodes WHEN NEW.node LIKE 'reverse-v1:%' BEGIN SELECT RAISE(ABORT,'fixture replacement abort'); END;").unwrap();
-    assert!(Store::open(dir.path(), policies(true), Arc::new(|| NOW)).is_err());
+    assert!(
+        Store::open(dir.path(), policies(true), Arc::new(|| NOW)).is_err(),
+        "64-source relay replacement insert-abort control unexpectedly succeeded"
+    );
     assert_eq!(
         c.query_row("SELECT count(*) FROM nodes", [], |r| r.get::<_, i64>(0))
             .unwrap(),
@@ -1942,10 +2065,129 @@ fn relay_route_replacement_abort_never_commits_over_64_nodes() {
     );
     c.execute_batch("DROP TRIGGER fail_route_insert").unwrap();
     let store = Store::open(dir.path(), policies(true), Arc::new(|| NOW)).unwrap();
-    assert_eq!(store.view(None, 0).unwrap().len(), 64);
+    assert_eq!(
+        store.view(None, 0).unwrap().len(),
+        64,
+        "64-source relay replacement could not recover full configured inventory after abort"
+    );
     assert_eq!(
         c.query_row("SELECT count(*) FROM nodes", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        64
+        64,
+        "64-source relay replacement recovery committed extra or missing SQL keys"
+    );
+}
+
+#[test]
+fn relay_storage_keys_hash_full_authorities_and_keep_public_leaf() {
+    let dir = private_temp();
+    for (hub,leaf,expected) in [
+        ("spiffe://fleet/host/hub/user/owner","spiffe://fleet/ns/fleet/sa/leaf",RELAY_STORAGE_KEY),
+        ("spiffe://other/host/hub/user/owner","spiffe://fleet/ns/fleet/sa/leaf","reverse-v1:a7dfc1a95fd1fdde36a1298c2a188c2ae2404fcda892b39fd507e9014b1cea3d:5ff479a0de95d4a031aed526d2f4b7d8451d391db2b98150530913b77794c84a"),
+        ("spiffe://fleet/host/hub/user/owner","spiffe://other/ns/fleet/sa/leaf","reverse-v1:a4c0f94c93e38598c013dcadeb08e6c96dba245447400f1b4713fdb2755d0460:4ac15cdb2387b099d6b07665d3db2580f58c4e0f2efcbbfe4159be82994f3b99"),
+    ] {
+        let mut policy=relay_fixture_policy();policy.relay=Some(RelayOrigin{hub:hub.into(),leaf:leaf.into()});
+        assert_eq!(crate::observe_relay::identity_node(leaf).as_deref(),Some("leaf.fleet"),"authority-only leaf fixture changed public node");
+        assert_eq!(crate::observe_relay::identity_node(hub).as_deref(),Some("owner.hub"),"authority-only hub fixture changed derived display node");
+        assert_eq!(policy.storage_key(),expected,"relay SQL key omitted complete hub or leaf authority");
+        let store=Store::open(dir.path(),vec![policy],Arc::new(||NOW)).expect("full-authority relay source must open");
+        assert!(store.view(None,200).unwrap()[0].history_hidden,"authority-only relay route replacement exposed prior history");
+        store.ingest_page("leaf.fleet",&Cursor::default(),relay_page(1)).expect("full-authority relay event positive must ingest");
+        let view=store.view(None,200).unwrap().pop().unwrap();
+        assert_eq!(view.node,"leaf.fleet","authority-only relay route replaced public leaf with SQL identity");
+        assert_eq!(view.events[0].origin_hub.as_deref(),Some(hub),"authority-only relay route lost configured full hub attestation");
+        let inner=store.lock().unwrap();let c=inner.connection.as_ref().unwrap();
+        let persisted:String=c.query_row("SELECT node FROM nodes",[],|r|r.get(0)).unwrap();
+        assert_eq!(persisted,expected,"persisted relay SQL key differs from independent authority digest");
+    }
+}
+#[test]
+fn relay_future_kind_canonical_bytes_and_replay_identity_are_preserved() {
+    let dir = private_temp();
+    let policy = relay_fixture_policy();
+    let store = Store::open(dir.path(), vec![policy.clone()], Arc::new(|| NOW))
+        .expect("relay future-kind store positive must open");
+    let mut packet = serde_json::to_value(relay_page(1)).unwrap();
+    packet["events"][0] = serde_json::json!({"sequence":1,"observed_at":NOW,"persisted_at":NOW,"kind":"future_relay_fixture","available":"not_recorded"});
+    let decoded =
+        crate::observe_collector_decode::decode_page(&serde_json::to_vec(&packet).unwrap())
+            .expect("closed relay future-kind wire positive must decode");
+    let expected=br#"{"sequence":1,"observed_at":1800000000,"persisted_at":1800000000,"kind":"future_relay_fixture","available":"not_recorded"}"#;
+    assert_eq!(
+        decoded.events[0].canonical, expected,
+        "relay decoder rewrote raw future-kind canonical bytes"
+    );
+    let outcome = store.ingest_decoded_page(&policy.node, &Cursor::default(), decoded);
+    assert!(
+        outcome.is_ok(),
+        "relay decoded future-kind positive failed ingestion"
+    );
+    assert_eq!(
+        outcome.unwrap().inserted,
+        1,
+        "relay future-kind positive did not persist exactly one event"
+    );
+    let read_raw = || {
+        let c = Connection::open(dir.path().join("collector.sqlite")).unwrap();
+        c.query_row("SELECT json,origin_hub FROM events", [], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
+        })
+        .unwrap()
+    };
+    let (raw, origin) = read_raw();
+    assert_eq!(
+        raw, expected,
+        "relay store replaced raw future-kind canonical JSON with unknown enum"
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["kind"],
+        "future_relay_fixture",
+        "relay raw stored kind did not preserve wire replay identity"
+    );
+    assert_eq!(
+        origin,
+        policy.origin_hub().unwrap(),
+        "relay canonical future-kind event lost configured origin"
+    );
+    let before = store.cursor(&policy.node).unwrap();
+    packet["gaps"] = serde_json::json!([{"reason":"cursor_ahead","unknown_loss":true}]);
+    let replay =
+        crate::observe_collector_decode::decode_page(&serde_json::to_vec(&packet).unwrap())
+            .unwrap();
+    let duplicate = store.ingest_decoded_page(&policy.node, &before, replay);
+    assert!(
+        duplicate.is_ok(),
+        "relay same canonical future-kind replay positive refused"
+    );
+    assert_eq!(
+        duplicate.unwrap().inserted,
+        0,
+        "relay same canonical future-kind replay inserted duplicate event"
+    );
+    assert_eq!(
+        read_raw().0,
+        expected,
+        "relay exact future-kind replay changed retained canonical bytes"
+    );
+    packet["events"][0]["kind"] = serde_json::json!("different_relay_future");
+    let conflict =
+        crate::observe_collector_decode::decode_page(&serde_json::to_vec(&packet).unwrap())
+            .unwrap();
+    assert!(
+        matches!(
+            store.ingest_decoded_page(&policy.node, &before, conflict),
+            Err(StoreError::Invalid)
+        ),
+        "relay same epoch/sequence with changed future-kind replay identity accepted"
+    );
+    assert_eq!(
+        read_raw().0,
+        expected,
+        "conflicting relay future-kind replay altered retained canonical bytes"
+    );
+    assert_eq!(
+        store.cursor(&policy.node).unwrap(),
+        before,
+        "conflicting relay future-kind replay advanced committed cursor"
     );
 }
