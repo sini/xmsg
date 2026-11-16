@@ -325,9 +325,12 @@ fn dynamic_relay_unsupported_retains_hidden_history_warning_in_tiles() {
     node.origin_hub = Some("spiffe://fleet/host/hub/user/owner".into());
     let html = render(std::slice::from_ref(&node), None, Filter::default());
     assert!(html.contains("history hidden until this node answers"));
+    assert!(html.contains("unsupported: observation transport"));
+    assert!(!html.contains("unsupported: outbound-only source"));
     node.origin_hub = None;
     node.failure = None;
     let html = render(&[node], None, Filter::default());
+    assert!(html.contains("unsupported: outbound-only source"));
     assert!(
         !html.contains("history hidden until this node answers"),
         "static direct unsupported presentation changed"
