@@ -62,6 +62,9 @@ impl Fixture {
         Self::with_relay(false).await
     }
     async fn with_relay(relay: bool) -> Self {
+        Self::with_validation(relay, true).await
+    }
+    async fn with_validation(relay: bool, validated: bool) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let files = tempfile::tempdir().unwrap();
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
@@ -160,7 +163,9 @@ impl Fixture {
             truncated: false,
             available: SnapshotAvailability::Available,
         };
-        store.ingest_snapshot("fixture.node", snapshot).unwrap();
+        if validated {
+            store.ingest_snapshot("fixture.node", snapshot).unwrap();
+        }
         let state = Arc::new(State {
             verifier: Verifier::new(config.auth.clone(), clock).unwrap(),
             store,
@@ -169,7 +174,11 @@ impl Fixture {
             nodes: vec!["fixture.node".into()],
             denied: Mutex::new(BTreeSet::new()),
             failures: Mutex::new(BTreeMap::new()),
-            scopes: Mutex::new(BTreeMap::from([("fixture.node".into(), "a".repeat(64))])),
+            scopes: Mutex::new(if validated {
+                BTreeMap::from([("fixture.node".into(), "a".repeat(64))])
+            } else {
+                BTreeMap::new()
+            }),
             scope_hidden: Mutex::new(BTreeSet::new()),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1227,5 +1236,96 @@ async fn relay_failure_overlay_preserves_scope_and_denial_masks() {
     assert!(
         !html.contains("Observation request timed out."),
         "failure overlay caption overrode authenticated relay denial caption"
+    );
+}
+
+#[tokio::test]
+async fn relay_failure_overlay_keeps_unvalidated_history_pending() {
+    let fixture = Fixture::with_validation(true, false).await;
+    assert!(
+        fixture.state.store.view(None, 200).unwrap()[0].history_hidden,
+        "unvalidated relay fixture unexpectedly began with validated history"
+    );
+    assert!(
+        fixture.state.denied.lock().unwrap().is_empty(),
+        "unvalidated relay fixture unexpectedly began with denial mask"
+    );
+    assert!(
+        fixture.state.scope_hidden.lock().unwrap().is_empty(),
+        "unvalidated relay fixture unexpectedly began with scope mask"
+    );
+    mark_error(&fixture.state, "fixture.node".into(), net::Error::Timeout).await;
+    let reply = fixture.get("/?node=0").send().await.unwrap();
+    assert_eq!(
+        reply.status(),
+        200,
+        "unvalidated relay timeout view became unavailable"
+    );
+    let html = reply.text().await.unwrap();
+    assert!(
+        html.contains("<p>pending revalidation</p>"),
+        "unvalidated relay failure overlay replaced pending revalidation with stale status"
+    );
+    assert!(
+        html.contains("history hidden until this node answers"),
+        "unvalidated relay timeout omitted hidden-history explanation"
+    );
+    assert!(
+        html.contains("Observation request timed out."),
+        "unvalidated relay timeout omitted fixed failure caption"
+    );
+    assert!(
+        !html.contains("stale: exporter unavailable"),
+        "unvalidated relay timeout invented validated stale history"
+    );
+    assert!(
+        fixture.state.denied.lock().unwrap().is_empty(),
+        "relay timeout added a denial mask instead of exercising natural unvalidated state"
+    );
+    assert!(
+        fixture.state.scope_hidden.lock().unwrap().is_empty(),
+        "relay timeout added a scope mask instead of exercising natural unvalidated state"
+    );
+    fixture
+        .state
+        .store
+        .ingest_snapshot(
+            "fixture.node",
+            ExportSnapshot {
+                v: 1,
+                node: "fixture.node".into(),
+                scope: "a".repeat(64),
+                observed_at: 1000,
+                endpoints: vec![],
+                truncated: false,
+                available: SnapshotAvailability::Available,
+            },
+        )
+        .expect("fresh relay snapshot validation positive refused");
+    accepted_scope(&fixture.state, "fixture.node", "a".repeat(64));
+    assert!(
+        !fixture.state.store.view(None, 200).unwrap()[0].history_hidden,
+        "fresh relay snapshot positive did not validate history"
+    );
+    mark_error(&fixture.state, "fixture.node".into(), net::Error::Timeout).await;
+    let html = fixture
+        .get("/?node=0")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        html.contains("<p>stale: exporter unavailable</p>"),
+        "validated relay timeout neighbor failed to retain truthful stale state"
+    );
+    assert!(
+        !html.contains("history hidden until this node answers"),
+        "validated relay timeout neighbor incorrectly hid validated history"
+    );
+    assert!(
+        html.contains("Latest source inventory"),
+        "validated relay timeout neighbor lost retained snapshot"
     );
 }
