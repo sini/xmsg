@@ -170,12 +170,9 @@ fn headers() -> axum::http::HeaderMap {
     h.insert("authorization", "Bearer fixture-token".parse().unwrap());
     h
 }
-async fn assert_denied(idp: &Idp, value: Value, message: &str) {
+async fn is_denied(idp: &Idp, value: Value) -> bool {
     idp.set(value);
-    assert!(
-        idp.verifier().authorize(&headers()).await.is_err(),
-        "{message}"
-    );
+    idp.verifier().authorize(&headers()).await.is_err()
 }
 
 #[tokio::test]
@@ -211,7 +208,7 @@ macro_rules! denied_claim {
             assert!(idp.verifier().authorize(&headers()).await.is_ok());
             let mut c = claims();
             c[$field] = $value;
-            assert_denied(&idp, c, $message).await;
+            assert!(is_denied(&idp, c).await, $message);
         }
     };
 }
@@ -284,7 +281,7 @@ async fn conflicting_client() {
     assert!(idp.verifier().authorize(&headers()).await.is_ok());
     let mut c = claims();
     c["azp"] = json!("other");
-    assert_denied(&idp, c, "conflicting clients must refuse").await;
+    assert!(is_denied(&idp, c).await, "conflicting clients must refuse");
 }
 #[tokio::test]
 async fn missing_claims() {
@@ -292,13 +289,16 @@ async fn missing_claims() {
     for field in ["active", "iss", "sub", "aud", "client_id", "exp"] {
         let mut c = claims();
         c.as_object_mut().unwrap().remove(field);
-        assert_denied(&idp, c, "missing required claim must refuse").await;
+        assert!(
+            is_denied(&idp, c).await,
+            "missing required claim must refuse"
+        );
     }
     for field in ["active", "iss", "sub", "aud", "client_id", "exp", "nbf"] {
         for bad in [Value::Null, json!(false), json!({}), json!([])] {
             let mut c = claims();
             c[field] = bad;
-            assert_denied(&idp, c, "malformed claim must refuse").await;
+            assert!(is_denied(&idp, c).await, "malformed claim must refuse");
         }
     }
     for bad in [
@@ -308,7 +308,7 @@ async fn missing_claims() {
     ] {
         let mut c = claims();
         c["exp"] = bad;
-        assert_denied(&idp, c, "non-u64 expiry must refuse").await;
+        assert!(is_denied(&idp, c).await, "non-u64 expiry must refuse");
     }
 }
 #[tokio::test]
@@ -317,7 +317,7 @@ async fn missing_client() {
     assert!(idp.verifier().authorize(&headers()).await.is_ok());
     let mut c = claims();
     c.as_object_mut().unwrap().remove("client_id");
-    assert_denied(&idp, c, "missing client must refuse").await;
+    assert!(is_denied(&idp, c).await, "missing client must refuse");
 }
 #[tokio::test]
 async fn revalidation() {
@@ -533,7 +533,7 @@ macro_rules! absent_claim {
             assert!(idp.verifier().authorize(&headers()).await.is_ok());
             let mut c = claims();
             c.as_object_mut().unwrap().remove($field);
-            assert_denied(&idp, c, $message).await;
+            assert!(is_denied(&idp, c).await, $message);
         }
     };
 }
@@ -588,7 +588,10 @@ async fn audience_array() {
     idp.set(c.clone());
     assert!(idp.verifier().authorize(&headers()).await.is_ok());
     c["aud"] = json!(["other"]);
-    assert_denied(&idp, c, "foreign singleton audience must refuse").await;
+    assert!(
+        is_denied(&idp, c).await,
+        "foreign singleton audience must refuse"
+    );
 }
 #[tokio::test]
 async fn audience_array_type() {
@@ -598,7 +601,10 @@ async fn audience_array_type() {
     idp.set(c.clone());
     assert!(idp.verifier().authorize(&headers()).await.is_ok());
     c["aud"] = json!([null]);
-    assert_denied(&idp, c, "nonstring singleton audience must refuse").await;
+    assert!(
+        is_denied(&idp, c).await,
+        "nonstring singleton audience must refuse"
+    );
 }
 #[tokio::test]
 async fn malformed_azp() {
@@ -606,13 +612,14 @@ async fn malformed_azp() {
     for bad in [Value::Null, json!(false), json!(1), json!([]), json!({})] {
         let mut c = claims();
         c["azp"] = bad.clone();
-        assert_denied(
-            &idp,
-            c.clone(),
-            "malformed additional client binding must refuse",
-        )
-        .await;
+        assert!(
+            is_denied(&idp, c.clone()).await,
+            "malformed additional client binding must refuse"
+        );
         c.as_object_mut().unwrap().remove("client_id");
-        assert_denied(&idp, c, "malformed sole client binding must refuse").await;
+        assert!(
+            is_denied(&idp, c).await,
+            "malformed sole client binding must refuse"
+        );
     }
 }
