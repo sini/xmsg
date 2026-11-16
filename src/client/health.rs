@@ -114,27 +114,23 @@ mod tests {
 
     #[test]
     fn peek_observes_idle_data_and_eof_without_consumption() {
-        for half_close in [false, true] {
-            let (mut reader, mut writer) = UnixStream::pair().unwrap();
+        let (mut reader, mut writer) = UnixStream::pair().unwrap();
+        assert!(!peek_eof(reader.as_raw_fd()).unwrap());
+        writer.write_all(b"frame\n").unwrap();
+        for _ in 0..3 {
             assert!(!peek_eof(reader.as_raw_fd()).unwrap());
-            writer.write_all(b"frame\n").unwrap();
-            for _ in 0..3 {
-                assert!(!peek_eof(reader.as_raw_fd()).unwrap());
-            }
-            if half_close {
-                writer.shutdown(std::net::Shutdown::Write).unwrap();
-            } else {
-                drop(writer);
-            }
-            assert!(!peek_eof(reader.as_raw_fd()).unwrap());
-            let mut frame = [0; 6];
-            reader.read_exact(&mut frame).unwrap();
-            assert_eq!(&frame, b"frame\n");
-            assert!(
-                peek_eof(reader.as_raw_fd()).unwrap(),
-                "zero-byte peek observes EOF"
-            );
         }
+        // A concurrent child may inherit the writer (macOS sets CLOEXEC late); the held copy forces that case.
+        let _inherited = writer.try_clone().unwrap();
+        writer.shutdown(std::net::Shutdown::Write).unwrap();
+        assert!(!peek_eof(reader.as_raw_fd()).unwrap());
+        let mut frame = [0; 6];
+        reader.read_exact(&mut frame).unwrap();
+        assert_eq!(&frame, b"frame\n");
+        assert!(
+            peek_eof(reader.as_raw_fd()).unwrap(),
+            "zero-byte peek observes EOF"
+        );
     }
 
     #[test]
