@@ -485,7 +485,7 @@
     "target": "gate_reverse_observe",
     "test_file": "tests/gate_reverse_observe.rs",
     "test": "slow_busy_answer_does_not_block_list_or_attachment_controls",
-    "expected_literal": "slow observation Busy POST must leave both existing controls progressing",
+    "expected_literal": "refusal scheduling must return without polling answer network I/O",
     "edits": [
       {
         "file": "src/observe_relay.rs",
