@@ -1,0 +1,210 @@
+[
+  {
+    "label": "reverse-collector-store-missing-origin_hub",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_storage_origin_key_migration_and_tamper",
+    "expected_literal": "missing relay origin accepted: origin_hub",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "AND origin_hub IS NOT ?2",
+        "replacement": "AND origin_hub IS NOT NULL AND origin_hub IS NOT ?2",
+        "start": "fn validate_origins",
+        "end": "fn transaction"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-foreign-origin_hub",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_and_direct_origins_refuse_foreign_values",
+    "expected_literal": "direct history accepted stamped origin: origin_hub",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "AND origin_hub IS NOT ?2",
+        "replacement": "AND origin_hub IS NULL AND ?2 IS NOT NULL",
+        "start": "fn validate_origins",
+        "end": "fn transaction"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-missing-snapshot_origin_hub",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_storage_origin_key_migration_and_tamper",
+    "expected_literal": "missing relay origin accepted: snapshot_origin_hub",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "AND snapshot_origin_hub IS NOT ?2",
+        "replacement": "AND snapshot_origin_hub IS NOT NULL AND snapshot_origin_hub IS NOT ?2",
+        "start": "fn validate_origins",
+        "end": "fn transaction"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-foreign-snapshot_origin_hub",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_and_direct_origins_refuse_foreign_values",
+    "expected_literal": "direct history accepted stamped origin: snapshot_origin_hub",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "AND snapshot_origin_hub IS NOT ?2",
+        "replacement": "AND snapshot_origin_hub IS NULL AND ?2 IS NOT NULL",
+        "start": "fn validate_origins",
+        "end": "fn transaction"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-event-origin-bytes",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_key_and_origin_bytes_are_independently_accounted",
+    "expected_literal": "event relay key/origin bytes omitted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "+origin.map_or(0,str::len)",
+        "replacement": ""
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-event-key-bytes",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_key_and_origin_bytes_are_independently_accounted",
+    "expected_literal": "event relay key/origin bytes omitted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "+node.len()+128+origin",
+        "replacement": "+128+origin"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-snapshot-origin-bytes",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_key_and_origin_bytes_are_independently_accounted",
+    "expected_literal": "snapshot origin bytes omitted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "coalesce(length(CAST(snapshot_origin_hub AS BLOB)),0)+",
+        "replacement": ""
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-control-key-bytes",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_key_and_origin_bytes_are_independently_accounted",
+    "expected_literal": "node relay key bytes omitted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "CASE WHEN node LIKE 'reverse-v1:%' THEN length(node) ELSE 0 END+",
+        "replacement": ""
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-web-relay-hidden-warning",
+    "target": "lib",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "test": "observe_collector_web::tests::dynamic_relay_unsupported_retains_hidden_history_warning_in_tiles",
+    "expected_literal": "assertion failed: html.contains(\"history hidden until this node answers\")",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "node.status != NodeStatus::Unsupported || node.origin_hub.is_some()",
+        "replacement": "node.status != NodeStatus::Unsupported"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-web-static-hidden-warning",
+    "target": "lib",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "test": "observe_collector_web::tests::dynamic_relay_unsupported_retains_hidden_history_warning_in_tiles",
+    "expected_literal": "static direct unsupported presentation changed",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "node.status != NodeStatus::Unsupported || node.origin_hub.is_some()",
+        "replacement": "true"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-web-relay-caption",
+    "target": "lib",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "test": "observe_collector_web::tests::dynamic_relay_unsupported_retains_hidden_history_warning_in_tiles",
+    "expected_literal": "assertion failed: html.contains(\"unsupported: observation transport\")",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "NodeStatus::Unsupported if node.origin_hub.is_none()",
+        "replacement": "NodeStatus::Unsupported if true"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-web-static-caption",
+    "target": "lib",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "test": "observe_collector_web::tests::dynamic_relay_unsupported_retains_hidden_history_warning_in_tiles",
+    "expected_literal": "assertion failed: html.contains(\"unsupported: outbound-only source\")",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "NodeStatus::Unsupported if node.origin_hub.is_none()",
+        "replacement": "NodeStatus::Unsupported if false"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-relay-foreign-origin_hub",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_and_direct_origins_refuse_foreign_values",
+    "expected_literal": "relay history accepted foreign origin: origin_hub",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "AND origin_hub IS NOT ?2",
+        "replacement": "AND ?2 IS NULL AND origin_hub IS NOT ?2",
+        "start": "fn validate_origins",
+        "end": "fn transaction"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-relay-foreign-snapshot_origin_hub",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_and_direct_origins_refuse_foreign_values",
+    "expected_literal": "relay history accepted foreign origin: snapshot_origin_hub",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "AND snapshot_origin_hub IS NOT ?2",
+        "replacement": "AND ?2 IS NULL AND snapshot_origin_hub IS NOT ?2",
+        "start": "fn validate_origins",
+        "end": "fn transaction"
+      }
+    ]
+  }
+]
