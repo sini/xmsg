@@ -124,7 +124,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_web_tests.rs",
     "test": "observe_collector_web::tests::dynamic_relay_unsupported_retains_hidden_history_warning_in_tiles",
-    "expected_literal": "assertion failed: html.contains(\"history hidden until this node answers\")",
+    "expected_literal": "dynamic relay unsupported tile omitted startup hidden-history explanation",
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
@@ -152,7 +152,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_web_tests.rs",
     "test": "observe_collector_web::tests::dynamic_relay_unsupported_retains_hidden_history_warning_in_tiles",
-    "expected_literal": "assertion failed: html.contains(\"unsupported: observation transport\")",
+    "expected_literal": "dynamic relay unsupported tile omitted relay transport caption",
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
@@ -166,7 +166,7 @@
     "target": "lib",
     "test_file": "src/observe_collector_web_tests.rs",
     "test": "observe_collector_web::tests::dynamic_relay_unsupported_retains_hidden_history_warning_in_tiles",
-    "expected_literal": "assertion failed: html.contains(\"unsupported: outbound-only source\")",
+    "expected_literal": "static direct unsupported tile lost inherited outbound-only caption",
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
@@ -390,6 +390,92 @@
         "file": "src/observe_collector_store.rs",
         "needle": "c.execute(\"UPDATE nodes SET scope=?2,snapshot=?3,snapshot_receipt=?4,snapshot_base=?5,snapshot_fingerprint=?6,snapshot_origin_hub=?7 WHERE node=?1\",params![node,snapshot.scope,bytes,receipt,base,fingerprint,origin])?;",
         "replacement": "c.execute(\"UPDATE nodes SET scope=?2,snapshot=?3,snapshot_receipt=?4,snapshot_base=?5,snapshot_fingerprint=?6 WHERE node=?1\",params![node,snapshot.scope,bytes,receipt,base,fingerprint])?;\n            c.execute_batch(\"COMMIT; BEGIN IMMEDIATE\")?;\n            c.execute(\"UPDATE nodes SET snapshot_origin_hub=?2 WHERE node=?1\",params![node,origin])?;"
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-web-tile-provenance",
+    "target": "lib",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "test": "observe_collector_web::tests::relay_origin_is_escaped_in_event_snapshot_and_stale_view",
+    "expected_literal": "relay tile omitted escaped configured via-hub provenance",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "tile.push_str(&provenance(node.origin_hub.as_deref()));",
+        "replacement": ""
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-web-detail-provenance",
+    "target": "lib",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "test": "observe_collector_web::tests::relay_origin_is_escaped_in_event_snapshot_and_stale_view",
+    "expected_literal": "relay detail omitted escaped configured via-hub provenance",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "out.push(&provenance(node.origin_hub.as_deref()));",
+        "replacement": ""
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-web-snapshot-provenance",
+    "target": "lib",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "test": "observe_collector_web::tests::relay_origin_is_escaped_in_event_snapshot_and_stale_view",
+    "expected_literal": "relay snapshot omitted escaped persisted via-hub provenance",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "out.push(&provenance(snapshot.origin_hub.as_deref()));",
+        "replacement": ""
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-web-event-provenance",
+    "target": "lib",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "test": "observe_collector_web::tests::relay_origin_is_escaped_in_event_snapshot_and_stale_view",
+    "expected_literal": "relay event omitted escaped persisted via-hub provenance",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "part.push_str(&provenance(cached.origin_hub.as_deref()));",
+        "replacement": ""
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-web-provenance-escape",
+    "target": "lib",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "test": "observe_collector_web::tests::relay_origin_is_escaped_in_event_snapshot_and_stale_view",
+    "expected_literal": "relay via-hub provenance rendered raw HTML instead of escaped text",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "html_text(hub)",
+        "replacement": "hub",
+        "start": "fn provenance(",
+        "end": "fn failure("
+      }
+    ]
+  },
+  {
+    "label": "reverse-collector-store-route-purge-before-insert",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::relay_route_replacement_abort_never_commits_over_64_nodes",
+    "expected_literal": "old keys were not purged before first new insert",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "        for node in persisted {\n            if !configured.contains(&node) {\n                transaction(&mut inner, |c| {\n                    c.execute(\"DELETE FROM events WHERE node=?1\", [&node])?;\n                    c.execute(\"DELETE FROM nodes WHERE node=?1\", [&node])?;\n                    Ok(())\n                })?;\n            }\n        }\n        for node in configured {\n            transaction(&mut inner, |c| {\n                c.execute(\"INSERT OR IGNORE INTO nodes(node) VALUES(?1)\", [node])?;\n                Ok(())\n            })?;\n        }\n",
+        "replacement": "        for node in configured {\n            transaction(&mut inner, |c| {\n                c.execute(\"INSERT OR IGNORE INTO nodes(node) VALUES(?1)\", [node])?;\n                Ok(())\n            })?;\n        }\n        for node in persisted {\n            if !configured.contains(&node) {\n                transaction(&mut inner, |c| {\n                    c.execute(\"DELETE FROM events WHERE node=?1\", [&node])?;\n                    c.execute(\"DELETE FROM nodes WHERE node=?1\", [&node])?;\n                    Ok(())\n                })?;\n            }\n        }\n"
       }
     ]
   }
