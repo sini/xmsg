@@ -1310,6 +1310,56 @@ async fn leaf_listener(f: &RelayFixture) -> (std::net::SocketAddr, AbortTask) {
 }
 #[tokio::test]
 async fn slow_busy_answer_does_not_block_list_or_attachment_controls() {
+    {
+        let f = RelayFixture::new().await;
+        let occupied = xmsg::observe_relay::test_hooks::occupy_reads(&f.leaf_state, 8);
+        let gates = xmsg::observe_relay::test_hooks::controls(&f.leaf_state);
+        let reads = xmsg::observe_fed::test_hooks::controls(&f.leaf_state);
+        gates.before_post.arm(1);
+        let delivery = xmsg::observe_relay::test_hooks::deliver_control(
+            &f.leaf_state,
+            &f.hub.node,
+            &f.hub.cert,
+            "127.0.0.1".parse().unwrap(),
+            policy_control(&f),
+        );
+        tokio::pin!(delivery);
+        let ready = std::future::poll_fn(|context| {
+            std::task::Poll::Ready(std::future::Future::poll(delivery.as_mut(), context).is_ready())
+        })
+        .await;
+        if !ready {
+            gates.before_post.release();
+        }
+        assert!(
+            ready,
+            "refusal scheduling must return without polling answer network I/O"
+        );
+        assert_eq!(
+            reads
+                .read_decisions
+                .load(std::sync::atomic::Ordering::Acquire),
+            1,
+            "valid control reaches the actual saturated read budget"
+        );
+        assert_eq!(
+            reads
+                .read_admissions
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "saturated current-policy control is a real Busy refusal"
+        );
+        assert_eq!(
+            gates
+                .refusal_spawned
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "one bounded refusal task is scheduled before network polling"
+        );
+        gates.before_post.wait_for(1).await;
+        gates.before_post.release();
+        drop(occupied);
+    }
     let f = RelayFixture::new().await;
     let (address, _listener) = leaf_listener(&f).await;
     let reads = xmsg::observe_fed::test_hooks::controls(&f.leaf_state);
