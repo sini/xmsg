@@ -24,9 +24,12 @@ optional; package-only clean removes all xmsg artifacts before building. Both th
 library and helper must report `fresh=false`, the executable must live under its
 own target, and the executed helper must print its embedded per-build nonce.
 Receipts retain production, helper, library, manifest, lock and binary SHA-256s.
-Artifact-guard controls refuse cached library/helper records and foreign targets.
+An actual repeated Cargo build must be refused as cached; separate artifact-guard
+controls refuse cached library/helper records and foreign targets.
 Fresh output-directory creation refuses a second runner sharing the same output;
-different output roots have independent sources, targets, nonces and stores.
+different output roots have independent sources, targets, nonces and stores. A
+concurrent output-claim control proves exactly one shared claim succeeds and both
+separate claims succeed.
 
 The candidate writes neighboring direct and relay events and snapshots. Two
 separate databases exercise saved outbound-only inventory and a fresh direct-leaf
