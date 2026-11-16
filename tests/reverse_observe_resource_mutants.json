@@ -128,7 +128,7 @@
       {
         "file": "src/observe_relay.rs",
         "start": "async fn relay_inner",
-        "end": "struct Reservations",
+        "end": "struct HeldBody",
         "needle": "if state.now() >= deadline {",
         "replacement": "if false {"
       }
@@ -181,7 +181,7 @@
         "start": "async fn answer_inner",
         "end": "async fn read_answer_body",
         "needle": "(w.deadline, w.reservations.clone())",
-        "replacement": "(w.deadline, None::<Arc<Reservations>>)"
+        "replacement": "(w.deadline, None::<Arc<OwnedSemaphorePermit>>)"
       }
     ],
     "scope_note": "Only the answer stream ownership clone is removed; after collector cancellation the stream must still own the original permits."
@@ -196,12 +196,12 @@
       {
         "file": "src/observe_relay.rs",
         "start": "async fn relay_inner",
-        "end": "struct Reservations",
+        "end": "struct HeldBody",
         "needle": ".map_err(|_| Failure::Unreachable)??;",
         "replacement": ".map_err(|_| Failure::Unreachable)??;\n    state.queue.lock().unwrap().pairs.remove(&(control.leaf.clone(), control.collector.clone()));"
       }
     ],
-    "scope_note": "Releases only the pair reservation after the answer is ready, before final forwarding; slot and buffer reservations remain."
+    "scope_note": "Releases only the pair reservation after the answer is ready, before final forwarding; slot reservation remains (aggregate derives structurally)."
   },
   {
     "label": "reverse-resource-post-connection-lane",
@@ -264,7 +264,7 @@
       {
         "file": "src/observe_relay.rs",
         "start": "async fn relay_inner",
-        "end": "struct Reservations",
+        "end": "struct HeldBody",
         "needle": "query,\n        remaining_ms: 5000,",
         "replacement": "query: String::new(),\n        remaining_ms: 5000,"
       }
@@ -281,7 +281,7 @@
       {
         "file": "src/observe_relay.rs",
         "start": "async fn relay_inner",
-        "end": "struct Reservations",
+        "end": "struct HeldBody",
         "needle": "id: ulid::Ulid::new().to_string(),",
         "replacement": "id: \"reused-opaque-id\".to_owned(),"
       }
@@ -335,5 +335,172 @@
       }
     ],
     "scope_note": "Node name and full authenticated identity are duplicated representations of the same expected answer leaf binding. Both are removed together; stored collector/route authorization remains unchanged. This does not independently claim coverage for each representation."
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-resource-eighth-slot",
+    "test": "hub_last_slot_and_same_pair_races_reserve_atomically_and_cancel_cleanly",
+    "expected_literal": "only one contender gets the eighth waiter",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "let slots = Arc::new(Semaphore::new(MAX_WAITERS));",
+        "replacement": "let slots = Arc::new(Semaphore::new(MAX_WAITERS + 1));",
+        "start": "fn shared(",
+        "end": "impl RelayState {"
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-resource-pair-not-global",
+    "test": "same_pair_race_refuses_duplicate_with_global_slots_available",
+    "expected_literal": "same-pair duplicate refuses independently of the global eight-slot cap",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "queue\n            .pairs\n            .contains(&(control.leaf.clone(), control.collector.clone()))",
+        "replacement": "false",
+        "start": "async fn relay_inner(",
+        "end": "struct HeldBody"
+      }
+    ]
+  },
+  {
+    "label": "reverse-resource-id-nonempty",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "authenticated_hub_control_id_grammar_refuses_before_leaf_work",
+    "expected_literal": "refuses before leaf admission",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "!id.is_empty()",
+        "replacement": "true",
+        "start": "fn valid_id(",
+        "end": "#[derive"
+      }
+    ]
+  },
+  {
+    "label": "reverse-resource-id-bytes",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "authenticated_hub_control_id_grammar_refuses_before_leaf_work",
+    "expected_literal": "refuses before leaf admission",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "id.len() <= 64",
+        "replacement": "true",
+        "start": "fn valid_id(",
+        "end": "#[derive"
+      }
+    ]
+  },
+  {
+    "label": "reverse-resource-id-characters",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "authenticated_hub_control_id_grammar_refuses_before_leaf_work",
+    "expected_literal": "refuses before leaf admission",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')",
+        "replacement": "true",
+        "start": "fn valid_id(",
+        "end": "#[derive"
+      }
+    ]
+  },
+  {
+    "label": "reverse-resource-shared-direct-to-relay",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "slow_busy_answer_does_not_block_list_or_attachment_controls",
+    "expected_literal": "full shared direct+relay budget must not admit a ninth metadata read",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "let read_slots = crate::observe_fed::read_slots(&fs);",
+        "replacement": "let read_slots = Arc::new(tokio::sync::Semaphore::new(8));",
+        "start": "pub(crate) fn spawn_control_worker(",
+        "end": "pub(crate) fn spawn_control_answer("
+      }
+    ]
+  },
+  {
+    "label": "reverse-resource-shared-relay-to-direct",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "relay_reads_fill_the_same_leaf_budget_seen_by_direct_export",
+    "expected_literal": "full shared direct+relay budget must not admit a ninth metadata read",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "let read_slots = crate::observe_fed::read_slots(&fs);",
+        "replacement": "let read_slots = Arc::new(tokio::sync::Semaphore::new(8));",
+        "start": "pub(crate) fn spawn_control_worker(",
+        "end": "pub(crate) fn spawn_control_answer("
+      }
+    ]
+  },
+  {
+    "label": "reverse-resource-cancel-cleans-waiter",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "cancellation_during_answer_read_retains_reservations_until_stream_drops",
+    "expected_literal": "pending state reached expected bounded count",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "queue.waiting.remove(&self.id);",
+        "replacement": "let _ = &self.id;",
+        "start": "impl Drop for Forget {",
+        "end": "async fn relay("
+      }
+    ]
+  },
+  {
+    "label": "reverse-resource-refusal-state-lifetime",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "refusal_budget_survives_worker_restart_and_full_lane_keeps_controls_progressing",
+    "expected_literal": "worker restart cannot create a ninth refusal task before the original eight finish",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "let _scheduler = scheduler;",
+        "replacement": "drop(scheduler);",
+        "start": "Err(error) => {\n            let Ok(refusal)",
+        "end": "async fn leaf_read("
+      }
+    ]
+  },
+  {
+    "label": "reverse-resource-refusal-does-not-await-inline",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "slow_busy_answer_does_not_block_list_or_attachment_controls",
+    "expected_literal": "slow observation Busy POST must leave both existing controls progressing",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "tokio::spawn(async move {",
+        "replacement": "async move {",
+        "start": "Err(error) => {\n            let Ok(refusal)",
+        "end": "async fn leaf_read("
+      },
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "            });",
+        "replacement": "            }.await;",
+        "start": "Err(error) => {\n            let Ok(refusal)",
+        "end": "async fn leaf_read("
+      }
+    ]
   }
 ]

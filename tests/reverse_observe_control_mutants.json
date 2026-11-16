@@ -1,0 +1,410 @@
+[
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-outbound-only",
+    "test": "production_leaf_exports_events_and_snapshot_without_listener_or_custody",
+    "expected_literal": "production leaf exports",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "get_federated_inbox_witnessed(&fs, &peers, &peer, 30, Some(true), advertise)",
+        "replacement": "get_federated_inbox_witnessed(&fs, &peers, &peer, 30, Some(false), advertise)",
+        "start": "pub(crate) fn spawn_control_worker(",
+        "end": "pub(crate) fn spawn_control_answer("
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-no-leaf-listener",
+    "test": "production_leaf_exports_events_and_snapshot_without_listener_or_custody",
+    "expected_literal": "reverse leaf never opens listener",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "let _scheduler = crate::observe_relay::keep_scheduler(&fs);",
+        "replacement": "let _scheduler = crate::observe_relay::keep_scheduler(&fs);\n        let extra_listener = tokio::net::TcpListener::bind(\"127.0.0.1:0\").await.unwrap();\n        let extra_fs = fs.clone();\n        tokio::spawn(async move { let _ = crate::fed::run_fed_listener(extra_listener, extra_fs).await; });",
+        "start": "pub(crate) fn spawn_control_worker(",
+        "end": "pub(crate) fn spawn_control_answer("
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-per-poll-capability",
+    "test": "concurrent_legacy_poll_cannot_take_observe_and_capability_is_not_cached",
+    "expected_literal": "right: Null",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "0 if query.control == Some(true) && query.observe_relay == Some(1) => {",
+        "replacement": "0 if query.control == Some(true) => {",
+        "start": "async fn fed_get_inbox_handler(",
+        "end": "// -----------------------------------------------------------------------------"
+      }
+    ],
+    "rationale": "The non-advertising poll must yield JSON Null in either overlap branch; exact Null assertion line discriminates observed new variant."
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-current-poll-tls",
+    "test": "old_tls_poll_cannot_take_new_generation_observe_work",
+    "expected_literal": "old TLS poll never receives new-generation collector attestation",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "!current_poll || w.control.leaf != peer_identity(peer)",
+        "replacement": "false || w.control.leaf != peer_identity(peer)",
+        "start": "pub(crate) fn next_for(",
+        "end": "fn header<"
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-raw-byte-preservation",
+    "test": "hub_relays_exact_raw_snapshot_only_via_advertising_control_poll",
+    "expected_literal": "hub preserves exact DTO bytes",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "bytes: Some(body.into()),",
+        "replacement": "bytes: Some(bytes::Bytes::from(serde_json::to_vec(&serde_json::from_slice::<serde_json::Value>(&body).unwrap()).unwrap())),",
+        "start": "async fn relay_inner(",
+        "end": "struct HeldBody"
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-future-name-preservation",
+    "test": "hub_preserves_future_kind_event_bytes_and_refuses_nonmetadata_fields",
+    "expected_literal": "future kind survives unchanged",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "bytes: Some(body.into()),",
+        "replacement": "bytes: Some(bytes::Bytes::from(serde_json::to_vec(&crate::observe_collector_decode::decode_page(&body).unwrap().page).unwrap())),",
+        "start": "async fn relay_inner(",
+        "end": "struct HeldBody"
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-no-bearer-wire",
+    "test": "hub_relays_exact_raw_snapshot_only_via_advertising_control_poll",
+    "expected_literal": "human bearer never crosses relay control wire",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "id: ulid::Ulid::new().to_string(),",
+        "replacement": "id: request.headers().get(\"authorization\").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix(\"Bearer \")).unwrap_or(\"unexpected-credential-id\").to_owned(),",
+        "start": "async fn relay_inner(",
+        "end": "struct HeldBody"
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-event-node-binding",
+    "test": "hub_preserves_future_kind_event_bytes_and_refuses_nonmetadata_fields",
+    "expected_literal": "invalid wrong node refuses at answer hop",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "page.node != node",
+        "replacement": "false",
+        "start": "fn validate_dto(",
+        "end": "Kind::Snapshot => {"
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-events-version",
+    "test": "events_dto_version_and_count_are_independent_of_transport_bounds",
+    "expected_literal": "events version2 DTO answer-hop result",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "page.v != 1",
+        "replacement": "false",
+        "start": "fn validate_dto(",
+        "end": "Kind::Snapshot => {"
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-snapshot-version",
+    "test": "snapshot_dto_node_version_count_and_closed_schema_are_independent",
+    "expected_literal": "snapshot version2 DTO answer-hop result",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "page.v != 1",
+        "replacement": "false",
+        "start": "Kind::Snapshot => {\n            let page: ExportSnapshot",
+        "end": "pub mod test_hooks"
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-snapshot-node",
+    "test": "snapshot_dto_node_version_count_and_closed_schema_are_independent",
+    "expected_literal": "snapshot wrong node DTO answer-hop result",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "page.node != node",
+        "replacement": "false",
+        "start": "Kind::Snapshot => {\n            let page: ExportSnapshot",
+        "end": "pub mod test_hooks"
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-snapshot-count",
+    "test": "snapshot_dto_node_version_count_and_closed_schema_are_independent",
+    "expected_literal": "snapshot201 endpoints DTO answer-hop result",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "page.endpoints.len() > 200",
+        "replacement": "false",
+        "start": "Kind::Snapshot => {\n            let page: ExportSnapshot",
+        "end": "pub mod test_hooks"
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-event-count",
+    "test": "events_dto_version_and_count_are_independent_of_transport_bounds",
+    "expected_literal": "events201 sequenced events DTO answer-hop result",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "raw.len() > MAX_EVENTS",
+        "replacement": "false",
+        "start": "pub(crate) fn decode_page(",
+        "end": "fn finish_page("
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-snapshot-root-closed",
+    "test": "snapshot_dto_node_version_count_and_closed_schema_are_independent",
+    "expected_literal": "snapshot body extra field DTO answer-hop result",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]",
+        "replacement": "",
+        "start": "#[serde(deny_unknown_fields)]\npub struct ExportSnapshot",
+        "end": "fn valid_node("
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-snapshot-endpoint-closed",
+    "test": "snapshot_dto_node_version_count_and_closed_schema_are_independent",
+    "expected_literal": "snapshot endpoint cwd extra field DTO answer-hop result",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]",
+        "replacement": "",
+        "start": "#[serde(deny_unknown_fields)]\npub struct EndpointDescriptor",
+        "end": "#[derive(Clone, Debug, Serialize, Deserialize)]"
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-control-outer-closed",
+    "test": "authenticated_hub_control_schema_is_closed_and_duplicate_free_before_leaf_work",
+    "expected_literal": "outer unknown control schema refuses before leaf admission",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "#[serde(deny_unknown_fields)]",
+        "replacement": "",
+        "start": "#[serde(deny_unknown_fields)]\n                struct ObserveEnvelope",
+        "end": "let closed: ObserveEnvelope"
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-control-nested-closed",
+    "test": "authenticated_hub_control_schema_is_closed_and_duplicate_free_before_leaf_work",
+    "expected_literal": "nested unknown control schema refuses before leaf admission",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "#[serde(deny_unknown_fields)]",
+        "replacement": "",
+        "start": "#[serde(deny_unknown_fields)]\npub struct Control",
+        "end": "impl Control {"
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-control-duplicate",
+    "test": "authenticated_hub_control_schema_is_closed_and_duplicate_free_before_leaf_work",
+    "expected_literal": "outer duplicate control schema refuses before leaf admission",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "let msg: Option<FedInboxItem> = serde_json::from_slice(&body_bytes)",
+        "replacement": "let msg: Option<FedInboxItem> = serde_json::from_value(serde_json::from_slice::<serde_json::Value>(&body_bytes).map_err(|_| AppError::BadRequest(\"invalid control\".into()))?)",
+        "start": "async fn get_federated_inbox_witnessed(",
+        "end": "// -----------------------------------------------------------------------------"
+      },
+      {
+        "file": "src/fed.rs",
+        "needle": "let closed: ObserveEnvelope = serde_json::from_slice(&body_bytes)",
+        "replacement": "let closed: ObserveEnvelope = serde_json::from_value(serde_json::from_slice::<serde_json::Value>(&body_bytes).map_err(|_| AppError::BadRequest(\"invalid control\".into()))?)",
+        "start": "async fn get_federated_inbox_witnessed(",
+        "end": "// -----------------------------------------------------------------------------"
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-snapshot-duplicate",
+    "test": "snapshot_dto_node_version_count_and_closed_schema_are_independent",
+    "expected_literal": "snapshot duplicate known version field DTO answer-hop result",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "serde_json::from_slice(body).map_err(|_| Failure::Invalid)?",
+        "replacement": "serde_json::from_value(serde_json::from_slice::<serde_json::Value>(body).map_err(|_| Failure::Invalid)?).map_err(|_| Failure::Invalid)?",
+        "start": "Kind::Snapshot => {\n            let page: ExportSnapshot",
+        "end": "pub mod test_hooks"
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-control-event-duplicate",
+    "test": "hub_preserves_future_kind_event_bytes_and_refuses_nonmetadata_fields",
+    "expected_literal": "invalid duplicate field refuses at answer hop",
+    "edits": [
+      {
+        "file": "src/observe_collector_decode.rs",
+        "needle": "if values.contains_key(&key) {",
+        "replacement": "if false && values.contains_key(&key) {",
+        "start": "fn visit_map<",
+        "end": "fn visit_seq<"
+      }
+    ]
+  },
+  {
+    "label": "reverse-control-event-root-closed",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "events_dto_version_and_count_are_independent_of_transport_bounds",
+    "expected_literal": "events root body extra field DTO answer-hop result",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]",
+        "replacement": "",
+        "start": "#[serde(deny_unknown_fields)]\npub struct ExportPage",
+        "end": "#[derive(Clone, Debug)]\npub struct SnapshotRecord"
+      }
+    ]
+  },
+  {
+    "label": "reverse-control-event-outcome-closed",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "hub_preserves_future_kind_event_bytes_and_refuses_nonmetadata_fields",
+    "expected_literal": "invalid unknown outcome refuses at answer hop",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "closed_enum!(Outcome {\n    Delivered,\n    Queued,\n    Pending,\n    Failed,\n    Done,\n    Accepted,\n    Relayed,\n    Stored,\n    Pushed,\n    PushFailed,\n    SenderGone,\n    Expired,\n    Unknown\n});",
+        "replacement": "#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]\n#[serde(rename_all=\"snake_case\")]\npub enum Outcome { Delivered, Queued, Pending, Failed, Done, Accepted, Relayed, Stored, Pushed, PushFailed, SenderGone, Expired, #[serde(other)] Unknown }",
+        "start": "closed_enum!(Outcome",
+        "end": "closed_enum!(Reason"
+      }
+    ]
+  },
+  {
+    "label": "reverse-control-future-kind-tolerance",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "hub_preserves_future_kind_event_bytes_and_refuses_nonmetadata_fields",
+    "expected_literal": "valid bounded future-kind page is accepted from the expected leaf",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "let page = crate::observe_collector_decode::decode_page(body)\n                .map_err(|_| Failure::Invalid)?\n                .page;",
+        "replacement": "let page: crate::observe_export::ExportPage = serde_json::from_slice(body).map_err(|_| Failure::Invalid)?;",
+        "start": "fn validate_dto(",
+        "end": "Kind::Snapshot => {"
+      }
+    ]
+  },
+  {
+    "label": "reverse-control-events-kind-bound",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "production_leaf_exports_events_and_snapshot_without_listener_or_custody",
+    "expected_literal": "events request returns an event page",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "read: kind,",
+        "replacement": "read: Kind::Snapshot,",
+        "start": "async fn relay_inner(",
+        "end": "struct HeldBody"
+      }
+    ]
+  },
+  {
+    "label": "reverse-control-snapshot-kind-bound",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "production_leaf_exports_events_and_snapshot_without_listener_or_custody",
+    "expected_literal": "snapshot request returns an endpoint snapshot",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "read: kind,",
+        "replacement": "read: Kind::Events,",
+        "start": "async fn relay_inner(",
+        "end": "struct HeldBody"
+      }
+    ]
+  }
+]

@@ -9,7 +9,9 @@
       {
         "file": "src/observe_relay.rs",
         "needle": "|| self.routes[..index].contains(route)",
-        "replacement": "|| false"
+        "replacement": "|| false",
+        "start": "",
+        "end": ""
       }
     ]
   },
@@ -23,7 +25,9 @@
       {
         "file": "src/observe_relay.rs",
         "needle": "#[serde(deny_unknown_fields)]\npub struct Config",
-        "replacement": "pub struct Config"
+        "replacement": "pub struct Config",
+        "start": "",
+        "end": ""
       }
     ]
   },
@@ -37,7 +41,9 @@
       {
         "file": "src/observe_relay.rs",
         "needle": "#[serde(deny_unknown_fields)]\npub struct Route",
-        "replacement": "pub struct Route"
+        "replacement": "pub struct Route",
+        "start": "",
+        "end": ""
       }
     ]
   },
@@ -51,7 +57,9 @@
       {
         "file": "src/fed.rs",
         "needle": "if allow.iter().any(|op| op == \"observe\") && pat.contains('*') {",
-        "replacement": "if false {"
+        "replacement": "if false {",
+        "start": "",
+        "end": ""
       }
     ]
   },
@@ -64,10 +72,10 @@
     "edits": [
       {
         "file": "src/observe_relay.rs",
-        "needle": "config.hub_enabled",
-        "replacement": "true",
-        "start": "fn exact_route(",
-        "end": "#[derive(Clone)]"
+        "needle": "!peers.reverse_observe.hub_enabled",
+        "replacement": "false",
+        "start": "fn authorize(",
+        "end": "pub(crate) fn router("
       }
     ]
   },
@@ -82,7 +90,7 @@
         "file": "src/observe_relay.rs",
         "needle": "config.leaf_enabled",
         "replacement": "true",
-        "start": "fn exact_route(",
+        "start": "fn leaf_route(",
         "end": "#[derive(Clone)]"
       }
     ]
@@ -98,7 +106,7 @@
         "file": "src/observe_relay.rs",
         "needle": "!config.routes.contains(route)",
         "replacement": "false",
-        "start": "fn exact_route(",
+        "start": "fn leaf_route(",
         "end": "#[derive(Clone)]"
       }
     ]
@@ -115,7 +123,7 @@
         "needle": "!config.allow.iter().any(|v| v == \"observe\")",
         "replacement": "false",
         "start": "fn grant(",
-        "end": "fn exact_route("
+        "end": "fn leaf_route("
       }
     ],
     "rationale": "The same production grant helper serves hub authorization and leaf admission/current checks; each side has its own refusal scenario."
@@ -132,7 +140,7 @@
         "needle": "!config.allow.iter().any(|v| v == \"observe\")",
         "replacement": "false",
         "start": "fn grant(",
-        "end": "fn exact_route("
+        "end": "fn leaf_route("
       }
     ],
     "rationale": "The same production grant helper serves hub authorization and leaf admission/current checks; each side has its own refusal scenario."
@@ -149,7 +157,7 @@
         "needle": "(labels && !config.observe_labels)",
         "replacement": "false",
         "start": "fn grant(",
-        "end": "fn exact_route("
+        "end": "fn leaf_route("
       }
     ]
   },
@@ -268,13 +276,13 @@
     "edits": [
       {
         "file": "src/observe_relay.rs",
-        "needle": "(!config.observe_labels\n                            || !control.read.labels(&control.query).unwrap_or(false))",
-        "replacement": "(!config.observe_labels)",
+        "needle": "!control.read.labels(&control.query).unwrap_or(false)",
+        "replacement": "false",
         "start": "fn validate_dto(",
         "end": "pub mod test_hooks"
       }
     ],
-    "rationale": "First policy-denied iteration stays GREEN; second permits policy labels but has no request opt-in, isolating the request predicate."
+    "rationale": "Admission grant plus original generation implies policy permission; this live post-response predicate separately refuses unrequested labels."
   },
   {
     "label": "reverse-auth-hub-original-generation",
@@ -332,5 +340,212 @@
       }
     ],
     "rationale": "Change the pinned+URI route-admission outcome to Denied, isolating required explicit Unsupported from ordinary control compatibility."
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-auth-default-hub",
+    "test": "reverse_config_absent_fields_default_independently_off_and_empty",
+    "expected_literal": "missing hub flag defaults off",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "#[serde(default)]\n    pub hub_enabled: bool,",
+        "replacement": "#[serde(default = \"mutant_enabled_default\")]\n    pub hub_enabled: bool,",
+        "start": "pub struct Config {",
+        "end": "pub struct Route {"
+      },
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "pub(crate) fn identity_node(",
+        "replacement": "fn mutant_enabled_default() -> bool { true }\npub(crate) fn identity_node(",
+        "start": "pub struct Route {",
+        "end": "impl Config {"
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-auth-default-leaf",
+    "test": "reverse_config_absent_fields_default_independently_off_and_empty",
+    "expected_literal": "missing leaf flag defaults off",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "#[serde(default)]\n    pub leaf_enabled: bool,",
+        "replacement": "#[serde(default = \"mutant_enabled_default\")]\n    pub leaf_enabled: bool,",
+        "start": "pub struct Config {",
+        "end": "pub struct Route {"
+      },
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "pub(crate) fn identity_node(",
+        "replacement": "fn mutant_enabled_default() -> bool { true }\npub(crate) fn identity_node(",
+        "start": "pub struct Route {",
+        "end": "impl Config {"
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-auth-literal-wildcard",
+    "test": "each_route_identity_refuses_an_otherwise_valid_spiffe_wildcard",
+    "expected_literal": "wildcard hub identity must refuse",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "value.contains('*')",
+        "replacement": "false",
+        "start": "pub(crate) fn identity_node(",
+        "end": "impl Config {"
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-auth-full-collector-authority",
+    "test": "leaf_current_admission_binds_full_collector_hub_and_self_before_reads",
+    "expected_literal": "current valid route/grant must not erase foreign collector authority binding",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": ".is_some_and(|ids| ids.as_slice() == [identity])",
+        "replacement": ".is_some_and(|ids| ids.len() == 1 && identity_node(&ids[0]) == identity_node(identity))",
+        "start": "fn config_identity(",
+        "end": "fn config_for_identity("
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-auth-actual-hub-witness",
+    "test": "leaf_current_admission_binds_full_collector_hub_and_self_before_reads",
+    "expected_literal": "current valid route/grant must not erase wrong attested hub binding",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "witness.identity != control.hub",
+        "replacement": "false",
+        "start": "fn leaf_admit(",
+        "end": "fn leaf_current("
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-auth-actual-leaf-self",
+    "test": "leaf_current_admission_binds_full_collector_hub_and_self_before_reads",
+    "expected_literal": "current valid route/grant must not erase wrong leaf self binding",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "own_identity(fs)? != control.leaf",
+        "replacement": "false",
+        "start": "fn leaf_admit(",
+        "end": "fn leaf_current("
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-auth-no-permissive-unknown-collector",
+    "test": "leaf_current_admission_binds_full_collector_hub_and_self_before_reads",
+    "expected_literal": "current valid route/grant must not erase unknown collector binding",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "let config = peers.get_peer_config(&node)?;",
+        "replacement": "let config = peers.get_peer_config(&node).unwrap_or_else(|| PeerConfig {\n        name: node.clone(),\n        pin: identity.strip_prefix(\"sha256:\").map(str::to_owned),\n        identities: identity.starts_with(\"spiffe://\").then(|| vec![identity.to_owned()]),\n        allow: vec![\"observe\".into()],\n        ..Default::default()\n    });",
+        "start": "fn config_for_identity(",
+        "end": "fn grant("
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-auth-leaf-request-label",
+    "test": "leaf_request_label_opt_in_is_applied_before_any_hub_filter",
+    "expected_literal": "leaf request-label suppression is measured before a hub can reject",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "control.read.labels(&control.query)? && admission.config.observe_labels",
+        "replacement": "admission.config.observe_labels",
+        "start": "async fn leaf_read(",
+        "end": "async fn post_answer("
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-auth-origin-header-not-authority",
+    "test": "authorized_collector_with_spoofed_origin_still_attests_actual_tls_identity",
+    "expected_literal": "spoofed origin must not falsely refuse an actual authorized collector",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "let collector_identity = peer_identity(&collector);",
+        "replacement": "let collector_identity = request.headers().get(\"xmsg-origin\").and_then(|v| v.to_str().ok()).map(str::to_owned).unwrap_or_else(|| peer_identity(&collector));",
+        "start": "async fn relay_inner(",
+        "end": "struct HeldBody"
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-auth-route-generation",
+    "test": "hub_route_removal_before_forward_is_enforced_by_original_generation",
+    "expected_literal": "original generation must invalidate prepared response even when fresh grant and empty DTO would permit it",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "!Arc::ptr_eq(&peers, &waiter.peers)",
+        "replacement": "false",
+        "start": "fn authorize(",
+        "end": "pub(crate) fn router("
+      }
+    ]
+  },
+  {
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "label": "reverse-auth-labels-generation",
+    "test": "hub_labels_only_change_with_unlabeled_request_invalidates_original_generation",
+    "expected_literal": "original generation must invalidate prepared response even when fresh grant and empty DTO would permit it",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "!Arc::ptr_eq(&peers, &waiter.peers)",
+        "replacement": "false",
+        "start": "fn authorize(",
+        "end": "pub(crate) fn router("
+      }
+    ]
+  },
+  {
+    "label": "reverse-auth-hub-route-selection",
+    "target": "gate_reverse_observe",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "test": "hub_exact_route_is_required",
+    "expected_literal": "independent policy refusal:",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": ".find(|r| {\n            own_matches(&state.fed, &r.hub)\n                && r.collector == collector_identity\n                && identity_node(&r.leaf).as_deref() == Some(&leaf)\n        })",
+        "replacement": ".find(|r| { let _ = (r, &leaf); true })",
+        "start": "async fn relay_inner(",
+        "end": "struct HeldBody"
+      }
+    ],
+    "rationale": "Nonempty route for another collector must not become an implicit route; no redundant post-construction contains check exists."
   }
 ]
