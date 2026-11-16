@@ -42,27 +42,18 @@ and provider requirements. Keep OAuth credentials and grant administration outsi
 
 ## Protocol bootstrap
 
-**Planned, not yet released.** An authenticated hosted client can call
-`server/discover` before `initialize`, without an `Mcp-Session-Id`. The answer lists
-only the gateway's implemented transport revisions: `2025-03-26`, `2025-06-18` and
-`2025-11-25`. It is a bootstrap compatibility answer, not 2026-07-28 transport support.
+The gateway uses `initialize` with the supported transport revisions
+`2025-03-26`, `2025-06-18` and `2025-11-25`, followed by `tools/list` and
+`tools/call`. It does not implement `server/discover` or 2026-07-28 transport.
 
-For example, POST this request to the gateway's MCP endpoint after OAuth:
+An authenticated discovery probe with `MCP-Protocol-Version: 2026-07-28` receives
+an empty HTTP 400. Without that header, or with a supported version, a valid
+`server/discover` request receives JSON-RPC `-32601` (`Method not found`). Bearer
+verification and live-grant authorization still apply before these responses.
 
-```json
-{"jsonrpc":"2.0","id":"discover-1","method":"server/discover"}
-```
-
-Only discovery accepts an otherwise unsupported textual `MCP-Protocol-Version`
-header to learn those versions. The client then selects a supported legacy version
-and continues with `initialize` and `tools/list`. Discovery uses the catalog's
-bearer and live-grant checks; a valid probe without a bearer receives `401`.
-
-The response includes server identity metadata, initialization instructions and
-caller-scoped capabilities. Events appears only for its selected grant, as during
-`initialize`. Its cache hints are `ttlMs: 0` and `cacheScope: "private"`; cached
-capabilities must not cross authorization contexts. See the gateway's
-[protocol reference](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/serving.md#supported-protocol-revisions-and-discovery).
+A successful discovery answer containing only legacy revisions stopped the
+ChatGPT connector in production. Leaving discovery unimplemented lets that
+client fall back to `initialize`.
 
 ## Authentication profiles and issuer cutover
 
