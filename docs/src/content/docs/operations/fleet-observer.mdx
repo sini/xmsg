@@ -221,6 +221,10 @@ failure. No direct, custody, or alternate-hub fallback is attempted.
 
 ## Configure the collector
 
+Collector config changes take effect on restart. The next collector start hides
+persisted history before purging old route keys and keeps it hidden if the purge
+fails; there is no live config reload.
+
 The collector starts separately from `xmsg serve`. It uses its own metadata
 database and does not initialize bus storage, enrollment or harness registries.
 Provide the client certificate/key and each exporter's existing trust inputs;
