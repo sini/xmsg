@@ -1,4 +1,4 @@
-use crate::observe_collector_store::{NodeStatus, NodeView};
+use crate::observe_collector_store::{NodeStatus, NodeView, UnavailableKind};
 use crate::observe_export::EndpointKind;
 use base64::Engine;
 use sha2::{Digest, Sha256};
@@ -95,8 +95,24 @@ fn status(value: NodeStatus) -> &'static str {
         NodeStatus::Healthy => "healthy",
         NodeStatus::Stale => "stale: exporter unavailable",
         NodeStatus::Denied => "denied",
-        NodeStatus::Unsupported => "unsupported: outbound-only source",
+        NodeStatus::Unsupported => "unsupported: observation transport",
         NodeStatus::StorageFull => "storage full",
+    }
+}
+fn provenance(origin: Option<&str>) -> String {
+    origin
+        .map(|hub| format!("<p>via {} (hub-attested)</p>", html_text(hub)))
+        .unwrap_or_default()
+}
+fn failure(node: &NodeView) -> &'static str {
+    match node.failure {
+        Some(UnavailableKind::Timeout) => "<p>Observation request timed out.</p>",
+        Some(UnavailableKind::Malformed) => "<p>Invalid observation response.</p>",
+        Some(UnavailableKind::RateLimited) => "<p>Observation rate limited.</p>",
+        Some(UnavailableKind::Unreachable) => "<p>Observation exporter unavailable.</p>",
+        Some(UnavailableKind::Unsupported) => "<p>Observation transport unsupported.</p>",
+        Some(UnavailableKind::StorageFull) => "<p>Collector storage full.</p>",
+        None => "",
     }
 }
 struct Document {
@@ -128,13 +144,18 @@ fn render_with_cap(
         cap,
         truncated: false,
     };
-    out.push(&format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"refresh\" content=\"5\"><title>xmsg fleet observer</title><style>{CSS}</style></head><body><main><h1>Fleet observer</h1><p class=\"muted\">Read-only metadata from configured direct exporters. Source clocks are independent; these observations do not establish agent reads or completion.</p><nav><a href=\"/\">All nodes</a></nav><div class=\"tiles\">"));
+    out.push(&format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"refresh\" content=\"5\"><title>xmsg fleet observer</title><style>{CSS}</style></head><body><main><h1>Fleet observer</h1><p class=\"muted\">Read-only metadata from configured exporters. Source clocks are independent; these observations do not establish agent reads or completion.</p><nav><a href=\"/\">All nodes</a></nav><div class=\"tiles\">"));
     for (index, node) in summaries.iter().take(64).enumerate() {
         let mut tile = format!(
             "<article class=\"tile\"><h2><a href=\"/?node={index}\">{}</a></h2><p>{}</p>",
             html_text(&node.node),
             status(node.status)
         );
+        tile.push_str(&provenance(node.origin_hub.as_deref()));
+        tile.push_str(failure(node));
+        if node.failure.is_some() && !node.history_hidden {
+            tile.push_str("<p>Previously validated history is stale.</p>");
+        }
         if node.history_hidden && node.status != NodeStatus::Unsupported {
             tile.push_str("<p class=\"warning\">history hidden until this node answers</p>");
         }
@@ -148,6 +169,11 @@ fn render_with_cap(
             html_text(&node.node),
             status(node.status)
         ));
+        out.push(&provenance(node.origin_hub.as_deref()));
+        out.push(failure(node));
+        if node.failure.is_some() && !node.history_hidden {
+            out.push("<p>Previously validated history is stale.</p>");
+        }
         if node.history_hidden {
             out.push("<p class=\"warning\">history hidden until this node answers</p>");
         } else {
@@ -170,6 +196,7 @@ fn render_with_cap(
             }
             if let Some(snapshot) = &node.latest_snapshot {
                 out.push(&format!("<h3>Latest source inventory</h3><p>Availability: {}; truncated: {}. Source observation: {} (age {} s); collector receipt: {} (age {} s).</p>",name(snapshot.snapshot.available),snapshot.snapshot.truncated,snapshot.snapshot.observed_at,snapshot.source_age_seconds,snapshot.received_at,snapshot.receipt_age_seconds));
+                out.push(&provenance(snapshot.origin_hub.as_deref()));
                 let endpoints = &snapshot.snapshot.endpoints;
                 if endpoints.len() > MAX_ENDPOINTS {
                     out.push("<p class=\"warning\">Endpoint objects truncated to 200.</p>");
@@ -223,6 +250,7 @@ fn render_with_cap(
                         let _ = write!(part, "<p>{label}: <code>{}</code></p>", html_text(value));
                     }
                 }
+                part.push_str(&provenance(cached.origin_hub.as_deref()));
                 part.push_str("</article>");
                 out.push(&part);
             }

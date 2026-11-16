@@ -97,3 +97,19 @@ Registered owner-process liveness does not prove a usable Codex writer lease, me
 delivery or task completion. Treat these as separate investigations, not implied successes. Doctor offers no automatic database recovery or
 integrity guarantee. See the [CLI reference](/reference/cli-and-mcp/#xmsg-doctor-planned)
 for its options and output contract.
+
+## Collector relay failures (planned)
+
+The planned reverse collector reports fixed failure states: unsupported (501),
+unavailable (503 or a disconnected leaf), invalid response (400 or malformed
+metadata), denied (403), rate limited (429), and timeout. None proves empty or
+healthy traffic. Check the configured full hub/leaf identities, the exact enabled
+route and independent `observe` grant at both nodes. Do not add a leaf listener
+or custody transport as a fallback. Collector changes apply on restart.
+
+Previously validated observations may remain visible as stale, labeled `via hub`
+with their original ages. Restart, denied access and changed scope hide history
+until validation succeeds. Missing or inconsistent stored relay origin refuses
+the history rather than treating it as direct. Downgrading to an older collector
+destructively purges relay history; save any required operational evidence before
+choosing that downgrade. See [relay configuration](/operations/fleet-observer/#collector-relay-source-planned).
