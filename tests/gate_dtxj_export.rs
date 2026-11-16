@@ -199,6 +199,10 @@ impl Fixture {
         content: &'static str,
         chunked: bool,
     ) -> (u16, Value) {
+        tokio::time::timeout(Duration::from_secs(8), sender.ready())
+            .await
+            .unwrap()
+            .unwrap();
         let mut request = hyper::Request::get(uri).header("host", "localhost");
         if chunked {
             request = request.header("transfer-encoding", "chunked");
@@ -854,8 +858,69 @@ async fn handshake_spanning_reload_does_not_acquire_the_new_policy_witness() {
     assert_eq!(fixture.request("/fed/v2/observe/events").await.0, 200);
 }
 
+async fn held_dispatcher_readiness_control() {
+    let (client, server) = tokio::io::duplex(4096);
+    let (mut sender, connection) =
+        hyper::client::conn::http1::handshake::<_, Full<Bytes>>(TokioIo::new(client))
+            .await
+            .unwrap();
+    let requests = Arc::new(AtomicU64::new(0));
+    let observed = requests.clone();
+    let server = tokio::spawn(async move {
+        let service =
+            hyper::service::service_fn(move |_request: hyper::Request<hyper::body::Incoming>| {
+                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async {
+                    Ok::<_, std::convert::Infallible>(hyper::Response::new(Full::new(
+                        Bytes::from_static(b"{}"),
+                    )))
+                }
+            });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(server), service)
+            .await;
+    });
+    let first = sender.send_request(
+        hyper::Request::get("/first")
+            .header("host", "localhost")
+            .body(Full::new(Bytes::new()))
+            .unwrap(),
+    );
+    assert!(
+        !sender.is_ready(),
+        "forced control did not consume the buffered slot"
+    );
+    let second = Fixture::exchange(&mut sender, "/second", "");
+    tokio::pin!(second);
+    let initial = std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(std::future::Future::poll(second.as_mut(), cx))
+    })
+    .await;
+    assert!(
+        initial.is_pending(),
+        "fixture sent before the paused dispatcher was released"
+    );
+    let driver = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let response = tokio::time::timeout(Duration::from_secs(8), first)
+        .await
+        .unwrap()
+        .unwrap();
+    response.into_body().collect().await.unwrap();
+    assert_eq!(second.await.0, 200);
+    assert_eq!(
+        requests.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "fixture retried or replaced a request"
+    );
+    driver.abort();
+    server.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_hub_resolver_cannot_restore_revoked_observe_authority() {
+    held_dispatcher_readiness_control().await;
     let mut fixture = Fixture::new(&["observe"]).await;
     let ca_file = fixture.ca_identity();
     let hub = |rights: Vec<&str>| {
