@@ -63,12 +63,13 @@ def edit(tree, item):
 
 
 def instrument(tree, case, nonce):
+    # Preserve frozen assertion line numbers for panic-location contracts.
     marker = f"enroll-arm nonce={nonce} case={case['label']}"
     file = tree / case["test_file"]
     text = file.read_text()
     name = case["test"].split("::")[-1]
     pattern = rf"(\b(?:async\s+)?fn\s+{re.escape(name)}\s*\([^)]*\)\s*\{{)"
-    text, count = re.subn(pattern, lambda m: m[0] + f'\n eprintln!("{marker}");', text)
+    text, count = re.subn(pattern, lambda m: m[0] + f" eprintln!(\"{marker}\");", text)
     if count == 0 and case.get("test_macro"):
         macro = case["test_macro"]
         assert re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", macro)
@@ -77,7 +78,7 @@ def instrument(tree, case, nonce):
         assert invocation and definition and definition.end() < invocation.start(), "named macro test missing"
         start, end = definition.end(), invocation.start()
         fragment, count = re.subn(r"(\b(?:async\s+)?fn\s+\$name\s*\([^)]*\)\s*\{)",
-                                  lambda m: m[0] + f'\n eprintln!("{marker}");', text[start:end])
+                                  lambda m: m[0] + f" eprintln!(\"{marker}\");", text[start:end])
         text = text[:start] + fragment + text[end:]
     assert count == 1, (case["test"], "named test instrumentation missing")
     file.write_text(text)

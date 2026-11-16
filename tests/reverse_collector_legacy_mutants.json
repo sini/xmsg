@@ -12,7 +12,11 @@
         "replacement": "claims.get(\"active\").and_then(Value::as_bool).is_none()"
       }
     ],
-    "test_macro": "denied_claim"
+    "test_macro": "denied_claim",
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 211,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_macro_literal"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-active-type",
@@ -27,7 +31,11 @@
         "replacement": "claims.get(\"active\").and_then(|value| value.as_bool().or_else(|| value.as_str().map(|s| s == \"true\"))) != Some(true)"
       }
     ],
-    "test_macro": "denied_claim"
+    "test_macro": "denied_claim",
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 211,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_macro_literal"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-issuer",
@@ -42,7 +50,11 @@
         "replacement": "false"
       }
     ],
-    "test_macro": "denied_claim"
+    "test_macro": "denied_claim",
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 211,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_macro_literal"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-missing-issuer",
@@ -57,7 +69,11 @@
         "replacement": "claims.get(\"iss\").and_then(Value::as_str).unwrap_or(self.config.issuer.as_str()) != self.config.issuer.as_str()"
       }
     ],
-    "test_macro": "absent_claim"
+    "test_macro": "absent_claim",
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 536,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_macro_literal"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-subject",
@@ -72,7 +88,11 @@
         "replacement": ".any(|_allowed| true)"
       }
     ],
-    "test_macro": "denied_claim"
+    "test_macro": "denied_claim",
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 211,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_macro_literal"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-missing-subject",
@@ -87,7 +107,11 @@
         "replacement": ".get(\"sub\")\n            .and_then(Value::as_str)\n            .unwrap_or(self.config.subjects[0].as_str())"
       }
     ],
-    "test_macro": "absent_claim"
+    "test_macro": "absent_claim",
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 536,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_macro_literal"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-audience",
@@ -102,7 +126,11 @@
         "replacement": "Some(Value::String(_aud)) => true"
       }
     ],
-    "test_macro": "denied_claim"
+    "test_macro": "denied_claim",
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 211,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_macro_literal"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-audience-cardinality",
@@ -117,7 +145,11 @@
         "replacement": "!aud.is_empty() && aud[0].as_str() == Some(self.config.audience.as_str())"
       }
     ],
-    "test_macro": "denied_claim"
+    "test_macro": "denied_claim",
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 211,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_macro_literal"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-client",
@@ -132,7 +164,11 @@
         "replacement": "if false && client != &self.config.hosted_client"
       }
     ],
-    "test_macro": "denied_claim"
+    "test_macro": "denied_claim",
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 211,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_macro_literal"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-client-type",
@@ -148,7 +184,11 @@
         "start": "let client = match"
       }
     ],
-    "test_macro": "denied_claim"
+    "test_macro": "denied_claim",
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 211,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_macro_literal"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-missing-client",
@@ -163,7 +203,11 @@
         "replacement": "_ => &self.config.hosted_client,",
         "start": "let client = match"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 320,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-client-conflict",
@@ -177,7 +221,11 @@
         "needle": "if client == azp => client",
         "replacement": "if true || client == azp => client"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 284,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-expiry",
@@ -192,7 +240,11 @@
         "replacement": "if false && expires_at <= now"
       }
     ],
-    "test_macro": "denied_claim"
+    "test_macro": "denied_claim",
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 211,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_macro_literal"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-expiry-type",
@@ -207,7 +259,11 @@
         "replacement": ".get(\"exp\")\n            .and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()))"
       }
     ],
-    "test_macro": "denied_claim"
+    "test_macro": "denied_claim",
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 211,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_macro_literal"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-missing-expiry",
@@ -222,7 +278,11 @@
         "replacement": ".get(\"exp\")\n            .and_then(Value::as_u64)\n            .unwrap_or(u64::MAX)"
       }
     ],
-    "test_macro": "absent_claim"
+    "test_macro": "absent_claim",
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 536,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_macro_literal"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-not-before",
@@ -237,7 +297,11 @@
         "replacement": "if false && not_before > now"
       }
     ],
-    "test_macro": "denied_claim"
+    "test_macro": "denied_claim",
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 211,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_macro_literal"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-not-before-type",
@@ -252,7 +316,11 @@
         "replacement": "value.as_u64().unwrap_or(0)"
       }
     ],
-    "test_macro": "denied_claim"
+    "test_macro": "denied_claim",
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 211,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_macro_literal"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-every-request",
@@ -277,21 +345,29 @@
         "needle": "        tokio::time::timeout(Duration::from_secs(2), self.introspect(token))\n            .await\n            .map_err(|_| AuthError::Unavailable)?",
         "replacement": "        let cached = { self.cached_owner.lock().unwrap().clone() };\n        if let Some((subject, expires_at)) = cached {\n            return Ok(VerifiedOwner { subject, expires_at });\n        }\n        let owner = tokio::time::timeout(Duration::from_secs(2), self.introspect(token))\n            .await.map_err(|_| AuthError::Unavailable)??;\n        *self.cached_owner.lock().unwrap() = Some((owner.subject.clone(), owner.expires_at));\n        Ok(owner)"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 330,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-identity-header",
     "target": "lib",
     "test": "observe_collector_auth::tests::identity_header_fallback",
     "test_file": "src/observe_collector_auth_tests.rs",
-    "expected_literal": "identity headers must not authorize",
+    "expected_literal": "panicked at src/observe_collector_auth_tests.rs:549",
     "edits": [
       {
         "file": "src/observe_collector_auth.rs",
         "needle": "let token = bearer(headers)?;",
         "replacement": "if headers.contains_key(\"x-auth-request-user\") { return Ok(VerifiedOwner { subject: self.config.subjects[0].clone(), expires_at: 2000 }); }\n        let token = bearer(headers)?;"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 549,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "source_location"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-bearer-limit",
@@ -305,7 +381,11 @@
         "needle": "token.len() > 8192",
         "replacement": "token.len() > 8193"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 407,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-header-limit",
@@ -319,7 +399,11 @@
         "needle": "if size > 16_384",
         "replacement": "if size > 16_385"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 427,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-stream-limit",
@@ -333,7 +417,11 @@
         "needle": "bytes.len().saturating_add(chunk.len()) > 65_536",
         "replacement": "bytes.len().saturating_add(chunk.len()) > 65_537"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 446,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-provider-status",
@@ -347,7 +435,11 @@
         "needle": "response.status() != StatusCode::OK",
         "replacement": "!response.status().is_success()"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 457,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-provider-redirect",
@@ -361,7 +453,11 @@
         "needle": ".redirect(Policy::none())",
         "replacement": ".redirect(Policy::limited(1))"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 469,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-provider-deadline",
@@ -375,7 +471,11 @@
         "needle": "Duration::from_secs(2)",
         "replacement": "Duration::from_secs(60)"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 483,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-bearer-scheme",
@@ -389,7 +489,11 @@
         "needle": "!scheme.eq_ignore_ascii_case(\"Bearer\")",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 372,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-bearer-duplicates",
@@ -403,7 +507,11 @@
         "needle": "if values.next().is_some()",
         "replacement": "if false && values.next().is_some()"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 379,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-bearer-grammar",
@@ -417,7 +525,11 @@
         "needle": ".all(|b| b.is_ascii_alphanumeric() || b\"-._~+/\".contains(&b))",
         "replacement": ".all(|_b| true)"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 372,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-provider-tls",
@@ -431,7 +543,11 @@
         "needle": "Client::builder().https_only(true)",
         "replacement": "Client::builder().danger_accept_invalid_certs(true).https_only(true)"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 562,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-provider-https",
@@ -445,7 +561,11 @@
         "needle": "endpoint.scheme() != \"https\"",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 577,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-mounted-secret-limit",
@@ -459,7 +579,11 @@
         "needle": "bytes.len() as u64 > limit",
         "replacement": "bytes.len() as u64 > limit + 1"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 518,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-audience-array",
@@ -473,7 +597,11 @@
         "needle": "aud[0].as_str() == Some(self.config.audience.as_str())",
         "replacement": "true"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 591,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-audience-array-type",
@@ -487,7 +615,11 @@
         "needle": "aud[0].as_str() == Some(self.config.audience.as_str())",
         "replacement": "aud[0].as_str().or(Some(self.config.audience.as_str())) == Some(self.config.audience.as_str())"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 604,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-bearer-separator",
@@ -501,7 +633,11 @@
         "needle": "token.trim_start_matches(' ')",
         "replacement": "token"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_auth_tests.rs",
+    "assertion_line": 388,
+    "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-inventory-cap",
@@ -515,7 +651,11 @@
         "needle": "config.sources.len() > 64",
         "replacement": "config.sources.len() > 65"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 214,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-inventory-unique",
@@ -529,7 +669,11 @@
         "needle": "!names.insert(source.node.clone())",
         "replacement": "{ names.insert(source.node.clone()); false }"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 205,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-outbound-visible",
@@ -543,7 +687,11 @@
         "needle": "if !source.supported {",
         "replacement": "if false {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 192,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-spacing",
@@ -557,7 +705,11 @@
         "needle": "now.duration_since(last) < Duration::from_secs(2)",
         "replacement": "now.duration_since(last) < Duration::from_secs(0)"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 179,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-node-reservation",
@@ -571,21 +723,29 @@
         "needle": "slot: Arc::new(Semaphore::new(1))",
         "replacement": "slot: Arc::new(Semaphore::new(2))"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 511,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-global-reservation",
     "target": "lib",
     "test": "observe_collector_net::tests::node_and_global_reservations_survive_forced_races",
     "test_file": "src/observe_collector_net_tests.rs",
-    "expected_literal": "global request reservation exceeded eight",
+    "expected_literal": "panicked at src/observe_collector_net_tests.rs:274",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
         "needle": "slots: Arc::new(Semaphore::new(8))",
         "replacement": "slots: Arc::new(Semaphore::new(9))"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 274,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "specific-panic-location"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-wire-byte-cap",
@@ -599,7 +759,11 @@
         "needle": "Limited::new(response.into_body(), 256 * 1024)",
         "replacement": "Limited::new(response.into_body(), 257 * 1024)"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 305,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-wire-encoding",
@@ -613,7 +777,11 @@
         "needle": ".is_some_and(|v| v != \"identity\")",
         "replacement": ".is_some_and(|_| false)"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 322,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-wire-denial",
@@ -627,7 +795,11 @@
         "needle": "response.status() == hyper::StatusCode::FORBIDDEN",
         "replacement": "response.status() == hyper::StatusCode::UNAUTHORIZED"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 328,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-rate-upper",
@@ -641,7 +813,11 @@
         "needle": ".clamp(2, 60)",
         "replacement": ".clamp(2, 120)"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 334,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-rate-lower",
@@ -655,7 +831,11 @@
         "needle": ".clamp(2, 60)",
         "replacement": ".clamp(0, 60)"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 341,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-redirect-refusal",
@@ -669,21 +849,29 @@
         "needle": "if response.status() != hyper::StatusCode::OK {",
         "replacement": "if false {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 348,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-rpc-deadline",
     "target": "lib",
     "test": "observe_collector_net::tests::whole_rpc_deadline_aborts_header_and_body_drivers",
     "test_file": "src/observe_collector_net_tests.rs",
-    "expected_literal": "whole exporter request exceeded five-second deadline",
+    "expected_literal": "panicked at src/observe_collector_net_tests.rs:376",
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
         "needle": "tokio::time::timeout(Duration::from_secs(5), async move {",
         "replacement": "tokio::time::timeout(Duration::from_secs(6), async move {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 376,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "specific-panic-location"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-driver-abort",
@@ -697,7 +885,11 @@
         "needle": "self.0.abort();",
         "replacement": "let _ = &self.0;"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 495,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-dns-lease",
@@ -711,7 +903,11 @@
         "needle": "    let (resolved, leases) = tokio::task::spawn_blocking(move || (lookup(), leases))\n        .await\n        .map_err(|_| Error::Unavailable)?;",
         "replacement": "    let resolved = tokio::task::spawn_blocking(lookup)\n        .await\n        .map_err(|_| Error::Unavailable)?;"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 445,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-browser-filter",
@@ -725,7 +921,11 @@
         "needle": "\"node\" if !seen_node && number < nodes",
         "replacement": "\"node\" if !seen_node && number <= nodes"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_web_tests.rs",
+    "assertion_line": 100,
+    "assertion_sha256": "be83d669234cb3f8c4feaa5e55afb253f204fb81aeee437cb87fb7f2302db194",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-browser-page",
@@ -739,7 +939,11 @@
         "needle": "\"page\" if !seen_page && number < 50",
         "replacement": "\"page\" if !seen_page && number <= 50"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_web_tests.rs",
+    "assertion_line": 100,
+    "assertion_sha256": "be83d669234cb3f8c4feaa5e55afb253f204fb81aeee437cb87fb7f2302db194",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-html-escape",
@@ -759,7 +963,11 @@
     "binaries": [
       "xmsg"
     ],
-    "browser_required": true
+    "browser_required": true,
+    "assertion_file": "tests/dtxj_collector_browser.py",
+    "assertion_line": 45,
+    "assertion_sha256": "c03115aa6c6567d4e5c44bc786dc0b8ac7d0ee42ec8cb197cbc8c2b06eac13fb",
+    "assertion_rule": "transitive-python-static-message"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-svg-escape",
@@ -779,7 +987,11 @@
     "binaries": [
       "xmsg"
     ],
-    "browser_required": true
+    "browser_required": true,
+    "assertion_file": "tests/dtxj_collector_browser.py",
+    "assertion_line": 45,
+    "assertion_sha256": "c03115aa6c6567d4e5c44bc786dc0b8ac7d0ee42ec8cb197cbc8c2b06eac13fb",
+    "assertion_rule": "transitive-python-static-message"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-row-cap",
@@ -793,7 +1005,11 @@
         "needle": "pub const PAGE_ROWS: usize = 200;",
         "replacement": "pub const PAGE_ROWS: usize = 201;"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_web_tests.rs",
+    "assertion_line": 207,
+    "assertion_sha256": "be83d669234cb3f8c4feaa5e55afb253f204fb81aeee437cb87fb7f2302db194",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-object-cap",
@@ -807,7 +1023,11 @@
         "needle": "pub const MAX_ENDPOINTS: usize = 200;",
         "replacement": "pub const MAX_ENDPOINTS: usize = 201;"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_web_tests.rs",
+    "assertion_line": 212,
+    "assertion_sha256": "be83d669234cb3f8c4feaa5e55afb253f204fb81aeee437cb87fb7f2302db194",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-html-byte-cap",
@@ -821,21 +1041,29 @@
         "needle": "self.html.len() + part.len() + 180 <= self.cap",
         "replacement": "true"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_web_tests.rs",
+    "assertion_line": 228,
+    "assertion_sha256": "be83d669234cb3f8c4feaa5e55afb253f204fb81aeee437cb87fb7f2302db194",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-refresh",
     "target": "lib",
     "test": "observe_collector_web::tests::presentation_preserves_boundaries_and_separate_clocks",
     "test_file": "src/observe_collector_web_tests.rs",
-    "expected_literal": "missing presentation fact: content=",
+    "expected_literal": "missing presentation fact: ",
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
         "needle": "content=\\\"5\\\"",
         "replacement": "content=\\\"1\\\""
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_web_tests.rs",
+    "assertion_line": 178,
+    "assertion_sha256": "be83d669234cb3f8c4feaa5e55afb253f204fb81aeee437cb87fb7f2302db194",
+    "assertion_rule": "formatted-static-prefix"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-hidden-render",
@@ -849,35 +1077,47 @@
         "needle": "if node.history_hidden {",
         "replacement": "if false {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_web_tests.rs",
+    "assertion_line": 191,
+    "assertion_sha256": "be83d669234cb3f8c4feaa5e55afb253f204fb81aeee437cb87fb7f2302db194",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-backfill-render",
     "target": "lib",
     "test": "observe_collector_web::tests::presentation_preserves_boundaries_and_separate_clocks",
     "test_file": "src/observe_collector_web_tests.rs",
-    "expected_literal": "missing presentation fact: Backfill pending",
+    "expected_literal": "missing presentation fact: ",
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
         "needle": "if node.backfill {",
         "replacement": "if false {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_web_tests.rs",
+    "assertion_line": 178,
+    "assertion_sha256": "be83d669234cb3f8c4feaa5e55afb253f204fb81aeee437cb87fb7f2302db194",
+    "assertion_rule": "formatted-static-prefix"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-partial-render",
     "target": "lib",
     "test": "observe_collector_web::tests::presentation_preserves_boundaries_and_separate_clocks",
     "test_file": "src/observe_collector_web_tests.rs",
-    "expected_literal": "missing presentation fact: Availability: partial",
+    "expected_literal": "missing presentation fact: ",
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
         "needle": "name(snapshot.snapshot.available)",
         "replacement": "\"available\""
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_web_tests.rs",
+    "assertion_line": 178,
+    "assertion_sha256": "be83d669234cb3f8c4feaa5e55afb253f204fb81aeee437cb87fb7f2302db194",
+    "assertion_rule": "formatted-static-prefix"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-lane-facts",
@@ -891,7 +1131,11 @@
         "needle": "if event.from.is_some() || event.to.is_some() {",
         "replacement": "if true {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_web_tests.rs",
+    "assertion_line": 284,
+    "assertion_sha256": "be83d669234cb3f8c4feaa5e55afb253f204fb81aeee437cb87fb7f2302db194",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-cache-header",
@@ -905,7 +1149,11 @@
         "needle": "headers.insert(\"cache-control\", \"no-store\".parse().unwrap());",
         "replacement": "headers.insert(\"cache-control\", \"public\".parse().unwrap());"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 19,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-nosniff-header",
@@ -919,7 +1167,11 @@
         "needle": "headers.insert(\"x-content-type-options\", \"nosniff\".parse().unwrap());",
         "replacement": "headers.insert(\"x-content-type-options\", \"sniff\".parse().unwrap());"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 24,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-header-cap",
@@ -933,14 +1185,18 @@
         "needle": "if header_bytes > 16 * 1024 {",
         "replacement": "if header_bytes > 17 * 1024 {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 582,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-request-cap",
     "target": "lib",
     "test": "observe_collector::tests::request_saturation_has_no_admission_waiters",
     "test_file": "src/observe_collector_tests.rs",
-    "expected_literal": "web request admission exceeded eight",
+    "expected_literal": "panicked at src/observe_collector_tests.rs:311",
     "edits": [
       {
         "file": "src/observe_collector.rs",
@@ -949,21 +1205,29 @@
         "start": "fn request_slots()",
         "end": "fn connection_slots()"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 311,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "specific-panic-location"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-connection-cap",
     "target": "lib",
     "test": "observe_collector::tests::connection_saturation_refuses_without_an_accept_waiter",
     "test_file": "src/observe_collector_tests.rs",
-    "expected_literal": "web connection reservation exceeded 64",
+    "expected_literal": "panicked at src/observe_collector_tests.rs:502",
     "edits": [
       {
         "file": "src/observe_collector.rs",
         "needle": "Arc::new(Semaphore::new(64))",
         "replacement": "Arc::new(Semaphore::new(65))"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 502,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "specific-panic-location"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-header-deadline",
@@ -977,7 +1241,11 @@
         "needle": ".header_read_timeout(Duration::from_secs(5))",
         "replacement": ".header_read_timeout(Duration::from_secs(7))"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 556,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-web-tls",
@@ -991,7 +1259,11 @@
         "needle": "if !listen.ip().is_loopback() {",
         "replacement": "if false {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 403,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-denial-overlay",
@@ -1007,7 +1279,11 @@
         "start": "async fn mark_error(",
         "end": "    let _ = store_call("
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 378,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-scope-overlay",
@@ -1021,7 +1297,11 @@
         "needle": "if scopes.get(node).is_some_and(|old| old != scope) {",
         "replacement": "if false {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 466,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-owner-backend",
@@ -1035,7 +1315,11 @@
         "needle": "self.verifier.authorize(request.headers()).await",
         "replacement": "async { Ok::<_, crate::observe_collector_auth::AuthError>(crate::observe_collector_auth::VerifiedOwner {subject:\"fixture\".into(),expires_at:2000}) }.await"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 227,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-health-minimization",
@@ -1049,7 +1333,11 @@
         "needle": "return response(StatusCode::OK, \"available\\n\", false);",
         "replacement": "return response(StatusCode::OK, self.nodes.join(\",\"), false);"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 264,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-entry-passive",
@@ -1066,7 +1354,11 @@
     ],
     "binaries": [
       "xmsg"
-    ]
+    ],
+    "assertion_file": "tests/gate_dtxj_collector.rs",
+    "assertion_line": 427,
+    "assertion_sha256": "57175348e6945dc82d1095331751e6ea9b7b23b5e09d6e62f1321d74b74b23e7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-primary-write-passive",
@@ -1083,7 +1375,11 @@
     ],
     "binaries": [
       "xmsg"
-    ]
+    ],
+    "assertion_file": "tests/gate_dtxj_collector.rs",
+    "assertion_line": 557,
+    "assertion_sha256": "57175348e6945dc82d1095331751e6ea9b7b23b5e09d6e62f1321d74b74b23e7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-html-label-context",
@@ -1101,7 +1397,11 @@
     "binaries": [
       "xmsg"
     ],
-    "browser_required": true
+    "browser_required": true,
+    "assertion_file": "tests/dtxj_collector_browser.py",
+    "assertion_line": 45,
+    "assertion_sha256": "c03115aa6c6567d4e5c44bc786dc0b8ac7d0ee42ec8cb197cbc8c2b06eac13fb",
+    "assertion_rule": "transitive-python-static-message"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-svg-label-context",
@@ -1119,7 +1419,11 @@
     "binaries": [
       "xmsg"
     ],
-    "browser_required": true
+    "browser_required": true,
+    "assertion_file": "tests/dtxj_collector_browser.py",
+    "assertion_line": 45,
+    "assertion_sha256": "c03115aa6c6567d4e5c44bc786dc0b8ac7d0ee42ec8cb197cbc8c2b06eac13fb",
+    "assertion_rule": "transitive-python-static-message"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-svg-from-context",
@@ -1137,7 +1441,11 @@
     "binaries": [
       "xmsg"
     ],
-    "browser_required": true
+    "browser_required": true,
+    "assertion_file": "tests/dtxj_collector_browser.py",
+    "assertion_line": 45,
+    "assertion_sha256": "c03115aa6c6567d4e5c44bc786dc0b8ac7d0ee42ec8cb197cbc8c2b06eac13fb",
+    "assertion_rule": "transitive-python-static-message"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-svg-to-context",
@@ -1155,105 +1463,137 @@
     "binaries": [
       "xmsg"
     ],
-    "browser_required": true
+    "browser_required": true,
+    "assertion_file": "tests/dtxj_collector_browser.py",
+    "assertion_line": 45,
+    "assertion_sha256": "c03115aa6c6567d4e5c44bc786dc0b8ac7d0ee42ec8cb197cbc8c2b06eac13fb",
+    "assertion_rule": "transitive-python-static-message"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-csp-script",
     "target": "lib",
     "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
     "test_file": "src/observe_collector_web_tests.rs",
-    "expected_literal": "script-src 'none'",
+    "expected_literal": "panicked at src/observe_collector_web_tests.rs:257",
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
         "needle": "script-src 'none'",
         "replacement": "script-src 'self'"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_web_tests.rs",
+    "assertion_line": 257,
+    "assertion_sha256": "be83d669234cb3f8c4feaa5e55afb253f204fb81aeee437cb87fb7f2302db194",
+    "assertion_rule": "specific-panic-location"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-csp-style",
     "target": "lib",
     "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
     "test_file": "src/observe_collector_web_tests.rs",
-    "expected_literal": "style-src 'sha256-",
+    "expected_literal": "panicked at src/observe_collector_web_tests.rs:258",
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
         "needle": "style-src 'sha256-{hash}'",
         "replacement": "style-src 'unsafe-inline'"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_web_tests.rs",
+    "assertion_line": 258,
+    "assertion_sha256": "be83d669234cb3f8c4feaa5e55afb253f204fb81aeee437cb87fb7f2302db194",
+    "assertion_rule": "specific-panic-location"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-csp-self-assets",
     "target": "lib",
     "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
     "test_file": "src/observe_collector_web_tests.rs",
-    "expected_literal": "missing policy: default-src 'self'",
+    "expected_literal": "missing policy: ",
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
         "needle": "default-src 'self'",
         "replacement": "default-src *"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_web_tests.rs",
+    "assertion_line": 267,
+    "assertion_sha256": "be83d669234cb3f8c4feaa5e55afb253f204fb81aeee437cb87fb7f2302db194",
+    "assertion_rule": "formatted-static-prefix"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-csp-frame",
     "target": "lib",
     "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
     "test_file": "src/observe_collector_web_tests.rs",
-    "expected_literal": "missing policy: frame-src 'none'",
+    "expected_literal": "missing policy: ",
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
         "needle": "frame-src 'none'",
         "replacement": "frame-src 'self'"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_web_tests.rs",
+    "assertion_line": 267,
+    "assertion_sha256": "be83d669234cb3f8c4feaa5e55afb253f204fb81aeee437cb87fb7f2302db194",
+    "assertion_rule": "formatted-static-prefix"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-csp-frame-ancestors",
     "target": "lib",
     "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
     "test_file": "src/observe_collector_web_tests.rs",
-    "expected_literal": "missing policy: frame-ancestors 'none'",
+    "expected_literal": "missing policy: ",
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
         "needle": "frame-ancestors 'none'",
         "replacement": "frame-ancestors 'self'"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_web_tests.rs",
+    "assertion_line": 267,
+    "assertion_sha256": "be83d669234cb3f8c4feaa5e55afb253f204fb81aeee437cb87fb7f2302db194",
+    "assertion_rule": "formatted-static-prefix"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-csp-object",
     "target": "lib",
     "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
     "test_file": "src/observe_collector_web_tests.rs",
-    "expected_literal": "missing policy: object-src 'none'",
+    "expected_literal": "missing policy: ",
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
         "needle": "object-src 'none'",
         "replacement": "object-src 'self'"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_web_tests.rs",
+    "assertion_line": 267,
+    "assertion_sha256": "be83d669234cb3f8c4feaa5e55afb253f204fb81aeee437cb87fb7f2302db194",
+    "assertion_rule": "formatted-static-prefix"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-csp-base",
     "target": "lib",
     "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
     "test_file": "src/observe_collector_web_tests.rs",
-    "expected_literal": "missing policy: base-uri 'none'",
+    "expected_literal": "missing policy: ",
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
         "needle": "base-uri 'none'",
         "replacement": "base-uri 'self'"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_web_tests.rs",
+    "assertion_line": 267,
+    "assertion_sha256": "be83d669234cb3f8c4feaa5e55afb253f204fb81aeee437cb87fb7f2302db194",
+    "assertion_rule": "formatted-static-prefix"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-web-transport-deadline",
@@ -1267,7 +1607,11 @@
         "needle": "let _ = tokio::time::timeout_at(deadline, connection).await;",
         "replacement": "let _ = deadline; let _ = connection.await;"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 672,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-web-preparation-deadline",
@@ -1281,7 +1625,11 @@
         "needle": "const WEB_BUDGET: Duration = Duration::from_secs(5);",
         "replacement": "const WEB_BUDGET: Duration = Duration::from_secs(6);"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 710,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-snapshot-backoff-application",
@@ -1295,7 +1643,11 @@
         "needle": "next_start = tokio::time::Instant::now() + Duration::from_secs(seconds);",
         "replacement": "next_start = tokio::time::Instant::now() + Duration::from_secs(0);"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 814,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-events-backoff-application",
@@ -1309,7 +1661,11 @@
         "needle": "next_start = tokio::time::Instant::now() + Duration::from_secs(seconds);",
         "replacement": "next_start = tokio::time::Instant::now() + Duration::from_secs(0);"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 814,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-idle-maintenance-wiring",
@@ -1323,7 +1679,11 @@
         "needle": "tasks.spawn(maintain(state));",
         "replacement": "drop(state);"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 962,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-idle-maintenance-call",
@@ -1337,7 +1697,11 @@
         "needle": "store.maintain()",
         "replacement": "Ok(())"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 962,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-trust-pin",
@@ -1353,7 +1717,11 @@
         "start": "impl rustls::client::danger::ServerCertVerifier for PinnedServerCertVerifier",
         "end": "fn verify_tls12_signature("
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 618,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-trust-ca-chain",
@@ -1369,7 +1737,11 @@
         "start": "impl rustls::client::danger::ServerCertVerifier for CaServerCertVerifier",
         "end": "fn verify_tls12_signature("
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 628,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-trust-ca-uri-count",
@@ -1385,7 +1757,11 @@
         "start": "impl rustls::client::danger::ServerCertVerifier for CaServerCertVerifier",
         "end": "fn verify_tls12_signature("
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 655,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-trust-ca-uri-match",
@@ -1401,7 +1777,11 @@
         "start": "impl rustls::client::danger::ServerCertVerifier for CaServerCertVerifier",
         "end": "fn verify_tls12_signature("
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 668,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-am6-pin-hookup",
@@ -1417,7 +1797,11 @@
         "start": "pub fn make_tls_connector_with_credentials(",
         "end": "pub fn make_tls_acceptor("
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 704,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-am6-pin-refusal",
@@ -1433,7 +1817,11 @@
         "start": "impl rustls::client::danger::ServerCertVerifier for PinnedServerCertVerifier",
         "end": "fn verify_tls12_signature("
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 704,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-am6-ca-hookup",
@@ -1449,7 +1837,11 @@
         "start": "pub fn make_tls_connector_with_credentials(",
         "end": "pub fn make_tls_acceptor("
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 704,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-am6-ca-refusal",
@@ -1465,7 +1857,11 @@
         "start": "impl rustls::client::danger::ServerCertVerifier for CaServerCertVerifier",
         "end": "fn verify_tls12_signature("
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 704,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-configured-node-binding",
@@ -1480,77 +1876,101 @@
         "replacement": "!= source.node && false",
         "start": "if source.ca.is_some() {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 221,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-wire-unknown-event",
     "target": "lib",
     "test": "observe_collector_net::tests::incoming_unknown_event_refuses",
     "test_file": "src/observe_collector_net_tests.rs",
-    "expected_literal": "incoming unknown field was accepted: event",
+    "expected_literal": "incoming unknown field was accepted: ",
     "edits": [
       {
         "file": "src/observe_export.rs",
         "needle": "#[serde(deny_unknown_fields)]\npub struct ExportEvent",
         "replacement": "pub struct ExportEvent"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 751,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "formatted-static-prefix"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-wire-unknown-gap",
     "target": "lib",
     "test": "observe_collector_net::tests::incoming_unknown_gap_refuses",
     "test_file": "src/observe_collector_net_tests.rs",
-    "expected_literal": "incoming unknown field was accepted: gap",
+    "expected_literal": "incoming unknown field was accepted: ",
     "edits": [
       {
         "file": "src/observe_export.rs",
         "needle": "#[serde(deny_unknown_fields)]\npub struct ExportGap",
         "replacement": "pub struct ExportGap"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 751,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "formatted-static-prefix"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-wire-unknown-page",
     "target": "lib",
     "test": "observe_collector_net::tests::incoming_unknown_page_refuses",
     "test_file": "src/observe_collector_net_tests.rs",
-    "expected_literal": "incoming unknown field was accepted: page",
+    "expected_literal": "incoming unknown field was accepted: ",
     "edits": [
       {
         "file": "src/observe_export.rs",
         "needle": "#[serde(deny_unknown_fields)]\npub struct ExportPage",
         "replacement": "pub struct ExportPage"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 751,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "formatted-static-prefix"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-wire-unknown-endpoint",
     "target": "lib",
     "test": "observe_collector_net::tests::incoming_unknown_endpoint_refuses",
     "test_file": "src/observe_collector_net_tests.rs",
-    "expected_literal": "incoming unknown field was accepted: endpoint",
+    "expected_literal": "incoming unknown field was accepted: ",
     "edits": [
       {
         "file": "src/observe_export.rs",
         "needle": "#[serde(deny_unknown_fields)]\npub struct EndpointDescriptor",
         "replacement": "pub struct EndpointDescriptor"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 751,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "formatted-static-prefix"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-wire-unknown-snapshot",
     "target": "lib",
     "test": "observe_collector_net::tests::incoming_unknown_snapshot_refuses",
     "test_file": "src/observe_collector_net_tests.rs",
-    "expected_literal": "incoming unknown field was accepted: snapshot",
+    "expected_literal": "incoming unknown field was accepted: ",
     "edits": [
       {
         "file": "src/observe_export.rs",
         "needle": "#[serde(deny_unknown_fields)]\npub struct ExportSnapshot",
         "replacement": "pub struct ExportSnapshot"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_net_tests.rs",
+    "assertion_line": 751,
+    "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
+    "assertion_rule": "formatted-static-prefix"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-diagnostics-minimization",
@@ -1567,7 +1987,11 @@
         "needle": "Commands::ObserveCollector(args) => {",
         "replacement": "Commands::ObserveCollector(args) => { eprintln!(\"{}\",std::env::var(\"XMSG_COLLECTOR_FIXTURE_LEAK\").unwrap_or_default());"
       }
-    ]
+    ],
+    "assertion_file": "tests/gate_dtxj_collector.rs",
+    "assertion_line": 575,
+    "assertion_sha256": "57175348e6945dc82d1095331751e6ea9b7b23b5e09d6e62f1321d74b74b23e7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-html-token-minimization",
@@ -1584,203 +2008,263 @@
         "needle": "web::render(&summaries, detail.as_ref(), filter)",
         "replacement": "format!(\"{}{}\",web::render(&summaries, detail.as_ref(), filter),request.headers().get(\"authorization\").and_then(|h|h.to_str().ok()).unwrap_or_default())"
       }
-    ]
+    ],
+    "assertion_file": "tests/gate_dtxj_collector.rs",
+    "assertion_line": 509,
+    "assertion_sha256": "57175348e6945dc82d1095331751e6ea9b7b23b5e09d6e62f1321d74b74b23e7",
+    "assertion_rule": "static-message-unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-wire-version",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
-    "expected_literal": "invalid field accepted: /v",
+    "expected_literal": "invalid field accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "page.v != 1",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 245,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-wire-node",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
-    "expected_literal": "invalid field accepted: /node",
+    "expected_literal": "invalid field accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "page.node != policy.node",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 245,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-wire-epoch",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
-    "expected_literal": "invalid field accepted: /epoch",
+    "expected_literal": "invalid field accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "!valid_epoch(&page.epoch)",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 245,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-wire-scope",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
-    "expected_literal": "invalid field accepted: /scope",
+    "expected_literal": "invalid field accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "!valid_scope(&page.scope)",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 245,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-wire-available",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
-    "expected_literal": "invalid field accepted: /available",
+    "expected_literal": "invalid field accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "!page.available",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 245,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-wire-sequence",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
-    "expected_literal": "invalid field accepted: /events/0/sequence",
+    "expected_literal": "invalid field accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "event.sequence <= previous",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 245,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-wire-observed-time",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
-    "expected_literal": "invalid field accepted: /events/0/observed_at",
+    "expected_literal": "invalid field accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "!valid_time(event.observed_at)",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 245,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-wire-persisted-time",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
-    "expected_literal": "invalid field accepted: /events/0/persisted_at",
+    "expected_literal": "invalid field accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "!valid_time(event.persisted_at)",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 245,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-wire-source-time",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
-    "expected_literal": "invalid field accepted: /events/0/source_at",
+    "expected_literal": "invalid field accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "event.source_at.is_some_and(|t| !valid_time(t))",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 245,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-wire-reply-id",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
-    "expected_literal": "invalid field accepted: /events/0/reply_id",
+    "expected_literal": "invalid field accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "event.reply_id.is_some_and(|id| id <= 0)",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 245,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-wire-from",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
-    "expected_literal": "invalid field accepted: /events/0/from",
+    "expected_literal": "invalid field accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "event\n                .from\n                .as_deref()\n                .is_some_and(|id| !identity(&scope, id))",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 245,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-wire-to",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
-    "expected_literal": "invalid field accepted: /events/0/to",
+    "expected_literal": "invalid field accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "event.to.as_deref().is_some_and(|id| !identity(&scope, id))",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 245,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-wire-message_id",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
-    "expected_literal": "invalid field accepted: /events/0/message_id",
+    "expected_literal": "invalid field accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "event\n                .message_id\n                .as_deref()\n                .is_some_and(|id| !correlation(id))",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 245,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-wire-thread_id",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
-    "expected_literal": "invalid field accepted: /events/0/thread_id",
+    "expected_literal": "invalid field accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "event\n                .thread_id\n                .as_deref()\n                .is_some_and(|id| !correlation(id))",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 245,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-wire-row-cap",
@@ -1794,21 +2278,29 @@
         "needle": "page.events.len() > 200",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 587,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-wire-page-bytes",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::wire_count_and_byte_caps_have_positive_controls",
-    "expected_literal": "page byte cap ignored",
+    "expected_literal": "panicked at src/observe_collector_store_tests.rs:602",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "encoded(page, PAGE_BYTES)?;",
         "replacement": "encoded(page, PAGE_BYTES * 2)?;"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 602,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "source_location"
   },
   {
     "label": "legacy-dtxj-collector-store-wire-next",
@@ -1822,7 +2314,11 @@
         "needle": "page.next < previous",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 665,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-wire-progress",
@@ -1836,161 +2332,209 @@
         "needle": "page.has_more && page.next <= after",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 673,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-snapshot-version",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
-    "expected_literal": "invalid snapshot accepted: v",
+    "expected_literal": "invalid snapshot accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "snapshot.v != 1",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 732,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-snapshot-node",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
-    "expected_literal": "invalid snapshot accepted: node",
+    "expected_literal": "invalid snapshot accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "snapshot.node != policy.node",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 732,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-snapshot-scope",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
-    "expected_literal": "invalid snapshot accepted: scope",
+    "expected_literal": "invalid snapshot accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "!valid_scope(&snapshot.scope)",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 732,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-snapshot-time",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
-    "expected_literal": "invalid snapshot accepted: time",
+    "expected_literal": "invalid snapshot accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "!valid_time(snapshot.observed_at)",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 732,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-snapshot-count",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
-    "expected_literal": "invalid snapshot accepted: count",
+    "expected_literal": "invalid snapshot accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "snapshot.endpoints.len() > 200",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 732,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-snapshot-id",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
-    "expected_literal": "invalid snapshot accepted: id",
+    "expected_literal": "invalid snapshot accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "!identity(&scope, &e.id)",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 732,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-snapshot-node-binding",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
-    "expected_literal": "invalid snapshot accepted: endpoint_node",
+    "expected_literal": "invalid snapshot accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "e.id.split_once('@').map(|p| p.1) != Some(e.node.as_str())",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 732,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-snapshot-source-time",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
-    "expected_literal": "invalid snapshot accepted: endpoint_time",
+    "expected_literal": "invalid snapshot accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "e.source_at\n                .is_some_and(|t| !valid_time(t) || t > snapshot.observed_at)",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 732,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-snapshot-label-optin",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
-    "expected_literal": "invalid snapshot accepted: label_opt_in",
+    "expected_literal": "invalid snapshot accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "!policy.labels || s.len() > 256",
         "replacement": "s.len() > 256"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 732,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-snapshot-label-length",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
-    "expected_literal": "invalid snapshot accepted: label_length",
+    "expected_literal": "invalid snapshot accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "!policy.labels || s.len() > 256",
         "replacement": "!policy.labels"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 732,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-snapshot-duplicates",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
-    "expected_literal": "invalid snapshot accepted: duplicate",
+    "expected_literal": "invalid snapshot accepted: ",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "!ids.insert(&e.id)",
         "replacement": "{ let _ = ids.insert(&e.id); false }"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 732,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-startup-mask",
@@ -2006,7 +2550,11 @@
         "start": "fn open_limits",
         "end": "fn lock("
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 133,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-scope-mask",
@@ -2022,7 +2570,11 @@
         "start": "pub fn ingest_page",
         "end": "fn finish"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 838,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-scope-purge",
@@ -2038,7 +2590,11 @@
         "start": "pub fn ingest_page",
         "end": "fn finish"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 296,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-epoch-preservation",
@@ -2054,7 +2610,11 @@
         "start": "pub fn ingest_page",
         "end": "fn finish"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 287,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-epoch-marker",
@@ -2068,7 +2628,11 @@
         "needle": "epoch_changed.then_some(ExportGap {",
         "replacement": "false.then_some(ExportGap {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 288,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-replay-uniqueness",
@@ -2082,7 +2646,11 @@
         "needle": "PRIMARY KEY(node,epoch,sequence)",
         "replacement": "UNIQUE(node,epoch,sequence,receipt)"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 753,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-replay-age",
@@ -2096,7 +2664,11 @@
         "needle": "INSERT OR IGNORE INTO events",
         "replacement": "INSERT OR REPLACE INTO events"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 754,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-atomic-page-cursor",
@@ -2110,7 +2682,11 @@
         "needle": "            c.execute(\n                \"UPDATE nodes SET epoch=?2,scope=?3,next=?4,gaps=?5,backfill=?6 WHERE node=?1\",",
         "replacement": "            c.execute_batch(\"COMMIT; BEGIN IMMEDIATE\")?;\n            c.execute(\n                \"UPDATE nodes SET epoch=?2,scope=?3,next=?4,gaps=?5,backfill=?6 WHERE node=?1\","
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 335,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-rollback-close",
@@ -2124,7 +2700,11 @@
         "needle": "inner.connection.take();",
         "replacement": "let _ = &inner.connection;"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 800,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-ttl-idle",
@@ -2140,7 +2720,11 @@
         "start": "pub fn maintain",
         "end": "pub fn view"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 194,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-ttl-source-base",
@@ -2154,7 +2738,11 @@
         "needle": "event.observed_at.min(now)",
         "replacement": "now"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 358,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-ttl-future-base",
@@ -2168,21 +2756,29 @@
         "needle": "event.observed_at.min(now)",
         "replacement": "event.observed_at"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 368,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-row-retention",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::independent_row_and_byte_limits_include_snapshot",
-    "expected_literal": "retention cap ignored rows=1",
+    "expected_literal": "retention cap ignored rows=",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
         "needle": "if rows > self.limits.rows as i64 {",
         "replacement": "if false {"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 401,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-byte-retention",
@@ -2198,7 +2794,11 @@
         "start": "let mut total =",
         "end": "let mut statement = c.prepare("
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 394,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-physical-cap",
@@ -2217,7 +2817,11 @@
         "needle": "(\"max_page_count\", limits.pages)",
         "replacement": "(\"max_page_count\", limits.pages * 100)"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 510,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-compaction",
@@ -2231,7 +2835,11 @@
         "needle": "PRAGMA incremental_vacuum(64)",
         "replacement": "PRAGMA page_count"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 542,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-secure-deletion",
@@ -2250,7 +2858,11 @@
         "needle": "(\"secure_delete\", 1)",
         "replacement": "(\"secure_delete\", 0)"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 558,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-database-mode",
@@ -2264,7 +2876,11 @@
         "needle": "m.mode() & 0o7777 != 0o600",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 1292,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-database-length",
@@ -2278,7 +2894,11 @@
         "needle": "m.len() > cap",
         "replacement": "{ let _ = cap; false }"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 1287,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-epoch-empty",
@@ -2294,7 +2914,11 @@
         "start": "fn valid_epoch",
         "end": "fn valid_scope"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 623,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-epoch-length",
@@ -2310,7 +2934,11 @@
         "start": "fn valid_epoch",
         "end": "fn valid_scope"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 623,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-epoch-ascii",
@@ -2326,7 +2954,11 @@
         "start": "fn valid_epoch",
         "end": "fn valid_scope"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 623,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-scope-length",
@@ -2342,7 +2974,11 @@
         "start": "fn valid_scope",
         "end": "fn encoded"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 636,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-scope-hex",
@@ -2358,7 +2994,11 @@
         "start": "fn valid_scope",
         "end": "fn encoded"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 636,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-correlation-empty",
@@ -2374,7 +3014,11 @@
         "start": "fn correlation",
         "end": "fn validate_page"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 644,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-correlation-length",
@@ -2390,7 +3034,11 @@
         "start": "fn correlation",
         "end": "fn validate_page"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 644,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-correlation-ascii",
@@ -2406,7 +3054,11 @@
         "start": "fn correlation",
         "end": "fn validate_page"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 644,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-cursor-ahead-reset",
@@ -2420,7 +3072,11 @@
         "needle": "page.gaps.iter().any(|g| g.reason == Reason::CursorAhead)",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 877,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-conflicting-replay",
@@ -2434,7 +3090,11 @@
         "needle": "previous.canonical != *json",
         "replacement": "{ let _ = &previous; false }"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 886,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-snapshot-byte-accounting",
@@ -2448,7 +3108,11 @@
         "needle": "coalesce(length(snapshot),0)+",
         "replacement": ""
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 928,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-snapshot-receipt-replay",
@@ -2462,14 +3126,18 @@
         "needle": "old_fingerprint.as_ref() == Some(&fingerprint)",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 934,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-removed-inventory-events",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::removed_inventory_is_purged_on_restart_and_retained_nodes_expire",
-    "expected_literal": "removed inventory events persisted keep_old=false",
+    "expected_literal": "removed inventory events persisted keep_old=",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
@@ -2478,14 +3146,18 @@
         "start": "fn open_limits",
         "end": "fn lock("
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 1022,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-removed-inventory-snapshot",
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::removed_inventory_is_purged_on_restart_and_retained_nodes_expire",
-    "expected_literal": "removed inventory snapshot persisted keep_old=false",
+    "expected_literal": "removed inventory snapshot persisted keep_old=",
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
@@ -2494,7 +3166,11 @@
         "start": "fn open_limits",
         "end": "fn lock("
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 1026,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_template_prefix"
   },
   {
     "label": "legacy-dtxj-collector-store-stored-inventory-cap",
@@ -2508,7 +3184,11 @@
         "needle": "persisted.len() > 64",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 1069,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-snapshot-watermark-ttl",
@@ -2522,7 +3202,11 @@
         "needle": "SET snapshot=NULL WHERE node=?1 AND snapshot IS NOT NULL AND snapshot_base<?2",
         "replacement": "SET snapshot=NULL,snapshot_fingerprint=NULL WHERE node=?1 AND snapshot IS NOT NULL AND snapshot_base<?2"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 957,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-snapshot-watermark-byte-eviction",
@@ -2536,7 +3220,11 @@
         "needle": "SET snapshot=NULL WHERE node=?1 AND snapshot IS NOT NULL\"",
         "replacement": "SET snapshot=NULL,snapshot_fingerprint=zeroblob(32) WHERE node=?1 AND snapshot IS NOT NULL\""
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 1203,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-snapshot-watermark-denial",
@@ -2550,7 +3238,11 @@
         "needle": "snapshot_fingerprint=NULL,snapshot_origin_hub=NULL,gaps=",
         "replacement": "snapshot_origin_hub=NULL,gaps="
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 1133,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-snapshot-control-accounting",
@@ -2564,7 +3256,11 @@
         "needle": "coalesce(length(snapshot_fingerprint),0)+",
         "replacement": ""
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 1173,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-snapshot-control-ceiling",
@@ -2578,7 +3274,11 @@
         "needle": "accounted_bytes(c, node)? > self.limits.bytes as i64",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 1173,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-snapshot-fingerprint-capture",
@@ -2592,7 +3292,11 @@
         "needle": "Sha256::digest(&bytes).to_vec()",
         "replacement": "Sha256::digest(snapshot.scope.as_bytes()).to_vec()"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 963,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-directory-special-mode",
@@ -2606,7 +3310,11 @@
         "needle": "m.mode() & 0o7777 != 0o700",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 1228,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-inherited-directory-mode",
@@ -2622,7 +3330,11 @@
         "start": "pub fn ensure_secure_socket_dir",
         "end": "pub fn socket_dir_for_env"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 1247,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-inherited-directory-owner",
@@ -2638,7 +3350,11 @@
         "start": "pub fn ensure_secure_socket_dir",
         "end": "pub fn socket_dir_for_env"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 1242,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-inherited-directory-type",
@@ -2654,7 +3370,11 @@
         "start": "pub fn ensure_secure_socket_dir",
         "end": "pub fn socket_dir_for_env"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 1259,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-private-file-owner",
@@ -2668,7 +3388,11 @@
         "needle": "m.uid() != expected_uid",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 1283,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-private-file-type",
@@ -2682,7 +3406,11 @@
         "needle": "!m.is_file()",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 1299,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-journal-admission",
@@ -2696,7 +3424,11 @@
         "needle": "private_file(&journal, journal_cap, false)?;",
         "replacement": "let _ = (&journal, journal_cap);"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 462,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj-collector-store-journal-error-abort",
@@ -2710,14 +3442,18 @@
         "needle": "c.execute_batch(\"ROLLBACK\").is_err()",
         "replacement": "false"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_store_tests.rs",
+    "assertion_line": 1414,
+    "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj2-decode-decode-unknown-fallback",
     "target": "lib",
     "test_file": "src/observe_collector_decode_tests.rs",
     "test": "observe_collector_decode::tests::unknown_preserves_identifier_and_replay_bytes",
-    "expected_literal": "called `Result::unwrap()` on an `Err` value: DecodeError",
+    "expected_literal": "panicked at src/observe_collector_decode_tests.rs:42",
     "edits": [
       {
         "file": "src/observe_collector_decode.rs",
@@ -2726,7 +3462,11 @@
       }
     ],
     "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
-    "scope_note": "Existing valid future-string control must decode. The existing unwrap is the failure site; no custom assertion message exists."
+    "scope_note": "Existing valid future-string control must decode. The existing unwrap is the failure site; no custom assertion message exists.",
+    "assertion_file": "src/observe_collector_decode_tests.rs",
+    "assertion_line": 42,
+    "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
+    "assertion_rule": "source_location"
   },
   {
     "label": "legacy-dtxj2-decode-decode-unknown-kind-max64",
@@ -2742,7 +3482,11 @@
       }
     ],
     "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
-    "scope_note": "The65-byte unknown string is independently reachable at the codec and semantic store boundary."
+    "scope_note": "The65-byte unknown string is independently reachable at the codec and semantic store boundary.",
+    "assertion_file": "src/observe_collector_decode_tests.rs",
+    "assertion_line": 71,
+    "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj2-decode-decode-unknown-kind-first-lowercase",
@@ -2758,7 +3502,11 @@
       }
     ],
     "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
-    "scope_note": "Empty string or digit/underscore-leading identifier passes the remaining all-character predicate."
+    "scope_note": "Empty string or digit/underscore-leading identifier passes the remaining all-character predicate.",
+    "assertion_file": "src/observe_collector_decode_tests.rs",
+    "assertion_line": 71,
+    "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj2-decode-decode-unknown-kind-rest-characters",
@@ -2774,14 +3522,18 @@
       }
     ],
     "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
-    "scope_note": "Lowercase-leading a-b/a/b/a b fail only this character predicate."
+    "scope_note": "Lowercase-leading a-b/a/b/a b fail only this character predicate.",
+    "assertion_file": "src/observe_collector_decode_tests.rs",
+    "assertion_line": 71,
+    "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj2-decode-decode-unknown-kind-string-only",
     "target": "lib",
     "test_file": "src/observe_collector_decode_tests.rs",
     "test": "observe_collector_decode::tests::unknown_identifier_grammar_and_length_are_closed",
-    "expected_literal": "assertion failed: decode_event(&bytes(&value)).is_err()",
+    "expected_literal": "panicked at src/observe_collector_decode_tests.rs:84",
     "edits": [
       {
         "file": "src/observe_collector_decode.rs",
@@ -2790,14 +3542,18 @@
       }
     ],
     "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
-    "scope_note": "Unknown map/number/null/array representations must not be converted into accepted strings. Known unit maps remain admitted by the existing EventKind decoder."
+    "scope_note": "Unknown map/number/null/array representations must not be converted into accepted strings. Known unit maps remain admitted by the existing EventKind decoder.",
+    "assertion_file": "src/observe_collector_decode_tests.rs",
+    "assertion_line": 84,
+    "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
+    "assertion_rule": "source_location"
   },
   {
     "label": "legacy-dtxj2-decode-decode-duplicate-json",
     "target": "lib",
     "test_file": "src/observe_collector_decode_tests.rs",
     "test": "observe_collector_decode::tests::duplicate_fields_and_unknown_fields_remain_errors",
-    "expected_literal": "assertion failed: decode_event(duplicate.as_bytes()).is_err()",
+    "expected_literal": "panicked at src/observe_collector_decode_tests.rs:94",
     "edits": [
       {
         "file": "src/observe_collector_decode.rs",
@@ -2806,14 +3562,18 @@
       }
     ],
     "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
-    "scope_note": "JSON duplicate rejection precedes normalization. The valid final future-kind duplicate must not become accepted."
+    "scope_note": "JSON duplicate rejection precedes normalization. The valid final future-kind duplicate must not become accepted.",
+    "assertion_file": "src/observe_collector_decode_tests.rs",
+    "assertion_line": 94,
+    "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
+    "assertion_rule": "source_location"
   },
   {
     "label": "legacy-dtxj2-decode-decode-known-kind-map-parity",
     "target": "lib",
     "test_file": "src/observe_collector_decode_tests.rs",
     "test": "observe_collector_decode::tests::collector_preserves_shared_known_kind_map_representation",
-    "expected_literal": "called `Result::unwrap()` on an `Err` value: DecodeError",
+    "expected_literal": "panicked at src/observe_collector_decode_tests.rs:187",
     "edits": [
       {
         "file": "src/observe_collector_decode.rs",
@@ -2822,14 +3582,18 @@
       }
     ],
     "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
-    "scope_note": "Known unit-map parity is established by the unchanged shared DTO. The existing unwrap is the failure site; no custom assertion message exists."
+    "scope_note": "Known unit-map parity is established by the unchanged shared DTO. The existing unwrap is the failure site; no custom assertion message exists.",
+    "assertion_file": "src/observe_collector_decode_tests.rs",
+    "assertion_line": 187,
+    "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
+    "assertion_rule": "source_location"
   },
   {
     "label": "legacy-dtxj2-decode-decode-original-kind-identity",
     "target": "lib",
     "test_file": "src/observe_collector_decode_tests.rs",
     "test": "observe_collector_decode::tests::unknown_preserves_identifier_and_replay_bytes",
-    "expected_literal": "assertion `left == right` failed",
+    "expected_literal": "panicked at src/observe_collector_decode_tests.rs:44",
     "edits": [
       {
         "file": "src/observe_collector_decode.rs",
@@ -2838,14 +3602,18 @@
       }
     ],
     "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
-    "scope_note": "The existing equality assertion compares canonical JSON kind against the original unknown identifier."
+    "scope_note": "The existing equality assertion compares canonical JSON kind against the original unknown identifier.",
+    "assertion_file": "src/observe_collector_decode_tests.rs",
+    "assertion_line": 44,
+    "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
+    "assertion_rule": "source_location"
   },
   {
     "label": "legacy-dtxj2-decode-decode-canonical-event-budget-codec-only",
     "target": "lib",
     "test_file": "src/observe_collector_decode_tests.rs",
     "test": "observe_collector_decode::tests::canonical_event_and_page_bounds_remain_enforced",
-    "expected_literal": "assertion failed: decode_event(&bytes(&value)).is_err()",
+    "expected_literal": "panicked at src/observe_collector_decode_tests.rs:144",
     "edits": [
       {
         "file": "src/observe_collector_decode.rs",
@@ -2854,14 +3622,18 @@
       }
     ],
     "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
-    "scope_note": "Codec-only reachable size case uses a4096-byte message_id. This is invalid under later semantic correlation validation; it is not a fully validated4KiB independent store kill. The conservative2659-byte derivation still applies after semantic envelope validation."
+    "scope_note": "Codec-only reachable size case uses a4096-byte message_id. This is invalid under later semantic correlation validation; it is not a fully validated4KiB independent store kill. The conservative2659-byte derivation still applies after semantic envelope validation.",
+    "assertion_file": "src/observe_collector_decode_tests.rs",
+    "assertion_line": 144,
+    "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
+    "assertion_rule": "source_location"
   },
   {
     "label": "legacy-dtxj2-decode-decode-page-event-count",
     "target": "lib",
     "test_file": "src/observe_collector_decode_tests.rs",
     "test": "observe_collector_decode::tests::canonical_event_and_page_bounds_remain_enforced",
-    "expected_literal": "assertion failed: decode_page(&bytes(&page(vec![event(\"arrival\"); 201]))).is_err()",
+    "expected_literal": "panicked at src/observe_collector_decode_tests.rs:146",
     "edits": [
       {
         "file": "src/observe_collector_decode.rs",
@@ -2870,14 +3642,18 @@
       }
     ],
     "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
-    "scope_note": "The201-event page is independently reachable;200-event positive control precedes it."
+    "scope_note": "The201-event page is independently reachable;200-event positive control precedes it.",
+    "assertion_file": "src/observe_collector_decode_tests.rs",
+    "assertion_line": 146,
+    "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
+    "assertion_rule": "source_location"
   },
   {
     "label": "legacy-dtxj2-decode-decode-canonical-page-budget-codec-only",
     "target": "lib",
     "test_file": "src/observe_collector_decode_tests.rs",
     "test": "observe_collector_decode::tests::canonical_event_and_page_bounds_remain_enforced",
-    "expected_literal": "assertion failed: decode_page(&bytes(&value)).is_err()",
+    "expected_literal": "panicked at src/observe_collector_decode_tests.rs:149",
     "edits": [
       {
         "file": "src/observe_collector_decode.rs",
@@ -2886,14 +3662,18 @@
       }
     ],
     "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
-    "scope_note": "Codec-only oversized node fixture reaches this budget. Later semantic node validation refuses that fixture; do not credit it as a semantically valid store-page budget kill."
+    "scope_note": "Codec-only oversized node fixture reaches this budget. Later semantic node validation refuses that fixture; do not credit it as a semantically valid store-page budget kill.",
+    "assertion_file": "src/observe_collector_decode_tests.rs",
+    "assertion_line": 149,
+    "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
+    "assertion_rule": "source_location"
   },
   {
     "label": "legacy-dtxj2-decode-decode-original-kind-page-accounting",
     "target": "lib",
     "test_file": "src/observe_collector_decode_tests.rs",
     "test": "observe_collector_decode::tests::mixed_page_length_accounts_for_original_names",
-    "expected_literal": "assertion `left == right` failed",
+    "expected_literal": "panicked at src/observe_collector_decode_tests.rs:133",
     "edits": [
       {
         "file": "src/observe_collector_decode.rs",
@@ -2902,7 +3682,11 @@
       }
     ],
     "source_sha256": "5c199cdef5e3d62ad91bbaf02a583d3e809a275b9e5ce1356581a6f287195d2c",
-    "scope_note": "The existing canonical_len equality requires the original64-byte kind delta. This proves accounting, not admission of a semantically valid page at the exact256KiB threshold."
+    "scope_note": "The existing canonical_len equality requires the original64-byte kind delta. This proves accounting, not admission of a semantically valid page at the exact256KiB threshold.",
+    "assertion_file": "src/observe_collector_decode_tests.rs",
+    "assertion_line": 133,
+    "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
+    "assertion_rule": "source_location"
   },
   {
     "label": "legacy-dtxj2-integration-compat-stored-fallback",
@@ -2916,7 +3700,11 @@
         "needle": "crate::observe_collector_decode::decode_event(&json)\n                        .map_err(|_| StoreError::Storage)?\n                        .event",
         "replacement": "serde_json::from_slice::<ExportEvent>(&json).map_err(|_| StoreError::Storage)?"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_unknown_tests.rs",
+    "assertion_line": 63,
+    "assertion_sha256": "7f452165c323303b30975235db70885ca2ac5279075c6f66e4a9448cf7575d94",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj2-integration-compat-private-kind-preserved",
@@ -2930,7 +3718,11 @@
         "needle": "let json = &original.canonical;",
         "replacement": "let normalized = encoded(event, 4096)?; let json = &normalized;"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_unknown_tests.rs",
+    "assertion_line": 93,
+    "assertion_sha256": "7f452165c323303b30975235db70885ca2ac5279075c6f66e4a9448cf7575d94",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj2-integration-compat-kind-in-conflict-identity",
@@ -2944,7 +3736,11 @@
         "needle": "previous.canonical != *json",
         "replacement": "serde_json::to_vec(&previous.event).ok() != serde_json::to_vec(event).ok()"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_unknown_tests.rs",
+    "assertion_line": 112,
+    "assertion_sha256": "7f452165c323303b30975235db70885ca2ac5279075c6f66e4a9448cf7575d94",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj2-integration-compat-fixed-caption",
@@ -2958,7 +3754,11 @@
         "needle": "\"unknown event kind (newer node)\".into()",
         "replacement": "\"unknown\".into()"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_unknown_tests.rs",
+    "assertion_line": 84,
+    "assertion_sha256": "7f452165c323303b30975235db70885ca2ac5279075c6f66e4a9448cf7575d94",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj2-integration-compat-runtime-retains-envelope",
@@ -2972,7 +3772,11 @@
         "needle": "move |store| store.ingest_decoded_page(&node, &cursor, page)",
         "replacement": "move |store| store.ingest_page(&node, &cursor, page.page)"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_tests.rs",
+    "assertion_line": 903,
+    "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
+    "assertion_rule": "static_unchanged"
   },
   {
     "label": "legacy-dtxj2-integration-compat-corrupt-row-refuses",
@@ -2986,6 +3790,10 @@
         "needle": "let event = crate::observe_collector_decode::decode_event(&json)\n                        .map_err(|_| StoreError::Storage)?\n                        .event;",
         "replacement": "let event = match crate::observe_collector_decode::decode_event(&json) { Ok(value) => value.event, Err(_) => continue };"
       }
-    ]
+    ],
+    "assertion_file": "src/observe_collector_unknown_tests.rs",
+    "assertion_line": 153,
+    "assertion_sha256": "7f452165c323303b30975235db70885ca2ac5279075c6f66e4a9448cf7575d94",
+    "assertion_rule": "static_unchanged"
   }
 ]
