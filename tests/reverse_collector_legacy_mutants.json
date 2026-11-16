@@ -1,0 +1,2295 @@
+[
+  {
+    "label": "legacy-dtxj-collector-integration-collector-inventory-cap",
+    "target": "lib",
+    "test": "observe_collector_net::tests::inventory_is_bounded_literal_and_unique",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "oversized inventory accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "config.sources.len() > 64",
+        "replacement": "config.sources.len() > 65"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-inventory-unique",
+    "target": "lib",
+    "test": "observe_collector_net::tests::inventory_is_bounded_literal_and_unique",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "duplicate inventory node accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "!names.insert(source.node.clone())",
+        "replacement": "{ names.insert(source.node.clone()); false }"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-outbound-visible",
+    "target": "lib",
+    "test": "observe_collector_net::tests::outbound_only_inventory_never_opens_a_connection",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "outbound leaf became directly observable",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "if !source.supported {",
+        "replacement": "if false {"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-spacing",
+    "target": "lib",
+    "test": "observe_collector_net::tests::configured_pin_collects_without_any_bus_state_and_enforces_spacing",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "minimum node spacing bypassed",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "now.duration_since(last) < Duration::from_secs(2)",
+        "replacement": "now.duration_since(last) < Duration::from_secs(0)"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-node-reservation",
+    "target": "lib",
+    "test": "observe_collector_net::tests::one_node_reservation_is_independent_of_global_capacity",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "per-node reservation bypassed with global capacity available",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "slot: Arc::new(Semaphore::new(1))",
+        "replacement": "slot: Arc::new(Semaphore::new(2))"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-global-reservation",
+    "target": "lib",
+    "test": "observe_collector_net::tests::node_and_global_reservations_survive_forced_races",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "global request reservation exceeded eight",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "slots: Arc::new(Semaphore::new(8))",
+        "replacement": "slots: Arc::new(Semaphore::new(9))"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-wire-byte-cap",
+    "target": "lib",
+    "test": "observe_collector_net::tests::streamed_cap_encoding_status_and_closed_driver_are_independent",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "stream byte cap bypassed",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "Limited::new(response.into_body(), 256 * 1024)",
+        "replacement": "Limited::new(response.into_body(), 257 * 1024)"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-wire-encoding",
+    "target": "lib",
+    "test": "observe_collector_net::tests::streamed_cap_encoding_status_and_closed_driver_are_independent",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "compressed exporter response accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": ".is_some_and(|v| v != \"identity\")",
+        "replacement": ".is_some_and(|_| false)"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-wire-denial",
+    "target": "lib",
+    "test": "observe_collector_net::tests::streamed_cap_encoding_status_and_closed_driver_are_independent",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "observe denial became unavailable",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "response.status() == hyper::StatusCode::FORBIDDEN",
+        "replacement": "response.status() == hyper::StatusCode::UNAUTHORIZED"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-rate-upper",
+    "target": "lib",
+    "test": "observe_collector_net::tests::streamed_cap_encoding_status_and_closed_driver_are_independent",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "rate limit upper bound bypassed",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": ".clamp(2, 60)",
+        "replacement": ".clamp(2, 120)"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-rate-lower",
+    "target": "lib",
+    "test": "observe_collector_net::tests::streamed_cap_encoding_status_and_closed_driver_are_independent",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "rate limit lower bound bypassed",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": ".clamp(2, 60)",
+        "replacement": ".clamp(0, 60)"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-redirect-refusal",
+    "target": "lib",
+    "test": "observe_collector_net::tests::streamed_cap_encoding_status_and_closed_driver_are_independent",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "exporter redirect accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "if response.status() != hyper::StatusCode::OK {",
+        "replacement": "if false {"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-rpc-deadline",
+    "target": "lib",
+    "test": "observe_collector_net::tests::whole_rpc_deadline_aborts_header_and_body_drivers",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "whole exporter request exceeded five-second deadline",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "tokio::time::timeout(Duration::from_secs(5), async move {",
+        "replacement": "tokio::time::timeout(Duration::from_secs(6), async move {"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-driver-abort",
+    "target": "lib",
+    "test": "observe_collector_net::tests::connection_driver_is_aborted_on_owner_drop",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "connection driver continued after its owner ended",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "self.0.abort();",
+        "replacement": "let _ = &self.0;"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-dns-lease",
+    "target": "lib",
+    "test": "observe_collector_net::tests::resolver_keeps_node_and_global_leases_after_cancellation",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "cancelled resolver released global permit early",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "    let (resolved, leases) = tokio::task::spawn_blocking(move || (lookup(), leases))\n        .await\n        .map_err(|_| Error::Unavailable)?;",
+        "replacement": "    let resolved = tokio::task::spawn_blocking(lookup)\n        .await\n        .map_err(|_| Error::Unavailable)?;"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-browser-filter",
+    "target": "lib",
+    "test": "observe_collector_web::tests::numeric_filters_never_become_network_destinations",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "browser authority or invalid paging accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "\"node\" if !seen_node && number < nodes",
+        "replacement": "\"node\" if !seen_node && number <= nodes"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-browser-page",
+    "target": "lib",
+    "test": "observe_collector_web::tests::numeric_filters_never_become_network_destinations",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "browser authority or invalid paging accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "\"page\" if !seen_page && number < 50",
+        "replacement": "\"page\" if !seen_page && number <= 50"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-html-escape",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "hostile label added DOM resource or executable nodes",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "    escape(value)",
+        "replacement": "    value.to_owned()",
+        "start": "fn html_text(",
+        "end": "fn svg_text("
+      }
+    ],
+    "binaries": [
+      "xmsg"
+    ],
+    "browser_required": true
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-svg-escape",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "hostile label added DOM resource or executable nodes",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "    escape(value)",
+        "replacement": "    value.to_owned()",
+        "start": "fn svg_text(",
+        "end": "fn escape("
+      }
+    ],
+    "binaries": [
+      "xmsg"
+    ],
+    "browser_required": true
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-row-cap",
+    "target": "lib",
+    "test": "observe_collector_web::tests::rows_objects_and_response_bytes_are_bounded",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "event row cap bypassed",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "pub const PAGE_ROWS: usize = 200;",
+        "replacement": "pub const PAGE_ROWS: usize = 201;"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-object-cap",
+    "target": "lib",
+    "test": "observe_collector_web::tests::rows_objects_and_response_bytes_are_bounded",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "endpoint cap bypassed",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "pub const MAX_ENDPOINTS: usize = 200;",
+        "replacement": "pub const MAX_ENDPOINTS: usize = 201;"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-html-byte-cap",
+    "target": "lib",
+    "test": "observe_collector_web::tests::rows_objects_and_response_bytes_are_bounded",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "HTML byte cap bypassed",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "self.html.len() + part.len() + 180 <= self.cap",
+        "replacement": "true"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-refresh",
+    "target": "lib",
+    "test": "observe_collector_web::tests::presentation_preserves_boundaries_and_separate_clocks",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "missing presentation fact: content=",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "content=\\\"5\\\"",
+        "replacement": "content=\\\"1\\\""
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-hidden-render",
+    "target": "lib",
+    "test": "observe_collector_web::tests::presentation_preserves_boundaries_and_separate_clocks",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "hidden history rendered",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "if node.history_hidden {",
+        "replacement": "if false {"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-backfill-render",
+    "target": "lib",
+    "test": "observe_collector_web::tests::presentation_preserves_boundaries_and_separate_clocks",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "missing presentation fact: Backfill pending",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "if node.backfill {",
+        "replacement": "if false {"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-partial-render",
+    "target": "lib",
+    "test": "observe_collector_web::tests::presentation_preserves_boundaries_and_separate_clocks",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "missing presentation fact: Availability: partial",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "name(snapshot.snapshot.available)",
+        "replacement": "\"available\""
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-lane-facts",
+    "target": "lib",
+    "test": "observe_collector_web::tests::records_without_reported_endpoints_do_not_invent_lanes",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "record without endpoints gained a decorative exchange",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "if event.from.is_some() || event.to.is_some() {",
+        "replacement": "if true {"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-cache-header",
+    "target": "lib",
+    "test": "observe_collector::tests::fixed_response_policy_and_health_contain_no_metadata",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "response caching enabled",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "headers.insert(\"cache-control\", \"no-store\".parse().unwrap());",
+        "replacement": "headers.insert(\"cache-control\", \"public\".parse().unwrap());"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-nosniff-header",
+    "target": "lib",
+    "test": "observe_collector::tests::fixed_response_policy_and_health_contain_no_metadata",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "response sniffing enabled",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "headers.insert(\"x-content-type-options\", \"nosniff\".parse().unwrap());",
+        "replacement": "headers.insert(\"x-content-type-options\", \"sniff\".parse().unwrap());"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-header-cap",
+    "target": "lib",
+    "test": "observe_collector::tests::aggregate_header_accounting_has_an_exact_control",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "aggregate web header cap bypassed",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "if header_bytes > 16 * 1024 {",
+        "replacement": "if header_bytes > 17 * 1024 {"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-request-cap",
+    "target": "lib",
+    "test": "observe_collector::tests::request_saturation_has_no_admission_waiters",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "web request admission exceeded eight",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "Arc::new(Semaphore::new(8))",
+        "replacement": "Arc::new(Semaphore::new(9))",
+        "start": "fn request_slots()",
+        "end": "fn connection_slots()"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-connection-cap",
+    "target": "lib",
+    "test": "observe_collector::tests::connection_saturation_refuses_without_an_accept_waiter",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "web connection reservation exceeded 64",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "Arc::new(Semaphore::new(64))",
+        "replacement": "Arc::new(Semaphore::new(65))"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-header-deadline",
+    "target": "lib",
+    "test": "observe_collector::tests::slow_headers_have_a_finite_read_deadline",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "slow request headers escaped their read deadline",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": ".header_read_timeout(Duration::from_secs(5))",
+        "replacement": ".header_read_timeout(Duration::from_secs(7))"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-web-tls",
+    "target": "lib",
+    "test": "observe_collector::tests::nonloopback_listener_requires_tls_and_tls_keeps_owner_boundary",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "public plaintext listener accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "if !listen.ip().is_loopback() {",
+        "replacement": "if false {"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-denial-overlay",
+    "target": "lib",
+    "test": "observe_collector::tests::denial_masks_before_busy_or_failed_purge",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "denial mask lost while storage busy",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "if error == net::Error::Denied {",
+        "replacement": "if false {",
+        "start": "async fn mark_error(",
+        "end": "    let _ = store_call("
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-scope-overlay",
+    "target": "lib",
+    "test": "observe_collector::tests::scope_change_masks_before_busy_ingest",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "scope mask lost while storage busy",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "if scopes.get(node).is_some_and(|old| old != scope) {",
+        "replacement": "if false {"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-owner-backend",
+    "target": "lib",
+    "test": "observe_collector::tests::backend_reauthorizes_and_health_has_no_cache_data",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "inactive next request reached cached history",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "self.verifier.authorize(request.headers()).await",
+        "replacement": "async { Ok::<_, crate::observe_collector_auth::AuthError>(crate::observe_collector_auth::VerifiedOwner {subject:\"fixture\".into(),expires_at:2000}) }.await"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-health-minimization",
+    "target": "lib",
+    "test": "observe_collector::tests::backend_reauthorizes_and_health_has_no_cache_data",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "health exposed metadata",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "return response(StatusCode::OK, \"available\\n\", false);",
+        "replacement": "return response(StatusCode::OK, self.nodes.join(\",\"), false);"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-entry-passive",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "collector CLI exited during isolated startup",
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": "Commands::ObserveCollector(args) => {",
+        "replacement": "Commands::ObserveCollector(args) => { let connection = rusqlite::Connection::open(resolve_db_path(None))?; storage::init_db(&connection)?;"
+      }
+    ],
+    "binaries": [
+      "xmsg"
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-primary-write-passive",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "collector initialized or changed primary/harness/enrollment state",
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": "Commands::ObserveCollector(args) => {",
+        "replacement": "Commands::ObserveCollector(args) => { std::fs::write(\"registration.sock\",b\"source-fault\")?;"
+      }
+    ],
+    "binaries": [
+      "xmsg"
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-html-label-context",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "hostile label added DOM resource or executable nodes",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "html_text(endpoint.label.as_deref().unwrap_or(\"label not reported\"))",
+        "replacement": "endpoint.label.as_deref().unwrap_or(\"label not reported\").to_owned()"
+      }
+    ],
+    "binaries": [
+      "xmsg"
+    ],
+    "browser_required": true
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-svg-label-context",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "hostile label added DOM resource or executable nodes",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "svg_text(endpoint.label.as_deref().unwrap_or(\"label not reported\"))",
+        "replacement": "endpoint.label.as_deref().unwrap_or(\"label not reported\").to_owned()"
+      }
+    ],
+    "binaries": [
+      "xmsg"
+    ],
+    "browser_required": true
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-svg-from-context",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "hostile label added DOM resource or executable nodes",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "svg_text(&from)",
+        "replacement": "from.to_owned()"
+      }
+    ],
+    "binaries": [
+      "xmsg"
+    ],
+    "browser_required": true
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-svg-to-context",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "hostile label added DOM resource or executable nodes",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "svg_text(&to)",
+        "replacement": "to.to_owned()"
+      }
+    ],
+    "binaries": [
+      "xmsg"
+    ],
+    "browser_required": true
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-csp-script",
+    "target": "lib",
+    "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "script-src 'none'",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "script-src 'none'",
+        "replacement": "script-src 'self'"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-csp-style",
+    "target": "lib",
+    "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "style-src 'sha256-",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "style-src 'sha256-{hash}'",
+        "replacement": "style-src 'unsafe-inline'"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-csp-self-assets",
+    "target": "lib",
+    "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "missing policy: default-src 'self'",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "default-src 'self'",
+        "replacement": "default-src *"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-csp-frame",
+    "target": "lib",
+    "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "missing policy: frame-src 'none'",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "frame-src 'none'",
+        "replacement": "frame-src 'self'"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-csp-frame-ancestors",
+    "target": "lib",
+    "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "missing policy: frame-ancestors 'none'",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "frame-ancestors 'none'",
+        "replacement": "frame-ancestors 'self'"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-csp-object",
+    "target": "lib",
+    "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "missing policy: object-src 'none'",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "object-src 'none'",
+        "replacement": "object-src 'self'"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-csp-base",
+    "target": "lib",
+    "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
+    "test_file": "src/observe_collector_web_tests.rs",
+    "expected_literal": "missing policy: base-uri 'none'",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "base-uri 'none'",
+        "replacement": "base-uri 'self'"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-web-transport-deadline",
+    "target": "lib",
+    "test": "observe_collector::tests::admitted_read_deadline_includes_backpressured_delivery",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "response transport escaped admitted read budget",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "let _ = tokio::time::timeout_at(deadline, connection).await;",
+        "replacement": "let _ = deadline; let _ = connection.await;"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-web-preparation-deadline",
+    "target": "lib",
+    "test": "observe_collector::tests::admitted_read_deadline_includes_preparation",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "preparation escaped admitted read budget",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "const WEB_BUDGET: Duration = Duration::from_secs(5);",
+        "replacement": "const WEB_BUDGET: Duration = Duration::from_secs(6);"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-snapshot-backoff-application",
+    "target": "lib",
+    "test": "observe_collector::tests::snapshot_backoff_is_applied_to_scheduler",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "rate-limit backoff was not applied",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "next_start = tokio::time::Instant::now() + Duration::from_secs(seconds);",
+        "replacement": "next_start = tokio::time::Instant::now() + Duration::from_secs(0);"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-events-backoff-application",
+    "target": "lib",
+    "test": "observe_collector::tests::events_backoff_is_applied_to_scheduler",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "rate-limit backoff was not applied",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "next_start = tokio::time::Instant::now() + Duration::from_secs(seconds);",
+        "replacement": "next_start = tokio::time::Instant::now() + Duration::from_secs(0);"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-idle-maintenance-wiring",
+    "target": "lib",
+    "test": "observe_collector::tests::idle_background_maintenance_removes_persisted_rows",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "idle background maintenance left persisted event rows",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "tasks.spawn(maintain(state));",
+        "replacement": "drop(state);"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-idle-maintenance-call",
+    "target": "lib",
+    "test": "observe_collector::tests::idle_background_maintenance_removes_persisted_rows",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "idle background maintenance left persisted event rows",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "store.maintain()",
+        "replacement": "Ok(())"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-trust-pin",
+    "target": "lib",
+    "test": "observe_collector_net::tests::wrong_pin_refuses_after_valid_pin_control",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "foreign pinned exporter was admitted",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if norm_pin != self.expected_pin {",
+        "replacement": "if false {",
+        "start": "impl rustls::client::danger::ServerCertVerifier for PinnedServerCertVerifier",
+        "end": "fn verify_tls12_signature("
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-trust-ca-chain",
+    "target": "lib",
+    "test": "observe_collector_net::tests::foreign_ca_refuses_after_trusted_chain_control",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "foreign CA exporter was admitted",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "        verify_cert_chain(\n            end_entity,\n            intermediates,\n            &self.anchors,\n            now,\n            webpki::KeyUsage::server_auth(),\n        )?;\n\n",
+        "replacement": "",
+        "start": "impl rustls::client::danger::ServerCertVerifier for CaServerCertVerifier",
+        "end": "fn verify_tls12_signature("
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-trust-ca-uri-count",
+    "target": "lib",
+    "test": "observe_collector_net::tests::ca_uri_cardinality_refuses_zero_and_multiple",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "CA exporter with wrong URI cardinality was admitted",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if uris.len() != 1 {",
+        "replacement": "if uris.is_empty() {",
+        "start": "impl rustls::client::danger::ServerCertVerifier for CaServerCertVerifier",
+        "end": "fn verify_tls12_signature("
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-trust-ca-uri-match",
+    "target": "lib",
+    "test": "observe_collector_net::tests::ca_uri_match_is_literal",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "CA exporter with unlisted literal URI was admitted",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if !uri_matches_any_identity(&uris[0], &self.allowed_identities) {",
+        "replacement": "if false {",
+        "start": "impl rustls::client::danger::ServerCertVerifier for CaServerCertVerifier",
+        "end": "fn verify_tls12_signature("
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-am6-pin-hookup",
+    "target": "lib",
+    "test": "observe_collector_net::tests::pinned_collector_dial_refuses_ca_membership",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "outgoing collector pin/CA ambiguity was admitted",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": ".refusing_ca(&peer.name, peers.clone())",
+        "replacement": "",
+        "start": "pub fn make_tls_connector_with_credentials(",
+        "end": "pub fn make_tls_acceptor("
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-am6-pin-refusal",
+    "target": "lib",
+    "test": "observe_collector_net::tests::pinned_collector_dial_refuses_ca_membership",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "outgoing collector pin/CA ambiguity was admitted",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if !ca.is_empty() {",
+        "replacement": "if false {",
+        "start": "impl rustls::client::danger::ServerCertVerifier for PinnedServerCertVerifier",
+        "end": "fn verify_tls12_signature("
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-am6-ca-hookup",
+    "target": "lib",
+    "test": "observe_collector_net::tests::ca_collector_dial_refuses_pinned_membership",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "outgoing collector pin/CA ambiguity was admitted",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": ".refusing_pinned(&peer.name, peers.pinned_entries())",
+        "replacement": "",
+        "start": "pub fn make_tls_connector_with_credentials(",
+        "end": "pub fn make_tls_acceptor("
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-am6-ca-refusal",
+    "target": "lib",
+    "test": "observe_collector_net::tests::ca_collector_dial_refuses_pinned_membership",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "outgoing collector pin/CA ambiguity was admitted",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "self.pinned.get(&normalize_pin(&pin))",
+        "replacement": "self.pinned.get(\"source-fault-no-pin\")",
+        "start": "impl rustls::client::danger::ServerCertVerifier for CaServerCertVerifier",
+        "end": "fn verify_tls12_signature("
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-configured-node-binding",
+    "target": "lib",
+    "test": "observe_collector_net::tests::inventory_is_bounded_literal_and_unique",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "foreign inventory identity accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_net.rs",
+        "needle": "!= source.node",
+        "replacement": "!= source.node && false",
+        "start": "if source.ca.is_some() {"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-wire-unknown-event",
+    "target": "lib",
+    "test": "observe_collector_net::tests::incoming_unknown_event_refuses",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "incoming unknown field was accepted: event",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct ExportEvent",
+        "replacement": "pub struct ExportEvent"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-wire-unknown-gap",
+    "target": "lib",
+    "test": "observe_collector_net::tests::incoming_unknown_gap_refuses",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "incoming unknown field was accepted: gap",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct ExportGap",
+        "replacement": "pub struct ExportGap"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-wire-unknown-page",
+    "target": "lib",
+    "test": "observe_collector_net::tests::incoming_unknown_page_refuses",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "incoming unknown field was accepted: page",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct ExportPage",
+        "replacement": "pub struct ExportPage"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-wire-unknown-endpoint",
+    "target": "lib",
+    "test": "observe_collector_net::tests::incoming_unknown_endpoint_refuses",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "incoming unknown field was accepted: endpoint",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct EndpointDescriptor",
+        "replacement": "pub struct EndpointDescriptor"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-wire-unknown-snapshot",
+    "target": "lib",
+    "test": "observe_collector_net::tests::incoming_unknown_snapshot_refuses",
+    "test_file": "src/observe_collector_net_tests.rs",
+    "expected_literal": "incoming unknown field was accepted: snapshot",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct ExportSnapshot",
+        "replacement": "pub struct ExportSnapshot"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-diagnostics-minimization",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "collector diagnostics leaked a synthetic canary",
+    "binaries": [
+      "xmsg"
+    ],
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": "Commands::ObserveCollector(args) => {",
+        "replacement": "Commands::ObserveCollector(args) => { eprintln!(\"{}\",std::env::var(\"XMSG_COLLECTOR_FIXTURE_LEAK\").unwrap_or_default());"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-integration-collector-html-token-minimization",
+    "target": "gate_dtxj_collector",
+    "test": "collector_cli_is_passive_and_owner_view_is_bounded",
+    "test_file": "tests/gate_dtxj_collector.rs",
+    "expected_literal": "browser HTML leaked a synthetic canary",
+    "binaries": [
+      "xmsg"
+    ],
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "web::render(&summaries, detail.as_ref(), filter)",
+        "replacement": "format!(\"{}{}\",web::render(&summaries, detail.as_ref(), filter),request.headers().get(\"authorization\").and_then(|h|h.to_str().ok()).unwrap_or_default())"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-wire-version",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /v",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "page.v != 1",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-wire-node",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /node",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "page.node != policy.node",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-wire-epoch",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /epoch",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!valid_epoch(&page.epoch)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-wire-scope",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /scope",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!valid_scope(&page.scope)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-wire-available",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /available",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!page.available",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-wire-sequence",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /events/0/sequence",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "event.sequence <= previous",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-wire-observed-time",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /events/0/observed_at",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!valid_time(event.observed_at)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-wire-persisted-time",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /events/0/persisted_at",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!valid_time(event.persisted_at)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-wire-source-time",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /events/0/source_at",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "event.source_at.is_some_and(|t| !valid_time(t))",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-wire-reply-id",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /events/0/reply_id",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "event.reply_id.is_some_and(|id| id <= 0)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-wire-from",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /events/0/from",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "event\n                .from\n                .as_deref()\n                .is_some_and(|id| !identity(&scope, id))",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-wire-to",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /events/0/to",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "event.to.as_deref().is_some_and(|id| !identity(&scope, id))",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-wire-message_id",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /events/0/message_id",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "event\n                .message_id\n                .as_deref()\n                .is_some_and(|id| !correlation(id))",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-wire-thread_id",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_fields_refuse_independently_without_cursor_changes",
+    "expected_literal": "invalid field accepted: /events/0/thread_id",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "event\n                .thread_id\n                .as_deref()\n                .is_some_and(|id| !correlation(id))",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-wire-row-cap",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_count_and_byte_caps_have_positive_controls",
+    "expected_literal": "event count cap ignored",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "page.events.len() > 200",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-wire-page-bytes",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::wire_count_and_byte_caps_have_positive_controls",
+    "expected_literal": "page byte cap ignored",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "encoded(page, PAGE_BYTES)?;",
+        "replacement": "encoded(page, PAGE_BYTES * 2)?;"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-wire-next",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "next before visible sequence accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "page.next < previous",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-wire-progress",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "nonprogress has_more accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "page.has_more && page.next <= after",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-snapshot-version",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: v",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "snapshot.v != 1",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-snapshot-node",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: node",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "snapshot.node != policy.node",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-snapshot-scope",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: scope",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!valid_scope(&snapshot.scope)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-snapshot-time",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: time",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!valid_time(snapshot.observed_at)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-snapshot-count",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: count",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "snapshot.endpoints.len() > 200",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-snapshot-id",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: id",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!identity(&scope, &e.id)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-snapshot-node-binding",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: endpoint_node",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "e.id.split_once('@').map(|p| p.1) != Some(e.node.as_str())",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-snapshot-source-time",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: endpoint_time",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "e.source_at\n                .is_some_and(|t| !valid_time(t) || t > snapshot.observed_at)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-snapshot-label-optin",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: label_opt_in",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!policy.labels || s.len() > 256",
+        "replacement": "s.len() > 256"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-snapshot-label-length",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: label_length",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!policy.labels || s.len() > 256",
+        "replacement": "!policy.labels"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-snapshot-duplicates",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid snapshot accepted: duplicate",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!ids.insert(&e.id)",
+        "replacement": "{ let _ = ids.insert(&e.id); false }"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-startup-mask",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::startup_hidden_and_denial_hide_before_failed_purge",
+    "expected_literal": "hidden history contents exposed",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "validated: false,",
+        "replacement": "validated: true,",
+        "start": "fn open_limits",
+        "end": "fn lock("
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-scope-mask",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::scope_purge_failure_masks_before_sql_and_restarts_hidden",
+    "expected_literal": "scope purge failure exposed retained history",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "state.validated = false;",
+        "replacement": "state.validated = true;",
+        "start": "pub fn ingest_page",
+        "end": "fn finish"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-scope-purge",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::scope_purge_and_epoch_preservation_and_stale",
+    "expected_literal": "scope cache not purged",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "purge(c, node)?;",
+        "replacement": "let _ = node;",
+        "start": "pub fn ingest_page",
+        "end": "fn finish"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-epoch-preservation",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::scope_purge_and_epoch_preservation_and_stale",
+    "expected_literal": "epoch boundary destroyed history",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "if scope_changed {\n                purge(c, node)?;",
+        "replacement": "if scope_changed || epoch_changed {\n                purge(c, node)?;",
+        "start": "pub fn ingest_page",
+        "end": "fn finish"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-epoch-marker",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::scope_purge_and_epoch_preservation_and_stale",
+    "expected_literal": "epoch boundary concealed",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "epoch_changed.then_some(ExportGap {",
+        "replacement": "false.then_some(ExportGap {"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-replay-uniqueness",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::repeated_epoch_records_deduplicate_without_refresh",
+    "expected_literal": "replayed record duplicated",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "PRIMARY KEY(node,epoch,sequence)",
+        "replacement": "UNIQUE(node,epoch,sequence,receipt)"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-replay-age",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::repeated_epoch_records_deduplicate_without_refresh",
+    "expected_literal": "replayed record refreshed retention age",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "INSERT OR IGNORE INTO events",
+        "replacement": "INSERT OR REPLACE INTO events"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-atomic-page-cursor",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::transaction_failure_and_replay_never_refresh_or_split",
+    "expected_literal": "failed transaction kept page",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "            c.execute(\n                \"UPDATE nodes SET epoch=?2,scope=?3,next=?4,gaps=?5,backfill=?6 WHERE node=?1\",",
+        "replacement": "            c.execute_batch(\"COMMIT; BEGIN IMMEDIATE\")?;\n            c.execute(\n                \"UPDATE nodes SET epoch=?2,scope=?3,next=?4,gaps=?5,backfill=?6 WHERE node=?1\","
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-rollback-close",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::rollback_failure_closes_connection_and_restart_revalidates",
+    "expected_literal": "failed rollback connection remained writable",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "inner.connection.take();",
+        "replacement": "let _ = &inner.connection;"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-ttl-idle",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::row_and_ttl_retention_are_honest",
+    "expected_literal": "idle maintenance retained expired rows",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "for node in nodes {",
+        "replacement": "for node in nodes.into_iter().take(0) {",
+        "start": "pub fn maintain",
+        "end": "pub fn view"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-ttl-source-base",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::future_and_late_observation_ttl",
+    "expected_literal": "late observation renewed TTL",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "event.observed_at.min(now)",
+        "replacement": "now"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-ttl-future-base",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::future_and_late_observation_ttl",
+    "expected_literal": "future observation extended TTL",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "event.observed_at.min(now)",
+        "replacement": "event.observed_at"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-row-retention",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_row_and_byte_limits_include_snapshot",
+    "expected_literal": "retention cap ignored rows=1",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "if rows > self.limits.rows as i64 {",
+        "replacement": "if false {"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-byte-retention",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_row_and_byte_limits_include_snapshot",
+    "expected_literal": "logical eviction refused safe ingest",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "if total > self.limits.bytes as i64 {",
+        "replacement": "if false {",
+        "start": "let mut total =",
+        "end": "let mut statement = c.prepare("
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-physical-cap",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::engine_settings_journal_peak_full_abort_and_compaction",
+    "expected_literal": "physical page cap not enforced",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "c.pragma_update(None, \"max_page_count\", limits.pages)?;",
+        "replacement": "c.pragma_update(None, \"max_page_count\", limits.pages * 100)?;"
+      },
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "(\"max_page_count\", limits.pages)",
+        "replacement": "(\"max_page_count\", limits.pages * 100)"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-compaction",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::engine_settings_journal_peak_full_abort_and_compaction",
+    "expected_literal": "bounded compaction did not reduce file",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "PRAGMA incremental_vacuum(64)",
+        "replacement": "PRAGMA page_count"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-secure-deletion",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::secure_delete_removes_metadata_canary",
+    "expected_literal": "deleted metadata persisted in managed database",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "PRAGMA secure_delete=ON;",
+        "replacement": "PRAGMA secure_delete=OFF;"
+      },
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "(\"secure_delete\", 1)",
+        "replacement": "(\"secure_delete\", 0)"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-database-mode",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::private_file_metadata_predicates_use_real_metadata",
+    "expected_literal": "private file mode accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "m.mode() & 0o7777 != 0o600",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-database-length",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::private_file_metadata_predicates_use_real_metadata",
+    "expected_literal": "private file length accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "m.len() > cap",
+        "replacement": "{ let _ = cap; false }"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-epoch-empty",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid epoch accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!value.is_empty()",
+        "replacement": "true",
+        "start": "fn valid_epoch",
+        "end": "fn valid_scope"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-epoch-length",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid epoch accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "value.len() <= 128",
+        "replacement": "true",
+        "start": "fn valid_epoch",
+        "end": "fn valid_scope"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-epoch-ascii",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid epoch accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')",
+        "replacement": "true",
+        "start": "fn valid_epoch",
+        "end": "fn valid_scope"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-scope-length",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid scope accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "value.len() == 64",
+        "replacement": "true",
+        "start": "fn valid_scope",
+        "end": "fn encoded"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-scope-hex",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid scope accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "b.is_ascii_digit() || (b'a'..=b'f').contains(&b)",
+        "replacement": "true",
+        "start": "fn valid_scope",
+        "end": "fn encoded"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-correlation-empty",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid correlation accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!value.is_empty()",
+        "replacement": "true",
+        "start": "fn correlation",
+        "end": "fn validate_page"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-correlation-length",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid correlation accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "value.len() <= 512",
+        "replacement": "true",
+        "start": "fn correlation",
+        "end": "fn validate_page"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-correlation-ascii",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::independent_string_ranges_sequence_and_snapshot_guards",
+    "expected_literal": "invalid correlation accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')",
+        "replacement": "true",
+        "start": "fn correlation",
+        "end": "fn validate_page"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-cursor-ahead-reset",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::authenticated_cursor_ahead_resets_and_conflicting_replay_refuses",
+    "expected_literal": "cursor ahead reset rejected",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "page.gaps.iter().any(|g| g.reason == Reason::CursorAhead)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-conflicting-replay",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::authenticated_cursor_ahead_resets_and_conflicting_replay_refuses",
+    "expected_literal": "conflicting replay accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "previous.canonical != *json",
+        "replacement": "{ let _ = &previous; false }"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-snapshot-byte-accounting",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::snapshot_budget_and_replay_receipt_are_independent",
+    "expected_literal": "snapshot bytes omitted from budget",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "coalesce(length(snapshot),0)+",
+        "replacement": ""
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-snapshot-receipt-replay",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::snapshot_budget_and_replay_receipt_are_independent",
+    "expected_literal": "snapshot replay refreshed receipt",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "old_fingerprint.as_ref() == Some(&fingerprint)",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-removed-inventory-events",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::removed_inventory_is_purged_on_restart_and_retained_nodes_expire",
+    "expected_literal": "removed inventory events persisted keep_old=false",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "c.execute(\"DELETE FROM events WHERE node=?1\", [&node])?;",
+        "replacement": "let _ = &node;",
+        "start": "fn open_limits",
+        "end": "fn lock("
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-removed-inventory-snapshot",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::removed_inventory_is_purged_on_restart_and_retained_nodes_expire",
+    "expected_literal": "removed inventory snapshot persisted keep_old=false",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "c.execute(\"DELETE FROM nodes WHERE node=?1\", [&node])?;",
+        "replacement": "let _ = &node;",
+        "start": "fn open_limits",
+        "end": "fn lock("
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-stored-inventory-cap",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::startup_replaces_full_inventory_and_refuses_oversized_legacy_inventory",
+    "expected_literal": "oversized stored inventory accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "persisted.len() > 64",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-snapshot-watermark-ttl",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::identical_future_snapshot_cannot_renew_after_idle_expiry",
+    "expected_literal": "expired future snapshot replay resurrected cache",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "SET snapshot=NULL WHERE node=?1 AND snapshot IS NOT NULL AND snapshot_base<?2",
+        "replacement": "SET snapshot=NULL,snapshot_fingerprint=NULL WHERE node=?1 AND snapshot IS NOT NULL AND snapshot_base<?2"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-snapshot-watermark-byte-eviction",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::snapshot_control_counts_toward_bytes_and_survives_blob_byte_eviction",
+    "expected_literal": "byte eviction forgot snapshot first receipt",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "SET snapshot=NULL WHERE node=?1 AND snapshot IS NOT NULL\"",
+        "replacement": "SET snapshot=NULL,snapshot_fingerprint=zeroblob(32) WHERE node=?1 AND snapshot IS NOT NULL\""
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-snapshot-watermark-denial",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::snapshot_watermark_survives_restart_and_authority_changes_reset_it",
+    "expected_literal": "denial retained snapshot watermark",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "snapshot_fingerprint=NULL,snapshot_origin_hub=NULL,gaps=",
+        "replacement": "snapshot_origin_hub=NULL,gaps="
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-snapshot-control-accounting",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::snapshot_control_counts_toward_bytes_and_survives_blob_byte_eviction",
+    "expected_literal": "snapshot control bytes omitted from budget",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "coalesce(length(snapshot_fingerprint),0)+",
+        "replacement": ""
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-snapshot-control-ceiling",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::snapshot_control_counts_toward_bytes_and_survives_blob_byte_eviction",
+    "expected_literal": "snapshot control bytes omitted from budget",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "accounted_bytes(c, node)? > self.limits.bytes as i64",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-snapshot-fingerprint-capture",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::identical_future_snapshot_cannot_renew_after_idle_expiry",
+    "expected_literal": "new observation reused expired watermark",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "Sha256::digest(&bytes).to_vec()",
+        "replacement": "Sha256::digest(snapshot.scope.as_bytes()).to_vec()"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-directory-special-mode",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::collector_directory_special_mode_is_refused",
+    "expected_literal": "state directory special mode accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "m.mode() & 0o7777 != 0o700",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-inherited-directory-mode",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::inherited_directory_predicates_use_real_metadata",
+    "expected_literal": "inherited directory mode accepted",
+    "edits": [
+      {
+        "file": "src/agent.rs",
+        "needle": "actual_mode != 0o700",
+        "replacement": "false",
+        "start": "pub fn ensure_secure_socket_dir",
+        "end": "pub fn socket_dir_for_env"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-inherited-directory-owner",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::inherited_directory_predicates_use_real_metadata",
+    "expected_literal": "inherited directory owner mismatch accepted",
+    "edits": [
+      {
+        "file": "src/agent.rs",
+        "needle": "actual_uid != expected_uid",
+        "replacement": "false",
+        "start": "pub fn ensure_secure_socket_dir",
+        "end": "pub fn socket_dir_for_env"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-inherited-directory-type",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::inherited_directory_predicates_use_real_metadata",
+    "expected_literal": "inherited directory type accepted",
+    "edits": [
+      {
+        "file": "src/agent.rs",
+        "needle": "!meta.is_dir()",
+        "replacement": "false",
+        "start": "pub fn ensure_secure_socket_dir",
+        "end": "pub fn socket_dir_for_env"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-private-file-owner",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::private_file_metadata_predicates_use_real_metadata",
+    "expected_literal": "private file owner mismatch accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "m.uid() != expected_uid",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-private-file-type",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::private_file_metadata_predicates_use_real_metadata",
+    "expected_literal": "private file type accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "!m.is_file()",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-journal-admission",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::private_paths_and_preexisting_physical_limits",
+    "expected_literal": "oversized journal accepted",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "private_file(&journal, journal_cap, false)?;",
+        "replacement": "let _ = (&journal, journal_cap);"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj-collector-store-journal-error-abort",
+    "target": "lib",
+    "test_file": "src/observe_collector_store_tests.rs",
+    "test": "observe_collector_store::tests::journal_failure_barrier_bounds_abort_and_reopen",
+    "expected_literal": "error resumed live transaction",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "c.execute_batch(\"ROLLBACK\").is_err()",
+        "replacement": "false"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj2-integration-compat-stored-fallback",
+    "target": "lib",
+    "test": "observe_collector_unknown_tests::unknown_kind_storage_rendering_and_exact_replay",
+    "test_file": "src/observe_collector_unknown_tests.rs",
+    "expected_literal": "stored future kind readback was refused",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "crate::observe_collector_decode::decode_event(&json)\n                        .map_err(|_| StoreError::Storage)?\n                        .event",
+        "replacement": "serde_json::from_slice::<ExportEvent>(&json).map_err(|_| StoreError::Storage)?"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj2-integration-compat-private-kind-preserved",
+    "target": "lib",
+    "test": "observe_collector_unknown_tests::unknown_kind_storage_rendering_and_exact_replay",
+    "test_file": "src/observe_collector_unknown_tests.rs",
+    "expected_literal": "stored future kind identity was normalized",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "let json = &original.canonical;",
+        "replacement": "let normalized = encoded(event, 4096)?; let json = &normalized;"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj2-integration-compat-kind-in-conflict-identity",
+    "target": "lib",
+    "test": "observe_collector_unknown_tests::unknown_kind_storage_rendering_and_exact_replay",
+    "test_file": "src/observe_collector_unknown_tests.rs",
+    "expected_literal": "changed unknown kind was accepted as duplicate",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "previous.canonical != *json",
+        "replacement": "serde_json::to_vec(&previous.event).ok() != serde_json::to_vec(event).ok()"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj2-integration-compat-fixed-caption",
+    "target": "lib",
+    "test": "observe_collector_unknown_tests::unknown_kind_storage_rendering_and_exact_replay",
+    "test_file": "src/observe_collector_unknown_tests.rs",
+    "expected_literal": "unknown caption missing",
+    "edits": [
+      {
+        "file": "src/observe_collector_web.rs",
+        "needle": "\"unknown event kind (newer node)\".into()",
+        "replacement": "\"unknown\".into()"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj2-integration-compat-runtime-retains-envelope",
+    "target": "lib",
+    "test": "observe_collector::tests::runtime_preserves_original_future_kind",
+    "test_file": "src/observe_collector_tests.rs",
+    "expected_literal": "runtime lost original kind identity",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "move |store| store.ingest_decoded_page(&node, &cursor, page)",
+        "replacement": "move |store| store.ingest_page(&node, &cursor, page.page)"
+      }
+    ]
+  },
+  {
+    "label": "legacy-dtxj2-integration-compat-corrupt-row-refuses",
+    "target": "lib",
+    "test": "observe_collector_unknown_tests::malformed_future_stored_row_is_not_skipped",
+    "test_file": "src/observe_collector_unknown_tests.rs",
+    "expected_literal": "malformed stored row was silently skipped",
+    "edits": [
+      {
+        "file": "src/observe_collector_store.rs",
+        "needle": "let event = crate::observe_collector_decode::decode_event(&json)\n                        .map_err(|_| StoreError::Storage)?\n                        .event;",
+        "replacement": "let event = match crate::observe_collector_decode::decode_event(&json) { Ok(value) => value.event, Err(_) => continue };"
+      }
+    ]
+  }
+]
