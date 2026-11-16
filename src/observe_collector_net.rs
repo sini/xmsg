@@ -47,6 +47,18 @@ pub struct SourceConfig {
     pub labels: bool,
     #[serde(default)]
     pub outbound_only: bool,
+    #[serde(default)]
+    pub relay: Option<RelayConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayConfig {
+    pub hub: String,
+    pub leaf: String,
+    pub address: String,
+    #[serde(default)]
+    pub ca: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -123,6 +135,26 @@ impl Config {
             if let Some(file) = &mut source.ca {
                 relative(base, file);
             }
+            if let Some(relay) = &mut source.relay {
+                crate::observe_relay::identity_node(&relay.hub).ok_or(Error::Configuration)?;
+                let leaf =
+                    crate::observe_relay::identity_node(&relay.leaf).ok_or(Error::Configuration)?;
+                if relay.hub == relay.leaf
+                    || leaf != source.node
+                    || relay.address.is_empty()
+                    || source.address.is_some()
+                    || source.pin.is_some()
+                    || source.ca.is_some()
+                    || source.identity.is_some()
+                    || relay.hub.starts_with("spiffe://") != relay.ca.is_some()
+                {
+                    return Err(Error::Configuration);
+                }
+                if let Some(file) = &mut relay.ca {
+                    relative(base, file);
+                }
+                continue;
+            }
             if source.outbound_only {
                 continue;
             }
@@ -170,6 +202,8 @@ pub struct Source {
     pub node: String,
     pub labels: bool,
     pub supported: bool,
+    pub relay: Option<crate::observe_collector_store::RelayOrigin>,
+    server_name: String,
     peer: Option<PeerConfig>,
     connector: Option<tokio_rustls::TlsConnector>,
     slot: Arc<Semaphore>,
@@ -207,7 +241,11 @@ impl Client {
     pub fn new(config: &Config) -> Result<Self, Error> {
         let (chain, key) = credentials(&config.client_cert, &config.client_key)?;
         let mut entries = serde_json::Map::new();
-        for source in config.sources.iter().filter(|source| !source.outbound_only) {
+        for source in config
+            .sources
+            .iter()
+            .filter(|s| s.relay.is_none() && !s.outbound_only)
+        {
             let mut entry = serde_json::json!({"address":source.address,"allow":[]});
             if let Some(pin) = &source.pin {
                 entry["pin"] = serde_json::json!(pin);
@@ -218,23 +256,47 @@ impl Client {
             }
             entries.insert(source.node.clone(), entry);
         }
-        let peers = Arc::new(
+        let direct_peers = Arc::new(
             PeersMap::load_from_json(&serde_json::Value::Object(entries).to_string())
                 .map_err(|_| Error::Configuration)?,
         );
         let mut sources = Vec::new();
         for config_source in &config.sources {
-            let (peer, connector) = if config_source.outbound_only {
+            let supported = config_source.relay.is_some() || !config_source.outbound_only;
+            let mut server_name = config_source.node.clone();
+            let (peer, connector) = if !supported {
                 (None, None)
             } else {
+                let mut entry = serde_json::json!({"allow":[]});
+                if let Some(relay) = &config_source.relay {
+                    server_name = crate::observe_relay::identity_node(&relay.hub)
+                        .ok_or(Error::Configuration)?;
+                    entry["address"] = serde_json::json!(relay.address);
+                    if let Some(ca) = &relay.ca {
+                        entry["ca"] = serde_json::json!(ca);
+                        entry["identities"] = serde_json::json!([relay.hub]);
+                    } else {
+                        entry["pin"] = serde_json::json!(relay.hub);
+                    }
+                }
+                let peers = if config_source.relay.is_some() {
+                    Arc::new(
+                        PeersMap::load_from_json(
+                            &serde_json::json!({server_name.clone(): entry}).to_string(),
+                        )
+                        .map_err(|_| Error::Configuration)?,
+                    )
+                } else {
+                    direct_peers.clone()
+                };
                 let peer = peers
-                    .get_peer_config(&config_source.node)
+                    .get_peer_config(&server_name)
                     .ok_or(Error::Configuration)?;
                 let connector = crate::fed::make_tls_connector_with_credentials(
                     chain.clone(),
                     key.clone(),
                     &peer,
-                    peers.clone(),
+                    peers,
                 )
                 .map_err(|_| Error::Configuration)?;
                 (Some(peer), Some(connector))
@@ -242,7 +304,14 @@ impl Client {
             sources.push(Source {
                 node: config_source.node.clone(),
                 labels: config_source.labels,
-                supported: !config_source.outbound_only,
+                supported,
+                server_name,
+                relay: config_source.relay.as_ref().map(|r| {
+                    crate::observe_collector_store::RelayOrigin {
+                        hub: r.hub.clone(),
+                        leaf: r.leaf.clone(),
+                    }
+                }),
                 peer,
                 connector,
                 slot: Arc::new(Semaphore::new(1)),
@@ -309,6 +378,15 @@ impl Client {
         if !source.supported {
             return Err(Error::Unsupported);
         }
+        let path = if source.relay.is_some() {
+            path.replacen(
+                "/fed/v2/observe/",
+                &format!("/fed/v2/observe/relay/{}/", source.node),
+                1,
+            )
+        } else {
+            path
+        };
         let leases = Leases {
             _node: source
                 .slot
@@ -347,8 +425,8 @@ impl Client {
                 }
             }
             let tcp = connected.ok_or(Error::Unavailable)?;
-            let name =
-                ServerName::try_from(source.node.clone()).map_err(|_| Error::Configuration)?;
+            let name = ServerName::try_from(source.server_name.clone())
+                .map_err(|_| Error::Configuration)?;
             let tls = source
                 .connector
                 .as_ref()
@@ -366,7 +444,7 @@ impl Client {
                 let _ = connection.await;
             }));
             let request = hyper::Request::get(path)
-                .header("host", &source.node)
+                .header("host", &source.server_name)
                 .body(Empty::<Bytes>::new())
                 .map_err(|_| Error::Configuration)?;
             let response = sender
@@ -385,6 +463,14 @@ impl Client {
                     .unwrap_or(2)
                     .clamp(2, 60);
                 return Err(Error::RateLimited(seconds));
+            }
+            if source.relay.is_some() {
+                if response.status() == hyper::StatusCode::NOT_IMPLEMENTED {
+                    return Err(Error::Unsupported);
+                }
+                if response.status() == hyper::StatusCode::BAD_REQUEST {
+                    return Err(Error::Malformed);
+                }
             }
             if response.status() != hyper::StatusCode::OK {
                 return Err(Error::Unavailable);

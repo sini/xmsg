@@ -34,6 +34,7 @@ fn main() {
     let store = Store::open(
         directory,
         vec![NodePolicy {
+            relay: None,
             node: NODE.into(),
             labels: false,
             supported: true,

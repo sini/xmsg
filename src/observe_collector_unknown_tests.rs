@@ -22,6 +22,7 @@ fn fixture() -> (tempfile::TempDir, Store, Arc<AtomicI64>) {
     let store = Store::open(
         &directory.path().join("state"),
         vec![NodePolicy {
+            relay: None,
             node: NODE.into(),
             labels: false,
             supported: true,
