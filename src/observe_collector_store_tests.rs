@@ -15,6 +15,7 @@ fn fixture() -> (tempfile::TempDir, Store, Arc<AtomicI64>) {
     let store = Store::open(
         dir.path(),
         vec![NodePolicy {
+            relay: None,
             node: "node".into(),
             labels: false,
             supported: true,
@@ -115,6 +116,7 @@ fn startup_hidden_and_denial_hide_before_failed_purge() {
     let store = Store::open(
         dir.path(),
         vec![NodePolicy {
+            relay: None,
             node: "node".into(),
             labels: false,
             supported: true,
@@ -375,6 +377,7 @@ fn independent_row_and_byte_limits_include_snapshot() {
         let store = Store::open_limits(
             dir.path(),
             vec![NodePolicy {
+                relay: None,
                 node: "node".into(),
                 labels: false,
                 supported: true,
@@ -410,6 +413,7 @@ fn private_paths_and_preexisting_physical_limits() {
         Store::open_limits(
             dir,
             vec![NodePolicy {
+                relay: None,
                 node: "node".into(),
                 labels: false,
                 supported: true,
@@ -463,6 +467,7 @@ fn engine_settings_journal_peak_full_abort_and_compaction() {
     let store = Store::open_limits(
         dir.path(),
         vec![NodePolicy {
+            relay: None,
             node: "node".into(),
             labels: false,
             supported: true,
@@ -559,6 +564,7 @@ fn secure_delete_removes_metadata_canary() {
 fn wire_count_and_byte_caps_have_positive_controls() {
     let (_dir, store, _) = fixture();
     let policy = NodePolicy {
+        relay: None,
         node: "node".into(),
         labels: false,
         supported: true,
@@ -606,6 +612,7 @@ fn wire_count_and_byte_caps_have_positive_controls() {
 fn independent_string_ranges_sequence_and_snapshot_guards() {
     let (_dir, store, _) = fixture();
     let policy = NodePolicy {
+        relay: None,
         node: "node".into(),
         labels: false,
         supported: true,
@@ -798,6 +805,7 @@ fn rollback_failure_closes_connection_and_restart_revalidates() {
     let store = Store::open(
         dir.path(),
         vec![NodePolicy {
+            relay: None,
             node: "node".into(),
             labels: false,
             supported: true,
@@ -839,6 +847,7 @@ fn scope_purge_failure_masks_before_sql_and_restarts_hidden() {
     let store = Store::open(
         dir.path(),
         vec![NodePolicy {
+            relay: None,
             node: "node".into(),
             labels: false,
             supported: true,
@@ -892,6 +901,7 @@ fn snapshot_budget_and_replay_receipt_are_independent() {
     let store = Store::open_limits(
         dir.path(),
         vec![NodePolicy {
+            relay: None,
             node: "node".into(),
             labels: true,
             supported: true,
@@ -970,11 +980,13 @@ fn removed_inventory_is_purged_on_restart_and_retained_nodes_expire() {
         let dir = private_temp();
         let policies = vec![
             NodePolicy {
+                relay: None,
                 node: "node".into(),
                 labels: false,
                 supported: true,
             },
             NodePolicy {
+                relay: None,
                 node: "other".into(),
                 labels: false,
                 supported: true,
@@ -1023,6 +1035,7 @@ fn startup_replaces_full_inventory_and_refuses_oversized_legacy_inventory() {
     let policies = |offset| {
         (offset..offset + 64)
             .map(|i| NodePolicy {
+                relay: None,
                 node: format!("node{i}"),
                 labels: false,
                 supported: true,
@@ -1074,6 +1087,7 @@ fn snapshot_watermark_survives_restart_and_authority_changes_reset_it() {
     let store = Store::open(
         dir.path(),
         vec![NodePolicy {
+            relay: None,
             node: "node".into(),
             labels: false,
             supported: true,
@@ -1138,6 +1152,7 @@ fn snapshot_control_counts_toward_bytes_and_survives_blob_byte_eviction() {
         let store = Store::open_limits(
             dir.path(),
             vec![NodePolicy {
+                relay: None,
                 node: "node".into(),
                 labels: true,
                 supported: true,
@@ -1203,6 +1218,7 @@ fn collector_directory_special_mode_is_refused() {
     let result = Store::open(
         dir.path(),
         vec![NodePolicy {
+            relay: None,
             node: "node".into(),
             labels: false,
             supported: true,
@@ -1289,6 +1305,7 @@ fn journal_store(dir: &Path) -> Store {
     Store::open_limits(
         dir,
         vec![NodePolicy {
+            relay: None,
             node: "node".into(),
             labels: false,
             supported: true,
@@ -1541,4 +1558,319 @@ fn uncommitted_child_crash_journal_is_bounded_and_recovers_hidden() {
         fs::metadata(&journal).map_or(true, |m| m.len() <= 128 * 4104 + 131072),
         "recovery grew journal beyond bound"
     );
+}
+
+fn relay_policy() -> NodePolicy {
+    NodePolicy {
+        node: "node".into(),
+        labels: false,
+        supported: true,
+        relay: Some(RelayOrigin {
+            hub: "spiffe://fleet/host/hub/user/owner".into(),
+            leaf: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+        }),
+    }
+}
+fn relay_fixture_policy() -> NodePolicy {
+    let mut policy = relay_policy();
+    policy.relay.as_mut().unwrap().leaf = "spiffe://fleet/ns/fleet/sa/leaf".into();
+    policy.node = "leaf.fleet".into();
+    policy
+}
+fn relay_page(sequence: i64) -> ExportPage {
+    let mut p = page(sequence);
+    p.node = "leaf.fleet".into();
+    p.events[0].from = Some("bot@leaf.fleet".into());
+    p
+}
+fn relay_snapshot() -> ExportSnapshot {
+    let mut s = snapshot();
+    s.node = "leaf.fleet".into();
+    for e in &mut s.endpoints {
+        e.node = "leaf.fleet".into();
+        e.id = "bot@leaf.fleet".into();
+    }
+    s
+}
+#[test]
+fn relay_storage_origin_key_migration_and_tamper() {
+    let dir = private_temp();
+    let policy = relay_fixture_policy();
+    let key = policy.storage_key();
+    let hub = policy.relay.as_ref().unwrap().hub.clone();
+    assert_ne!(key, policy.node);
+    assert!(key.starts_with("reverse-v1:"));
+    for round in 0..2 {
+        let store = Store::open(dir.path(), vec![policy.clone()], Arc::new(|| NOW)).unwrap();
+        assert!(store.view(None, 200).unwrap()[0].history_hidden);
+        if round == 0 {
+            store
+                .ingest_page(&policy.node, &Cursor::default(), relay_page(1))
+                .unwrap();
+            store
+                .ingest_snapshot(&policy.node, relay_snapshot())
+                .unwrap();
+        } else {
+            let mut p = relay_page(2);
+            p.events.clear();
+            p.next = 1;
+            store
+                .ingest_page(&policy.node, &store.cursor(&policy.node).unwrap(), p)
+                .unwrap();
+        }
+        let view = store.view(None, 200).unwrap().pop().unwrap();
+        assert_eq!(view.node, policy.node);
+        assert_eq!(view.origin_hub.as_deref(), Some(hub.as_str()));
+        assert_eq!(view.events[0].origin_hub.as_deref(), Some(hub.as_str()));
+        assert_eq!(
+            view.latest_snapshot.unwrap().origin_hub.as_deref(),
+            Some(hub.as_str())
+        );
+        let inner = store.lock().unwrap();
+        let c = inner.connection.as_ref().unwrap();
+        assert_eq!(
+            c.query_row("SELECT node FROM nodes", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            key
+        );
+        assert_eq!(
+            c.query_row("SELECT origin_hub FROM events", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            hub
+        );
+        assert_eq!(
+            c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    for column in ["origin_hub", "snapshot_origin_hub"] {
+        let store = Store::open(dir.path(), vec![policy.clone()], Arc::new(|| NOW)).unwrap();
+        let c = Connection::open(dir.path().join("collector.sqlite")).unwrap();
+        let table = if column == "origin_hub" {
+            "events"
+        } else {
+            "nodes"
+        };
+        c.execute(&format!("UPDATE {table} SET {column}=NULL"), [])
+            .unwrap();
+        assert!(
+            store
+                .ingest_snapshot(&policy.node, relay_snapshot())
+                .is_err(),
+            "missing relay origin accepted: {column}"
+        );
+        assert!(store.view(None, 200).unwrap()[0].history_hidden);
+        c.execute(&format!("UPDATE {table} SET {column}=?1"), [&hub])
+            .unwrap();
+    }
+}
+#[test]
+fn relay_atomic_origin_rows_cursor_and_snapshot_abort() {
+    let dir = private_temp();
+    let policy = relay_fixture_policy();
+    let store = Store::open(dir.path(), vec![policy.clone()], Arc::new(|| NOW)).unwrap();
+    store
+        .ingest_page(&policy.node, &Cursor::default(), relay_page(1))
+        .unwrap();
+    store
+        .ingest_snapshot(&policy.node, relay_snapshot())
+        .unwrap();
+    let c = Connection::open(dir.path().join("collector.sqlite")).unwrap();
+    c.execute_batch("CREATE TRIGGER fail_cursor BEFORE UPDATE OF next ON nodes BEGIN SELECT RAISE(ABORT,'fixture abort'); END;").unwrap();
+    let cursor = store.cursor(&policy.node).unwrap();
+    assert!(store
+        .ingest_page(&policy.node, &cursor, relay_page(2))
+        .is_err());
+    assert_eq!(store.cursor(&policy.node).unwrap(), cursor);
+    assert_eq!(store.view(None, 200).unwrap()[0].events.len(), 1);
+    c.execute_batch("DROP TRIGGER fail_cursor; CREATE TRIGGER fail_origin BEFORE UPDATE OF snapshot_origin_hub ON nodes BEGIN SELECT RAISE(ABORT,'fixture abort'); END;").unwrap();
+    let mut changed = relay_snapshot();
+    changed.observed_at -= 1;
+    assert!(store.ingest_snapshot(&policy.node, changed).is_err());
+    assert_eq!(
+        store.view(None, 200).unwrap()[0]
+            .latest_snapshot
+            .as_ref()
+            .unwrap()
+            .snapshot
+            .observed_at,
+        NOW
+    );
+}
+#[test]
+fn relay_and_direct_inventory_switches_never_exceed_64() {
+    let dir = private_temp();
+    let policies = |relay: bool, alternate: bool| {
+        (0..64)
+            .map(|i| {
+                let leaf = format!("spiffe://fleet/ns/fleet/sa/leaf{i}");
+                NodePolicy {
+                    node: format!("leaf{i}.fleet"),
+                    labels: false,
+                    supported: i != 63,
+                    relay: relay.then(|| RelayOrigin {
+                        hub: format!(
+                            "spiffe://{}/host/hub/user/owner",
+                            if alternate { "other" } else { "fleet" }
+                        ),
+                        leaf,
+                    }),
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    for (relay, alternate) in [(false, false), (true, false), (true, true), (false, false)] {
+        let store = Store::open(dir.path(), policies(relay, alternate), Arc::new(|| NOW)).unwrap();
+        assert_eq!(store.view(None, 0).unwrap().len(), 64);
+        let c = Connection::open(dir.path().join("collector.sqlite")).unwrap();
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM nodes", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            64
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT count(*) FROM nodes WHERE node LIKE 'reverse-v1:%'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            if relay { 64 } else { 0 }
+        );
+    }
+}
+
+#[test]
+fn relay_and_direct_origins_refuse_foreign_values() {
+    let (_dir, store, _) = fixture();
+    store
+        .ingest_page("node", &Cursor::default(), page(1))
+        .unwrap();
+    store.ingest_snapshot("node", snapshot()).unwrap();
+    for (table, column) in [("events", "origin_hub"), ("nodes", "snapshot_origin_hub")] {
+        let inner = store.lock().unwrap();
+        let c = inner.connection.as_ref().unwrap();
+        c.execute(
+            &format!("UPDATE {table} SET {column}='spiffe://foreign/host/hub/user/owner'"),
+            [],
+        )
+        .unwrap();
+        drop(inner);
+        assert!(
+            store.view(None, 200).is_err(),
+            "direct history accepted stamped origin: {column}"
+        );
+        let inner = store.lock().unwrap();
+        let c = inner.connection.as_ref().unwrap();
+        c.execute(&format!("UPDATE {table} SET {column}=NULL"), [])
+            .unwrap();
+        drop(inner);
+        assert_eq!(store.view(None, 200).unwrap()[0].events.len(), 1);
+    }
+    let dir = private_temp();
+    let policy = relay_fixture_policy();
+    let store = Store::open(dir.path(), vec![policy.clone()], Arc::new(|| NOW)).unwrap();
+    store
+        .ingest_page(&policy.node, &Cursor::default(), relay_page(1))
+        .unwrap();
+    store
+        .ingest_snapshot(&policy.node, relay_snapshot())
+        .unwrap();
+    for (table, column) in [("events", "origin_hub"), ("nodes", "snapshot_origin_hub")] {
+        let c = Connection::open(dir.path().join("collector.sqlite")).unwrap();
+        c.execute(
+            &format!("UPDATE {table} SET {column}='spiffe://foreign/host/hub/user/owner'"),
+            [],
+        )
+        .unwrap();
+        assert!(
+            store.view(None, 200).is_err(),
+            "relay history accepted foreign origin: {column}"
+        );
+        c.execute(
+            &format!("UPDATE {table} SET {column}=?1"),
+            [policy.origin_hub()],
+        )
+        .unwrap();
+    }
+}
+#[test]
+fn relay_key_and_origin_bytes_are_independently_accounted() {
+    let dir = private_temp();
+    let policy = relay_fixture_policy();
+    let key = policy.storage_key();
+    let hub = policy.origin_hub().unwrap();
+    let store = Store::open(dir.path(), vec![policy.clone()], Arc::new(|| NOW)).unwrap();
+    store
+        .ingest_page(&policy.node, &Cursor::default(), relay_page(1))
+        .unwrap();
+    store
+        .ingest_snapshot(&policy.node, relay_snapshot())
+        .unwrap();
+    let inner = store.lock().unwrap();
+    let c = inner.connection.as_ref().unwrap();
+    let bytes: i64 = c
+        .query_row("SELECT bytes FROM events", [], |r| r.get(0))
+        .unwrap();
+    let json_bytes: i64 = c
+        .query_row("SELECT length(json) FROM events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        bytes,
+        json_bytes + "epoch".len() as i64 + key.len() as i64 + 128 + hub.len() as i64,
+        "event relay key/origin bytes omitted"
+    );
+    let total = accounted_bytes(c, &key).unwrap();
+    c.execute("UPDATE nodes SET snapshot_origin_hub=NULL", [])
+        .unwrap();
+    assert_eq!(
+        total - accounted_bytes(c, &key).unwrap(),
+        hub.len() as i64,
+        "snapshot origin bytes omitted"
+    );
+    let expected:i64=c.query_row("SELECT coalesce(length(snapshot),0)+coalesce(length(snapshot_fingerprint),0)+coalesce(length(epoch),0)+coalesce(length(scope),0)+length(gaps)+192+(SELECT sum(bytes) FROM events) FROM nodes",[],|r|r.get(0)).unwrap();
+    assert_eq!(
+        accounted_bytes(c, &key).unwrap() - expected,
+        key.len() as i64,
+        "node relay key bytes omitted"
+    );
+}
+#[test]
+fn relay_upgrade_migrates_b0_nullable_columns_twice() {
+    let (dir, store, _) = fixture();
+    store
+        .ingest_page("node", &Cursor::default(), page(1))
+        .unwrap();
+    drop(store);
+    let c = Connection::open(dir.path().join("collector.sqlite")).unwrap();
+    c.execute_batch("ALTER TABLE events DROP COLUMN origin_hub; ALTER TABLE nodes DROP COLUMN snapshot_origin_hub;").unwrap();
+    drop(c);
+    for _ in 0..2 {
+        let store = Store::open(
+            dir.path(),
+            vec![NodePolicy {
+                node: "node".into(),
+                labels: false,
+                supported: true,
+                relay: None,
+            }],
+            Arc::new(|| NOW),
+        )
+        .unwrap();
+        let mut empty = page(2);
+        empty.events.clear();
+        empty.next = 1;
+        store
+            .ingest_page("node", &store.cursor("node").unwrap(), empty)
+            .unwrap();
+        assert_eq!(store.view(None, 200).unwrap()[0].events.len(), 1);
+        let inner = store.lock().unwrap();
+        let c = inner.connection.as_ref().unwrap();
+        for (table, column) in [("events", "origin_hub"), ("nodes", "snapshot_origin_hub")] {
+            let (notnull,default):(i64,Option<String>)=c.query_row(&format!("SELECT [notnull],dflt_value FROM pragma_table_info('{table}') WHERE name=?1"),[column],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+            assert_eq!((notnull, default), (0, None));
+        }
+    }
 }

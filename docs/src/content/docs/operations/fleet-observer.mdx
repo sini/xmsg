@@ -93,9 +93,8 @@ backfill when the policy scope changes.
 
 ## Reverse observation through a trusted hub (planned)
 
-This leaf/hub transport is **planned, not yet released**. Collector reverse-source
-configuration, origin storage, and the `via hub` view are a separate planned
-extension. Use only a hub administered by the same owner: the hub is trusted for
+This transport and collector reverse-source configuration, origin storage, and
+`via hub` view are **planned, not yet released**. Use only a hub administered by the same owner: the hub is trusted for
 confidentiality and collector-origin attestation and can fabricate observations.
 No independent leaf signature is provided.
 
@@ -382,3 +381,44 @@ escaped, scripts are disabled by CSP, and responses use no-store and nosniff. No
 message body, transcript, cwd, path, environment or credential field is stored or
 rendered. Authorized compromised exporters or collectors remain trusted-component
 compromises; metadata identifiers and opted-in labels are not a covert-data filter.
+
+## Collector relay source (planned)
+
+After configuring the hub and leaf above, replace the direct source entry with:
+
+```json
+{
+  "node": "leaf.leaves",
+  "outbound_only": true,
+  "relay": {
+    "hub": "spiffe://fleet.example/host/hub/user/owner",
+    "leaf": "spiffe://fleet.example/ns/leaves/sa/leaf",
+    "address": "hub.example:9433",
+    "ca": "fleet-ca.pem"
+  }
+}
+```
+
+Use the actual full identities from the matching hub/leaf route. `relay` has only
+`hub`, `leaf`, `address`, and optional `ca`. URI hubs require `ca`; pinned hubs use
+canonical lowercase `sha256:` plus 64 hex digits and omit `ca`. The leaf identity
+must derive the source `node`. Relative CA paths resolve beside the collector
+config. A relay entry refuses direct `address`, `pin`, `ca`, and `identity`
+fields. `outbound_only` without `relay` remains unsupported. Configuration applies
+on restart; no fallback or automatic discovery chooses another transport.
+
+Direct and relay reads share the collector's eight-request global admission,
+one request per source, two-second start spacing, five-second total deadline,
+and 256 KiB response bound. Human bearer tokens remain on the owner web path;
+relay requests use collector mTLS. Labels still require both node grants and the
+collector source opt-in. A route alone, or `list`/`leaf` rights alone, refuses
+observation.
+
+The view labels event, inventory and stale history `via` the configured hub and
+identifies it as hub-attested. Only validated cached history can remain visible
+during an outage; a restart hides history until revalidation. Denial and scope
+changes hide old history before purge. The nullable origin columns and separate
+relay storage keys preserve this distinction without changing exporter JSON.
+Downgrading to an older collector **permanently deletes relay history**, including
+up to seven days of metadata; direct history remains subject to normal retention.
+A later upgrade starts a fresh relay poll, without restoring deleted history.

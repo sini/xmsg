@@ -352,7 +352,7 @@ both grant and request opt-in. Reconnect after peer-policy reload.
 
 See [fleet observer concepts](/concepts/fleet-observer/) and the
 [grant and request example](/operations/fleet-observer/). The collector, owner
-authentication and web view remain planned and unimplemented.
+authentication and web view remain planned, not yet released.
 
 
 ## Reverse observation controls (planned)
@@ -377,3 +377,9 @@ assertion against its enabled exact route and its own current collector policy.
 The hub is an owner-administered trusted origin attestor, not independent leaf
 proof. See [the trust and IP limits](/concepts/fleet-observer/) and
 [the hub/leaf configuration example](/operations/fleet-observer/#reverse-observation-through-a-trusted-hub-planned).
+
+The planned collector selects direct or relay transport per source, using full
+hub/leaf identities and a separate trust binding for each configured hub. Relay
+history displays the configured leaf via its trusted hub. Changing routes takes
+effect on collector restart and purges the previous route's cache; no browser
+header can select or stamp an origin. See [collector relay setup](/operations/fleet-observer/#collector-relay-source-planned).
