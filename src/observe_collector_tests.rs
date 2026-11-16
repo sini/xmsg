@@ -168,6 +168,7 @@ impl Fixture {
             requests: request_slots(),
             nodes: vec!["fixture.node".into()],
             denied: Mutex::new(BTreeSet::new()),
+            failures: Mutex::new(BTreeMap::new()),
             scopes: Mutex::new(BTreeMap::from([("fixture.node".into(), "a".repeat(64))])),
             scope_hidden: Mutex::new(BTreeSet::new()),
         });
@@ -717,6 +718,7 @@ fn scheduler_state(fixture: &Fixture, node: &str, store: Arc<Store>) -> Arc<Stat
         requests: request_slots(),
         nodes: vec![node.into()],
         denied: Mutex::new(BTreeSet::new()),
+        failures: Mutex::new(BTreeMap::new()),
         scopes: Mutex::new(BTreeMap::new()),
         scope_hidden: Mutex::new(BTreeSet::new()),
     })
@@ -1013,4 +1015,149 @@ async fn relay_owner_headers_are_not_identity() {
         .await
         .unwrap();
     assert_eq!(reply.status(), 401);
+}
+
+#[tokio::test]
+async fn relay_failure_overlay_survives_busy_store_slot_and_clears_on_fresh_ingest() {
+    let fixture = Fixture::with_relay(true).await;
+    for (error, caption) in [
+        (net::Error::Timeout, "Observation request timed out."),
+        (net::Error::Unavailable, "Observation exporter unavailable."),
+        (net::Error::Malformed, "Invalid observation response."),
+        (net::Error::RateLimited(2), "Observation rate limited."),
+        (
+            net::Error::Unsupported,
+            "Observation transport unsupported.",
+        ),
+    ] {
+        let held = fixture
+            .state
+            .store_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .unwrap();
+        mark_error(&fixture.state, "fixture.node".into(), error).await;
+        assert_eq!(
+            fixture.state.store.view(None, 200).unwrap()[0].status,
+            crate::observe_collector_store::NodeStatus::Healthy,
+            "forced busy-slot control did not leave SQL status unchanged"
+        );
+        drop(held);
+        let reply = fixture.get("/?node=0").send().await.unwrap();
+        assert_eq!(reply.status(), 200);
+        let html = reply.text().await.unwrap();
+        assert!(
+            html.contains(caption),
+            "busy store dropped known failure: {error:?}"
+        );
+        assert!(html.contains("Previously validated history is stale."));
+        assert!(!html.contains("<p>healthy</p>"));
+        assert!(html.contains("via spiffe://fleet/host/hub/user/owner (hub-attested)"));
+        assert_eq!(fixture.state.failures.lock().unwrap().len(), 1);
+        fixture
+            .state
+            .store
+            .ingest_snapshot(
+                "fixture.node",
+                ExportSnapshot {
+                    v: 1,
+                    node: "fixture.node".into(),
+                    scope: "a".repeat(64),
+                    observed_at: 1000,
+                    endpoints: vec![],
+                    truncated: false,
+                    available: SnapshotAvailability::Available,
+                },
+            )
+            .unwrap();
+        accepted_scope(&fixture.state, "fixture.node", "a".repeat(64));
+        assert!(fixture.state.failures.lock().unwrap().is_empty());
+        let html = fixture
+            .get("/?node=0")
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(html.contains("<p>healthy</p>"));
+        assert!(!html.contains(caption));
+    }
+    for (error, caption) in [
+        (StoreError::Full, "Collector storage full."),
+        (StoreError::Storage, "Invalid observation response."),
+    ] {
+        let held = fixture
+            .state
+            .store_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .unwrap();
+        mark_storage_error(&fixture.state, "fixture.node".into(), error).await;
+        drop(held);
+        let html = fixture
+            .get("/?node=0")
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(html.contains(caption));
+        assert!(!html.contains("<p>healthy</p>"));
+    }
+    remember_failure(&fixture.state, "unconfigured", UnavailableKind::Timeout);
+    assert_eq!(
+        fixture.state.failures.lock().unwrap().len(),
+        1,
+        "failure overlay grew beyond configured inventory"
+    );
+}
+#[tokio::test]
+async fn relay_failure_overlay_preserves_scope_and_denial_masks() {
+    let fixture = Fixture::with_relay(true).await;
+    let held = fixture
+        .state
+        .store_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .unwrap();
+    mark_error(&fixture.state, "fixture.node".into(), net::Error::Timeout).await;
+    observe_scope(&fixture.state, "fixture.node", &"b".repeat(64));
+    drop(held);
+    let html = fixture
+        .get("/?node=0")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(html.contains("pending revalidation"));
+    assert!(html.contains("history hidden until this node answers"));
+    assert!(!html.contains("Latest source inventory"));
+    let held = fixture
+        .state
+        .store_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .unwrap();
+    mark_error(&fixture.state, "fixture.node".into(), net::Error::Denied).await;
+    drop(held);
+    fixture.state.scope_hidden.lock().unwrap().clear();
+    let html = fixture
+        .get("/?node=0")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(html.contains("<p>denied</p>"));
+    assert!(!html.contains("Latest source inventory"));
+    assert!(!html.contains("Observation request timed out."));
 }
