@@ -1,6 +1,6 @@
 {
   "baseline": {
-    "linux": "cargo test --locked local native on 62c8ee6dfb89eaaa1144808cb75dfddd4ca44192: exit0, measured1270passed/8ignored/0failed,104summaries/all101targets; later changes only refine assertions, final CI must confirm",
+    "linux": "native cargo test --locked on 0db68b76f54107ad8a2bbbc8148b2a890d44855c: exit0, measured 1279 passed/8 ignored/0 failed, 104 summaries/all 101 targets",
     "darwin": "run43786358905 job133034770215 on0fbd378889b4368eed40acfa6b5b2004d8bee8be: measured1273passed/10ignored/0failed,104summaries/all101targets; only prior census guard failed"
   },
   "integration_targets": [
@@ -108,7 +108,7 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1270,
+      "passed": 1279,
       "failed": 0,
       "ignored": 8,
       "summaries": 104
