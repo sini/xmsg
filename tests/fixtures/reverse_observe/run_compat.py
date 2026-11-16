@@ -159,17 +159,18 @@ def main():
     args = parser.parse_args()
     source, old, output = args.source.resolve(),args.old_source.resolve(),args.output.resolve()
     assert source != old and not source.is_relative_to(output) and not old.is_relative_to(output)
+    seed = args.artifact_seed.resolve(strict=True) if args.artifact_seed else None
+    assert seed is None or not output.is_relative_to(seed), "output must be outside artifact seed"
     pin = verify_old(old)
     output.mkdir(parents=True,exist_ok=False,mode=0o700)
     isolation_controls(output)
-    seed = args.artifact_seed.resolve(strict=True) if args.artifact_seed else None
     older = build(old,output,"old",seed,False)
     if args.old_build_only:
         print("old-only construction check; candidate/downgrade NOT executed")
         return
     newer = build(source,output,"candidate",seed,True)
     results = []
-    for scenario in ("saved","direct"):
+    for scenario in ("direct","saved"):
         store = output/f"{scenario}-store"
         store.mkdir(mode=0o700)
         before = None
