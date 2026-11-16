@@ -35,12 +35,17 @@ async fn delivery_body(socket: std::os::unix::net::UnixStream) -> std::io::Resul
 #[tokio::test]
 async fn queued_payload_is_read_after_sender_closes_before_receive_setup() {
     let (mut sender, receiver) = std::os::unix::net::UnixStream::pair().unwrap();
+    // macOS socketpair sets CLOEXEC after creation, so a child spawned by a concurrent
+    // test can inherit the sender; hold such a copy always and close the write side itself.
+    let inherited = sender.try_clone().unwrap();
     sender.write_all(b"closed-peer queued canary").unwrap();
+    sender.shutdown(std::net::Shutdown::Write).unwrap();
     drop(sender);
     assert_eq!(
         delivery_body(receiver).await.unwrap(),
         "closed-peer queued canary"
     );
+    drop(inherited);
 }
 
 struct Fixture {
