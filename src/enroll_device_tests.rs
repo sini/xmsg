@@ -260,3 +260,36 @@ async fn diagnostic_pending_count_is_private_and_does_not_prune() {
         "diagnostic reloaded public root from disk"
     );
 }
+
+#[tokio::test]
+async fn healthy_ca_node_reports_no_warnings_and_a_fixed_check_count() {
+    let harness = enabled().await;
+    let config = crate::ca_health::Config {
+        enabled: Some(true),
+        ca_dir: Some(harness._directory.path().join("ca")),
+    };
+    let ids = |report: &crate::ca_health::Report| {
+        report
+            .checks
+            .iter()
+            .map(|check| check.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let healthy = crate::ca_health::live(&config, Some(&harness.service), harness.clock.now());
+    assert_eq!(healthy.pending_approvals, Some(0));
+    assert!(
+        healthy.checks.iter().all(|check| check.status == "pass"),
+        "healthy CA node reported a warning: {:?}",
+        healthy.checks
+    );
+    let (status, created, _) = start(&harness, "pending-host", 1).await;
+    assert_eq!(status, StatusCode::CREATED);
+    authorized(&harness, &created).await;
+    let busy = crate::ca_health::live(&config, Some(&harness.service), harness.clock.now());
+    assert_eq!(busy.pending_approvals, Some(1));
+    assert_eq!(
+        ids(&busy),
+        ids(&healthy),
+        "CA check lines grew with pending rows"
+    );
+}
