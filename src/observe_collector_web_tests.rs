@@ -4,6 +4,8 @@ use crate::observe_export::*;
 
 fn view() -> NodeView {
     NodeView {
+        failure: None,
+        origin_hub: None,
         history_hidden: false,
         node: "fixture.node".into(),
         status: NodeStatus::Stale,
@@ -29,6 +31,7 @@ fn hostile_view() -> NodeView {
     let hostile =
         "</text><image href=\"https://attacker.invalid/collect\"/><script>alert('x')</script>&";
     node.latest_snapshot = Some(CachedSnapshot {
+        origin_hub: None,
         snapshot: ExportSnapshot {
             v: 1,
             node: node.node.clone(),
@@ -51,6 +54,7 @@ fn hostile_view() -> NodeView {
         receipt_age_seconds: 10,
     });
     node.events = vec![CachedEvent {
+        origin_hub: None,
         epoch: "epoch".into(),
         event: ExportEvent {
             sequence: 1,
@@ -282,4 +286,30 @@ fn records_without_reported_endpoints_do_not_invent_lanes() {
         "record without endpoints gained a decorative exchange"
     );
     assert!(html.contains("No exchange endpoints reported"));
+}
+
+#[test]
+fn relay_origin_is_escaped_in_event_snapshot_and_stale_view() {
+    let mut node = hostile_view();
+    let hub = "spiffe://fleet/host/<hub>&\"/user/owner";
+    node.origin_hub = Some(hub.into());
+    node.latest_snapshot.as_mut().unwrap().origin_hub = Some(hub.into());
+    node.events[0].origin_hub = Some(hub.into());
+    node.failure = Some(UnavailableKind::Timeout);
+    let html = render(
+        &[node.clone()],
+        Some(&node),
+        Filter {
+            node: Some(0),
+            page: 0,
+        },
+    );
+    assert!(html.contains("stale: exporter unavailable"));
+    assert!(html.contains("Observation request timed out."));
+    assert_eq!(
+        html.matches("via spiffe://fleet/host/&lt;hub&gt;&amp;&quot;/user/owner (hub-attested)")
+            .count(),
+        4
+    );
+    assert!(!html.contains(hub));
 }

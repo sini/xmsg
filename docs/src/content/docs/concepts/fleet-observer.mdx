@@ -25,8 +25,9 @@ flowchart LR
 Direct export uses the node's existing federation listener. **Reverse observation
 through an owner-administered hub is planned, not yet released.** An outbound-only
 leaf can answer metadata reads over its existing control-only polls, without an
-inbound listener, message custody, ACK, or agent wake. This transport extension
-does not yet add reverse sources to the collector configuration or view.
+inbound listener, message custody, ACK, or agent wake. A planned collector source
+selects one explicit relay route and shows the configured leaf `via hub` in event,
+inventory, and stale history. Direct sources keep their existing transport.
 
 The hub and leaf each opt in through independent default-off switches and the
 same exact `(hub, leaf, collector)` route. Routes name full literal SPIFFE URIs or
@@ -111,3 +112,7 @@ The collector keeps the bounded original name only in its private stored event
 JSON so exact replays and later upgrades preserve event identity. Stored newer rows
 use the same fallback after fresh scope validation. This requires a collector with
 the compatibility change; an unpatched older binary can still reject new data.
+
+Relay history retains its configured hub origin in the bounded seven-day cache.
+Downgrading to a collector without relay support destructively purges relay
+history; it never reclassifies that history as direct observations.

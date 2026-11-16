@@ -238,6 +238,8 @@ async fn node_and_global_reservations_survive_forced_races() {
     for _ in 1..9 {
         let source = &client.sources[0];
         client.sources.push(Source {
+            relay: None,
+            server_name: source.server_name.clone(),
             node: source.node.clone(),
             labels: source.labels,
             supported: source.supported,
@@ -767,4 +769,161 @@ async fn unknown_event_kinds_preserve_other_enum_refusals() {
         client.events(0, None, None, 0).await,
         Err(Error::Malformed)
     ));
+}
+
+fn use_relay(fixture: &mut Fixture) {
+    let source = fixture.config["sources"][0].clone();
+    fixture.config["sources"][0] = json!({"node":"leaf.fleet", "outbound_only":true,
+        "relay":{"hub": format!("sha256:{}", crate::fed::normalize_pin(source["pin"].as_str().unwrap())),
+        "leaf":"spiffe://fleet/ns/fleet/sa/leaf", "address":source["address"]}});
+}
+#[tokio::test]
+async fn relay_config_closed_full_identity_and_no_mixed_mode() {
+    let mut fixture = Fixture::new().await;
+    use_relay(&mut fixture);
+    assert!(fixture.load().is_ok());
+    let valid = fixture.config.clone();
+    for field in ["address", "pin", "ca", "identity"] {
+        fixture.config = valid.clone();
+        fixture.config["sources"][0][field] = json!("forbidden");
+        assert!(
+            fixture.load().is_err(),
+            "mixed relay/direct {field} accepted"
+        );
+    }
+    for field in ["hub", "leaf"] {
+        for value in [
+            "hub.node",
+            "sha256:ABC",
+            "spiffe://fleet/ns/*/sa/leaf",
+            "sha256:00",
+        ] {
+            fixture.config = valid.clone();
+            fixture.config["sources"][0]["relay"][field] = json!(value);
+            assert!(
+                fixture.load().is_err(),
+                "noncanonical identity accepted: {field} {value}"
+            );
+        }
+    }
+    fixture.config = valid.clone();
+    fixture.config["sources"][0]["relay"]["leaf"] = json!("spiffe://fleet/ns/other/sa/leaf");
+    assert!(
+        fixture.load().is_err(),
+        "configured leaf was not bound to public node"
+    );
+    fixture.config = valid.clone();
+    fixture.config["sources"][0]["relay"]["extra"] = json!(true);
+    assert!(fixture.load().is_err());
+    fixture.config = valid;
+    fixture.config["sources"][0]["relay"]["hub"] = json!("spiffe://fleet/host/hub/user/owner");
+    assert!(fixture.load().is_err(), "URI hub without CA accepted");
+}
+#[tokio::test]
+async fn relay_transport_fixed_status_path_and_no_bearer() {
+    let mut fixture = Fixture::new().await;
+    use_relay(&mut fixture);
+    for (status, expected) in [
+        ("501 Not Implemented", Error::Unsupported),
+        ("503 Service Unavailable", Error::Unavailable),
+        ("400 Bad Request", Error::Malformed),
+        ("403 Forbidden", Error::Denied),
+        ("429 Too Many Requests", Error::RateLimited(2)),
+    ] {
+        fixture.set_response(status, "", b"");
+        let client = Client::new(&fixture.load().unwrap()).unwrap();
+        assert_eq!(client.snapshot(0).await.unwrap_err(), expected);
+        let ledger = fixture.ledger.lock().unwrap();
+        let request = ledger.last().unwrap();
+        assert!(
+            request.starts_with("GET /fed/v2/observe/relay/leaf.fleet/snapshot?v=1&labels=false ")
+        );
+        assert!(!request.to_ascii_lowercase().contains("authorization:"));
+        assert!(!request.to_ascii_lowercase().contains("origin"));
+    }
+    let calls = fixture.requests.load(Ordering::SeqCst);
+    assert_eq!(calls, 5, "relay failure triggered direct/custody fallback");
+}
+#[tokio::test]
+async fn relay_snapshot_and_event_share_source_admission() {
+    let mut fixture = Fixture::new().await;
+    use_relay(&mut fixture);
+    fixture.set_response("503 Service Unavailable", "", b"");
+    let client = Client::new(&fixture.load().unwrap()).unwrap();
+    assert_eq!(client.snapshot(0).await.unwrap_err(), Error::Unavailable);
+    assert_eq!(
+        client.events(0, None, None, 0).await.unwrap_err(),
+        Error::Pending
+    );
+    assert_eq!(fixture.requests.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn relay_equal_display_hubs_keep_independent_full_identity_bindings() {
+    let fixture = CaFixture::new(&[SERVER_IDENTITY], "valid").await;
+    let mut config = fixture.net.config.clone();
+    let route = |leaf: &str, hub: &str| {
+        json!({"node":format!("{leaf}.fleet"),"relay":{
+        "hub":hub,"leaf":format!("spiffe://fleet/ns/fleet/sa/{leaf}"),
+        "address":fixture.net.config["sources"][0]["address"],"ca":fixture.ca_file}})
+    };
+    config["sources"] = json!([
+        route("one", SERVER_IDENTITY),
+        route("two", "spiffe://other/host/node/user/owner")
+    ]);
+    std::fs::write(&fixture.net.config_file, config.to_string()).unwrap();
+    let client = Client::new(&Config::load(&fixture.net.config_file).unwrap()).unwrap();
+    assert_eq!(client.sources[0].server_name, client.sources[1].server_name);
+    assert!(
+        client
+            .get(0, "/fed/v2/observe/snapshot".into())
+            .await
+            .is_ok(),
+        "second hub overwrote first full identity"
+    );
+    assert_eq!(
+        client
+            .get(1, "/fed/v2/observe/snapshot".into())
+            .await
+            .unwrap_err(),
+        Error::Unavailable,
+        "wrong full hub identity accepted"
+    );
+}
+#[tokio::test]
+async fn mixed_direct_and_relay_share_global_admission() {
+    let mut direct = Fixture::new().await;
+    let original = direct.config["sources"][0].clone();
+    use_relay(&mut direct);
+    let relay = direct.config["sources"][0].clone();
+    direct.config["sources"] = json!([original, relay]);
+    let mut client = Client::new(&direct.load().unwrap()).unwrap();
+    for i in 2..9 {
+        let source = &client.sources[i % 2];
+        client.sources.push(Source {
+            node: source.node.clone(),
+            relay: source.relay.clone(),
+            server_name: source.server_name.clone(),
+            labels: false,
+            supported: true,
+            peer: source.peer.clone(),
+            connector: source.connector.clone(),
+            slot: Arc::new(Semaphore::new(1)),
+            last_start: Mutex::new(None),
+        });
+    }
+    direct.hold.store(true, Ordering::SeqCst);
+    let client = Arc::new(client);
+    let mut tasks = tokio::task::JoinSet::new();
+    for i in 0..8 {
+        let client = client.clone();
+        tasks.spawn(async move { client.get(i, "/fed/v2/observe/snapshot".into()).await });
+    }
+    observed(&direct, 8).await;
+    assert_eq!(client.snapshot(8).await.unwrap_err(), Error::Pending);
+    assert_eq!(direct.requests.load(Ordering::SeqCst), 8);
+    direct.hold.store(false, Ordering::SeqCst);
+    while let Some(result) = tasks.join_next().await {
+        assert!(result.unwrap().is_ok());
+    }
 }

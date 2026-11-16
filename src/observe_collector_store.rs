@@ -19,6 +19,27 @@ pub struct NodePolicy {
     pub node: String,
     pub labels: bool,
     pub supported: bool,
+    pub relay: Option<RelayOrigin>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelayOrigin {
+    pub hub: String,
+    pub leaf: String,
+}
+impl NodePolicy {
+    fn storage_key(&self) -> String {
+        match &self.relay {
+            Some(origin) => format!(
+                "reverse-v1:{}:{}",
+                hex::encode(Sha256::digest(origin.hub.as_bytes())),
+                hex::encode(Sha256::digest(origin.leaf.as_bytes()))
+            ),
+            None => self.node.clone(),
+        }
+    }
+    fn origin_hub(&self) -> Option<&str> {
+        self.relay.as_ref().map(|r| r.hub.as_str())
+    }
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Cursor {
@@ -42,9 +63,11 @@ pub enum UnavailableKind {
     Malformed,
     RateLimited,
     StorageFull,
+    Unsupported,
 }
 #[derive(Clone, Debug)]
 pub struct CachedEvent {
+    pub origin_hub: Option<String>,
     pub epoch: String,
     pub event: ExportEvent,
     pub received_at: i64,
@@ -53,6 +76,7 @@ pub struct CachedEvent {
 }
 #[derive(Clone, Debug)]
 pub struct CachedSnapshot {
+    pub origin_hub: Option<String>,
     pub snapshot: ExportSnapshot,
     pub received_at: i64,
     pub source_age_seconds: i64,
@@ -60,6 +84,8 @@ pub struct CachedSnapshot {
 }
 #[derive(Clone, Debug)]
 pub struct NodeView {
+    pub failure: Option<UnavailableKind>,
+    pub origin_hub: Option<String>,
     pub history_hidden: bool,
     pub node: String,
     pub status: NodeStatus,
@@ -105,6 +131,7 @@ struct NodeState {
     policy: NodePolicy,
     validated: bool,
     status: NodeStatus,
+    failure: Option<UnavailableKind>,
 }
 struct Inner {
     connection: Option<Connection>,
@@ -287,12 +314,20 @@ fn read_cursor(c: &Connection, node: &str) -> Result<Cursor, StoreError> {
 }
 fn purge(c: &Connection, node: &str) -> Result<(), StoreError> {
     c.execute("DELETE FROM events WHERE node=?1", [node])?;
-    c.execute("UPDATE nodes SET epoch=NULL,scope=NULL,next=0,snapshot=NULL,snapshot_receipt=NULL,snapshot_base=NULL,snapshot_fingerprint=NULL,gaps='[]',truncated=1,backfill=1 WHERE node=?1",[node])?;
+    c.execute("UPDATE nodes SET epoch=NULL,scope=NULL,next=0,snapshot=NULL,snapshot_receipt=NULL,snapshot_base=NULL,snapshot_fingerprint=NULL,snapshot_origin_hub=NULL,gaps='[]',truncated=1,backfill=1 WHERE node=?1",[node])?;
     Ok(())
 }
 fn accounted_bytes(c: &Connection, node: &str) -> Result<i64, StoreError> {
-    let (metadata,events):(i64,i64)=c.query_row("SELECT coalesce(length(snapshot),0)+coalesce(length(snapshot_fingerprint),0)+coalesce(length(epoch),0)+coalesce(length(scope),0)+length(gaps)+192,(SELECT coalesce(sum(bytes),0) FROM events WHERE node=?1) FROM nodes WHERE node=?1",[node],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    let (metadata,events):(i64,i64)=c.query_row("SELECT coalesce(length(snapshot),0)+coalesce(length(snapshot_fingerprint),0)+coalesce(length(CAST(snapshot_origin_hub AS BLOB)),0)+CASE WHEN node LIKE 'reverse-v1:%' THEN length(node) ELSE 0 END+coalesce(length(epoch),0)+coalesce(length(scope),0)+length(gaps)+192,(SELECT coalesce(sum(bytes),0) FROM events WHERE node=?1) FROM nodes WHERE node=?1",[node],|r|Ok((r.get(0)?,r.get(1)?)))?;
     metadata.checked_add(events).ok_or(StoreError::Full)
+}
+fn validate_origins(c: &Connection, key: &str, origin: Option<&str>) -> Result<(), StoreError> {
+    let invalid: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE node=?1 AND origin_hub IS NOT ?2) OR EXISTS(SELECT 1 FROM nodes WHERE node=?1 AND snapshot IS NOT NULL AND snapshot_origin_hub IS NOT ?2)", params![key, origin], |r| r.get(0))?;
+    if invalid {
+        Err(StoreError::Storage)
+    } else {
+        Ok(())
+    }
 }
 fn transaction<T>(
     inner: &mut Inner,
@@ -349,6 +384,15 @@ impl Store {
         for policy in nodes {
             Scope::new(&policy.node, "collector", None, policy.labels)
                 .map_err(|_| StoreError::Invalid)?;
+            if let Some(origin) = &policy.relay {
+                if crate::observe_relay::identity_node(&origin.hub).is_none()
+                    || crate::observe_relay::identity_node(&origin.leaf).as_deref()
+                        != Some(policy.node.as_str())
+                    || origin.hub == origin.leaf
+                {
+                    return Err(StoreError::Invalid);
+                }
+            }
             let status = if policy.supported {
                 NodeStatus::HiddenPendingRevalidation
             } else {
@@ -361,6 +405,7 @@ impl Store {
                         policy,
                         validated: false,
                         status,
+                        failure: None,
                     },
                 )
                 .is_some()
@@ -421,6 +466,24 @@ impl Store {
             return Err(StoreError::Storage);
         }
         c.execute_batch("CREATE TABLE IF NOT EXISTS nodes(node TEXT PRIMARY KEY,epoch TEXT,scope TEXT,next INTEGER NOT NULL DEFAULT 0,snapshot BLOB,snapshot_receipt INTEGER,snapshot_base INTEGER,snapshot_fingerprint BLOB,gaps TEXT NOT NULL DEFAULT '[]',truncated INTEGER NOT NULL DEFAULT 0,backfill INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS events(node TEXT NOT NULL,epoch TEXT NOT NULL,sequence INTEGER NOT NULL,json BLOB NOT NULL,receipt INTEGER NOT NULL,base INTEGER NOT NULL,bytes INTEGER NOT NULL,PRIMARY KEY(node,epoch,sequence)); CREATE INDEX IF NOT EXISTS retention ON events(node,base,receipt,epoch,sequence);")?;
+        c.execute_batch("BEGIN IMMEDIATE")?;
+        let migration = (|| -> Result<(), StoreError> {
+            for (table, column) in [("events", "origin_hub"), ("nodes", "snapshot_origin_hub")] {
+                let columns = c
+                    .prepare(&format!("PRAGMA table_info({table})"))?
+                    .query_map([], |r| r.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                if !columns.iter().any(|name| name == column) {
+                    c.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT"))?;
+                }
+            }
+            c.execute_batch("COMMIT")?;
+            Ok(())
+        })();
+        if migration.is_err() {
+            let _ = c.execute_batch("ROLLBACK");
+        }
+        migration?;
         c.prepare("SELECT snapshot_fingerprint FROM nodes LIMIT 0")?;
         let persisted = c
             .prepare("SELECT node FROM nodes ORDER BY node LIMIT 65")?
@@ -434,8 +497,13 @@ impl Store {
             connection: Some(c),
             nodes: inventory,
         };
+        let configured: BTreeSet<String> = inner
+            .nodes
+            .values()
+            .map(|s| s.policy.storage_key())
+            .collect();
         for node in persisted {
-            if !inner.nodes.contains_key(&node) {
+            if !configured.contains(&node) {
                 transaction(&mut inner, |c| {
                     c.execute("DELETE FROM events WHERE node=?1", [&node])?;
                     c.execute("DELETE FROM nodes WHERE node=?1", [&node])?;
@@ -443,7 +511,6 @@ impl Store {
                 })?;
             }
         }
-        let configured: Vec<String> = inner.nodes.keys().cloned().collect();
         for node in configured {
             transaction(&mut inner, |c| {
                 c.execute("INSERT OR IGNORE INTO nodes(node) VALUES(?1)", [node])?;
@@ -471,8 +538,8 @@ impl Store {
     }
     pub fn cursor(&self, node: &str) -> Result<Cursor, StoreError> {
         let inner = self.lock()?;
-        Self::policy(&inner, node)?;
-        read_cursor(inner.connection.as_ref().ok_or(StoreError::Storage)?, node)
+        let key = Self::policy(&inner, node)?.storage_key();
+        read_cursor(inner.connection.as_ref().ok_or(StoreError::Storage)?, &key)
     }
     fn policy<'a>(inner: &'a Inner, node: &str) -> Result<&'a NodePolicy, StoreError> {
         inner
@@ -506,7 +573,10 @@ impl Store {
         let now = self.now()?;
         let mut inner = self.lock()?;
         validate_page(Self::policy(&inner, node)?, requested, &page)?;
-        let old = read_cursor(inner.connection.as_ref().ok_or(StoreError::Storage)?, node)?;
+        let policy = Self::policy(&inner, node)?.clone();
+        let key = policy.storage_key();
+        let origin = policy.origin_hub();
+        let old = read_cursor(inner.connection.as_ref().ok_or(StoreError::Storage)?, &key)?;
         if old != *requested {
             return Err(StoreError::Cursor);
         }
@@ -517,7 +587,13 @@ impl Store {
             state.validated = false;
             state.status = NodeStatus::HiddenPendingRevalidation;
         }
+        validate_origins(
+            inner.connection.as_ref().ok_or(StoreError::Storage)?,
+            &key,
+            origin,
+        )?;
         let result = transaction(&mut inner, |c| {
+            let node = key.as_str();
             if scope_changed {
                 purge(c, node)?;
             }
@@ -538,7 +614,7 @@ impl Store {
                         return Err(StoreError::Invalid);
                     }
                 }
-                inserted += c.execute("INSERT OR IGNORE INTO events(node,epoch,sequence,json,receipt,base,bytes) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![node,page.epoch,event.sequence,json,now,event.observed_at.min(now),(json.len()+page.epoch.len()+node.len()+128) as i64])?;
+                inserted += c.execute("INSERT OR IGNORE INTO events(node,epoch,sequence,json,receipt,base,bytes,origin_hub) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![node,page.epoch,event.sequence,json,now,event.observed_at.min(now),(json.len()+page.epoch.len()+node.len()+128+origin.map_or(0,str::len)) as i64,origin])?;
             }
             let old_gaps: Vec<u8> = c.query_row(
                 "SELECT CAST(gaps AS BLOB) FROM nodes WHERE node=?1",
@@ -591,6 +667,7 @@ impl Store {
             if result.is_ok() {
                 state.validated = true;
                 state.status = NodeStatus::Healthy;
+                state.failure = None;
             } else if matches!(result, Err(StoreError::Full)) {
                 state.status = NodeStatus::StorageFull;
             }
@@ -606,14 +683,23 @@ impl Store {
         validate_snapshot(Self::policy(&inner, node)?, &snapshot)?;
         let bytes = encoded(&snapshot, PAGE_BYTES)?;
         let fingerprint = Sha256::digest(&bytes).to_vec();
-        let old = read_cursor(inner.connection.as_ref().ok_or(StoreError::Storage)?, node)?;
+        let policy = Self::policy(&inner, node)?.clone();
+        let key = policy.storage_key();
+        let origin = policy.origin_hub();
+        let old = read_cursor(inner.connection.as_ref().ok_or(StoreError::Storage)?, &key)?;
         let scope_changed = old.scope.as_deref().is_some_and(|s| s != snapshot.scope);
         if scope_changed {
             let s = inner.nodes.get_mut(node).ok_or(StoreError::Node)?;
             s.validated = false;
             s.status = NodeStatus::HiddenPendingRevalidation;
         }
+        validate_origins(
+            inner.connection.as_ref().ok_or(StoreError::Storage)?,
+            &key,
+            origin,
+        )?;
         let result = transaction(&mut inner, |c| {
+            let node = key.as_str();
             if scope_changed {
                 purge(c, node)?;
             }
@@ -627,7 +713,7 @@ impl Store {
             } else {
                 (now, snapshot.observed_at.min(now))
             };
-            c.execute("UPDATE nodes SET scope=?2,snapshot=?3,snapshot_receipt=?4,snapshot_base=?5,snapshot_fingerprint=?6 WHERE node=?1",params![node,snapshot.scope,bytes,receipt,base,fingerprint])?;
+            c.execute("UPDATE nodes SET scope=?2,snapshot=?3,snapshot_receipt=?4,snapshot_base=?5,snapshot_fingerprint=?6,snapshot_origin_hub=?7 WHERE node=?1",params![node,snapshot.scope,bytes,receipt,base,fingerprint,origin])?;
             self.retain(c, node, now)?;
             Ok(CommitOutcome {
                 cursor: read_cursor(c, node)?,
@@ -641,21 +727,26 @@ impl Store {
     }
     pub fn deny(&self, node: &str) -> Result<(), StoreError> {
         let mut inner = self.lock()?;
-        Self::policy(&inner, node)?;
+        let key = Self::policy(&inner, node)?.storage_key();
         let state = inner.nodes.get_mut(node).ok_or(StoreError::Node)?;
         state.validated = false;
         state.status = NodeStatus::Denied;
-        transaction(&mut inner, |c| purge(c, node))
+        transaction(&mut inner, |c| purge(c, &key))
     }
     pub fn unavailable(&self, node: &str, kind: UnavailableKind) -> Result<(), StoreError> {
         let mut inner = self.lock()?;
         let state = inner.nodes.get_mut(node).ok_or(StoreError::Node)?;
-        if state.policy.supported && (state.validated || kind == UnavailableKind::StorageFull) {
-            state.status = if kind == UnavailableKind::StorageFull {
-                NodeStatus::StorageFull
-            } else {
-                NodeStatus::Stale
-            };
+        if state.policy.supported {
+            state.failure = Some(kind);
+            if kind == UnavailableKind::Unsupported {
+                state.status = NodeStatus::Unsupported;
+            } else if state.validated || kind == UnavailableKind::StorageFull {
+                state.status = if kind == UnavailableKind::StorageFull {
+                    NodeStatus::StorageFull
+                } else {
+                    NodeStatus::Stale
+                };
+            }
         }
         Ok(())
     }
@@ -704,7 +795,11 @@ impl Store {
     pub fn maintain(&self) -> Result<(), StoreError> {
         let now = self.now()?;
         let mut inner = self.lock()?;
-        let nodes: Vec<String> = inner.nodes.keys().cloned().collect();
+        let nodes: Vec<String> = inner
+            .nodes
+            .values()
+            .map(|s| s.policy.storage_key())
+            .collect();
         for node in nodes {
             transaction(&mut inner, |c| self.retain(c, &node, now))?;
         }
@@ -724,7 +819,11 @@ impl Store {
             if node.is_some_and(|n| n != name) {
                 continue;
             }
+            let key = state.policy.storage_key();
+            let origin = state.policy.origin_hub();
             let mut v = NodeView {
+                failure: state.failure,
+                origin_hub: origin.map(str::to_owned),
                 history_hidden: !state.validated,
                 node: name.clone(),
                 status: state.status,
@@ -736,8 +835,10 @@ impl Store {
                 backfill: false,
             };
             if state.validated {
+                let name = key.as_str();
+                validate_origins(c, name, origin)?;
                 v.cursor = Some(read_cursor(c, name)?);
-                let (snapshot,receipt,gaps,truncated,backfill):(Option<Vec<u8>>,Option<i64>,Vec<u8>,bool,bool)=c.query_row("SELECT CASE WHEN snapshot_base>=?2 THEN snapshot END,CASE WHEN snapshot_base>=?2 THEN snapshot_receipt END,CAST(gaps AS BLOB),truncated,backfill FROM nodes WHERE node=?1",params![name,cutoff],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+                let (snapshot,receipt,gaps,truncated,backfill,snapshot_origin)=c.query_row("SELECT CASE WHEN snapshot_base>=?2 THEN snapshot END,CASE WHEN snapshot_base>=?2 THEN snapshot_receipt END,CAST(gaps AS BLOB),truncated,backfill,snapshot_origin_hub FROM nodes WHERE node=?1",params![name,cutoff],|r|Ok((r.get::<_,Option<Vec<u8>>>(0)?,r.get::<_,Option<i64>>(1)?,r.get::<_,Vec<u8>>(2)?,r.get::<_,bool>(3)?,r.get::<_,bool>(4)?,r.get::<_,Option<String>>(5)?)))?;
                 v.gaps = serde_json::from_slice(&gaps).map_err(|_| StoreError::Storage)?;
                 v.truncated = truncated;
                 v.truncated |= c.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE node=?1 AND base<?3) OR (SELECT count(*) FROM events WHERE node=?1 AND base>=?3)>?2 OR EXISTS(SELECT 1 FROM nodes WHERE node=?1 AND snapshot_base<?3)",params![name,limit.min(ROWS) as i64,cutoff],|r|r.get::<_,bool>(0))?;
@@ -746,27 +847,30 @@ impl Store {
                     let snapshot: ExportSnapshot =
                         serde_json::from_slice(&bytes).map_err(|_| StoreError::Storage)?;
                     v.latest_snapshot = Some(CachedSnapshot {
+                        origin_hub: snapshot_origin,
                         source_age_seconds: now.saturating_sub(snapshot.observed_at).max(0),
                         receipt_age_seconds: now.saturating_sub(received_at).max(0),
                         snapshot,
                         received_at,
                     });
                 }
-                let mut statement=c.prepare("SELECT epoch,json,receipt FROM events WHERE node=?1 AND base>=?3 ORDER BY receipt DESC,epoch DESC,sequence DESC LIMIT ?2")?;
+                let mut statement=c.prepare("SELECT epoch,json,receipt,origin_hub FROM events WHERE node=?1 AND base>=?3 ORDER BY receipt DESC,epoch DESC,sequence DESC LIMIT ?2")?;
                 let events =
                     statement.query_map(params![name, limit.min(ROWS) as i64, cutoff], |r| {
                         Ok((
                             r.get::<_, String>(0)?,
                             r.get::<_, Vec<u8>>(1)?,
                             r.get::<_, i64>(2)?,
+                            r.get::<_, Option<String>>(3)?,
                         ))
                     })?;
                 for e in events {
-                    let (epoch, json, received_at) = e?;
+                    let (epoch, json, received_at, event_origin) = e?;
                     let event = crate::observe_collector_decode::decode_event(&json)
                         .map_err(|_| StoreError::Storage)?
                         .event;
                     v.events.push(CachedEvent {
+                        origin_hub: event_origin,
                         epoch,
                         source_age_seconds: now.saturating_sub(event.observed_at).max(0),
                         receipt_age_seconds: now.saturating_sub(received_at).max(0),
