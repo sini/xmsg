@@ -26,9 +26,24 @@ impl Fixture {
             .await
     }
     async fn with_server(server: rcgen::CertifiedKey<rcgen::KeyPair>) -> Self {
+        Self::with_server_key(server, None).await
+    }
+    async fn with_server_key(
+        server: rcgen::CertifiedKey<rcgen::KeyPair>,
+        client_key: Option<rcgen::KeyPair>,
+    ) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let directory = tempfile::tempdir().unwrap();
-        let client = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let client = match client_key {
+            Some(signing_key) => rcgen::CertifiedKey {
+                cert: rcgen::CertificateParams::new(vec!["localhost".into()])
+                    .unwrap()
+                    .self_signed(&signing_key)
+                    .unwrap(),
+                signing_key,
+            },
+            None => rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap(),
+        };
         let server_pin = crate::fed::spki_sha256_from_der(server.cert.der()).unwrap();
         let client_pin = crate::fed::spki_sha256_from_der(client.cert.der()).unwrap();
         let server_name = crate::node::node_name_from_pin(&server_pin).unwrap();
@@ -508,6 +523,13 @@ struct CaFixture {
 }
 impl CaFixture {
     async fn new(uris: &[&str], kind: &str) -> Self {
+        Self::with_client_key(uris, kind, None).await
+    }
+    async fn with_client_key(
+        uris: &[&str],
+        kind: &str,
+        client_key: Option<rcgen::KeyPair>,
+    ) -> Self {
         let mut ca = rcgen::CertificateParams::default();
         ca.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         ca.key_usages = vec![
@@ -546,7 +568,8 @@ impl CaFixture {
         let cert = leaf
             .signed_by(&signing_key, &rcgen::Issuer::from_params(&ca, &ca_key))
             .unwrap();
-        let net = Fixture::with_server(rcgen::CertifiedKey { cert, signing_key }).await;
+        let net =
+            Fixture::with_server_key(rcgen::CertifiedKey { cert, signing_key }, client_key).await;
         let ca_file = net._directory.path().join("ca.pem");
         let wrong_ca_file = net._directory.path().join("wrong-ca.pem");
         std::fs::write(&ca_file, ca_pem).unwrap();
@@ -1083,4 +1106,56 @@ async fn relay_response_body_bound_has_exact_control() {
         Error::Malformed
     );
     assert_eq!(fixture.requests.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn relay_equal_display_hubs_at_distinct_addresses_both_succeed() {
+    let identities = [SERVER_IDENTITY, "spiffe://other/host/node/user/owner"];
+    let first = CaFixture::new(&[identities[0]], "valid").await;
+    let key = rcgen::KeyPair::from_pem(
+        &std::fs::read_to_string(first.net._directory.path().join("client.key")).unwrap(),
+    )
+    .unwrap();
+    let second = CaFixture::with_client_key(&[identities[1]], "valid", Some(key)).await;
+    let fixtures = [&first, &second];
+    let mut config = first.net.config.clone();
+    let mut sources = Vec::new();
+    for (index, fixture) in fixtures.iter().enumerate() {
+        let leaf = format!("leaf{index}.fleet");
+        sources.push(json!({"node":leaf,"relay":{"hub":identities[index],"leaf":format!("spiffe://fleet/ns/fleet/sa/leaf{index}"),"address":fixture.net.config["sources"][0]["address"],"ca":fixture.ca_file}}));
+        fixture.net.set_response("200 OK","",&serde_json::to_vec(&json!({"v":1,"node":leaf,"scope":"a".repeat(64),"observed_at":1000,"endpoints":[],"truncated":false,"available":"available"})).unwrap());
+    }
+    assert_ne!(
+        sources[0]["relay"]["address"],
+        sources[1]["relay"]["address"]
+    );
+    config["sources"] = json!(sources);
+    std::fs::write(&first.net.config_file, config.to_string()).unwrap();
+    let client = Client::new(&Config::load(&first.net.config_file).unwrap()).unwrap();
+    assert_eq!(client.sources[0].server_name, client.sources[1].server_name);
+    for (index, fixture) in fixtures.iter().enumerate() {
+        assert_eq!(
+            client.snapshot(index).await.unwrap().node,
+            format!("leaf{index}.fleet"),
+            "configured hub destination was overwritten"
+        );
+        assert_eq!(fixture.net.requests.load(Ordering::SeqCst), 1);
+        assert!(fixture.net.ledger.lock().unwrap()[0].starts_with(&format!(
+            "GET /fed/v2/observe/relay/leaf{index}.fleet/snapshot?v=1&labels=false "
+        )));
+    }
+    config["sources"][0]["relay"]["hub"] = json!(identities[1]);
+    std::fs::write(&first.net.config_file, config.to_string()).unwrap();
+    let crossed = Client::new(&Config::load(&first.net.config_file).unwrap()).unwrap();
+    assert_eq!(
+        crossed.snapshot(0).await.unwrap_err(),
+        Error::Unavailable,
+        "crossed full hub URI accepted at first address"
+    );
+    assert_eq!(
+        first.net.requests.load(Ordering::SeqCst),
+        1,
+        "crossed hub URI reached exporter"
+    );
+    assert_eq!(second.net.requests.load(Ordering::SeqCst), 1);
 }
