@@ -602,5 +602,19 @@
         "replacement": "net::Error::Unsupported => UnavailableKind::Unreachable"
       }
     ]
+  },
+  {
+    "label": "reverse-collector-runtime-unvalidated-history-priority",
+    "target": "lib",
+    "test_file": "src/observe_collector_tests.rs",
+    "test": "observe_collector::tests::relay_failure_overlay_keeps_unvalidated_history_pending",
+    "expected_literal": "unvalidated relay failure overlay replaced pending revalidation with stale status",
+    "edits": [
+      {
+        "file": "src/observe_collector.rs",
+        "needle": "                                _ if view.history_hidden => crate::observe_collector_store::NodeStatus::HiddenPendingRevalidation,\n",
+        "replacement": ""
+      }
+    ]
   }
 ]
