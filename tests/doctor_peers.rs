@@ -610,3 +610,96 @@ async fn ca_diagnostics_is_unix_only_and_distinguishes_disabled_from_unknown() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn all_outbound_only_leaves_are_not_probed_or_partial() {
+    let own = Identity::new(NODE, 1, 2);
+    let peers = (0..2)
+        .map(|index| PeerConfig {
+            name: format!("outbound-{index}.example"),
+            leaf: true,
+            pin: Some(own.pin.clone()),
+            allow: vec!["send".into()],
+            ..Default::default()
+        })
+        .collect();
+    let fixture = Fixture::new(own, peers).await;
+    let result = tokio::time::timeout(Duration::from_secs(1), fixture.diagnostics())
+        .await
+        .expect("outbound-only catalogue entered the network budget");
+    assert_eq!(result["partial"], false, "{result}");
+    assert_eq!(result["budget_exhausted"], false);
+    for row in result["peers"].as_array().unwrap() {
+        assert_eq!(row["reason"], "outbound_only");
+        assert_eq!(row["reachability"], "unknown");
+        assert_eq!(row["leaf"], Value::Null);
+        assert_eq!(row["expiry"], "unknown");
+        assert_eq!(row["offset_state"], "unknown");
+        assert_eq!(row["observed_offset_seconds"], Value::Null);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outbound_only_leaf_stays_informational_after_network_budget_exhaustion() {
+    let blackhole = Peer::blackhole("blackhole.example").await;
+    let mut peers: Vec<_> = (0..17)
+        .map(|index| {
+            let mut config = blackhole.config.clone();
+            config.name = format!("a-{index:02}.example");
+            config
+        })
+        .collect();
+    peers.push(PeerConfig {
+        name: "z-outbound.example".into(),
+        leaf: true,
+        pin: Some(blackhole.config.pin.clone().unwrap()),
+        allow: vec!["send".into()],
+        ..Default::default()
+    });
+    let fixture = Fixture::new(Identity::new(NODE, 1, 2), peers).await;
+    let result = tokio::time::timeout(Duration::from_secs(10), fixture.diagnostics())
+        .await
+        .expect("total diagnostic budget was not bounded");
+    assert_eq!(result["budget_exhausted"], true, "{result}");
+    assert_eq!(result["partial"], true);
+    assert_eq!(
+        peer(&result, "z-outbound.example")["reason"],
+        "outbound_only"
+    );
+    assert_eq!(peer(&result, "z-outbound.example")["leaf"], Value::Null);
+    assert!(
+        blackhole.accepted.load(Ordering::SeqCst) > 0,
+        "budget fixture was not probed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn addressless_nonleaf_and_addressed_leaf_remain_unknown() {
+    let blackhole = Peer::blackhole("addressed-leaf.example").await;
+    let mut addressed_leaf = blackhole.config.clone();
+    addressed_leaf.leaf = true;
+    let fixture = Fixture::new(
+        Identity::new(NODE, 1, 2),
+        vec![
+            addressed_leaf,
+            PeerConfig {
+                name: "addressless-nonleaf.example".into(),
+                pin: blackhole.config.pin.clone(),
+                allow: vec!["send".into()],
+                ..Default::default()
+            },
+        ],
+    )
+    .await;
+    let result = fixture.diagnostics().await;
+    assert_eq!(result["partial"], true);
+    for name in ["addressed-leaf.example", "addressless-nonleaf.example"] {
+        assert_eq!(peer(&result, name)["reason"], "not_dialable");
+        assert_eq!(peer(&result, name)["reachability"], "unknown");
+    }
+    assert_eq!(
+        blackhole.accepted.load(Ordering::SeqCst),
+        0,
+        "a configured leaf was dialled"
+    );
+}

@@ -57,6 +57,24 @@ impl Fixture {
         fed_status: u16,
         federation: Value,
     ) -> Self {
+        Self::with_ca_sources(
+            health,
+            snapshot_status,
+            snapshot,
+            fed_status,
+            federation,
+            None,
+        )
+    }
+
+    fn with_ca_sources(
+        health: Value,
+        snapshot_status: u16,
+        snapshot: Value,
+        fed_status: u16,
+        federation: Value,
+        ca: Option<Value>,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let run = root.path().join("run");
         fs::create_dir(&run).unwrap();
@@ -96,6 +114,9 @@ impl Fixture {
                         let (value, status) = match request.as_str() {
                             "GET /healthz HTTP/1.1" => (&health, 200),
                             "GET /v1/diagnostics/federation HTTP/1.1" => (&federation, fed_status),
+                            "GET /v1/diagnostics/enrollment HTTP/1.1" if ca.is_some() => {
+                                (ca.as_ref().unwrap(), 200)
+                            }
                             _ => (&snapshot, snapshot_status),
                         };
                         let body = value.to_string();
@@ -245,11 +266,12 @@ fn healthy_json_is_read_only_and_requests_only_read_only_sources() {
     ] {
         status(&report, id, "pass");
     }
-    status(&report, "database.schema_version", "warn");
+    status(&report, "database.schema_version", "pass");
+    status(&report, "database.additive", "warn");
     assert!(check(&report, "database.schema_view")["message"]
         .as_str()
         .unwrap()
-        .contains("mode unopened"));
+        .contains("mode ro;"));
     assert_eq!(report["failed"], 0);
     assert!(report["client_version"]
         .as_str()
@@ -650,14 +672,16 @@ fn unavailable_process_backend_is_explained_once_without_claiming_death() {
     );
     let (output, report) = fixture.report();
     assert!(output.status.success());
-    status(&report, "session.process.one@fixture", "warn");
-    status(&report, "session.process.two@fixture", "warn");
-    for address in ["one@fixture", "two@fixture"] {
-        assert_eq!(
-            check(&report, &format!("session.process.{address}"))["message"],
-            "process unknown"
-        );
-    }
+    status(&report, "sessions.process", "warn");
+    let message = check(&report, "sessions.process")["message"]
+        .as_str()
+        .unwrap();
+    assert!(message.contains("2 unknown") && message.contains("backend_unavailable=2"));
+    assert!(!report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["id"].as_str().unwrap().starts_with("session.process.")));
     assert_eq!(
         report["checks"]
             .as_array()
@@ -686,7 +710,7 @@ fn process_rows_are_bounded_and_terminal_ids_are_inert() {
             .iter()
             .filter(|row| row["id"].as_str().unwrap().starts_with("session.process."))
             .count(),
-        1000
+        0
     );
     status(&report, "sessions.process", "warn");
     let text = fixture.command().output().unwrap();
@@ -856,4 +880,236 @@ fn explicit_installed_ca_is_separate_from_client_enrollment_state() {
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     status(&report, "ca.root_expiry", "pass");
     status(&report, "ca.configuration", "warn");
+}
+
+fn cortex_catalogue() -> Vec<Value> {
+    let mut rows = Vec::new();
+    for (harness, kind, count) in [
+        ("claude", "subagent", 105),
+        ("claude", "instance", 48),
+        ("codex", "instance", 5),
+        ("codex", "subagent", 3),
+        ("agy", "instance", 2),
+    ] {
+        for index in 0..count {
+            rows.push(json!({"address":format!("{harness}-{kind}-{index}@fixture"),"harness":harness,"kind":kind,"status":"seen","process_liveness":{"state":"unknown","reason":"missing_identity"}}));
+        }
+    }
+    for (harness, count) in [("codex", 2), ("claude", 2), ("svc", 1)] {
+        for index in 0..count {
+            rows.push(json!({"address":format!("live-{harness}-{index}@fixture"),"harness":harness,"kind":"instance","status":"registered","process_liveness":{"state":"live","reason":"identity_match"}}));
+        }
+    }
+    rows
+}
+
+#[test]
+fn historical_seen_sessions_are_counted_without_process_warning_rows() {
+    let fixture = Fixture::with_snapshot(
+        json!({"status":"ok","sessions_dir":"ok"}),
+        200,
+        json!({"read_only":true,"partial":true,"truncated":false,"recipients":cortex_catalogue()}),
+    );
+    let (_, report) = fixture.report();
+    status(&report, "sessions.process", "pass");
+    let message = check(&report, "sessions.process")["message"]
+        .as_str()
+        .unwrap();
+    for count in [
+        "5 live",
+        "0 gone",
+        "163 unknown",
+        "seen=163",
+        "registered=5",
+        "missing_identity=163",
+        "identity_match=5",
+    ] {
+        assert!(message.contains(count), "missing {count}: {message}");
+    }
+    assert!(!report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["id"].as_str().unwrap().starts_with("session.process.")));
+}
+
+#[test]
+fn gone_process_details_are_capped_without_hiding_the_total() {
+    let rows: Vec<_> = (0..25).map(|index| json!({"address":format!("gone-{index}\u{1b}[31m@fixture"),"status":"registered","process_liveness":{"state":"gone","reason":"identity_gone"}})).collect();
+    let fixture = Fixture::with_snapshot(
+        json!({"status":"ok","sessions_dir":"ok"}),
+        200,
+        json!({"read_only":true,"partial":true,"truncated":false,"recipients":rows}),
+    );
+    let (_, report) = fixture.report();
+    status(&report, "sessions.process", "warn");
+    assert_eq!(
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["id"].as_str().unwrap().starts_with("session.process."))
+            .count(),
+        20
+    );
+    let message = check(&report, "sessions.process")["message"]
+        .as_str()
+        .unwrap();
+    assert!(
+        message.contains("25 gone") && message.contains("and 5 more"),
+        "{message}"
+    );
+    let output = fixture.command().output().unwrap();
+    assert!(!String::from_utf8_lossy(&output.stdout).contains('\u{1b}'));
+}
+
+#[test]
+fn registered_unknown_and_failed_observations_remain_aggregate_warnings() {
+    let rows = json!([
+        {"address":"registered@fixture","status":"registered","process_liveness":{"state":"unknown","reason":"missing_identity"}},
+        {"address":"probe@fixture","status":"seen","process_liveness":{"state":"unknown","reason":"probe_error"}},
+        {"address":"backend@fixture","status":"seen","process_liveness":{"state":"unknown","reason":"backend_unavailable"}}
+    ]);
+    let fixture = Fixture::with_snapshot(
+        json!({"status":"ok","sessions_dir":"ok"}),
+        200,
+        json!({"read_only":true,"partial":true,"truncated":false,"recipients":rows}),
+    );
+    let (_, report) = fixture.report();
+    status(&report, "sessions.process", "warn");
+    let message = check(&report, "sessions.process")["message"]
+        .as_str()
+        .unwrap();
+    for count in [
+        "3 unknown",
+        "missing_identity=1",
+        "probe_error=1",
+        "backend_unavailable=1",
+    ] {
+        assert!(message.contains(count), "{message}");
+    }
+    assert!(!report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["id"].as_str().unwrap().starts_with("session.process.")));
+}
+
+#[test]
+fn outbound_only_peer_is_informational_without_tls_or_clock_claims() {
+    let value = federation_data(
+        "valid",
+        vec![
+            json!({"name":"outbound.example","reachability":"unknown","reason":"outbound_only","leaf":null,"expiry":"unknown","offset_state":"unknown","observed_offset_seconds":null,"offset_uncertainty_seconds":null}),
+        ],
+    );
+    let fixture = Fixture::with_federation(200, value);
+    let (_, report) = fixture.report();
+    status(&report, "peer.federation.outbound.example", "pass");
+    assert_eq!(
+        check(&report, "peer.federation.outbound.example")["message"],
+        "outbound-only leaf; not probed (reachable through its own outbound link)"
+    );
+    status(&report, "federation.probe", "pass");
+}
+
+fn healthy_ca_metadata(enabled: Option<bool>) -> Value {
+    json!({"source":"runtime","enabled":enabled,"pending_approvals":null,"checks":[{"id":"ca.configuration","status":"pass","message":"fixture configuration metadata"}]})
+}
+
+fn cortex_fixture() -> Fixture {
+    let fixture = Fixture::with_ca_sources(
+        json!({"status":"ok","sessions_dir":"ok","version":env!("CARGO_PKG_VERSION"),"build_revision":option_env!("XMSG_BUILD_REVISION").unwrap_or("unknown")}),
+        200,
+        json!({"read_only":true,"partial":true,"truncated":false,"recipients":cortex_catalogue()}),
+        200,
+        federation_data(
+            "valid",
+            vec![
+                json!({"name":"outbound.example","reachability":"unknown","reason":"outbound_only","leaf":null,"expiry":"unknown","offset_state":"unknown","observed_offset_seconds":null,"offset_uncertainty_seconds":null}),
+            ],
+        ),
+        Some(healthy_ca_metadata(Some(false))),
+    );
+    let connection = rusqlite::Connection::open(&fixture.db).unwrap();
+    xmsg::storage::init_db(&connection).unwrap();
+    drop(connection);
+    fixture
+}
+
+#[test]
+fn cortex_shaped_healthy_node_has_no_noise_warnings() {
+    let fixture = cortex_fixture();
+    let before = snapshot(fixture.root.path());
+    let (output, report) = fixture.report();
+    assert!(output.status.success(), "{report}");
+    let warnings: Vec<_> = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["status"] == "warn")
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    let metadata = option_env!("XMSG_BUILD_REVISION")
+        .filter(|revision| !revision.is_empty() && *revision != "unknown");
+    println!(
+        "doctor-cortex-warning-count: {}; build metadata known: {}",
+        warnings.len(),
+        metadata.is_some()
+    );
+    if metadata.is_some() {
+        assert!(warnings.is_empty(), "{report}");
+    } else {
+        assert_eq!(warnings, ["daemon.build_revision"], "{report}");
+    }
+    for id in [
+        "sessions.process",
+        "database.schema_view",
+        "database.schema_version",
+        "database.additive",
+        "database.enrollment_schema",
+        "peer.federation.outbound.example",
+        "federation.probe",
+    ] {
+        status(&report, id, "pass");
+    }
+    assert_eq!(report["failed"], 0);
+    assert_eq!(
+        snapshot(fixture.root.path()),
+        before,
+        "healthy diagnostic changed persistent state"
+    );
+    fixture.assert_read_only_requests();
+}
+
+#[test]
+fn optional_enrollment_tables_are_informational_when_present_or_disabled() {
+    let fixture = cortex_fixture();
+    let (_, report) = fixture.report();
+    status(&report, "database.enrollment_schema", "pass");
+    assert!(check(&report, "database.enrollment_schema")["message"]
+        .as_str()
+        .unwrap()
+        .contains("disabled"));
+    for enabled in [None, Some(true)] {
+        let fixture = Fixture::with_ca_sources(
+            json!({"status":"ok","sessions_dir":"ok"}),
+            200,
+            json!({"read_only":true,"partial":true,"truncated":false,"recipients":[]}),
+            200,
+            federation_data("valid", vec![]),
+            Some(healthy_ca_metadata(enabled)),
+        );
+        let connection = rusqlite::Connection::open(&fixture.db).unwrap();
+        xmsg::storage::init_db(&connection).unwrap();
+        let (_, report) = fixture.report();
+        status(&report, "database.enrollment_schema", "warn");
+        connection.execute_batch("CREATE TABLE enroll_bindings(value INTEGER); CREATE TABLE enroll_aliases(value INTEGER); CREATE TABLE enroll_certs(value INTEGER); CREATE TABLE enroll_rates(value INTEGER);").unwrap();
+        let (_, report) = fixture.report();
+        status(&report, "database.enrollment_schema", "pass");
+        assert!(check(&report, "database.enrollment_schema")["message"]
+            .as_str()
+            .unwrap()
+            .contains("loaded enrollment configuration remains unknown"));
+    }
 }
