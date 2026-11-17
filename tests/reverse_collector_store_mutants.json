@@ -341,7 +341,11 @@
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::relay_storage_origin_key_migration_and_tamper",
-    "expected_literal": "panicked at src/observe_collector_store_tests.rs:1623",
+    "expected_literal": [
+      "panicked at src/observe_collector_store_tests.rs:1623",
+      "panicked at src/observe_collector_store_tests.rs:1657",
+      "panicked at src/observe_collector_store_tests.rs:1678"
+    ],
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
@@ -352,7 +356,24 @@
     "assertion_file": "src/observe_collector_store_tests.rs",
     "assertion_line": 1623,
     "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
-    "assertion_rule": "assertion-location"
+    "assertion_rule": "assertion-location",
+    "assertion_locations": [
+      {
+        "line": 1623,
+        "literal": "panicked at src/observe_collector_store_tests.rs:1623",
+        "source": "            assert_eq!("
+      },
+      {
+        "line": 1657,
+        "literal": "panicked at src/observe_collector_store_tests.rs:1657",
+        "source": "        assert_eq!("
+      },
+      {
+        "line": 1678,
+        "literal": "panicked at src/observe_collector_store_tests.rs:1678",
+        "source": "                .unwrap(),"
+      }
+    ]
   },
   {
     "label": "reverse-collector-store-snapshot-stamp",
@@ -603,7 +624,7 @@
       {
         "file": "src/observe_collector_store.rs",
         "needle": "        for node in persisted {\n            if !configured.contains(&node) {\n                transaction(&mut inner, |c| {\n                    c.execute(\"DELETE FROM events WHERE node=?1\", [&node])?;\n                    c.execute(\"DELETE FROM nodes WHERE node=?1\", [&node])?;\n                    Ok(())\n                })?;\n            }\n        }\n        for node in configured {\n            transaction(&mut inner, |c| {\n                c.execute(\"INSERT OR IGNORE INTO nodes(node) VALUES(?1)\", [node])?;\n                Ok(())\n            })?;\n        }\n",
-        "replacement": "        for node in configured {\n            transaction(&mut inner, |c| {\n                c.execute(\"INSERT OR IGNORE INTO nodes(node) VALUES(?1)\", [node])?;\n                Ok(())\n            })?;\n        }\n        for node in persisted {\n            if !configured.contains(&node) {\n                transaction(&mut inner, |c| {\n                    c.execute(\"DELETE FROM events WHERE node=?1\", [&node])?;\n                    c.execute(\"DELETE FROM nodes WHERE node=?1\", [&node])?;\n                    Ok(())\n                })?;\n            }\n        }\n"
+        "replacement": "        for node in &configured {\n            transaction(&mut inner, |c| {\n                c.execute(\"INSERT OR IGNORE INTO nodes(node) VALUES(?1)\", [node])?;\n                Ok(())\n            })?;\n        }\n        for node in persisted {\n            if !configured.contains(&node) {\n                transaction(&mut inner, |c| {\n                    c.execute(\"DELETE FROM events WHERE node=?1\", [&node])?;\n                    c.execute(\"DELETE FROM nodes WHERE node=?1\", [&node])?;\n                    Ok(())\n                })?;\n            }\n        }\n"
       }
     ],
     "assertion_file": "src/observe_collector_store_tests.rs",
