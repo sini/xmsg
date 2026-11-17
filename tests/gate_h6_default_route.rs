@@ -1839,3 +1839,116 @@ async fn test_oracle_15_nickname_address_routes_direct() {
         "Hub must receive 0 messages when nickname address routes direct"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explicit_pattern_leaf_keeps_mailbox_custody_without_upstream_dial() {
+    let (cert_h, key_h, pin_h) = generate_self_signed_ed25519_pem("hub").unwrap();
+    let (_cert_u, _key_u, pin_u) = generate_self_signed_ed25519_pem("upstream").unwrap();
+
+    // Create CA and issue client cert with SPIFFE URI
+    let (ca_params, ca_key, _ca_der, ca_pem) = make_ca("test-ca");
+    let tmp_ca = tempdir().unwrap();
+    let ca_file = tmp_ca.path().join("ca.pem");
+    fs::write(&ca_file, &ca_pem).unwrap();
+
+    let client_uri = "spiffe://json64.dev/ns/genie/sa/worker";
+    let (client_cert_der, client_key_der) =
+        issue_cert(&ca_params, &ca_key, "worker.genie", &[client_uri]);
+
+    // Upstream knows hub
+    let listener_u = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port_u = listener_u.local_addr().unwrap().port();
+    let upstream_conns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let conns_clone = upstream_conns.clone();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener_u.accept().await {
+            conns_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = stream.shutdown().await;
+        }
+    });
+
+    // Hub has:
+    // 1. Default route to upstream
+    // 2. CA peer anchor
+    // 3. Hub pattern admission block
+    let peers_h = json!({
+        "peers": {
+            "upstream": {
+                "address": format!("127.0.0.1:{port_u}"),
+                "pin": normalize_pin(&pin_u),
+                "allow": ["send", "reply", "forward"],
+                "default_route": true
+            },
+            "hub.hub": {
+                "address": "127.0.0.1:0",
+                "ca": ca_file.display().to_string(),
+                "identities": ["spiffe://json64.dev/ns/hub/sa/hub"],
+                "allow": ["send", "reply"]
+            }
+        },
+        "hub": {
+            "patterns": ["spiffe://json64.dev/ns/*/sa/*"],
+            "rules": [
+                {
+                    "pattern": "spiffe://json64.dev/ns/genie/sa/*",
+                    "allow": ["send", "reply"],
+                    "leaf": true
+                }
+            ]
+        }
+    });
+
+    let hub = spawn_test_node("hub", &cert_h, &key_h, peers_h).await;
+
+    let (_sock_h_target, _rx_h_target) =
+        create_claude_session_fixture(&hub.sessions_dir, "target", "Target");
+    let (_sock_h, _rx_h) = create_claude_session_fixture(&hub.sessions_dir, "alice", "Alice");
+
+    // Client connects to Hub presenting client certificate to get admitted
+    let client_origin = Origin {
+        cert_der: &client_cert_der,
+        key_der: &client_key_der,
+    };
+    let (status, res) = hop_client::send_envelope(
+        &client_origin,
+        &pin_h,
+        hub.fed_port,
+        hop_client::envelope("sess-1", "Worker", "Target", "client hello"),
+    )
+    .await;
+    assert_eq!(status, 202, "client must be admitted by hub: {res}");
+
+    // Hub session sends to the admitted client worker.genie
+    let _send_resp = send_via_agent_sock(
+        &hub.agent_sock,
+        "Bob@worker.genie",
+        "direct link to admitted client",
+    )
+    .await;
+
+    let connection = rusqlite::Connection::open(&hub.db_path).unwrap();
+    assert_eq!(
+        xmsg::storage::count_peer_mailbox_messages(&connection, "worker.genie").unwrap(),
+        1,
+        "explicit pattern leaf lost its committed mailbox item"
+    );
+    drop(connection);
+    let (status, item) = hop_client::request(
+        &client_origin,
+        &pin_h,
+        hub.fed_port,
+        "GET",
+        "/fed/v2/inbox",
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{item}");
+    assert_eq!(item["kind"], "message");
+    assert_eq!(item["body"], "direct link to admitted client");
+    assert_eq!(item["to"], "Bob");
+    assert_eq!(
+        upstream_conns.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "explicit pattern leaf was sent upstream instead of its mailbox"
+    );
+}
