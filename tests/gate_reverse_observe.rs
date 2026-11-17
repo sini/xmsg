@@ -1730,6 +1730,18 @@ async fn returned_labels_and_targets_are_independently_refused() {
     }
 }
 
+async fn wait_for_control_poll(state: &std::sync::Arc<xmsg::fed::FedState>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let hub = xmsg::observe_relay::test_hooks::controls(state);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while hub.control_polls.load(Relaxed) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("outbound worker completed initial TLS handshake and control poll");
+}
+
 #[tokio::test]
 async fn reverse_enable_for_another_route_preserves_unrouted_ordinary_control() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -1754,8 +1766,9 @@ async fn reverse_enable_for_another_route_preserves_unrouted_ordinary_control() 
     });
     let _worker =
         xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
+    wait_for_control_poll(&f.state).await;
     let (_, status) = tokio::time::timeout(
-        Duration::from_secs(10),
+        Duration::from_secs(1),
         xmsg::fed::list_peer(&f.state, &f.leaf.node),
     )
     .await
@@ -1785,20 +1798,22 @@ async fn reverse_enable_for_another_route_survives_slow_worker_startup() {
     reload(&f.leaf_state, |c| {
         c["reverse_observe"]["routes"][0]["hub"] = json!(routed_hub.full())
     });
-    // Forced-race control: delay worker startup past 1s (simulating heavy parallel CPU/TLS contention)
-    // so list_peer must survive >1s startup without timing out.
+    // Forced-race control: delay worker startup by 1100ms (would trip the 1s list_peer
+    // bound without the handshake barrier, and passes once the 1s bound starts after
+    // `wait_for_control_poll`).
     let leaf_state = f.leaf_state.clone();
     let hub_node = f.hub.node.clone();
     let delayed_worker = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(1100)).await;
         xmsg::observe_relay::test_hooks::start_worker(leaf_state, hub_node)
     });
+    wait_for_control_poll(&f.state).await;
     let (_, status) = tokio::time::timeout(
-        Duration::from_secs(10),
+        Duration::from_secs(1),
         xmsg::fed::list_peer(&f.state, &f.leaf.node),
     )
     .await
-    .expect("unrouted pinned control still progresses when worker startup exceeds 1s");
+    .expect("unrouted pinned control still progresses after delayed worker handshake");
     assert_eq!(status.status, "ok");
     let _worker = delayed_worker.await.unwrap();
 }
