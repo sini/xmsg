@@ -576,7 +576,7 @@ in
       httpSocket = mkOption {
         type = types.nullOr types.str;
         default = null;
-        description = "`--http-sock`. Null takes xmsg's default, `$XDG_RUNTIME_DIR/xmsg/http.sock`.";
+        description = "`--http-sock`. Null takes xmsg's default, `$XDG_RUNTIME_DIR/xmsg/http.sock` (on macOS, under the Darwin user temp directory, `getconf DARWIN_USER_TEMP_DIR`).";
       };
       agyExe = mkOption {
         type = types.listOf types.str;

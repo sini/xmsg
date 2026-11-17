@@ -133,10 +133,11 @@ transport or operational error: report it rather than retrying blindly.
 
 ## Without the tools: `http.sock`
 
-The same surface is an HTTP API on the unix socket `$XDG_RUNTIME_DIR/xmsg/http.sock`:
+The same surface is an HTTP API on the unix socket `xmsg/http.sock` under `$XDG_RUNTIME_DIR`, or on macOS with
+`XDG_RUNTIME_DIR` unset, under the Darwin user temp directory (`getconf DARWIN_USER_TEMP_DIR`):
 
 ```bash
-sock="$XDG_RUNTIME_DIR/xmsg/http.sock"
+dir="${XDG_RUNTIME_DIR:-$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null)}"; sock="${dir%/}/xmsg/http.sock"
 curl -s --unix-socket "$sock" http://localhost/v1/recipients
 curl -s --unix-socket "$sock" http://localhost/v1/messages \
   -H 'content-type: application/json' -d '{"to": "reviewer", "text": "Please review.", "from": "ci"}'

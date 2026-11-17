@@ -3,20 +3,21 @@ title: HTTP API & Unix Sockets
 description: Wire reference for http.sock, agent.sock, register.sock, /fed/v2 routes, and the unified error vocabulary.
 ---
 
-`xmsg serve` has three local Unix domain sockets in `$XDG_RUNTIME_DIR/xmsg/`. Each socket has
+`xmsg serve` has three local Unix domain sockets in `$XDG_RUNTIME_DIR/xmsg/`. On macOS, with `XDG_RUNTIME_DIR` unset, the directory is `xmsg/` under the
+Darwin user temp directory (`getconf DARWIN_USER_TEMP_DIR`). Each socket has
 mode `0600`, in a `0700` directory. With federation, it also has an mTLS listener for
 `/fed/v2/*`. Each JSON request body and socket frame refuses unknown fields. The error is
 `bad_request`, and it names the unknown fields.
 
 ## `http.sock` & HTTP API routes
 
-By default, xmsg serves HTTP only on `$XDG_RUNTIME_DIR/xmsg/http.sock`. A caller whose process
+By default, xmsg serves HTTP only on `xmsg/http.sock` in that runtime directory. A caller whose process
 ancestry traces to a registered session or service acts as that sender. Other callers are
 **[anonymous](/glossary/#anonymous-sender)** (`<from> · anon@<node>`). An anonymous caller can
 send, and can read replies by `message_id`. It cannot call `reply` (`403 denied`).
 
 ```bash
-sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/xmsg/http.sock"
+dir="${XDG_RUNTIME_DIR:-$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null)}"; sock="${dir%/}/xmsg/http.sock"
 
 # Health check
 curl -s --unix-socket "$sock" http://localhost/healthz
