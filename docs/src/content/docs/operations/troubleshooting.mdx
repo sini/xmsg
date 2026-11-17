@@ -19,6 +19,8 @@ failure makes the command exit `1`; warnings alone exit `0`. JSON includes the c
 summary counts, the CLI's `client_version`, its `client_build_revision` (planned) and a
 `not_checked` list.
 
+The `collector.sqlite_engine` metadata line (planned) is always informational, including when the linked and required SQLite versions differ. It describes this CLI binary, performs no file or network I/O, and does not validate a collector configuration. `info` rows are excluded from summary counts and do not change the exit code. A collector startup error remains the authoritative engine refusal.
+
 For a custom installation, select the paths you want checked:
 
 ```sh

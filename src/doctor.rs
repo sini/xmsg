@@ -42,6 +42,7 @@ pub struct DoctorArgs {
 #[derive(Clone, Copy, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 enum Status {
+    Info,
     Pass,
     Warn,
     Fail,
@@ -91,6 +92,7 @@ impl Report {
         hint: Option<&'static str>,
     ) {
         match status {
+            Status::Info => {}
             Status::Pass => self.passed += 1,
             Status::Warn => self.warnings += 1,
             Status::Fail => self.failed += 1,
@@ -107,6 +109,19 @@ impl Report {
             .insert(name, path.to_string_lossy().into_owned());
     }
 }
+
+fn sqlite_engine_info(report: &mut Report, found: &str) {
+    report.add(
+        "collector.sqlite_engine",
+        Status::Info,
+        format!(
+            "linked SQLite {found}; the fleet collector requires {}",
+            xmsg::observe_collector_store::REQUIRED_SQLITE_ENGINE
+        ),
+        None,
+    );
+}
+
 fn suffix(path: &Path, end: &str) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(end);
@@ -742,6 +757,7 @@ async fn ca_application(
 
 async fn inspect(args: &DoctorArgs) -> Report {
     let mut report = Report::new();
+    sqlite_engine_info(&mut report, rusqlite::version());
     let http = args
         .http_sock
         .clone()
@@ -869,6 +885,7 @@ pub fn run(args: DoctorArgs) -> Result<bool> {
         }
         for check in &report.checks {
             let status = match check.status {
+                Status::Info => "INFO",
                 Status::Pass => "PASS",
                 Status::Warn => "WARN",
                 Status::Fail => "FAIL",
@@ -890,4 +907,29 @@ pub fn run(args: DoctorArgs) -> Result<bool> {
         )?;
     }
     Ok(report.failed != 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linked_sqlite_versions_are_informational_even_when_unsupported() {
+        for found in ["3.53.2", "3.54.0"] {
+            let mut report = Report::new();
+            sqlite_engine_info(&mut report, found);
+            assert_eq!(report.checks.len(), 1);
+            let check = &report.checks[0];
+            assert_eq!(check.id, "collector.sqlite_engine");
+            assert!(check.status == Status::Info);
+            assert_eq!(
+                check.message,
+                format!("linked SQLite {found}; the fleet collector requires 3.53.2")
+            );
+            assert!(check.hint.is_none());
+            assert_eq!((report.passed, report.warnings, report.failed), (0, 0, 0));
+            assert!(report.checked_paths.is_empty());
+            assert_eq!(report.not_checked, ["loaded_configuration"]);
+        }
+    }
 }

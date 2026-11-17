@@ -98,7 +98,7 @@ known-ID inspection. Existing caller-attribution rules still apply.
 
 ### `xmsg doctor` (planned)
 
-Checks local setup once and prints `pass`, `warn` or `fail` lines with fix hints:
+Checks local setup once and prints `pass`, `warn` or `fail` lines with fix hints, plus informational metadata:
 
 ```sh
 xmsg doctor
@@ -109,6 +109,8 @@ xmsg doctor --http-sock /absolute/path/to/http.sock --db-path /absolute/path/to/
 The command exits `1` if any check fails. Warnings alone exit `0`. `--json` reports
 `checks` (each with `id`, `status`, `message` and `hint`), `passed`, `warnings`, `failed`,
 `client_version`, `client_build_revision` (planned) and `not_checked`.
+
+The always-on `collector.sqlite_engine` line (planned) reports `linked SQLite <found>; the fleet collector requires <required>` for this CLI binary. Its status is `info`, even when the versions differ; it does not affect summary counts or the exit code. It performs no file or network I/O and does not validate a collector configuration or a running collector. The collector enforces its engine requirement at startup.
 
 Doctor displays the client and daemon crate versions and build revisions (planned).
 The daemon metadata comes from the bounded Unix-socket health response, not a process
