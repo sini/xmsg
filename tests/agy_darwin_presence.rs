@@ -15,8 +15,9 @@ use tempfile::{tempdir, TempDir};
 use tokio::sync::broadcast;
 
 use xmsg::agy::{
-    attest_mcp_caller, find_lock_holder_fdinfo, list_agy_sessions, new_agy_store,
-    run_agy_proc_watcher, verify_registration, AgyConfig, AgyRegisterRequest, LIVE_PROC_LOCKS,
+    attest_mcp_caller, attested_lock_holder, find_lock_holder_fdinfo, list_agy_sessions,
+    new_agy_store, run_agy_proc_watcher, verify_registration, AgyConfig, AgyRegisterRequest,
+    LIVE_PROC_LOCKS,
 };
 use xmsg::error::AppError;
 use xmsg::process::{open_file_vnodes, LIVE_PROC_ROOT};
@@ -337,6 +338,47 @@ fn two_flagged_processes_are_ambiguous() {
     assert!(
         !matches!(holder, Ok(Some(_))),
         "ambiguous holders fail closed: {holder:?}"
+    );
+    assert_eq!(p.listed(conv), None);
+}
+
+// ---------------------------------------------------------------------------
+// The same ambiguity through a call attesting one pid: with two flagged processes, neither is
+// the holder, and neither call leaves a watched holder behind for the next List.
+// Mutant: scan only the attested pid => RED.
+// ---------------------------------------------------------------------------
+#[test]
+fn attesting_one_of_two_flagged_processes_finds_no_holder() {
+    let _serial = serial();
+    let p = Presence::new();
+    let conv = "0199cecf-da06-7000-8000-00000000da06";
+    let path = p.lock(conv);
+    let h = Holder::spawn(&path, "dup", &[]);
+    let pids = [h.pid(), h.grandchildren[0]];
+    assert!(
+        pids.iter().all(|&pid| has_flock(pid, &path)),
+        "control: both are flagged"
+    );
+    let meta = fs::metadata(&path).unwrap();
+    let locks = Path::new(LIVE_PROC_LOCKS);
+    for pid in pids {
+        let holder = attested_lock_holder(live(), locks, pid, meta.dev(), meta.ino());
+        assert!(
+            !matches!(holder, Ok(Some(_))),
+            "attesting {pid}: no holder: {holder:?}"
+        );
+    }
+    let holder = find_lock_holder_fdinfo(live(), locks, meta.dev(), meta.ino());
+    assert!(
+        !matches!(holder, Ok(Some(_))),
+        "no watched holder was left behind: {holder:?}"
+    );
+    let uid = xmsg::agent::current_uid();
+    let trusted = vec![std::env::current_exe().unwrap()];
+    let attest = attest_mcp_caller(live(), locks, &p.dir, &trusted, uid, uid, h.pid());
+    assert!(
+        matches!(attest, Err(AppError::NotRecipient(_))),
+        "mcp_start from a flagged process is refused: {attest:?}"
     );
     assert_eq!(p.listed(conv), None);
 }
