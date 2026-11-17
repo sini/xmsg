@@ -1,0 +1,41 @@
+[
+  {
+    "label": "grt4-typed-browser-paste",
+    "classification": "compile-refusal; not a runtime mutant kill",
+    "expected_compiler": "E0308",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": ".lease_enrollment_name(uri, false)",
+        "replacement": ".lease_enrollment_name(uri, false).map(|_| ())"
+      }
+    ],
+    "reason": "Explicit NameAuthorityLease generic fixes callback return; unit callback cannot retain publication lease."
+  },
+  {
+    "label": "grt4-typed-renew",
+    "classification": "compile-refusal; not a runtime mutant kill",
+    "expected_compiler": "E0308",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": ".lease_enrollment_name(uri, true)",
+        "replacement": ".lease_enrollment_name(uri, true).map(|_| ())"
+      }
+    ],
+    "reason": "Explicit NameAuthorityLease generic fixes callback return; unit callback cannot retain publication lease."
+  },
+  {
+    "label": "grt4-typed-device",
+    "classification": "compile-refusal; not a runtime mutant kill",
+    "expected_compiler": "E0308",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": ".lease_enrollment_name(uri, false)",
+        "replacement": ".lease_enrollment_name(uri, false).map(|_| ())"
+      }
+    ],
+    "reason": "Explicit NameAuthorityLease generic fixes callback return; unit callback cannot retain publication lease."
+  }
+]
