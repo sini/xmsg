@@ -1368,3 +1368,39 @@ fn grt4_name_lease_drop_observes_committed_certificate() {
         "grt4 publication lock remained leased after committed return"
     );
 }
+
+#[test]
+fn grt4_renewal_name_lease_drop_observes_committed_certificate() {
+    struct RenewalCommitLease<'a> {
+        _guard: std::sync::RwLockReadGuard<'a, ()>,
+        file: PathBuf,
+    }
+    impl Drop for RenewalCommitLease<'_> {
+        fn drop(&mut self) {
+            let connection = Connection::open(&self.file).unwrap();
+            let count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM enroll_certs", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(
+                count, 2,
+                "grt4 renewal ownership lease was dropped before committed certificate visibility"
+            );
+        }
+    }
+    let (s, file) = grt4_file_setup();
+    let issued =
+        s.ca.issue(&claims("alice-id"), &csr(false), "laptop", &[], NOW)
+            .unwrap();
+    let publication = std::sync::RwLock::new(());
+    s.ca.renew_with_name_authority(&chain(&issued.cert_chain_pem), NOW + 1, |_, _| {
+        Ok(RenewalCommitLease {
+            _guard: publication.read().unwrap(),
+            file: file.clone(),
+        })
+    })
+    .unwrap();
+    assert!(
+        publication.try_write().is_ok(),
+        "grt4 publication lock remained leased after committed renewal return"
+    );
+}
