@@ -2846,16 +2846,63 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn every_live_path_reader_survives_forced_missing_line_in_proc_locks() {
+        use std::io::{BufRead, Read};
         use std::os::unix::fs::MetadataExt;
         use std::os::unix::io::AsRawFd;
+        use std::process::{Child, Command, Stdio};
+
+        const HELPER: &str = "XMSG_AGY_TEST_HOLD_LOCK";
+        // Helper mode: hold the flock on the named file (an empty name holds none) until stdin closes.
+        if let Some(hold) = std::env::var_os(HELPER) {
+            let lock = (!hold.is_empty()).then(|| fs::File::open(&hold).unwrap());
+            if let Some(f) = &lock {
+                assert_eq!(
+                    unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+                    0
+                );
+            }
+            println!("agy-test-helper-ready");
+            let _ = std::io::stdin().read_to_end(&mut Vec::new());
+            return;
+        }
+        struct Reaped(Child);
+        impl Drop for Reaped {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let helper = |hold: &Path, env: &[(&str, &str)]| {
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "agy::tests::every_live_path_reader_survives_forced_missing_line_in_proc_locks",
+                    "--nocapture",
+                ])
+                .env(HELPER, hold)
+                .envs(env.iter().copied())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let out = std::io::BufReader::new(child.stdout.take().unwrap());
+            let child = Reaped(child);
+            assert!(
+                out.lines()
+                    .any(|l| l.is_ok_and(|l| l.contains("agy-test-helper-ready"))),
+                "helper exited before it was ready"
+            );
+            child
+        };
 
         let dir = tempfile::tempdir().unwrap();
         let presence_dir = dir.path().join("presence");
         fs::create_dir_all(&presence_dir).unwrap();
         let conv_id = "0199cecf-0099-7000-8000-000000000001";
         let lock_path = presence_dir.join(format!("{conv_id}.lock"));
-        let f = fs::File::create(&lock_path).unwrap();
-        let meta = f.metadata().unwrap();
+        fs::write(&lock_path, "").unwrap();
+        let meta = fs::metadata(&lock_path).unwrap();
         let (dev, ino) = (meta.dev(), meta.ino());
         let (maj, min) = (dev_major(dev), dev_minor(dev));
 
@@ -2890,10 +2937,18 @@ mod tests {
         assert!(!is_conversation_proc_watched(&config, conv_id));
         assert!(eligible_agy_conversations(&config, &store).is_empty());
 
-        // Acquire the kernel flock on `lock_path`.
-        assert_eq!(
-            unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-            0
+        // The kernel flock on `lock_path` is held by a helper child, not by this process: the
+        // watcher reads the holder's children, and a child another test spawns from this process
+        // would be one, carrying this process's environment (agy credentials, under agy).
+        let holder = helper(&lock_path, &[]);
+        let hp = holder.0.id();
+        // Forced control: a live child of this process that carries agy credentials.
+        let _stray = helper(
+            Path::new(""),
+            &[
+                ("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:41112"),
+                ("ANTIGRAVITY_CSRF_TOKEN", "forced-control"),
+            ],
         );
 
         // Snapshot real `/proc/locks` and strip our lock's line to simulate a torn `/proc/locks`
@@ -2926,11 +2981,11 @@ mod tests {
             std::slice::from_ref(&my_exe),
             my_uid,
             my_uid,
-            my_pid,
+            hp,
             &req,
         )
         .expect("XR2: verify_registration must succeed from fdinfo when proc_locks omits line");
-        assert_eq!(reg.pid, my_pid);
+        assert_eq!(reg.pid, hp);
 
         // 2. attest_mcp_caller_peer (`attested_lock_holder`) succeeds via fdinfo despite missing line.
         let (mcp_reg, mcp_conv) = attest_mcp_caller(
@@ -2940,16 +2995,16 @@ mod tests {
             std::slice::from_ref(&my_exe),
             my_uid,
             my_uid,
-            my_pid,
+            hp,
         )
         .expect("XR2: attest_mcp_caller must succeed from fdinfo when proc_locks omits line");
-        assert_eq!(mcp_reg.pid, my_pid);
+        assert_eq!(mcp_reg.pid, hp);
         assert_eq!(mcp_conv, conv_id);
 
         // 3. Listing (`get_presence_lock_holder` and `list_agy_sessions`) finds holder via fdinfo.
         assert_eq!(
             get_presence_lock_holder(&presence_dir, &missing_line_locks, conv_id).unwrap(),
-            Some(my_pid),
+            Some(hp),
             "XR2: get_presence_lock_holder must find holder from fdinfo when proc_locks omits line"
         );
         let listed = list_agy_sessions(&config, &store, &SessionsQuery::default());
@@ -2959,7 +3014,7 @@ mod tests {
             "XR2: list_agy_sessions must list unregistered holder from fdinfo when proc_locks omits line"
         );
         assert_eq!(listed[0].session_id, conv_id);
-        assert_eq!(listed[0].pid, my_pid);
+        assert_eq!(listed[0].pid, hp);
 
         // 4. Hook watch check (`is_conversation_proc_watched`) succeeds via fdinfo despite missing line.
         assert!(
