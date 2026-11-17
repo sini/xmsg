@@ -917,8 +917,7 @@ fn test_oracle_6_prefix_wildcard_matching() {
         }}})
         .to_string(),
     )
-    .err()
-    .expect("static wildcard CA identity must be rejected by the loader");
+    .expect_err("static wildcard CA identity must be rejected by the loader");
     assert!(
         error.contains("names no single node"),
         "static wildcard loader refusal lost its single-node explanation: {error}"
