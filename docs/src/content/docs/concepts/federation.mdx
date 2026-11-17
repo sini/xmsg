@@ -383,3 +383,7 @@ hub/leaf identities and a separate trust binding for each configured hub. Relay
 history displays the configured leaf via its trusted hub. Changing routes takes
 effect on collector restart and purges the previous route's cache; no browser
 header can select or stamp an origin. See [collector relay setup](/operations/fleet-observer/#collector-relay-source-planned).
+
+## Exact-identity discovery (planned)
+
+The [discovery core](/concepts/discovery/) keeps configured addresses authoritative, then verifies candidate addresses against an exact configured CA identity. Announcements do not grant admission. Core-only builds keep the unimplemented source off; address-less onboarding requires the later source integration. Existing leaf mailboxes and applicable hub forwarding retain their semantics.

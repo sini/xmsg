@@ -1306,6 +1306,17 @@ async fn leaf_read(
     leaf_current(&fs, &admission, control)?;
     Ok(body)
 }
+#[cfg(test)]
+pub(crate) async fn post_discovery_error_answer_for_test(
+    fs: &Arc<FedState>,
+    hub: &str,
+    control: &Control,
+) -> bool {
+    post_answer(fs, hub, control, Err(Failure::Invalid), None)
+        .await
+        .is_ok()
+}
+
 async fn post_answer(
     fs: &Arc<FedState>,
     hub: &str,

@@ -2919,6 +2919,22 @@ pub struct FedState {
 }
 
 impl FedState {
+    pub(crate) fn with_discovery_policy<T>(
+        &self,
+        expected: &Arc<PeersMap>,
+        effect: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let guard = self.dynamic_tls.read().unwrap_or_else(|e| e.into_inner());
+        let current = guard
+            .as_ref()
+            .map(|tls| tls.peers.clone())
+            .unwrap_or_else(|| self.dial_initial_peers());
+        if !Arc::ptr_eq(&current, expected) {
+            return None;
+        }
+        Some(effect())
+    }
+
     pub(crate) fn dial_credentials(
         &self,
     ) -> (Vec<CertificateDer<'static>>, Vec<u8>, Arc<PeersMap>) {

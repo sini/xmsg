@@ -16,14 +16,14 @@ pub struct Dial {
 }
 
 enum Route {
-    Direct(TlsStream<TcpStream>),
+    Direct(Box<TlsStream<TcpStream>>),
     ViaHub(String),
 }
 
 impl Dial {
     pub fn into_direct(self) -> Result<TlsStream<TcpStream>, AppError> {
         match self.inner {
-            Route::Direct(stream) => Ok(stream),
+            Route::Direct(stream) => Ok(*stream),
             Route::ViaHub(hub) => Err(AppError::PeerUnreachable(format!(
                 "this operation requires a direct peer; route is via hub '{hub}'"
             ))),
@@ -144,12 +144,11 @@ async fn discovered(
         verified_at: now,
         not_after,
     };
-    if !fs.discovery.record_verified(
-        row,
-        &fs.current_peers(),
-        now,
-        crate::storage::now_epoch_secs(),
-    ) {
+    let recorded = fs.with_discovery_policy(policy, || {
+        fs.discovery
+            .record_verified(row, policy, now, crate::storage::now_epoch_secs())
+    });
+    if recorded != Some(true) {
         return Err(AppError::PeerRejected(
             "discovery proof expired or policy changed".into(),
         ));
@@ -167,48 +166,62 @@ pub async fn resolve_dial(fs: &FedState, peer: &PeerConfig) -> Result<Dial, AppE
         return connect(fs, &peer, policy, &peer.address)
             .await
             .map(|tls| Dial {
-                inner: Route::Direct(tls),
+                inner: Route::Direct(Box::new(tls)),
             });
     }
     let work = async {
         if let Some(uri) = exact_uri(&peer) {
-            if let Some(row) = fs.discovery.lookup(
-                uri,
-                &peer.name,
-                &policy,
-                Instant::now(),
-                crate::storage::now_epoch_secs(),
-            ) {
+            let cached = fs
+                .with_discovery_policy(&policy, || {
+                    fs.discovery.lookup(
+                        uri,
+                        &peer.name,
+                        &policy,
+                        Instant::now(),
+                        crate::storage::now_epoch_secs(),
+                    )
+                })
+                .flatten();
+            if let Some(row) = cached {
                 match discovered(fs, &peer, &policy, row.candidate.clone()).await {
                     Ok(tls) => return Some(tls),
                     Err(_) => {
-                        fs.discovery.evict(uri);
-                        fs.discovery.negative(
-                            row.candidate.addr,
-                            &peer.name,
-                            &policy,
-                            row.candidate.expires_at,
-                            Instant::now(),
-                        );
+                        let _ = fs.with_discovery_policy(&policy, || {
+                            fs.discovery.evict(uri);
+                            fs.discovery.negative(
+                                row.candidate.addr,
+                                &peer.name,
+                                &policy,
+                                row.candidate.expires_at,
+                                Instant::now(),
+                            );
+                        });
                     }
                 }
             }
             for candidate in candidates(fs, &peer, &policy, Instant::now()) {
-                if fs
-                    .discovery
-                    .is_negative(candidate.addr, &peer.name, &policy, Instant::now())
-                {
-                    continue;
+                let negative = fs.with_discovery_policy(&policy, || {
+                    fs.discovery
+                        .is_negative(candidate.addr, &peer.name, &policy, Instant::now())
+                });
+                match negative {
+                    Some(false) => {}
+                    Some(true) => continue,
+                    None => return None,
                 }
                 match discovered(fs, &peer, &policy, candidate.clone()).await {
                     Ok(tls) => return Some(tls),
-                    Err(_) => fs.discovery.negative(
-                        candidate.addr,
-                        &peer.name,
-                        &policy,
-                        candidate.expires_at,
-                        Instant::now(),
-                    ),
+                    Err(_) => {
+                        let _ = fs.with_discovery_policy(&policy, || {
+                            fs.discovery.negative(
+                                candidate.addr,
+                                &peer.name,
+                                &policy,
+                                candidate.expires_at,
+                                Instant::now(),
+                            )
+                        });
+                    }
                 }
             }
         }
@@ -217,7 +230,7 @@ pub async fn resolve_dial(fs: &FedState, peer: &PeerConfig) -> Result<Dial, AppE
     let result = tokio::time::timeout(Duration::from_secs(8), work).await;
     if let Ok(Some(tls)) = result {
         return Ok(Dial {
-            inner: Route::Direct(tls),
+            inner: Route::Direct(Box::new(tls)),
         });
     }
     if let Some(hub) = &policy.default_route_peer {
@@ -237,7 +250,7 @@ pub async fn resolve_dial(fs: &FedState, peer: &PeerConfig) -> Result<Dial, AppE
 
 pub fn is_direct(fs: &FedState, peer: &PeerConfig) -> bool {
     if peer.leaf {
-        return false;
+        return true;
     }
     if !peer.address.is_empty() {
         return true;
@@ -289,4 +302,53 @@ mod ordering_tests {
         assert_eq!(rows[0].addr, "10.1.0.2:7777".parse().unwrap());
         assert_eq!(rows[1].addr, "10.1.0.1:7777".parse().unwrap());
     }
+}
+
+#[cfg(test)]
+#[path = "dial_tests.rs"]
+mod tests;
+
+pub fn spawn_sweep(fs: &Arc<FedState>) -> tokio::task::JoinHandle<()> {
+    let weak = Arc::downgrade(fs);
+    let changed = fs.discovery.changed.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut next = 0usize;
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {},
+                _ = changed.notified() => {},
+            }
+            let Some(fs) = weak.upgrade() else {
+                break;
+            };
+            fs.discovery
+                .candidates
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .expire(Instant::now());
+            let policy = fs.current_peers();
+            if !policy.discovery.source_enabled(super::Source::Mdns) {
+                continue;
+            }
+            let mut peers = policy
+                .values()
+                .filter(|peer| !peer.leaf && peer.address.is_empty() && exact_uri(peer).is_some())
+                .cloned()
+                .collect::<Vec<_>>();
+            peers.sort_by(|a, b| a.name.cmp(&b.name));
+            if peers.is_empty() {
+                continue;
+            }
+            let sweep = async {
+                for _ in 0..peers.len() {
+                    let index = next % peers.len();
+                    next = next.wrapping_add(1);
+                    let _ = resolve_dial(&fs, &peers[index]).await;
+                }
+            };
+            let _ = tokio::time::timeout(Duration::from_secs(8), sweep).await;
+        }
+    })
 }

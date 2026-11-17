@@ -190,3 +190,7 @@ unimplemented by node export. A compromised authorized node or collector remains
 a trusted-component compromise. Metadata IDs and opted-in labels are not a
 secrecy filter against intentional disclosure. No message body or transcript
 reader is added.
+
+## Discovery addresses (planned)
+
+A discovery announcement supplies only an address and optional ordering hints. The application connection retains the exact configured identity verifier used for the TLS proof, and presence is keyed by the actual certificate URI. A reloaded policy invalidates older proofs. This does not widen incoming admission or implement pattern probing. The standalone collector client remains outside daemon discovery; see [peer discovery](/concepts/discovery/).

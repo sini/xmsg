@@ -390,3 +390,7 @@ See [federated view resolution](/concepts/addressing/#how-a-bare-reference-resol
 
 A signed `xmsg.message.received.v1` hint that the gateway's [Events](#events) profile sends. It
 tells a hosted client to read its mailbox.
+
+## Candidate and verified presence (planned)
+
+A **candidate** is an untrusted discovered socket address. A **verified presence** binds an actual certificate URI to an endpoint after mutual TLS under an exact configured identity rule. An announced root fingerprint is an eligibility hint; the configured CA root remains the trust anchor. Presence expires with its proof and policy generation. See [peer discovery](/concepts/discovery/).

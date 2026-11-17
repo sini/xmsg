@@ -483,3 +483,7 @@ identities; a URI hub requires its CA. Configuration applies on restart. The pri
 `GET /` is the authenticated view, with numeric `node` and `page` filters;
 `GET /health` is a fixed metadata-free availability response. There is no MCP
 observation tool, browser token store, body route or action control.
+
+### Discovery and explicit-node routing (planned)
+
+The shared federation dial resolver preserves static-address priority and existing operation-specific hub fallback. `check-peers` rejects source-dependent address omission when no source is available; malformed address values are rejected. Doctor uses the same authenticated direct-dial path under its existing shorter budget and never reports a hub certificate as the target leaf. See [peer discovery](/concepts/discovery/) for core-only build limits.

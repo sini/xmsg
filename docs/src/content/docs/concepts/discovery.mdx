@@ -1,0 +1,67 @@
+---
+title: Peer discovery
+description: How untrusted addresses become verified federation endpoints.
+---
+
+## Exact-identity discovery (planned)
+
+A discovery candidate is an address, not a peer identity or permission. A hint or
+announced root fingerprint can order candidates, but cannot admit a peer. A
+candidate becomes a verified presence only after mutual TLS proves the exact
+configured certificate identity under its configured CA roots. Presence is keyed
+by the certificate's URI, never by an announcement's name.
+
+Federation chooses an endpoint in this order:
+
+1. The configured static address, using its configured pin or CA identity.
+2. An unexpired verified presence for the exact configured identity.
+3. Eligible candidates, verified with that same exact identity rule.
+4. The existing hub route, where that operation supports forwarding.
+5. The existing unknown-node result when no route is available.
+
+A static address remains authoritative even if it fails: discovery cannot replace
+it. Existing applicable hub fallback is retained. A hub route remains a forwarding
+or mailbox operation; xmsg does not send an arbitrary target RPC to the hub while
+pretending the hub is the target.
+
+Presence expires by the earliest of its source TTL, ten minutes, certificate
+expiry and a policy reload. An announcement refresh cannot extend a verified
+presence without another TLS proof. Failed addresses are remembered for that
+rule until their observed candidate expiry. Reloaded policy cannot reuse an old
+proof, and candidates are copied out of their table before any network wait.
+
+Probes share four slots, have a two-second handshake limit and an eight-second
+resolution budget. Existing shorter operation deadlines still apply, including
+`xmsg doctor`'s bounds. A coalescing change notification and a bounded periodic
+sweep refresh discovery independently of message delivery.
+
+## Source availability (planned)
+
+The discovery core defines the peers-file key and candidate interface. It does
+not include an mDNS socket backend. In a core-only build, configuring `mdns`
+produces a not-compiled warning; the source stays off and cannot justify an
+address-less entry. Unsupported source keys are rejected. Enabling an actual
+source and verifying address-less onboarding belong to the source integration.
+
+```json
+{
+  "discovery": { "mdns": {}, "ttl_secs": 120 },
+  "peers": {
+    "alice.laptop": {
+      "address": "192.0.2.10:7788",
+      "ca": "/absolute/path/to/root.pem",
+      "identities": ["spiffe://example.test/host/laptop/user/alice"],
+      "allow": ["send"]
+    }
+  }
+}
+```
+
+The TTL must be between 1 and 600 seconds. Address omission requires a CA entry
+and a source that is both configured and available in the build, except for the
+existing leaf and default-route cases. A pin alone cannot enable address-less
+discovery. Pattern probing is outside this exact-identity core.
+
+The standalone fleet collector has a separate client and configuration; this
+resolver does not silently add discovery to it. See [federation](/concepts/federation/)
+and the [trust model](/concepts/trust-model/) for the existing admission boundary.
