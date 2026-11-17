@@ -108,6 +108,7 @@ required-features = ["daemon"]
 [[test]]
 name = "test_home_isolation"
 path = "tests/test_home_isolation.rs"
+required-features = ["daemon"]
 
 [[test]]
 name = "agy_spawn_fds"
