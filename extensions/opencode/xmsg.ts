@@ -403,7 +403,7 @@ const TOOLS: { name: string; description: string; args: Answer; required?: strin
   },
 ];
 
-const noSock = () => console.warn("[xmsg] XDG_RUNTIME_DIR is not set; the xmsg plugin is off");
+const noSock = () => console.warn("[xmsg] socket directory not found (XDG_RUNTIME_DIR is unset and the macOS fallback is unavailable); the xmsg plugin is off");
 
 // opencode 1.x: hooks returned from `server`, the SDK client for sessions.
 const server = async ({ client }: any) => {

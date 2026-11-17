@@ -405,7 +405,7 @@ TOOLS = [
 def register(ctx):
     path = _register_sock()
     if not path:
-        logger.warning("xmsg: XDG_RUNTIME_DIR is not set; the xmsg plugin is off")
+        logger.warning("xmsg: socket directory not found (XDG_RUNTIME_DIR is unset and the macOS fallback is unavailable); the xmsg plugin is off")
         return
     x = Xmsg(ctx, path)
     for name, action, fields, schema in TOOLS:
