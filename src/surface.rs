@@ -2396,9 +2396,15 @@ async fn deliver_send(
         (Some(n), _) if n == state.node_name => Dest::Local,
         (Some(n), Some(fs)) => {
             let peers = fs.current_peers();
-            let is_direct = peers
-                .get_peer_config(n)
-                .is_some_and(|peer| crate::discovery::dial::is_direct(fs, &peer));
+            let is_direct = if let Some(peer) = peers.get(n) {
+                crate::discovery::dial::is_direct(fs, peer)
+            } else {
+                peers
+                    .admitted_clients
+                    .read()
+                    .ok()
+                    .is_some_and(|adm| adm.contains_key(n))
+            };
 
             if is_direct {
                 Dest::Peer {
