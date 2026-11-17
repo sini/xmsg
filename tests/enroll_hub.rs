@@ -262,7 +262,7 @@ fn expired_admitted_entry_is_pruned_only_when_mailbox_empty() {
         .admitted_clients
         .write()
         .unwrap()
-        .get_mut("carol.lap")
+        .get_mut("spiffe://example.org/host/lap/user/carol")
         .unwrap()
         .not_after = 0;
     let db = rusqlite::Connection::open_in_memory().unwrap();

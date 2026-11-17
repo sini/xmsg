@@ -1025,3 +1025,66 @@ async fn approved_completion_releases_device_permit_before_certificate_collectio
     assert_eq!(status, StatusCode::OK);
     assert!(result["cert_chain_pem"].is_string());
 }
+
+#[tokio::test]
+async fn grt4_device_approval_refuses_prospective_alias_before_any_pod_admission() {
+    for changed_after_projection in [false, true] {
+        let h = enabled().await;
+        if !changed_after_projection {
+            crate::enroll::protocol_tests::grt4_publish_ambiguous_names(&h, "remote");
+        }
+        let (created, view) = awaiting(&h).await;
+        if changed_after_projection {
+            crate::enroll::protocol_tests::grt4_publish_ambiguous_names(&h, "remote");
+        }
+        let result = h
+            .service
+            .approve_device(created["request_id"].as_str().unwrap(), approval(&view));
+        assert!(
+            matches!(result, Err(Failure(_, "reserved_name"))),
+            "grt4 device approval issued a prospective pod alias"
+        );
+        assert_eq!(
+            effects(&h),
+            [0, 0, 0],
+            "grt4 device name refusal spent authority effects"
+        );
+        assert!(h
+            .service
+            .fed
+            .current_peers()
+            .admitted_clients
+            .read()
+            .unwrap()
+            .is_empty());
+    }
+}
+
+#[tokio::test]
+async fn grt4_actual_device_approval_refreshes_ownership_after_sql_wait() {
+    let h = enabled().await;
+    let (created, view) = awaiting(&h).await;
+    let pending = session(&h, &created);
+    let locked = h.db.lock().unwrap();
+    let service = h.service.clone();
+    let id = created["request_id"].as_str().unwrap().to_owned();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        tx.send(service.approve_device(&id, approval(&view)))
+            .unwrap();
+    });
+    wait_for_approval_lock(&pending);
+    crate::enroll::protocol_tests::grt4_publish_ambiguous_names(&h, "remote");
+    drop(locked);
+    let result = bounded_result(rx);
+    join_worker(worker);
+    assert!(
+        matches!(result, Err(Failure(_, "reserved_name"))),
+        "grt4 actual approval retained stale pre-SQL name ownership"
+    );
+    assert_eq!(
+        effects(&h),
+        [0, 0, 0],
+        "grt4 stale actual approval wrote authority effects"
+    );
+}
