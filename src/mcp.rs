@@ -948,20 +948,32 @@ pub fn execute_tool_with_meta(
             match call_agent_sock_within(&config.agent_sock, &payload, Duration::from_secs(5)) {
                 Ok(resp) => {
                     let reply_val = resp.get("reply").cloned().unwrap_or(Value::Null);
-                    let new_id = match reply_val.get("pushedMessageId").and_then(Value::as_str) {
-                        Some(id) => id,
-                        None => {
-                            return tool_err(
-                                "reply failed: missing 'pushedMessageId' in socket response"
-                                    .to_string(),
-                            );
-                        }
-                    };
                     let outcome = match reply_val.get("pushOutcome").and_then(Value::as_str) {
                         Some(o) => o,
                         None => {
                             return tool_err(
                                 "reply failed: missing 'pushOutcome' in socket response"
+                                    .to_string(),
+                            );
+                        }
+                    };
+                    if matches!(outcome, "push_failed" | "sender_gone") {
+                        let err_msg = reply_val
+                            .get("pushError")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| match outcome {
+                                "sender_gone" => "gone: recipient session is gone".to_string(),
+                                _ => format!("reply delivery failed: {outcome}"),
+                            });
+                        return tool_err(err_msg);
+                    }
+                    let new_id = match reply_val.get("pushedMessageId").and_then(Value::as_str) {
+                        Some(id) => Value::String(id.to_string()),
+                        None if outcome == "stored" => Value::Null,
+                        None => {
+                            return tool_err(
+                                "reply failed: missing 'pushedMessageId' in socket response"
                                     .to_string(),
                             );
                         }

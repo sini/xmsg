@@ -322,6 +322,8 @@ pub struct ReplyRecord {
     #[serde(default)]
     pub pushed_message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replier: Option<Origin>,
 }
 

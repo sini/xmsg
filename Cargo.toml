@@ -601,3 +601,7 @@ required-features = ["daemon"]
 name = "test_write_exe_guard"
 path = "tests/test_write_exe_guard.rs"
 required-features = ["daemon"]
+[[test]]
+name = "gate_whrh_reply_error"
+path = "tests/gate_whrh_reply_error.rs"
+required-features = ["daemon"]

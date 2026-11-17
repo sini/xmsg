@@ -1490,6 +1490,11 @@ pub async fn deliver_with_in_reply_to(
 /// a registered service, whose push lands in the inbox it long-polls with `in_reply_to`.
 /// Returns `pushed`, `sender_gone` or `push_failed`.
 #[allow(clippy::too_many_arguments)]
+fn format_app_error(e: &AppError) -> String {
+    format!("{}: {}", e.code().1, e.detail())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn push_reply(
     local: &Local<'_>,
     ret_harness: &str,
@@ -1500,9 +1505,34 @@ pub async fn push_reply(
     replier_origin: Origin,
     text: &str,
 ) -> &'static str {
+    push_reply_with_error(
+        local,
+        ret_harness,
+        ret_session_id,
+        in_reply_to,
+        reply_id,
+        replier_label,
+        replier_origin,
+        text,
+    )
+    .await
+    .0
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn push_reply_with_error(
+    local: &Local<'_>,
+    ret_harness: &str,
+    ret_session_id: &str,
+    in_reply_to: &str,
+    reply_id: &str,
+    replier_label: &str,
+    replier_origin: Origin,
+    text: &str,
+) -> (&'static str, Option<String>) {
     let attachment_summary = match attachment_lines(local, reply_id) {
         Ok(s) => s,
-        Err(_) => return "push_failed",
+        Err(e) => return ("push_failed", Some(format_app_error(&e))),
     };
     let mut envelope = format!(
         "[xmsg] reply to message_id={in_reply_to} — message_id={reply_id}; reply with the xmsg reply tool (tools: send, reply, list, replies){attachment_summary}\n\n{text}"
@@ -1518,7 +1548,7 @@ pub async fn push_reply(
             let Ok((_snap, child_state, b)) =
                 crate::codex::admit_codex_subagent(local.db, parent_ref, child_ref, None)
             else {
-                return "sender_gone";
+                return ("sender_gone", None);
             };
             let active = !child_state.active_turns.is_empty()
                 && crate::claim::is_subagent_in_turn(&local.agy_config.proc_root, &b);
@@ -1526,14 +1556,17 @@ pub async fn push_reply(
         } else {
             let b = {
                 let Ok(db) = local.db.lock() else {
-                    return "push_failed";
+                    return (
+                        "push_failed",
+                        Some("internal: database lock poisoned".to_string()),
+                    );
                 };
                 storage::resolve_subagent_in(&db, parent_ref, child_ref)
                     .ok()
                     .flatten()
             };
             let Some(b) = b else {
-                return "sender_gone";
+                return ("sender_gone", None);
             };
             let active = crate::claim::is_subagent_in_turn(&local.agy_config.proc_root, &b);
             (b, active)
@@ -1560,9 +1593,9 @@ pub async fn push_reply(
             };
             return if inserted {
                 let _ = local.notify_tx.send(instance_id);
-                "pushed"
+                ("pushed", None)
             } else {
-                "push_failed"
+                ("push_failed", None)
             };
         }
 
@@ -1612,9 +1645,9 @@ pub async fn push_reply(
                 };
                 return if inserted {
                     let _ = local.notify_tx.send(instance_id);
-                    "pushed"
+                    ("pushed", None)
                 } else {
-                    "push_failed"
+                    ("push_failed", None)
                 };
             }
             return match parent_live {
@@ -1622,24 +1655,33 @@ pub async fn push_reply(
                     let body_with_header = format!("{header}\n{envelope}");
                     let Ok(line) = inbox::encode_transport_line(replier_label, &body_with_header)
                     else {
-                        return "push_failed";
+                        return (
+                            "push_failed",
+                            Some("internal: failed to encode transport line".to_string()),
+                        );
                     };
                     match inbox::deliver_to_socket(&socket_path, &line).await {
-                        Ok(()) => "pushed",
+                        Ok(()) => ("pushed", None),
                         Err(e) => {
                             let err = e.to_string();
                             if err.contains("Connection refused")
                                 || err.contains("No such file or directory")
                             {
-                                "sender_gone"
+                                ("sender_gone", Some(format!("gone: {err}")))
                             } else {
-                                "push_failed"
+                                ("push_failed", Some(format!("inbox_unavailable: {err}")))
                             }
                         }
                     }
                 }
-                Ok(_) | Err(AppError::Gone { .. }) | Err(AppError::NotFound(_)) => "sender_gone",
-                Err(_) => "push_failed",
+                Ok(_) => (
+                    "sender_gone",
+                    Some("gone: claude inbox socket missing".to_string()),
+                ),
+                Err(e @ (AppError::Gone { .. } | AppError::NotFound(_))) => {
+                    ("sender_gone", Some(format_app_error(&e)))
+                }
+                Err(e) => ("push_failed", Some(format_app_error(&e))),
             };
         }
 
@@ -1667,24 +1709,33 @@ pub async fn push_reply(
             {
                 Ok((_session, socket_path)) if socket_path.exists() => {
                     let Ok(line) = inbox::encode_transport_line(replier_label, &envelope) else {
-                        return "push_failed";
+                        return (
+                            "push_failed",
+                            Some("internal: failed to encode transport line".to_string()),
+                        );
                     };
                     match inbox::deliver_to_socket(&socket_path, &line).await {
-                        Ok(()) => "pushed",
+                        Ok(()) => ("pushed", None),
                         Err(e) => {
                             let err = e.to_string();
                             if err.contains("Connection refused")
                                 || err.contains("No such file or directory")
                             {
-                                "sender_gone"
+                                ("sender_gone", Some(format!("gone: {err}")))
                             } else {
-                                "push_failed"
+                                ("push_failed", Some(format!("inbox_unavailable: {err}")))
                             }
                         }
                     }
                 }
-                Ok(_) | Err(AppError::Gone { .. }) | Err(AppError::NotFound(_)) => "sender_gone",
-                Err(_) => "push_failed",
+                Ok(_) => (
+                    "sender_gone",
+                    Some("gone: claude inbox socket missing".to_string()),
+                ),
+                Err(e @ (AppError::Gone { .. } | AppError::NotFound(_))) => {
+                    ("sender_gone", Some(format_app_error(&e)))
+                }
+                Err(e) => ("push_failed", Some(format_app_error(&e))),
             }
         }
         "agy" => {
@@ -1701,10 +1752,12 @@ pub async fn push_reply(
                         )
                         .await
                         {
-                            Ok(()) => return "pushed",
+                            Ok(()) => return ("pushed", None),
                             Err(AppError::CredentialsStale(_)) => {}
-                            Err(AppError::Gone { .. }) => return "sender_gone",
-                            Err(_) => return "push_failed",
+                            Err(e @ AppError::Gone { .. }) => {
+                                return ("sender_gone", Some(format_app_error(&e)));
+                            }
+                            Err(e) => return ("push_failed", Some(format_app_error(&e))),
                         }
                     }
                     let agy_msg = storage::AgyPendingMessage {
@@ -1718,17 +1771,25 @@ pub async fn push_reply(
                         delivered_at: None,
                     };
                     match local.db.lock() {
-                        Ok(db) if storage::insert_agy_message(&db, &agy_msg).is_ok() => "pushed",
-                        _ => "push_failed",
+                        Ok(db) if storage::insert_agy_message(&db, &agy_msg).is_ok() => {
+                            ("pushed", None)
+                        }
+                        _ => (
+                            "push_failed",
+                            Some("internal: failed to queue agy reply".to_string()),
+                        ),
                     }
                 }
-                Ok(None) => "sender_gone",
-                Err(_) => "push_failed",
+                Ok(None) => (
+                    "sender_gone",
+                    Some(format!("gone: agy session {ret_session_id} not found")),
+                ),
+                Err(e) => ("push_failed", Some(format_app_error(&e))),
             }
         }
         "codex" => {
             let Some(root_snap) = crate::codex::resolve_codex_root(local.db, ret_session_id) else {
-                return "sender_gone";
+                return ("sender_gone", None);
             };
             let pi_msg = storage::PiPendingMessage {
                 id: reply_id.to_string(),
@@ -1751,14 +1812,14 @@ pub async fn push_reply(
                 Err(_) => false,
             };
             if !inserted {
-                return "push_failed";
+                return ("push_failed", None);
             }
             match try_push_codex_queued_message(local, &root_snap, reply_id, &pi_msg.envelope).await
             {
-                Ok("delivered") | Ok("queued") => "pushed",
-                Ok("delivery_unknown") => "push_failed",
-                Err(_) => "sender_gone",
-                _ => "push_failed",
+                Ok("delivered") | Ok("queued") => ("pushed", None),
+                Ok("delivery_unknown") => ("push_failed", None),
+                Err(_) => ("sender_gone", None),
+                _ => ("push_failed", None),
             }
         }
         h if h == "pi" || crate::plugin::harness(h).is_some() => {
@@ -1793,9 +1854,9 @@ pub async fn push_reply(
                     };
                     if inserted {
                         let _ = local.pi_notify_tx.send(session.session_id);
-                        "pushed"
+                        ("pushed", None)
                     } else {
-                        "push_failed"
+                        ("push_failed", None)
                     }
                 }
                 Ok(None) => {
@@ -1829,15 +1890,15 @@ pub async fn push_reply(
                             Err(_) => false,
                         };
                         if inserted {
-                            "pushed"
+                            ("pushed", None)
                         } else {
-                            "push_failed"
+                            ("push_failed", None)
                         }
                     } else {
-                        "sender_gone"
+                        ("sender_gone", None)
                     }
                 }
-                Err(_) => "push_failed",
+                Err(_) => ("push_failed", None),
             }
         }
         "svc" => {
@@ -1847,8 +1908,8 @@ pub async fn push_reply(
                 ret_session_id,
             ) {
                 Ok(Some(session)) => session.session_id,
-                Ok(None) => return "sender_gone",
-                Err(_) => return "push_failed",
+                Ok(None) => return ("sender_gone", None),
+                Err(_) => return ("push_failed", None),
             };
             let svc_msg = storage::SvcPendingMessage {
                 id: reply_id.to_string(),
@@ -1869,12 +1930,12 @@ pub async fn push_reply(
             };
             if inserted {
                 let _ = local.svc_notify_tx.send(target_session_id);
-                "pushed"
+                ("pushed", None)
             } else {
-                "push_failed"
+                ("push_failed", None)
             }
         }
-        _ => "sender_gone",
+        _ => ("sender_gone", None),
     }
 }
 
@@ -2870,6 +2931,7 @@ pub async fn reply_with_attachments(
                             text: text.to_string(),
                             push_outcome: Some(storage::KEY_PENDING.to_string()),
                             pushed_message_id: Some(r.reply_id),
+                            push_error: None,
                             attachments: refs.clone(),
                             replier: None,
                         }),
@@ -3303,7 +3365,7 @@ async fn deliver_reply(
             return Ok(record);
         }
     }
-    let push_outcome = match remote_host.as_deref() {
+    let (push_outcome, push_error) = match remote_host.as_deref() {
         Some(host) => {
             {
                 let db = state.db.lock().map_err(db_err)?;
@@ -3469,9 +3531,9 @@ async fn deliver_reply(
                 });
                 let _ = storage::delete_outbound(&db, &reply_id);
             }
-            Some(outcome)
+            (Some(outcome), None)
         }
-        None if !has_inbox || is_forwarded => None,
+        None if !has_inbox || is_forwarded => (None, None),
         None => {
             if let Ok(db) = state.db.lock() {
                 if caller_is_sender {
@@ -3511,7 +3573,7 @@ async fn deliver_reply(
                 }
             }
             let replier_origin = Sender::Session(caller.clone()).origin(&state.node_name);
-            let outcome = push_reply(
+            let (outcome, err) = push_reply_with_error(
                 &state.local(),
                 &ret_harness,
                 &ret_session_id,
@@ -3531,7 +3593,7 @@ async fn deliver_reply(
                         });
                 }
             }
-            Some(outcome)
+            (Some(outcome), err)
         }
     };
     // The pushed copy's ID: a local push that landed, or the envelope a remote origin
@@ -3575,7 +3637,9 @@ async fn deliver_reply(
         };
         let _ = storage::purge_replies(&db, state.reply_ttl.as_secs());
         let _ = storage::purge_messages(&db, state.reply_ttl.as_secs());
-        reply_attachments(&db, record)?
+        let mut record = reply_attachments(&db, record)?;
+        record.push_error = push_error;
+        record
     };
     let _ = state.notify_tx.send(message_id.to_string());
     Ok(record)

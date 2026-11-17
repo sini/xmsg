@@ -803,6 +803,7 @@ pub fn insert_reply(
         text: text.to_string(),
         push_outcome: push_outcome.map(|s| s.to_string()),
         pushed_message_id: pushed_message_id.map(|s| s.to_string()),
+        push_error: None,
         replier: None,
         attachments: Vec::new(),
     })
@@ -825,6 +826,7 @@ pub fn get_replies_after(
             text: row.get(4)?,
             push_outcome: row.get(5)?,
             pushed_message_id: row.get(6)?,
+            push_error: None,
             replier: None,
             attachments: Vec::new(),
         })
@@ -858,6 +860,7 @@ pub fn get_reply_by_pushed_id(
             text: row.get(4)?,
             push_outcome: row.get(5)?,
             pushed_message_id: row.get(6)?,
+            push_error: None,
             replier: None,
             attachments: Vec::new(),
         }))
@@ -1580,6 +1583,7 @@ pub fn get_reply_by_seq(conn: &Connection, seq: i64) -> Result<Option<ReplyRecor
             text: row.get(4)?,
             push_outcome: row.get(5)?,
             pushed_message_id: row.get(6)?,
+            push_error: None,
             replier: None,
             attachments: Vec::new(),
         }))
