@@ -149,5 +149,21 @@
         "end": "    if !peer.address.is_empty()"
       }
     ]
+  },
+  {
+    "label": "discovery-directness-route",
+    "target": "lib",
+    "test": "discovery::dial::tests::x6_successful_discovery_uses_prepared_tls_without_hub",
+    "test_file": "src/discovery/dial_tests.rs",
+    "expected_literal": "verified discovery directness was lost",
+    "edits": [
+      {
+        "file": "src/discovery/dial.rs",
+        "start": "pub fn is_direct",
+        "end": "#[cfg(test)]",
+        "needle": "        .is_some()\n        || !candidates(fs, peer, &policy, Instant::now()).is_empty()",
+        "replacement": "        .is_some() && false\n        || (!candidates(fs, peer, &policy, Instant::now()).is_empty() && false)"
+      }
+    ]
   }
 ]
