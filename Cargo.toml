@@ -570,3 +570,7 @@ required-features = ["daemon"]
 name = "gate_reverse_observe"
 path = "tests/gate_reverse_observe.rs"
 required-features = ["daemon"]
+[[test]]
+name = "grt4_concrete_ca_leaf"
+path = "tests/grt4_concrete_ca_leaf.rs"
+required-features = ["daemon"]
