@@ -331,6 +331,31 @@ let
     fi
   '';
 
+  # Darwin: refresh the stable copy the launchd agent runs. A new file renamed over the old
+  # keeps the path (and its Local Network grant) and never rewrites a running binary's inode.
+  stableExe = lib.escapeShellArg srv.stableExecutable;
+  installStableExe = ''
+    xmsgStableReplaced=
+    if ! cmp -s ${exe} ${stableExe}; then
+      run mkdir -p -m 0700 "$(dirname ${stableExe})"
+      run install -m 0755 ${exe} ${stableExe}.tmp.$$
+      run mv -f ${stableExe}.tmp.$$ ${stableExe}
+      xmsgStableReplaced=1
+    fi
+  '';
+  # The plist no longer changes across upgrades, so setupLaunchAgents leaves the agent running.
+  restartStableExe =
+    let
+      agent = config.launchd.agents.xmsg;
+      target = "${agent.domain}/$UID/${agent.config.Label}";
+    in
+    ''
+      if [ -n "$xmsgStableReplaced" ]; then
+        run /bin/launchctl kickstart -k "${target}" \
+          || warnEcho "xmsg: could not restart ${target} (not loaded yet?); it runs the new binary when it starts"
+      fi
+    '';
+
   peerType = types.submodule {
     options = {
       address = mkOption {
@@ -580,6 +605,19 @@ in
         default = [ ];
         description = "Additional session directories appended to `programs.xmsg.server.sessionsDirs`.";
       };
+      stableExecutable = mkOption {
+        type = types.nullOr types.str;
+        default = "${config.xdg.dataHome}/xmsg/serve/xmsg";
+        defaultText = lib.literalExpression ''"''${config.xdg.dataHome}/xmsg/serve/xmsg"'';
+        description = ''
+          Darwin only. The launchd agent runs `xmsg serve` from this file, a copy of the
+          package's binary that activation replaces (a new file renamed over it, never a
+          symlink) when the package changes, then restarts the agent. macOS keys the Local
+          Network permission to the executable's real path, so running from the Nix store
+          would re-prompt on every upgrade. Null runs the store path directly. It must not
+          be the Codex harness's `''${config.xdg.dataHome}/xmsg/bin/xmsg` link.
+        '';
+      };
       federation = {
         enable = mkEnableOption "cross-host federation (`--fed-listen`, `--fed-cert`, `--fed-key`, `--peers-file`)";
         listenAddress = mkOption {
@@ -685,6 +723,10 @@ in
         )
         ++ lib.optionals cfg.harnesses.codex.enable [
           (requireHarness "codex" "programs.codex.enable" (config.programs.codex.enable or false))
+          {
+            assertion = srv.stableExecutable != codexStableBin;
+            message = "programs.xmsg.server.stableExecutable: ${codexStableBin} is the Codex harness's store link; pick another path.";
+          }
         ]
         ++ lib.concatLists (
           lib.mapAttrsToList (
@@ -774,7 +816,7 @@ in
         enable = true;
         config = {
           ProgramArguments = [
-            exe
+            (if srv.stableExecutable != null then srv.stableExecutable else exe)
             "serve"
           ]
           ++ serveArgs;
@@ -785,6 +827,19 @@ in
           EnvironmentVariables.XMSG_SESSIONS_DIR = sessionsDirsEnv;
         };
       };
+    })
+
+    (mkIf (srv.enable && pkgs.stdenv.hostPlatform.isDarwin && srv.stableExecutable != null) {
+      home.activation.xmsgInstallStableExe =
+        lib.hm.dag.entryBetween
+          [ "setupLaunchAgents" ]
+          [
+            "writeBoundary"
+          ]
+          installStableExe;
+      home.activation.xmsgRestartStableExe = lib.hm.dag.entryAfter [
+        "setupLaunchAgents"
+      ] restartStableExe;
     })
 
     (mkIf cfg.harnesses.claude.enable {
