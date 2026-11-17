@@ -224,6 +224,43 @@ fn status(report: &Value, id: &str, expected: &str) {
     assert_eq!(check(report, id)["status"], expected, "{id}: {report}");
 }
 
+#[test]
+fn linked_sqlite_information_is_always_reported_without_collector_configuration() {
+    let fixture = Fixture::healthy();
+    let before = snapshot(fixture.root.path());
+    let (output, report) = fixture.report();
+    assert!(output.status.success(), "{report}");
+    let expected = format!(
+        "linked SQLite {}; the fleet collector requires 3.53.2",
+        rusqlite::version()
+    );
+    let info = check(&report, "collector.sqlite_engine");
+    assert_eq!(info["status"], "info");
+    assert_eq!(info["message"], expected);
+    assert_eq!(
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["id"] == "collector.sqlite_engine")
+            .count(),
+        1
+    );
+    let text = fixture.command().output().unwrap();
+    assert!(text.status.success());
+    let stdout = String::from_utf8(text.stdout).unwrap();
+    let expected_line = format!("INFO collector.sqlite_engine: {expected}");
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| *line == expected_line.as_str())
+            .count(),
+        1
+    );
+    assert_eq!(snapshot(fixture.root.path()), before);
+    fixture.assert_read_only_requests();
+}
+
 fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>, u32)> {
     fn visit(root: &Path, directory: &Path, entries: &mut Vec<(PathBuf, Vec<u8>, u32)>) {
         for entry in fs::read_dir(directory).unwrap() {
