@@ -583,3 +583,360 @@ async fn discovery_probe_slots_are_shared_and_bounded() {
     drop(held);
     assert_eq!(state.probes.available_permits(), 4);
 }
+
+struct X6Http {
+    method: hyper::Method,
+    path: String,
+    body: Value,
+    outbound_peer: Option<String>,
+}
+
+struct X6Server {
+    address: std::net::SocketAddr,
+    accepted: Arc<AtomicUsize>,
+    received: tokio::sync::mpsc::UnboundedReceiver<X6Http>,
+    task: JoinHandle<()>,
+}
+
+impl X6Server {
+    async fn start(identity: Identity, fixture: &Fixture) -> Self {
+        Self::with_status(identity, fixture, hyper::StatusCode::OK).await
+    }
+
+    async fn with_status(
+        identity: Identity,
+        fixture: &Fixture,
+        post_status: hyper::StatusCode,
+    ) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peers = PeersMap::load_from_json(
+            &json!({"peers":{"client":{
+                "pin":fixture.client_pin,"leaf":true,"allow":["send"]
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+        let acceptor = crate::fed::make_tls_acceptor(
+            &[CertificateDer::from(identity.cert)],
+            &identity.key,
+            Arc::new(peers),
+        )
+        .unwrap();
+        let db = fixture.fs.db.clone();
+        let (tx, received) = tokio::sync::mpsc::unbounded_channel();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let count = accepted.clone();
+        let task = tokio::spawn(async move {
+            let mut connections = JoinSet::new();
+            loop {
+                tokio::select! {
+                    connection = listener.accept() => {
+                        let (tcp, _) = connection.unwrap();
+                        count.fetch_add(1, Ordering::SeqCst);
+                        let acceptor = acceptor.clone();
+                        let tx = tx.clone();
+                        let db = db.clone();
+                        connections.spawn(async move {
+                            let Ok(Ok(tls)) = tokio::time::timeout(Duration::from_secs(3), acceptor.accept(tcp)).await else { return; };
+                            let service = hyper::service::service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
+                                let tx = tx.clone();
+                                let db = db.clone();
+                                async move {
+                                    let method = request.method().clone();
+                                    let path = request.uri().to_string();
+                                    let bytes = request.into_body().collect().await.unwrap().to_bytes();
+                                    let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                                    let outbound_peer = body["id"].as_str().and_then(|id| {
+                                        crate::storage::get_outbound(&db.lock().unwrap(), id).unwrap().map(|row| row.peer)
+                                    });
+                                    let response = if method == hyper::Method::POST {
+                                        serde_json::to_string(&crate::inbox::DeliveryResponse {
+                                            session_id: "fixture-target".into(), from_name: "fixture".into(), bytes: 1,
+                                            message_id: body["id"].as_str().unwrap().into(), outcome: Some("queued".into()),
+                                        }).unwrap()
+                                    } else { "[]".into() };
+                                    let status = if method == hyper::Method::POST { post_status } else { hyper::StatusCode::OK };
+                                    let _ = tx.send(X6Http { method, path, body, outbound_peer });
+                                    Ok::<_, Infallible>(hyper::Response::builder().status(status).body(http_body_util::Full::new(bytes::Bytes::from(response))).unwrap())
+                                }
+                            });
+                            let _ = hyper::server::conn::http1::Builder::new().serve_connection(hyper_util::rt::TokioIo::new(tls), service).await;
+                        });
+                    }
+                    Some(result) = connections.join_next(), if !connections.is_empty() => result.unwrap(),
+                }
+            }
+        });
+        Self {
+            address,
+            accepted,
+            received,
+            task,
+        }
+    }
+}
+
+impl Drop for X6Server {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+fn x6_app(fixture: &Fixture) -> Arc<crate::http::AppState> {
+    let fs = &fixture.fs;
+    Arc::new(crate::http::AppState {
+        sessions_dirs: fs.sessions_dirs.clone(),
+        agy_config: fs.agy_config.clone(),
+        agy_store: fs.agy_store.clone(),
+        pi_store: fs.pi_store.clone(),
+        pi_notify_tx: fs.pi_notify_tx.clone(),
+        svc_store: fs.svc_store.clone(),
+        svc_notify_tx: fs.svc_notify_tx.clone(),
+        node_name: fs.node_name.clone(),
+        max_body: fs.max_body,
+        max_attachment_bytes: fs.max_attachment_bytes,
+        request_counter: AtomicU64::new(0),
+        db: fs.db.clone(),
+        notify_tx: fs.notify_tx.clone(),
+        reply_ttl: fs.reply_ttl,
+        idempotency_ttl: Duration::from_secs(3600),
+        long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(16)),
+        fed_state: Some(fs.clone()),
+    })
+}
+
+async fn x6_surface_send(discovery_succeeds: bool, post_fails: bool) {
+    let ca = Ca::new();
+    let mut fixture = Fixture::new(&ca, &[(N, None)]);
+    let (cert, key, pin) = crate::fed::generate_self_signed_ed25519("fixture-hub").unwrap();
+    let mut hub = X6Server::start(Identity { cert, key }, &fixture).await;
+    let mut target = X6Server::with_status(
+        ca.issue(if discovery_succeeds { N } else { M }),
+        &fixture,
+        if post_fails {
+            hyper::StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            hyper::StatusCode::OK
+        },
+    )
+    .await;
+    let policy = PeersMap::load_from_json(&json!({"peers":{
+        "hub":{"address":hub.address.to_string(),"pin":pin,"allow":["send","reply"],"dial":"outbound","default_route":true},
+        (N):{"ca":fixture._root.path().join("ca.pem"),"identities":[uri(N)],"allow":["send","reply"]}
+    }}).to_string()).unwrap();
+    Arc::get_mut(&mut fixture.fs).unwrap().peers = Arc::new(policy).into();
+    let now = Instant::now();
+    fixture
+        .fs
+        .discovery
+        .candidates
+        .write()
+        .unwrap()
+        .inject_for_test(Candidate {
+            addr: target.address,
+            source: Source::Mdns,
+            hint: Some(uri(N)),
+            root_fp: None,
+            seen_at: now,
+            expires_at: now + Duration::from_secs(60),
+        });
+    let state = x6_app(&fixture);
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::surface::send(
+            &state,
+            &crate::surface::Sender::service("sender"),
+            &format!("receiver@{N}"),
+            "x6",
+            None,
+        ),
+    )
+    .await
+    .unwrap();
+    if post_fails {
+        assert!(
+            matches!(result, Err(AppError::ServiceUnavailable(_))),
+            "{result:?}"
+        );
+        let post = tokio::time::timeout(Duration::from_secs(2), target.received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(post.method, hyper::Method::POST);
+        assert_eq!(post.outbound_peer.as_deref(), Some(N));
+        assert_eq!(target.accepted.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            hub.accepted.load(Ordering::SeqCst),
+            0,
+            "request failure retried via the hub"
+        );
+        assert!(
+            target.received.try_recv().is_err(),
+            "application request repeated"
+        );
+        return;
+    }
+    assert!(
+        result.is_ok(),
+        "same SEND lost its prepared operation route: {result:?}"
+    );
+    let result = result.unwrap();
+    assert_eq!(result.outcome, "queued");
+    let receiver = if discovery_succeeds {
+        &mut target.received
+    } else {
+        &mut hub.received
+    };
+    let post = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(post.method, hyper::Method::POST);
+    assert_eq!(post.path, "/fed/v2/messages");
+    assert_eq!(
+        post.body["to"]["ref"],
+        if discovery_succeeds {
+            "receiver".to_string()
+        } else {
+            format!("receiver@{N}")
+        }
+    );
+    assert!(
+        post.body["forwarded"].is_null(),
+        "sender fabricated forwarding provenance"
+    );
+    let actual_peer = if discovery_succeeds { N } else { "hub" };
+    assert_eq!(
+        post.outbound_peer.as_deref(),
+        Some(actual_peer),
+        "bookkeeping preceded the operation route"
+    );
+    let outbound = crate::storage::get_outbound(&state.db.lock().unwrap(), &result.message_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(outbound.peer, actual_peer);
+    assert_eq!(outbound.target_ref, format!("fixture-target@{N}"));
+    assert_eq!(
+        target.accepted.load(Ordering::SeqCst),
+        1,
+        "discovered TLS was discarded and probed twice"
+    );
+    if discovery_succeeds {
+        assert_eq!(
+            hub.accepted.load(Ordering::SeqCst),
+            0,
+            "direct success contacted the hub"
+        );
+    } else {
+        assert!(
+            target.received.try_recv().is_err(),
+            "rejected discovery received an application request"
+        );
+        let poll = tokio::time::timeout(Duration::from_secs(2), hub.received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(poll.method, hyper::Method::GET);
+        assert!(
+            poll.path
+                .starts_with(&format!("/fed/v2/messages/{}/replies?", result.message_id)),
+            "poller did not use the actual hub: {}",
+            poll.path
+        );
+    }
+}
+
+#[tokio::test]
+async fn x6_failed_discovery_uses_hub_within_same_surface_send() {
+    x6_surface_send(false, false).await;
+}
+
+#[tokio::test]
+async fn x6_successful_discovery_uses_prepared_tls_without_hub() {
+    x6_surface_send(true, false).await;
+}
+
+#[tokio::test]
+async fn x6_prepared_send_rejects_a_reloaded_policy_before_request() {
+    let ca = Ca::new();
+    let fixture = Fixture::new(&ca, &[(N, None)]);
+    let server = Server::start(ca.issue(N), &fixture.client_pin).await;
+    fixture.inject(&server, &uri(N));
+    let prepared = prepare_send(&fixture.fs, N).await.unwrap().unwrap();
+    let current = Arc::new((*fixture.fs.current_peers()).clone());
+    let acceptor = crate::fed::make_tls_acceptor(
+        &[CertificateDer::from(fixture.fs.cert_der.clone())],
+        &fixture.fs.key_der,
+        current.clone(),
+    )
+    .unwrap();
+    *fixture.fs.dynamic_tls.write().unwrap() = Some(crate::fed::DynamicTls {
+        cert_der: fixture.fs.cert_der.clone(),
+        cert_chain_der: Vec::new(),
+        key_der: fixture.fs.key_der.clone(),
+        ca_anchors: Default::default(),
+        acceptor,
+        peers: current,
+    });
+    let envelope = crate::fed::FedEnvelope {
+        v: crate::fed::WIRE_VERSION,
+        id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+        origin: crate::storage::Origin::anonymous("fixture", &fixture.fs.node_name),
+        to: crate::fed::FedTarget {
+            r#ref: "receiver".into(),
+        },
+        body: "x6".into(),
+        thread_id: String::new(),
+        created_at: crate::storage::now_epoch_secs(),
+        forwarded: None,
+        attachments: Vec::new(),
+    };
+    let result = crate::fed::send_federated_message_prepared_with(
+        &fixture.fs,
+        N,
+        &envelope,
+        false,
+        prepared,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(AppError::PeerRejected(ref detail)) if detail.contains("policy changed")),
+        "old prepared proof survived reload: {result:?}"
+    );
+    assert_eq!(server.requests.load(Ordering::SeqCst), 0);
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn x6_admitted_addressless_nonleaf_is_not_prepared() {
+    let ca = Ca::new();
+    let fixture = Fixture::new(&ca, &[]);
+    let policy = fixture.fs.current_peers();
+    policy.admitted_clients.write().unwrap().insert(
+        N.into(),
+        crate::fed::AdmittedClient {
+            canonical_name: N.into(),
+            uri: uri(N),
+            pin: fixture.client_pin.clone(),
+            not_after: i64::MAX,
+            config: PeerConfig {
+                name: N.into(),
+                pin: Some(fixture.client_pin.clone()),
+                allow: vec!["send".into()],
+                ..Default::default()
+            },
+        },
+    );
+    assert!(!policy.get_peer_config(N).unwrap().leaf);
+    assert!(policy.get(N).is_none());
+    assert!(
+        prepare_send(&fixture.fs, N).await.unwrap().is_none(),
+        "admitted policy entered configured discovery preparation"
+    );
+}
+
+#[tokio::test]
+async fn x6_request_error_does_not_retry_through_hub() {
+    x6_surface_send(true, true).await;
+}

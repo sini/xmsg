@@ -2706,6 +2706,39 @@ async fn deliver_send(
                 .as_ref()
                 .ok_or_else(|| AppError::UnknownPeer(peer_key.clone()))?
                 .clone();
+            let prepared = match crate::discovery::dial::prepare_send(&fed_state, &peer_key).await {
+                Ok(Some(dial)) => match dial.current_policy(&fed_state) {
+                    Err(error) => Err(error),
+                    Ok(peers) => {
+                        if let Some(hub) = dial.via_hub() {
+                            if node.is_none() && cached {
+                                crate::mesh::forget(state, &key);
+                                dest = crate::mesh::resolve(state, &fed_state, target_ref).await?;
+                                continue;
+                            }
+                            if key.contains('@') {
+                                Err(AppError::PeerUnreachable(format!(
+                                    "this operation requires a direct peer; route is via hub '{hub}'"
+                                )))
+                            } else {
+                                let wire_node = peers.key_for(&peer_key)
+                                    .and_then(|key| peers.canonical_name(key))
+                                    .unwrap_or(&peer_key);
+                                dest = Dest::Peer {
+                                    node: hub.to_string(),
+                                    key: format!("{key}@{wire_node}"),
+                                    cached: false,
+                                    id: false,
+                                };
+                                continue;
+                            }
+                        } else {
+                            Ok(Some(dial))
+                        }
+                    }
+                },
+                other => other,
+            };
             let peers = fed_state.current_peers();
             let leaf = peers.get(&peer_key).is_some_and(|p| p.leaf);
             let outbound_target = format!("{key}@{peer_key}");
@@ -2736,11 +2769,16 @@ async fn deliver_send(
                 forwarded: None,
                 attachments: refs.to_vec(),
             };
-            let resp = match crate::fed::send_federated_message_with(
-                &fed_state, &peer_key, &envelope, cached,
-            )
-            .await
-            {
+            let sent = match prepared {
+                Ok(Some(dial)) => crate::fed::send_federated_message_prepared_with(
+                    &fed_state, &peer_key, &envelope, cached, dial,
+                ).await,
+                Ok(None) => crate::fed::send_federated_message_with(
+                    &fed_state, &peer_key, &envelope, cached,
+                ).await,
+                Err(error) => Err(error),
+            };
+            let resp = match sent {
                 Ok(resp) => resp,
                 Err(_) if node.is_none() && cached => {
                     // A failed delivery invalidates the location, and a cache-routed send

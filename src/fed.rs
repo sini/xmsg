@@ -5440,8 +5440,55 @@ pub async fn send_federated_message_with(
             }
         }
     }
-    let mut sender = sender.expect("connect loop either assigned sender or returned Err");
+    let sender = sender.expect("connect loop either assigned sender or returned Err");
+    send_federated_message_request(fed_state, peer_name, envelope, live_only, sender, None).await
+}
 
+pub(crate) async fn send_federated_message_prepared_with(
+    fed_state: &FedState,
+    peer_name: &str,
+    envelope: &FedEnvelope,
+    live_only: bool,
+    dial: crate::discovery::dial::Dial,
+) -> Result<DeliveryResponse, AppError> {
+    let policy = dial.current_policy(fed_state)?;
+    let peer = policy
+        .get(peer_name)
+        .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
+    let peer_name = peer.name.as_str();
+    attachment_egress(fed_state, &envelope.id, &envelope.attachments, peer_name)?;
+    let tls = dial.into_direct()?;
+    let (sender, connection) = tokio::time::timeout(
+        FED_SEND_CONNECT_TIMEOUT,
+        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls)),
+    )
+    .await
+    .map_err(|_| AppError::PeerUnreachable("Outbound call timed out after 5s".into()))?
+    .map_err(|error| AppError::PeerUnreachable(format!("HTTP handshake failed: {error}")))?;
+    tokio::spawn(async move {
+        if let Err(error) = connection.await {
+            debug!("HTTP connection closed: {error}");
+        }
+    });
+    send_federated_message_request(
+        fed_state,
+        peer_name,
+        envelope,
+        live_only,
+        sender,
+        Some(policy.clone()),
+    )
+    .await
+}
+
+async fn send_federated_message_request(
+    fed_state: &FedState,
+    peer_name: &str,
+    envelope: &FedEnvelope,
+    live_only: bool,
+    mut sender: hyper::client::conn::http1::SendRequest<http_body_util::Full<bytes::Bytes>>,
+    expected_policy: Option<Arc<PeersMap>>,
+) -> Result<DeliveryResponse, AppError> {
     let req_fut = async move {
         let body_bytes =
             serde_json::to_vec(envelope).map_err(|e| AppError::Internal(e.to_string()))?;
@@ -5457,6 +5504,12 @@ pub async fn send_federated_message_with(
             .body(http_body_util::Full::new(bytes::Bytes::from(body_bytes)))
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
+        if expected_policy
+            .as_ref()
+            .is_some_and(|policy| !Arc::ptr_eq(&fed_state.current_peers(), policy))
+        {
+            return Err(AppError::PeerRejected("discovery policy changed".into()));
+        }
         let resp = sender
             .send_request(req)
             .await
