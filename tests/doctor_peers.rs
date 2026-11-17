@@ -2,6 +2,7 @@ use rustls::pki_types::CertificateDer;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -201,6 +202,21 @@ impl Fixture {
         peers: Vec<PeerConfig>,
         config: Option<xmsg::ca_health::Config>,
     ) -> Self {
+        let peers = PeersMap::new(
+            peers
+                .into_iter()
+                .map(|peer| (peer.name.clone(), peer))
+                .collect(),
+        );
+        Self::with_map(identity, peers, config, false).await
+    }
+
+    async fn with_map(
+        identity: Identity,
+        peers: PeersMap,
+        config: Option<xmsg::ca_health::Config>,
+        legacy: bool,
+    ) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let root = tempfile::tempdir().unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -213,13 +229,9 @@ impl Fixture {
         xmsg::storage::init_db(&connection).unwrap();
         std::fs::set_permissions(db_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let db = Arc::new(Mutex::new(connection));
-        let mut peers_map = HashMap::new();
-        for peer in peers {
-            peers_map.insert(peer.name.clone(), peer);
-        }
         let fed = Arc::new(FedState {
             node_name: NODE.into(),
-            peers: Arc::new(PeersMap::new(peers_map)).into(),
+            peers: Arc::new(peers).into(),
             cert_der: identity.cert,
             cert_chain_der: vec![],
             key_der: identity.key,
@@ -275,6 +287,11 @@ impl Fixture {
         let router = match config {
             Some(config) => xmsg::http::build_unix_router_with_enrollment(state.clone(), config),
             None => build_unix_router(state.clone()),
+        };
+        let router = if legacy {
+            router.layer(axum::middleware::from_fn(legacy_federation_response))
+        } else {
+            router
         };
         let server = tokio::spawn(async move {
             axum::serve(
@@ -360,6 +377,12 @@ fn peer<'a>(value: &'a Value, name: &str) -> &'a Value {
         .iter()
         .find(|p| p["name"] == name)
         .unwrap_or_else(|| panic!("missing peer {name}: {value}"))
+}
+
+fn has_check(value: &Value, id: &str) -> bool {
+    value["checks"]
+        .as_array()
+        .is_some_and(|checks| checks.iter().any(|row| row["id"] == id))
 }
 
 fn check<'a>(value: &'a Value, id: &str) -> &'a Value {
@@ -702,4 +725,270 @@ async fn addressless_nonleaf_and_addressed_leaf_remain_unknown() {
         0,
         "a configured leaf was dialled"
     );
+}
+
+async fn legacy_federation_response(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let federation = request.uri().path() == "/v1/diagnostics/federation";
+    let response = next.run(request).await;
+    if !federation {
+        return response;
+    }
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 65_536)
+        .await
+        .unwrap();
+    let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+    value.as_object_mut().unwrap().remove("ambiguous_aliases");
+    (status, axum::Json(value)).into_response()
+}
+
+fn ambiguity_config(root: &Path, literal: bool, concrete: bool) -> String {
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut params = rcgen::CertificateParams::default();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    params.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::CrlSign,
+        rcgen::KeyUsagePurpose::DigitalSignature,
+    ];
+    let ca = root.join("ambiguity-ca.pem");
+    std::fs::write(&ca, params.self_signed(&key).unwrap().pem()).unwrap();
+    let host = if literal {
+        "spiffe://example.invalid/*/pods/*/guard"
+    } else {
+        "spiffe://example.invalid/host/*/user/*"
+    };
+    let pod = if literal {
+        "spiffe://example.invalid/host/pods/*/guard"
+    } else {
+        "spiffe://example.invalid/ns/pods/sa/*"
+    };
+    let peers = if concrete {
+        serde_json::json!({"guard.pods": {"ca":ca,"identities":["spiffe://example.invalid/ns/pods/sa/guard"],"leaf":true,"allow":["send"]}})
+    } else {
+        serde_json::json!({})
+    };
+    serde_json::json!({"peers":peers,"hub":{"patterns":[{"pattern":host,"ca":ca},{"pattern":pod,"ca":ca}],"rules":[{"pattern":host,"allow":["send"]},{"pattern":pod,"allow":["send"]}]}}).to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loaded_ambiguous_aliases_are_visible_without_store_writes_or_uri_export() {
+    let configuration = TempDir::new().unwrap();
+    let text = ambiguity_config(configuration.path(), false, false);
+    let fixture = Fixture::with_map(
+        Identity::new(NODE, 1, 2),
+        PeersMap::load_from_json(&text).unwrap(),
+        None,
+        false,
+    )
+    .await;
+    let before = std::fs::read(fixture.root.path().join("primary.sqlite")).unwrap();
+    let changes = fixture.state.db.lock().unwrap().total_changes();
+    let diagnostics = fixture.diagnostics().await;
+    assert_eq!(
+        diagnostics["ambiguous_aliases"], true,
+        "grt4 doctor omitted loaded ambiguity flag"
+    );
+    assert!(
+        !diagnostics.to_string().contains("spiffe://"),
+        "grt4 diagnostics exported full URI witnesses"
+    );
+    let (_, report) = fixture.doctor().await;
+    assert!(
+        has_check(&report, "federation.aliases"),
+        "grt4 loaded ambiguity produced no doctor assessment"
+    );
+    let row = check(&report, "federation.aliases");
+    assert_eq!(
+        row["status"], "warn",
+        "grt4 ambiguous aliases were not a doctor warning"
+    );
+    assert_eq!(
+        row["message"], "pattern admits ambiguous aliases; give pods concrete CA leaf entries",
+        "grt4 doctor ambiguity message changed"
+    );
+    assert_eq!(
+        check(&report, "federation.local_certificate")["status"],
+        "pass"
+    );
+    assert_eq!(
+        fixture.state.db.lock().unwrap().total_changes(),
+        changes,
+        "grt4 ambiguity assessment wrote primary state"
+    );
+    assert_eq!(
+        std::fs::read(fixture.root.path().join("primary.sqlite")).unwrap(),
+        before
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concrete_names_suppress_literal_alias_warning_without_leaf_probe_noise() {
+    let configuration = TempDir::new().unwrap();
+    let text = ambiguity_config(configuration.path(), true, true);
+    let fixture = Fixture::with_map(
+        Identity::new(NODE, 1, 2),
+        PeersMap::load_from_json(&text).unwrap(),
+        None,
+        false,
+    )
+    .await;
+    let diagnostics = fixture.diagnostics().await;
+    assert_eq!(
+        diagnostics["ambiguous_aliases"], false,
+        "grt4 concrete reservation left a literal ambiguity warning"
+    );
+    assert_eq!(
+        diagnostics["partial"], false,
+        "grt4 ambiguity flag changed addressless-leaf coverage"
+    );
+    let (_, report) = fixture.doctor().await;
+    assert!(
+        has_check(&report, "federation.aliases"),
+        "grt4 concrete reservation produced no doctor assessment"
+    );
+    assert_eq!(
+        check(&report, "federation.aliases")["status"],
+        "pass",
+        "grt4 concrete-only ownership was not assessed as clear"
+    );
+    assert_eq!(
+        check(&report, "peer.federation.guard.pods")["status"],
+        "pass",
+        "grt4 restored addressless leaf warning noise"
+    );
+    assert_eq!(check(&report, "federation.probe")["status"], "pass");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn older_daemon_alias_assessment_is_unknown_without_discarding_peer_health() {
+    let fixture = Fixture::with_map(Identity::new(NODE, 1, 2), PeersMap::empty(), None, true).await;
+    let (_, report) = fixture.doctor().await;
+    assert!(
+        has_check(&report, "federation.aliases"),
+        "grt4 legacy daemon produced no alias assessment"
+    );
+    assert_eq!(
+        check(&report, "federation.aliases")["status"],
+        "warn",
+        "grt4 missing legacy ambiguity flag was treated as clear"
+    );
+    assert!(check(&report, "federation.aliases")["message"]
+        .as_str()
+        .unwrap()
+        .contains("unknown"));
+    assert_eq!(
+        check(&report, "federation.local_certificate")["status"],
+        "pass",
+        "grt4 missing alias assessment suppressed certificate health"
+    );
+    assert_eq!(
+        check(&report, "federation.probe")["status"],
+        "pass",
+        "grt4 missing alias assessment suppressed probe coverage"
+    );
+}
+
+fn fixture_pem(label: &str, bytes: &[u8]) -> String {
+    use base64::Engine;
+    format!(
+        "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reloaded_alias_assessment_uses_the_new_loaded_configuration() {
+    let configuration = TempDir::new().unwrap();
+    let peers_path = configuration.path().join("peers.json");
+    let text = ambiguity_config(configuration.path(), false, false);
+    std::fs::write(&peers_path, &text).unwrap();
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut params = rcgen::CertificateParams::default();
+    params.subject_alt_names = vec![rcgen::SanType::URI(
+        "spiffe://example.invalid/host/example/user/doctor"
+            .try_into()
+            .unwrap(),
+    )];
+    let cert = params.self_signed(&key).unwrap().der().to_vec();
+    let identity = Identity {
+        pin: xmsg::fed::spki_sha256_from_der(&cert).unwrap(),
+        cert: cert.clone(),
+        key: key.serialize_der(),
+    };
+    let cert_path = configuration.path().join("node.pem");
+    let key_path = configuration.path().join("node-key.pem");
+    std::fs::write(&cert_path, fixture_pem("CERTIFICATE", &cert)).unwrap();
+    std::fs::write(&key_path, fixture_pem("PRIVATE KEY", &identity.key)).unwrap();
+    let fixture = Fixture::with_map(
+        identity,
+        PeersMap::load_from_json(&text).unwrap(),
+        None,
+        false,
+    )
+    .await;
+    let fed = fixture.state.fed_state.as_ref().unwrap().clone();
+    let reloader = xmsg::fed::CredentialReloader::new_full(
+        cert_path,
+        key_path,
+        Some(peers_path.clone()),
+        None,
+        fed.current_peers(),
+        Some(fed),
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(fixture.diagnostics().await["ambiguous_aliases"], true);
+    std::fs::write(&peers_path, r#"{"peers":{}}"#).unwrap();
+    reloader.force_reload().unwrap();
+    assert_eq!(
+        fixture.diagnostics().await["ambiguous_aliases"],
+        false,
+        "grt4 reload retained stale ambiguity assessment"
+    );
+    let (_, report) = fixture.doctor().await;
+    assert!(
+        has_check(&report, "federation.aliases"),
+        "grt4 reloaded daemon produced no alias assessment"
+    );
+    assert_eq!(
+        check(&report, "federation.aliases")["status"],
+        "pass",
+        "grt4 doctor ignored reloaded alias ownership"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concrete_only_configuration_has_no_alias_warning() {
+    let peer = Identity::new("outbound-leaf.example", 1, 2);
+    let text = serde_json::json!({"peers":{"leaf":{"pin":peer.pin,"leaf":true,"allow":["send"]}}})
+        .to_string();
+    let fixture = Fixture::with_map(
+        Identity::new(NODE, 1, 2),
+        PeersMap::load_from_json(&text).unwrap(),
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(
+        fixture.diagnostics().await["ambiguous_aliases"],
+        false,
+        "grt4 concrete-only config reported ambiguous aliases"
+    );
+    let (_, report) = fixture.doctor().await;
+    assert!(
+        has_check(&report, "federation.aliases"),
+        "grt4 concrete-only daemon produced no alias assessment"
+    );
+    assert_eq!(
+        check(&report, "federation.aliases")["status"],
+        "pass",
+        "grt4 concrete-only doctor produced an alias warning"
+    );
+    assert_eq!(check(&report, "peer.federation.leaf")["status"], "pass");
+    assert_eq!(check(&report, "federation.probe")["status"], "pass");
 }
