@@ -936,9 +936,28 @@ pub async fn try_push_codex_queued_message(
             },
         );
     }
-    try_push_codex_queued_message_for_recovery(local, root_snap, message_id, raw_envelope)
+    match try_push_codex_queued_message_for_recovery(local, root_snap, message_id, raw_envelope)
         .await
-        .map(|(outcome, _)| outcome)
+    {
+        Ok((outcome, _)) => Ok(outcome),
+        Err(error) => {
+            let db = local.db.lock().map_err(db_err)?;
+            if storage::codex_handoff_held_for_live_root(&db, message_id).map_err(db_err)? {
+                Ok(
+                    match storage::get_codex_handoff_state(&db, message_id)
+                        .map_err(db_err)?
+                        .as_ref()
+                        .map(|(state, _, _)| state.as_str())
+                    {
+                        Some("accepted") => "delivered",
+                        _ => "queued",
+                    },
+                )
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 struct CodexPushReservationGuard {
@@ -1816,7 +1835,16 @@ pub async fn push_reply_with_error(
             }
             match try_push_codex_queued_message(local, &root_snap, reply_id, &pi_msg.envelope).await
             {
-                Ok("delivered") | Ok("queued") => ("pushed", None),
+                Ok("delivered") => ("pushed", None),
+                Ok("queued") => match local.db.lock() {
+                    Ok(db)
+                        if storage::codex_handoff_held_for_live_root(&db, reply_id)
+                            .unwrap_or(false) =>
+                    {
+                        ("pushed", None)
+                    }
+                    _ => ("sender_gone", None),
+                },
                 Ok("delivery_unknown") => ("push_failed", None),
                 Err(_) => ("sender_gone", None),
                 _ => ("push_failed", None),
