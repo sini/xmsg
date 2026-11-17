@@ -3,10 +3,14 @@
 //! A candidate is only an address. It never admits, names or routes a peer: whoever answers at
 //! it must still prove an identity in the federation handshake.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
+
+#[cfg(feature = "mdns")]
+pub mod mdns;
 
 /// The longest a candidate lives without a fresh sighting.
 pub const MAX_TTL_SECS: u64 = 600;
@@ -93,8 +97,7 @@ impl Config {
     /// The source is configured on and compiled into this build.
     pub fn source_enabled(&self, source: Source) -> bool {
         match source {
-            // shortcut: no mDNS backend exists yet, so nothing may claim the source runs.
-            Source::Mdns => false,
+            Source::Mdns => self.configured(source) && cfg!(feature = "mdns"),
         }
     }
 }
@@ -227,6 +230,123 @@ impl CandidateTable {
     fn live(&self, now: Instant) -> impl Iterator<Item = &Candidate> {
         self.entries.values().filter(move |c| c.expires_at > now)
     }
+}
+
+/// The mDNS source's state, as health and doctor report it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum State {
+    #[default]
+    Off,
+    Starting,
+    /// Our own announcement came back on a non-loopback address.
+    Active,
+    /// No LAN echo of our announcement by the deadline: LAN multicast is blocked.
+    LanSilent,
+    Failed,
+    /// Announce is off or not possible, so the echo can't be checked.
+    BrowseOnly,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Status {
+    pub state: State,
+    pub detail: String,
+    /// Unix seconds of the last state change.
+    pub since: Option<u64>,
+}
+
+impl Status {
+    pub fn set(&mut self, state: State, detail: impl Into<String>) {
+        if state != self.state || self.since.is_none() {
+            self.since = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs());
+        }
+        self.state = state;
+        self.detail = detail.into();
+    }
+}
+
+pub type SharedStatus = Arc<Mutex<Status>>;
+
+static RUNNING: OnceLock<(SharedStatus, SharedCandidates)> = OnceLock::new();
+
+/// The `discovery` health field: `{mdns: {state, detail, since, candidates}}`.
+pub fn health(fed: Option<&crate::fed::FedState>) -> serde_json::Value {
+    let (mut status, candidates) = match RUNNING.get() {
+        Some((status, table)) => (
+            status
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+            table
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .snapshot(Instant::now())
+                .iter()
+                .filter(|c| c.source == Source::Mdns)
+                .count(),
+        ),
+        None => (Status::default(), 0),
+    };
+    let config = fed.map(|f| f.current_peers().discovery.clone());
+    if config.is_some_and(|c| c.configured(Source::Mdns) && !c.source_enabled(Source::Mdns)) {
+        status.state = State::Off;
+        status.detail = "not compiled into this build".into();
+    }
+    serde_json::json!({"mdns": {
+        "state": status.state,
+        "detail": status.detail,
+        "since": status.since,
+        "candidates": candidates,
+    }})
+}
+
+/// Starts the discovery sources on their own thread. It never blocks the caller, and serve
+/// never waits on it.
+pub fn spawn(
+    fed: Option<Arc<crate::fed::FedState>>,
+    fed_listen: Option<SocketAddr>,
+    candidates: SharedCandidates,
+) {
+    #[cfg(feature = "mdns")]
+    if let Some(fed) = fed {
+        let status = SharedStatus::default();
+        if RUNNING.set((status.clone(), candidates.clone())).is_ok() {
+            mdns::spawn(fed, fed_listen, status, candidates);
+        }
+    }
+    #[cfg(not(feature = "mdns"))]
+    let _ = (fed, fed_listen, candidates, &RUNNING);
+}
+
+/// sha256 of the federation CA root certificate DER: the first CA entry by name, and within
+/// its bundle the first self-issued certificate (else the first certificate).
+pub fn root_fingerprint(peers: &crate::fed::PeersMap) -> Option<[u8; 32]> {
+    use rustls::pki_types::pem::PemObject;
+    use sha2::Digest;
+    let mut cas: Vec<_> = peers
+        .ca_peers()
+        .into_iter()
+        .filter_map(|p| Some((p.name.clone(), p.ca.clone()?)))
+        .collect();
+    cas.sort();
+    cas.into_iter().find_map(|(_, ca)| {
+        let pem = std::fs::read(ca).ok()?;
+        let certs: Vec<_> = rustls::pki_types::CertificateDer::pem_slice_iter(&pem)
+            .filter_map(Result::ok)
+            .collect();
+        let root = certs
+            .iter()
+            .find(|c| {
+                x509_parser::parse_x509_certificate(c.as_ref())
+                    .is_ok_and(|(_, x)| x.subject() == x.issuer())
+            })
+            .or(certs.first())?;
+        Some(sha2::Sha256::digest(root.as_ref()).into())
+    })
 }
 
 #[cfg(test)]
@@ -392,9 +512,21 @@ mod tests {
     }
 
     #[test]
-    fn mdns_is_not_enabled_without_a_backend() {
+    fn mdns_is_enabled_only_when_configured_and_compiled() {
+        let off = Config::default();
+        assert!(!off.source_enabled(Source::Mdns));
+        let neither =
+            Config::parse(serde_json::json!({"mdns": {"browse": false, "announce": false}}));
+        assert!(!neither.unwrap().source_enabled(Source::Mdns));
         let on = Config::parse(serde_json::json!({"mdns": {}})).unwrap();
         assert!(on.configured(Source::Mdns));
+        assert_eq!(on.source_enabled(Source::Mdns), cfg!(feature = "mdns"));
+    }
+
+    #[cfg(not(feature = "mdns"))]
+    #[test]
+    fn configured_but_not_compiled_reports_off() {
+        let on = Config::parse(serde_json::json!({"mdns": {}})).unwrap();
         assert!(!on.source_enabled(Source::Mdns));
     }
 }

@@ -296,6 +296,7 @@ async fn healthz_handler(
     });
     if local.is_some() {
         health["build_revision"] = json!(option_env!("XMSG_BUILD_REVISION").unwrap_or("unknown"));
+        health["discovery"] = crate::discovery::health(state.fed_state.as_deref());
     }
     (StatusCode::OK, Json(health))
 }

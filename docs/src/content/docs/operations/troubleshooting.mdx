@@ -125,6 +125,30 @@ should not have held. The fix marks those descriptors close-on-exec before `agy`
 the child when a delivery times out. Linux was not affected. Commands run by `xmsg service exec`
 get the same close-on-exec treatment.
 
+## LAN discovery on macOS: Local Network permission (planned)
+
+With [LAN discovery](/concepts/discovery/) on, doctor reports a `discovery.mdns` check
+from the daemon's health. `active`, `off`, `starting` and `browse_only` pass;
+`lan_silent` and `failed` warn.
+
+`lan_silent` means the node announced itself, but its own announcement never came back
+on a LAN address within 15 seconds: multicast to the LAN is being dropped. macOS does
+this silently while xmsg lacks Local Network access. There is no error to log, and the
+node still sees loopback. Serving continues; only LAN discovery is off.
+
+To allow it, open **System Settings › Privacy & Security › Local Network** and turn on
+the entry for xmsg. The first time the daemon announces, macOS may show a dialog asking
+for access; allow it. The node re-checks on every 30-second tick, so the state turns
+`active` without a restart.
+
+After an upgrade macOS may ask again for Local Network access; until you allow it, LAN
+discovery is silently off. macOS keys the permission to the binary's resolved real path,
+not a symlink to it, so a symlink retargeted at a new build is a new binary to macOS.
+Run xmsg from a stable real path, such as a copy updated in place, rather than through
+a symlink into a package store.
+
+On Linux, `lan_silent` usually means a firewall drops mDNS: open UDP port 5353.
+
 ## What remains unchecked
 
 Doctor reports the running daemon's version and build revision when its Unix health

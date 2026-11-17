@@ -244,6 +244,9 @@ async fn health(report: &mut Report, path: &Path) {
                 if !known { Some("Use builds with revision metadata to compare client and daemon.") }
                 else if !matches { Some("Client and daemon revisions differ; check the installed pins and restart the intended daemon.") }
                 else { None });
+            if let Some(mdns) = value["discovery"]["mdns"].as_object() {
+                discovery(report, mdns);
+            }
             let good = value["sessions_dir"] == "ok";
             report.add("daemon.sessions_directory",if good {Status::Pass}else{Status::Warn},if good {"A configured sessions directory exists."}else{"Sessions directory is missing or this daemon does not report it."},if good {None}else{Some("Check --sessions-dir if using a harness; a service-only node may not need one.")});
         }
@@ -254,6 +257,30 @@ async fn health(report: &mut Report, path: &Path) {
             Some("Start the node or pass its actual --http-sock; check the node service logs."),
         ),
     }
+}
+fn discovery(report: &mut Report, mdns: &serde_json::Map<String, Value>) {
+    let state = mdns
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let detail = mdns.get("detail").and_then(Value::as_str).unwrap_or("");
+    let candidates = mdns.get("candidates").and_then(Value::as_u64).unwrap_or(0);
+    let (status, hint) = match state {
+        "active" | "off" | "starting" | "browse_only" => (Status::Pass, None),
+        "lan_silent" => (Status::Warn, Some("LAN multicast is blocked: on macOS allow xmsg in System Settings › Privacy & Security › Local Network; on Linux open UDP 5353.")),
+        _ => (Status::Warn, Some("Check the node log for the LAN discovery error; serving continues without it.")),
+    };
+    let detail = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(": {detail}")
+    };
+    report.add(
+        "discovery.mdns",
+        status,
+        format!("LAN discovery {state}{detail}; {candidates} candidates."),
+        hint,
+    );
 }
 async fn sessions(report: &mut Report, path: &Path) {
     let snapshot = read_json(

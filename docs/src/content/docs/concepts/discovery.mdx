@@ -1,0 +1,115 @@
+---
+title: LAN Discovery (planned)
+description: Candidate addresses learned from mDNS on the local network, what they carry, and what they never do.
+---
+
+**LAN discovery is planned, not yet released.** A node can browse and announce
+`_xmsg._tcp.local.` over mDNS/DNS-SD on its local network segment and collect
+**candidates**: addresses where another xmsg node said it listens.
+
+**Discovered candidates are collected and shown, but not yet dialled.** Federation still
+dials the `address` configured for each peer. Using candidates to reach a peer comes in
+a later release. Today a candidate appears only in the local health response,
+[`xmsg doctor`](/operations/troubleshooting/#lan-discovery-on-macos-local-network-permission-planned)
+and the debug log.
+
+## What a candidate is (planned)
+
+A candidate is an address and nothing else. A record on the LAN never admits, names or
+routes anyone:
+
+- it does not add a peer, a name or a route;
+- it does not change who the federation listener accepts;
+- whoever answers at a candidate address still has to prove its identity in the normal
+  mutual-TLS handshake against your peer rules.
+
+A forged announcement can only point at an address, and the handshake refuses anyone
+your rules don't already trust.
+
+Each node keeps at most 64 mDNS candidates and evicts the oldest first. A candidate
+lives at most `ttl_secs` (600 seconds by default) after the source last saw it, and goes
+as soon as the announcer withdraws its record. Loopback, unspecified, multicast and IPv6
+link-local addresses are never kept. **IPv6 link-local addresses aren't used yet:** a
+link-local address needs an interface scope to be dialled, and scoped addresses are not
+kept in this version.
+
+## What a node announces (planned)
+
+The announcement is `_xmsg._tcp.local.`: the SRV record carries the `--fed-listen` port
+and the address records carry the interface addresses. The TXT record carries exactly
+two keys:
+
+| Key | Value |
+| --- | --- |
+| `id` | A random opaque value, new each time the daemon starts. It names no user, host or node. |
+| `root` | The sha256 (hex) of the federation CA root certificate DER, so a browser can tell which team a candidate belongs to. |
+
+The `root` comes from the CA bundle of the first CA peer entry by name. Within a bundle
+that holds several certificates, it is the first self-signed one, or the first
+certificate when none is self-signed. A node announces only when:
+
+- it has a CA peer entry, so there is a root to announce; a pinned-only node can't;
+- `--fed-listen` is set, and is the unspecified address or an address on one of its
+  interfaces.
+
+Otherwise it runs browse-only and logs one warning saying why. The TXT record carries no
+user, host, session, node name, email or version. A record whose `root` isn't 64 hex
+characters is ignored, and so are any TXT keys other than `id` and `root`.
+
+## The `discovery` key (planned)
+
+Discovery is off unless the peers file asks for it. It is a top-level key in the wrapped
+peers file, beside `peers`:
+
+```json
+{
+  "peers": { "...": {} },
+  "discovery": {
+    "mdns": { "browse": true, "announce": true },
+    "ttl_secs": 600
+  }
+}
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `mdns` | absent (off) | Turns the mDNS source on. `{}` turns on both switches. |
+| `mdns.browse` | `true` | Collect candidates from other nodes' announcements. |
+| `mdns.announce` | `true` | Announce this node, when it can (see above). With announce off the node only browses, and the LAN echo check can't run. |
+| `ttl_secs` | `600` | How long a candidate lives without a fresh sighting, `1` to `600`. |
+
+Unknown fields are refused, so a typo fails loudly. `tailnet` is refused with "not
+supported by this build". `xmsg check-peers` applies the same rules. When the daemon reloads the peers
+file, its next 30-second tick applies the new key, so you can turn discovery on or off
+without a restart.
+
+A build compiled without the `mdns` Cargo feature (it is on by default) still loads a
+`discovery.mdns` key. It logs one warning and reports the source `off`, with the detail
+"not compiled into this build".
+
+## Off the critical path (planned)
+
+The mDNS responder runs on its own thread, started after the node's listeners are up.
+Serving never waits on it: federation, the agent socket and the hub work the same
+whether discovery is starting, silent or failed. It binds UDP 5353 beside the system's
+responder (mDNSResponder on macOS) and needs no Bonjour or Avahi library.
+
+To tell whether its announcements actually reach the LAN, the node watches for its own
+announcement to come back on a non-loopback address within 15 seconds of each announce.
+The source state, in the local [health response](/reference/http-and-sockets/#lan-discovery-health-planned),
+is one of:
+
+| State | Meaning |
+| --- | --- |
+| `off` | The key is absent, or the build lacks mDNS. |
+| `starting` | The responder is starting, or waiting for the first echo. |
+| `active` | Our own announcement came back on a LAN address. |
+| `lan_silent` | No LAN echo by the deadline: LAN multicast is blocked. See [troubleshooting](/operations/troubleshooting/#lan-discovery-on-macos-local-network-permission-planned). |
+| `failed` | The responder failed to start or stopped; the detail names the cause. It retries on the next tick. |
+| `browse_only` | Announce is off or not possible, so the echo can't be checked. |
+
+`lan_silent` is re-checked on every tick, so allowing access later turns the state
+`active` without a restart. A changed set of network interfaces (a Wi-Fi roam, sleep
+and wake) re-announces and re-runs the echo check.
+
+LAN discovery reaches one network segment only: not a tailnet and not across k8s pods.

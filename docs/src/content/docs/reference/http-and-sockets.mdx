@@ -60,6 +60,21 @@ federation listener does not serve `/healthz`. Use
 [`xmsg doctor`](/reference/cli-and-mcp/#xmsg-doctor-planned) on the node to compare the
 running daemon with the client.
 
+### LAN discovery health (planned)
+
+On `http.sock`, `GET /healthz` also includes the state of
+[LAN discovery](/concepts/discovery/):
+
+```json
+{"discovery":{"mdns":{"state":"active","detail":"our announcement came back on the LAN","since":1763400000,"candidates":2}}}
+```
+
+`state` is one of `off`, `starting`, `active`, `lan_silent`, `failed` or `browse_only`.
+`detail` explains it and, for `lan_silent` and `failed`, names the remedy. `since` is the
+Unix time of the last state change, or `null`. `candidates` counts the unexpired mDNS
+candidates. Like the build revision, this field is not on the optional TCP health
+response.
+
 ### Read-only local recipient snapshot (planned)
 
 Use this mode when observing a node must not reconcile its claims or drive queued delivery:
