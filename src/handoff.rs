@@ -27,7 +27,6 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Extension, Json};
-use rustls::pki_types::ServerName;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -578,18 +577,10 @@ async fn post(
         AppError::PeerUnreachable(format!("{what} '{}': {e}", peer.name))
     };
     let fut = async {
-        let connector = crate::fed::make_tls_connector_for_peer(fs, &peer)?;
-        let tcp = tokio::net::TcpStream::connect(&peer.address)
-            .await
-            .map_err(|e| unreachable("connecting to", &e))?;
-        let name = ServerName::try_from(peer.name.clone())
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-        let tls = connector
-            .connect(name, tcp)
-            .await
-            .map_err(|e| unreachable("TLS with", &e))?;
-        let authority = crate::fed::CurrentLeaf::outbound(fs, connector.admission_mode(), &tls)?;
-        let (sender, conn) =
+        let tls = crate::discovery::dial::resolve_dial(fs, &peer)
+            .await?
+            .into_direct()?;
+        let (mut sender, conn) =
             hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls))
                 .await
                 .map_err(|e| unreachable("HTTP with", &e))?;

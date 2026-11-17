@@ -1372,18 +1372,16 @@ async fn post_answer(
         Ok(body) => (body, "ok"),
         Err(e) => (Vec::new(), e.text()),
     };
-    let connector =
-        crate::fed::make_tls_connector_for_peer(fs, peer).map_err(|_| Failure::Unreachable)?;
-    let tcp = tokio::net::TcpStream::connect(&peer.address)
+    let tls = crate::discovery::dial::resolve_dial(fs, peer)
         .await
+        .and_then(|dial| dial.into_direct())
         .map_err(|_| Failure::Unreachable)?;
-    let remote_ip = tcp.peer_addr().map_err(|_| Failure::Unreachable)?.ip();
-    let name =
-        rustls::pki_types::ServerName::try_from(peer.name.clone()).map_err(|_| Failure::Invalid)?;
-    let tls = connector
-        .connect(name, tcp)
-        .await
-        .map_err(|_| Failure::Unreachable)?;
+    let remote_ip = tls
+        .get_ref()
+        .0
+        .peer_addr()
+        .map_err(|_| Failure::Unreachable)?
+        .ip();
     let cert = tls
         .get_ref()
         .1

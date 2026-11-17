@@ -1355,11 +1355,13 @@ impl PeersMap {
                 }
             }
 
-            let address = obj
-                .get("address")
-                .and_then(|a| a.as_str())
-                .unwrap_or("")
-                .to_string();
+            let address = match obj.get("address") {
+                Some(address) => address
+                    .as_str()
+                    .ok_or_else(|| format!("peer '{name}': 'address' must be a string"))?,
+                None => "",
+            }
+            .to_string();
 
             let has_pin = obj.contains_key("pin");
             let has_ca = obj.contains_key("ca");
@@ -1527,7 +1529,14 @@ impl PeersMap {
                     "peer '{name}' marked 'default_route' missing required field 'address'"
                 ));
             }
-            if !leaf && address.is_empty() && !has_default_route {
+            if !leaf
+                && address.is_empty()
+                && !has_default_route
+                && !crate::discovery::permits_address_omission(
+                    has_ca,
+                    discovery.source_enabled(crate::discovery::Source::Mdns),
+                )
+            {
                 return Err(format!("peer '{name}' missing required field 'address'"));
             }
 
@@ -5370,25 +5379,12 @@ pub async fn send_federated_message_with(
 
     attachment_egress(fed_state, &envelope.id, &envelope.attachments, peer_name)?;
 
-    let connector = make_tls_connector_for_peer(fed_state, peer)?;
-    let server_name = ServerName::try_from(peer_name.to_string())
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-
     let mut sender = None;
     for attempt in 0..2 {
-        let server_name_clone = server_name.clone();
-        let connector_clone = connector.clone();
         let connect_fut = async move {
-            let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
-                .await
-                .map_err(|e| {
-                    AppError::PeerUnreachable(format!("Failed to connect to {}: {e}", peer.address))
-                })?;
-
-            let tls_stream = connector_clone
-                .connect(server_name_clone, tcp_stream)
-                .await
-                .map_err(|e| map_tls_connect_error(peer_name, e))?;
+            let tls_stream = crate::discovery::dial::resolve_dial(fed_state, peer)
+                .await?
+                .into_direct()?;
 
             let authority =
                 CurrentLeaf::outbound(fed_state, connector_clone.admission_mode(), &tls_stream)?;
@@ -5525,19 +5521,9 @@ pub async fn send_federated_reply(
     attachment_egress(fed_state, &reply.id, &reply.attachments, peer_name)?;
 
     let reply_fut = async {
-        let connector = make_tls_connector_for_peer(fed_state, peer)?;
-        let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
-            .await
-            .map_err(|e| {
-                AppError::PeerUnreachable(format!("Failed to connect to {}: {e}", peer.address))
-            })?;
-
-        let server_name = ServerName::try_from(peer_name.to_string())
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-        let tls_stream = connector
-            .connect(server_name, tcp_stream)
-            .await
-            .map_err(|e| map_tls_connect_error(peer_name, e))?;
+        let tls_stream = crate::discovery::dial::resolve_dial(fed_state, peer)
+            .await?
+            .into_direct()?;
 
         let authority = CurrentLeaf::outbound(fed_state, connector.admission_mode(), &tls_stream)?;
         let io = hyper_util::rt::TokioIo::new(tls_stream);
@@ -5637,19 +5623,9 @@ pub async fn poll_federated_replies(
     let peer_name = peer.name.as_str();
 
     let poll_fut = async {
-        let connector = make_tls_connector_for_peer(fed_state, peer)?;
-        let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
-            .await
-            .map_err(|e| {
-                AppError::PeerUnreachable(format!("Failed to connect to {}: {e}", peer.address))
-            })?;
-
-        let server_name = ServerName::try_from(peer_name.to_string())
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-        let tls_stream = connector
-            .connect(server_name, tcp_stream)
-            .await
-            .map_err(|e| map_tls_connect_error(peer_name, e))?;
+        let tls_stream = crate::discovery::dial::resolve_dial(fed_state, peer)
+            .await?
+            .into_direct()?;
 
         let authority = CurrentLeaf::outbound(fed_state, connector.admission_mode(), &tls_stream)?;
         let io = hyper_util::rt::TokioIo::new(tls_stream);
@@ -5820,23 +5796,15 @@ pub(crate) async fn get_federated_inbox_witnessed(
     let peer_name = peer.name.as_str();
 
     let poll_fut = async {
-        let connector = make_tls_connector_for_peer(fed_state, peer)?;
-        let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
-            .await
-            .map_err(|e| {
-                AppError::PeerUnreachable(format!("Failed to connect to {}: {e}", peer.address))
-            })?;
-
-        let remote_ip = tcp_stream
+        let tls_stream = crate::discovery::dial::resolve_dial(fed_state, peer)
+            .await?
+            .into_direct()?;
+        let remote_ip = tls_stream
+            .get_ref()
+            .0
             .peer_addr()
             .map_err(|_| AppError::Unavailable("observation transport unavailable".into()))?
             .ip();
-        let server_name = ServerName::try_from(peer_name.to_string())
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-        let tls_stream = connector
-            .connect(server_name, tcp_stream)
-            .await
-            .map_err(|e| map_tls_connect_error(peer_name, e))?;
 
         let witness = if advertise {
             crate::observe_relay::PollWitness::new(
@@ -5993,19 +5961,9 @@ pub async fn ack_federated_inbox(
     let peer_name = peer.name.as_str();
 
     let ack_fut = async {
-        let connector = make_tls_connector_for_peer(fed_state, peer)?;
-        let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
-            .await
-            .map_err(|e| {
-                AppError::PeerUnreachable(format!("Failed to connect to {}: {e}", peer.address))
-            })?;
-
-        let server_name = ServerName::try_from(peer_name.to_string())
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-        let tls_stream = connector
-            .connect(server_name, tcp_stream)
-            .await
-            .map_err(|e| map_tls_connect_error(peer_name, e))?;
+        let tls_stream = crate::discovery::dial::resolve_dial(fed_state, peer)
+            .await?
+            .into_direct()?;
 
         let authority = CurrentLeaf::outbound(fed_state, connector.admission_mode(), &tls_stream)?;
         let io = hyper_util::rt::TokioIo::new(tls_stream);
@@ -6745,21 +6703,9 @@ pub async fn list_direct_peer(
     peer: &PeerConfig,
 ) -> Result<(FedListAnswer, String), AppError> {
     let peer_name = peer.name.as_str();
-    let connector = make_tls_connector_for_peer(fed_state, peer)?;
-    let tcp_stream = tokio::net::TcpStream::connect(&peer.address)
-        .await
-        .map_err(|e| {
-            AppError::PeerUnreachable(format!(
-                "Failed to connect to peer '{peer_name}' at {}: {e}",
-                peer.address
-            ))
-        })?;
-    let server_name = ServerName::try_from(peer_name.to_string())
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-    let tls_stream = connector
-        .connect(server_name, tcp_stream)
-        .await
-        .map_err(|e| map_tls_connect_error(peer_name, e))?;
+    let tls_stream = crate::discovery::dial::resolve_dial(fed_state, peer)
+        .await?
+        .into_direct()?;
     // The user the peer's certificate names (A16), read from the certificate it presented.
     let user = tls_stream
         .get_ref()
@@ -6843,18 +6789,10 @@ pub async fn answer_list_query(fed_state: &FedState, peer_key: &str, query: &str
         FedListAnswer::Denied
     };
     let posted = async {
-        let connector = make_tls_connector_for_peer(fed_state, &peer)?;
-        let tcp = tokio::net::TcpStream::connect(&peer.address)
-            .await
-            .map_err(|e| AppError::PeerUnreachable(e.to_string()))?;
-        let server_name = ServerName::try_from(peer.name.clone())
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-        let tls = connector
-            .connect(server_name, tcp)
-            .await
-            .map_err(|e| map_tls_connect_error(&peer.name, e))?;
-        let authority = CurrentLeaf::outbound(fed_state, connector.admission_mode(), &tls)?;
-        let (sender, conn) =
+        let tls = crate::discovery::dial::resolve_dial(fed_state, &peer)
+            .await?
+            .into_direct()?;
+        let (mut sender, conn) =
             hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls))
                 .await
                 .map_err(|e| AppError::PeerUnreachable(e.to_string()))?;
@@ -7945,18 +7883,10 @@ async fn attachment_http(
     success_limit: usize,
 ) -> Result<Vec<u8>, AppError> {
     let request = async {
-        let connector = make_tls_connector_for_peer(fs, peer)?;
-        let tcp = tokio::net::TcpStream::connect(&peer.address)
-            .await
-            .map_err(|e| AppError::PeerUnreachable(e.to_string()))?;
-        let name = ServerName::try_from(peer.name.clone())
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-        let tls = connector
-            .connect(name, tcp)
-            .await
-            .map_err(|e| map_tls_connect_error(&peer.name, e))?;
-        let authority = CurrentLeaf::outbound(fs, connector.admission_mode(), &tls)?;
-        let (sender, conn) =
+        let tls = crate::discovery::dial::resolve_dial(fs, peer)
+            .await?
+            .into_direct()?;
+        let (mut sender, conn) =
             hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls))
                 .await
                 .map_err(|e| AppError::PeerUnreachable(e.to_string()))?;
