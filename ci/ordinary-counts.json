@@ -1,7 +1,7 @@
 {
   "baseline": {
     "linux": "run 44040913487 job 133898929342 on 34b6fb25153647eacb5e47f59aae41d3e9c96b43: measured 1328 passed/8 ignored/0 failed, 105 summaries; only the stale count guard failed",
-    "darwin": "run 44040913594 job 133895011329 on 34b6fb25153647eacb5e47f59aae41d3e9c96b43: measured 1331 passed/10 ignored/0 failed, 105 summaries; only the stale count guard failed"
+    "darwin": "run 44060474147 job 133960753155 on 470be6390f58f871ec06436546814f2ea83b312b: measured 1332 passed/10 ignored/0 failed, 105 summaries; only the stale count guard failed"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -115,7 +115,7 @@
       "summaries": 105
     },
     "darwin": {
-      "passed": 1331,
+      "passed": 1332,
       "failed": 0,
       "ignored": 10,
       "summaries": 105
