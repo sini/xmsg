@@ -94,6 +94,14 @@ impl Node {
     }
 
     fn service(&self, program: &Path, args: &[&str], timeout: u64, cap: usize) -> Process {
+        Process(
+            self.service_command(program, args, timeout, cap)
+                .spawn()
+                .unwrap(),
+        )
+    }
+
+    fn service_command(&self, program: &Path, args: &[&str], timeout: u64, cap: usize) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_xmsg"));
         isolated(&mut cmd, self.dir.path());
         cmd.current_dir(self.dir.path())
@@ -109,7 +117,7 @@ impl Node {
             .arg("--")
             .arg(program)
             .args(args);
-        Process(cmd.spawn().unwrap())
+        cmd
     }
 
     async fn request(&self, method: &str, route: &str, body: Option<&Value>) -> (u16, Value) {
@@ -343,6 +351,69 @@ async fn invalid_empty_and_failed_commands_have_static_errors() {
     assert_eq!(
         serde_json::from_str::<Value>(&node.settled_reply(&id).await).unwrap(),
         json!({"status":"unknown", "error":"command_failed"})
+    );
+}
+
+/// Plants an inheritable (non-CLOEXEC) descriptor at `PLANTED_FD` in the spawned process.
+#[cfg(target_os = "macos")]
+fn plant_inheritable_fd(cmd: &mut Command, file: &fs::File) {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    let src = file.as_raw_fd();
+    // SAFETY: dup2 and fcntl are async-signal-safe and the closure captures one integer.
+    unsafe {
+        cmd.pre_exec(move || {
+            // dup2 onto itself keeps CLOEXEC, so clear it explicitly.
+            if libc::dup2(src, PLANTED_FD) < 0 || libc::fcntl(PLANTED_FD, libc::F_SETFD, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(target_os = "macos")]
+const PLANTED_FD: i32 = 50;
+
+/// Descriptors above stdio in a `/bin/ls /dev/fd` listing.
+#[cfg(target_os = "macos")]
+fn fds_above_stdio(listing: &str) -> Vec<i32> {
+    listing
+        .split_whitespace()
+        .map(|fd| fd.parse().unwrap())
+        .filter(|fd| *fd > 2)
+        .collect()
+}
+
+// A descriptor left inheritable in the service process is what a socket or pipe caught in the
+// Apple create-then-CLOEXEC window looks like to a concurrent spawn; planting one makes it certain.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_command_inherits_no_fds_above_stdio() {
+    let node = Node::start();
+    let planted = fs::File::open(node.dir.path().join("messages.db")).unwrap();
+
+    // Positive control: the detector sees the planted fd in a directly spawned lister.
+    let mut direct = Command::new("/bin/ls");
+    direct.arg("/dev/fd");
+    plant_inheritable_fd(&mut direct, &planted);
+    let control = String::from_utf8(direct.output().unwrap().stdout).unwrap();
+    assert!(
+        fds_above_stdio(&control).contains(&PLANTED_FD),
+        "detector missed the planted fd: {control:?}"
+    );
+
+    let mut cmd = node.service_command(Path::new("/bin/ls"), &["/dev/fd"], 2000, 65536);
+    plant_inheritable_fd(&mut cmd, &planted);
+    let mut service = Process(cmd.spawn().unwrap());
+    drop(planted);
+    let id = node.send(&mut service, "ignored").await;
+    let listing = node.settled_reply(&id).await;
+    // ls lists two descriptors of its own (3 and 4) on a quiet macOS host.
+    let above = fds_above_stdio(&listing);
+    assert!(
+        above.len() <= 2 && !above.contains(&PLANTED_FD),
+        "configured command inherited fds: {listing:?}"
     );
 }
 

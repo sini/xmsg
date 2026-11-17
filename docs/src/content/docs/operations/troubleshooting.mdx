@@ -122,7 +122,8 @@ checkpoint, VACUUM or recovery is run by doctor.
 On macOS, an Antigravity delivery could time out or leave its `agy` child running when another
 delivery or connection was being set up at the same moment: the child inherited descriptors it
 should not have held. The fix marks those descriptors close-on-exec before `agy` starts and kills
-the child when a delivery times out. Linux was not affected.
+the child when a delivery times out. Linux was not affected. Commands run by `xmsg service exec`
+get the same close-on-exec treatment.
 
 ## What remains unchecked
 
