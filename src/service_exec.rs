@@ -74,14 +74,15 @@ async fn invoke(
     limit: usize,
     shutdown: &mut (impl Future<Output = ()> + Unpin),
 ) -> Result<String, Failure> {
-    let mut child = tokio::process::Command::new(&args.command[0])
-        .args(&args.command[1..])
+    let mut cmd = tokio::process::Command::new(&args.command[0]);
+    cmd.args(&args.command[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|_| Failure::CommandFailed)?;
+        .kill_on_drop(true);
+    #[cfg(target_os = "macos")]
+    xmsg::spawn::cloexec_inherited_fds(&mut cmd);
+    let mut child = cmd.spawn().map_err(|_| Failure::CommandFailed)?;
     let stdout = child.stdout.take().expect("stdout is piped");
     let operation = async {
         let mut output = Vec::new();
