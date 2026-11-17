@@ -16,6 +16,8 @@ external hooks do not get them. Thus `xmsg` registers an Antigravity session in 
    looks for a trusted `--agy-exe` binary with an open file descriptor to
    `~/.gemini/antigravity-cli/presence/<conversation_id>.lock`. The match uses the canonical
    `(dev, ino)`. On Linux, xmsg also checks for exclusive `FLOCK` ownership in `/proc/locks`.
+   On macOS (planned), it checks the same ownership through the lock flag on the open file and a
+   `kqueue` release watch; see [lock state on macOS](/operations/troubleshooting/#agy-and-codex-lock-state-on-macos-planned).
    The session is then immediately addressable by its conversation UUID (`registered: false`).
    Messages to it wait in `agy_pending_messages` (`outcome: "queued"`).
 2. **Stage 2 — Credential capture & FIFO flush:**
@@ -35,11 +37,13 @@ external hooks do not get them. Thus `xmsg` registers an Antigravity session in 
   presence lock without registered push credentials. During that time, `xmsg serve` scans the
   attested `agy` process's descendant tree (`/proc/<pid>/task/<tid>/children`) every 100 ms. When
   a descendant tool command runs, `xmsg` checks its start time before and after it reads
-  `/proc/<pid>/environ`. It copies **only** `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN`
+  `/proc/<pid>/environ`. On macOS (planned), the same watcher lists children with
+  `proc_listchildpids` and reads the environment from `KERN_PROCARGS2`, so a conversation is
+  listed, and messages to it queue and are delivered, before its first hook turn. It copies **only** `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN`
   into memory. While Arm A watches on the first turn, the `PreInvocation` hook does nothing (it
   prints `{}`).
-- **Darwin & Sandbox Fallback (Arm B′):** Arm B′ applies on macOS, in a Linux sandbox where
-  `/proc` is not readable, and when a turn ends without a shell command. There,
+- **Sandbox Fallback (Arm B′):** Arm B′ applies in a Linux sandbox where `/proc` is not
+  readable, when a turn ends without a shell command, and on macOS until the watcher above ships. There,
   `xmsg register agy --hook --event pre-invocation` returns an `ephemeralMessage`. The message
   tells the model to run `xmsg register agy` first.
 

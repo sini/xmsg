@@ -125,6 +125,24 @@ should not have held. The fix marks those descriptors close-on-exec before `agy`
 the child when a delivery times out. Linux was not affected. Commands run by `xmsg service exec`
 get the same close-on-exec treatment.
 
+## agy and Codex lock state on macOS (planned)
+
+macOS has no `/proc/locks`. xmsg reads a process's lock state from the `FWASLOCKED` flag that
+`proc_pidfdinfo` reports for each open file. The flag is sticky: `flock(2)` sets it, and it stays
+set after `LOCK_UN` until that open file is closed. Only a closed file clears it.
+
+- **Antigravity:** the flag only nominates the holder of a presence lock. Once xmsg has seen a
+  holder, it watches the file with `kqueue` `NOTE_FUNLOCK`. The watch fires on an unlock, or when
+  a locked file is closed, and from then on xmsg treats that process as released, whatever its
+  flag still reads. Two processes sharing one locked open file (an inherited descriptor) have no
+  holder, and the conversation is not listed. A lock taken and released before xmsg first sees
+  it reads as held. A holder that is starting a child when xmsg first looks briefly shares its
+  descriptors with that child, reads as ambiguous, and is listed on the next look.
+- **Codex:** admission reads the flag directly. After an explicit unlock that leaves the lock file
+  open, admission can still read the owner as holding the writer lock. The lease watch still
+  detects the release through `NOTE_FUNLOCK`, so on macOS even a close followed by a reopen of the
+  same lock file starts a new lease generation.
+
 ## What remains unchecked
 
 Doctor reports the running daemon's version and build revision when its Unix health

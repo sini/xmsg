@@ -695,6 +695,44 @@ pub fn claude_start_token_matches(proc_root: &Path, token: &str, expected: &str)
     false
 }
 
+/// The children of `pid`. On a procfs root, from `<pid>/task/<tid>/children` over all of its
+/// threads (a child is listed under the thread that forked it); on live macOS, from
+/// `proc_listchildpids(3)`. `None` where the kernel provides no such file (`CONFIG_PROC_CHILDREN`
+/// off) or the process is gone.
+pub fn child_pids(proc_root: &Path, pid: u32) -> Option<Vec<u32>> {
+    if is_live(proc_root) {
+        #[cfg(target_os = "macos")]
+        return macos::child_pids(pid);
+    }
+    let tasks = fs::read_dir(proc_root.join(pid.to_string()).join("task")).ok()?;
+    let mut found = false;
+    let mut kids = Vec::new();
+    for task in tasks.flatten() {
+        if let Ok(s) = fs::read_to_string(task.path().join("children")) {
+            found = true;
+            kids.extend(s.split_whitespace().filter_map(|t| t.parse::<u32>().ok()));
+        }
+    }
+    found.then_some(kids)
+}
+
+/// The environment of `pid` as NUL-terminated `KEY=value` strings, the format of Linux
+/// `/proc/<pid>/environ`. On live macOS it is the environment section of `KERN_PROCARGS2`,
+/// which the kernel strips for Apple platform binaries.
+pub fn environ(proc_root: &Path, pid: u32) -> io::Result<Vec<u8>> {
+    if is_live(proc_root) {
+        #[cfg(target_os = "macos")]
+        return macos::environ(pid);
+    }
+    fs::read(proc_root.join(pid.to_string()).join("environ"))
+}
+
+/// The PIDs whose effective UID is this process's, from `proc_listpids(PROC_UID_ONLY)`.
+#[cfg(target_os = "macos")]
+pub fn same_uid_pids() -> io::Result<Vec<u32>> {
+    macos::same_uid_pids()
+}
+
 /// Returns the current working directory of `pid`.
 ///
 /// On Linux live systems, reads the `/proc/<pid>/cwd` symlink.
@@ -1014,6 +1052,74 @@ mod macos {
     }
 
     pub fn procargs(pid: u32) -> io::Result<Vec<String>> {
+        parse_procargs2(&procargs2_raw(pid)?)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid KERN_PROCARGS2"))
+    }
+
+    pub fn environ(pid: u32) -> io::Result<Vec<u8>> {
+        parse_procargs2_env(&procargs2_raw(pid)?)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid KERN_PROCARGS2"))
+    }
+
+    /// Grows the buffer until the listing fits: `proc_listpids(3)` returns bytes written.
+    fn list_pids(kind: u32, arg: u32) -> io::Result<Vec<u32>> {
+        let mut cap = 1024usize;
+        loop {
+            let mut buf = vec![0 as libc::pid_t; cap];
+            let bytes = (cap * size_of::<libc::pid_t>()) as libc::c_int;
+            // SAFETY: buf has `bytes` writable bytes.
+            let n = unsafe { libc::proc_listpids(kind, arg, buf.as_mut_ptr().cast(), bytes) };
+            if n < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if n < bytes {
+                buf.truncate(n as usize / size_of::<libc::pid_t>());
+                return Ok(buf
+                    .into_iter()
+                    .filter(|&p| p > 0)
+                    .map(|p| p as u32)
+                    .collect());
+            }
+            cap *= 2;
+        }
+    }
+
+    const PROC_UID_ONLY: u32 = 4;
+
+    pub fn same_uid_pids() -> io::Result<Vec<u32>> {
+        // SAFETY: geteuid cannot fail.
+        list_pids(PROC_UID_ONLY, unsafe { libc::geteuid() })
+    }
+
+    /// `proc_listchildpids(3)` returns a pid count and reports a gone parent as childless, so a
+    /// parent that cannot be read is `None`.
+    pub fn child_pids(pid: u32) -> Option<Vec<u32>> {
+        bsdinfo(pid).ok()?;
+        let mut cap = 256usize;
+        loop {
+            let mut buf = vec![0 as libc::pid_t; cap];
+            let bytes = (cap * size_of::<libc::pid_t>()) as libc::c_int;
+            // SAFETY: buf has `bytes` writable bytes.
+            let n = unsafe {
+                libc::proc_listchildpids(pid as libc::pid_t, buf.as_mut_ptr().cast(), bytes)
+            };
+            if n < 0 {
+                return None;
+            }
+            if (n as usize) < cap {
+                buf.truncate(n as usize);
+                return Some(
+                    buf.into_iter()
+                        .filter(|&p| p > 0)
+                        .map(|p| p as u32)
+                        .collect(),
+                );
+            }
+            cap *= 2;
+        }
+    }
+
+    fn procargs2_raw(pid: u32) -> io::Result<Vec<u8>> {
         let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
         let mut size: libc::size_t = 0;
         // SAFETY: a null buffer asks sysctl for the required size.
@@ -1046,8 +1152,7 @@ mod macos {
             return Err(io::Error::last_os_error());
         }
         buf.truncate(size);
-        parse_procargs2(&buf)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid KERN_PROCARGS2"))
+        Ok(buf)
     }
 
     /// Pointer size the exec path area is padded to.
@@ -1066,6 +1171,27 @@ mod macos {
     /// length mod 8. Empty arguments count towards argc but are dropped, as
     /// [`super::cmdline`] does with `/proc/<pid>/cmdline` on Linux.
     pub fn parse_procargs2(buf: &[u8]) -> Option<Vec<String>> {
+        split_procargs2(buf).map(|(args, _)| args)
+    }
+
+    /// The environment section of a KERN_PROCARGS2 buffer: the strings after argv up to the
+    /// first empty one, each NUL-terminated. The kernel's own `apple[]` strings
+    /// (`executable_path=`, `ptr_munge=`) follow that empty string and are not the environment.
+    pub fn parse_procargs2_env(buf: &[u8]) -> Option<Vec<u8>> {
+        let (_, mut rest) = split_procargs2(buf)?;
+        let mut env = Vec::new();
+        while let Some(end) = rest.iter().position(|&b| b == 0) {
+            if end == 0 {
+                break;
+            }
+            env.extend_from_slice(&rest[..=end]);
+            rest = &rest[end + 1..];
+        }
+        Some(env)
+    }
+
+    /// argv, and the bytes after it.
+    fn split_procargs2(buf: &[u8]) -> Option<(Vec<String>, &[u8])> {
         let argc = usize::try_from(i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?)).ok()?;
         let strings = &buf[4..];
         let path_len = strings.iter().position(|&b| b == 0)?;
@@ -1082,7 +1208,7 @@ mod macos {
             }
             rest = &rest[end + 1..];
         }
-        Some(args)
+        Some((args, rest))
     }
 
     pub fn darwin_user_temp_dir() -> Option<PathBuf> {
@@ -1293,6 +1419,16 @@ mod macos {
                 let buf = procargs2(path, &["node", "/opt/pi.js"], &["HOME=/x"]);
                 assert_eq!(parse_procargs2(&buf).unwrap(), ["node", "/opt/pi.js"]);
             }
+        }
+
+        #[test]
+        fn procargs2_env_stops_before_apple_strings() {
+            // As measured live: env, an empty string, padding, then the kernel's apple[] strings.
+            let mut buf = procargs2("./e", &["./e", "x", ""], &["A=1", "B=2", "", "", ""]);
+            buf.extend_from_slice(b"ptr_munge=\0executable_path=./e\0");
+            assert_eq!(parse_procargs2_env(&buf).unwrap(), b"A=1\0B=2\0");
+            let none = procargs2("./e", &["./e"], &["", "executable_path=./e"]);
+            assert_eq!(parse_procargs2_env(&none).unwrap(), b"");
         }
 
         #[test]
