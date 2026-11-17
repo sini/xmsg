@@ -769,6 +769,30 @@ impl EnrollCa {
             now,
             Some(approved),
             &guard,
+            &|_, _| Ok(()),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue_device_approved_with_name_authority<L>(
+        &self,
+        claims: &VerifiedClaims,
+        csr: &VerifiedCsr,
+        host: &str,
+        reserved_names: &[String],
+        approved: &DeviceProjection,
+        now: i64,
+        guard: impl Fn() -> bool,
+        ownership: impl Fn(&str, &str) -> Result<L, Error>,
+    ) -> Result<Issued, Error> {
+        self.issue_inner(
+            claims,
+            csr,
+            host,
+            reserved_names,
+            now,
+            Some(approved),
+            &guard,
+            &ownership,
         )
     }
     pub fn issue(
@@ -779,10 +803,40 @@ impl EnrollCa {
         reserved_names: &[String],
         now: i64,
     ) -> Result<Issued, Error> {
-        self.issue_inner(claims, csr, host, reserved_names, now, None, &|| true)
+        self.issue_inner(
+            claims,
+            csr,
+            host,
+            reserved_names,
+            now,
+            None,
+            &|| true,
+            &|_, _| Ok(()),
+        )
     }
     #[allow(clippy::too_many_arguments)]
-    fn issue_inner(
+    pub fn issue_with_name_authority<L>(
+        &self,
+        claims: &VerifiedClaims,
+        csr: &VerifiedCsr,
+        host: &str,
+        reserved_names: &[String],
+        now: i64,
+        ownership: impl Fn(&str, &str) -> Result<L, Error>,
+    ) -> Result<Issued, Error> {
+        self.issue_inner(
+            claims,
+            csr,
+            host,
+            reserved_names,
+            now,
+            None,
+            &|| true,
+            &ownership,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn issue_inner<L>(
         &self,
         claims: &VerifiedClaims,
         csr: &VerifiedCsr,
@@ -791,6 +845,7 @@ impl EnrollCa {
         now: i64,
         approved: Option<&DeviceProjection>,
         guard: &dyn Fn() -> bool,
+        ownership: &dyn Fn(&str, &str) -> Result<L, Error>,
     ) -> Result<Issued, Error> {
         let mut db = self.db.lock().map_err(|_| Error::Storage)?;
         let tx = db
@@ -817,6 +872,11 @@ impl EnrollCa {
         if !guard() {
             return Err(Error::ApprovalExpired);
         }
+        let uri = format!(
+            "spiffe://{}/host/{host}/user/{}",
+            p.trust_domain, proposed.user
+        );
+        let _name_lease = ownership(&uri, &proposed.node_name)?;
         let user = proposed.user;
         let iss = proposed.issuer;
         let spki = proposed.spki_sha256;
@@ -872,7 +932,6 @@ impl EnrollCa {
             .map_err(|_| Error::Storage)?;
         drop(stmt);
         tx.execute("UPDATE enroll_certs SET superseded_at=COALESCE(superseded_at,?4) WHERE user=?1 AND host=?2 AND spki_sha256!=?3",rusqlite::params![user,host,spki,now]).map_err(|_|Error::Storage)?;
-        let uri = format!("spiffe://{}/host/{host}/user/{user}", p.trust_domain);
         let (chain, serial, not_after) = self.sign(&csr.key, &uri, now, p.lifetime_secs)?;
         tx.execute(
             "INSERT INTO enroll_certs VALUES(?1,?2,?3,?4,?5,?6,?7,?7,?8,NULL)",
@@ -894,6 +953,14 @@ impl EnrollCa {
         })
     }
     pub fn renew(&self, presented_chain: &[Vec<u8>], now: i64) -> Result<Issued, Error> {
+        self.renew_with_name_authority(presented_chain, now, |_, _| Ok(()))
+    }
+    pub fn renew_with_name_authority<L>(
+        &self,
+        presented_chain: &[Vec<u8>],
+        now: i64,
+        ownership: impl Fn(&str, &str) -> Result<L, Error>,
+    ) -> Result<Issued, Error> {
         use rusqlite::OptionalExtension;
         use rustls::pki_types::{CertificateDer, UnixTime};
         self.reload_policy()?;
@@ -929,17 +996,34 @@ impl EnrollCa {
         let tx = db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|_| Error::Storage)?;
+        self.reload_policy()?;
+        let live = self.live.lock().map_err(|_| Error::Storage)?;
+        let p = live.policy.clone();
+        if now > end.saturating_add(p.renew_grace_secs) {
+            return Err(Error::ReenrollRequired);
+        }
         let record=tx.query_row("SELECT serial,user,host,spki_sha256,iss,sub,oidc_at,issued_at,not_after,superseded_at FROM enroll_certs WHERE serial=?1",[&serial],record_row).optional().map_err(|_|Error::Storage)?.ok_or(Error::ReenrollRequired)?;
         if record.spki_sha256 != spki {
             return Err(Error::ReenrollRequired);
         }
         let uri = crate::fed::extract_uri_sans(leaf).map_err(|_| Error::ReenrollRequired)?;
-        if uri.len() != 1
-            || crate::node::node_name_from_uri(&uri[0]).ok()
-                != Some(format!("{}.{}", record.user, record.host))
-        {
+        if uri.len() != 1 {
             return Err(Error::ReenrollRequired);
         }
+        let original_domain = uri[0]
+            .strip_prefix("spiffe://")
+            .and_then(|body| body.split_once('/'))
+            .map(|(domain, _)| domain)
+            .filter(|domain| !domain.is_empty())
+            .ok_or(Error::ReenrollRequired)?;
+        let expected_uri = format!(
+            "spiffe://{original_domain}/host/{}/user/{}",
+            record.host, record.user
+        );
+        if uri[0] != expected_uri {
+            return Err(Error::ReenrollRequired);
+        }
+        let _name_lease = ownership(&uri[0], &format!("{}.{}", record.user, record.host))?;
         let superseded:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM enroll_certs WHERE spki_sha256=?1 AND superseded_at IS NOT NULL)",[&spki],|r|r.get(0)).map_err(|_|Error::Storage)?;
         if superseded {
             return Err(Error::Superseded);
