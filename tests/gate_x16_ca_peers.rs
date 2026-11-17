@@ -816,8 +816,8 @@ async fn test_oracle_5_zero_and_two_uri_sans_refused() {
 // Oracle 6: Prefix `spiffe://t/ns/a/*` matches `spiffe://t/ns/a/sa/x`,
 //           does NOT match `spiffe://t/ns/a` or `spiffe://t/ns/ab/sa/x`
 // -----------------------------------------------------------------------------
-#[tokio::test]
-async fn test_oracle_6_prefix_wildcard_matching() {
+#[test]
+fn test_oracle_6_prefix_wildcard_matching() {
     let pattern = "spiffe://t/ns/a/*";
     assert!(xmsg::fed::uri_matches_identity(
         "spiffe://t/ns/a/sa/x",
@@ -876,158 +876,53 @@ async fn test_oracle_6_prefix_wildcard_matching() {
     assert!(!xmsg::fed::uri_matches_identity("a/?q", bare_pattern));
     assert!(!xmsg::fed::uri_matches_identity("a/#f", bare_pattern));
 
-    // Integration check over TLS
+    // Static CA entries name one node; exercise the prefix component without bypassing the loader.
+    use rustls::client::danger::ServerCertVerifier;
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
     let (ca_params, ca_key, _ca_der, ca_pem) = generate_ca("Test CA 6");
     let anchors = parse_ca_bundle_pem(ca_pem.as_bytes()).unwrap();
-
-    let (cert_match, key_match) = issue_cert(
-        &ca_params,
-        &ca_key,
-        "match",
-        &["spiffe://t/ns/a/sa/x"],
-        None,
-    );
-    let (cert_nomatch_short, key_nomatch_short) =
-        issue_cert(&ca_params, &ca_key, "short", &["spiffe://t/ns/a"], None);
-    let (cert_nomatch_prefix, key_nomatch_prefix) =
-        issue_cert(&ca_params, &ca_key, "ab", &["spiffe://t/ns/ab/sa/x"], None);
-    let (server_cert, server_key) = issue_cert(
-        &ca_params,
-        &ca_key,
-        "server-b",
-        &["spiffe://example.org/ns/test/sa/server-b"],
-        None,
-    );
-
-    let mut b_peers = PeersMap::empty();
-    b_peers
-        .insert_with_anchors(
-            PeerConfig {
-                observe_labels: false,
-                name: "client-a".to_string(),
-                address: "127.0.0.1:0".to_string(),
-                pin: None,
-                ca: Some(PathBuf::from("/dummy/ca.pem")),
-                identities: Some(vec![pattern.to_string()]),
-                allow: vec!["send".to_string()],
-                from: None,
-                leaf: false,
-                principals: Vec::new(),
-                targets: None,
-                dial: None,
-            },
-            anchors.clone(),
+    let verifier = xmsg::fed::CaServerCertVerifier::new(anchors.clone(), vec![pattern.into()]);
+    let server_name = ServerName::try_from("prefix.component").unwrap();
+    let now = UnixTime::now();
+    for (name, uri, expected) in [
+        ("match", "spiffe://t/ns/a/sa/x", true),
+        ("short", "spiffe://t/ns/a", false),
+        ("ab", "spiffe://t/ns/ab/sa/x", false),
+    ] {
+        let (certificate, _) = issue_cert(&ca_params, &ca_key, name, &[uri], None);
+        let certificate = CertificateDer::from(certificate);
+        xmsg::fed::verify_cert_chain(
+            &certificate,
+            &[],
+            &anchors,
+            now,
+            webpki::KeyUsage::server_auth(),
         )
-        .unwrap();
+        .expect("prefix matcher case must have an independently valid certificate chain");
+        let result = verifier.verify_server_cert(&certificate, &[], &server_name, &[], now);
+        assert_eq!(
+            result.is_ok(),
+            expected,
+            "prefix certificate matcher returned the wrong answer for {uri}: {result:?}"
+        );
+    }
 
-    let node_b = create_test_node("server-b", b_peers, server_cert, Vec::new(), server_key).await;
-    let (_sock, received) =
-        create_claude_session_fixture(&node_b.sessions_dir, "sess-target", "sess-target");
-
-    let mut a_peers = PeersMap::empty();
-    a_peers
-        .insert_with_anchors(
-            PeerConfig {
-                observe_labels: false,
-                name: "server-b".to_string(),
-                address: node_b.fed_addr.to_string(),
-                pin: None,
-                ca: Some(PathBuf::from("/dummy/ca.pem")),
-                identities: Some(vec!["spiffe://example.org/ns/test/sa/server-b".to_string()]),
-                allow: vec!["send".to_string()],
-                from: None,
-                leaf: false,
-                principals: Vec::new(),
-                targets: None,
-                dial: None,
-            },
-            anchors,
-        )
-        .unwrap();
-
-    // 1. Matching URI -> succeeds
-    let node_match = create_test_node(
-        "client-a",
-        a_peers.clone(),
-        cert_match,
-        Vec::new(),
-        key_match,
+    let directory = TempDir::new().unwrap();
+    let ca_file = directory.path().join("ca.pem");
+    fs::write(&ca_file, ca_pem).unwrap();
+    let error = PeersMap::load_from_json(
+        &serde_json::json!({"peers":{"client-a":{
+            "address":"127.0.0.1:1", "ca":ca_file,
+            "identities":[pattern], "allow":["send"]
+        }}})
+        .to_string(),
     )
-    .await;
-    let envelope = make_envelope("sess-target", "prefix match");
-    let res = send_federated_message(&node_match.fed_state, "server-b", &envelope).await;
+    .err()
+    .expect("static wildcard CA identity must be rejected by the loader");
     assert!(
-        res.is_ok(),
-        "Expected valid prefix match to succeed, got: {res:?}"
+        error.contains("names no single node"),
+        "static wildcard loader refusal lost its single-node explanation: {error}"
     );
-
-    // 2. Short URI without segment -> fails
-    let node_short = create_test_node(
-        "client-a",
-        a_peers.clone(),
-        cert_nomatch_short,
-        Vec::new(),
-        key_nomatch_short,
-    )
-    .await;
-    let res_short = send_federated_message(&node_short.fed_state, "server-b", &envelope).await;
-    assert!(
-        res_short.is_err(),
-        "Expected short URI without segment to fail handshake"
-    );
-    match res_short.unwrap_err() {
-        AppError::PeerUnreachable(ref msg) => {
-            assert!(
-                msg.contains("connection error") || msg.contains("handshake failed"),
-                "Unexpected PeerUnreachable: {msg}"
-            );
-        }
-        AppError::PeerRejected(ref msg) => {
-            assert!(
-                msg.contains("verification failed")
-                    || msg.contains("ApplicationVerificationFailure"),
-                "Unexpected PeerRejected: {msg}"
-            );
-        }
-        other => panic!("Unexpected error variant: {other:?}"),
-    }
-
-    // 3. Substring without slash (ns/ab) -> fails
-    let node_ab = create_test_node(
-        "client-a",
-        a_peers,
-        cert_nomatch_prefix,
-        Vec::new(),
-        key_nomatch_prefix,
-    )
-    .await;
-    let res_ab = send_federated_message(&node_ab.fed_state, "server-b", &envelope).await;
-    assert!(res_ab.is_err(), "Expected ns/ab prefix to fail handshake");
-    match res_ab.unwrap_err() {
-        AppError::PeerUnreachable(ref msg) => {
-            assert!(
-                msg.contains("connection error") || msg.contains("handshake failed"),
-                "Unexpected PeerUnreachable: {msg}"
-            );
-        }
-        AppError::PeerRejected(ref msg) => {
-            assert!(
-                msg.contains("verification failed")
-                    || msg.contains("ApplicationVerificationFailure"),
-                "Unexpected PeerRejected: {msg}"
-            );
-        }
-        other => panic!("Unexpected error variant: {other:?}"),
-    }
-
-    for _ in 0..250 {
-        if !received.lock().unwrap().is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let msgs = received.lock().unwrap();
-    assert_eq!(msgs.len(), 1, "Only matching URI should deliver a message");
 }
 
 // -----------------------------------------------------------------------------
