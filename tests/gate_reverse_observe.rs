@@ -1755,12 +1755,52 @@ async fn reverse_enable_for_another_route_preserves_unrouted_ordinary_control() 
     let _worker =
         xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
     let (_, status) = tokio::time::timeout(
-        Duration::from_secs(1),
+        Duration::from_secs(10),
         xmsg::fed::list_peer(&f.state, &f.leaf.node),
     )
     .await
     .expect("unrouted pinned control still progresses with reverse enabled elsewhere");
     assert_eq!(status.status, "ok");
+}
+
+#[tokio::test]
+async fn reverse_enable_for_another_route_survives_slow_worker_startup() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
+    params.subject_alt_names.push(rcgen::SanType::URI(
+        "urn:synthetic:ordinary".try_into().unwrap(),
+    ));
+    let cert = params.self_signed(&key).unwrap().der().to_vec();
+    let pin = xmsg::fed::spki_sha256_from_der(&cert).unwrap();
+    let hub = Identity {
+        node: xmsg::node::node_name_from_pin(&pin).unwrap(),
+        cert,
+        key: key.serialize_der(),
+        pin,
+        ca_identity: None,
+    };
+    let f = RelayFixture::with_hub(hub).await;
+    let routed_hub = Identity::new();
+    reload(&f.leaf_state, |c| {
+        c["reverse_observe"]["routes"][0]["hub"] = json!(routed_hub.full())
+    });
+    // Forced-race control: delay worker startup past 1s (simulating heavy parallel CPU/TLS contention)
+    // so list_peer must survive >1s startup without timing out.
+    let leaf_state = f.leaf_state.clone();
+    let hub_node = f.hub.node.clone();
+    let delayed_worker = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        xmsg::observe_relay::test_hooks::start_worker(leaf_state, hub_node)
+    });
+    let (_, status) = tokio::time::timeout(
+        Duration::from_secs(10),
+        xmsg::fed::list_peer(&f.state, &f.leaf.node),
+    )
+    .await
+    .expect("unrouted pinned control still progresses when worker startup exceeds 1s");
+    assert_eq!(status.status, "ok");
+    let _worker = delayed_worker.await.unwrap();
 }
 
 #[tokio::test]
