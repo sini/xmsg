@@ -1,0 +1,899 @@
+[
+  {
+    "label": "grt4-admission-cardinality-before-first-arrival",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_first_ambiguous_uri_is_refused_before_registration",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 first ambiguous URI must be refused before any registration",
+    "edits": [
+      {
+        "file": "src/node.rs",
+        "needle": "if witnesses.len() > 1 {",
+        "replacement": "if witnesses.len() > 2 {"
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 1704,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-trust-domain-witnesses",
+    "target": "lib",
+    "test": "node::authority_tests::trust_domains_and_wildcard_authority_are_identity_distinctions",
+    "test_file": "src/node_authority_tests.rs",
+    "expected_literal": "distinct trust domains cannot share a derived alias",
+    "edits": [
+      {
+        "file": "src/node.rs",
+        "needle": "witnesses.insert(uri);",
+        "replacement": "if witnesses.iter().any(|old| node_name_from_uri(old).ok() == node_name_from_uri(&uri).ok()) { continue; }\n                    witnesses.insert(uri);"
+      }
+    ],
+    "assertion_file": "src/node_authority_tests.rs",
+    "assertion_line": 31,
+    "assertion_sha256": "ff9deda061538c675bfc8044e6341832144849e1dfdd1d74a3de6edc6ff885a7",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-wildcard-authority-witnesses",
+    "target": "lib",
+    "test": "node::authority_tests::trust_domains_and_wildcard_authority_are_identity_distinctions",
+    "test_file": "src/node_authority_tests.rs",
+    "expected_literal": "one wildcard authority must supply distinct identity witnesses",
+    "edits": [
+      {
+        "file": "src/node.rs",
+        "needle": "&[\"witness-one.invalid\", \"witness-two.invalid\"]",
+        "replacement": "&[\"witness-one.invalid\"]"
+      }
+    ],
+    "assertion_file": "src/node_authority_tests.rs",
+    "assertion_line": 37,
+    "assertion_sha256": "ff9deda061538c675bfc8044e6341832144849e1dfdd1d74a3de6edc6ff885a7",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-host-and-pod-forms",
+    "target": "lib",
+    "test": "node::authority_tests::prospective_host_and_pod_alias_has_no_first_owner",
+    "test_file": "src/node_authority_tests.rs",
+    "expected_literal": "host and pod possibilities must refuse before either arrives",
+    "edits": [
+      {
+        "file": "src/node.rs",
+        "needle": "[(\"host\", \"user\", \"host/user\"), (\"ns\", \"sa\", \"ns/sa\")]",
+        "replacement": "[(\"host\", \"user\", \"host/user\")]"
+      }
+    ],
+    "assertion_file": "src/node_authority_tests.rs",
+    "assertion_line": 16,
+    "assertion_sha256": "ff9deda061538c675bfc8044e6341832144849e1dfdd1d74a3de6edc6ff885a7",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-structural-first-keyword",
+    "target": "lib",
+    "test": "node::authority_tests::structural_wildcards_must_consider_both_uri_forms",
+    "test_file": "src/node_authority_tests.rs",
+    "expected_literal": "a single structural-wildcard pattern can admit two URI forms",
+    "edits": [
+      {
+        "file": "src/node.rs",
+        "needle": "(*first_keyword == *a || *first_keyword == \"*\")",
+        "replacement": "(*first_keyword == *a)"
+      }
+    ],
+    "assertion_file": "src/node_authority_tests.rs",
+    "assertion_line": 47,
+    "assertion_sha256": "ff9deda061538c675bfc8044e6341832144849e1dfdd1d74a3de6edc6ff885a7",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-structural-second-keyword",
+    "target": "lib",
+    "test": "node::authority_tests::structural_wildcards_must_consider_both_uri_forms",
+    "test_file": "src/node_authority_tests.rs",
+    "expected_literal": "a single structural-wildcard pattern can admit two URI forms",
+    "edits": [
+      {
+        "file": "src/node.rs",
+        "needle": "(*second_keyword == *b || *second_keyword == \"*\")",
+        "replacement": "(*second_keyword == *b)"
+      }
+    ],
+    "assertion_file": "src/node_authority_tests.rs",
+    "assertion_line": 47,
+    "assertion_sha256": "ff9deda061538c675bfc8044e6341832144849e1dfdd1d74a3de6edc6ff885a7",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-same-uri-deduplication",
+    "target": "lib",
+    "test": "node::authority_tests::overlapping_patterns_for_one_uri_are_not_two_owners",
+    "test_file": "src/node_authority_tests.rs",
+    "expected_literal": "same full URI must be deduplicated across matching patterns",
+    "edits": [
+      {
+        "file": "src/node.rs",
+        "needle": "witnesses.insert(uri);",
+        "replacement": "if !witnesses.insert(uri) { return PatternAliasOwner::Ambiguous; }"
+      }
+    ],
+    "assertion_file": "src/node_authority_tests.rs",
+    "assertion_line": 66,
+    "assertion_sha256": "ff9deda061538c675bfc8044e6341832144849e1dfdd1d74a3de6edc6ff885a7",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-component-membership",
+    "target": "lib",
+    "test": "node::authority_tests::disjoint_names_and_non_node_patterns_have_no_false_ambiguity",
+    "test_file": "src/node_authority_tests.rs",
+    "expected_literal": "disjoint users must remain usable",
+    "edits": [
+      {
+        "file": "src/node.rs",
+        "needle": "crate::fed::spiffe_uri_matches_pattern(&uri, pattern)",
+        "replacement": "true"
+      }
+    ],
+    "assertion_file": "src/node_authority_tests.rs",
+    "assertion_line": 85,
+    "assertion_sha256": "ff9deda061538c675bfc8044e6341832144849e1dfdd1d74a3de6edc6ff885a7",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-impossible-name-projection",
+    "target": "lib",
+    "test": "node::authority_tests::disjoint_names_and_non_node_patterns_have_no_false_ambiguity",
+    "test_file": "src/node_authority_tests.rs",
+    "expected_literal": "impossible or disjoint projections must not warn",
+    "edits": [
+      {
+        "file": "src/node.rs",
+        "needle": "part.is_empty() || part.contains('.')",
+        "replacement": "part.is_empty()"
+      }
+    ],
+    "assertion_file": "src/node_authority_tests.rs",
+    "assertion_line": 89,
+    "assertion_sha256": "ff9deda061538c675bfc8044e6341832144849e1dfdd1d74a3de6edc6ff885a7",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-unique-namespace-positive",
+    "target": "lib",
+    "test": "node::authority_tests::a_disjoint_namespace_pattern_has_its_unique_uri",
+    "test_file": "src/node_authority_tests.rs",
+    "expected_literal": "a unique namespace service-account identity must remain usable",
+    "edits": [
+      {
+        "file": "src/node.rs",
+        "needle": "[(\"host\", \"user\", \"host/user\"), (\"ns\", \"sa\", \"ns/sa\")]",
+        "replacement": "[(\"host\", \"user\", \"host/user\")]"
+      }
+    ],
+    "assertion_file": "src/node_authority_tests.rs",
+    "assertion_line": 187,
+    "assertion_sha256": "ff9deda061538c675bfc8044e6341832144849e1dfdd1d74a3de6edc6ff885a7",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-tls-admission-wiring",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_tls_refuses_the_first_ambiguous_uri",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 TLS accepted the first ambiguous identity",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if !self.peers.dynamic_uri_owns_alias(uri, &canonical) {",
+        "replacement": "if false {",
+        "start": "impl rustls::server::danger::ClientCertVerifier for CombinedClientCertVerifier"
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 1357,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-request-admission-wiring",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_first_ambiguous_uri_is_refused_before_registration",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 first ambiguous URI must be refused before any registration",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if !self.dynamic_uri_owns_alias(uri, &canonical) {",
+        "replacement": "if false {",
+        "start": "pub fn resolve_incoming_peer("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 1704,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-concurrent-no-winner",
+    "target": "gate_h5_hub_admission",
+    "test": "test_oracle_6_concurrent_collision_race",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 concurrent arrival became an alias winner",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if !self.dynamic_uri_owns_alias(uri, &canonical) {",
+        "replacement": "if false {",
+        "start": "pub fn resolve_incoming_peer("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 1312,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-concrete-offline-reservation",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_concrete_pod_reserves_its_name_before_any_connection",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 TLS host captured a reserved offline pod name",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "&& self.get(name).is_none()",
+        "replacement": "&& true",
+        "start": "fn dynamic_uri_owns_alias("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2648,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-own-name-retention",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_wildcard_identity_cannot_claim_the_hubs_own_alias",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 TLS wildcard claimant captured this hubs own alias",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "map.own_name = own.map(|node| node.name.clone());",
+        "replacement": "map.own_name = None;"
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2392,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-own-name-admission",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_wildcard_identity_cannot_claim_the_hubs_own_alias",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 TLS wildcard claimant captured this hubs own alias",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "self.own_name.as_deref() != Some(name)",
+        "replacement": "true",
+        "start": "fn dynamic_uri_owns_alias("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2392,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-uri-registry-write-key",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_dynamic_registry_uses_current_uri_and_rule_grants",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 admitted URI lacks name-based routing",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "uri.clone(),\n                                AdmittedClient {",
+        "replacement": "canonical.clone(),\n                                AdmittedClient {",
+        "start": "pub fn resolve_incoming_peer("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2549,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-uri-registry-read-key",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_dynamic_registry_uses_current_uri_and_rule_grants",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 admitted URI lacks name-based routing",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "let client = clients.get(&uri)?;",
+        "replacement": "let client = clients.get(name)?;",
+        "start": "pub fn get_peer_config("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2549,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-current-registry-owner",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_dynamic_registry_uses_current_uri_and_rule_grants",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 retired URI remained in admitted listings",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if !self.dynamic_uri_owns_alias(&client.uri, &client.canonical_name) {",
+        "replacement": "if false {",
+        "start": "fn current_dynamic_config("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2592,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-current-rule-allow",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_dynamic_registry_uses_current_uri_and_rule_grants",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 dynamic lookup restored stale allow grants",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "config.allow = rule.map(|r| r.allow.clone()).unwrap_or_default();",
+        "replacement": "",
+        "start": "fn current_dynamic_config("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2561,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-current-rule-leaf",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_dynamic_registry_uses_current_uri_and_rule_grants",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 dynamic lookup restored stale leaf status",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "config.leaf = rule.is_some_and(|r| r.leaf);",
+        "replacement": "",
+        "start": "fn current_dynamic_config("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2565,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-current-rule-labels",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_dynamic_registry_uses_current_uri_and_rule_grants",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 dynamic lookup restored stale label permission",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "config.observe_labels = rule.is_some_and(|r| r.observe_labels);",
+        "replacement": "",
+        "start": "fn current_dynamic_config("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2569,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-current-rule-targets",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_dynamic_registry_uses_current_uri_and_rule_grants",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 dynamic lookup restored stale target grants",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "config.targets = rule.and_then(|r| r.targets.clone());",
+        "replacement": "",
+        "start": "fn current_dynamic_config("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2574,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-canonical-listing",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_dynamic_registry_uses_current_uri_and_rule_grants",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 admitted listing exposed a URI key",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": ".map(|client| client.canonical_name.clone())",
+        "replacement": ".map(|client| client.uri.clone())",
+        "start": "pub fn admitted_names(",
+        "end": "pub fn get_peer_config("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2579,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-default-route-refusal",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_ambiguous_alias_never_uses_default_route",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 ambiguous alias selected a default or direct route",
+    "edits": [
+      {
+        "file": "src/surface.rs",
+        "needle": "if peers.is_ambiguous_alias(n) {",
+        "replacement": "if false {",
+        "start": "async fn deliver_send("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2337,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-fresh-authenticated-uri",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_keepalive_uri_cannot_borrow_a_replacement_alias",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 body-completion handler borrowed a replacement URI grant:",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if matches {",
+        "replacement": "if true {",
+        "start": "pub fn get_authenticated_peer_config(",
+        "end": "pub fn contains_name("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 1907,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-outer-request-uri-wiring",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_keepalive_uri_cannot_borrow_a_replacement_alias",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 old keep-alive URI borrowed replacement ownership",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "current_peers.get_authenticated_peer_config(&peer_info)",
+        "replacement": "current_peers.get_peer_config(&peer_info.name).ok_or_else(|| AppError::UnknownPeer(peer_info.name.clone()))",
+        "start": "pub async fn run_fed_listener_with_acceptor("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 1917,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-send-effect-uri-wiring",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_keepalive_uri_cannot_borrow_a_replacement_alias",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 body-completion handler borrowed a replacement URI grant:",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": ".get_authenticated_peer_config(&peer)?",
+        "replacement": ".get_peer_config(&peer.name).ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?",
+        "start": "async fn fed_send_message_handler(",
+        "end": "async fn fed_reply_handler("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 1907,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-publication-warning-wiring",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_warning_is_once_per_published_alias_class",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 startup did not emit exactly one ambiguity class",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "new_peers_map.log_ambiguous_alias_classes();",
+        "replacement": ""
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2033,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-offline-warning-wiring",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_check_peers_reports_ambiguity_without_invalidating_config",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 offline pre-upgrade check omitted or duplicated its ambiguity warning",
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": "for class in peers.ambiguous_alias_classes() {",
+        "replacement": "for class in Vec::<xmsg::node::AmbiguousAliasClass>::new() {",
+        "start": "Commands::CheckPeers(args) =>"
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2119,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment",
+    "binaries": [
+      "xmsg"
+    ]
+  },
+  {
+    "label": "grt4-admission-published-warning-escaping",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_warning_is_once_per_published_alias_class",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 published warning split its alias over log lines",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "alias = ?class.alias,",
+        "replacement": "alias = %class.alias,"
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2092,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-offline-warning-escaping",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_offline_warning_escapes_control_characters",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 offline warning split its alias over lines",
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": "entries; alias={:?} forms={:?} multiple_domains={}",
+        "replacement": "entries; alias={} forms={:?} multiple_domains={}"
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2275,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment",
+    "binaries": [
+      "xmsg"
+    ]
+  },
+  {
+    "label": "grt4-admission-class-domain-presence",
+    "target": "lib",
+    "test": "node::authority_tests::wildcard_domain_and_structural_self_classes_are_reported",
+    "test_file": "src/node_authority_tests.rs",
+    "expected_literal": "wildcard authority alone is an ambiguous alias class",
+    "edits": [
+      {
+        "file": "src/node.rs",
+        "needle": "let multiple_domains = a.domain != b.domain || a.domain == \"*\";",
+        "replacement": "let multiple_domains = a.domain != b.domain;"
+      }
+    ],
+    "assertion_file": "src/node_authority_tests.rs",
+    "assertion_line": 157,
+    "assertion_sha256": "ff9deda061538c675bfc8044e6341832144849e1dfdd1d74a3de6edc6ff885a7",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-class-form-presence",
+    "target": "lib",
+    "test": "node::authority_tests::wildcard_domain_and_structural_self_classes_are_reported",
+    "test_file": "src/node_authority_tests.rs",
+    "expected_literal": "structural wildcard alone reports both forms",
+    "edits": [
+      {
+        "file": "src/node.rs",
+        "needle": "if a.form == b.form && !multiple_domains {",
+        "replacement": "if !multiple_domains {"
+      }
+    ],
+    "assertion_file": "src/node_authority_tests.rs",
+    "assertion_line": 167,
+    "assertion_sha256": "ff9deda061538c675bfc8044e6341832144849e1dfdd1d74a3de6edc6ff885a7",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-class-fixed-form-labels",
+    "target": "lib",
+    "test": "node::authority_tests::diagnostic_classes_are_deduplicated_ordered_and_do_not_expose_uris",
+    "test_file": "src/node_authority_tests.rs",
+    "expected_literal": "diagnostic uses only fixed colliding-form labels",
+    "edits": [
+      {
+        "file": "src/node.rs",
+        "needle": "forms.insert(a.form.to_owned());",
+        "replacement": "forms.insert(a.form.to_owned()); forms.insert(a.domain.to_owned());"
+      }
+    ],
+    "assertion_file": "src/node_authority_tests.rs",
+    "assertion_line": 125,
+    "assertion_sha256": "ff9deda061538c675bfc8044e6341832144849e1dfdd1d74a3de6edc6ff885a7",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-class-domain-indicator",
+    "target": "lib",
+    "test": "node::authority_tests::diagnostic_classes_are_deduplicated_ordered_and_do_not_expose_uris",
+    "test_file": "src/node_authority_tests.rs",
+    "expected_literal": "cross-domain class records a fixed multiple-domain flag",
+    "edits": [
+      {
+        "file": "src/node.rs",
+        "needle": "            multiple_domains,",
+        "replacement": "            multiple_domains: false,",
+        "start": "pub fn ambiguous_alias_classes("
+      }
+    ],
+    "assertion_file": "src/node_authority_tests.rs",
+    "assertion_line": 129,
+    "assertion_sha256": "ff9deda061538c675bfc8044e6341832144849e1dfdd1d74a3de6edc6ff885a7",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-own-diagnostic-exclusion",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_wildcard_identity_cannot_claim_the_hubs_own_alias",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 own reservation produced a dynamic ambiguity warning",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "self.own_name.as_deref() != Some(class.alias.as_str())",
+        "replacement": "true",
+        "start": "pub fn ambiguous_alias_classes("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2433,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-own-ambiguity-exclusion",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_wildcard_identity_cannot_claim_the_hubs_own_alias",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 own reservation became an ambiguous external address",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "self.own_name.as_deref() != Some(name)",
+        "replacement": "true",
+        "start": "pub fn is_ambiguous_alias(",
+        "end": "pub fn enrollment_name_available("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2429,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-own-enrollment-reservation",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_direct_name_lease_reserves_the_running_node",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 FedState issued a name lease for its own running node",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "name == self.node_name",
+        "replacement": "false",
+        "start": "pub fn lease_enrollment_name("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2454,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-concrete-enrollment-uri",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_concrete_name_lease_matches_the_exact_uri_and_mode",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 foreign concrete URI received a renewal lease",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": ".is_some_and(|expected| expected == uri)",
+        "replacement": ".is_some_and(|_expected| true)",
+        "start": "pub fn enrollment_name_available(",
+        "end": "fn dynamic_uri_owns_alias("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2507,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-concrete-enrollment-mode",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_concrete_name_lease_matches_the_exact_uri_and_mode",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 fresh issuance bypassed a concrete name reservation",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "return allow_same_concrete",
+        "replacement": "return true",
+        "start": "pub fn enrollment_name_available(",
+        "end": "fn dynamic_uri_owns_alias("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2495,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-loader-ca-single-identity",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_loader_enforces_concrete_name_identity_invariants",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 loader admitted multiple concrete CA identities",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if ids_val.len() > 1 {",
+        "replacement": "if false {",
+        "start": "pub fn load_from_json_for("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2530,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-loader-pin-no-dotted-name",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_loader_enforces_concrete_name_identity_invariants",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 loader admitted a dotted pin nickname",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if name.contains('.') {",
+        "replacement": "if false {",
+        "start": "pub fn load_from_json_for("
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2522,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-published-warning-no-uri-witness",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_warning_is_once_per_published_alias_class",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 ambiguity warning exposed a full URI witness",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "alias = ?class.alias,",
+        "replacement": "witness = ?self.hub.as_ref().map(|hub| &hub.patterns), alias = ?class.alias,"
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2076,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "grt4-admission-offline-warning-no-uri-witness",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_check_peers_reports_ambiguity_without_invalidating_config",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 offline warning exposed a full URI witness",
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": "class.alias, class.forms, class.multiple_domains",
+        "replacement": "class.alias, class.forms.iter().chain(peers.hub.as_ref().into_iter().flat_map(|hub| hub.patterns.iter())).collect::<Vec<_>>(), class.multiple_domains"
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2127,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment",
+    "binaries": [
+      "xmsg"
+    ]
+  },
+  {
+    "label": "grt4-admission-startup-no-double-publication",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_serve_startup_reports_its_ambiguity_class_once",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 serve startup omitted or duplicated its ambiguity class warning",
+    "edits": [
+      {
+        "file": "src/main.rs",
+        "needle": "let peers_arc = Arc::new(peers);",
+        "replacement": "let peers_arc = Arc::new(peers); peers_arc.log_ambiguous_alias_classes();"
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2245,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment",
+    "binaries": [
+      "xmsg"
+    ]
+  },
+  {
+    "label": "grt4-admission-warning-after-valid-tls-only",
+    "target": "gate_h5_hub_admission",
+    "test": "grt4_warning_is_once_per_published_alias_class",
+    "test_file": "tests/gate_h5_hub_admission.rs",
+    "expected_literal": "grt4 failed TLS reload published an ambiguity warning",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "new_peers_map.log_ambiguous_alias_classes();",
+        "replacement": "",
+        "start": "*self.file_hashes.lock().unwrap_or_else",
+        "end": "// Reconcile outbound pull loops"
+      },
+      {
+        "file": "src/fed.rs",
+        "needle": "match self.build_tls_config(&new_peers_map) {",
+        "replacement": "new_peers_map.log_ambiguous_alias_classes(); match self.build_tls_config(&new_peers_map) {"
+      }
+    ],
+    "assertion_file": "tests/gate_h5_hub_admission.rs",
+    "assertion_line": 2060,
+    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_rule": "unique-static-source-fragment"
+  }
+]
