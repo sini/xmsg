@@ -741,7 +741,7 @@ fn registration_status_without_process_evidence_stays_unknown() {
 }
 
 fn federation_data(own_expiry: &str, peers: Vec<Value>) -> Value {
-    json!({"available":true,"own_leaf":{"subject":"our subject","issuer":"our issuer","not_after":4102444800_i64},"own_expiry":own_expiry,"peers":peers,"partial":false,"truncated":false,"budget_exhausted":false})
+    json!({"available":true,"own_leaf":{"subject":"our subject","issuer":"our issuer","not_after":4102444800_i64},"own_expiry":own_expiry,"peers":peers,"partial":false,"truncated":false,"budget_exhausted":false,"ambiguous_aliases":false})
 }
 fn federation_peer(name: &str, reach: &str, expiry: &str, offset: &str) -> Value {
     json!({"name":name,"reachability":reach,"reason":"fixture","leaf":{"subject":"peer subject","issuer":"peer issuer","not_after":4102444800_i64},"expiry":expiry,"offset_state":offset,"observed_offset_seconds":600.0,"offset_uncertainty_seconds":1.25})
