@@ -1,5 +1,5 @@
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -9,6 +9,33 @@ use tokio::sync::broadcast;
 
 use xmsg::agy::{dev_major, dev_minor, new_agy_store, AgyConfig, AgyCredentials};
 use xmsg::http::{build_router, AppState};
+
+/// Writes an executable fixture from a child process, so this test process never holds a write
+/// descriptor on it. A sibling test's fork can then never inherit one, and exec never hits ETXTBSY.
+fn write_exe(path: &Path, contents: &str) {
+    use std::io::Write;
+    let mut child = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            r#"umask 022; cat > "$1.tmp" && chmod 755 "$1.tmp" && mv "$1.tmp" "$1""#,
+            "sh",
+        ])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(contents.as_bytes())
+        .unwrap();
+    assert!(
+        child.wait().unwrap().success(),
+        "write_exe {}",
+        path.display()
+    );
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_agy_delivery_env_isolation_and_credentials_lifecycle() {
@@ -66,8 +93,7 @@ exit 0
         env_log.display(),
         fail_file.display()
     );
-    fs::write(&fake_agy_bin, script_content).unwrap();
-    fs::set_permissions(&fake_agy_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    write_exe(&fake_agy_bin, &script_content);
 
     let agy_config = AgyConfig {
         presence_dir,
@@ -285,8 +311,7 @@ escaped=$(printf '%s' "$7" | awk 'BEGIN { ORS="" } { gsub(/\\/, "\\\\"); gsub(/"
 printf '{\n  "response": {\n    "sendMessage": {\n      "recipientId": "%s",\n      "content": "%s"\n    }\n  }\n}\n' "$6" "$escaped"
 exit 0
 "#;
-    fs::write(&fake_agy_bin, echo_script).unwrap();
-    fs::set_permissions(&fake_agy_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    write_exe(&fake_agy_bin, &echo_script);
 
     let agy_config = AgyConfig {
         presence_dir,
@@ -453,8 +478,7 @@ exit 0
         delivered_log.display(),
         delivered_log.display()
     );
-    fs::write(&fake_agy_bin, script_content).unwrap();
-    fs::set_permissions(&fake_agy_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    write_exe(&fake_agy_bin, &script_content);
 
     let pid_dir = proc_root.join(my_pid.to_string());
     let fd_dir = pid_dir.join("fd");
@@ -737,8 +761,7 @@ async fn assert_nonzero_exit_not_stale(stdout_payload: &str, stderr_payload: &st
         stdout_file.display(),
         stderr_file.display()
     );
-    fs::write(&fake_agy_bin, script).unwrap();
-    fs::set_permissions(&fake_agy_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    write_exe(&fake_agy_bin, &script);
 
     let agy_config = AgyConfig {
         presence_dir,
@@ -929,12 +952,10 @@ async fn deliver_with(holder: bool, pin: bool, explicit: bool) -> Ran {
     let fake = |name: &str| {
         let bin = tmp.path().join(format!("{name}.sh"));
         let log = tmp.path().join(format!("{name}.ran"));
-        fs::write(
+        write_exe(
             &bin,
-            format!("#!/bin/sh\necho ran > \"{}\"\necho '{{}}'\n", log.display()),
-        )
-        .unwrap();
-        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+            &format!("#!/bin/sh\necho ran > \"{}\"\necho '{{}}'\n", log.display()),
+        );
         (bin, log)
     };
     let (holder_bin, holder_log) = fake("holder");
@@ -991,4 +1012,32 @@ async fn deliver_with(holder: bool, pin: bool, explicit: bool) -> Ran {
         pinned: pinned_log.exists(),
         explicit: explicit_log.exists(),
     }
+}
+
+/// Forced control for the fixture race: a sibling thread forks and execs continuously while
+/// fixtures are written and executed. With `write_exe` no exec may fail with ETXTBSY.
+#[test]
+fn fixtures_written_by_write_exe_never_hit_etxtbsy_under_concurrent_forks() {
+    let tmp = tempdir().unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let forker = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = std::process::Command::new("/usr/bin/true").status();
+            }
+        })
+    };
+    for i in 0..200 {
+        let bin = tmp.path().join(format!("f{i}.sh"));
+        write_exe(&bin, "#!/bin/sh\nexit 0\n");
+        let r = std::process::Command::new(&bin).status();
+        assert!(
+            !matches!(&r, Err(e) if e.raw_os_error() == Some(libc::ETXTBSY)),
+            "ETXTBSY on fixture {i}"
+        );
+        assert!(r.unwrap().success());
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    forker.join().unwrap();
 }
