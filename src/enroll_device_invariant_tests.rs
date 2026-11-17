@@ -1088,3 +1088,69 @@ async fn grt4_actual_device_approval_refreshes_ownership_after_sql_wait() {
         "grt4 stale actual approval wrote authority effects"
     );
 }
+
+#[tokio::test]
+async fn grt4_actual_device_approval_retains_tls_lease_through_precommit_guard() {
+    use std::sync::atomic::AtomicUsize;
+    struct LeaseClock {
+        wall: i64,
+        armed: AtomicBool,
+        calls: AtomicUsize,
+        db: std::sync::Weak<Mutex<rusqlite::Connection>>,
+        fed: std::sync::Weak<crate::fed::FedState>,
+    }
+    impl Clock for LeaseClock {
+        fn now(&self) -> i64 {
+            if self.armed.load(Ordering::SeqCst) {
+                let db = self.db.upgrade().unwrap();
+                if db.try_lock().is_err() {
+                    let fed = self.fed.upgrade().unwrap();
+                    match self.calls.fetch_add(1, Ordering::SeqCst) {
+                        0 => assert!(fed.dynamic_tls.try_write().is_ok(), "grt4 actual lease positive control was already locked before ownership"),
+                        1 => assert!(fed.dynamic_tls.try_write().is_err(), "grt4 actual device approval dropped its TLS ownership lease before precommit"),
+                        _ => panic!("grt4 unexpected post-SQL device clock call"),
+                    }
+                }
+            }
+            self.wall
+        }
+    }
+    let mut h = enabled().await;
+    let clock = Arc::new(LeaseClock {
+        wall: h.clock.now(),
+        armed: AtomicBool::new(false),
+        calls: AtomicUsize::new(0),
+        db: Arc::downgrade(&h.db),
+        fed: Arc::downgrade(&h.service.fed),
+    });
+    h.service = Arc::new(Service::with_oidc_http(
+        h.service.ca.clone(),
+        h.service.fed.clone(),
+        clock.clone(),
+        h.service.hub_entry.clone(),
+        h.service.ca_identity.clone(),
+        h.idp.http_client(),
+    ));
+    h.service.register_local_approval().unwrap();
+    let (created, view) = awaiting(&h).await;
+    clock.armed.store(true, Ordering::SeqCst);
+    let result = h
+        .service
+        .approve_device(created["request_id"].as_str().unwrap(), approval(&view));
+    clock.armed.store(false, Ordering::SeqCst);
+    assert!(result.is_ok(), "grt4 leased actual approval was refused");
+    assert_eq!(
+        clock.calls.load(Ordering::SeqCst),
+        2,
+        "grt4 actual approval missed its two post-SQL deadline guards"
+    );
+    assert!(
+        h.service.fed.dynamic_tls.try_write().is_ok(),
+        "grt4 actual approval leaked TLS ownership lease"
+    );
+    assert_eq!(
+        effects(&h),
+        [1, 1, 1],
+        "grt4 leased actual approval failed to commit its authority effects"
+    );
+}
