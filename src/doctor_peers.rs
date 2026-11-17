@@ -55,6 +55,7 @@ fn outbound_only(peer: &PeerConfig) -> bool {
 #[derive(Debug, Serialize)]
 pub(crate) struct Report {
     available: bool,
+    ambiguous_aliases: bool,
     own_leaf: Option<Certificate>,
     own_expiry: &'static str,
     peers: Vec<Peer>,
@@ -276,6 +277,7 @@ pub(crate) async fn collect(fed: Option<Arc<FedState>>) -> Report {
     let Some(fed) = fed else {
         return Report {
             available: false,
+            ambiguous_aliases: false,
             own_leaf: None,
             own_expiry: "unknown",
             peers: Vec::new(),
@@ -294,6 +296,7 @@ pub(crate) async fn collect(fed: Option<Arc<FedState>>) -> Report {
         None => (None, "unknown"),
     };
     let current = fed.current_peers();
+    let ambiguous_aliases = !current.ambiguous_alias_classes().is_empty();
     let mut configured = current
         .iter()
         .map(|(_, peer)| peer.clone())
@@ -369,6 +372,7 @@ pub(crate) async fn collect(fed: Option<Arc<FedState>>) -> Report {
         });
     Report {
         available: true,
+        ambiguous_aliases,
         own_leaf,
         own_expiry,
         peers,
