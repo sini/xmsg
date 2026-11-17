@@ -106,6 +106,10 @@ path = "tests/e2e_agy_delivery.rs"
 required-features = ["daemon"]
 
 [[test]]
+name = "test_home_isolation"
+path = "tests/test_home_isolation.rs"
+
+[[test]]
 name = "agy_spawn_fds"
 path = "tests/agy_spawn_fds.rs"
 required-features = ["daemon"]

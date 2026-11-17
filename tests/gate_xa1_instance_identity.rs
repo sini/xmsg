@@ -1600,6 +1600,8 @@ async fn test_oracle_9_service_name_validation_refusals() {
         sessions_dirs: vec![],
         agy_config: xmsg::agy::AgyConfig {
             proc_root: proc_root.clone(),
+            presence_dir: tmp.path().join("presence"),
+            brain_dir: tmp.path().join("brain"),
             ..Default::default()
         },
         agy_store: xmsg::agy::new_agy_store(),
@@ -1964,6 +1966,8 @@ async fn test_xs3_sync_claims_refuses_claude_session_file_claiming_non_claude_uu
 
     let agy_config = AgyConfig {
         proc_root: proc_root.clone(),
+        presence_dir: tmp.path().join("presence"),
+        brain_dir: tmp.path().join("brain"),
         ..Default::default()
     };
     let caller_7001 = xmsg::agent::resolve_caller_session(

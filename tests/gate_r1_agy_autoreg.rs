@@ -66,7 +66,11 @@ async fn oracle_1_hook_credential_less_and_credentialed_and_malformed() {
     fs::set_permissions(sock_dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let reg_sock = sock_dir.path().join("register.sock");
 
-    let agy_config = AgyConfig::default();
+    let agy_config = AgyConfig {
+        presence_dir: sock_dir.path().join("presence"),
+        brain_dir: sock_dir.path().join("brain"),
+        ..Default::default()
+    };
     let agy_store = new_agy_store();
     let pi_store = xmsg::pi::new_pi_store();
     let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -355,6 +359,8 @@ exit 0
     let agy_config = AgyConfig {
         agy_bin: fake_agy_bin.to_string_lossy().to_string(),
         proc_root,
+        presence_dir: tmp.path().join("presence"),
+        brain_dir: tmp.path().join("brain"),
         ..Default::default()
     };
     let agy_store = new_agy_store();
@@ -558,7 +564,11 @@ async fn oracle_3_live_unattested_pid_returns_unregistered_without_exited() {
     let state = Arc::new(AppState {
         max_attachment_bytes: 8 * 1024 * 1024,
         sessions_dirs: vec![tmp.path().join("claude_sessions")],
-        agy_config: AgyConfig::default(),
+        agy_config: AgyConfig {
+            presence_dir: tmp.path().join("presence"),
+            brain_dir: tmp.path().join("brain"),
+            ..Default::default()
+        },
         agy_store: new_agy_store(),
         pi_store: xmsg::pi::new_pi_store(),
         pi_notify_tx,

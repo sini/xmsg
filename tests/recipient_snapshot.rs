@@ -73,6 +73,7 @@ impl Fixture {
             sessions_dirs: vec![root.path().join("sessions")],
             agy_config: xmsg::agy::AgyConfig {
                 presence_dir: root.path().join("presence"),
+                brain_dir: root.path().join("brain"),
                 ..Default::default()
             },
             agy_store: xmsg::agy::new_agy_store(),

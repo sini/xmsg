@@ -1037,7 +1037,11 @@ async fn test_oracle_4_peer_mailbox_isolation_and_non_leaf_denied() {
         rate_limiter: Arc::new(RateLimiter::new(60, 20)),
         db: hub.db.clone(),
         sessions_dirs: vec![PathBuf::new()],
-        agy_config: AgyConfig::default(),
+        agy_config: AgyConfig {
+            presence_dir: hub.proc_root.with_file_name("presence"),
+            brain_dir: hub.proc_root.with_file_name("brain"),
+            ..Default::default()
+        },
         agy_store: new_agy_store(),
         pi_store: new_pi_store(),
         pi_notify_tx: tokio::sync::broadcast::channel(16).0,
@@ -1114,7 +1118,11 @@ async fn test_oracle_4_peer_mailbox_isolation_and_non_leaf_denied() {
         rate_limiter: Arc::new(RateLimiter::new(60, 20)),
         db: hub.db.clone(),
         sessions_dirs: vec![PathBuf::new()],
-        agy_config: AgyConfig::default(),
+        agy_config: AgyConfig {
+            presence_dir: hub.proc_root.with_file_name("presence"),
+            brain_dir: hub.proc_root.with_file_name("brain"),
+            ..Default::default()
+        },
         agy_store: new_agy_store(),
         pi_store: new_pi_store(),
         pi_notify_tx: tokio::sync::broadcast::channel(16).0,
