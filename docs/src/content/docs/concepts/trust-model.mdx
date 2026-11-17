@@ -58,7 +58,9 @@ sessions do not collide, and one session cannot pose as another:
   - ancestor executable attestation (`--codex-exe`);
   - an open `<H>/thread-writer-locks/<P>.lock` descriptor under a configured `--codex-home` `<H>`,
     with a continuous lease watch. On Linux, the watch uses `inotify`. On macOS, it uses `kqueue`
-    on an `O_EVTONLY` descriptor;
+    on an `O_EVTONLY` descriptor. On macOS, a process that releases the lock without closing it
+    can be re-admitted, because macOS reports only that the file was locked; codex never does this
+    (see [Codex](/harnesses/codex/));
   - bounded `O_NOFOLLOW` rollout header verification.
 
   Runtime MCP calls take `sessionId`, `threadId` and `turn_id` only from `params._meta`. They

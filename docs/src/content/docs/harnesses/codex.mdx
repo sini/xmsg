@@ -27,6 +27,11 @@ xmsg serve \
     `<H>/thread-writer-locks/<P>.lock`, under a configured `--codex-home` `<H>`. A continuous
     lease watch monitors it. On Linux, the watch uses `inotify`. On macOS, it uses `kqueue` on an
     `O_EVTONLY` descriptor.
+    *macOS limits:* closing and reopening the same lock file starts a new lease generation, so
+    the root is parked and rebinds on its next hook or MCP call (Linux keeps the generation).
+    macOS can't show which process holds a `flock`, only that an open file was locked at some point,
+    so a codex process that releases its lock with `LOCK_UN` while keeping the file open can be
+    re-admitted. Codex itself never does this; it holds the lock until it closes it.
   - The rollout file under `<H>/sessions` passes bounded `O_NOFOLLOW` verification
     (`session_meta.payload.id == P` and `payload.session_id == P`).
 - **Runtime MCP `_meta` attribution:** `xmsg mcp` takes three values only from the JSON-RPC
