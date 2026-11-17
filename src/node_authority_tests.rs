@@ -177,3 +177,13 @@ fn percent_spellings_stay_raw_and_are_not_normalized() {
         "prospective identity preserves raw percent spelling"
     );
 }
+
+#[test]
+fn a_disjoint_namespace_pattern_has_its_unique_uri() {
+    let rules = patterns(&["spiffe://fleet/ns/*/sa/*"]);
+    assert_eq!(
+        pattern_alias_owner("guard.pods", &rules),
+        PatternAliasOwner::Unique("spiffe://fleet/ns/pods/sa/guard".into()),
+        "a unique namespace service-account identity must remain usable"
+    );
+}
