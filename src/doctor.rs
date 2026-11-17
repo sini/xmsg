@@ -42,6 +42,7 @@ pub struct DoctorArgs {
 #[derive(Clone, Copy, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 enum Status {
+    Info,
     Pass,
     Warn,
     Fail,
@@ -91,6 +92,7 @@ impl Report {
         hint: Option<&'static str>,
     ) {
         match status {
+            Status::Info => {}
             Status::Pass => self.passed += 1,
             Status::Warn => self.warnings += 1,
             Status::Fail => self.failed += 1,
@@ -606,8 +608,8 @@ async fn federation(report: &mut Report, path: Option<&Path>, configured_names: 
         if row["reason"] == "outbound_only" {
             report.add(
                 format!("peer.federation.{name}"),
-                Status::Pass,
-                "outbound-only leaf; not probed (reachable through its own outbound link)",
+                Status::Info,
+                "outbound-only leaf, reached via its hub",
                 None,
             );
             shown += 1;
@@ -869,6 +871,7 @@ pub fn run(args: DoctorArgs) -> Result<bool> {
         }
         for check in &report.checks {
             let status = match check.status {
+                Status::Info => "INFO",
                 Status::Pass => "PASS",
                 Status::Warn => "WARN",
                 Status::Fail => "FAIL",

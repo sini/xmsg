@@ -49,7 +49,22 @@ impl Peer {
 }
 
 fn outbound_only(peer: &PeerConfig) -> bool {
-    peer.leaf && peer.address.is_empty()
+    if !peer.leaf {
+        return false;
+    }
+    if peer.address.is_empty() {
+        return true;
+    }
+    let Ok(address) = peer.address.parse::<axum::http::uri::Authority>() else {
+        return false;
+    };
+    let host = address.host().strip_suffix('.').unwrap_or(address.host());
+    !address.as_str().contains('@')
+        && (!address.as_str().contains(':') || address.port_u16().is_some())
+        && host
+            .rsplit('.')
+            .next()
+            .is_some_and(|label| label.eq_ignore_ascii_case("invalid"))
 }
 
 #[derive(Debug, Serialize)]

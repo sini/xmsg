@@ -703,3 +703,72 @@ async fn addressless_nonleaf_and_addressed_leaf_remain_unknown() {
         "a configured leaf was dialled"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reserved_invalid_leaf_addresses_are_outbound_only() {
+    let own = Identity::new(NODE, 1, 2);
+    let peers = [
+        "",
+        "leaf.invalid:443",
+        "leaf.INVALID:8443",
+        "invalid:123",
+        "leaf.invalid.:443",
+        "leaf.invalid",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, address)| PeerConfig {
+        name: format!("placeholder-{index}.example"),
+        address: address.into(),
+        leaf: true,
+        pin: Some(own.pin.clone()),
+        allow: vec!["send".into()],
+        ..Default::default()
+    })
+    .collect();
+    let fixture = Fixture::new(own, peers).await;
+    let result = tokio::time::timeout(Duration::from_secs(1), fixture.diagnostics())
+        .await
+        .expect("placeholder leaves entered the network budget");
+    assert_eq!(result["partial"], false, "{result}");
+    for row in result["peers"].as_array().unwrap() {
+        assert_eq!(row["reason"], "outbound_only");
+        assert_eq!(row["reachability"], "unknown");
+        assert_eq!(row["leaf"], Value::Null);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_suffix_boundaries_and_malformed_leaf_addresses_remain_unknown() {
+    let own = Identity::new(NODE, 1, 2);
+    let peers = [
+        "notinvalid:443",
+        "leaf.invalid.example:443",
+        "127.0.0.1:9",
+        "[::1]:9",
+        "leaf.invalid:bogus",
+        "leaf.invalid:65536",
+        "leaf.invalid:",
+        "leaf.invalid..:443",
+        "https://leaf.invalid:443",
+        "user@leaf.invalid:443",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, address)| PeerConfig {
+        name: format!("boundary-{index}.example"),
+        address: address.into(),
+        leaf: true,
+        pin: Some(own.pin.clone()),
+        allow: vec!["send".into()],
+        ..Default::default()
+    })
+    .collect();
+    let fixture = Fixture::new(own, peers).await;
+    let result = fixture.diagnostics().await;
+    assert_eq!(result["partial"], true);
+    for row in result["peers"].as_array().unwrap() {
+        assert_eq!(row["reason"], "not_dialable");
+        assert_eq!(row["reachability"], "unknown");
+    }
+}
