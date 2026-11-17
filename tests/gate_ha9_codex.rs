@@ -8644,7 +8644,7 @@ async fn codex_post_enqueue_error_keeps_queue_custody(reply: bool, subaddress: b
         );
         return;
     }
-    assert_eq!(stop.handoff_ids, [id.clone()]);
+    assert_eq!(stop.handoff_ids, std::slice::from_ref(&id));
     storage::complete_codex_handoff_accepted(
         &env.state.db.lock().unwrap(),
         root,
