@@ -131,6 +131,13 @@ make peer text safe to execute or supply end-to-end outside-service authorizatio
 [bridges and gateways](/extensions/gateway/) own their outside-facing boundaries.
 
 
+## Planned: federation handshake privacy
+
+Federation TLS clients omit the DNS `server_name` extension from ClientHello, so
+node names such as `<user>.<host>` are not sent as cleartext SNI. Peer verification
+continues to use the configured SPKI pin or CA chain and SPIFFE identity.
+Enrollment and OAuth HTTPS clients retain their normal hostname SNI.
+
 ## Planned: the enrollment CA boundary
 
 The [enrollment CA](/operations/enrollment-ca/) is an optional online signing
