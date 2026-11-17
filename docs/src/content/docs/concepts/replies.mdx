@@ -16,6 +16,9 @@ Each `send` returns an `address`, a `message_id` and an [`outcome`](/glossary/#o
     subagent calls `inbox` or its turn ends;
   - a live **Pi**, **opencode** or **Hermes** session, or a registered **service**. The message
     waits until the harness plugin or the service acknowledges (`ack`) the delivery.
+- **Planned:** a send already held for a live Codex root's current generation reports
+  `queued` if the immediate push fails before handoff. This also applies to an idle
+  subagent's parent fallback. An accepted handoff still reports `delivered`.
 - **`pending`:** a retry with the same [idempotency key](#idempotency-idempotency_key) found the
   first send still in progress.
 
@@ -89,6 +92,11 @@ Each envelope that xmsg delivers to a recipient has a reply instruction footer:
   reports `pushed` when xmsg holds it in that live root's queue for its next hook, as for an
   embedded `codex exec` root without an app-server. A revoked root reports `sender_gone`. A
   reply to an anonymous HTTP caller has no push outcome. The caller reads it with `replies`.
+  **Planned:** a failed immediate push still reports `pushed` when durable custody is
+  proven for that live root's current generation, including an idle subagent's parent
+  fallback. Parked or revoked roots retain `sender_gone`; uncertain handoffs are not
+  replayed automatically. For example, an embedded root can receive the queued reply
+  through its next hook without the sender retrying it.
 - **Codex restart custody (planned):** These rules apply to a Codex root after an xmsg daemon restart:
   - A known root that was active before restart and is not revoked stays queueable within the
     reply TTL. xmsg retains its recovery eligibility across repeated restarts. Deliberate
