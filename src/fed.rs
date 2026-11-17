@@ -725,23 +725,23 @@ impl PeersMap {
         db: &rusqlite::Connection,
         now: i64,
     ) -> Result<usize, rusqlite::Error> {
-        let expired: Vec<String> = self
+        let expired: Vec<(String, String)> = self
             .admitted_clients
             .read()
             .unwrap()
             .iter()
             .filter(|(_, client)| client.not_after <= now)
-            .map(|(name, _)| name.clone())
+            .map(|(uri, client)| (uri.clone(), client.canonical_name.clone()))
             .collect();
         let mut removed = 0;
-        for name in expired {
+        for (uri, name) in expired {
             if storage::count_peer_mailbox_messages(db, &name)? == 0 {
                 let mut admitted = self.admitted_clients.write().unwrap();
                 if admitted
-                    .get(&name)
+                    .get(&uri)
                     .is_some_and(|client| client.not_after <= now)
                 {
-                    admitted.remove(&name);
+                    admitted.remove(&uri);
                     removed += 1;
                 }
             }
@@ -790,25 +790,132 @@ impl PeersMap {
         self.get(name).is_some()
     }
 
+    pub fn ambiguous_alias_classes(&self) -> Vec<crate::node::AmbiguousAliasClass> {
+        self.hub
+            .as_ref()
+            .map(|hub| crate::node::ambiguous_alias_classes(&hub.patterns))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|class| class.alias.contains('*') || !self.contains_concrete_name(&class.alias))
+            .collect()
+    }
+
+    pub fn log_ambiguous_alias_classes(&self) {
+        for class in self.ambiguous_alias_classes() {
+            tracing::warn!(
+                alias = %class.alias,
+                forms = ?class.forms,
+                multiple_domains = class.multiple_domains,
+                "pattern admits ambiguous aliases; give pods concrete CA leaf entries"
+            );
+        }
+    }
+
+    pub fn is_ambiguous_alias(&self, name: &str) -> bool {
+        self.get(name).is_none()
+            && self.hub.as_ref().is_some_and(|hub| {
+                matches!(
+                    crate::node::pattern_alias_owner(name, &hub.patterns),
+                    crate::node::PatternAliasOwner::Ambiguous
+                )
+            })
+    }
+
+    pub fn enrollment_name_available(&self, uri: &str, allow_same_concrete: bool) -> bool {
+        let Ok(name) = crate::node::node_name_from_uri(uri) else {
+            return false;
+        };
+        if let Some(peer) = self.get(&name) {
+            return allow_same_concrete
+                && peer.pin.is_none()
+                && peer
+                    .identities
+                    .as_ref()
+                    .is_some_and(|ids| ids.len() == 1 && ids[0] == uri);
+        }
+        match self
+            .hub
+            .as_ref()
+            .map(|hub| crate::node::pattern_alias_owner(&name, &hub.patterns))
+        {
+            None | Some(crate::node::PatternAliasOwner::Unclaimed) => true,
+            Some(crate::node::PatternAliasOwner::Unique(owner)) => owner == uri,
+            Some(crate::node::PatternAliasOwner::Ambiguous) => false,
+        }
+    }
+
+    fn dynamic_uri_owns_alias(&self, uri: &str, name: &str) -> bool {
+        self.get(name).is_none()
+            && self.hub.as_ref().is_some_and(|hub| {
+                matches!(
+                    crate::node::pattern_alias_owner(name, &hub.patterns),
+                    crate::node::PatternAliasOwner::Unique(owner) if owner == uri
+                )
+            })
+    }
+
+    fn current_dynamic_config(&self, client: &AdmittedClient) -> Option<PeerConfig> {
+        if !self.dynamic_uri_owns_alias(&client.uri, &client.canonical_name) {
+            return None;
+        }
+        let hub = self.hub.as_ref()?;
+        let rule = hub
+            .rules
+            .iter()
+            .find(|r| spiffe_uri_matches_pattern(&client.uri, &r.pattern));
+        let mut config = client.config.clone();
+        config.allow = rule.map(|r| r.allow.clone()).unwrap_or_default();
+        config.observe_labels = rule.is_some_and(|r| r.observe_labels);
+        config.leaf = rule.is_some_and(|r| r.leaf);
+        config.targets = rule.and_then(|r| r.targets.clone());
+        Some(config)
+    }
+
+    pub fn admitted_names(&self) -> Vec<String> {
+        self.admitted_clients
+            .read()
+            .map(|clients| {
+                clients
+                    .values()
+                    .filter(|client| self.current_dynamic_config(client).is_some())
+                    .map(|client| client.canonical_name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn get_peer_config(&self, name: &str) -> Option<PeerConfig> {
-        if let Some(p) = self.get(name) {
-            return Some(p.clone());
+        if let Some(peer) = self.get(name) {
+            return Some(peer.clone());
         }
-        if let Ok(admitted) = self.admitted_clients.read() {
-            if let Some(adm) = admitted.get(name) {
-                return Some(adm.config.clone());
-            }
-        }
-        None
+        let hub = self.hub.as_ref()?;
+        let crate::node::PatternAliasOwner::Unique(uri) =
+            crate::node::pattern_alias_owner(name, &hub.patterns)
+        else {
+            return None;
+        };
+        let clients = self.admitted_clients.read().ok()?;
+        let client = clients.get(&uri)?;
+        self.current_dynamic_config(client)
+    }
+
+    pub fn get_authenticated_peer_config(&self, peer: &AuthenticatedPeer) -> Option<PeerConfig> {
+        let config = self.get_peer_config(&peer.name)?;
+        let matches = match peer.uri.as_deref() {
+            Some(uri) => config
+                .identities
+                .as_ref()
+                .is_some_and(|ids| ids.len() == 1 && ids[0] == uri),
+            None => config
+                .pin
+                .as_deref()
+                .is_some_and(|pin| normalize_pin(pin) == normalize_pin(&peer.pin)),
+        };
+        matches.then_some(config)
     }
 
     pub fn contains_name(&self, name: &str) -> bool {
-        self.get(name).is_some()
-            || self
-                .admitted_clients
-                .read()
-                .ok()
-                .is_some_and(|adm| adm.contains_key(name))
+        self.get_peer_config(name).is_some()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1546,13 +1653,10 @@ impl PeersMap {
                         let canonical =
                             crate::node::node_name_from_uri(uri).map_err(AppError::PeerRejected)?;
 
-                        // Amendment 3: A pattern-derived name equal to a concrete peer's name is refused
-                        if self.contains_concrete_name(&canonical) {
-                            let msg = format!(
-                                "hub admitted identity '{uri}' derives name '{canonical}', colliding with concrete peer"
-                            );
-                            tracing::warn!("{msg}");
-                            return Err(AppError::PeerRejected(msg));
+                        if !self.dynamic_uri_owns_alias(uri, &canonical) {
+                            return Err(AppError::PeerRejected(format!(
+                                "node name '{canonical}' is reserved or ambiguous"
+                            )));
                         }
 
                         // Rules table: find matching rule (closed by default if none)
@@ -1577,38 +1681,19 @@ impl PeersMap {
                             dial: None,
                         };
 
-                        // Amendment 4 / Oracle 6: collision check and insert under single write lock
-                        {
-                            let mut admitted = self
-                                .admitted_clients
-                                .write()
-                                .map_err(|e| AppError::Internal(e.to_string()))?;
-                            if let Some(existing) = admitted.get(&canonical) {
-                                if existing.uri != *uri {
-                                    let msg = format!(
-                                        "node name '{canonical}' collision: existing client URI '{}' vs incoming '{uri}'",
-                                        existing.uri
-                                    );
-                                    tracing::warn!("{msg}");
-                                    return Err(AppError::PeerRejected(msg));
-                                }
-                                admitted.get_mut(&canonical).unwrap().not_after =
-                                    certificate_not_after(leaf.as_ref())?;
-                                admitted.get_mut(&canonical).unwrap().config = peer_config.clone();
-                                admitted.get_mut(&canonical).unwrap().pin = norm_pin.clone();
-                            } else {
-                                admitted.insert(
-                                    canonical.clone(),
-                                    AdmittedClient {
-                                        canonical_name: canonical.clone(),
-                                        uri: uri.clone(),
-                                        pin: norm_pin,
-                                        config: peer_config.clone(),
-                                        not_after: certificate_not_after(leaf.as_ref())?,
-                                    },
-                                );
-                            }
-                        }
+                        self.admitted_clients
+                            .write()
+                            .map_err(|e| AppError::Internal(e.to_string()))?
+                            .insert(
+                                uri.clone(),
+                                AdmittedClient {
+                                    canonical_name: canonical.clone(),
+                                    uri: uri.clone(),
+                                    pin: norm_pin,
+                                    config: peer_config.clone(),
+                                    not_after: certificate_not_after(leaf.as_ref())?,
+                                },
+                            );
 
                         return Ok((peer_config, Some(uri.clone())));
                     }
@@ -2066,22 +2151,10 @@ impl rustls::server::danger::ClientCertVerifier for CombinedClientCertVerifier {
                         )
                     })?;
 
-                    // Check collision with concrete peer
-                    if self.peers.contains_concrete_name(&canonical) {
+                    if !self.peers.dynamic_uri_owns_alias(uri, &canonical) {
                         return Err(rustls::Error::InvalidCertificate(
                             rustls::CertificateError::ApplicationVerificationFailure,
                         ));
-                    }
-
-                    // Check collision with already admitted client
-                    if let Ok(admitted) = self.peers.admitted_clients.read() {
-                        if let Some(existing) = admitted.get(&canonical) {
-                            if existing.uri != *uri {
-                                return Err(rustls::Error::InvalidCertificate(
-                                    rustls::CertificateError::ApplicationVerificationFailure,
-                                ));
-                            }
-                        }
                     }
 
                     return Ok(rustls::server::danger::ClientCertVerified::assertion());
@@ -2838,9 +2911,37 @@ mod initial_peers {
             init.clone()
                 .expect("initial peers cleared only after dynamic_tls is populated")
         }
+
+        pub fn lease_enrollment_name(
+            &self,
+            uri: &str,
+            allow_same_concrete: bool,
+        ) -> Result<super::NameAuthorityLease<'_>, String> {
+            let guard = self.dynamic_tls.read().unwrap_or_else(|e| e.into_inner());
+            let peers = match guard.as_ref() {
+                Some(tls) => tls.peers.clone(),
+                None => self
+                    .peers
+                    .0
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+                    .expect("startup peers available before dynamic TLS"),
+            };
+            let name = crate::node::node_name_from_uri(uri)?;
+            if name == self.node_name || !peers.enrollment_name_available(uri, allow_same_concrete)
+            {
+                return Err(format!("node name '{name}' is reserved or ambiguous"));
+            }
+            Ok(super::NameAuthorityLease { _tls: guard })
+        }
     }
 }
 pub use initial_peers::InitialPeers;
+
+pub struct NameAuthorityLease<'a> {
+    _tls: std::sync::RwLockReadGuard<'a, Option<DynamicTls>>,
+}
 
 pub struct FedState {
     pub node_name: String,
@@ -2965,7 +3066,7 @@ async fn fed_send_message_handler(
     // 1. Check peer config and allow list
     let peer_cfg = fed_state
         .current_peers()
-        .get_peer_config(&peer.name)
+        .get_authenticated_peer_config(&peer)
         .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
 
     if !peer_cfg.allow.iter().any(|op| op == "send") {
@@ -3568,7 +3669,7 @@ async fn fed_reply_handler(
     // 1. Check peer config and allow list
     let peers = fed_state.current_peers();
     let peer_cfg = peers
-        .get_peer_config(&peer.name)
+        .get_authenticated_peer_config(&peer)
         .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
 
     if !peer_cfg.allow.iter().any(|op| op == "reply") {
@@ -4147,7 +4248,7 @@ async fn fed_get_replies_handler(
 ) -> Result<Response, AppError> {
     let _peer_cfg = fed_state
         .current_peers()
-        .get_peer_config(&peer.name)
+        .get_authenticated_peer_config(&peer)
         .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
 
     // Check rate limiter
@@ -4277,7 +4378,7 @@ async fn fed_list_sessions_handler(
 ) -> Result<Response, AppError> {
     let peer_cfg = fed_state
         .current_peers()
-        .get_peer_config(&peer.name)
+        .get_authenticated_peer_config(&peer)
         .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
 
     // Refused with 403 op_denied unless peer's allow contains "list"
@@ -4376,7 +4477,7 @@ async fn fed_get_inbox_handler(
 ) -> Result<Response, AppError> {
     let peer_cfg = fed_state
         .current_peers()
-        .get_peer_config(&peer.name)
+        .get_authenticated_peer_config(&peer)
         .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
 
     if !peer_cfg.leaf {
@@ -4527,7 +4628,7 @@ async fn fed_ack_inbox_handler(
 ) -> Result<Response, AppError> {
     let peer_cfg = fed_state
         .current_peers()
-        .get_peer_config(&peer.name)
+        .get_authenticated_peer_config(&peer)
         .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
 
     if !peer_cfg.leaf {
@@ -6686,7 +6787,8 @@ pub async fn run_fed_listener_with_acceptor(
                         // narrowing takes effect immediately on established keep-alive
                         // connections across every /fed/v2/* route.
                         let current_peers = fed_state_req.current_peers();
-                        let Some(current_peer_cfg) = current_peers.get_peer_config(&peer_info.name)
+                        let Some(current_peer_cfg) =
+                            current_peers.get_authenticated_peer_config(&peer_info)
                         else {
                             return Ok::<_, std::convert::Infallible>(
                                 AppError::UnknownPeer(peer_info.name.clone()).into_response(),
