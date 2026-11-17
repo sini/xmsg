@@ -157,40 +157,34 @@ async fn next_probe(probes: &mut Vec<Probe>) -> usize {
 }
 
 async fn probe(fed: Arc<FedState>, peer: PeerConfig, progress: Arc<Mutex<Peer>>) {
-    if peer.leaf || peer.address.is_empty() {
+    if peer.leaf || !crate::discovery::dial::is_direct(&fed, &peer) {
         progress.lock().unwrap().reason = "not_dialable";
         return;
     }
     let work = async {
-        let connector = match crate::fed::make_tls_connector_for_peer(&fed, &peer) {
-            Ok(connector) => connector,
-            Err(_) => {
-                progress.lock().unwrap().reason = "tls_configuration";
-                return;
-            }
-        };
-        let server_name = match rustls::pki_types::ServerName::try_from(peer.name.clone()) {
-            Ok(name) => name,
-            Err(_) => {
-                progress.lock().unwrap().reason = "tls_configuration";
-                return;
-            }
-        };
-        let tcp = match tokio::net::TcpStream::connect(&peer.address).await {
-            Ok(tcp) => tcp,
-            Err(_) => {
-                let mut row = progress.lock().unwrap();
-                row.reachability = "unreachable";
-                row.reason = "connect_failed";
-                return;
-            }
-        };
-        let tls = match connector.connect(server_name, tcp).await {
+        let tls = match crate::discovery::dial::resolve_dial(&fed, &peer)
+            .await
+            .and_then(|dial| dial.into_direct())
+        {
             Ok(tls) => tls,
-            Err(_) => {
+            Err(error) => {
                 let mut row = progress.lock().unwrap();
-                row.reachability = "unreachable";
-                row.reason = "tls_failed";
+                match error {
+                    crate::error::AppError::Internal(_)
+                    | crate::error::AppError::UnknownPeer(_) => {
+                        row.reason = "tls_configuration";
+                    }
+                    crate::error::AppError::PeerUnreachable(ref message)
+                        if message.starts_with("connecting to ") =>
+                    {
+                        row.reachability = "unreachable";
+                        row.reason = "connect_failed";
+                    }
+                    _ => {
+                        row.reachability = "unreachable";
+                        row.reason = "tls_failed";
+                    }
+                }
                 return;
             }
         };

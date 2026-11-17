@@ -81,13 +81,27 @@ fn candidates(fs: &FedState, peer: &PeerConfig, policy: &PeersMap, now: Instant)
         .candidates
         .read()
         .unwrap_or_else(|e| e.into_inner());
+    eligible_candidates(&table, policy.discovery_roots(&peer.name), now)
+}
+
+fn eligible_candidates(
+    table: &super::CandidateTable,
+    roots: &[[u8; 32]],
+    now: Instant,
+) -> Vec<Candidate> {
     let mut seen = HashSet::new();
-    policy
-        .discovery_roots(&peer.name)
+    let mut eligible = roots
         .iter()
         .flat_map(|root| table.eligible(root, now))
         .filter(|candidate| seen.insert((candidate.source, candidate.addr)))
-        .collect()
+        .collect::<Vec<_>>();
+    eligible.sort_by(|a, b| {
+        b.hint
+            .is_some()
+            .cmp(&a.hint.is_some())
+            .then(b.seen_at.cmp(&a.seen_at))
+    });
+    eligible
 }
 
 fn witness(tls: &TlsStream<TcpStream>) -> Option<(String, i64)> {
@@ -219,4 +233,60 @@ pub async fn resolve_dial(fs: &FedState, peer: &PeerConfig) -> Result<Dial, AppE
         ));
     }
     Err(AppError::UnknownPeer(peer.name.clone()))
+}
+
+pub fn is_direct(fs: &FedState, peer: &PeerConfig) -> bool {
+    if peer.leaf {
+        return false;
+    }
+    if !peer.address.is_empty() {
+        return true;
+    }
+    let Some(uri) = exact_uri(peer) else {
+        return false;
+    };
+    let policy = fs.current_peers();
+    fs.discovery
+        .lookup(
+            uri,
+            &peer.name,
+            &policy,
+            Instant::now(),
+            crate::storage::now_epoch_secs(),
+        )
+        .is_some()
+        || !candidates(fs, peer, &policy, Instant::now()).is_empty()
+}
+
+#[cfg(test)]
+mod ordering_tests {
+    use super::*;
+    use crate::discovery::{CandidateTable, Source};
+
+    #[test]
+    fn eligible_roots_deduplicate_unhinted_roots_and_preserve_global_order() {
+        let now = Instant::now();
+        let mut table = CandidateTable::new();
+        for (address, root, hint) in [
+            ("10.1.0.1:7777", None, None),
+            ("10.1.0.2:7777", Some([2; 32]), Some("opaque")),
+            ("10.1.0.3:7777", Some([3; 32]), Some("foreign")),
+        ] {
+            assert!(table.upsert(
+                Candidate {
+                    addr: address.parse().unwrap(),
+                    source: Source::Mdns,
+                    hint: hint.map(str::to_owned),
+                    root_fp: root,
+                    seen_at: now,
+                    expires_at: now + Duration::from_secs(60),
+                },
+                now
+            ));
+        }
+        let rows = eligible_candidates(&table, &[[1; 32], [2; 32]], now);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].addr, "10.1.0.2:7777".parse().unwrap());
+        assert_eq!(rows[1].addr, "10.1.0.1:7777".parse().unwrap());
+    }
 }

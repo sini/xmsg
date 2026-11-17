@@ -54,6 +54,10 @@ struct RawConfig {
     ttl_secs: Option<u64>,
 }
 
+pub(crate) fn permits_address_omission(has_ca: bool, source_enabled: bool) -> bool {
+    has_ca && source_enabled
+}
+
 impl Config {
     /// Parses and validates the `discovery` value; `null` (the key absent) is discovery off.
     pub fn parse(value: serde_json::Value) -> Result<Self, String> {
@@ -149,6 +153,12 @@ pub fn acceptable_ip(ip: IpAddr) -> bool {
 }
 
 impl CandidateTable {
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn inject_for_test(&mut self, candidate: Candidate) {
+        self.entries
+            .insert((candidate.source, candidate.addr), candidate);
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -397,6 +407,14 @@ mod tests {
         assert!(load(r#"{"mdns":{"extra":1}}"#).is_err());
         let none = crate::fed::PeersMap::load_from_json(r#"{"peers":{}}"#).unwrap();
         assert_eq!(none.discovery, Config::default());
+    }
+
+    #[test]
+    fn address_omission_requires_ca_and_an_available_source() {
+        assert!(permits_address_omission(true, true));
+        assert!(!permits_address_omission(false, true));
+        assert!(!permits_address_omission(true, false));
+        assert!(!permits_address_omission(false, false));
     }
 
     #[test]
