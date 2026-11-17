@@ -147,6 +147,17 @@ affects the peer entries and hub patterns/rules trusting its root, including the
 names and mailboxes. It does not make that root satisfy a fleet-bundle pattern.
 It remains the operator's job to give enrollment identities suitably narrow rules.
 
+**Planned node-name ownership:** dynamic admission uses the full URI, including its trust
+domain and form. It refuses a candidate if another allowed URI could derive the same alias,
+before either arrives. Concrete CA entries reserve their names while offline. Current
+operations are gated by the authenticated URI's current ownership, not by whichever client
+connected first.
+
+Durable mailbox, outbound and reply records remain addressed by the node alias. A deliberate
+administrator reassignment of that alias is an owner-authorized routing change; it is not a
+promise that old records remain bound to a historical URI. This change adds no mailbox
+migration or new node-name prefix.
+
 Default host certificates expire 24 hours after issuance. The CA deny list stops
 new issuance or renewal immediately there; there is no CRL or OCSP distribution
 to peers. Renewal does not query the IdP, and fresh login is required after
