@@ -1810,3 +1810,40 @@ fn test_oracle_3_load_concrete_peer_collision() {
         "Unexpected error: {err}"
     );
 }
+
+#[test]
+fn grt4_first_ambiguous_uri_is_refused_before_registration() {
+    let (ca_params, ca_key, _, ca_pem) = generate_ca("grt4 prospective CA");
+    let temp = TempDir::new().unwrap();
+    let ca = temp.path().join("ca.pem");
+    fs::write(&ca, ca_pem).unwrap();
+    let config = serde_json::json!({
+        "peers": {"hub.hub": {
+            "ca": ca, "address": "127.0.0.1:1",
+            "identities": ["spiffe://example.invalid/ns/hub/sa/hub"],
+            "allow": ["send"]
+        }},
+        "hub": {
+            "patterns": ["spiffe://example.invalid/host/*/user/*", "spiffe://example.invalid/ns/pods/sa/*"],
+            "rules": [{"pattern": "spiffe://example.invalid/host/*/user/*", "allow": ["send"]},
+                      {"pattern": "spiffe://example.invalid/ns/pods/sa/*", "allow": ["send"]}]
+        }
+    }).to_string();
+    for uri in [
+        "spiffe://example.invalid/host/pods/user/guard",
+        "spiffe://example.invalid/ns/pods/sa/guard",
+    ] {
+        let peers = PeersMap::load_from_json(&config).unwrap();
+        let (cert, _) = issue_cert(&ca_params, &ca_key, "guard.pods", &[uri]);
+        let result =
+            peers.resolve_incoming_peer(&rustls::pki_types::CertificateDer::from(cert), &[]);
+        assert!(
+            matches!(result, Err(AppError::PeerRejected(_))),
+            "grt4 first ambiguous URI must be refused before any registration"
+        );
+        assert!(
+            peers.admitted_clients.read().unwrap().is_empty(),
+            "grt4 refused first URI published an admitted row"
+        );
+    }
+}
