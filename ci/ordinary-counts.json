@@ -96,6 +96,8 @@
     "tests/gate_xh2_plugin.rs",
     "tests/gate_xl1_list_live_default.rs",
     "tests/gate_xu1_api_ergonomics.rs",
+    "tests/grt4_concrete_ca_leaf.rs",
+    "tests/grt4_standalone_enrollment.rs",
     "tests/observe_arrival.rs",
     "tests/observe_http.rs",
     "tests/operator_cli.rs",
@@ -110,16 +112,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1333,
+      "passed": 1375,
       "failed": 0,
       "ignored": 7,
-      "summaries": 106
+      "summaries": 108
     },
     "darwin": {
-      "passed": 1345,
+      "passed": 1387,
       "failed": 0,
       "ignored": 9,
-      "summaries": 106
+      "summaries": 108
     }
   }
 }
