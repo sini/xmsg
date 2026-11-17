@@ -2580,10 +2580,14 @@ async fn deliver_send(
                     "node '{n}' has ambiguous identity patterns"
                 )));
             }
-            let is_direct = if let Some(p) = peers.get(n) {
-                crate::discovery::dial::is_direct(fs, p)
+            let is_direct = if let Some(peer) = peers.get(n) {
+                crate::discovery::dial::is_direct(fs, peer)
             } else {
-                peers.get_peer_config(n).is_some()
+                peers
+                    .admitted_clients
+                    .read()
+                    .ok()
+                    .is_some_and(|adm| adm.contains_key(n))
             };
 
             if is_direct {
