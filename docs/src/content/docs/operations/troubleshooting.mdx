@@ -128,8 +128,10 @@ get the same close-on-exec treatment.
 ## LAN discovery on macOS: Local Network permission (planned)
 
 With [LAN discovery](/concepts/discovery/) on, doctor reports a `discovery.mdns` check
-from the daemon's health. `active`, `off`, `starting` and `browse_only` pass;
-`lan_silent` and `failed` warn.
+from the daemon's health. `active`, `off` and `browse_only` pass, and so does `starting`
+within the 15-second echo deadline; a source still `starting` after that warns.
+`lan_silent` and `failed` warn. `failed` names its cause, such as UDP 5353 that couldn't
+be bound; it is not a Local Network problem.
 
 `lan_silent` means the node announced itself, but its own announcement never came back
 on a LAN address within 15 seconds: multicast to the LAN is being dropped. macOS does

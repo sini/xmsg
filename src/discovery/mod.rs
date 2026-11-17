@@ -325,6 +325,17 @@ pub fn spawn(
     let _ = (fed, fed_listen, candidates, &RUNNING);
 }
 
+/// Withdraws the mDNS announcement and stops the source, waiting at most `bound`. Does
+/// nothing when no source was started.
+pub fn stop(bound: std::time::Duration) {
+    #[cfg(feature = "mdns")]
+    if RUNNING.get().is_some() {
+        mdns::stop(bound);
+    }
+    #[cfg(not(feature = "mdns"))]
+    let _ = bound;
+}
+
 /// sha256 of the federation CA root certificate DER: the first CA entry by name, and within
 /// its bundle the first self-issued certificate (else the first certificate).
 pub fn root_fingerprint(peers: &crate::fed::PeersMap) -> Option<[u8; 32]> {

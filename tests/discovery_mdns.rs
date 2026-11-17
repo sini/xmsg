@@ -39,7 +39,8 @@ fn http_get(sock: &Path, uri: &str) -> Option<Value> {
 /// Whether process `pid` holds a UDP socket bound to `port`.
 #[cfg(target_os = "macos")]
 fn udp_port_open(pid: u32, port: u16) -> bool {
-    let out = Command::new("lsof")
+    // The Nix build's PATH holds only build inputs, so host tools are named by path.
+    let out = Command::new("/usr/sbin/lsof")
         .args([
             "-nP",
             "-a",
@@ -376,6 +377,22 @@ fn doctor_reports_the_discovery_state() {
             "{state}"
         );
     }
+    let fresh = {
+        let mut h = health("starting", "");
+        h["discovery"]["mdns"]["since"] = json!(std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs());
+        doctor_with_health(h)
+    };
+    assert_eq!(
+        doctor_check(&fresh, "discovery.mdns").unwrap()["status"],
+        "pass"
+    );
+    let stuck = doctor_with_health(health("starting", ""));
+    let check = doctor_check(&stuck, "discovery.mdns").unwrap();
+    assert_eq!(check["status"], "warn", "{check}");
+    assert!(check["hint"].as_str().unwrap().contains("still starting"));
     let old = doctor_with_health(json!({"status": "ok", "sessions_dir": "ok", "version": "0"}));
     assert!(doctor_check(&old, "discovery.mdns").is_none());
 }
@@ -388,11 +405,12 @@ mod engine {
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
     use xmsg::discovery::mdns::{
-        Backend, Engine, Event, Inputs, ECHO_DEADLINE, IP_CHECK_SECS, TICK,
+        announce_addrs, probe_bind, Backend, Engine, Event, Inputs, ECHO_DEADLINE, IP_CHECK_SECS,
+        TICK,
     };
     use xmsg::discovery::{MdnsConfig, SharedCandidates, SharedStatus, State, MDNS_CAP};
 
-    type Registration = (String, u16, Vec<(String, String)>);
+    type Registration = (String, u16, Vec<IpAddr>, Vec<(String, String)>);
 
     #[derive(Default)]
     struct Log {
@@ -401,6 +419,7 @@ mod engine {
         registers: Vec<Registration>,
         interfaces: Vec<(String, IpAddr)>,
         events: VecDeque<Event>,
+        start_error: Option<String>,
     }
 
     #[derive(Clone, Default)]
@@ -408,20 +427,22 @@ mod engine {
 
     impl Backend for Fake {
         fn start(&mut self) -> Result<(), String> {
-            self.0.lock().unwrap().starts += 1;
-            Ok(())
+            let mut log = self.0.lock().unwrap();
+            log.starts += 1;
+            log.start_error.clone().map_or(Ok(()), Err)
         }
         fn register(
             &mut self,
             id: &str,
             port: u16,
+            addrs: &[IpAddr],
             txt: &[(String, String)],
         ) -> Result<(), String> {
             self.0
                 .lock()
                 .unwrap()
                 .registers
-                .push((id.into(), port, txt.to_vec()));
+                .push((id.into(), port, addrs.to_vec(), txt.to_vec()));
             Ok(())
         }
         fn unregister(&mut self) {}
@@ -453,7 +474,7 @@ mod engine {
             fake.0.lock().unwrap().interfaces = vec![("en0".into(), "10.9.3.2".parse().unwrap())];
             let status = SharedStatus::default();
             let table = SharedCandidates::default();
-            let engine = Engine::new(fake.clone(), ID.into(), status.clone(), table.clone());
+            let engine = Engine::new(fake.clone(), Ok(ID.into()), status.clone(), table.clone());
             Self {
                 fake,
                 engine,
@@ -545,7 +566,7 @@ mod engine {
         let mut rig = Rig::new();
         rig.tick(&inputs(true, true), 0);
         let log = rig.fake.0.lock().unwrap();
-        let (id, port, txt) = log.registers.last().expect("announced").clone();
+        let (id, port, _, txt) = log.registers.last().expect("announced").clone();
         assert_eq!((id.as_str(), port), (ID, 7788));
         let mut keys: Vec<&str> = txt.iter().map(|(k, _)| k.as_str()).collect();
         keys.sort();
@@ -813,6 +834,157 @@ mod engine {
             vec![("en1".into(), "192.168.1.20".parse().unwrap())];
         rig.tick(&inputs(true, false), 30);
         assert!(rig.candidates(30).is_empty());
+    }
+
+    /// A restarted peer announcing the same address keeps its candidate when the old
+    /// record's removal arrives.
+    #[test]
+    fn a_shared_address_survives_one_instance_removal() {
+        let mut rig = Rig::new();
+        rig.tick(&inputs(true, false), 0);
+        rig.event(resolved("old._xmsg._tcp.local.", &["10.9.4.1"], &[]), 1);
+        rig.event(resolved("new._xmsg._tcp.local.", &["10.9.4.1"], &[]), 2);
+        for _ in 0..3 {
+            rig.event(
+                Event::Removed {
+                    fullname: "old._xmsg._tcp.local.".into(),
+                },
+                3,
+            );
+        }
+        assert_eq!(rig.candidates(3), ["10.9.4.1:7788".parse().unwrap()]);
+        rig.event(
+            Event::Removed {
+                fullname: "new._xmsg._tcp.local.".into(),
+            },
+            4,
+        );
+        assert!(rig.candidates(4).is_empty());
+    }
+
+    /// A responder error (a 5353 bind failure) reads `failed` with its cause, never
+    /// `lan_silent`, even past the echo deadline.
+    #[test]
+    fn a_responder_error_is_failed_not_lan_silent() {
+        let mut rig = Rig::new();
+        rig.tick(&inputs(true, true), 0);
+        rig.event(
+            Event::Failed("cannot bind UDP 5353: Address in use".into()),
+            1,
+        );
+        rig.engine.check_echo(rig.at(ECHO_DEADLINE.as_secs() + 1));
+        let (state, detail) = rig.state();
+        assert_eq!(state, State::Failed);
+        assert!(detail.contains("cannot bind UDP 5353"), "{detail}");
+    }
+
+    /// The bind probe sees a port it can't share.
+    #[test]
+    fn the_bind_probe_reports_a_held_port() {
+        let held = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        let port = held.local_addr().unwrap().port();
+        let error = probe_bind(port).unwrap_err();
+        assert!(
+            error.contains(&format!("cannot bind UDP {port}")),
+            "{error}"
+        );
+        // Control: a port held with the same reuse options is shared.
+        let shared =
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, None).unwrap();
+        shared.set_reuse_address(true).unwrap();
+        shared.set_reuse_port(true).unwrap();
+        shared
+            .bind(&std::net::SocketAddr::from(([0, 0, 0, 0], 0)).into())
+            .unwrap();
+        let port = shared.local_addr().unwrap().as_socket().unwrap().port();
+        assert_eq!(probe_bind(port), Ok(()));
+    }
+
+    #[test]
+    fn a_failure_warns_once_per_cause() {
+        let mut rig = Rig::new();
+        rig.fake.0.lock().unwrap().start_error = Some("cannot bind UDP 5353: busy".into());
+        for tick in 0..4 {
+            rig.tick(&inputs(true, true), tick * 30);
+        }
+        assert_eq!(rig.state().0, State::Failed);
+        assert_eq!(rig.engine.warnings(), 1);
+        rig.fake.0.lock().unwrap().start_error = Some("cannot open a UDP socket".into());
+        rig.tick(&inputs(true, true), 150);
+        rig.tick(&inputs(true, true), 180);
+        assert_eq!(rig.engine.warnings(), 2);
+    }
+
+    /// Only dialable addresses are announced, and only in the listener's families.
+    #[test]
+    fn announced_addresses_are_dialable() {
+        let interfaces: Vec<(String, IpAddr)> = [
+            ("en0", "10.9.3.2"),
+            ("en0", "fe80::c94:1"),
+            ("en0", "2001:db8::5"),
+            ("en1", "169.254.3.3"),
+        ]
+        .iter()
+        .map(|(n, a)| (n.to_string(), a.parse().unwrap()))
+        .collect();
+        let at = |listen: &str| -> Vec<String> {
+            announce_addrs(listen.parse().unwrap(), &interfaces)
+                .iter()
+                .map(|a| a.to_string())
+                .collect()
+        };
+        assert_eq!(at("0.0.0.0:7788"), ["10.9.3.2"]);
+        assert_eq!(at("[::]:7788"), ["10.9.3.2", "2001:db8::5"]);
+        assert_eq!(at("10.9.3.2:7788"), ["10.9.3.2"]);
+        assert!(at("169.254.3.3:7788").is_empty());
+
+        let mut rig = Rig::new();
+        rig.fake.0.lock().unwrap().interfaces = interfaces.clone();
+        rig.tick(
+            &Inputs {
+                fed_listen: Some("[::]:7788".parse().unwrap()),
+                ..inputs(true, true)
+            },
+            0,
+        );
+        let announced = rig.fake.0.lock().unwrap().registers[0].2.clone();
+        assert_eq!(
+            announced,
+            [
+                "10.9.3.2".parse::<IpAddr>().unwrap(),
+                "2001:db8::5".parse().unwrap()
+            ]
+        );
+        let mut rig = Rig::new();
+        rig.fake.0.lock().unwrap().interfaces = interfaces;
+        rig.tick(
+            &Inputs {
+                fed_listen: Some("169.254.3.3:7788".parse().unwrap()),
+                ..inputs(true, true)
+            },
+            0,
+        );
+        assert_eq!(rig.state().0, State::BrowseOnly);
+        assert!(rig.fake.0.lock().unwrap().registers.is_empty());
+    }
+
+    /// Without a random id the node never announces; it browses and says why.
+    #[test]
+    fn no_random_id_is_browse_only() {
+        let fake = Fake::default();
+        fake.0.lock().unwrap().interfaces = vec![("en0".into(), "10.9.3.2".parse().unwrap())];
+        let status = SharedStatus::default();
+        let mut engine = Engine::new(
+            fake.clone(),
+            Err("entropy unavailable".into()),
+            status.clone(),
+            SharedCandidates::default(),
+        );
+        engine.reconcile(&inputs(true, true), Instant::now());
+        assert!(fake.0.lock().unwrap().registers.is_empty());
+        let s = status.lock().unwrap();
+        assert_eq!(s.state, State::BrowseOnly);
+        assert!(s.detail.contains("entropy unavailable"), "{}", s.detail);
     }
 
     /// M5 (macOS): the real responder binds beside mDNSResponder and receives a record

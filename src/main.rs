@@ -1957,6 +1957,7 @@ async fn run_shutdown_drain(
         }
     });
 
+    let _ = tokio::task::spawn_blocking(|| xmsg::discovery::stop(Duration::from_secs(1))).await;
     // 1. Notify axum servers to stop accepting connections and drain
     let _ = shutdown_tx.send(true);
 

@@ -28,16 +28,24 @@ your rules don't already trust.
 
 Each node keeps at most 64 mDNS candidates and evicts the oldest first. A candidate
 lives at most `ttl_secs` (600 seconds by default) after the source last saw it, and goes
-as soon as the announcer withdraws its record. Loopback, unspecified, multicast and IPv6
-link-local addresses are never kept. **IPv6 link-local addresses aren't used yet:** a
-link-local address needs an interface scope to be dialled, and scoped addresses are not
-kept in this version.
+as soon as the announcer withdraws its record. Loopback, unspecified, multicast and
+link-local addresses (IPv4 `169.254.0.0/16` and IPv6 `fe80::/10`) are never kept. **IPv6
+link-local addresses aren't used yet:** a link-local address needs an interface scope to
+be dialled, and scoped addresses are not kept in this version. Two announcements of the
+same address, such as a restarted peer, share one candidate, and it stays until both are
+withdrawn.
 
 ## What a node announces (planned)
 
-The announcement is `_xmsg._tcp.local.`: the SRV record carries the `--fed-listen` port
-and the address records carry the interface addresses. The TXT record carries exactly
-two keys:
+The announcement is `_xmsg._tcp.local.`: the SRV record carries the `--fed-listen` port,
+and the address records carry only addresses the listener can be dialled at:
+
+- a specific `--fed-listen` address announces just that address;
+- `0.0.0.0` announces the node's IPv4 interface addresses;
+- `[::]` announces its IPv4 and IPv6 interface addresses;
+- loopback and link-local addresses are never announced.
+
+The TXT record carries exactly two keys:
 
 | Key | Value |
 | --- | --- |
@@ -102,14 +110,15 @@ is one of:
 | State | Meaning |
 | --- | --- |
 | `off` | The key is absent, or the build lacks mDNS. |
-| `starting` | The responder is starting, or waiting for the first echo. |
+| `starting` | The responder is starting, or waiting for the first echo. Past the 15-second echo deadline, doctor warns that it is still starting. |
 | `active` | Our own announcement came back on a LAN address. |
 | `lan_silent` | No LAN echo by the deadline: LAN multicast is blocked. See [troubleshooting](/operations/troubleshooting/#lan-discovery-on-macos-local-network-permission-planned). |
-| `failed` | The responder failed to start or stopped; the detail names the cause. It retries on the next tick. |
+| `failed` | The responder failed to start or stopped, for example because UDP 5353 couldn't be bound; the detail names the cause. It retries on the next tick and logs each distinct cause once. |
 | `browse_only` | Announce is off or not possible, so the echo can't be checked. |
 
 `lan_silent` is re-checked on every tick, so allowing access later turns the state
 `active` without a restart. A changed set of network interfaces (a Wi-Fi roam, sleep
-and wake) re-announces and re-runs the echo check.
+and wake) re-announces and re-runs the echo check. When serve shuts down it withdraws
+its announcement, waiting at most a second.
 
 LAN discovery reaches one network segment only: not a tailnet and not across k8s pods.

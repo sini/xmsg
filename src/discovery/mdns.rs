@@ -9,6 +9,7 @@ use super::{
 };
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -42,8 +43,15 @@ pub enum Event {
 pub trait Backend {
     /// Start the responder and browse `SERVICE_TYPE`.
     fn start(&mut self) -> Result<(), String>;
-    /// (Re-)announce our instance `id` on `port` with `txt`, and replay the browse cache.
-    fn register(&mut self, id: &str, port: u16, txt: &[(String, String)]) -> Result<(), String>;
+    /// (Re-)announce our instance `id` at `addrs` on `port` with `txt`, and replay the browse
+    /// cache.
+    fn register(
+        &mut self,
+        id: &str,
+        port: u16,
+        addrs: &[IpAddr],
+        txt: &[(String, String)],
+    ) -> Result<(), String>;
     fn unregister(&mut self);
     fn stop(&mut self);
     fn recv(&mut self, timeout: Duration) -> Option<Event>;
@@ -68,6 +76,26 @@ pub fn txt(id: &str, root: &[u8; 32]) -> Vec<(String, String)> {
     ]
 }
 
+/// The addresses a node listening on `listen` can be dialled at: that IP when it is specific;
+/// for `0.0.0.0` the IPv4 interface addresses; for `[::]` both families. Never loopback or
+/// link-local.
+pub fn announce_addrs(listen: SocketAddr, interfaces: &[(String, IpAddr)]) -> Vec<IpAddr> {
+    let ip = listen.ip();
+    let mut out: Vec<IpAddr> = if ip.is_unspecified() {
+        interfaces
+            .iter()
+            .map(|(_, a)| *a)
+            .filter(|a| ip.is_ipv6() || a.is_ipv4())
+            .collect()
+    } else {
+        vec![ip]
+    };
+    out.retain(|a| acceptable_ip(*a));
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn lan_silent_detail(interfaces: usize) -> String {
     if interfaces == 0 {
         return "no non-loopback network interface (0 interfaces), so LAN discovery is silent"
@@ -82,7 +110,7 @@ fn lan_silent_detail(interfaces: usize) -> String {
 
 pub struct Engine<B> {
     pub backend: B,
-    id: String,
+    id: Result<String, String>,
     status: SharedStatus,
     candidates: SharedCandidates,
     running: bool,
@@ -94,12 +122,18 @@ pub struct Engine<B> {
     instances: HashMap<String, Vec<(SocketAddr, Vec<String>)>>,
     ttl: Duration,
     warned: Option<String>,
+    warnings: u64,
     dropped: u64,
 }
 
 impl<B: Backend> Engine<B> {
-    /// `id` is this process's opaque TXT id.
-    pub fn new(backend: B, id: String, status: SharedStatus, candidates: SharedCandidates) -> Self {
+    /// `id` is this process's opaque TXT id, or why there is none (then it never announces).
+    pub fn new(
+        backend: B,
+        id: Result<String, String>,
+        status: SharedStatus,
+        candidates: SharedCandidates,
+    ) -> Self {
         Self {
             backend,
             id,
@@ -114,6 +148,7 @@ impl<B: Backend> Engine<B> {
             instances: HashMap::new(),
             ttl: Duration::from_secs(MAX_TTL_SECS),
             warned: None,
+            warnings: 0,
             dropped: 0,
         }
     }
@@ -136,6 +171,20 @@ impl<B: Backend> Engine<B> {
         self.candidates
             .write()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Logs `what` once per distinct `cause`; a changed cause logs again.
+    fn warn_once(&mut self, cause: &str, what: &str) {
+        if self.warned.as_deref() != Some(cause) {
+            tracing::warn!(cause = %cause, "{what}");
+            self.warned = Some(cause.to_string());
+            self.warnings += 1;
+        }
+    }
+
+    /// Warnings logged so far.
+    pub fn warnings(&self) -> u64 {
+        self.warnings
     }
 
     /// Link-local and other unusable addresses dropped so far.
@@ -175,7 +224,7 @@ impl<B: Backend> Engine<B> {
         if !self.running {
             self.set(State::Starting, "starting the mDNS responder");
             if let Err(error) = self.backend.start() {
-                tracing::warn!(%error, "LAN discovery failed to start; serving without it");
+                self.warn_once(&error, "LAN discovery failed to start; serving without it");
                 self.set(State::Failed, error);
                 return;
             }
@@ -197,8 +246,9 @@ impl<B: Backend> Engine<B> {
         match (self.announce_refusal(&config, inputs), inputs.root) {
             (None, Some(root)) => {
                 if self.announced != Some(root) || changed || self.state() == State::LanSilent {
-                    let port = inputs.fed_listen.map_or(0, |a| a.port());
-                    self.announce(root, port, now);
+                    if let Some(listen) = inputs.fed_listen {
+                        self.announce(root, listen, now);
+                    }
                 }
             }
             (refusal, _) => {
@@ -207,9 +257,8 @@ impl<B: Backend> Engine<B> {
                 }
                 self.echo_deadline = None;
                 let reason = refusal.unwrap_or_default();
-                if config.announce && self.warned.as_deref() != Some(reason.as_str()) {
-                    tracing::warn!(reason = %reason, "LAN discovery is browse-only");
-                    self.warned = Some(reason.clone());
+                if config.announce {
+                    self.warn_once(&reason, "LAN discovery is browse-only");
                 }
                 self.set(State::BrowseOnly, reason);
             }
@@ -236,6 +285,9 @@ impl<B: Backend> Engine<B> {
         if !config.announce {
             return Some("announce is off".into());
         }
+        if let Err(error) = &self.id {
+            return Some(format!("no random id for the announcement: {error}"));
+        }
         if inputs.root.is_none() {
             return Some("no federation CA root to announce".into());
         }
@@ -248,11 +300,21 @@ impl<B: Backend> Engine<B> {
                 "--fed-listen {ip} is not an address on a LAN interface"
             ));
         }
+        if !self.interfaces.is_empty() && announce_addrs(listen, &self.interfaces).is_empty() {
+            return Some(format!("--fed-listen {ip} has no dialable LAN address"));
+        }
         None
     }
 
-    fn announce(&mut self, root: [u8; 32], port: u16, now: Instant) {
-        match self.backend.register(&self.id, port, &txt(&self.id, &root)) {
+    fn announce(&mut self, root: [u8; 32], listen: SocketAddr, now: Instant) {
+        let Ok(id) = self.id.clone() else {
+            return;
+        };
+        let addrs = announce_addrs(listen, &self.interfaces);
+        match self
+            .backend
+            .register(&id, listen.port(), &addrs, &txt(&id, &root))
+        {
             Ok(()) => {
                 self.announced = Some(root);
                 self.echo_seen = false;
@@ -265,7 +327,7 @@ impl<B: Backend> Engine<B> {
                 }
             }
             Err(error) => {
-                tracing::warn!(%error, "LAN discovery could not announce");
+                self.warn_once(&error, "LAN discovery could not announce");
                 self.announced = None;
                 self.set(State::Failed, error);
             }
@@ -295,15 +357,25 @@ impl<B: Backend> Engine<B> {
             });
         }
         self.instances.retain(|_, addrs| !addrs.is_empty());
-        let gone: HashSet<SocketAddr> = gone.into_iter().collect();
+        let held = self.held();
+        let gone: HashSet<SocketAddr> = gone.into_iter().filter(|a| !held.contains(a)).collect();
         self.table()
             .retain_source(Source::Mdns, |c| !gone.contains(&c.addr));
+    }
+
+    /// Addresses some known instance still announces.
+    fn held(&self) -> HashSet<SocketAddr> {
+        self.instances
+            .values()
+            .flatten()
+            .map(|(addr, _)| *addr)
+            .collect()
     }
 
     pub fn handle(&mut self, event: Event, now: Instant) {
         match event {
             Event::Failed(error) => {
-                tracing::warn!(%error, "LAN discovery stopped; restarting on the next tick");
+                self.warn_once(&error, "LAN discovery stopped; restarting on the next tick");
                 self.backend.stop();
                 self.running = false;
                 self.announced = None;
@@ -321,10 +393,14 @@ impl<B: Backend> Engine<B> {
     }
 
     fn remove_instance(&mut self, fullname: &str) {
+        // Another instance (a restarted peer) may announce the same address: keep it then.
         if let Some(addrs) = self.instances.remove(fullname) {
+            let held = self.held();
             let mut table = self.table();
             for (addr, _) in addrs {
-                table.remove(Source::Mdns, addr);
+                if !held.contains(&addr) {
+                    table.remove(Source::Mdns, addr);
+                }
             }
         }
     }
@@ -339,9 +415,10 @@ impl<B: Backend> Engine<B> {
     ) {
         let value = |key: &str| txt.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
         let id = value("id");
-        if id == Some(self.id.as_str()) {
+        if id.is_some() && id == self.id.as_deref().ok() {
             if self.announced.is_some() && addrs.iter().any(|(ip, _)| acceptable_ip(*ip)) {
                 self.echo_seen = true;
+                self.warned = None;
                 self.set(State::Active, "our announcement came back on the LAN");
             }
             return;
@@ -380,12 +457,13 @@ impl<B: Backend> Engine<B> {
         let ttl = self.ttl;
         let hint = id.map(str::to_string);
         let previous = self.instances.remove(&fullname).unwrap_or_default();
+        let held = self.held();
         let mut kept = Vec::new();
         let mut dropped = 0;
         {
             let mut table = self.table();
             for (addr, _) in &previous {
-                if !fresh.iter().any(|(a, _)| a == addr) {
+                if !fresh.iter().any(|(a, _)| a == addr) && !held.contains(addr) {
                     table.remove(Source::Mdns, *addr);
                 }
             }
@@ -420,11 +498,16 @@ impl<B: Backend> Engine<B> {
         }
     }
 
-    /// Runs forever on the calling thread: a reconcile every `TICK` from `inputs`, events in
-    /// between.
-    pub fn run(mut self, mut inputs: impl FnMut() -> Inputs) -> ! {
+    /// Runs on the calling thread until [`stop`]: a reconcile every `TICK` from `inputs`,
+    /// events in between.
+    pub fn run(mut self, mut inputs: impl FnMut() -> Inputs) {
         let mut next_tick = Instant::now();
         loop {
+            if STOP.load(Ordering::SeqCst) {
+                self.shutdown();
+                STOPPED.store(true, Ordering::SeqCst);
+                return;
+            }
             let now = Instant::now();
             if now >= next_tick {
                 self.reconcile(&inputs(), now);
@@ -434,7 +517,10 @@ impl<B: Backend> Engine<B> {
             let until = self
                 .echo_deadline()
                 .map_or(next_tick, |d| d.min(next_tick))
-                .max(now + Duration::from_millis(50));
+                .clamp(
+                    now + Duration::from_millis(50),
+                    now + Duration::from_millis(250),
+                );
             if !self.running {
                 std::thread::sleep(until - now);
             } else if let Some(event) = self.backend.recv(until - now) {
@@ -450,14 +536,35 @@ impl<B: Backend> Engine<B> {
 pub struct MdnsSd {
     daemon: Option<mdns_sd::ServiceDaemon>,
     events: Option<mdns_sd::Receiver<mdns_sd::ServiceEvent>>,
+    monitor: Option<mdns_sd::Receiver<mdns_sd::DaemonEvent>>,
     registered: Option<String>,
+}
+
+/// Binds UDP `port` on 0.0.0.0 with the reuse options mdns-sd uses, then lets it go. mdns-sd
+/// only logs its own bind failure, so this is how one is seen.
+pub fn probe_bind(port: u16) -> Result<(), String> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )
+    .map_err(|e| format!("cannot open a UDP socket: {e}"))?;
+    socket
+        .set_reuse_address(true)
+        .map_err(|e| format!("cannot set SO_REUSEADDR: {e}"))?;
+    let _ = socket.set_reuse_port(true);
+    socket
+        .bind(&SocketAddr::from(([0, 0, 0, 0], port)).into())
+        .map_err(|e| format!("cannot bind UDP {port}: {e}"))
 }
 
 impl Backend for MdnsSd {
     fn start(&mut self) -> Result<(), String> {
+        probe_bind(5353)?;
         let daemon = mdns_sd::ServiceDaemon::new()
             .map_err(|e| format!("the mDNS responder failed to start: {e}"))?;
         let _ = daemon.set_ip_check_interval(IP_CHECK_SECS);
+        self.monitor = daemon.monitor().ok();
         let events = daemon
             .browse(SERVICE_TYPE)
             .map_err(|e| format!("mDNS browse failed: {e}"))?;
@@ -466,12 +573,17 @@ impl Backend for MdnsSd {
         Ok(())
     }
 
-    fn register(&mut self, id: &str, port: u16, txt: &[(String, String)]) -> Result<(), String> {
+    fn register(
+        &mut self,
+        id: &str,
+        port: u16,
+        addrs: &[IpAddr],
+        txt: &[(String, String)],
+    ) -> Result<(), String> {
         let daemon = self.daemon.as_ref().ok_or("mDNS responder not running")?;
-        let info =
-            mdns_sd::ServiceInfo::new(SERVICE_TYPE, id, &format!("{id}.local."), "", port, txt)
-                .map_err(|e| format!("invalid mDNS announcement: {e}"))?
-                .enable_addr_auto();
+        let host = format!("{id}.local.");
+        let info = mdns_sd::ServiceInfo::new(SERVICE_TYPE, id, &host, addrs, port, txt)
+            .map_err(|e| format!("invalid mDNS announcement: {e}"))?;
         let fullname = info.get_fullname().to_string();
         daemon
             .register(info)
@@ -493,13 +605,17 @@ impl Backend for MdnsSd {
     fn stop(&mut self) {
         self.unregister();
         self.events = None;
+        self.monitor = None;
         if let Some(daemon) = self.daemon.take() {
             let _ = daemon.shutdown();
         }
     }
 
     fn recv(&mut self, timeout: Duration) -> Option<Event> {
-        use mdns_sd::{RecvTimeoutError, ServiceEvent};
+        use mdns_sd::{DaemonEvent, RecvTimeoutError, ServiceEvent};
+        if let Some(Ok(DaemonEvent::Error(error))) = self.monitor.as_ref().map(|m| m.try_recv()) {
+            return Some(Event::Failed(format!("mDNS responder error: {error}")));
+        }
         let events = self.events.as_ref()?;
         match events.recv_timeout(timeout) {
             Ok(ServiceEvent::ServiceResolved(r)) => Some(Event::Resolved {
@@ -547,10 +663,23 @@ impl Backend for MdnsSd {
 }
 
 /// A fresh opaque id for this process's announcement.
-pub fn random_id() -> String {
+pub fn random_id() -> Result<String, String> {
     let mut bytes = [0u8; 8];
-    let _ = getrandom::fill(&mut bytes);
-    hex::encode(bytes)
+    getrandom::fill(&mut bytes).map_err(|e| e.to_string())?;
+    Ok(hex::encode(bytes))
+}
+
+static STOP: AtomicBool = AtomicBool::new(false);
+static STOPPED: AtomicBool = AtomicBool::new(false);
+
+/// Asks the running source to withdraw its announcement and shut down, waiting at most
+/// `bound`.
+pub fn stop(bound: Duration) {
+    STOP.store(true, Ordering::SeqCst);
+    let deadline = Instant::now() + bound;
+    while !STOPPED.load(Ordering::SeqCst) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Starts the source on its own thread; it reads the current peers map on every tick.
@@ -566,14 +695,16 @@ pub fn spawn(
         .spawn(move || {
             engine.run(|| {
                 let peers = fed.current_peers();
+                let mdns = peers
+                    .discovery
+                    .source_enabled(Source::Mdns)
+                    .then_some(peers.discovery.mdns)
+                    .flatten();
                 Inputs {
-                    mdns: peers
-                        .discovery
-                        .source_enabled(Source::Mdns)
-                        .then_some(peers.discovery.mdns)
-                        .flatten(),
+                    // Only a running source reads and parses the CA bundle.
+                    root: mdns.and_then(|_| super::root_fingerprint(&peers)),
+                    mdns,
                     ttl_secs: peers.discovery.ttl_secs,
-                    root: super::root_fingerprint(&peers),
                     fed_listen,
                 }
             })

@@ -265,7 +265,17 @@ fn discovery(report: &mut Report, mdns: &serde_json::Map<String, Value>) {
         .unwrap_or("unknown");
     let detail = mdns.get("detail").and_then(Value::as_str).unwrap_or("");
     let candidates = mdns.get("candidates").and_then(Value::as_u64).unwrap_or(0);
+    // Past the 15 s echo deadline a source still `starting` is stuck.
+    let since = mdns.get("since").and_then(Value::as_u64);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let stuck = state == "starting" && since.is_some_and(|t| now.saturating_sub(t) > 15);
     let (status, hint) = match state {
+        "starting" if stuck => (
+            Status::Warn,
+            Some("The mDNS responder is still starting; check the node log. Serving continues without it."),
+        ),
         "active" | "off" | "starting" | "browse_only" => (Status::Pass, None),
         "lan_silent" => (Status::Warn, Some("LAN multicast is blocked: on macOS allow xmsg in System Settings › Privacy & Security › Local Network; on Linux open UDP 5353.")),
         _ => (Status::Warn, Some("Check the node log for the LAN discovery error; serving continues without it.")),
