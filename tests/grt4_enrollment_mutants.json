@@ -475,5 +475,24 @@
     "assertion_line": 1069,
     "assertion_sha256": "66de4162812075b1764ce42d05b6d66da8dfdeff4aa617b23d210915bfa7c42c",
     "assertion_rule": "unique-static-message"
+  },
+  {
+    "label": "grt4-enroll-device-concrete-mode",
+    "oracle": "G8 device fresh concrete reservation mode; SQL-arrival ordering is separately gated, this is not a freshness proof",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::grt4_actual_device_approval_refreshes_ownership_after_sql_wait",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": ".lease_enrollment_name(uri, false)",
+        "replacement": ".lease_enrollment_name(uri, true)"
+      }
+    ],
+    "expected_literal": "grt4 actual approval retained stale pre-SQL name ownership",
+    "assertion_file": "src/enroll_device_invariant_tests.rs",
+    "assertion_line": 1092,
+    "assertion_sha256": "0039461ac63c17bd675126a662772533300d7131262387ee4ac2b4f0e82cd9f9",
+    "assertion_rule": "unique-static-message"
   }
 ]
