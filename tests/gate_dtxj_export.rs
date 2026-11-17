@@ -945,16 +945,31 @@ async fn stale_hub_resolver_cannot_restore_revoked_observe_authority() {
         &[],
     )
     .unwrap();
+    let current = fixture.state.current_peers();
+    let uri = xmsg::fed::extract_uri_sans(&fixture.client_cert)
+        .unwrap()
+        .remove(0);
     assert!(
-        fixture
-            .state
-            .current_peers()
+        current
+            .admitted_clients
+            .read()
+            .unwrap()
+            .get(&uri)
+            .unwrap()
+            .config
+            .allow
+            .iter()
+            .any(|right| right == "observe"),
+        "forced old resolver did not overwrite the shared cache"
+    );
+    assert!(
+        !current
             .get_peer_config(&fixture.client_name)
             .unwrap()
             .allow
             .iter()
             .any(|right| right == "observe"),
-        "forced old resolver did not overwrite the shared cache"
+        "current rule lookup restored a stale observe grant"
     );
     assert_eq!(
         Fixture::exchange(&mut sender, "/fed/v2/observe/events", "")
