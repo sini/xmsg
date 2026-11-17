@@ -101,6 +101,11 @@ path = "tests/e2e_agy_delivery.rs"
 required-features = ["daemon"]
 
 [[test]]
+name = "agy_spawn_fds"
+path = "tests/agy_spawn_fds.rs"
+required-features = ["daemon"]
+
+[[test]]
 name = "e2e_http"
 path = "tests/e2e_http.rs"
 required-features = ["daemon"]
