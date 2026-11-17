@@ -142,6 +142,10 @@ let
           copiesExe = lib.hasInfix "install -m 0755 ${builtins.unsafeDiscardStringContext darwinExe} " (
             builtins.unsafeDiscardStringContext c.home.activation.xmsgInstallStableExe.data
           );
+          # `mv -T` is GNU-only: the rename must name coreutils, never BSD /bin/mv.
+          gnuMv = lib.hasInfix "run ${builtins.unsafeDiscardStringContext nixpkgs.legacyPackages.${system}.coreutils}/bin/mv -fT " (
+            builtins.unsafeDiscardStringContext c.home.activation.xmsgInstallStableExe.data
+          );
         };
         restart = {
           inherit (c.home.activation.xmsgRestartStableExe) after;
@@ -190,6 +194,7 @@ let
           after = [ "writeBoundary" ];
           before = [ "setupLaunchAgents" ];
           copiesExe = true;
+          gnuMv = true;
         };
         restart = {
           after = [ "setupLaunchAgents" ];

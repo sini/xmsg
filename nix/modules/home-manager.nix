@@ -335,6 +335,7 @@ let
   # keeps the path (and its Local Network grant) and never rewrites a running binary's inode.
   # A fixed temp name: a failed run leaves one `.new`, which the next run's install overwrites.
   # Only a replaced file kicks: on first install setupLaunchAgents' RunAtLoad starts the agent.
+  # Tools by store path: `mv -T` is GNU-only, and BSD /bin/mv must never be picked up.
   installStableExe = ''
     xmsgStable=${lib.escapeShellArg srv.stableExecutable}
     xmsgStableReplaced=
@@ -342,13 +343,13 @@ let
       errorEcho "xmsg: $xmsgStable is a directory; remove it or set programs.xmsg.server.stableExecutable"
       exit 1
     fi
-    if [ -L "$xmsgStable" ] || ! cmp -s ${exe} "$xmsgStable"; then
+    if [ -L "$xmsgStable" ] || ! ${pkgs.diffutils}/bin/cmp -s ${exe} "$xmsgStable"; then
       if [ -e "$xmsgStable" ] || [ -L "$xmsgStable" ]; then
         xmsgStableReplaced=1
       fi
-      run mkdir -p -m 0700 "$(dirname "$xmsgStable")"
-      run install -m 0755 ${exe} "$xmsgStable.new"
-      run mv -fT "$xmsgStable.new" "$xmsgStable"
+      run ${pkgs.coreutils}/bin/mkdir -p -m 0700 "$(${pkgs.coreutils}/bin/dirname "$xmsgStable")"
+      run ${pkgs.coreutils}/bin/install -m 0755 ${exe} "$xmsgStable.new"
+      run ${pkgs.coreutils}/bin/mv -fT "$xmsgStable.new" "$xmsgStable"
     fi
   '';
   # Darwin: launchd opens these as the agent starts but does not create their directory.
