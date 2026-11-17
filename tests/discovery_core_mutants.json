@@ -1,0 +1,153 @@
+[
+  {
+    "label": "discovery-verified-identity-key",
+    "target": "lib",
+    "test": "discovery::dial::tests::candidate_hint_never_names_the_verified_presence",
+    "test_file": "src/discovery/dial_tests.rs",
+    "expected_literal": "verified M was not keyed by its certificate URI",
+    "edits": [
+      {
+        "file": "src/discovery/dial.rs",
+        "needle": "uri: verified_uri,",
+        "replacement": "uri: candidate.hint.clone().unwrap_or(verified_uri),"
+      }
+    ]
+  },
+  {
+    "label": "discovery-exact-verifier",
+    "target": "lib",
+    "test": "discovery::dial::tests::unruled_candidate_is_rejected_and_negative_cache_prevents_immediate_reprobe",
+    "test_file": "src/discovery/dial_tests.rs",
+    "expected_literal": "an unruled certificate became a direct peer",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if !uri_matches_any_identity(&uris[0], &self.allowed_identities) {",
+        "replacement": "if false && !uri_matches_any_identity(&uris[0], &self.allowed_identities) {",
+        "start": "impl rustls::client::danger::ServerCertVerifier for CaServerCertVerifier"
+      }
+    ]
+  },
+  {
+    "label": "discovery-static-send",
+    "target": "lib",
+    "test": "discovery::dial::tests::static_address_wins_over_an_actually_verified_discovered_presence_for_send",
+    "test_file": "src/discovery/dial_tests.rs",
+    "expected_literal": "static endpoint did not receive the operation",
+    "edits": [
+      {
+        "file": "src/discovery/dial.rs",
+        "needle": "if !peer.address.is_empty() {",
+        "replacement": "if false && !peer.address.is_empty() {",
+        "start": "pub async fn resolve_dial",
+        "end": "pub fn is_direct"
+      }
+    ]
+  },
+  {
+    "label": "discovery-static-reverse-answer",
+    "target": "lib",
+    "test": "discovery::dial::tests::static_address_wins_for_reverse_observe_error_answer",
+    "test_file": "src/discovery/dial_tests.rs",
+    "expected_literal": "static endpoint did not receive the reverse-observe answer",
+    "edits": [
+      {
+        "file": "src/discovery/dial.rs",
+        "needle": "if !peer.address.is_empty() {",
+        "replacement": "if false && !peer.address.is_empty() {",
+        "start": "pub async fn resolve_dial",
+        "end": "pub fn is_direct"
+      }
+    ]
+  },
+  {
+    "label": "discovery-static-failure",
+    "target": "lib",
+    "test": "discovery::dial::tests::static_connection_failure_does_not_fall_through_to_discovered_presence",
+    "test_file": "src/discovery/dial_tests.rs",
+    "expected_literal": "failed static endpoint silently fell through to discovery or its hub",
+    "edits": [
+      {
+        "file": "src/discovery/dial.rs",
+        "needle": "if !peer.address.is_empty() {",
+        "replacement": "if false && !peer.address.is_empty() {",
+        "start": "pub async fn resolve_dial",
+        "end": "pub fn is_direct"
+      }
+    ]
+  },
+  {
+    "label": "discovery-unavailable-source",
+    "target": "lib",
+    "test": "discovery::tests::address_omission_requires_ca_and_an_available_source",
+    "test_file": "src/discovery/mod.rs",
+    "expected_literal": "unavailable source accepted omission",
+    "edits": [
+      {
+        "file": "src/discovery/mod.rs",
+        "needle": "has_ca && source_enabled",
+        "replacement": "{ let _ = source_enabled; has_ca }"
+      }
+    ]
+  },
+  {
+    "label": "discovery-ca-only",
+    "target": "lib",
+    "test": "discovery::tests::address_omission_requires_ca_and_an_available_source",
+    "test_file": "src/discovery/mod.rs",
+    "expected_literal": "pin-only entry accepted source-dependent omission",
+    "edits": [
+      {
+        "file": "src/discovery/mod.rs",
+        "needle": "has_ca && source_enabled",
+        "replacement": "{ let _ = has_ca; source_enabled }"
+      }
+    ]
+  },
+  {
+    "label": "discovery-current-policy-commit",
+    "target": "lib",
+    "test": "discovery::dial::tests::policy_metadata_commit_is_leased_and_rejects_an_old_generation",
+    "test_file": "src/discovery/dial_tests.rs",
+    "expected_literal": "old generation metadata effect was committed",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if !Arc::ptr_eq(&current, expected) {",
+        "replacement": "if false && !Arc::ptr_eq(&current, expected) {",
+        "start": "pub(crate) fn with_discovery_policy",
+        "end": "pub(crate) fn dial_credentials"
+      }
+    ]
+  },
+  {
+    "label": "discovery-probe-limit",
+    "target": "lib",
+    "test": "discovery::dial::tests::discovery_probe_slots_are_shared_and_bounded",
+    "test_file": "src/discovery/dial_tests.rs",
+    "expected_literal": "discovery exceeded four shared probes",
+    "edits": [
+      {
+        "file": "src/discovery/state.rs",
+        "needle": "Semaphore::new(4)",
+        "replacement": "Semaphore::new(5)"
+      }
+    ]
+  },
+  {
+    "label": "discovery-existing-leaf-mailbox",
+    "target": "lib",
+    "test": "discovery::dial::tests::configured_leaf_keeps_its_existing_mailbox_route",
+    "test_file": "src/discovery/dial_tests.rs",
+    "expected_literal": "leaf mailbox route was lost",
+    "edits": [
+      {
+        "file": "src/discovery/dial.rs",
+        "needle": "return true;",
+        "replacement": "return false;",
+        "start": "pub fn is_direct",
+        "end": "    if !peer.address.is_empty()"
+      }
+    ]
+  }
+]

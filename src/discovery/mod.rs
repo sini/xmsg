@@ -412,8 +412,14 @@ mod tests {
     #[test]
     fn address_omission_requires_ca_and_an_available_source() {
         assert!(permits_address_omission(true, true));
-        assert!(!permits_address_omission(false, true));
-        assert!(!permits_address_omission(true, false));
+        assert!(
+            !permits_address_omission(false, true),
+            "pin-only entry accepted source-dependent omission"
+        );
+        assert!(
+            !permits_address_omission(true, false),
+            "unavailable source accepted omission"
+        );
         assert!(!permits_address_omission(false, false));
     }
 
