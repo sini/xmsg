@@ -54,6 +54,17 @@ The CA never issues the hub's own canonical name or a concrete peer's reserved
 name. Its root is separate from fleet and Kubernetes roots. Pod identities remain
 with their cluster issuer.
 
+**Planned name-ownership checks:** browser, pasted-redirect and device-code issuance, and
+renewal, recheck the proposed identity after waiting for store access and before issuing the
+certificate. An earlier device approval does not reserve a name. A foreign or ambiguous name
+is refused; normal renewal of the same bound identity remains supported.
+
+Before upgrading a hub that uses mixed host/user and namespace/service-account patterns,
+check for ambiguous aliases, **even if enrollment is disabled**. Another allowed full URI
+must not be able to derive the requested name. The configuration may load while those dynamic
+identities are refused. Reserve pods with concrete CA leaf entries or partition the patterns;
+see the [upgrade check and example](/concepts/hubs-and-leaves/#planned-reserve-pod-names-before-upgrading).
+
 ## Initialize and configure the hub
 
 Run these planned commands as the UID that will run the CA. Paths are examples;
