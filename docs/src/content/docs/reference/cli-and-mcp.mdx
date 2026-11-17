@@ -98,7 +98,7 @@ known-ID inspection. Existing caller-attribution rules still apply.
 
 ### `xmsg doctor` (planned)
 
-Checks local setup once and prints `pass`, `warn` or `fail` lines with fix hints:
+Checks local setup once and prints `info`, `pass`, `warn` or `fail` lines with fix hints:
 
 ```sh
 xmsg doctor
@@ -106,7 +106,8 @@ xmsg doctor --json
 xmsg doctor --http-sock /absolute/path/to/http.sock --db-path /absolute/path/to/xmsg.db
 ```
 
-The command exits `1` if any check fails. Warnings alone exit `0`. `--json` reports
+The command exits `1` if any check fails. Warnings alone exit `0`. Informational rows
+do not add to the passed, warning or failed totals. `--json` reports
 `checks` (each with `id`, `status`, `message` and `hint`), `passed`, `warnings`, `failed`,
 `client_version`, `client_build_revision` (planned) and `not_checked`.
 
@@ -178,9 +179,10 @@ there is no fallback to CLI peer dials if the daemon is down or lacks this endpo
 
 The invocation probes at most 32 configured peers in sorted order, with at most four
 concurrent attempts, two seconds per peer and an eight-second total deadline. Doctor's
-IPC deadline is nine seconds. A configured `leaf` without an address is reported as
-`outbound-only leaf; not probed (reachable through its own outbound link)`. This is
-informational and does not make coverage partial; its TLS, certificate expiry and clock
+IPC deadline is nine seconds. **Planned:** a configured `leaf` with an empty address
+or a reserved `.invalid` hostname (for example, `pod.invalid:443`) is reported as
+`INFO` with `outbound-only leaf, reached via its hub`. This does not add a pass or
+warning, and does not make coverage partial; its TLS, certificate expiry and clock
 offset remain unobserved. Addressless non-leaves and other unattempted entries remain
 unknown; no address is guessed. Peer failures and uncertain observations warn,
 rather than fail. An already-expired leaf certificate actually loaded by this daemon
