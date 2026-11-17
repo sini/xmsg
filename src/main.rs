@@ -1581,6 +1581,8 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
             }
         }
 
+        bg_tasks.push(xmsg::discovery::dial::spawn_sweep(&fs));
+
         if let Some((listener, listen_addr)) = fed_listener {
             let acceptor = match fs.get_tls_acceptor() {
                 Some(a) => a,
