@@ -131,14 +131,17 @@ fn cap(source: Source) -> usize {
     }
 }
 
-/// Loopback, unspecified, multicast and IPv6 link-local addresses are never candidates. A
-/// link-local address needs a scope id to be dialled, and none is kept.
+/// Loopback, unspecified, multicast and link-local (IPv4 169.254/16, IPv6 fe80::/10) addresses
+/// are never candidates. A link-local address needs a scope id to be dialled, and none is kept.
 pub fn acceptable_ip(ip: IpAddr) -> bool {
     let ip = match ip {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
         v4 => v4,
     };
-    let link_local = matches!(ip, IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80);
+    let link_local = match ip {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V6(v6) => v6.segments()[0] & 0xffc0 == 0xfe80,
+    };
     !(ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || link_local)
 }
 
@@ -297,6 +300,8 @@ mod tests {
             "[fe80::1]:7788",
             "[febf::1]:7788",
             "[::ffff:127.0.0.1]:7788",
+            "169.254.10.1:7788",
+            "[::ffff:169.254.10.1]:7788",
             "10.0.0.1:0",
         ] {
             assert!(!t.upsert(cand(addr, None, now, 60), now), "{addr} accepted");
