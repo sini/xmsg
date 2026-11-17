@@ -405,11 +405,7 @@ fn nodes_in_view(state: &AppState) -> Vec<String> {
         for k in peers.keys() {
             set.insert(k.clone());
         }
-        if let Ok(adm) = peers.admitted_clients.read() {
-            for k in adm.keys() {
-                set.insert(k.clone());
-            }
-        };
+        set.extend(peers.admitted_names());
     }
     set.into_iter().collect()
 }
@@ -431,11 +427,9 @@ fn peer_keys_for_host(peers: &crate::fed::PeersMap, host: &str) -> Vec<String> {
             matched.insert(key.clone());
         }
     }
-    if let Ok(adm) = peers.admitted_clients.read() {
-        for (key, client) in adm.iter() {
-            if host_part(&client.canonical_name) == Some(host) || host_part(key) == Some(host) {
-                matched.insert(key.clone());
-            }
+    for name in peers.admitted_names() {
+        if host_part(&name) == Some(host) {
+            matched.insert(name);
         }
     }
     matched.into_iter().collect()
@@ -2396,14 +2390,15 @@ async fn deliver_send(
         (Some(n), _) if n == state.node_name => Dest::Local,
         (Some(n), Some(fs)) => {
             let peers = fs.current_peers();
+            if peers.is_ambiguous_alias(n) {
+                return Err(AppError::Ambiguous(format!(
+                    "node '{n}' has ambiguous identity patterns"
+                )));
+            }
             let is_direct = if let Some(p) = peers.get(n) {
                 p.leaf || !p.address.is_empty()
             } else {
-                peers
-                    .admitted_clients
-                    .read()
-                    .ok()
-                    .is_some_and(|adm| adm.contains_key(n))
+                peers.get_peer_config(n).is_some()
             };
 
             if is_direct {
