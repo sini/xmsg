@@ -356,7 +356,9 @@
     "target": "lib",
     "test": "observe_collector_auth::tests::identity_header_fallback",
     "test_file": "src/observe_collector_auth_tests.rs",
-    "expected_literal": "panicked at src/observe_collector_auth_tests.rs:549",
+    "expected_literal": [
+      "panicked at src/observe_collector_auth_tests.rs:549"
+    ],
     "edits": [
       {
         "file": "src/observe_collector_auth.rs",
@@ -367,7 +369,14 @@
     "assertion_file": "src/observe_collector_auth_tests.rs",
     "assertion_line": 549,
     "assertion_sha256": "d0f4063174a4615fdcedf2718e2195476a8721199d29065df0ccc710cda903be",
-    "assertion_rule": "source_location"
+    "assertion_rule": "source_location",
+    "assertion_locations": [
+      {
+        "line": 549,
+        "literal": "panicked at src/observe_collector_auth_tests.rs:549",
+        "source": "    assert!("
+      }
+    ]
   },
   {
     "label": "legacy-dtxj-collector-auth-owner-bearer-limit",
@@ -734,7 +743,11 @@
     "target": "lib",
     "test": "observe_collector_net::tests::node_and_global_reservations_survive_forced_races",
     "test_file": "src/observe_collector_net_tests.rs",
-    "expected_literal": "panicked at src/observe_collector_net_tests.rs:274",
+    "expected_literal": [
+      "panicked at src/observe_collector_net_tests.rs:274",
+      "panicked at src/observe_collector_net_tests.rs:283",
+      "panicked at src/observe_collector_net_tests.rs:287"
+    ],
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
@@ -745,7 +758,24 @@
     "assertion_file": "src/observe_collector_net_tests.rs",
     "assertion_line": 274,
     "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
-    "assertion_rule": "specific-panic-location"
+    "assertion_rule": "specific-panic-location",
+    "assertion_locations": [
+      {
+        "line": 274,
+        "literal": "panicked at src/observe_collector_net_tests.rs:274",
+        "source": "    assert_eq!("
+      },
+      {
+        "line": 283,
+        "literal": "panicked at src/observe_collector_net_tests.rs:283",
+        "source": "    assert!("
+      },
+      {
+        "line": 287,
+        "literal": "panicked at src/observe_collector_net_tests.rs:287",
+        "source": "    assert_eq!(fixture.requests.load(Ordering::SeqCst), 8);"
+      }
+    ]
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-wire-byte-cap",
@@ -860,7 +890,10 @@
     "target": "lib",
     "test": "observe_collector_net::tests::whole_rpc_deadline_aborts_header_and_body_drivers",
     "test_file": "src/observe_collector_net_tests.rs",
-    "expected_literal": "panicked at src/observe_collector_net_tests.rs:376",
+    "expected_literal": [
+      "panicked at src/observe_collector_net_tests.rs:376",
+      "panicked at src/observe_collector_net_tests.rs:388"
+    ],
     "edits": [
       {
         "file": "src/observe_collector_net.rs",
@@ -871,7 +904,19 @@
     "assertion_file": "src/observe_collector_net_tests.rs",
     "assertion_line": 376,
     "assertion_sha256": "595a05d89598d930a386b05a6a5b2ca39e46464bf6bd0734af525b3c126474b7",
-    "assertion_rule": "specific-panic-location"
+    "assertion_rule": "specific-panic-location",
+    "assertion_locations": [
+      {
+        "line": 376,
+        "literal": "panicked at src/observe_collector_net_tests.rs:376",
+        "source": "    assert!("
+      },
+      {
+        "line": 388,
+        "literal": "panicked at src/observe_collector_net_tests.rs:388",
+        "source": "    assert!("
+      }
+    ]
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-driver-abort",
@@ -1196,7 +1241,10 @@
     "target": "lib",
     "test": "observe_collector::tests::request_saturation_has_no_admission_waiters",
     "test_file": "src/observe_collector_tests.rs",
-    "expected_literal": "panicked at src/observe_collector_tests.rs:311",
+    "expected_literal": [
+      "panicked at src/observe_collector_tests.rs:311",
+      "panicked at src/observe_collector_tests.rs:313"
+    ],
     "edits": [
       {
         "file": "src/observe_collector.rs",
@@ -1209,14 +1257,30 @@
     "assertion_file": "src/observe_collector_tests.rs",
     "assertion_line": 311,
     "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
-    "assertion_rule": "specific-panic-location"
+    "assertion_rule": "specific-panic-location",
+    "assertion_locations": [
+      {
+        "line": 311,
+        "literal": "panicked at src/observe_collector_tests.rs:311",
+        "source": "    assert_eq!(reply.status(), 503, \"web request admission exceeded eight\");"
+      },
+      {
+        "line": 313,
+        "literal": "panicked at src/observe_collector_tests.rs:313",
+        "source": "    assert_eq!("
+      }
+    ]
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-connection-cap",
     "target": "lib",
     "test": "observe_collector::tests::connection_saturation_refuses_without_an_accept_waiter",
     "test_file": "src/observe_collector_tests.rs",
-    "expected_literal": "panicked at src/observe_collector_tests.rs:502",
+    "expected_literal": [
+      "panicked at src/observe_collector_tests.rs:502",
+      "panicked at src/observe_collector_tests.rs:527",
+      "panicked at src/observe_collector_tests.rs:535"
+    ],
     "edits": [
       {
         "file": "src/observe_collector.rs",
@@ -1227,7 +1291,24 @@
     "assertion_file": "src/observe_collector_tests.rs",
     "assertion_line": 502,
     "assertion_sha256": "1732bb3efc96a1cae843f56999623ada05d130d99223da60a33e5365382c0207",
-    "assertion_rule": "specific-panic-location"
+    "assertion_rule": "specific-panic-location",
+    "assertion_locations": [
+      {
+        "line": 502,
+        "literal": "panicked at src/observe_collector_tests.rs:502",
+        "source": "    assert_eq!("
+      },
+      {
+        "line": 527,
+        "literal": "panicked at src/observe_collector_tests.rs:527",
+        "source": "    assert_eq!("
+      },
+      {
+        "line": 535,
+        "literal": "panicked at src/observe_collector_tests.rs:535",
+        "source": "    assert!("
+      }
+    ]
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-header-deadline",
@@ -1474,7 +1555,9 @@
     "target": "lib",
     "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
     "test_file": "src/observe_collector_web_tests.rs",
-    "expected_literal": "panicked at src/observe_collector_web_tests.rs:257",
+    "expected_literal": [
+      "panicked at src/observe_collector_web_tests.rs:257"
+    ],
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
@@ -1485,14 +1568,24 @@
     "assertion_file": "src/observe_collector_web_tests.rs",
     "assertion_line": 257,
     "assertion_sha256": "be83d669234cb3f8c4feaa5e55afb253f204fb81aeee437cb87fb7f2302db194",
-    "assertion_rule": "specific-panic-location"
+    "assertion_rule": "specific-panic-location",
+    "assertion_locations": [
+      {
+        "line": 257,
+        "literal": "panicked at src/observe_collector_web_tests.rs:257",
+        "source": "    assert!(csp.contains(\"script-src 'none'\"));"
+      }
+    ]
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-csp-style",
     "target": "lib",
     "test": "observe_collector_web::tests::csp_hash_covers_only_the_static_stylesheet",
     "test_file": "src/observe_collector_web_tests.rs",
-    "expected_literal": "panicked at src/observe_collector_web_tests.rs:258",
+    "expected_literal": [
+      "panicked at src/observe_collector_web_tests.rs:258",
+      "panicked at src/observe_collector_web_tests.rs:259"
+    ],
     "edits": [
       {
         "file": "src/observe_collector_web.rs",
@@ -1503,7 +1596,19 @@
     "assertion_file": "src/observe_collector_web_tests.rs",
     "assertion_line": 258,
     "assertion_sha256": "be83d669234cb3f8c4feaa5e55afb253f204fb81aeee437cb87fb7f2302db194",
-    "assertion_rule": "specific-panic-location"
+    "assertion_rule": "specific-panic-location",
+    "assertion_locations": [
+      {
+        "line": 258,
+        "literal": "panicked at src/observe_collector_web_tests.rs:258",
+        "source": "    assert!(csp.contains(\"style-src 'sha256-\"));"
+      },
+      {
+        "line": 259,
+        "literal": "panicked at src/observe_collector_web_tests.rs:259",
+        "source": "    assert!(!csp.contains(\"unsafe-inline\"));"
+      }
+    ]
   },
   {
     "label": "legacy-dtxj-collector-integration-collector-csp-self-assets",
@@ -2289,7 +2394,10 @@
     "target": "lib",
     "test_file": "src/observe_collector_store_tests.rs",
     "test": "observe_collector_store::tests::wire_count_and_byte_caps_have_positive_controls",
-    "expected_literal": "panicked at src/observe_collector_store_tests.rs:602",
+    "expected_literal": [
+      "panicked at src/observe_collector_store_tests.rs:602",
+      "panicked at src/observe_collector_store_tests.rs:606"
+    ],
     "edits": [
       {
         "file": "src/observe_collector_store.rs",
@@ -2300,7 +2408,19 @@
     "assertion_file": "src/observe_collector_store_tests.rs",
     "assertion_line": 602,
     "assertion_sha256": "afe96de10679d923d406916c2c1274377d9f354e3f4708126df01863a8bbe24c",
-    "assertion_rule": "source_location"
+    "assertion_rule": "source_location",
+    "assertion_locations": [
+      {
+        "line": 602,
+        "literal": "panicked at src/observe_collector_store_tests.rs:602",
+        "source": "    assert!("
+      },
+      {
+        "line": 606,
+        "literal": "panicked at src/observe_collector_store_tests.rs:606",
+        "source": "    assert!("
+      }
+    ]
   },
   {
     "label": "legacy-dtxj-collector-store-wire-next",
@@ -3453,7 +3573,12 @@
     "target": "lib",
     "test_file": "src/observe_collector_decode_tests.rs",
     "test": "observe_collector_decode::tests::unknown_preserves_identifier_and_replay_bytes",
-    "expected_literal": "panicked at src/observe_collector_decode_tests.rs:42",
+    "expected_literal": [
+      "panicked at src/observe_collector_decode_tests.rs:42",
+      "panicked at src/observe_collector_decode_tests.rs:49",
+      "panicked at src/observe_collector_decode_tests.rs:54",
+      "panicked at src/observe_collector_decode_tests.rs:55"
+    ],
     "edits": [
       {
         "file": "src/observe_collector_decode.rs",
@@ -3466,7 +3591,29 @@
     "assertion_file": "src/observe_collector_decode_tests.rs",
     "assertion_line": 42,
     "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
-    "assertion_rule": "source_location"
+    "assertion_rule": "source_location",
+    "assertion_locations": [
+      {
+        "line": 42,
+        "literal": "panicked at src/observe_collector_decode_tests.rs:42",
+        "source": "        let decoded = decode_event(&bytes(&event(kind))).unwrap();"
+      },
+      {
+        "line": 49,
+        "literal": "panicked at src/observe_collector_decode_tests.rs:49",
+        "source": "            decode_event(&decoded.canonical).unwrap().canonical,"
+      },
+      {
+        "line": 54,
+        "literal": "panicked at src/observe_collector_decode_tests.rs:54",
+        "source": "        decode_event(&bytes(&event(\"future_a\"))).unwrap().canonical,"
+      },
+      {
+        "line": 55,
+        "literal": "panicked at src/observe_collector_decode_tests.rs:55",
+        "source": "        decode_event(&bytes(&event(\"future_b\"))).unwrap().canonical"
+      }
+    ]
   },
   {
     "label": "legacy-dtxj2-decode-decode-unknown-kind-max64",
@@ -3533,7 +3680,9 @@
     "target": "lib",
     "test_file": "src/observe_collector_decode_tests.rs",
     "test": "observe_collector_decode::tests::unknown_identifier_grammar_and_length_are_closed",
-    "expected_literal": "panicked at src/observe_collector_decode_tests.rs:84",
+    "expected_literal": [
+      "panicked at src/observe_collector_decode_tests.rs:84"
+    ],
     "edits": [
       {
         "file": "src/observe_collector_decode.rs",
@@ -3546,14 +3695,25 @@
     "assertion_file": "src/observe_collector_decode_tests.rs",
     "assertion_line": 84,
     "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
-    "assertion_rule": "source_location"
+    "assertion_rule": "source_location",
+    "assertion_locations": [
+      {
+        "line": 84,
+        "literal": "panicked at src/observe_collector_decode_tests.rs:84",
+        "source": "        assert!(decode_event(&bytes(&value)).is_err());"
+      }
+    ]
   },
   {
     "label": "legacy-dtxj2-decode-decode-duplicate-json",
     "target": "lib",
     "test_file": "src/observe_collector_decode_tests.rs",
     "test": "observe_collector_decode::tests::duplicate_fields_and_unknown_fields_remain_errors",
-    "expected_literal": "panicked at src/observe_collector_decode_tests.rs:94",
+    "expected_literal": [
+      "panicked at src/observe_collector_decode_tests.rs:94",
+      "panicked at src/observe_collector_decode_tests.rs:96",
+      "panicked at src/observe_collector_decode_tests.rs:118"
+    ],
     "edits": [
       {
         "file": "src/observe_collector_decode.rs",
@@ -3566,14 +3726,33 @@
     "assertion_file": "src/observe_collector_decode_tests.rs",
     "assertion_line": 94,
     "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
-    "assertion_rule": "source_location"
+    "assertion_rule": "source_location",
+    "assertion_locations": [
+      {
+        "line": 94,
+        "literal": "panicked at src/observe_collector_decode_tests.rs:94",
+        "source": "    assert!(decode_event(duplicate.as_bytes()).is_err());"
+      },
+      {
+        "line": 96,
+        "literal": "panicked at src/observe_collector_decode_tests.rs:96",
+        "source": "    assert!(decode_event(duplicate.as_bytes()).is_err());"
+      },
+      {
+        "line": 118,
+        "literal": "panicked at src/observe_collector_decode_tests.rs:118",
+        "source": "    assert!(decode_page(duplicate.as_bytes()).is_err());"
+      }
+    ]
   },
   {
     "label": "legacy-dtxj2-decode-decode-known-kind-map-parity",
     "target": "lib",
     "test_file": "src/observe_collector_decode_tests.rs",
     "test": "observe_collector_decode::tests::collector_preserves_shared_known_kind_map_representation",
-    "expected_literal": "panicked at src/observe_collector_decode_tests.rs:187",
+    "expected_literal": [
+      "panicked at src/observe_collector_decode_tests.rs:187"
+    ],
     "edits": [
       {
         "file": "src/observe_collector_decode.rs",
@@ -3586,14 +3765,24 @@
     "assertion_file": "src/observe_collector_decode_tests.rs",
     "assertion_line": 187,
     "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
-    "assertion_rule": "source_location"
+    "assertion_rule": "source_location",
+    "assertion_locations": [
+      {
+        "line": 187,
+        "literal": "panicked at src/observe_collector_decode_tests.rs:187",
+        "source": "        let decoded = decode_event(&bytes(&value)).unwrap();"
+      }
+    ]
   },
   {
     "label": "legacy-dtxj2-decode-decode-original-kind-identity",
     "target": "lib",
     "test_file": "src/observe_collector_decode_tests.rs",
     "test": "observe_collector_decode::tests::unknown_preserves_identifier_and_replay_bytes",
-    "expected_literal": "panicked at src/observe_collector_decode_tests.rs:44",
+    "expected_literal": [
+      "panicked at src/observe_collector_decode_tests.rs:44",
+      "panicked at src/observe_collector_decode_tests.rs:53"
+    ],
     "edits": [
       {
         "file": "src/observe_collector_decode.rs",
@@ -3606,14 +3795,28 @@
     "assertion_file": "src/observe_collector_decode_tests.rs",
     "assertion_line": 44,
     "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
-    "assertion_rule": "source_location"
+    "assertion_rule": "source_location",
+    "assertion_locations": [
+      {
+        "line": 44,
+        "literal": "panicked at src/observe_collector_decode_tests.rs:44",
+        "source": "        assert_eq!("
+      },
+      {
+        "line": 53,
+        "literal": "panicked at src/observe_collector_decode_tests.rs:53",
+        "source": "    assert_ne!("
+      }
+    ]
   },
   {
     "label": "legacy-dtxj2-decode-decode-canonical-event-budget-codec-only",
     "target": "lib",
     "test_file": "src/observe_collector_decode_tests.rs",
     "test": "observe_collector_decode::tests::canonical_event_and_page_bounds_remain_enforced",
-    "expected_literal": "panicked at src/observe_collector_decode_tests.rs:144",
+    "expected_literal": [
+      "panicked at src/observe_collector_decode_tests.rs:144"
+    ],
     "edits": [
       {
         "file": "src/observe_collector_decode.rs",
@@ -3626,14 +3829,23 @@
     "assertion_file": "src/observe_collector_decode_tests.rs",
     "assertion_line": 144,
     "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
-    "assertion_rule": "source_location"
+    "assertion_rule": "source_location",
+    "assertion_locations": [
+      {
+        "line": 144,
+        "literal": "panicked at src/observe_collector_decode_tests.rs:144",
+        "source": "    assert!(decode_event(&bytes(&value)).is_err());"
+      }
+    ]
   },
   {
     "label": "legacy-dtxj2-decode-decode-page-event-count",
     "target": "lib",
     "test_file": "src/observe_collector_decode_tests.rs",
     "test": "observe_collector_decode::tests::canonical_event_and_page_bounds_remain_enforced",
-    "expected_literal": "panicked at src/observe_collector_decode_tests.rs:146",
+    "expected_literal": [
+      "panicked at src/observe_collector_decode_tests.rs:146"
+    ],
     "edits": [
       {
         "file": "src/observe_collector_decode.rs",
@@ -3646,14 +3858,24 @@
     "assertion_file": "src/observe_collector_decode_tests.rs",
     "assertion_line": 146,
     "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
-    "assertion_rule": "source_location"
+    "assertion_rule": "source_location",
+    "assertion_locations": [
+      {
+        "line": 146,
+        "literal": "panicked at src/observe_collector_decode_tests.rs:146",
+        "source": "    assert!(decode_page(&bytes(&page(vec![event(\"arrival\"); 201]))).is_err());"
+      }
+    ]
   },
   {
     "label": "legacy-dtxj2-decode-decode-canonical-page-budget-codec-only",
     "target": "lib",
     "test_file": "src/observe_collector_decode_tests.rs",
     "test": "observe_collector_decode::tests::canonical_event_and_page_bounds_remain_enforced",
-    "expected_literal": "panicked at src/observe_collector_decode_tests.rs:149",
+    "expected_literal": [
+      "panicked at src/observe_collector_decode_tests.rs:149",
+      "panicked at src/observe_collector_decode_tests.rs:159"
+    ],
     "edits": [
       {
         "file": "src/observe_collector_decode.rs",
@@ -3666,14 +3888,28 @@
     "assertion_file": "src/observe_collector_decode_tests.rs",
     "assertion_line": 149,
     "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
-    "assertion_rule": "source_location"
+    "assertion_rule": "source_location",
+    "assertion_locations": [
+      {
+        "line": 149,
+        "literal": "panicked at src/observe_collector_decode_tests.rs:149",
+        "source": "    assert!(decode_page(&bytes(&value)).is_err());"
+      },
+      {
+        "line": 159,
+        "literal": "panicked at src/observe_collector_decode_tests.rs:159",
+        "source": "    assert!(decode_page(&bytes(&value)).is_err());"
+      }
+    ]
   },
   {
     "label": "legacy-dtxj2-decode-decode-original-kind-page-accounting",
     "target": "lib",
     "test_file": "src/observe_collector_decode_tests.rs",
     "test": "observe_collector_decode::tests::mixed_page_length_accounts_for_original_names",
-    "expected_literal": "panicked at src/observe_collector_decode_tests.rs:133",
+    "expected_literal": [
+      "panicked at src/observe_collector_decode_tests.rs:133"
+    ],
     "edits": [
       {
         "file": "src/observe_collector_decode.rs",
@@ -3686,7 +3922,14 @@
     "assertion_file": "src/observe_collector_decode_tests.rs",
     "assertion_line": 133,
     "assertion_sha256": "0f8775e3907cb2f4197a1fbf72aa251389bd69c210e018091b9ceb799f450000",
-    "assertion_rule": "source_location"
+    "assertion_rule": "source_location",
+    "assertion_locations": [
+      {
+        "line": 133,
+        "literal": "panicked at src/observe_collector_decode_tests.rs:133",
+        "source": "    assert_eq!("
+      }
+    ]
   },
   {
     "label": "legacy-dtxj2-integration-compat-stored-fallback",
