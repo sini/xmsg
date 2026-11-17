@@ -299,11 +299,13 @@
   },
   {
     "label": "grt4-enroll-nonhub-positive",
-    "oracle": "G12 no-hub CA remains usable",
-    "target": "lib",
-    "test": "enroll::protocol_tests::grt4_http_renewal_rechecks_current_name_ownership",
-    "test_file": "src/enroll_protocol_tests.rs",
-    "expected_literal": "grt4 renewal positive issuance refused",
+    "oracle": "G12 actual standalone CA/Service issuance succeeds without any hub patterns or peers",
+    "target": "grt4_standalone_enrollment",
+    "test": "standalone_ca_without_hub_patterns_issues_unclaimed_identity",
+    "test_file": "tests/grt4_standalone_enrollment.rs",
+    "binaries": [
+      "xmsg"
+    ],
     "edits": [
       {
         "file": "src/fed.rs",
@@ -313,10 +315,11 @@
         "end": "    fn dynamic_uri_owns_alias("
       }
     ],
-    "assertion_file": "src/enroll_protocol_tests.rs",
-    "assertion_line": 916,
-    "assertion_sha256": "d66f77895e00f4f7beaf6e089aa4b662865a6243d94a9c9ac7e62b4dddc54c46",
-    "assertion_rule": "unique-static-message"
+    "expected_literal": "grt4 standalone no-hub enrollment refused an unclaimed name",
+    "assertion_file": "tests/grt4_standalone_enrollment.rs",
+    "assertion_line": 585,
+    "assertion_sha256": "52004ca3a41571c74c3f10004541659fa4328e9ed754446abae38943de33e59f",
+    "assertion_rule": "unique-static-template-prefix"
   },
   {
     "label": "grt4-doctor-producer-ambiguity",
