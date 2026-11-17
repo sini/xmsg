@@ -803,7 +803,7 @@ impl PeersMap {
     pub fn log_ambiguous_alias_classes(&self) {
         for class in self.ambiguous_alias_classes() {
             tracing::warn!(
-                alias = %class.alias,
+                alias = ?class.alias,
                 forms = ?class.forms,
                 multiple_domains = class.multiple_domains,
                 "pattern admits ambiguous aliases; give pods concrete CA leaf entries"
@@ -899,8 +899,13 @@ impl PeersMap {
         self.current_dynamic_config(client)
     }
 
-    pub fn get_authenticated_peer_config(&self, peer: &AuthenticatedPeer) -> Option<PeerConfig> {
-        let config = self.get_peer_config(&peer.name)?;
+    pub fn get_authenticated_peer_config(
+        &self,
+        peer: &AuthenticatedPeer,
+    ) -> Result<PeerConfig, AppError> {
+        let config = self
+            .get_peer_config(&peer.name)
+            .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
         let matches = match peer.uri.as_deref() {
             Some(uri) => config
                 .identities
@@ -911,7 +916,14 @@ impl PeersMap {
                 .as_deref()
                 .is_some_and(|pin| normalize_pin(pin) == normalize_pin(&peer.pin)),
         };
-        matches.then_some(config)
+        if matches {
+            Ok(config)
+        } else {
+            Err(AppError::PeerRejected(format!(
+                "authenticated identity no longer owns node '{}'",
+                peer.name
+            )))
+        }
     }
 
     pub fn contains_name(&self, name: &str) -> bool {
@@ -3066,8 +3078,7 @@ async fn fed_send_message_handler(
     // 1. Check peer config and allow list
     let peer_cfg = fed_state
         .current_peers()
-        .get_authenticated_peer_config(&peer)
-        .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
+        .get_authenticated_peer_config(&peer)?;
 
     if !peer_cfg.allow.iter().any(|op| op == "send") {
         return Err(AppError::OpDenied(
@@ -3668,9 +3679,7 @@ async fn fed_reply_handler(
 
     // 1. Check peer config and allow list
     let peers = fed_state.current_peers();
-    let peer_cfg = peers
-        .get_authenticated_peer_config(&peer)
-        .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
+    let peer_cfg = peers.get_authenticated_peer_config(&peer)?;
 
     if !peer_cfg.allow.iter().any(|op| op == "reply") {
         return Err(AppError::OpDenied(
@@ -4248,8 +4257,7 @@ async fn fed_get_replies_handler(
 ) -> Result<Response, AppError> {
     let _peer_cfg = fed_state
         .current_peers()
-        .get_authenticated_peer_config(&peer)
-        .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
+        .get_authenticated_peer_config(&peer)?;
 
     // Check rate limiter
     if !fed_state
@@ -4378,8 +4386,7 @@ async fn fed_list_sessions_handler(
 ) -> Result<Response, AppError> {
     let peer_cfg = fed_state
         .current_peers()
-        .get_authenticated_peer_config(&peer)
-        .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
+        .get_authenticated_peer_config(&peer)?;
 
     // Refused with 403 op_denied unless peer's allow contains "list"
     if !peer_cfg.allow.iter().any(|op| op == "list") {
@@ -4477,8 +4484,7 @@ async fn fed_get_inbox_handler(
 ) -> Result<Response, AppError> {
     let peer_cfg = fed_state
         .current_peers()
-        .get_authenticated_peer_config(&peer)
-        .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
+        .get_authenticated_peer_config(&peer)?;
 
     if !peer_cfg.leaf {
         return Err(AppError::OpDenied("peer is not a leaf".to_string()));
@@ -4628,8 +4634,7 @@ async fn fed_ack_inbox_handler(
 ) -> Result<Response, AppError> {
     let peer_cfg = fed_state
         .current_peers()
-        .get_authenticated_peer_config(&peer)
-        .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
+        .get_authenticated_peer_config(&peer)?;
 
     if !peer_cfg.leaf {
         return Err(AppError::OpDenied("peer is not a leaf".to_string()));
@@ -6787,13 +6792,13 @@ pub async fn run_fed_listener_with_acceptor(
                         // narrowing takes effect immediately on established keep-alive
                         // connections across every /fed/v2/* route.
                         let current_peers = fed_state_req.current_peers();
-                        let Some(current_peer_cfg) =
-                            current_peers.get_authenticated_peer_config(&peer_info)
-                        else {
-                            return Ok::<_, std::convert::Infallible>(
-                                AppError::UnknownPeer(peer_info.name.clone()).into_response(),
-                            );
-                        };
+                        let current_peer_cfg =
+                            match current_peers.get_authenticated_peer_config(&peer_info) {
+                                Ok(config) => config,
+                                Err(error) => {
+                                    return Ok::<_, std::convert::Infallible>(error.into_response())
+                                }
+                            };
                         drop(current_peers);
                         if let Err(err) = check_peer_source(&current_peer_cfg, &peer_info.remote_ip)
                         {
@@ -7127,6 +7132,7 @@ impl CredentialReloader {
                     fs.clear_initial_peers();
                 }
                 *self.file_hashes.lock().unwrap_or_else(|e| e.into_inner()) = current_hashes;
+                new_peers_map.log_ambiguous_alias_classes();
 
                 // Reconcile outbound pull loops
                 if let Some(ref fs) = self.fed_state {

@@ -412,6 +412,12 @@ async fn test_oracle_2_pattern_admission_and_xa2_naming() {
                 "ca": ca_file.display().to_string(),
                 "identities": ["spiffe://json64.dev/ns/hub/sa/hub"],
                 "allow": ["send"]
+            },
+            "genie-guard.genie": {
+                "ca": ca_file.display().to_string(),
+                "identities": [uri_pod],
+                "leaf": true,
+                "allow": ["send", "reply", "list", "forward"]
             }
         },
         "hub": {
@@ -481,9 +487,9 @@ async fn test_oracle_2_pattern_admission_and_xa2_naming() {
         );
         let current_peers = hub_node.fed_state.current_peers();
         let admitted = current_peers.admitted_clients.read().unwrap();
-        assert!(admitted.contains_key("sini.bitstream"));
+        assert!(admitted.contains_key(uri_host));
         assert_eq!(
-            admitted.get("sini.bitstream").unwrap().uri,
+            admitted.get(uri_host).unwrap().uri,
             "spiffe://json64.dev/host/bitstream/user/sini"
         );
     }
@@ -519,10 +525,17 @@ async fn test_oracle_2_pattern_admission_and_xa2_naming() {
         );
         let current_peers = hub_node.fed_state.current_peers();
         let admitted = current_peers.admitted_clients.read().unwrap();
-        assert!(admitted.contains_key("genie-guard.genie"));
+        assert!(
+            !admitted.contains_key(uri_pod),
+            "concrete pod was installed as a dynamic client"
+        );
         assert_eq!(
-            admitted.get("genie-guard.genie").unwrap().uri,
-            "spiffe://json64.dev/ns/genie/sa/genie-guard"
+            current_peers
+                .get_peer_config("genie-guard.genie")
+                .unwrap()
+                .identities,
+            Some(vec![uri_pod.to_owned()]),
+            "concrete pod lost its exact URI reservation"
         );
     }
 }
@@ -1215,276 +1228,139 @@ async fn test_oracle_5d_forward_gate() {
     );
 }
 
-// -----------------------------------------------------------------------------
-// Oracle 6: Real XA2 collision refusal (host/genie/user/genie-guard vs ns/genie/sa/genie-guard)
-// Neither overwrites the other (never last-writer-wins)
-// -----------------------------------------------------------------------------
-#[tokio::test]
-async fn test_oracle_6_collision_refusal_no_last_writer_wins() {
-    let (ca_params, ca_key, _ca_der, ca_pem) = generate_ca("Hub CA 6");
+fn grt4_mixed_config(ca_pem: &str) -> (TempDir, String) {
     let temp = TempDir::new().unwrap();
-    let ca_file = temp.path().join("ca.pem");
-    fs::write(&ca_file, &ca_pem).unwrap();
-
-    let uri1 = "spiffe://json64.dev/host/genie/user/genie-guard";
-    let (cert1, key1) = issue_cert(&ca_params, &ca_key, "genie-guard.genie", &[uri1]);
-
-    let uri2 = "spiffe://json64.dev/ns/genie/sa/genie-guard";
-    let (cert2, key2) = issue_cert(&ca_params, &ca_key, "genie-guard.genie", &[uri2]);
-
-    let (cert_hub, key_hub) = issue_cert(
-        &ca_params,
-        &ca_key,
-        "hub.hub",
-        &["spiffe://json64.dev/ns/hub/sa/hub"],
-    );
-
-    let hub_json = serde_json::json!({
-        "peers": {
-            "hub.hub": {
-                "address": "127.0.0.1:0",
-                "ca": ca_file.display().to_string(),
-                "identities": ["spiffe://json64.dev/ns/hub/sa/hub"],
-                "allow": ["send"]
-            }
-        },
+    let ca = temp.path().join("ca.pem");
+    fs::write(&ca, ca_pem).unwrap();
+    let config = serde_json::json!({
+        "peers": {"hub.hub": {
+            "ca": ca, "address": "127.0.0.1:1",
+            "identities": ["spiffe://example.invalid/ns/hub/sa/hub"],
+            "allow": ["send"]
+        }},
         "hub": {
-            "patterns": [
-                "spiffe://json64.dev/host/*/user/*",
-                "spiffe://json64.dev/ns/genie/sa/*"
-            ],
-            "rules": [
-                {
-                    "pattern": "spiffe://json64.dev/host/*/user/*",
-                    "allow": ["send"]
-                },
-                {
-                    "pattern": "spiffe://json64.dev/ns/genie/sa/*",
-                    "allow": ["send"]
-                }
-            ]
+            "patterns": ["spiffe://example.invalid/host/*/user/*", "spiffe://example.invalid/ns/pods/sa/*"],
+            "rules": [{"pattern": "spiffe://example.invalid/host/*/user/*", "allow": ["send"]},
+                      {"pattern": "spiffe://example.invalid/ns/pods/sa/*", "allow": ["send"]}]
         }
-    })
-    .to_string();
+    }).to_string();
+    (temp, config)
+}
 
-    let hub_peers = PeersMap::load_from_json(&hub_json).unwrap();
-    let hub_node = create_test_node("hub.hub", hub_peers, cert_hub, Vec::new(), key_hub).await;
-    let (_sock, received) =
-        create_claude_session_fixture(&hub_node.sessions_dir, "target", "target");
-
-    let client_peers_json = serde_json::json!({
-        "peers": {
-            "hub.hub": {
-                "address": hub_node.fed_addr.to_string(),
-                "ca": ca_file.display().to_string(),
-                "identities": ["spiffe://json64.dev/ns/hub/sa/hub"],
-                "allow": ["send"]
-            }
+#[test]
+fn test_oracle_6_no_arrival_order_owns_an_ambiguous_alias() {
+    let (params, key, _, pem) = generate_ca("grt4 arrival CA");
+    let (_temp, config) = grt4_mixed_config(&pem);
+    let uris = [
+        "spiffe://example.invalid/host/pods/user/guard",
+        "spiffe://example.invalid/ns/pods/sa/guard",
+    ];
+    for first in 0..2 {
+        let peers = PeersMap::load_from_json(&config).unwrap();
+        for index in [first, 1 - first] {
+            let (cert, _) = issue_cert(&params, &key, "guard.pods", &[uris[index]]);
+            assert!(
+                matches!(
+                    peers
+                        .resolve_incoming_peer(&rustls::pki_types::CertificateDer::from(cert), &[]),
+                    Err(AppError::PeerRejected(_))
+                ),
+                "grt4 arrival order selected an ambiguous URI"
+            );
         }
-    })
-    .to_string();
-
-    // Client 1 connects first -> admitted
-    let client1_peers = PeersMap::load_from_json(&client_peers_json).unwrap();
-    let client1_node = create_test_node(
-        "genie-guard.genie",
-        client1_peers,
-        cert1.clone(),
-        Vec::new(),
-        key1.clone(),
-    )
-    .await;
-    let env1 = make_envelope("target", "first client wins");
-    let res1 = send_federated_message(&client1_node.fed_state, "hub.hub", &env1).await;
-    assert!(res1.is_ok(), "Client 1 send should succeed: {res1:?}");
-
-    for _ in 0..250 {
-        if !received.lock().unwrap().is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert_eq!(received.lock().unwrap().len(), 1);
-
-    // Verify client 1 is registered
-    {
-        let current_peers = hub_node.fed_state.current_peers();
-        let admitted = current_peers.admitted_clients.read().unwrap();
-        assert_eq!(admitted.get("genie-guard.genie").unwrap().uri, uri1);
-    }
-
-    // Client 2 connects with colliding derived name genie-guard.genie but different URI -> refused
-    let client2_peers = PeersMap::load_from_json(&client_peers_json).unwrap();
-    let client2_node = create_test_node(
-        "genie-guard.genie",
-        client2_peers,
-        cert2.clone(),
-        Vec::new(),
-        key2,
-    )
-    .await;
-    let env2 = make_envelope("target", "second client collides");
-    let res2 = send_federated_message(&client2_node.fed_state, "hub.hub", &env2).await;
-    assert!(
-        res2.is_err(),
-        "Client 2 send must be rejected due to collision"
-    );
-
-    // Check that the error names BOTH URIs:
-    // At TLS layer or fed layer, error names the collision
-    // Let's also check direct resolve_incoming_peer on hub_node
-    let resolve_res = hub_node.fed_state.current_peers().resolve_incoming_peer(
-        &rustls::pki_types::CertificateDer::from(cert2.as_slice()),
-        &[],
-    );
-    assert!(
-        resolve_res.is_err(),
-        "resolve_incoming_peer must fail for colliding client"
-    );
-    let resolve_err = match resolve_res.unwrap_err() {
-        AppError::PeerRejected(s) => s,
-        other => format!("{other:?}"),
-    };
-    assert!(
-        resolve_err.contains(uri1) && resolve_err.contains(uri2),
-        "Expected error to name both URIs ('{uri1}' and '{uri2}'), got: '{resolve_err}'"
-    );
-
-    // Client 1's registration is unchanged (no last-writer-wins)
-    {
-        let current_peers = hub_node.fed_state.current_peers();
-        let admitted = current_peers.admitted_clients.read().unwrap();
-        assert_eq!(admitted.get("genie-guard.genie").unwrap().uri, uri1);
+        assert!(
+            peers.admitted_clients.read().unwrap().is_empty(),
+            "grt4 arrival refusal left an authoritative row"
+        );
+        assert!(
+            !peers.contains_name("guard.pods"),
+            "grt4 refused alias remained routable"
+        );
     }
 }
 
-#[tokio::test]
-async fn test_oracle_6_concurrent_collision_race() {
-    let (ca_params, ca_key, _ca_der, ca_pem) = generate_ca("Hub CA 6 Concurrent");
-    let temp = TempDir::new().unwrap();
-    let ca_file = temp.path().join("ca.pem");
-    fs::write(&ca_file, &ca_pem).unwrap();
-
-    let uri1 = "spiffe://json64.dev/host/genie/user/genie-guard";
-    let (cert1, _) = issue_cert(&ca_params, &ca_key, "genie-guard.genie", &[uri1]);
-
-    let uri2 = "spiffe://json64.dev/ns/genie/sa/genie-guard";
-    let (cert2, _) = issue_cert(&ca_params, &ca_key, "genie-guard.genie", &[uri2]);
-
-    let hub_json = serde_json::json!({
-        "peers": {
-            "hub.hub": {
-                "address": "127.0.0.1:0",
-                "ca": ca_file.display().to_string(),
-                "identities": ["spiffe://json64.dev/ns/hub/sa/hub"],
-                "allow": ["send"]
-            }
-        },
-        "hub": {
-            "patterns": [
-                "spiffe://json64.dev/host/*/user/*",
-                "spiffe://json64.dev/ns/genie/sa/*"
-            ],
-            "rules": [
-                {
-                    "pattern": "spiffe://json64.dev/host/*/user/*",
-                    "allow": ["send"]
-                },
-                {
-                    "pattern": "spiffe://json64.dev/ns/genie/sa/*",
-                    "allow": ["send"]
-                }
-            ]
-        }
+#[test]
+fn test_oracle_6_concurrent_collision_race() {
+    let (params, key, _, pem) = generate_ca("grt4 concurrent CA");
+    let (_temp, config) = grt4_mixed_config(&pem);
+    let peers = Arc::new(PeersMap::load_from_json(&config).unwrap());
+    let certs: Vec<_> = [
+        "spiffe://example.invalid/host/pods/user/guard",
+        "spiffe://example.invalid/ns/pods/sa/guard",
+    ]
+    .iter()
+    .map(|uri| {
+        let (cert, _) = issue_cert(&params, &key, "guard.pods", &[uri]);
+        rustls::pki_types::CertificateDer::from(cert)
     })
-    .to_string();
-
-    let hub_peers = Arc::new(PeersMap::load_from_json(&hub_json).unwrap());
-
-    // N parallel resolves across OS threads synchronized at a barrier
-    const N: usize = 50;
-    let mut handles = Vec::with_capacity(N);
-    let barrier = Arc::new(std::sync::Barrier::new(N));
-
-    let cert1_der = rustls::pki_types::CertificateDer::from(cert1);
-    let cert2_der = rustls::pki_types::CertificateDer::from(cert2);
-
-    for i in 0..N {
-        let peers = Arc::clone(&hub_peers);
-        let b = Arc::clone(&barrier);
-        let c1 = cert1_der.clone();
-        let c2 = cert2_der.clone();
-        handles.push(std::thread::spawn(move || {
-            b.wait();
-            if i % 2 == 0 {
-                (1, peers.resolve_incoming_peer(&c1, &[]))
-            } else {
-                (2, peers.resolve_incoming_peer(&c2, &[]))
-            }
-        }));
-    }
-
-    let mut c1_success = 0;
-    let mut c1_rejected = 0;
-    let mut c2_success = 0;
-    let mut c2_rejected = 0;
-
+    .collect();
+    let barrier = Arc::new(std::sync::Barrier::new(50));
+    let handles: Vec<_> = (0..50)
+        .map(|index| {
+            let peers = peers.clone();
+            let barrier = barrier.clone();
+            let cert = certs[index % 2].clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                peers.resolve_incoming_peer(&cert, &[])
+            })
+        })
+        .collect();
     for handle in handles {
-        let (client_id, res) = handle.join().unwrap();
-        match (client_id, res) {
-            (1, Ok(_)) => c1_success += 1,
-            (1, Err(AppError::PeerRejected(s))) => {
-                c1_rejected += 1;
-                assert!(
-                    s.contains(uri1) && s.contains(uri2),
-                    "Refusal must name both URIs ('{uri1}' and '{uri2}'), got: '{s}'"
-                );
-            }
-            (1, Err(other)) => panic!("Unexpected error for client 1: {other:?}"),
-            (2, Ok(_)) => c2_success += 1,
-            (2, Err(AppError::PeerRejected(s))) => {
-                c2_rejected += 1;
-                assert!(
-                    s.contains(uri1) && s.contains(uri2),
-                    "Refusal must name both URIs ('{uri1}' and '{uri2}'), got: '{s}'"
-                );
-            }
-            (2, Err(other)) => panic!("Unexpected error for client 2: {other:?}"),
-            _ => unreachable!(),
-        }
-    }
-
-    // Exactly one identity was admitted!
-    let admitted = hub_peers.admitted_clients.read().unwrap();
-    let winner = admitted
-        .get("genie-guard.genie")
-        .expect("genie-guard.genie must be admitted");
-
-    if winner.uri == uri1 {
         assert!(
-            c1_success > 0,
-            "Winner client 1 must have at least 1 success"
+            matches!(handle.join().unwrap(), Err(AppError::PeerRejected(_))),
+            "grt4 concurrent arrival became an alias winner"
         );
-        assert_eq!(c2_success, 0, "Losing client 2 must have ZERO successes");
-        assert_eq!(
-            c2_rejected,
-            N / 2,
-            "All attempts of client 2 must be refused"
-        );
-    } else if winner.uri == uri2 {
-        assert!(
-            c2_success > 0,
-            "Winner client 2 must have at least 1 success"
-        );
-        assert_eq!(c1_success, 0, "Losing client 1 must have ZERO successes");
-        assert_eq!(
-            c1_rejected,
-            N / 2,
-            "All attempts of client 1 must be refused"
-        );
-    } else {
-        panic!("Unexpected admitted URI: {}", winner.uri);
     }
+    assert!(
+        peers.admitted_clients.read().unwrap().is_empty(),
+        "grt4 concurrent refusal published a client"
+    );
+}
+
+#[test]
+fn grt4_tls_refuses_the_first_ambiguous_uri() {
+    use rustls::server::danger::ClientCertVerifier;
+    let (params, key, _, pem) = generate_ca("grt4 verifier CA");
+    let (_temp, config) = grt4_mixed_config(&pem);
+    let peers = Arc::new(PeersMap::load_from_json(&config).unwrap());
+    let verifier = xmsg::fed::CombinedClientCertVerifier::new(peers.clone());
+    let (positive, _) = issue_cert(
+        &params,
+        &key,
+        "alice.normal",
+        &["spiffe://example.invalid/host/normal/user/alice"],
+    );
+    assert!(
+        verifier
+            .verify_client_cert(
+                &rustls::pki_types::CertificateDer::from(positive),
+                &[],
+                rustls::pki_types::UnixTime::now()
+            )
+            .is_ok(),
+        "grt4 TLS fixture rejected a unique ordinary URI"
+    );
+    for uri in [
+        "spiffe://example.invalid/host/pods/user/guard",
+        "spiffe://example.invalid/ns/pods/sa/guard",
+    ] {
+        let (cert, _) = issue_cert(&params, &key, "guard.pods", &[uri]);
+        assert!(
+            verifier
+                .verify_client_cert(
+                    &rustls::pki_types::CertificateDer::from(cert),
+                    &[],
+                    rustls::pki_types::UnixTime::now()
+                )
+                .is_err(),
+            "grt4 TLS accepted the first ambiguous identity"
+        );
+    }
+    assert!(
+        peers.admitted_clients.read().unwrap().is_empty(),
+        "grt4 TLS verification changed the admitted registry"
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -1814,21 +1690,7 @@ fn test_oracle_3_load_concrete_peer_collision() {
 #[test]
 fn grt4_first_ambiguous_uri_is_refused_before_registration() {
     let (ca_params, ca_key, _, ca_pem) = generate_ca("grt4 prospective CA");
-    let temp = TempDir::new().unwrap();
-    let ca = temp.path().join("ca.pem");
-    fs::write(&ca, ca_pem).unwrap();
-    let config = serde_json::json!({
-        "peers": {"hub.hub": {
-            "ca": ca, "address": "127.0.0.1:1",
-            "identities": ["spiffe://example.invalid/ns/hub/sa/hub"],
-            "allow": ["send"]
-        }},
-        "hub": {
-            "patterns": ["spiffe://example.invalid/host/*/user/*", "spiffe://example.invalid/ns/pods/sa/*"],
-            "rules": [{"pattern": "spiffe://example.invalid/host/*/user/*", "allow": ["send"]},
-                      {"pattern": "spiffe://example.invalid/ns/pods/sa/*", "allow": ["send"]}]
-        }
-    }).to_string();
+    let (_temp, config) = grt4_mixed_config(&ca_pem);
     for uri in [
         "spiffe://example.invalid/host/pods/user/guard",
         "spiffe://example.invalid/ns/pods/sa/guard",
@@ -1844,6 +1706,562 @@ fn grt4_first_ambiguous_uri_is_refused_before_registration() {
         assert!(
             peers.admitted_clients.read().unwrap().is_empty(),
             "grt4 refused first URI published an admitted row"
+        );
+    }
+}
+
+fn grt4_pem(label: &str, der: &[u8]) -> String {
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(der);
+    let body = encoded
+        .as_bytes()
+        .chunks(64)
+        .map(|line| std::str::from_utf8(line).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("-----BEGIN {label}-----\n{body}\n-----END {label}-----\n")
+}
+
+type Grt4Sender = hyper::client::conn::http1::SendRequest<http_body_util::Full<bytes::Bytes>>;
+
+async fn grt4_keepalive(
+    cert: &[u8],
+    key: &[u8],
+    hub: &TestFedNode,
+) -> (Grt4Sender, tokio::task::JoinHandle<()>) {
+    let pin = xmsg::fed::spki_sha256_from_der(&hub.fed_state.cert_der).unwrap();
+    let connector = xmsg::fed::make_tls_connector(cert, key, &pin).unwrap();
+    let tcp = tokio::net::TcpStream::connect(hub.fed_addr).await.unwrap();
+    let tls = connector
+        .connect(
+            rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+            tcp,
+        )
+        .await
+        .unwrap();
+    let (sender, connection) =
+        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls))
+            .await
+            .unwrap();
+    (
+        sender,
+        tokio::spawn(async move {
+            let _ = connection.await;
+        }),
+    )
+}
+
+async fn grt4_unknown_list(sender: &mut Grt4Sender) -> (hyper::StatusCode, String) {
+    use http_body_util::BodyExt;
+    tokio::time::timeout(Duration::from_secs(3), sender.ready())
+        .await
+        .unwrap()
+        .unwrap();
+    let request = hyper::Request::builder()
+        .method("POST")
+        .uri("/fed/v2/list/unknown")
+        .header("host", "fixture")
+        .header("content-type", "application/json")
+        .body(http_body_util::Full::new(bytes::Bytes::from_static(
+            b"{\"status\":\"ok\",\"entries\":[]}",
+        )))
+        .unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(3), sender.send_request(request))
+        .await
+        .unwrap()
+        .unwrap();
+    let status = response.status();
+    let body = tokio::time::timeout(Duration::from_secs(3), response.into_body().collect())
+        .await
+        .unwrap()
+        .unwrap()
+        .to_bytes();
+    (status, String::from_utf8(body.to_vec()).unwrap())
+}
+
+#[tokio::test]
+async fn grt4_keepalive_uri_cannot_borrow_a_replacement_alias() {
+    let (params, key, _, pem) = generate_ca("grt4 reload CA");
+    let temp = TempDir::new().unwrap();
+    let ca_path = temp.path().join("ca.pem");
+    fs::write(&ca_path, pem).unwrap();
+    let uri_a = "spiffe://example.invalid/host/pods/user/guard";
+    let uri_b = "spiffe://example.invalid/ns/pods/sa/guard";
+    let (cert_a, key_a) = issue_cert(&params, &key, "guard.pods", &[uri_a]);
+    let (cert_b, key_b) = issue_cert(&params, &key, "guard.pods", &[uri_b]);
+    let (server_cert, server_key) = issue_cert(
+        &params,
+        &key,
+        "hub.hub",
+        &["spiffe://example.invalid/ns/hub/sa/hub"],
+    );
+    let config = |uri: &str| {
+        serde_json::json!({"peers": {"guard.pods": {
+            "ca": ca_path, "identities": [uri], "leaf": true, "allow": ["send", "reply", "list"]
+        }}})
+        .to_string()
+    };
+    let peers_path = temp.path().join("peers.json");
+    fs::write(&peers_path, config(uri_a)).unwrap();
+    let peers = PeersMap::load_from_file(&peers_path).unwrap();
+    let hub = create_test_node(
+        "hub.hub",
+        peers,
+        server_cert.clone(),
+        Vec::new(),
+        server_key.clone(),
+    )
+    .await;
+    let cert_path = temp.path().join("server.crt");
+    let key_path = temp.path().join("server.key");
+    fs::write(&cert_path, grt4_pem("CERTIFICATE", &server_cert)).unwrap();
+    fs::write(&key_path, grt4_pem("PRIVATE KEY", &server_key)).unwrap();
+    let reloader = xmsg::fed::CredentialReloader::new_full(
+        cert_path,
+        key_path,
+        Some(peers_path.clone()),
+        Some(xmsg::fed::OwnNode {
+            name: "hub.hub".into(),
+            pin: None,
+        }),
+        hub.fed_state.current_peers(),
+        Some(hub.fed_state.clone()),
+        Default::default(),
+    )
+    .unwrap();
+    let (mut sender_a, connection_a) = grt4_keepalive(&cert_a, &key_a, &hub).await;
+    let initial = grt4_unknown_list(&mut sender_a).await;
+    assert_eq!(
+        initial.0,
+        hyper::StatusCode::NOT_FOUND,
+        "grt4 original URI failed its admitted application control"
+    );
+    assert!(
+        initial.1.contains("list query"),
+        "grt4 original control did not reach the query handler"
+    );
+    reloader.force_reload().unwrap();
+    let same = grt4_unknown_list(&mut sender_a).await;
+    assert_eq!(
+        same.0,
+        hyper::StatusCode::NOT_FOUND,
+        "grt4 same-URI reload broke the existing connection"
+    );
+    assert!(
+        same.1.contains("list query"),
+        "grt4 same-URI reload failed before the query handler"
+    );
+    fs::write(&peers_path, config(uri_b)).unwrap();
+    reloader.force_reload().unwrap();
+    let old = grt4_unknown_list(&mut sender_a).await;
+    assert_eq!(
+        old.0,
+        hyper::StatusCode::FORBIDDEN,
+        "grt4 old keep-alive URI borrowed replacement ownership"
+    );
+    let (mut sender_b, connection_b) = grt4_keepalive(&cert_b, &key_b, &hub).await;
+    let fresh = grt4_unknown_list(&mut sender_b).await;
+    assert_eq!(
+        fresh.0,
+        hyper::StatusCode::NOT_FOUND,
+        "grt4 replacement URI failed its application control"
+    );
+    assert!(
+        fresh.1.contains("list query"),
+        "grt4 replacement control failed before the query handler"
+    );
+    drop(sender_a);
+    drop(sender_b);
+    connection_a.abort();
+    connection_b.abort();
+}
+
+#[derive(Clone)]
+struct Grt4Log(Arc<Mutex<Vec<u8>>>);
+impl std::io::Write for Grt4Log {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Grt4Log {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+#[test]
+fn grt4_warning_is_once_per_published_alias_class() {
+    let (params, key, _, pem) = generate_ca("grt4 warning CA");
+    let (temp, config) = grt4_mixed_config(&pem);
+    let mut config: serde_json::Value = serde_json::from_str(&config).unwrap();
+    let ca = config["peers"]["hub.hub"]["ca"].clone();
+    config["peers"] = serde_json::json!({"seed.seed": {
+        "ca": ca, "address": "127.0.0.1:1", "identities": ["spiffe://example.invalid/host/seed/user/seed"], "allow": ["send"]
+    }});
+    config["hub"]["patterns"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!("spiffe://example.invalid/*/pods/*/*"));
+    let peers_path = temp.path().join("peers.json");
+    fs::write(&peers_path, config.to_string()).unwrap();
+    let (cert, key) = issue_cert(
+        &params,
+        &key,
+        "hub.hub",
+        &["spiffe://example.invalid/ns/hub/sa/hub"],
+    );
+    let cert_path = temp.path().join("server.crt");
+    let key_path = temp.path().join("server.key");
+    fs::write(&cert_path, grt4_pem("CERTIFICATE", &cert)).unwrap();
+    fs::write(&key_path, grt4_pem("PRIVATE KEY", &key)).unwrap();
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(Grt4Log(buffer.clone()))
+        .finish();
+    // Keep two dispatchers registered so another test's cached callsite interest cannot hide this capture.
+    let _interest_guard = tracing::Dispatch::new(tracing_subscriber::registry());
+    tracing::subscriber::with_default(subscriber, || {
+        let warnings = || {
+            String::from_utf8(buffer.lock().unwrap().clone())
+                .unwrap()
+                .lines()
+                .filter(|line| line.contains("pattern admits ambiguous aliases"))
+                .count()
+        };
+        let peers = Arc::new(PeersMap::load_from_file(&peers_path).unwrap());
+        assert_eq!(
+            warnings(),
+            0,
+            "grt4 generic config parsing emitted an operator warning"
+        );
+        let reloader = xmsg::fed::CredentialReloader::new_full(
+            cert_path,
+            key_path,
+            Some(peers_path.clone()),
+            None,
+            peers,
+            None,
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            warnings(),
+            1,
+            "grt4 startup did not emit exactly one ambiguity class"
+        );
+        assert!(!reloader.check_and_reload().unwrap());
+        assert_eq!(
+            warnings(),
+            1,
+            "grt4 unchanged config repeated an ambiguity warning"
+        );
+        assert!(reloader.force_reload().unwrap());
+        assert_eq!(
+            warnings(),
+            2,
+            "grt4 successful reload did not emit one ambiguity class"
+        );
+        fs::write(&peers_path, "invalid json").unwrap();
+        assert!(reloader.force_reload().is_err());
+        assert_eq!(
+            warnings(),
+            2,
+            "grt4 failed reload published an ambiguity warning"
+        );
+        let output = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        let warning_lines: Vec<_> = output
+            .lines()
+            .filter(|line| line.contains("pattern admits ambiguous aliases"))
+            .collect();
+        assert!(
+            warning_lines.iter().all(|line| line.contains("*.pods")
+                && line.contains("host/user")
+                && line.contains("ns/sa")),
+            "grt4 warning omitted its alias class or colliding forms"
+        );
+        assert!(
+            warning_lines.iter().all(|line| !line.contains("spiffe://")),
+            "grt4 ambiguity warning exposed a full URI witness"
+        );
+        config["hub"]["patterns"] = serde_json::json!([
+            "spiffe://example.invalid/host/pods/user/line\nbreak",
+            "spiffe://example.invalid/ns/pods/sa/line\nbreak"
+        ]);
+        config["hub"]["rules"] = serde_json::json!([]);
+        fs::write(&peers_path, config.to_string()).unwrap();
+        reloader.force_reload().unwrap();
+        let escaped = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        let last = escaped
+            .lines()
+            .rfind(|line| line.contains("pattern admits ambiguous aliases"))
+            .unwrap();
+        assert!(
+            last.contains("line\\nbreak.pods"),
+            "grt4 published warning split its alias over log lines"
+        );
+    });
+}
+
+#[test]
+fn grt4_check_peers_reports_ambiguity_without_invalidating_config() {
+    let (_, _, _, pem) = generate_ca("grt4 offline check CA");
+    let (temp, config) = grt4_mixed_config(&pem);
+    let file = temp.path().join("peers.json");
+    fs::write(&file, config).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_xmsg"))
+        .arg("check-peers")
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "grt4 offline ambiguity warning invalidated a permitted config"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|line| line.contains("pattern admits ambiguous aliases"))
+            .count(),
+        1,
+        "grt4 offline pre-upgrade check omitted or duplicated its ambiguity warning"
+    );
+    assert!(
+        stderr.contains("*.pods") && stderr.contains("host/user") && stderr.contains("ns/sa"),
+        "grt4 offline warning omitted its safe class details"
+    );
+    assert!(
+        !stderr.contains("spiffe://"),
+        "grt4 offline warning exposed a full URI witness"
+    );
+}
+
+struct Grt4Child(std::process::Child);
+impl Drop for Grt4Child {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let until = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < until {
+            if self.0.try_wait().ok().flatten().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[test]
+fn grt4_serve_startup_reports_its_ambiguity_class_once() {
+    use std::io::{Read, Write};
+    let (params, ca_key, _, pem) = generate_ca("grt4 startup CA");
+    let (temp, config) = grt4_mixed_config(&pem);
+    let file = temp.path().join("peers.json");
+    fs::write(&file, config).unwrap();
+    for name in ["run", "sessions", "codex"] {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = temp.path().join(name);
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let http = temp.path().join("run/http.sock");
+    let (cert, key) = issue_cert(
+        &params,
+        &ca_key,
+        "serve.server",
+        &["spiffe://example.invalid/ns/server/sa/serve"],
+    );
+    let cert_path = temp.path().join("server.crt");
+    let key_path = temp.path().join("server.key");
+    fs::write(&cert_path, grt4_pem("CERTIFICATE", &cert)).unwrap();
+    fs::write(&key_path, grt4_pem("PRIVATE KEY", &key)).unwrap();
+    let log = temp.path().join("stderr.log");
+    let log_file = fs::File::create(&log).unwrap();
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_xmsg"));
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("XMSG_") {
+            command.env_remove(key);
+        }
+    }
+    command
+        .env_remove("LISTEN_PID")
+        .env_remove("LISTEN_FDS")
+        .env_remove("LISTEN_FDNAMES")
+        .env("RUST_LOG", "warn")
+        .env("XDG_RUNTIME_DIR", temp.path().join("run"))
+        .arg("serve")
+        .arg("--http-sock")
+        .arg(&http)
+        .arg("--agent-sock")
+        .arg(temp.path().join("run/agent.sock"))
+        .arg("--register-sock")
+        .arg(temp.path().join("run/register.sock"))
+        .arg("--sessions-dir")
+        .arg(temp.path().join("sessions"))
+        .arg("--codex-home")
+        .arg(temp.path().join("codex"))
+        .arg("--db-path")
+        .arg(temp.path().join("db.sqlite"))
+        .arg("--peers-file")
+        .arg(&file)
+        .arg("--fed-cert")
+        .arg(&cert_path)
+        .arg("--fed-key")
+        .arg(&key_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log_file.try_clone().unwrap()))
+        .stderr(std::process::Stdio::from(log_file));
+    let mut child = Grt4Child(command.spawn().unwrap());
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "grt4 startup fixture exited before health readiness: {}",
+            fs::read_to_string(&log).unwrap_or_default()
+        );
+        if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&http) {
+            stream
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_millis(200)))
+                .unwrap();
+            if stream
+                .write_all(b"GET /healthz HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\n\r\n")
+                .is_ok()
+            {
+                let mut response = String::new();
+                let _ = stream.read_to_string(&mut response);
+                if response.starts_with("HTTP/1.1 200") {
+                    break;
+                }
+            }
+        }
+        assert!(
+            std::time::Instant::now() < until,
+            "grt4 startup fixture did not reach health readiness: {}",
+            fs::read_to_string(&log).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = fs::read_to_string(log).unwrap();
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.contains("pattern admits ambiguous aliases"))
+            .count(),
+        1,
+        "grt4 serve startup omitted or duplicated its ambiguity class warning"
+    );
+}
+
+#[test]
+fn grt4_offline_warning_escapes_control_characters() {
+    let (_, _, _, pem) = generate_ca("grt4 escaped class CA");
+    let (temp, config) = grt4_mixed_config(&pem);
+    let mut config: serde_json::Value = serde_json::from_str(&config).unwrap();
+    config["hub"]["patterns"] = serde_json::json!([
+        "spiffe://example.invalid/host/pods/user/line\nbreak",
+        "spiffe://example.invalid/ns/pods/sa/line\nbreak"
+    ]);
+    config["hub"]["rules"] = serde_json::json!([]);
+    let file = temp.path().join("peers.json");
+    fs::write(&file, config.to_string()).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_xmsg"))
+        .env("RUST_LOG", "off")
+        .arg("check-peers")
+        .arg(file)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "grt4 escaped class fixture is not a permitted config"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        stderr.lines().count(),
+        1,
+        "grt4 offline warning split its alias over lines"
+    );
+    assert!(
+        stderr.contains("line\\nbreak.pods"),
+        "grt4 offline warning omitted its escaped alias"
+    );
+}
+
+fn grt4_app_state(fed: Arc<FedState>) -> Arc<xmsg::http::AppState> {
+    Arc::new(xmsg::http::AppState {
+        sessions_dirs: fed.sessions_dirs.clone(),
+        agy_config: fed.agy_config.clone(),
+        agy_store: fed.agy_store.clone(),
+        pi_store: fed.pi_store.clone(),
+        pi_notify_tx: fed.pi_notify_tx.clone(),
+        svc_store: fed.svc_store.clone(),
+        svc_notify_tx: fed.svc_notify_tx.clone(),
+        node_name: fed.node_name.clone(),
+        max_body: fed.max_body,
+        max_attachment_bytes: fed.max_attachment_bytes,
+        request_counter: AtomicU64::new(1),
+        db: fed.db.clone(),
+        notify_tx: fed.notify_tx.clone(),
+        reply_ttl: fed.reply_ttl,
+        idempotency_ttl: Duration::from_secs(86400),
+        long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
+        fed_state: Some(fed),
+    })
+}
+
+#[tokio::test]
+async fn grt4_ambiguous_alias_never_uses_default_route() {
+    let (params, key, _, pem) = generate_ca("grt4 route CA");
+    let (_temp, config) = grt4_mixed_config(&pem);
+    let mut config: serde_json::Value = serde_json::from_str(&config).unwrap();
+    config["peers"]["upstream"] = serde_json::json!({
+        "address": "127.0.0.1:1", "pin": "00".repeat(32),
+        "allow": ["send", "reply"], "default_route": true
+    });
+    let peers = PeersMap::load_from_json(&config.to_string()).unwrap();
+    assert!(
+        peers.default_route_link().is_some(),
+        "grt4 default-route fixture has no fallback link"
+    );
+    let (cert, key) = issue_cert(
+        &params,
+        &key,
+        "hub.hub",
+        &["spiffe://example.invalid/ns/hub/sa/hub"],
+    );
+    let hub = create_test_node("hub.hub", peers, cert, Vec::new(), key).await;
+    let app = grt4_app_state(hub.fed_state.clone());
+    let result = xmsg::surface::send(
+        &app,
+        &xmsg::surface::Sender::Anonymous("fixture".into()),
+        "worker@guard.pods",
+        "must not route",
+        None,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(AppError::Ambiguous(_))),
+        "grt4 ambiguous alias selected a default or direct route"
+    );
+    let db = app.db.lock().unwrap();
+    for table in ["messages", "outbound", "peer_mailbox"] {
+        let count: i64 = db
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "grt4 refused ambiguous send wrote routing authority state"
         );
     }
 }
