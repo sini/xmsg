@@ -57,6 +57,7 @@ default = ["daemon"]
 client = []
 daemon = ["client", "dep:openidconnect", "dep:time", "dep:chrono", "dep:axum", "dep:clap", "dep:tracing", "dep:tracing-subscriber", "dep:gethostname", "dep:unicode-general-category", "dep:regex", "dep:rusqlite", "dep:ulid", "dep:reqwest", "dep:rustls", "dep:tokio-rustls", "dep:rcgen", "dep:sha2", "dep:hex", "dep:base64", "dep:http-body-util", "dep:tower", "dep:hyper-util", "dep:x509-parser", "dep:bytes", "dep:hyper", "dep:webpki", "dep:getrandom", "dep:subtle"]
 test-hooks = []
+mdns = ["daemon"]
 
 [dev-dependencies]
 tokio = { version = "1.43", features = ["test-util"] }
