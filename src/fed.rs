@@ -831,13 +831,14 @@ impl PeersMap {
         let Ok(name) = crate::node::node_name_from_uri(uri) else {
             return false;
         };
+        // Loaded CA entries have one URI; pin names cannot be URI-derived dotted names.
         if let Some(peer) = self.get(&name) {
             return allow_same_concrete
-                && peer.pin.is_none()
                 && peer
                     .identities
                     .as_ref()
-                    .is_some_and(|ids| ids.len() == 1 && ids[0] == uri);
+                    .and_then(|ids| ids.first())
+                    .is_some_and(|expected| expected == uri);
         }
         match self
             .hub
@@ -917,7 +918,8 @@ impl PeersMap {
             Some(uri) => config
                 .identities
                 .as_ref()
-                .is_some_and(|ids| ids.len() == 1 && ids[0] == uri),
+                .and_then(|ids| ids.first())
+                .is_some_and(|expected| expected == uri),
             None => config
                 .pin
                 .as_deref()

@@ -1,0 +1,516 @@
+[
+  {
+    "label": "grt4-enroll-prospective-browser-paste",
+    "oracle": "G8/G11 prospective ownership",
+    "target": "lib",
+    "test": "enroll_consumer_tests::grt4_browser_and_paste_refuse_prospective_pod_alias_before_any_admission",
+    "test_file": "src/enroll_consumer_tests.rs",
+    "expected_literal": "grt4 browser/paste issued a prospective pod alias",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "Some(crate::node::PatternAliasOwner::Ambiguous) => false,",
+        "replacement": "Some(crate::node::PatternAliasOwner::Ambiguous) => true,",
+        "start": "    pub fn enrollment_name_available(",
+        "end": "    fn dynamic_uri_owns_alias("
+      }
+    ],
+    "assertion_file": "src/enroll_consumer_tests.rs",
+    "assertion_line": 609,
+    "assertion_sha256": "5f9831af840c957a3c5ecd03639d2a6f2cc9e5d33d014aa8adf389ff67235b06",
+    "assertion_rule": "unique-static-message"
+  },
+  {
+    "label": "grt4-enroll-prospective-device",
+    "oracle": "G8/G11 prospective ownership",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::grt4_device_approval_refuses_prospective_alias_before_any_pod_admission",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "expected_literal": "grt4 device approval issued a prospective pod alias",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "Some(crate::node::PatternAliasOwner::Ambiguous) => false,",
+        "replacement": "Some(crate::node::PatternAliasOwner::Ambiguous) => true,",
+        "start": "    pub fn enrollment_name_available(",
+        "end": "    fn dynamic_uri_owns_alias("
+      }
+    ],
+    "assertion_file": "src/enroll_device_invariant_tests.rs",
+    "assertion_line": 1045,
+    "assertion_sha256": "0039461ac63c17bd675126a662772533300d7131262387ee4ac2b4f0e82cd9f9",
+    "assertion_rule": "unique-static-message"
+  },
+  {
+    "label": "grt4-enroll-prospective-renew",
+    "oracle": "G8/G11 prospective ownership",
+    "target": "lib",
+    "test": "enroll::protocol_tests::grt4_http_renewal_rechecks_current_name_ownership",
+    "test_file": "src/enroll_protocol_tests.rs",
+    "expected_literal": "grt4 HTTP renewal bypassed current ownership",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "Some(crate::node::PatternAliasOwner::Ambiguous) => false,",
+        "replacement": "Some(crate::node::PatternAliasOwner::Ambiguous) => true,",
+        "start": "    pub fn enrollment_name_available(",
+        "end": "    fn dynamic_uri_owns_alias("
+      }
+    ],
+    "assertion_file": "src/enroll_protocol_tests.rs",
+    "assertion_line": 963,
+    "assertion_sha256": "d66f77895e00f4f7beaf6e089aa4b662865a6243d94a9c9ac7e62b4dddc54c46",
+    "assertion_rule": "unique-static-message"
+  },
+  {
+    "label": "grt4-enroll-fresh-concrete-mode",
+    "oracle": "G8 fresh concrete reservation",
+    "target": "lib",
+    "test": "enroll::protocol_tests::grt4_fresh_http_issuance_preserves_concrete_name_reservation",
+    "test_file": "src/enroll_protocol_tests.rs",
+    "expected_literal": "grt4 fresh HTTP issuance bypassed the unconditional concrete-name reservation",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": ".lease_enrollment_name(uri, false)",
+        "replacement": ".lease_enrollment_name(uri, true)"
+      }
+    ],
+    "assertion_file": "src/enroll_protocol_tests.rs",
+    "assertion_line": 1000,
+    "assertion_sha256": "d66f77895e00f4f7beaf6e089aa4b662865a6243d94a9c9ac7e62b4dddc54c46",
+    "assertion_rule": "unique-static-message"
+  },
+  {
+    "label": "grt4-enroll-renew-concrete-mode",
+    "oracle": "G12 same URI concrete renewal",
+    "target": "lib",
+    "test": "enroll::protocol_tests::grt4_http_renewal_rechecks_current_name_ownership",
+    "test_file": "src/enroll_protocol_tests.rs",
+    "expected_literal": "grt4 same-URI concrete reservation blocked normal renewal",
+    "edits": [
+      {
+        "file": "src/enroll.rs",
+        "needle": ".lease_enrollment_name(uri, true)",
+        "replacement": ".lease_enrollment_name(uri, false)"
+      }
+    ],
+    "assertion_file": "src/enroll_protocol_tests.rs",
+    "assertion_line": 947,
+    "assertion_sha256": "d66f77895e00f4f7beaf6e089aa4b662865a6243d94a9c9ac7e62b4dddc54c46",
+    "assertion_rule": "unique-static-message"
+  },
+  {
+    "label": "grt4-enroll-issue-callback-required",
+    "oracle": "G9 ownership callback required",
+    "target": "lib",
+    "test": "enroll_ca::tests::grt4_name_authority_refusal_has_no_issuance_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "expected_literal": "grt4 ownership refusal did not retain reserved_name classification",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "let _name_lease = ownership(&uri, &proposed.node_name)?;",
+        "replacement": "let _name_lease = if false { Some(ownership(&uri, &proposed.node_name)?) } else { None };"
+      }
+    ],
+    "assertion_file": "src/enroll_ca/tests.rs",
+    "assertion_line": 1080,
+    "assertion_sha256": "66de4162812075b1764ce42d05b6d66da8dfdeff4aa617b23d210915bfa7c42c",
+    "assertion_rule": "unique-static-message"
+  },
+  {
+    "label": "grt4-enroll-issue-replacement-callback",
+    "oracle": "G9 replacement ownership required",
+    "target": "lib",
+    "test": "enroll_ca::tests::grt4_name_authority_refusal_has_no_issuance_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "expected_literal": "grt4 replacement issuance bypassed name ownership",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "let _name_lease = ownership(&uri, &proposed.node_name)?;",
+        "replacement": "let _name_lease = if tx.query_row(\"SELECT COUNT(*) FROM enroll_certs\", [], |r| r.get::<_, i64>(0)).map_err(|_| Error::Storage)? == 0 { Some(ownership(&uri, &proposed.node_name)?) } else { None };"
+      }
+    ],
+    "assertion_file": "src/enroll_ca/tests.rs",
+    "assertion_line": 1110,
+    "assertion_sha256": "66de4162812075b1764ce42d05b6d66da8dfdeff4aa617b23d210915bfa7c42c",
+    "assertion_rule": "unique-static-message"
+  },
+  {
+    "label": "grt4-enroll-issue-sql-transaction",
+    "oracle": "G9 actual SQLite write lease precedes ownership",
+    "target": "lib",
+    "test": "enroll_ca::tests::grt4_name_authority_is_observed_after_sql_wait",
+    "test_file": "src/enroll_ca/tests.rs",
+    "expected_literal": "grt4 ownership callback ran before the SQL transaction acquired its write lease",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "let tx = db\n            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)\n            .map_err(|_| Error::Storage)?;",
+        "replacement": "",
+        "start": "    fn issue_inner<L>(",
+        "end": "    pub fn renew("
+      },
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "let _name_lease = ownership(&uri, &proposed.node_name)?;",
+        "replacement": "let _name_lease = ownership(&uri, &proposed.node_name)?;\n        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|_| Error::Storage)?;"
+      }
+    ],
+    "assertion_file": "src/enroll_ca/tests.rs",
+    "assertion_line": 1166,
+    "assertion_sha256": "66de4162812075b1764ce42d05b6d66da8dfdeff4aa617b23d210915bfa7c42c",
+    "assertion_rule": "unique-static-message"
+  },
+  {
+    "label": "grt4-enroll-lease-issue-commit",
+    "oracle": "G10 lease retention",
+    "target": "lib",
+    "test": "enroll_ca::tests::grt4_name_lease_drop_observes_committed_certificate",
+    "test_file": "src/enroll_ca/tests.rs",
+    "expected_literal": "grt4 ownership lease was dropped before committed certificate visibility",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "let _name_lease = ownership(&uri, &proposed.node_name)?;",
+        "replacement": "let _ = ownership(&uri, &proposed.node_name)?;"
+      }
+    ],
+    "assertion_file": "src/enroll_ca/tests.rs",
+    "assertion_line": 1346,
+    "assertion_sha256": "66de4162812075b1764ce42d05b6d66da8dfdeff4aa617b23d210915bfa7c42c",
+    "assertion_rule": "unique-static-message"
+  },
+  {
+    "label": "grt4-enroll-lease-renew-commit",
+    "oracle": "G10 lease retention",
+    "target": "lib",
+    "test": "enroll_ca::tests::grt4_renewal_name_lease_drop_observes_committed_certificate",
+    "test_file": "src/enroll_ca/tests.rs",
+    "expected_literal": "grt4 renewal ownership lease was dropped before committed certificate visibility",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "let _name_lease = ownership(&uri[0], &format!(\"{}.{}\", record.user, record.host))?;",
+        "replacement": "let _ = ownership(&uri[0], &format!(\"{}.{}\", record.user, record.host))?;"
+      }
+    ],
+    "assertion_file": "src/enroll_ca/tests.rs",
+    "assertion_line": 1386,
+    "assertion_sha256": "66de4162812075b1764ce42d05b6d66da8dfdeff4aa617b23d210915bfa7c42c",
+    "assertion_rule": "unique-static-message"
+  },
+  {
+    "label": "grt4-enroll-lease-device-precommit",
+    "oracle": "G10 lease retention",
+    "target": "lib",
+    "test": "enroll_ca::tests::grt4_ownership_lease_covers_signing_commit_and_error_release",
+    "test_file": "src/enroll_ca/tests.rs",
+    "expected_literal": "grt4 ownership lease was released before the commit guard",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "let _name_lease = ownership(&uri, &proposed.node_name)?;",
+        "replacement": "let _ = ownership(&uri, &proposed.node_name)?;"
+      }
+    ],
+    "assertion_file": "src/enroll_ca/tests.rs",
+    "assertion_line": 1219,
+    "assertion_sha256": "66de4162812075b1764ce42d05b6d66da8dfdeff4aa617b23d210915bfa7c42c",
+    "assertion_rule": "unique-static-message"
+  },
+  {
+    "label": "grt4-enroll-actual-device-lease",
+    "oracle": "G10 actual device retention Clock",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::grt4_actual_device_approval_retains_tls_lease_through_precommit_guard",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "expected_literal": "grt4 actual device approval dropped its TLS ownership lease before precommit",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "let _name_lease = ownership(&uri, &proposed.node_name)?;",
+        "replacement": "let _ = ownership(&uri, &proposed.node_name)?;"
+      }
+    ],
+    "assertion_file": "src/enroll_device_invariant_tests.rs",
+    "assertion_line": 1120,
+    "assertion_sha256": "0039461ac63c17bd675126a662772533300d7131262387ee4ac2b4f0e82cd9f9",
+    "assertion_rule": "unique-static-message"
+  },
+  {
+    "label": "grt4-enroll-renew-canonical-form",
+    "oracle": "G11 exact canonical host/user",
+    "target": "lib",
+    "test": "enroll_ca::tests::grt4_renewal_canonical_uri_form_and_ownership_are_authoritative",
+    "test_file": "src/enroll_ca/tests.rs",
+    "expected_literal": "grt4 namespace URI alias substitution was renewed",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "if uri[0] != expected_uri {",
+        "replacement": "if crate::node::node_name_from_uri(&uri[0]).ok() != crate::node::node_name_from_uri(&expected_uri).ok() {"
+      }
+    ],
+    "assertion_file": "src/enroll_ca/tests.rs",
+    "assertion_line": 1290,
+    "assertion_sha256": "66de4162812075b1764ce42d05b6d66da8dfdeff4aa617b23d210915bfa7c42c",
+    "assertion_rule": "unique-static-message"
+  },
+  {
+    "label": "grt4-enroll-renew-callback-required",
+    "oracle": "G11 current renewal ownership",
+    "target": "lib",
+    "test": "enroll_ca::tests::grt4_renewal_canonical_uri_form_and_ownership_are_authoritative",
+    "test_file": "src/enroll_ca/tests.rs",
+    "expected_literal": "grt4 renewal skipped current ownership",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "let _name_lease = ownership(&uri[0], &format!(\"{}.{}\", record.user, record.host))?;",
+        "replacement": "let _name_lease = if false { Some(ownership(&uri[0], &format!(\"{}.{}\", record.user, record.host))?) } else { None };"
+      }
+    ],
+    "assertion_file": "src/enroll_ca/tests.rs",
+    "assertion_line": 1306,
+    "assertion_sha256": "66de4162812075b1764ce42d05b6d66da8dfdeff4aa617b23d210915bfa7c42c",
+    "assertion_rule": "unique-static-message"
+  },
+  {
+    "label": "grt4-enroll-renew-original-domain",
+    "oracle": "G12 preserve original signed trust domain",
+    "target": "lib",
+    "test": "enroll_ca::tests::renewal_keeps_old_uri_after_policy_trust_domain_changes",
+    "test_file": "src/enroll_ca/tests.rs",
+    "expected_literal": "panicked at src/enroll_ca/tests.rs:512",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "\"spiffe://{original_domain}/host/{}/user/{}\",",
+        "replacement": "\"spiffe://{}/host/{}/user/{}\",\n            p.trust_domain,"
+      }
+    ],
+    "assertion_file": "src/enroll_ca/tests.rs",
+    "assertion_line": 512,
+    "assertion_sha256": "66de4162812075b1764ce42d05b6d66da8dfdeff4aa617b23d210915bfa7c42c",
+    "assertion_rule": "specific-panic-location"
+  },
+  {
+    "label": "grt4-enroll-nonhub-positive",
+    "oracle": "G12 no-hub CA remains usable",
+    "target": "lib",
+    "test": "enroll::protocol_tests::grt4_http_renewal_rechecks_current_name_ownership",
+    "test_file": "src/enroll_protocol_tests.rs",
+    "expected_literal": "grt4 renewal positive issuance refused",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "None | Some(crate::node::PatternAliasOwner::Unclaimed) => true,",
+        "replacement": "None | Some(crate::node::PatternAliasOwner::Unclaimed) => false,",
+        "start": "    pub fn enrollment_name_available(",
+        "end": "    fn dynamic_uri_owns_alias("
+      }
+    ],
+    "assertion_file": "src/enroll_protocol_tests.rs",
+    "assertion_line": 916,
+    "assertion_sha256": "d66f77895e00f4f7beaf6e089aa4b662865a6243d94a9c9ac7e62b4dddc54c46",
+    "assertion_rule": "unique-static-message"
+  },
+  {
+    "label": "grt4-doctor-producer-ambiguity",
+    "oracle": "G14 current loaded assessment",
+    "target": "doctor_peers",
+    "test": "loaded_ambiguous_aliases_are_visible_without_store_writes_or_uri_export",
+    "test_file": "tests/doctor_peers.rs",
+    "expected_literal": "grt4 doctor omitted loaded ambiguity flag",
+    "edits": [
+      {
+        "file": "src/doctor_peers.rs",
+        "needle": "let ambiguous_aliases = !current.ambiguous_alias_classes().is_empty();",
+        "replacement": "let ambiguous_aliases = false;"
+      }
+    ],
+    "assertion_file": "tests/doctor_peers.rs",
+    "assertion_line": 794,
+    "assertion_sha256": "5173083449e91ee21d0f54031eaa939eccf3916f4945c16394deaa4472eb3d2d",
+    "assertion_rule": "unique-static-message",
+    "binaries": [
+      "xmsg"
+    ]
+  },
+  {
+    "label": "grt4-doctor-producer-concrete",
+    "oracle": "G14 current loaded assessment",
+    "target": "doctor_peers",
+    "test": "concrete_only_configuration_has_no_alias_warning",
+    "test_file": "tests/doctor_peers.rs",
+    "expected_literal": "grt4 concrete-only config reported ambiguous aliases",
+    "edits": [
+      {
+        "file": "src/doctor_peers.rs",
+        "needle": "let ambiguous_aliases = !current.ambiguous_alias_classes().is_empty();",
+        "replacement": "let ambiguous_aliases = true;"
+      }
+    ],
+    "assertion_file": "tests/doctor_peers.rs",
+    "assertion_line": 980,
+    "assertion_sha256": "5173083449e91ee21d0f54031eaa939eccf3916f4945c16394deaa4472eb3d2d",
+    "assertion_rule": "unique-static-message",
+    "binaries": [
+      "xmsg"
+    ]
+  },
+  {
+    "label": "grt4-doctor-warning-status",
+    "oracle": "G14 explicit Warn",
+    "target": "doctor_peers",
+    "test": "loaded_ambiguous_aliases_are_visible_without_store_writes_or_uri_export",
+    "test_file": "tests/doctor_peers.rs",
+    "expected_literal": "grt4 ambiguous aliases were not a doctor warning",
+    "edits": [
+      {
+        "file": "src/doctor.rs",
+        "needle": "Status::Warn,",
+        "replacement": "Status::Pass,",
+        "start": "        Some(true) => report.add(",
+        "end": "        Some(false) => report.add("
+      }
+    ],
+    "assertion_file": "tests/doctor_peers.rs",
+    "assertion_line": 808,
+    "assertion_sha256": "5173083449e91ee21d0f54031eaa939eccf3916f4945c16394deaa4472eb3d2d",
+    "assertion_rule": "unique-static-message",
+    "binaries": [
+      "xmsg"
+    ]
+  },
+  {
+    "label": "grt4-doctor-warning-text",
+    "oracle": "G14 exact operator guidance",
+    "target": "doctor_peers",
+    "test": "loaded_ambiguous_aliases_are_visible_without_store_writes_or_uri_export",
+    "test_file": "tests/doctor_peers.rs",
+    "expected_literal": "grt4 doctor ambiguity message changed",
+    "edits": [
+      {
+        "file": "src/doctor.rs",
+        "needle": "\"pattern admits ambiguous aliases; give pods concrete CA leaf entries\",",
+        "replacement": "\"ambiguous aliases\","
+      }
+    ],
+    "assertion_file": "tests/doctor_peers.rs",
+    "assertion_line": 812,
+    "assertion_sha256": "5173083449e91ee21d0f54031eaa939eccf3916f4945c16394deaa4472eb3d2d",
+    "assertion_rule": "unique-static-message",
+    "binaries": [
+      "xmsg"
+    ]
+  },
+  {
+    "label": "grt4-doctor-concrete-pass",
+    "oracle": "G14 concrete no-warning control",
+    "target": "doctor_peers",
+    "test": "concrete_only_configuration_has_no_alias_warning",
+    "test_file": "tests/doctor_peers.rs",
+    "expected_literal": "grt4 concrete-only doctor produced an alias warning",
+    "edits": [
+      {
+        "file": "src/doctor.rs",
+        "needle": "Status::Pass,",
+        "replacement": "Status::Warn,",
+        "start": "        Some(false) => report.add(",
+        "end": "        None => report.add("
+      }
+    ],
+    "assertion_file": "tests/doctor_peers.rs",
+    "assertion_line": 990,
+    "assertion_sha256": "5173083449e91ee21d0f54031eaa939eccf3916f4945c16394deaa4472eb3d2d",
+    "assertion_rule": "unique-static-message",
+    "binaries": [
+      "xmsg"
+    ]
+  },
+  {
+    "label": "grt4-doctor-legacy-unknown-status",
+    "oracle": "G14 missing assessment never clear",
+    "target": "doctor_peers",
+    "test": "older_daemon_alias_assessment_is_unknown_without_discarding_peer_health",
+    "test_file": "tests/doctor_peers.rs",
+    "expected_literal": "grt4 missing legacy ambiguity flag was treated as clear",
+    "edits": [
+      {
+        "file": "src/doctor.rs",
+        "needle": "Status::Warn,",
+        "replacement": "Status::Pass,",
+        "start": "        None => report.add(\n            \"federation.aliases\",",
+        "end": "    let local = certificate_text("
+      }
+    ],
+    "assertion_file": "tests/doctor_peers.rs",
+    "assertion_line": 878,
+    "assertion_sha256": "5173083449e91ee21d0f54031eaa939eccf3916f4945c16394deaa4472eb3d2d",
+    "assertion_rule": "unique-static-message",
+    "binaries": [
+      "xmsg"
+    ]
+  },
+  {
+    "label": "grt4-enroll-computed-uri",
+    "oracle": "G9 callback sees transaction-derived identity",
+    "target": "lib",
+    "test": "enroll_ca::tests::grt4_name_authority_refusal_has_no_issuance_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "ownership(&uri, &proposed.node_name)?",
+        "replacement": "ownership(\"spiffe://example.org/ns/laptop/sa/alice\", &proposed.node_name)?"
+      }
+    ],
+    "expected_literal": "grt4 ownership callback saw wrong computed URI",
+    "assertion_file": "src/enroll_ca/tests.rs",
+    "assertion_line": 1065,
+    "assertion_sha256": "66de4162812075b1764ce42d05b6d66da8dfdeff4aa617b23d210915bfa7c42c",
+    "assertion_rule": "unique-static-message"
+  },
+  {
+    "label": "grt4-enroll-computed-alias",
+    "oracle": "G9 callback sees transaction-derived identity",
+    "target": "lib",
+    "test": "enroll_ca::tests::grt4_name_authority_refusal_has_no_issuance_effects",
+    "test_file": "src/enroll_ca/tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_ca.rs",
+        "needle": "ownership(&uri, &proposed.node_name)?",
+        "replacement": "ownership(&uri, \"root.laptop\")?"
+      }
+    ],
+    "expected_literal": "grt4 ownership callback saw wrong computed name",
+    "assertion_file": "src/enroll_ca/tests.rs",
+    "assertion_line": 1069,
+    "assertion_sha256": "66de4162812075b1764ce42d05b6d66da8dfdeff4aa617b23d210915bfa7c42c",
+    "assertion_rule": "unique-static-message"
+  },
+  {
+    "label": "grt4-enroll-device-concrete-mode",
+    "oracle": "G8 device fresh concrete reservation mode; SQL-arrival ordering is separately gated, this is not a freshness proof",
+    "target": "lib",
+    "test": "enroll::protocol_tests::device_tests::invariants::grt4_actual_device_approval_refreshes_ownership_after_sql_wait",
+    "test_file": "src/enroll_device_invariant_tests.rs",
+    "edits": [
+      {
+        "file": "src/enroll_device.rs",
+        "needle": ".lease_enrollment_name(uri, false)",
+        "replacement": ".lease_enrollment_name(uri, true)"
+      }
+    ],
+    "expected_literal": "grt4 actual approval retained stale pre-SQL name ownership",
+    "assertion_file": "src/enroll_device_invariant_tests.rs",
+    "assertion_line": 1092,
+    "assertion_sha256": "0039461ac63c17bd675126a662772533300d7131262387ee4ac2b4f0e82cd9f9",
+    "assertion_rule": "unique-static-message"
+  }
+]

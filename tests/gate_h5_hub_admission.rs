@@ -1796,8 +1796,13 @@ async fn grt4_keepalive_uri_cannot_borrow_a_replacement_alias() {
         &["spiffe://example.invalid/ns/hub/sa/hub"],
     );
     let config = |uri: &str| {
+        let rights = if uri == uri_a {
+            vec!["list"]
+        } else {
+            vec!["send", "reply", "list"]
+        };
         serde_json::json!({"peers": {"guard.pods": {
-            "ca": ca_path, "identities": [uri], "leaf": true, "allow": ["send", "reply", "list"]
+            "ca": ca_path, "identities": [uri], "leaf": true, "allow": rights
         }}})
         .to_string()
     };
@@ -1851,8 +1856,60 @@ async fn grt4_keepalive_uri_cannot_borrow_a_replacement_alias() {
         same.1.contains("list query"),
         "grt4 same-URI reload failed before the query handler"
     );
+    use tokio::io::AsyncWriteExt;
+    let (_inbox, received) = create_claude_session_fixture(&hub.sessions_dir, "target", "target");
+    let controls = xmsg::observe_relay::test_hooks::controls(&hub.fed_state);
+    let initial_posts = controls
+        .delivery_posts
+        .load(std::sync::atomic::Ordering::Acquire);
+    let server_pin = xmsg::fed::spki_sha256_from_der(&server_cert).unwrap();
+    let connector = xmsg::fed::make_tls_connector(&cert_a, &key_a, &server_pin).unwrap();
+    let tcp = tokio::net::TcpStream::connect(hub.fed_addr).await.unwrap();
+    let mut raw = connector
+        .connect(
+            rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+            tcp,
+        )
+        .await
+        .unwrap();
+    let body = serde_json::to_vec(&make_envelope(
+        "target",
+        "late body must not borrow new grants",
+    ))
+    .unwrap();
+    let headers = format!("POST /fed/v2/messages HTTP/1.1\r\nHost: fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+    raw.write_all(headers.as_bytes()).await.unwrap();
+    raw.flush().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while controls
+            .delivery_posts
+            .load(std::sync::atomic::Ordering::Acquire)
+            == initial_posts
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("grt4 held body never reached authenticated request admission");
     fs::write(&peers_path, config(uri_b)).unwrap();
     reloader.force_reload().unwrap();
+    raw.write_all(&body).await.unwrap();
+    raw.flush().await.unwrap();
+    let mut late_response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(3), raw.read_to_end(&mut late_response))
+        .await
+        .unwrap()
+        .unwrap();
+    let late_response = String::from_utf8(late_response).unwrap();
+    assert!(
+        late_response.starts_with("HTTP/1.1 403")
+            && late_response.contains("authenticated identity no longer owns"),
+        "grt4 body-completion handler borrowed a replacement URI grant: {late_response}"
+    );
+    assert!(
+        received.lock().unwrap().is_empty(),
+        "grt4 stale body delivered before current URI refusal"
+    );
     let old = grt4_unknown_list(&mut sender_a).await;
     assert_eq!(
         old.0,
@@ -1870,6 +1927,24 @@ async fn grt4_keepalive_uri_cannot_borrow_a_replacement_alias() {
         fresh.1.contains("list query"),
         "grt4 replacement control failed before the query handler"
     );
+    let request = hyper::Request::builder()
+        .method("POST")
+        .uri("/fed/v2/messages")
+        .header("host", "fixture")
+        .header("content-type", "application/json")
+        .body(http_body_util::Full::new(bytes::Bytes::from(body)))
+        .unwrap();
+    let accepted = tokio::time::timeout(Duration::from_secs(3), sender_b.send_request(request))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        accepted.status(),
+        hyper::StatusCode::ACCEPTED,
+        "grt4 replacement send control did not retain its current grant"
+    );
+    use http_body_util::BodyExt;
+    accepted.into_body().collect().await.unwrap();
     drop(sender_a);
     drop(sender_b);
     connection_a.abort();
@@ -1976,6 +2051,15 @@ fn grt4_warning_is_once_per_published_alias_class() {
             2,
             "grt4 failed reload published an ambiguity warning"
         );
+        fs::write(&peers_path, config.to_string()).unwrap();
+        fs::write(&reloader.key_path, "invalid private key fixture").unwrap();
+        assert!(reloader.force_reload().is_err());
+        assert_eq!(
+            warnings(),
+            2,
+            "grt4 failed TLS reload published an ambiguity warning"
+        );
+        fs::write(&reloader.key_path, grt4_pem("PRIVATE KEY", &key)).unwrap();
         let output = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
         let warning_lines: Vec<_> = output
             .lines()
@@ -2331,4 +2415,268 @@ fn grt4_wildcard_identity_cannot_claim_the_hubs_own_alias() {
             .contains_key(hostile_uri),
         "grt4 refused own-name claimant left a registered identity"
     );
+    config["hub"]["patterns"] = serde_json::json!(["spiffe://example.invalid/*/pods/*/hub"]);
+    let reserved = PeersMap::load_from_json_for(
+        &config.to_string(),
+        Some(&xmsg::fed::OwnNode {
+            name: "hub.pods".into(),
+            pin: None,
+        }),
+    )
+    .unwrap();
+    assert!(
+        !reserved.is_ambiguous_alias("hub.pods"),
+        "grt4 own reservation became an ambiguous external address"
+    );
+    assert!(
+        reserved.ambiguous_alias_classes().is_empty(),
+        "grt4 own reservation produced a dynamic ambiguity warning"
+    );
+}
+
+#[tokio::test]
+async fn grt4_direct_name_lease_reserves_the_running_node() {
+    let (params, key, _, pem) = generate_ca("grt4 direct lease CA");
+    let (_temp, config) = grt4_mixed_config(&pem);
+    let peers = PeersMap::load_from_json(&config).unwrap();
+    let (cert, key) = issue_cert(
+        &params,
+        &key,
+        "issuer.hub",
+        &["spiffe://example.invalid/ns/hub/sa/issuer"],
+    );
+    let node = create_test_node("issuer.hub", peers, cert, Vec::new(), key).await;
+    for renewal in [false, true] {
+        assert!(
+            node.fed_state
+                .lease_enrollment_name("spiffe://example.invalid/host/hub/user/issuer", renewal)
+                .is_err(),
+            "grt4 FedState issued a name lease for its own running node"
+        );
+    }
+    let lease = node
+        .fed_state
+        .lease_enrollment_name("spiffe://example.invalid/host/normal/user/alice", false)
+        .expect("grt4 unrelated direct name lease positive failed");
+    assert!(
+        node.fed_state.dynamic_tls.try_write().is_err(),
+        "grt4 direct name lease did not retain publication read lock"
+    );
+    drop(lease);
+    assert!(
+        node.fed_state.dynamic_tls.try_write().is_ok(),
+        "grt4 direct name lease did not release publication read lock"
+    );
+}
+
+#[tokio::test]
+async fn grt4_concrete_name_lease_matches_the_exact_uri_and_mode() {
+    let (params, key, _, pem) = generate_ca("grt4 concrete lease CA");
+    let (_temp, config) = grt4_mixed_config(&pem);
+    let original = "spiffe://example.invalid/host/normal/user/alice";
+    for configured in [original, "spiffe://other.invalid/ns/normal/sa/alice"] {
+        let mut config: serde_json::Value = serde_json::from_str(&config).unwrap();
+        config["peers"]["alice.normal"] = serde_json::json!({
+            "ca": config["peers"]["hub.hub"]["ca"], "identities": [configured],
+            "leaf": true, "allow": ["send", "reply"]
+        });
+        let peers = PeersMap::load_from_json(&config.to_string()).unwrap();
+        let (cert, server_key) = issue_cert(
+            &params,
+            &key,
+            "issuer.hub",
+            &["spiffe://example.invalid/ns/hub/sa/issuer"],
+        );
+        let node = create_test_node("issuer.hub", peers, cert, Vec::new(), server_key).await;
+        assert!(
+            node.fed_state
+                .lease_enrollment_name(original, false)
+                .is_err(),
+            "grt4 fresh issuance bypassed a concrete name reservation"
+        );
+        if configured == original {
+            assert!(
+                node.fed_state.lease_enrollment_name(original, true).is_ok(),
+                "grt4 bound same-URI renewal lost its concrete lease"
+            );
+        } else {
+            assert!(
+                node.fed_state
+                    .lease_enrollment_name(original, true)
+                    .is_err(),
+                "grt4 foreign concrete URI received a renewal lease"
+            );
+        }
+    }
+}
+
+#[test]
+fn grt4_loader_enforces_concrete_name_identity_invariants() {
+    let (_, _, _, pem) = generate_ca("grt4 loader invariant CA");
+    let (temp, _) = grt4_mixed_config(&pem);
+    let pin = serde_json::json!({"peers": {"alice.remote": {
+        "pin": "00".repeat(32), "address": "127.0.0.1:1", "allow": ["send"]
+    }}});
+    assert!(
+        PeersMap::load_from_json(&pin.to_string()).is_err(),
+        "grt4 loader admitted a dotted pin nickname"
+    );
+    let ca = serde_json::json!({"peers": {"alice.remote": {
+        "ca": temp.path().join("ca.pem"), "address": "127.0.0.1:1", "allow": ["send"],
+        "identities": ["spiffe://one/host/remote/user/alice", "spiffe://two/host/remote/user/alice"]
+    }}});
+    assert!(
+        PeersMap::load_from_json(&ca.to_string()).is_err(),
+        "grt4 loader admitted multiple concrete CA identities"
+    );
+}
+
+#[test]
+fn grt4_dynamic_registry_uses_current_uri_and_rule_grants() {
+    let (params, key, _, pem) = generate_ca("grt4 current registry CA");
+    let (_temp, config) = grt4_mixed_config(&pem);
+    let mut config: serde_json::Value = serde_json::from_str(&config).unwrap();
+    let pattern_a = "spiffe://example.invalid/host/*/user/*";
+    let uri_a = "spiffe://example.invalid/host/normal/user/alice";
+    config["hub"]["patterns"] = serde_json::json!([pattern_a]);
+    config["hub"]["rules"] = serde_json::json!([{"pattern": uri_a, "allow": ["send", "observe"], "leaf": true, "observe_labels": true, "targets": ["wide"]}]);
+    let old = PeersMap::load_from_json(&config.to_string()).unwrap();
+    let (cert_a, _) = issue_cert(&params, &key, "alice.normal", &[uri_a]);
+    let cert_a = rustls::pki_types::CertificateDer::from(cert_a);
+    let (admitted_a, _) = old.resolve_incoming_peer(&cert_a, &[]).unwrap();
+    assert!(
+        old.get_peer_config("alice.normal").is_some(),
+        "grt4 admitted URI lacks name-based routing"
+    );
+    config["hub"]["rules"] = serde_json::json!([{"pattern": pattern_a, "allow": ["list"], "leaf": false, "targets": ["narrow"]}]);
+    let mut current = PeersMap::load_from_json(&config.to_string()).unwrap();
+    current.admitted_clients = old.admitted_clients.clone();
+    old.resolve_incoming_peer(&cert_a, &[]).unwrap();
+    let grant = current
+        .get_peer_config("alice.normal")
+        .expect("grt4 current grant lookup lost an admitted URI");
+    assert_eq!(
+        grant.allow,
+        vec!["list"],
+        "grt4 dynamic lookup restored stale allow grants"
+    );
+    assert!(
+        !grant.leaf,
+        "grt4 dynamic lookup restored stale leaf status"
+    );
+    assert!(
+        !grant.observe_labels,
+        "grt4 dynamic lookup restored stale label permission"
+    );
+    assert_eq!(
+        grant.targets,
+        Some(vec!["narrow".into()]),
+        "grt4 dynamic lookup restored stale target grants"
+    );
+    assert_eq!(
+        current.admitted_names(),
+        vec!["alice.normal"],
+        "grt4 admitted listing exposed a URI key"
+    );
+    let pattern_b = "spiffe://other.invalid/host/*/user/*";
+    config["hub"]["patterns"] = serde_json::json!([pattern_b]);
+    config["hub"]["rules"] = serde_json::json!([{"pattern": pattern_b, "allow": ["list"]}]);
+    let mut reassigned = PeersMap::load_from_json(&config.to_string()).unwrap();
+    reassigned.admitted_clients = old.admitted_clients.clone();
+    assert!(
+        reassigned.get_peer_config("alice.normal").is_none(),
+        "grt4 retired URI remained name-routable"
+    );
+    assert!(
+        reassigned.admitted_names().is_empty(),
+        "grt4 retired URI remained in admitted listings"
+    );
+    let uri_b = "spiffe://other.invalid/host/normal/user/alice";
+    let (cert_b, _) = issue_cert(&params, &key, "alice.normal", &[uri_b]);
+    reassigned
+        .resolve_incoming_peer(&rustls::pki_types::CertificateDer::from(cert_b), &[])
+        .unwrap();
+    let old_peer = xmsg::fed::AuthenticatedPeer {
+        name: "alice.normal".into(),
+        pin: admitted_a.pin.unwrap(),
+        uri: Some(uri_a.into()),
+        certificate_has_uri: true,
+        user: "alice".into(),
+        remote_ip: "127.0.0.1".parse().unwrap(),
+    };
+    assert!(
+        matches!(
+            reassigned.get_authenticated_peer_config(&old_peer),
+            Err(AppError::PeerRejected(_))
+        ),
+        "grt4 current URI lookup lent replacement grants to an old URI"
+    );
+    assert_eq!(
+        reassigned.admitted_names(),
+        vec!["alice.normal"],
+        "grt4 reassigned registry duplicated or exposed identity keys"
+    );
+}
+
+#[test]
+fn grt4_concrete_pod_reserves_its_name_before_any_connection() {
+    use rustls::server::danger::ClientCertVerifier;
+    let (params, key, _, pem) = generate_ca("grt4 static pod CA");
+    let (_temp, config) = grt4_mixed_config(&pem);
+    let mut config: serde_json::Value = serde_json::from_str(&config).unwrap();
+    config["hub"]["patterns"] = serde_json::json!(["spiffe://example.invalid/host/*/user/*"]);
+    config["hub"]["rules"] = serde_json::json!([{"pattern": "spiffe://example.invalid/host/*/user/*", "allow": ["send"]}]);
+    let pod_uri = "spiffe://example.invalid/ns/pods/sa/guard";
+    config["peers"]["guard.pods"] = serde_json::json!({
+        "ca": config["peers"]["hub.hub"]["ca"], "identities": [pod_uri],
+        "leaf": true, "allow": ["send", "reply", "list"]
+    });
+    for _restart in 0..2 {
+        let peers = Arc::new(PeersMap::load_from_json(&config.to_string()).unwrap());
+        let verifier = xmsg::fed::CombinedClientCertVerifier::new(peers.clone());
+        let (host, _) = issue_cert(
+            &params,
+            &key,
+            "guard.pods",
+            &["spiffe://example.invalid/host/pods/user/guard"],
+        );
+        let host = rustls::pki_types::CertificateDer::from(host);
+        assert!(
+            verifier
+                .verify_client_cert(&host, &[], rustls::pki_types::UnixTime::now())
+                .is_err(),
+            "grt4 TLS host captured a reserved offline pod name"
+        );
+        assert!(
+            matches!(
+                peers.resolve_incoming_peer(&host, &[]),
+                Err(AppError::PeerRejected(_))
+            ),
+            "grt4 host registered against an offline concrete pod reservation"
+        );
+        let (pod, _) = issue_cert(&params, &key, "guard.pods", &[pod_uri]);
+        let pod = rustls::pki_types::CertificateDer::from(pod);
+        assert!(
+            verifier
+                .verify_client_cert(&pod, &[], rustls::pki_types::UnixTime::now())
+                .is_ok(),
+            "grt4 concrete pod TLS positive was refused"
+        );
+        let (config, uri) = peers
+            .resolve_incoming_peer(&pod, &[])
+            .expect("grt4 concrete pod registration positive failed");
+        assert_eq!(
+            uri.as_deref(),
+            Some(pod_uri),
+            "grt4 static pod admission lost full identity"
+        );
+        assert!(
+            config.leaf && config.address.is_empty(),
+            "grt4 concrete pod no longer has addressless leaf semantics"
+        );
+        assert!(
+            peers.admitted_clients.read().unwrap().is_empty(),
+            "grt4 concrete pod created a dynamic identity row"
+        );
+    }
 }
