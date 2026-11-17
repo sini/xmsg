@@ -374,9 +374,12 @@ Renewal does not contact the IdP and stores no IdP refresh token. Account disabl
 at the IdP therefore applies on the next fresh login, not every renewal. CA
 `deny.users`, `deny.hosts`, `deny.subs` and `deny.spkis` stop new issuance/renewal
 at that CA. Match keys by SPKI, not serial: renewals change serials. An already
-issued certificate remains usable until expiry, normally at most 24 hours. There
-is no CRL/OCSP distribution, and a peer that pins the key bypasses certificate
-expiry and these CA revocation bounds entirely.
+issued certificate can still authenticate a **new CA-mode connection** until its
+expiry, normally at most 24 hours after issuance. Existing connections and in-flight
+requests can outlast that expiry. There is no CRL/OCSP distribution, and a peer
+that pins the key bypasses certificate expiry and these CA admission bounds.
+Use the [offboarding procedure](#offboard-a-teammate-or-a-lost-or-stolen-device)
+when access must stop sooner.
 
 Re-enrolling the same `(user, host)` with a new key supersedes the earlier key
 lineage. It cannot renew; its existing certificate still has the remaining
@@ -401,14 +404,128 @@ is already any user's primary binding; unbinding is an intentional operator act.
 binding does not instantly invalidate certificates already held by peers.
 
 The policy is reloaded when its content changes. Invalid JSON or invalid rules
-keep the previous policy, log a refusal and mark readiness degraded; a valid
+keep the previous policy, log a refusal and mark CA policy-reload status degraded; a valid
 replacement applies at the next policy check. Startup with no valid policy fails.
+
+## Offboard a teammate, or a lost or stolen device
+
+Stop renewal at the CA, then remove admission at every node that can accept the
+identity. Disabling the person's Google or other IdP account is useful, but **is
+not xmsg revocation**: renewal uses the held certificate and key without another
+IdP check. The default fresh-login gate is 90 days; do not wait for it for an urgent
+cutoff. Data already delivered cannot be recalled.
+
+1. **Find the exact identity and stop its next issuance or renewal.** On the CA
+   host, use the serving UID and the actual CA directory, policy and database paths:
+
+   ```sh
+   xmsg enroll-ca --enroll-ca-dir ./enroll-ca --enroll-policy ./enroll-policy.json \
+     --db-path ./hub.db list
+   ```
+
+   This opens the selected **local database**, not the running daemon's inventory.
+   A wrong path can select or initialize a different database. Records include
+   historical, expired and superseded certificates; inspect `user`, `host`,
+   `spki_sha256` and `not_after` rather than assuming every row is active. Renewals
+   change serials, so use the key's SPKI for a lost device.
+
+   Edit the existing policy's `deny` arrays, preserving its other settings and
+   existing denied entries:
+
+   | Scope | Policy edit and exact selector |
+   | --- | --- |
+   | Teammate on every host | Add the projected policy user, such as `alice`, to `deny.users`. |
+   | One lost key | Add its exact inventory `spki_sha256` to `deny.spkis`: `sha256:` followed by 64 lower-case hex digits, **not bare hex**. |
+   | A host label across every user | Add the host label, such as `laptop`, to `deny.hosts`. This is global across users; `alice.laptop` is not a user-scoped host selector. Prefer SPKI for one person's device. |
+
+   An SPKI denial does not cover a new key, and a host denial does not cover other
+   host labels; use the projected-user denial for a whole-teammate/account cutoff
+   across hosts and keys.
+
+   Matching is exact and does not normalize these values. A wrong string may load
+   successfully and match nothing. `xmsg enroll-ca deny REQUEST_ID` denies only one
+   pending device request; it is not a persistent user or device ban.
+
+   A valid changed policy applies at the next CA operation. Invalid policy keeps
+   the last accepted policy, which can still issue or renew; look for log class
+   `invalid_enrollment_policy` and doctor warning `ca.policy_reload`. Doctor does
+   not load a newly edited policy, and a pass does not prove its selectors match.
+   The local `list` command opens a fresh CA object and can check that the selected
+   policy parses, but cannot prove remote admission has stopped. See the
+   [CA denial and renewal checks](https://github.com/sini/xmsg/blob/2fe05f828f0a3050c2bd4beaf2b03e8751b64b9d/src/enroll_ca.rs#L670-L960).
+
+2. **For an urgent cutoff, retire every admission path and existing connection.**
+   Remove or narrow **every applicable** concrete pin/CA entry, hub pattern and
+   root trust path for the identity on affected nodes. A remaining independent
+   entry or bundle can still admit it. Validate each edited peers file, using that
+   daemon's actual paths:
+
+   ```sh
+   xmsg check-peers ./hub-peers.json --fed-cert ./hub.crt
+   ```
+
+   This checks configuration syntax, not connectivity or revocation. Restart the
+   affected daemons, or use your deployment's drain procedure, to retire existing
+   connections. SIGHUP or periodic reload alone does not disconnect them; the
+   reload interval defaults to 30 seconds and `0` disables periodic reload. Reload
+   retains active sockets and the hub admission cache. See the
+   [listener and reload paths](https://github.com/sini/xmsg/blob/2fe05f828f0a3050c2bd4beaf2b03e8751b64b9d/src/fed.rs#L6688-L7049).
+
+   **Planned, not implemented here:** explicit peer denial will be checked at
+   request entry and response publication for CA and pinned admissions, without
+   dropping the socket. CA-mode expiry checks at those boundaries will use the
+   actual admitted leaf's `not_after`; pin-mode expiry will remain unchanged, while
+   explicit denial will still apply to pins. **Already-checked-request grace
+   (planned):** at most one request already past its applicable check may complete;
+   a parked poll that becomes denied or whose CA admission expires must not publish.
+   Until that behavior is available, use the current connection-retirement
+   procedure above.
+
+3. **If relying on certificate expiry, bound only new CA-authenticated connections.**
+   After CA denial prevents renewal, an already issued certificate can still pass
+   a new CA handshake for `max(0, not_after - now)`. For a freshly issued certificate:
+
+   | Issued `lifetime_secs` | Maximum remaining window for NEW CA-authenticated connections |
+   | --- | --- |
+   | Default `86400` | Up to 24 hours |
+   | Configured `604800` | Up to 7 days |
+
+   These are not deadlines for old sockets or in-flight requests. The default
+   five-minute `not_before` backdating adds no time to `not_after - now`.
+   `renew_grace_secs=604800` permits renewal eligibility after expiry; it is not
+   seven extra days of CA admission, and CA denial still blocks renewal in that
+   grace period. Pins bypass this expiry bound, as the
+   [CA and pin verifiers](https://github.com/sini/xmsg/blob/2fe05f828f0a3050c2bd4beaf2b03e8751b64b9d/src/fed.rs#L1773-L2025)
+   show.
+
+4. **If the CA host or root key is lost or compromised, replace that root.** Use a
+   new directory; initializing the existing directory preserves its key:
+
+   ```sh
+   xmsg enroll-ca --enroll-ca-dir ./enroll-ca-replacement init
+   ```
+
+   Distribute the new public root and fingerprint, remove the old root from every
+   applicable trust bundle and pattern, and re-enroll every machine that depended
+   on it using the new fingerprint and a new private state directory. Restart or
+   drain old connections too. Keeping old and new roots in an overlap bundle is
+   migration, not revocation. The cost is re-enrollment for all identities under
+   the removed root; independent root bundles are unaffected. Keep the new root's
+   private key on its CA host, never copy it to clients. See
+   [root initialization](https://github.com/sini/xmsg/blob/2fe05f828f0a3050c2bd4beaf2b03e8751b64b9d/src/enroll_ca.rs#L436-L524).
+
+5. **For pinned identities, remove the complete peer entry manually.** Pins ignore
+   certificate expiry. Replacing a pin under the same name can leave an old socket
+   authorized; remove the entire entry and any other applicable trust paths, then
+   restart or drain affected daemons. Do not wait for a CA deny, certificate expiry
+   or reload to retire the old connection or cached hub admission.
 
 ## Rotate the root
 
 Root rotation creates a new enrollment root and fingerprint. Distribute the new
 root to the patterns and peer entries that should trust it; bundles may contain
-old and new roots during a deliberate overlap. Re-enroll each machine with the
+old and new roots during a deliberate overlap. Such overlap does not revoke the old
+root; remove it from every applicable bundle for offboarding. Re-enroll each machine with the
 new fingerprint and switch its state directory. Do not copy `root.key` to clients
 or reuse the fleet/cluster CA key. Enrollment-root compromise affects its admitted
 users and the patterns bound to that bundle, not unrelated fleet bundles.
