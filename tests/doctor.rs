@@ -1042,10 +1042,10 @@ fn outbound_only_peer_is_informational_without_tls_or_clock_claims() {
     );
     let fixture = Fixture::with_federation(200, value);
     let (_, report) = fixture.report();
-    status(&report, "peer.federation.outbound.example", "pass");
+    status(&report, "peer.federation.outbound.example", "info");
     assert_eq!(
         check(&report, "peer.federation.outbound.example")["message"],
-        "outbound-only leaf; not probed (reachable through its own outbound link)"
+        "outbound-only leaf, reached via its hub"
     );
     status(&report, "federation.probe", "pass");
 }
@@ -1105,11 +1105,11 @@ fn cortex_shaped_healthy_node_has_no_noise_warnings() {
         "database.schema_version",
         "database.additive",
         "database.enrollment_schema",
-        "peer.federation.outbound.example",
         "federation.probe",
     ] {
         status(&report, id, "pass");
     }
+    status(&report, "peer.federation.outbound.example", "info");
     assert_eq!(report["failed"], 0);
     assert_eq!(
         snapshot(fixture.root.path()),
@@ -1149,4 +1149,27 @@ fn optional_enrollment_tables_are_informational_when_present_or_disabled() {
             .unwrap()
             .contains("loaded enrollment configuration remains unknown"));
     }
+}
+
+#[test]
+fn dialable_unreachable_peer_remains_warning() {
+    let mut data = federation_data(
+        "valid",
+        vec![json!({
+            "name":"dialable.example", "reachability":"unreachable", "reason":"connect_failed",
+            "leaf":null, "expiry":"unknown", "offset_state":"unknown",
+            "observed_offset_seconds":null, "offset_uncertainty_seconds":null
+        })],
+    );
+    data["partial"] = json!(true);
+    let fixture = Fixture::with_federation(200, data);
+    let (_, report) = fixture.report();
+    status(&report, "peer.federation.dialable.example", "warn");
+    status(&report, "federation.probe", "warn");
+    assert!(
+        check(&report, "peer.federation.dialable.example")["message"]
+            .as_str()
+            .unwrap()
+            .contains("TLS unreachable")
+    );
 }

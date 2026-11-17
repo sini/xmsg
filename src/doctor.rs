@@ -641,8 +641,8 @@ async fn federation(report: &mut Report, path: Option<&Path>, configured_names: 
         if row["reason"] == "outbound_only" {
             report.add(
                 format!("peer.federation.{name}"),
-                Status::Pass,
-                "outbound-only leaf; not probed (reachable through its own outbound link)",
+                Status::Info,
+                "outbound-only leaf, reached via its hub",
                 None,
             );
             shown += 1;
