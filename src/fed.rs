@@ -471,6 +471,7 @@ pub struct PeersMap {
     pub admitted_clients: Arc<std::sync::RwLock<HashMap<String, AdmittedClient>>>,
     pub default_route_peer: Option<String>,
     pub reverse_observe: crate::observe_relay::Config,
+    pub discovery: crate::discovery::Config,
 }
 
 /// This node's own identity, for the peers loader's namespace checks.
@@ -1025,6 +1026,7 @@ impl PeersMap {
         };
         let mut hub_config: Option<HubConfig> = None;
         let mut reverse_observe = crate::observe_relay::Config::default();
+        let mut discovery = crate::discovery::Config::default();
         let mut is_wrapped = false;
         let owned_entries: PeerObjects = match &val {
             serde_json::Value::Object(map) => {
@@ -1033,7 +1035,7 @@ impl PeersMap {
                 if is_wrapped {
                     for k in map.keys() {
                         match k.as_str() {
-                            "peers" | "hub" | "reverse_observe" => {}
+                            "peers" | "hub" | "reverse_observe" | "discovery" => {}
                             other => {
                                 return Err(format!("unknown field '{other}' in peers config"));
                             }
@@ -1049,11 +1051,14 @@ impl PeersMap {
                         peers: Members,
                         #[serde(default)]
                         reverse_observe: crate::observe_relay::Config,
+                        #[serde(default)]
+                        discovery: serde_json::Value,
                     }
                     let w: Wrapped = serde_json::from_str(json_str)
                         .map_err(|_| "'peers' field must be an object".to_string())?;
                     w.reverse_observe.validate()?;
                     reverse_observe = w.reverse_observe;
+                    discovery = crate::discovery::Config::parse(w.discovery)?;
                     member_objects(w.peers)?
                 } else {
                     let m: Members = serde_json::from_str(json_str)
@@ -1439,6 +1444,7 @@ impl PeersMap {
         }
         map.default_route_peer = default_routes.into_iter().next();
         map.reverse_observe = reverse_observe;
+        map.discovery = discovery;
         if let Some(mut hub) = hub_config {
             map.bind_hub_patterns(&mut hub)?;
             map.hub = Some(hub);
