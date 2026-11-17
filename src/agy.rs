@@ -319,11 +319,12 @@ fn darwin_watch(
     Some((kq, evt))
 }
 
-/// The `flock` holder of `(dev, ino)` on live macOS: `owner` alone, or every process of this
-/// UID, when `owner` is `None`. A holder is reported only while its release watch is unfired.
-/// More than one nominee is ambiguous and an error.
+/// The `flock` holder of `(dev, ino)` on live macOS, nominated from every process of this UID;
+/// a caller attesting one pid compares it with the result. A holder is reported only while its
+/// release watch is unfired. More than one unreleased nominee is ambiguous and an error. A lock
+/// taken and released before the first call that sees it reads as held: the watch comes too late.
 #[cfg(target_os = "macos")]
-fn darwin_holder(owner: Option<u32>, dev: u64, ino: u64) -> io::Result<Option<u32>> {
+fn darwin_holder(dev: u64, ino: u64) -> io::Result<Option<u32>> {
     let live = Path::new(crate::process::LIVE_PROC_ROOT);
     let released = |kq: &std::os::fd::OwnedFd| {
         crate::codex::kqueue_drain(kq).map_or(true, |fired| fired & DARWIN_RELEASE != 0)
@@ -332,11 +333,16 @@ fn darwin_holder(owner: Option<u32>, dev: u64, ino: u64) -> io::Result<Option<u3
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    // 1. A dead or recycled pid's entry goes; dropping a Live one closes its descriptors.
+    // 1. A dead or recycled pid's entry goes; dropping a Live one closes its descriptors. A read
+    // that fails otherwise keeps the entry, so a released pid is not resurrected by it.
     for entries in cache.values_mut() {
         entries.retain(|e| {
             let (pid, st) = e.id();
-            crate::process::starttime(live, pid).ok().as_deref() == Some(st)
+            match crate::process::probe_starttime(live, pid) {
+                Ok(crate::process::StartTimeProbe::Gone) => false,
+                Ok(crate::process::StartTimeProbe::Known(now)) => now == st,
+                _ => true,
+            }
         });
     }
     cache.retain(|_, entries| !entries.is_empty());
@@ -361,12 +367,8 @@ fn darwin_holder(owner: Option<u32>, dev: u64, ino: u64) -> io::Result<Option<u3
     }
 
     // 3. Nominees: the lock flag set, and not released.
-    let pids = match owner {
-        Some(pid) => vec![pid],
-        None => crate::process::same_uid_pids()?,
-    };
     let mut nominees = Vec::new();
-    for pid in pids {
+    for pid in crate::process::same_uid_pids()? {
         let Ok(st) = crate::process::starttime(live, pid) else {
             continue;
         };
@@ -529,7 +531,7 @@ pub fn find_lock_holder(
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!(
-                    "agy presence locks need {} (Linux only)",
+                    "agy presence lock table {} not found on this platform",
                     proc_locks_path.display()
                 ),
             ));
@@ -606,7 +608,7 @@ pub fn attested_lock_holder(
     // The watched lock flag stands in for `fdinfo`, with the same fixture fallback.
     #[cfg(target_os = "macos")]
     if proc_root == Path::new(crate::process::LIVE_PROC_ROOT) {
-        return match darwin_holder(Some(pid), dev, ino)? {
+        return match darwin_holder(dev, ino)? {
             None if proc_locks_path != Path::new(LIVE_PROC_LOCKS) => {
                 find_lock_holder(proc_locks_path, maj, min, ino)
             }
@@ -671,7 +673,7 @@ pub fn find_lock_holder_fdinfo(
     // The watched lock flag stands in for `fdinfo`, with the same fixture fallback.
     #[cfg(target_os = "macos")]
     if proc_root == Path::new(crate::process::LIVE_PROC_ROOT) {
-        return match darwin_holder(None, dev, ino)? {
+        return match darwin_holder(dev, ino)? {
             None if proc_locks_path != Path::new(LIVE_PROC_LOCKS) => {
                 find_lock_holder(proc_locks_path, maj, min, ino)
             }
@@ -1086,13 +1088,11 @@ pub fn verify_registration_peer(
             }
             Ok(None) => {
                 return Err(AppError::NotRecipient(format!(
-                    "presence lock file has no FLOCK holder in {proc_locks:?}"
+                    "presence lock file has no FLOCK holder ({proc_locks:?})"
                 )));
             }
             Err(e) => {
-                return Err(AppError::Ambiguous(format!(
-                    "ambiguous presence lock in /proc/locks: {e}"
-                )));
+                return Err(AppError::Ambiguous(format!("ambiguous presence lock: {e}")));
             }
         }
     }

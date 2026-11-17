@@ -39,7 +39,12 @@ external hooks do not get them. Thus `xmsg` registers an Antigravity session in 
   a descendant tool command runs, `xmsg` checks its start time before and after it reads
   `/proc/<pid>/environ`. On macOS (planned), the same watcher lists children with
   `proc_listchildpids` and reads the environment from `KERN_PROCARGS2`, so a conversation is
-  listed, and messages to it queue and are delivered, before its first hook turn. It copies **only** `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN`
+  listed, and messages to it queue and are delivered, before its first hook turn. That relies on
+  two agy behaviours measured on agy 1.5.3: its presence lock is close-on-exec, so its children
+  never hold it, and it stays locked for the whole conversation, released only at exit. If
+  another version differs, the lock is unattested (fail closed) and the conversation is reached
+  through the hook after its first turn, as before. agy leaves the `.lock` file behind when it
+  exits; a holderless lock file is a finished conversation. It copies **only** `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN`
   into memory. While Arm A watches on the first turn, the `PreInvocation` hook does nothing (it
   prints `{}`).
 - **Sandbox Fallback (Arm B′):** Arm B′ applies in a Linux sandbox where `/proc` is not

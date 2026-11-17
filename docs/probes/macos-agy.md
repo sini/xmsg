@@ -127,6 +127,7 @@ The earlier source reading concluded that unprivileged Darwin APIs expose no adv
 
 - **`fi_openflags` `FWASLOCKED` (`0x4000`) is sticky.** `proc_pidfdinfo(PROC_PIDFDVNODEPATHINFO)` reports it on an open file once `flock(2)` has been called on it. It stays set after `LOCK_UN` while that open file (or a dup of it) lives, and clears only when it closes. It is per open file: a sibling descriptor opened separately on the same file reads `0`.
 - **kqueue `EVFILT_VNODE` `NOTE_FUNLOCK`** on an `O_EVTONLY` descriptor fires on `LOCK_UN` with the locked descriptor still open, and on the close of a locked descriptor. It does not fire on a lock, a relock, a failed `LOCK_NB` attempt, or a never-locked open and close. It also fires when a descriptor that was locked and then unlocked is closed, even while another process holds the lock. A watcher must never take a test lock itself: its own unlock fires the event.
+- **Inherited copies do not release.** An inherited copy of the locked descriptor (a fork without close-on-exec, after which the child exits, closes it, or execs) fires no `NOTE_FUNLOCK` and does not release the lock. Only the last close of the open file, or `LOCK_UN`, does. A second independent open whose `LOCK_NB` attempt fails fires nothing on its close either.
 - **A spawning parent shares its descriptors.** While a child is being spawned, `proc_pidfdinfo` on the child briefly shows the parent's descriptors, close-on-exec ones included, until the exec closes them.
 - **`KERN_PROCARGS2`** returns a same-UID child's environment for ad-hoc signed and hardened-runtime binaries, and strips it for Apple platform binaries (`/bin/*`).
 
@@ -140,5 +141,17 @@ The earlier source reading concluded that unprivileged Darwin APIs expose no adv
 ### Known limits
 
 - A lock taken and released before xmsg first sees it reads as held: the watch arrives after the event.
-- If a former holder that unlocked without closing later closes its descriptor while another process holds the lock, the event releases the current holder, which then stays hidden until it restarts. This fails closed.
-- A holder that is spawning a child at the first check reads as ambiguous for that check.
+- The remaining hide case: a second, independent open of the file that was locked and unlocked (the flag set on it) and is then closed while another process holds the lock. Its close fires `NOTE_FUNLOCK` and releases the current holder, which stays hidden until it restarts. This fails closed.
+- More than one unreleased flagged process when no holder is watched yet is ambiguous: no holder, for a call attesting one pid as well as for List.
+- A holder that is spawning a child at the first check reads as ambiguous for that check. This is transient and fails closed.
+
+### What xmsg relies on from agy (planned; measured on agy 1.5.3)
+
+Listing and delivering to an agy conversation before its first hook turn relies on two agy behaviours, both measured on agy 1.5.3:
+
+1. agy opens its presence lock close-on-exec: across a live session, its six MCP and child processes never held the lock;
+2. agy holds the lock for the whole conversation, with no unlock during tool calls; the only release is at exit.
+
+If another agy version does not behave this way, xmsg treats the lock as unattested, which fails closed, and the conversation is reached through the hook path after its first turn, as before.
+
+agy leaves its presence `.lock` file behind after it exits. A lock file with no holder is the normal finished state of a conversation, and xmsg does not list it.

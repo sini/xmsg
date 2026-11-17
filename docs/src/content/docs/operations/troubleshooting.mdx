@@ -134,10 +134,22 @@ set after `LOCK_UN` until that open file is closed. Only a closed file clears it
 - **Antigravity:** the flag only nominates the holder of a presence lock. Once xmsg has seen a
   holder, it watches the file with `kqueue` `NOTE_FUNLOCK`. The watch fires on an unlock, or when
   a locked file is closed, and from then on xmsg treats that process as released, whatever its
-  flag still reads. Two processes sharing one locked open file (an inherited descriptor) have no
-  holder, and the conversation is not listed. A lock taken and released before xmsg first sees
-  it reads as held. A holder that is starting a child when xmsg first looks briefly shares its
-  descriptors with that child, reads as ambiguous, and is listed on the next look.
+  flag still reads. When xmsg looks for a holder it has not yet watched and finds more than one
+  unreleased process with the flag set on that file, for example a child that inherited the
+  locked descriptor without close-on-exec, it reports no holder, and the conversation is not
+  listed until only one remains. A holder already watched is not affected. A lock taken and
+  released before xmsg first sees it reads as held. A holder that is starting a child when xmsg
+  first looks briefly shares its descriptors with that child, reads as ambiguous, and is listed
+  on the next look.
+- **What listing before the first turn relies on:** listing and delivering to an agy conversation
+  before its first hook turn relies on two agy behaviours, measured on agy 1.5.3: agy opens its
+  presence lock close-on-exec, so its MCP and command children never hold it, and it holds the
+  lock for the whole conversation, with no unlock during tool calls; the only release is at
+  exit. If another version does not behave this way, xmsg treats the lock as unattested, which
+  fails closed, and the conversation is reached through the hook path after its first turn, as
+  before.
+- **A holderless `.lock` file is normal:** agy leaves the presence `.lock` file behind when it
+  exits. A lock file with no holder is a finished conversation; it is not listed.
 - **Codex:** admission reads the flag directly. After an explicit unlock that leaves the lock file
   open, admission can still read the owner as holding the writer lock. The lease watch still
   detects the release through `NOTE_FUNLOCK`, so on macOS even a close followed by a reopen of the

@@ -4804,6 +4804,8 @@ async fn c19_2_live_unlocked_o_rdwr_descriptor_rejected() {
 
 /// C19.3: Post-admission owner release transition without unlink (`N3`, `N4`, `Q5`, `N1`)
 /// in both fake-proc and live distinct-child `LIVE_PROC_ROOT`.
+// macOS: closing and reopening the same lock file starts a new lease generation (the close fires
+// NOTE_FUNLOCK); tracked separately.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn c19_3_post_admission_owner_release_without_unlink() {
