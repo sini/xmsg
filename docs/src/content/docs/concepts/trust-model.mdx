@@ -158,6 +158,16 @@ administrator reassignment of that alias is an owner-authorized routing change; 
 promise that old records remain bound to a historical URI. This change adds no mailbox
 migration or new node-name prefix.
 
+**Planned renewal boundary:** renewal retains the trust domain of the CA-signed certificate,
+including after a policy-domain change. It requires the exact canonical host/user path to
+match the stored user and host, then checks current full-URI ownership under a lease. A
+namespace/service-account URI with the same derived alias is not a substitute.
+
+The store does not independently bind a historical URI or trust domain. A differently-domained
+certificate reusing a known serial requires the CA's own signer and is outside the
+enrollment-client threat model. This preserves the existing renewal contract without adding
+historical identity fields.
+
 Default host certificates expire 24 hours after issuance. The CA deny list stops
 new issuance or renewal immediately there; there is no CRL or OCSP distribution
 to peers. Renewal does not query the IdP, and fresh login is required after
