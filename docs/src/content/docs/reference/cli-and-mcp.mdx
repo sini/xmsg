@@ -169,6 +169,10 @@ Unix socket: `GET /v1/diagnostics/federation`. The CLI never loads a private key
 a peer directly. The daemon reuses its loaded identity and existing pin/CA verifiers;
 there is no fallback to CLI peer dials if the daemon is down or lacks this endpoint.
 
+Planned: the federation section also reports a Warn for ambiguous dynamic alias classes:
+`pattern admits ambiguous aliases; give pods concrete CA leaf entries`. This check uses the
+loaded configuration, without another network probe or full URI witnesses in the warning.
+
 The invocation probes at most 32 configured peers in sorted order, with at most four
 concurrent attempts, two seconds per peer and an eight-second total deadline. Doctor's
 IPC deadline is nine seconds. Addressless, unattempted or outbound-only client entries
@@ -304,6 +308,12 @@ exits non-zero and names the failure. Use it in CI or before a deploy:
 ```bash
 xmsg check-peers /path/to/peers.json --fed-cert /path/to/node.crt
 ```
+
+Planned: an otherwise valid file with ambiguous dynamic aliases still exits `0`, but prints
+one warning per alias class to stderr. Such identities will be refused even on their first
+connection. Run the new binary's check before upgrading a mixed-pattern hub, including when
+enrollment is disabled. Reserve affected pods with concrete CA leaf entries or partition the
+patterns; see the [upgrade example](/concepts/hubs-and-leaves/#planned-reserve-pod-names-before-upgrading).
 
 ---
 
