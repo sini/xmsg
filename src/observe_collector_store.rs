@@ -14,6 +14,8 @@ const MAX_TIME: i64 = 253_402_300_799;
 const ROWS: usize = 10_000;
 const BYTES: usize = 16 * 1024 * 1024;
 const PAGE_BYTES: usize = 256 * 1024;
+/// SQLite engine used for the collector's measured journal bound.
+pub const REQUIRED_SQLITE_ENGINE: &str = "3.53.2";
 #[derive(Clone, Debug)]
 pub struct NodePolicy {
     pub node: String,
@@ -134,10 +136,9 @@ impl From<rusqlite::Error> for StoreError {
 }
 
 fn check_engine(found: &'static str) -> Result<(), StoreError> {
-    const REQUIRED: &str = "3.53.2";
-    if found != REQUIRED {
+    if found != REQUIRED_SQLITE_ENGINE {
         Err(StoreError::UnsupportedEngine {
-            required: REQUIRED,
+            required: REQUIRED_SQLITE_ENGINE,
             found,
         })
     } else {
