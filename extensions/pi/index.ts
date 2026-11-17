@@ -197,7 +197,7 @@ export class XmsgPiBridge {
   public start() {
     if (this.running) return;
     if (!this.sockPath) {
-      console.warn("[xmsg-pi] XDG_RUNTIME_DIR is not set and no sockPath provided; disabling socket polling");
+      console.warn("[xmsg-pi] socket directory not found (XDG_RUNTIME_DIR is unset, the macOS fallback is unavailable, and no sockPath was provided); disabling socket polling");
       return;
     }
     if (!verifySecureSocketDir(this.sockPath)) {
