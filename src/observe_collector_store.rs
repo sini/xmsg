@@ -113,6 +113,11 @@ pub enum StoreError {
     UnsafePath,
     #[error("observation storage unavailable")]
     Storage,
+    #[error("unsupported collector SQLite engine: required {required}, found {found}")]
+    UnsupportedEngine {
+        required: &'static str,
+        found: &'static str,
+    },
     #[error("observation storage full")]
     Full,
     #[error("observation cursor changed")]
@@ -125,6 +130,18 @@ impl From<rusqlite::Error> for StoreError {
         } else {
             Self::Storage
         }
+    }
+}
+
+fn check_engine(found: &'static str) -> Result<(), StoreError> {
+    const REQUIRED: &str = "3.53.2";
+    if found != REQUIRED {
+        Err(StoreError::UnsupportedEngine {
+            required: REQUIRED,
+            found,
+        })
+    } else {
+        Ok(())
     }
 }
 struct NodeState {
@@ -462,9 +479,10 @@ impl Store {
             }
         }
         let mode: String = c.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
-        if mode != "delete" || rusqlite::version() != "3.53.2" {
+        if mode != "delete" {
             return Err(StoreError::Storage);
         }
+        check_engine(rusqlite::version())?;
         c.execute_batch("CREATE TABLE IF NOT EXISTS nodes(node TEXT PRIMARY KEY,epoch TEXT,scope TEXT,next INTEGER NOT NULL DEFAULT 0,snapshot BLOB,snapshot_receipt INTEGER,snapshot_base INTEGER,snapshot_fingerprint BLOB,gaps TEXT NOT NULL DEFAULT '[]',truncated INTEGER NOT NULL DEFAULT 0,backfill INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS events(node TEXT NOT NULL,epoch TEXT NOT NULL,sequence INTEGER NOT NULL,json BLOB NOT NULL,receipt INTEGER NOT NULL,base INTEGER NOT NULL,bytes INTEGER NOT NULL,PRIMARY KEY(node,epoch,sequence)); CREATE INDEX IF NOT EXISTS retention ON events(node,base,receipt,epoch,sequence);")?;
         c.execute_batch("BEGIN IMMEDIATE")?;
         let migration = (|| -> Result<(), StoreError> {

@@ -30,8 +30,24 @@ pub enum Error {
     Configuration,
     #[error("collector storage unavailable")]
     Storage,
+    #[error("unsupported collector SQLite engine: required {required}, found {found}")]
+    UnsupportedEngine {
+        required: &'static str,
+        found: &'static str,
+    },
     #[error("collector listener unavailable")]
     Listener,
+}
+
+impl From<StoreError> for Error {
+    fn from(error: StoreError) -> Self {
+        match error {
+            StoreError::UnsupportedEngine { required, found } => {
+                Self::UnsupportedEngine { required, found }
+            }
+            _ => Self::Storage,
+        }
+    }
 }
 
 struct State {
@@ -566,7 +582,7 @@ pub async fn run(args: Args) -> Result<(), Error> {
         tokio::task::spawn_blocking(move || Store::open(Path::new(&directory), policies, clock))
             .await
             .map_err(|_| Error::Storage)?
-            .map_err(|_| Error::Storage)?;
+            .map_err(Error::from)?;
     let mut nodes = client
         .sources
         .iter()

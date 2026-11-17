@@ -463,6 +463,29 @@ fn private_paths_and_preexisting_physical_limits() {
 }
 #[test]
 fn engine_settings_journal_peak_full_abort_and_compaction() {
+    assert!(check_engine("3.53.2").is_ok());
+    let unsupported = check_engine("3.54.0").unwrap_err();
+    let startup = crate::observe_collector::Error::from(unsupported);
+    assert_eq!(
+        startup.to_string(),
+        "unsupported collector SQLite engine: required 3.53.2, found 3.54.0"
+    );
+    let startup_debug = format!("{startup:?}");
+    assert!(startup_debug.contains("3.53.2") && startup_debug.contains("3.54.0"));
+    assert_eq!(unsupported.to_string(), startup.to_string());
+    for other in [
+        StoreError::Invalid,
+        StoreError::Node,
+        StoreError::UnsafePath,
+        StoreError::Storage,
+        StoreError::Full,
+        StoreError::Cursor,
+    ] {
+        assert_eq!(
+            crate::observe_collector::Error::from(other).to_string(),
+            "collector storage unavailable"
+        );
+    }
     let dir = private_temp();
     let store = Store::open_limits(
         dir.path(),

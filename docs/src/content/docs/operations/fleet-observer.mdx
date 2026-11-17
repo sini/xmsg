@@ -362,6 +362,8 @@ bounds, not exact filesystem allocation or forensic erasure guarantees. Physical
 storage exhaustion can stop ingestion before the logical limit; it is visible and
 cannot commit a cursor without its page.
 
+If startup reports `UnsupportedEngine` (for example, `required 3.53.2, found 3.54.0`; the found version may differ), rebuild with bundled SQLite without `LIBSQLITE3_SYS_USE_PKG_CONFIG` overriding it; do not remove the engine pin.
+
 Crash recovery after the configured capacity is lowered has not been measured.
 The physical database and journal ceilings and the visible storage-full state
 remain the protections; this limit does not promise recovery within a newly
