@@ -1,5 +1,5 @@
 use std::fs;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -10,18 +10,21 @@ use tokio::sync::broadcast;
 use xmsg::agy::{dev_major, dev_minor, new_agy_store, AgyConfig, AgyCredentials};
 use xmsg::http::{build_router, AppState};
 
-/// Writes an executable fixture from a child process, so this test process never holds a write
-/// descriptor on it. A sibling test's fork can then never inherit one, and exec never hits ETXTBSY.
+/// Writes an executable fixture from a child process (this test binary in writer mode), so this
+/// process never holds a write descriptor on it: a sibling test's fork can never carry one into an
+/// exec window, and exec never hits ETXTBSY. No external tools, so a minimal PATH doesn't matter.
 fn write_exe(path: &Path, contents: &str) {
     use std::io::Write;
-    let mut child = std::process::Command::new("/bin/sh")
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
-            "-c",
-            r#"umask 022; cat > "$1.tmp" && chmod 755 "$1.tmp" && mv "$1.tmp" "$1""#,
-            "sh",
+            "--exact",
+            "write_exe_writer_child",
+            "--nocapture",
+            "--test-threads=1",
         ])
-        .arg(path)
+        .env(WRITE_EXE_TARGET, path)
         .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
     child
@@ -35,6 +38,40 @@ fn write_exe(path: &Path, contents: &str) {
         "write_exe {}",
         path.display()
     );
+    let meta = fs::metadata(path).unwrap();
+    assert!(
+        meta.permissions().mode() & 0o111 != 0,
+        "write_exe left {} non-executable",
+        path.display()
+    );
+}
+
+const WRITE_EXE_TARGET: &str = "XMSG_TEST_WRITE_EXE_TARGET";
+
+/// The writer half of [`write_exe`]; a no-op unless re-exec'd with its target set.
+#[test]
+fn write_exe_writer_child() {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let Some(target) = std::env::var_os(WRITE_EXE_TARGET) else {
+        return;
+    };
+    let target = PathBuf::from(target);
+    let tmp = target.with_extension("write-exe-tmp");
+    let mut body = Vec::new();
+    std::io::stdin().read_to_end(&mut body).unwrap();
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o755)
+        .open(&tmp)
+        .unwrap();
+    std::io::Write::write_all(&mut f, &body).unwrap();
+    f.sync_all().unwrap();
+    drop(f);
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(&tmp, &target).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -311,7 +348,7 @@ escaped=$(printf '%s' "$7" | awk 'BEGIN { ORS="" } { gsub(/\\/, "\\\\"); gsub(/"
 printf '{\n  "response": {\n    "sendMessage": {\n      "recipientId": "%s",\n      "content": "%s"\n    }\n  }\n}\n' "$6" "$escaped"
 exit 0
 "#;
-    write_exe(&fake_agy_bin, &echo_script);
+    write_exe(&fake_agy_bin, echo_script);
 
     let agy_config = AgyConfig {
         presence_dir,
@@ -1023,12 +1060,19 @@ fn fixtures_written_by_write_exe_never_hit_etxtbsy_under_concurrent_forks() {
     let forker = {
         let stop = stop.clone();
         std::thread::spawn(move || {
+            use std::os::unix::process::CommandExt;
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                let _ = std::process::Command::new("/usr/bin/true").status();
+                // A pre_exec hook forces fork+exec, so each child holds this process's fds until
+                // exec: the window the fixture race needs. Plain posix_spawn has no such window.
+                let mut c = std::process::Command::new("/bin/sh");
+                c.args(["-c", ":"]);
+                // SAFETY: the hook does nothing and is async-signal-safe.
+                unsafe { c.pre_exec(|| Ok(())) };
+                let _ = c.status();
             }
         })
     };
-    for i in 0..200 {
+    for i in 0..400 {
         let bin = tmp.path().join(format!("f{i}.sh"));
         write_exe(&bin, "#!/bin/sh\nexit 0\n");
         let r = std::process::Command::new(&bin).status();
