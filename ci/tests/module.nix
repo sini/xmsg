@@ -160,6 +160,12 @@ let
           inherit (c.launchd.agents.xmsg.config) StandardOutPath StandardErrorPath Umask;
           dir = c.home.activation.xmsgLogDir;
         };
+        badPaths =
+          map (p: failedAssertions (hmEval system { programs.xmsg.server.stableExecutable = p; }))
+            [
+              "xmsg/serve/xmsg"
+              "${builtins.storeDir}/x-xmsg/bin/xmsg"
+            ];
         systemd = c.systemd.user.services ? xmsg;
         failed = failedAssertions c;
       };
@@ -192,6 +198,12 @@ let
         nullActivation = [ ];
         codexCollision = [
           "programs.xmsg.server.stableExecutable: /Users/alice/.local/share/xmsg/bin/xmsg is the Codex harness's store link; pick another path."
+        ];
+        badPaths = [
+          [ "programs.xmsg.server.stableExecutable: xmsg/serve/xmsg is not an absolute path." ]
+          [
+            "programs.xmsg.server.stableExecutable: ${builtins.storeDir}/x-xmsg/bin/xmsg is in the Nix store; it must be a mutable path."
+          ]
         ];
         systemd = false;
         failed = [ ];

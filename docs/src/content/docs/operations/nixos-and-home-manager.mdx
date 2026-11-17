@@ -44,19 +44,19 @@ macOS keys the Local Network permission to the executable's real path, so a daem
 from the Nix store would re-prompt after every upgrade (and its first launch waits on the
 prompt). The module keeps a stable copy so upgrades don't re-prompt: `launchd.agents.xmsg` runs
 `programs.xmsg.server.stableExecutable`, a regular file (not a symlink) that activation replaces
-when the package changes, by copying the new binary beside it and renaming it into place. It then
-restarts the agent with `launchctl kickstart -k`, because the agent's plist no longer changes
-across upgrades. The copy keeps the binary's own ad-hoc signature; nothing is re-signed. The
+when the package changes, by copying the new binary beside it and renaming it into place. When it
+replaced an existing file it restarts the agent with `launchctl kickstart -k`, because the agent's
+plist no longer changes across upgrades; a first install is started by launchd's `RunAtLoad`. The copy keeps the binary's own ad-hoc signature; nothing is re-signed. The
 package stays in `home.packages`, so the copy's store libraries are not collected.
 
 Set `stableExecutable = null` to run the store path directly, accepting a new prompt per
-upgrade. The path must differ from the Codex harness's `${config.xdg.dataHome}/xmsg/bin/xmsg`
+upgrade. The path must be absolute and outside the Nix store, and must differ from the Codex harness's `${config.xdg.dataHome}/xmsg/bin/xmsg`
 link, which Home Manager owns. Linux is unaffected: the systemd unit runs the store path.
 
 The agent writes its standard output (xmsg's log) to `~/Library/Logs/xmsg/stdout.log` and its
-standard error (panics and early startup errors) to `~/Library/Logs/xmsg/stderr.log`, the same files as the hand-written plist in
-[macOS](/getting-started/macos/). Activation creates `~/Library/Logs/xmsg` (mode `0700`) before the
-agent loads, since launchd does not. The agent runs with `Umask` 0077, as the Linux unit does.
+standard error (panics and early startup errors) to `~/Library/Logs/xmsg/stderr.log`, the same
+files as the hand-written plist in [macOS](/getting-started/macos/). Activation creates
+`~/Library/Logs/xmsg` (mode `0700`) before the agent loads, since launchd does not. The agent runs with `Umask` 0077, as the Linux unit does.
 
 ## Per-harness switches
 
