@@ -8372,3 +8372,299 @@ async fn va41_unknown_handoff_does_not_orphan_later_pending_item() {
         "unknown"
     );
 }
+
+#[tokio::test]
+async fn codex_send_post_enqueue_error_keeps_queue_custody() {
+    codex_post_enqueue_error_keeps_queue_custody(false, false, "pending").await;
+}
+
+#[tokio::test]
+async fn codex_subaddress_send_post_enqueue_error_keeps_queue_custody() {
+    codex_post_enqueue_error_keeps_queue_custody(false, true, "pending").await;
+}
+
+#[tokio::test]
+async fn codex_root_reply_post_enqueue_error_keeps_queue_custody() {
+    codex_post_enqueue_error_keeps_queue_custody(true, false, "pending").await;
+}
+
+#[tokio::test]
+async fn codex_fallback_reply_post_enqueue_error_keeps_queue_custody() {
+    codex_post_enqueue_error_keeps_queue_custody(true, true, "pending").await;
+}
+
+#[tokio::test]
+async fn codex_post_enqueue_error_respects_custody_controls() {
+    for state in [
+        "accepted",
+        "parked",
+        "revoked",
+        "generation",
+        "unknown",
+        "inflight",
+        "before_enqueue",
+    ] {
+        for reply in [false, true] {
+            for subaddress in [false, true] {
+                codex_post_enqueue_error_keeps_queue_custody(reply, subaddress, state).await;
+            }
+        }
+    }
+}
+
+async fn codex_post_enqueue_error_keeps_queue_custody(reply: bool, subaddress: bool, fault: &str) {
+    let env = CodexTestEnv::new();
+    let root = "019a0000-0000-7000-8000-000000000469";
+    let child = "019a0000-0000-7000-8000-000000000470";
+    let pid = 7469;
+    env.write_fake_proc(pid, 1, "7469", &env.codex_exe);
+    env.create_writer_lock(&env.codex_home, pid, root, 3);
+    env.write_root_rollout(&env.codex_home, root, "/workspace");
+    let peer = env.peer(pid);
+    handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "SessionStart",
+        None,
+        &json!({"session_id":root,"source":"startup"}),
+    )
+    .await
+    .unwrap();
+    if subaddress {
+        env.write_child_rollout(&env.codex_home, child, root, Some(root));
+        for event in ["SubagentStart", "SubagentStop"] {
+            handle_codex_hook_frame(
+                &env.state,
+                &peer,
+                event,
+                None,
+                &json!({"session_id":root,"agent_id":child,"turn_id":"turn-1"}),
+            )
+            .await
+            .unwrap();
+        }
+    }
+    let snap = xmsg::codex::resolve_codex_root(&env.state.db, root).unwrap();
+    let destination = if subaddress {
+        format!("{root}/{child}")
+    } else {
+        root.into()
+    };
+    let fault_sql = match fault {
+        "unknown" | "inflight" => format!(
+            "CREATE TRIGGER refuse_push AFTER INSERT ON codex_handoff BEGIN \
+             UPDATE codex_handoff SET state='{fault}' WHERE message_id=NEW.message_id; END;"
+        ),
+        "before_enqueue" => "CREATE TRIGGER refuse_push BEFORE INSERT ON pi_pending_messages \
+            BEGIN SELECT RAISE(ABORT,'forced pre-enqueue refusal'); END;"
+            .into(),
+        _ => {
+            let mutation = match fault {
+                "accepted" => {
+                    "UPDATE codex_handoff SET state='accepted' WHERE message_id=NEW.message_id;"
+                }
+                "parked" => "UPDATE codex_roots SET active=0 WHERE root_id=NEW.root_id;",
+                "revoked" => "UPDATE codex_roots SET active=0,revoked=1 WHERE root_id=NEW.root_id;",
+                "generation" => {
+                    "UPDATE codex_roots SET generation=generation+1 WHERE root_id=NEW.root_id;"
+                }
+                "pending" => "",
+                _ => panic!("unrecognized custody control"),
+            };
+            format!(
+                "CREATE TRIGGER refuse_push BEFORE UPDATE OF state ON codex_handoff \
+                WHEN NEW.state='inflight' AND NEW.carrier='push' BEGIN {mutation} \
+                SELECT RAISE(FAIL,'forced post-enqueue push refusal'); END;"
+            )
+        }
+    };
+    env.state
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch(&fault_sql)
+        .unwrap();
+    let id = if reply {
+        let mut recipient = xmsg::codex::codex_root_to_session(&snap);
+        recipient.session_id = "019a0000-0000-7000-8000-000000000471".into();
+        recipient.harness = "claude".into();
+        storage::insert_message(
+            &env.state.db.lock().unwrap(),
+            &storage::MessageRecord {
+                id: "ORIGINAL".into(),
+                created_at: storage::now_epoch_secs(),
+                session_id: recipient.session_id.clone(),
+                from_name: "sender".into(),
+                bytes: 1,
+                outcome: "delivered".into(),
+                recipient_harness: "claude".into(),
+                return_harness: Some("codex".into()),
+                return_session_id: Some(destination),
+                thread_id: "ORIGINAL".into(),
+                return_host: None,
+            },
+        )
+        .unwrap();
+        let result = xmsg::surface::reply(&env.state, &recipient, "ORIGINAL", "BODY", None).await;
+        if fault == "before_enqueue" && !subaddress {
+            assert!(
+                result.is_err(),
+                "root reply pre-enqueue failure must remain an error"
+            );
+            let db = env.state.db.lock().unwrap();
+            let count: i64 = db
+                .query_row("SELECT COUNT(*) FROM codex_handoff", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 0);
+            return;
+        }
+        let record = result.unwrap();
+        let expected = match fault {
+            "pending" | "accepted" => "pushed",
+            "unknown" | "before_enqueue" => "push_failed",
+            _ => "sender_gone",
+        };
+        assert_eq!(
+            record.push_outcome.as_deref(),
+            Some(expected),
+            "reply={reply} subaddress={subaddress} fault={fault}"
+        );
+        if fault == "before_enqueue" {
+            let db = env.state.db.lock().unwrap();
+            let count: i64 = db
+                .query_row("SELECT COUNT(*) FROM codex_handoff", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 0);
+            return;
+        }
+        record.pushed_message_id.unwrap_or_else(|| {
+            env.state
+                .db
+                .lock()
+                .unwrap()
+                .query_row("SELECT message_id FROM codex_handoff", [], |row| row.get(0))
+                .unwrap()
+        })
+    } else {
+        let result = xmsg::surface::send(
+            &env.state,
+            &xmsg::surface::Sender::Anonymous("sender".into()),
+            &destination,
+            "BODY",
+            None,
+        )
+        .await;
+        if matches!(
+            fault,
+            "parked" | "revoked" | "generation" | "before_enqueue"
+        ) {
+            assert!(
+                result.is_err(),
+                "send without live custody must preserve its error: {fault}"
+            );
+            let db = env.state.db.lock().unwrap();
+            let count: i64 = db
+                .query_row("SELECT COUNT(*) FROM codex_handoff", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, i64::from(fault != "before_enqueue"));
+            let held: i64 = db.query_row(
+                "SELECT COUNT(*) FROM codex_handoff h JOIN codex_roots r ON r.root_id=h.root_id \
+                 WHERE h.state IN ('pending','accepted') AND h.root_generation=r.generation \
+                 AND r.active=1 AND r.revoked=0", [], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(held, 0);
+            return;
+        }
+        assert!(
+            result.is_ok(),
+            "send custody survives post-enqueue push refusal: {result:?}"
+        );
+        let result = result.unwrap();
+        assert_eq!(
+            result.outcome,
+            match fault {
+                "accepted" => "delivered",
+                "unknown" => "delivery_unknown",
+                _ => "queued",
+            }
+        );
+        result.message_id
+    };
+    {
+        let db = env.state.db.lock().unwrap();
+        if fault == "before_enqueue" {
+            assert!(storage::get_codex_handoff_state(&db, &id)
+                .unwrap()
+                .is_none());
+            return;
+        }
+        let state = storage::get_codex_handoff_state(&db, &id).unwrap().unwrap();
+        assert_eq!(
+            state.0,
+            match fault {
+                "accepted" | "unknown" | "inflight" => fault,
+                _ => "pending",
+            }
+        );
+        assert_eq!(state.2, snap.generation);
+        assert_eq!(
+            storage::codex_handoff_held_for_live_root(&db, &id).unwrap(),
+            matches!(fault, "pending" | "accepted")
+        );
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM pi_pending_messages WHERE id=?1 AND delivered_at IS NULL",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        db.execute_batch("DROP TRIGGER refuse_push;").unwrap();
+    }
+    if matches!(fault, "parked" | "revoked" | "generation") {
+        return;
+    }
+    let stop = handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "Stop",
+        None,
+        &json!({"session_id":root,"stop_hook_active":true}),
+    )
+    .await
+    .unwrap();
+    if fault != "pending" {
+        assert!(
+            stop.handoff_ids.is_empty(),
+            "{fault} must not replay automatically"
+        );
+        return;
+    }
+    assert_eq!(stop.handoff_ids, [id.clone()]);
+    storage::complete_codex_handoff_accepted(
+        &env.state.db.lock().unwrap(),
+        root,
+        &stop.handoff_ids,
+    )
+    .unwrap();
+    let again = handle_codex_hook_frame(
+        &env.state,
+        &peer,
+        "Stop",
+        None,
+        &json!({"session_id":root,"stop_hook_active":true}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        again.handoff_ids.is_empty(),
+        "accepted handoff must not repeat"
+    );
+    assert_eq!(
+        storage::get_codex_handoff_state(&env.state.db.lock().unwrap(), &id)
+            .unwrap()
+            .unwrap()
+            .0,
+        "accepted"
+    );
+}

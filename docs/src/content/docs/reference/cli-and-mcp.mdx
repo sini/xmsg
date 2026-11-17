@@ -378,7 +378,9 @@ Sends a message to `<id or name>[@<node>]` (at most one `@`):
 - **`as_agent`:** When a subagent calls the tool, the harness `PreToolUse` hook sets it
   automatically.
 - **Returns:** `{ message_id, address, outcome }` where `outcome` is `"delivered"`, `"queued"`, or `"pending"`.
-  Use the returned `address` for follow-ups.
+  Use the returned `address` for follow-ups. **Planned:** a failed immediate Codex push
+  returns `queued` when xmsg proves custody for the live root's current generation,
+  including an idle subagent's parent fallback.
 
 ### `reply(message_id, text, as_agent?)`
 
@@ -387,6 +389,9 @@ sender. If you sent it, the reply is a follow-up to the recipient in the same ex
 
 - **Returns:** `{ bytes, messageId, inReplyTo, outcome }`, where `messageId` is the new reply's
   ULID and `inReplyTo` is `message_id`.
+- **Planned:** a Codex reply held for a live root's current generation reports `pushed`
+  even if its immediate push fails before handoff. Parked or revoked roots keep
+  `sender_gone`; unknown or in-flight handoffs do not imply successful custody.
 
 ### `replies(message_id, wait?)`
 
