@@ -575,3 +575,57 @@ async fn actual_auto_renewal_reloads_the_certificate_presented_on_the_next_outbo
     enrollment.abort();
     let _ = enrollment.await;
 }
+
+#[tokio::test]
+async fn grt4_browser_and_paste_refuse_prospective_pod_alias_before_any_admission() {
+    for flow in [enroll_cli::Flow::Loopback, enroll_cli::Flow::Paste] {
+        let env = Harness::new().await;
+        crate::enroll::protocol_tests::grt4_publish_ambiguous_names(&env, "laptop");
+        assert!(env
+            .service
+            .fed
+            .current_peers()
+            .admitted_clients
+            .read()
+            .unwrap()
+            .is_empty());
+        let (url, listener) = network_server(&env, false).await;
+        let browser = Browser {
+            idp: &env.idp,
+            calls: AtomicUsize::new(0),
+            tasks: Mutex::new(vec![]),
+        };
+        let directory = env._directory.path().join("reserved-client");
+        let result = enroll_cli::run_with_browser(
+            args(&url, enrollment_fingerprint(&env), &directory, flow),
+            &browser,
+        )
+        .await;
+        browser.finish().await;
+        listener.abort();
+        let _ = listener.await;
+        assert!(
+            result.is_err(),
+            "grt4 browser/paste issued a prospective pod alias"
+        );
+        assert_eq!(
+            browser.calls.load(Ordering::SeqCst),
+            1,
+            "grt4 browser refusal bypassed the authenticated issue path"
+        );
+        assert!(
+            env.service.ca.list().unwrap().is_empty(),
+            "grt4 browser refusal persisted a certificate"
+        );
+        let db = env.db.lock().unwrap();
+        for table in ["enroll_bindings", "enroll_rates", "enroll_certs"] {
+            assert_eq!(
+                db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0,
+                "grt4 browser/paste refusal spent authority effects"
+            );
+        }
+    }
+}
