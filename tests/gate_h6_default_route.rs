@@ -1202,14 +1202,14 @@ async fn test_oracle_9_admitted_clients_preserved_across_reload() {
     {
         let mut adm = initial_admitted_arc.write().unwrap();
         adm.insert(
-            "client-canon".to_string(),
+            "spiffe://example.org/host/lap/user/alice".to_string(),
             xmsg::fed::AdmittedClient {
                 not_after: i64::MAX,
-                canonical_name: "client-canon".to_string(),
-                uri: "spiffe://example.org/client".to_string(),
+                canonical_name: "alice.lap".to_string(),
+                uri: "spiffe://example.org/host/lap/user/alice".to_string(),
                 pin: DUMMY_PIN.to_string(),
                 config: PeerConfig {
-                    name: "client-canon".to_string(),
+                    name: "alice.lap".to_string(),
                     address: "127.0.0.1:2222".to_string(),
                     pin: Some(DUMMY_PIN.to_string()),
                     allow: vec!["send".to_string()],
@@ -1248,7 +1248,7 @@ async fn test_oracle_9_admitted_clients_preserved_across_reload() {
         post_reload_admitted_arc
             .read()
             .unwrap()
-            .contains_key("client-canon"),
+            .contains_key("spiffe://example.org/host/lap/user/alice"),
         "admitted client must be preserved after reload"
     );
 }
