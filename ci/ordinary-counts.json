@@ -108,7 +108,8 @@
     "tests/service_exec.rs",
     "tests/shared_client.rs",
     "tests/shared_client_live.rs",
-    "tests/svc_liveness.rs"
+    "tests/svc_liveness.rs",
+    "tests/test_home_isolation.rs"
   ],
   "platforms": {
     "linux": {

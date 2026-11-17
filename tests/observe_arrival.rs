@@ -14,7 +14,11 @@ fn state(root: &Path) -> Arc<AppState> {
     xmsg::storage::init_db(&connection).unwrap();
     Arc::new(AppState {
         sessions_dirs: vec![root.join("sessions")],
-        agy_config: xmsg::agy::AgyConfig::default(),
+        agy_config: xmsg::agy::AgyConfig {
+            presence_dir: root.join("presence"),
+            brain_dir: root.join("brain"),
+            ..Default::default()
+        },
         agy_store: xmsg::agy::new_agy_store(),
         pi_store: xmsg::pi::new_pi_store(),
         pi_notify_tx: tokio::sync::broadcast::channel(16).0,

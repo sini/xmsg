@@ -160,7 +160,11 @@ fn state(identity: &Identity, peers: PeersMap, database: &std::path::Path) -> Ar
         rate_limiter: Arc::new(RateLimiter::new(600, 200)),
         db: Arc::new(Mutex::new(db)),
         sessions_dirs: vec![],
-        agy_config: Default::default(),
+        agy_config: xmsg::agy::AgyConfig {
+            presence_dir: database.parent().unwrap().join("presence"),
+            brain_dir: database.parent().unwrap().join("brain"),
+            ..Default::default()
+        },
         agy_store: xmsg::agy::new_agy_store(),
         pi_store: xmsg::pi::new_pi_store(),
         pi_notify_tx: tokio::sync::broadcast::channel(16).0,

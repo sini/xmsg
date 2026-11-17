@@ -945,7 +945,11 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
             rate_limiter: Arc::new(RateLimiter::new(60, 20)),
             db: Arc::new(Mutex::new(db_conn)),
             sessions_dirs: vec![],
-            agy_config: xmsg::agy::AgyConfig::default(),
+            agy_config: xmsg::agy::AgyConfig {
+                presence_dir: tmp.path().join("presence"),
+                brain_dir: tmp.path().join("brain"),
+                ..Default::default()
+            },
             agy_store: xmsg::agy::new_agy_store(),
             pi_store: xmsg::pi::new_pi_store(),
             pi_notify_tx,

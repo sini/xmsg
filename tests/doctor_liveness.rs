@@ -54,6 +54,7 @@ impl Fixture {
                     Path::new(xmsg::process::LIVE_PROC_ROOT).to_owned()
                 },
                 presence_dir: root.path().join("presence"),
+                brain_dir: root.path().join("brain"),
                 ..Default::default()
             },
             agy_store: xmsg::agy::new_agy_store(),
