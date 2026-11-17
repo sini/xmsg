@@ -52,15 +52,16 @@ local defaults; it cannot prove that the running daemon uses the same configurat
 | Enrollment renewal warns | The certificate has reached two-thirds of its recorded lifetime. | Schedule renewal. For a 24-hour certificate this is 16 hours after issuance; a fixed seven-day threshold would be misleading. |
 | Loaded leaf certificate expired (planned) | The running daemon's actually loaded leaf certificate has expired. | Renew and reload that node's identity through the normal procedure. This is a failure; a certificate file selected by the CLI is not substituted for the loaded certificate. |
 | Loaded leaf expiry warning (planned) | The loaded certificate expires within the smaller of seven days or one-third of its lifetime. | Schedule renewal. This threshold also covers short-lived certificates: a 24-hour leaf warns within its final eight hours. |
-| Peer mTLS diagnostic warning (planned) | A bounded daemon-side probe could not establish reachability, or the peer was addressless, unattempted or an outbound-only client. | Inspect the peer's intended configuration and connectivity. Unknown is not evidence of a bad peer, and TLS success does not establish application permissions or delivery readiness. Peer results warn at most. |
+| Peer mTLS diagnostic warning (planned) | A bounded daemon-side probe could not establish reachability, or an ordinary peer was addressless or unattempted. Configured addressless leaves are informational outbound-only entries; they are not dialled and make no TLS, expiry or clock claim. | Inspect the peer's intended configuration and connectivity. Unknown is not evidence of a bad peer, and TLS success does not establish application permissions or delivery readiness. Peer results warn at most. |
 | Observed clock offset warning (planned) | The peer HTTP date differs from the local clock beyond the 120-second tolerance, accounting for uncertainty. | Compare both clocks with a trusted time source. The diagnostic cannot say which clock is wrong. Missing/bad dates, unexpected status or local clock jumps leave the offset unknown. |
 | CA TLS warning | The optional CA TLS handshake did not succeed. | Check connectivity and configured trust. A successful handshake establishes TLS reachability, not enrollment application health or login readiness. |
 
 Doctor uses only the explicit Unix read-only liveness snapshot to inspect registrations.
 It never falls back to ordinary recipient listing, which can synchronize claims and deliver
-queued work. An older daemon, cold runtime, unsupported source or bounded/partial response
-leaves uncertain evidence unknown; a gone/stale registration warns rather than fails. Some
-rows lack process evidence, and a missing row does not prove a process is gone. Doctor also
+queued work. An older daemon, cold runtime, unsupported source or truncated response
+leaves uncertain evidence unknown; a gone/stale registration warns rather than fails.
+Historical seen rows with missing identity are informational, and catalogue-scope partial
+coverage alone does not warn. A missing row does not prove a process is gone. Doctor also
 avoids enrollment-pending APIs and commands that initialize
 stores. It does not send, acknowledge or consume a message, mint a token or load a private
 key for a diagnostic repair. Federation probes run inside the daemon using its loaded
@@ -94,18 +95,25 @@ establish application readiness. See [CA operations](/operations/enrollment-ca/)
 
 ## Primary schema views (planned)
 
-A live daemon with an existing regular WAL and SHM permits an ordinary read-only metadata
-reader. Main DB and WAL bytes remain unchanged; SQLite's reader marks can update the SHM.
-Without that live view, doctor reports unknown instead of creating missing sidecars. With
-the daemon down or unresponsive and sidecars present, it uses stat only and leaves SQLite
-recovery to startup. With no sidecars, it opens `mode=ro&immutable=1`, then rechecks metadata
-for concurrent changes. No mode is an integrity or live-backup guarantee.
+For a live daemon, an existing regular WAL and SHM permit an ordinary read-only metadata
+reader; SQLite's reader marks can update the existing SHM. A rollback-journal database also
+permits `mode=ro` when no journal, WAL or SHM is present. Doctor rechecks absent sidecars and
+main-file fingerprints; detected concurrent changes make the observation uncertain. Normal
+SQLite read locks are allowed, but the probe takes no writer reservation and performs no
+writes. A WAL database without its existing pair, or any rollback journal, remains unknown.
+
+With the daemon down or unresponsive and sidecars present, doctor uses stat only and leaves
+SQLite recovery to startup. With no sidecars, it opens `mode=ro&immutable=1`, then rechecks
+metadata for concurrent changes. No mode is an integrity or live-backup guarantee.
 
 Results from a different or unknown client/daemon revision are labelled `next start of THIS
 binary`. They describe this binary's startup requirements for the selected DB, whose path
 may differ from the running daemon's. Named requirements describe structural table/index/
 column additions; no migration ledger exists to certify historical backfills. Enrollment
-schema is conditional, and no migration, checkpoint, VACUUM or recovery is run by doctor.
+schema is conditional. Present optional tables, or missing tables when the daemon reports
+enrollment disabled, are informational; missing tables with enabled/unknown enrollment
+still warn. This does not certify the rest of the loaded configuration. No migration,
+checkpoint, VACUUM or recovery is run by doctor.
 
 ## What remains unchecked
 
@@ -119,3 +127,13 @@ Registered owner-process liveness does not prove a usable Codex writer lease, me
 delivery or task completion. Treat these as separate investigations, not implied successes. Doctor offers no automatic database recovery or
 integrity guarantee. See the [CLI reference](/reference/cli-and-mcp/#xmsg-doctor-planned)
 for its options and output contract.
+
+### Interpreting the process catalogue (planned)
+
+A large historical catalogue does not imply that hundreds of processes are unhealthy.
+For example, five live registrations plus 163 `seen` rows lacking a process identity appear
+as one aggregate: five live and 163 unknown, with `missing_identity=163`. That history is
+informational. A registered process whose observation is unknown, a probe failure, or a
+gone process still warns. Only gone rows get individual details, capped at 20; the aggregate
+keeps the full total. A truncated response still warns, while the catalogue-scope `partial`
+flag alone does not.

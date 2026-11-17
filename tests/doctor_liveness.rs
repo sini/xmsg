@@ -252,9 +252,13 @@ async fn doctor_reports_registered_process_live_and_gone_without_delivery_readin
     let fixture = Fixture::new(false).await;
     let (output, report) = fixture.report().await;
     assert!(output.status.success(), "{report}");
-    let live = check(&report, &format!("session.process.{LIVE}@{NODE}"));
-    assert_eq!(live["status"], "pass", "{report}");
-    assert_eq!(live["message"], "process live");
+    let aggregate = check(&report, "sessions.process");
+    assert!(aggregate["message"].as_str().unwrap().contains("live"));
+    assert!(!report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["id"] == format!("session.process.{LIVE}@{NODE}")));
     let gone = check(&report, &format!("session.process.{GONE}@{NODE}"));
     assert_eq!(gone["status"], "warn", "{report}");
     assert_eq!(gone["message"], "process gone");
@@ -274,10 +278,10 @@ async fn doctor_process_liveness_never_reconciles_claims_or_delivers_queue() {
     let (output, report) = fixture.report().await;
     fixture.assert_untouched(&before, changes, &stores);
     assert!(output.status.success(), "{report}");
-    assert_eq!(
-        check(&report, &format!("session.process.{LIVE}@{NODE}"))["status"],
-        "pass"
-    );
+    assert!(check(&report, "sessions.process")["message"]
+        .as_str()
+        .unwrap()
+        .contains("live"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -285,11 +289,16 @@ async fn unavailable_process_backend_is_unknown_with_one_portability_warning() {
     let fixture = Fixture::new(true).await;
     let (output, report) = fixture.report().await;
     assert!(output.status.success(), "{report}");
-    for id in [LIVE, GONE] {
-        let row = check(&report, &format!("session.process.{id}@{NODE}"));
-        assert_eq!(row["status"], "warn");
-        assert_eq!(row["message"], "process unknown");
-    }
+    assert_eq!(check(&report, "sessions.process")["status"], "warn");
+    assert!(check(&report, "sessions.process")["message"]
+        .as_str()
+        .unwrap()
+        .contains("backend_unavailable"));
+    assert!(!report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["id"].as_str().unwrap().starts_with("session.process.")));
     let backend = report["checks"]
         .as_array()
         .unwrap()
