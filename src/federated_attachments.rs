@@ -293,6 +293,7 @@ mod deadline_tests {
         crate::storage::init_db(&db).unwrap();
         let (notify, _) = tokio::sync::broadcast::channel(16);
         let state = Arc::new(FedState {
+            discovery: Default::default(),
             node_name: "reader".into(),
             peers: Arc::new(PeersMap::new(HashMap::from([(
                 "origin".into(),

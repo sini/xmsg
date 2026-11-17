@@ -218,6 +218,7 @@ impl Fixture {
             peers_map.insert(peer.name.clone(), peer);
         }
         let fed = Arc::new(FedState {
+            discovery: Default::default(),
             node_name: NODE.into(),
             peers: Arc::new(PeersMap::new(peers_map)).into(),
             cert_der: identity.cert,

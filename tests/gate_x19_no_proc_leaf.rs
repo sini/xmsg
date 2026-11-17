@@ -124,6 +124,7 @@ async fn start_hub_with_svc_receiver(
     let (cert_der, key_der, _pin) = creds;
 
     let fed_state = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: name.to_string(),
         peers: peers_arc.into(),
@@ -264,6 +265,7 @@ async fn start_leaf_with_unavailable_proc(
 
     let (cert_der, key_der, _pin) = creds;
     let fed_state = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: name.to_string(),
         peers: (peers_arc.clone()).into(),

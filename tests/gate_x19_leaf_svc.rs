@@ -214,6 +214,7 @@ async fn create_hub_test_node_with_listener(
     let rate_limiter = Arc::new(RateLimiter::new(60, 20));
 
     let fed_state = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: name.to_string(),
         peers: (peers_arc).into(),
@@ -389,6 +390,7 @@ async fn create_leaf_test_node_opts(
     let rate_limiter = Arc::new(RateLimiter::new(60, 20));
 
     let fed_state = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: name.to_string(),
         peers: (peers_arc.clone()).into(),
@@ -1028,6 +1030,7 @@ async fn test_oracle_4_peer_mailbox_isolation_and_non_leaf_denied() {
         .unwrap();
 
     let leaf1_fed_state = FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "leaf1".to_string(),
         peers: (Arc::new(leaf1_peers)).into(),
@@ -1105,6 +1108,7 @@ async fn test_oracle_4_peer_mailbox_isolation_and_non_leaf_denied() {
         .unwrap();
 
     let nonleaf_fed_state = FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "nonleaf".to_string(),
         peers: (Arc::new(nonleaf_peers)).into(),

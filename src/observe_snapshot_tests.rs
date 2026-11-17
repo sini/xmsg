@@ -45,6 +45,7 @@ impl PostAuthFixture {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         crate::storage::init_db(&connection).unwrap();
         let state = Arc::new(FedState {
+            discovery: Default::default(),
             node_name: "post-auth.node".into(),
             peers: peers.into(),
             cert_der: Vec::new(),

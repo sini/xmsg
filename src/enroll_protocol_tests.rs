@@ -223,6 +223,7 @@ pub(crate) fn node_state(
     let (pi_notify_tx, _) = tokio::sync::broadcast::channel(32);
     let (svc_notify_tx, _) = tokio::sync::broadcast::channel(32);
     Arc::new(fed::FedState {
+        discovery: Default::default(),
         node_name: "team.hub".into(),
         peers: peers.into(),
         cert_der: chain[0].clone(),

@@ -1519,6 +1519,7 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         }
 
         let fs = Arc::new(xmsg::fed::FedState {
+            discovery: Default::default(),
             max_attachment_bytes: args.max_attachment_bytes,
             node_name: node_name.clone(),
             peers: peers_arc.clone().into(),

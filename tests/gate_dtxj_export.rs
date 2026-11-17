@@ -73,6 +73,7 @@ impl Fixture {
         connection.execute("INSERT INTO instance_seen(id,harness,last_live) VALUES('11111111-1111-4111-8111-111111111111','claude',?1)",[xmsg::storage::now_epoch_secs()]).unwrap();
         connection.execute("INSERT INTO codex_roots(root_id,codex_home,owner_pid,owner_starttime,generation,label,cwd,registered_at) VALUES('22222222-2222-4222-8222-222222222222',?1,0,'synthetic',1,?2,?1,?3)",rusqlite::params![PATH_CANARY,LABEL_CANARY,xmsg::storage::now_epoch_secs()]).unwrap();
         let state = Arc::new(FedState {
+            discovery: Default::default(),
             node_name: server_name.clone(),
             peers: Arc::new(peers).into(),
             cert_der: server_cert.clone(),

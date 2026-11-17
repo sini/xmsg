@@ -57,6 +57,7 @@ async fn malicious_upstream_cannot_return_more_than_the_requested_chunk() {
     xmsg::storage::init_db(&db).unwrap();
     let (notify, _) = tokio::sync::broadcast::channel(16);
     let state = FedState {
+        discovery: Default::default(),
         node_name: "reader".into(),
         peers: Arc::new(PeersMap::new(HashMap::from([(
             "origin".into(),

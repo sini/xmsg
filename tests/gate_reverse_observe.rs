@@ -152,6 +152,7 @@ fn state(identity: &Identity, peers: PeersMap, database: &std::path::Path) -> Ar
     let db = rusqlite::Connection::open(database).unwrap();
     xmsg::storage::init_db(&db).unwrap();
     Arc::new(FedState {
+        discovery: Default::default(),
         node_name: identity.node.clone(),
         peers: Arc::new(peers).into(),
         cert_der: identity.cert.clone(),
