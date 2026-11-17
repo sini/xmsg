@@ -576,6 +576,26 @@ async fn federation(report: &mut Report, path: Option<&Path>, configured_names: 
         unknown_federation(report, configured_names);
         return;
     }
+    match value["ambiguous_aliases"].as_bool() {
+        Some(true) => report.add(
+            "federation.aliases",
+            Status::Warn,
+            "pattern admits ambiguous aliases; give pods concrete CA leaf entries",
+            Some("Run xmsg check-peers before upgrading; reserve affected pods with concrete CA leaf entries or partition the patterns."),
+        ),
+        Some(false) => report.add(
+            "federation.aliases",
+            Status::Pass,
+            "Loaded patterns have no ambiguous dynamic aliases.",
+            None,
+        ),
+        None => report.add(
+            "federation.aliases",
+            Status::Warn,
+            "Dynamic alias ambiguity: unknown; the daemon does not report this assessment.",
+            Some("Use a daemon that reports alias ownership or run xmsg check-peers on the configured peers file."),
+        ),
+    }
     let local = certificate_text(&value["own_leaf"]);
     let expiry = if local.is_some() {
         value["own_expiry"].as_str().unwrap_or("unknown")
