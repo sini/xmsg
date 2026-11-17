@@ -36,6 +36,22 @@ To install the CLI and the harness integrations without a local `xmsg serve` dae
 | `programs.xmsg.server.svcExe` | `--svc-exe NAME=PATH` | `{ }` |
 | `programs.xmsg.server.sessionsDirs` | `XMSG_SESSIONS_DIR` (colon-joined) | `[ "${config.home.homeDirectory}/.claude/sessions" ]` |
 | `programs.xmsg.server.extraSessionsDirs` | appended to `sessionsDirs` | `[ ]` |
+| `programs.xmsg.server.stableExecutable` (planned) | — (macOS only) | `"${config.xdg.dataHome}/xmsg/serve/xmsg"` |
+
+## macOS: a stable daemon executable (planned)
+
+macOS keys the Local Network permission to the executable's real path, so a daemon run straight
+from the Nix store would re-prompt after every upgrade (and its first launch waits on the
+prompt). The module keeps a stable copy so upgrades don't re-prompt: `launchd.agents.xmsg` runs
+`programs.xmsg.server.stableExecutable`, a regular file (not a symlink) that activation replaces
+when the package changes, by copying the new binary beside it and renaming it into place. It then
+restarts the agent with `launchctl kickstart -k`, because the agent's plist no longer changes
+across upgrades. The copy keeps the binary's own ad-hoc signature; nothing is re-signed. The
+package stays in `home.packages`, so the copy's store libraries are not collected.
+
+Set `stableExecutable = null` to run the store path directly, accepting a new prompt per
+upgrade. The path must differ from the Codex harness's `${config.xdg.dataHome}/xmsg/bin/xmsg`
+link, which Home Manager owns. Linux is unaffected: the systemd unit runs the store path.
 
 ## Per-harness switches
 

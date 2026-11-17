@@ -126,19 +126,58 @@ let
     system:
     let
       c = hmEval system { };
+      darwinExe = lib.getExe xmsg.packages.${system}.default;
     in
     {
       expr = {
         launchd = c.launchd.agents.xmsg.enable or false;
         launchdArgs = lib.take 2 (c.launchd.agents.xmsg.config.ProgramArguments or [ ]);
+        nullArgs =
+          lib.take 1
+            (hmEval system { programs.xmsg.server.stableExecutable = null; })
+            .launchd.agents.xmsg.config.ProgramArguments;
+        install = {
+          inherit (c.home.activation.xmsgInstallStableExe) after before;
+          # Context discarded: hasInfix builds a regex, which refuses a store path.
+          copiesExe = lib.hasInfix "install -m 0755 ${builtins.unsafeDiscardStringContext darwinExe} " (
+            builtins.unsafeDiscardStringContext c.home.activation.xmsgInstallStableExe.data
+          );
+        };
+        restart = {
+          inherit (c.home.activation.xmsgRestartStableExe) after;
+          kicks = lib.hasInfix "kickstart -k \"gui/$UID/org.nix-community.home.xmsg\"" c.home.activation.xmsgRestartStableExe.data;
+        };
+        nullActivation = lib.attrNames (
+          lib.filterAttrs (n: _: lib.hasPrefix "xmsg" n && lib.hasSuffix "StableExe" n)
+            (hmEval system { programs.xmsg.server.stableExecutable = null; }).home.activation
+        );
+        codexCollision = failedAssertions (
+          hmEval system {
+            programs.xmsg.server.stableExecutable = "/Users/alice/.local/share/xmsg/bin/xmsg";
+          }
+        );
         systemd = c.systemd.user.services ? xmsg;
         failed = failedAssertions c;
       };
       expected = {
         launchd = true;
         launchdArgs = [
-          (lib.getExe xmsg.packages.${system}.default)
+          "/Users/alice/.local/share/xmsg/serve/xmsg"
           "serve"
+        ];
+        nullArgs = [ darwinExe ];
+        install = {
+          after = [ "writeBoundary" ];
+          before = [ "setupLaunchAgents" ];
+          copiesExe = true;
+        };
+        restart = {
+          after = [ "setupLaunchAgents" ];
+          kicks = true;
+        };
+        nullActivation = [ ];
+        codexCollision = [
+          "programs.xmsg.server.stableExecutable: /Users/alice/.local/share/xmsg/bin/xmsg is the Codex harness's store link; pick another path."
         ];
         systemd = false;
         failed = [ ];
@@ -170,6 +209,9 @@ in
         warnSuggest = (hmEval "x86_64-linux" { systemd.user.startServices = "suggest"; }).warnings;
         warnSdSwitch = (hmEval "x86_64-linux" { systemd.user.startServices = "sd-switch"; }).warnings;
         launchd = linux.launchd.agents ? xmsg;
+        stableExeActivation = lib.filter (n: lib.hasSuffix "StableExe" n) (
+          lib.attrNames linux.home.activation
+        );
         failed = failedAssertions linux;
       };
       expected = {
@@ -185,6 +227,7 @@ in
         ];
         warnSdSwitch = [ ];
         launchd = false;
+        stableExeActivation = [ ];
         failed = [ ];
       };
     };
