@@ -618,8 +618,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(cert) => Some(own_node_from_cert_file(cert)?),
                 None => None,
             };
-            xmsg::fed::PeersMap::load_from_file_for(&args.peers_file, own.as_ref())
+            let peers = xmsg::fed::PeersMap::load_from_file_for(&args.peers_file, own.as_ref())
                 .map_err(|e| format!("peers file {}: {e}", args.peers_file.display()))?;
+            for class in peers.ambiguous_alias_classes() {
+                eprintln!(
+                    "warning: pattern admits ambiguous aliases; give pods concrete CA leaf entries; alias={:?} forms={:?} multiple_domains={}",
+                    class.alias, class.forms, class.multiple_domains
+                );
+            }
             match own {
                 Some(own) => println!(
                     "peers file {} loads for node {}",
