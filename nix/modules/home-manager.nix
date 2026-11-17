@@ -343,6 +343,9 @@ let
       xmsgStableReplaced=1
     fi
   '';
+  # Darwin: launchd opens these as the agent starts but does not create their directory.
+  logDir = "${config.home.homeDirectory}/Library/Logs/xmsg";
+
   # The plist no longer changes across upgrades, so setupLaunchAgents leaves the agent running.
   restartStableExe =
     let
@@ -822,11 +825,22 @@ in
           ++ serveArgs;
           KeepAlive.SuccessfulExit = false;
           RunAtLoad = true;
+          StandardOutPath = "${logDir}/stdout.log";
+          StandardErrorPath = "${logDir}/stderr.log";
+          # 0077, the Linux unit's UMask.
+          Umask = 63;
         }
         // lib.optionalAttrs hasCustomSessionsDirs {
           EnvironmentVariables.XMSG_SESSIONS_DIR = sessionsDirsEnv;
         };
       };
+      home.activation.xmsgLogDir =
+        lib.hm.dag.entryBetween
+          [ "setupLaunchAgents" ]
+          [
+            "writeBoundary"
+          ]
+          "run mkdir -p -m 0700 ${lib.escapeShellArg logDir}";
     })
 
     (mkIf (srv.enable && pkgs.stdenv.hostPlatform.isDarwin && srv.stableExecutable != null) {

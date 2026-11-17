@@ -53,6 +53,11 @@ Set `stableExecutable = null` to run the store path directly, accepting a new pr
 upgrade. The path must differ from the Codex harness's `${config.xdg.dataHome}/xmsg/bin/xmsg`
 link, which Home Manager owns. Linux is unaffected: the systemd unit runs the store path.
 
+The agent writes its standard output (xmsg's log) to `~/Library/Logs/xmsg/stdout.log` and its
+standard error (panics and early startup errors) to `~/Library/Logs/xmsg/stderr.log`, the same files as the hand-written plist in
+[macOS](/getting-started/macos/). Activation creates `~/Library/Logs/xmsg` (mode `0700`) before the
+agent loads, since launchd does not. The agent runs with `Umask` 0077, as the Linux unit does.
+
 ## Per-harness switches
 
 Each switch under `programs.xmsg.harnesses.<name>.enable` installs the shared skill

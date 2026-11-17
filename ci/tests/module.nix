@@ -156,11 +156,25 @@ let
             programs.xmsg.server.stableExecutable = "/Users/alice/.local/share/xmsg/bin/xmsg";
           }
         );
+        logs = {
+          inherit (c.launchd.agents.xmsg.config) StandardOutPath StandardErrorPath Umask;
+          dir = c.home.activation.xmsgLogDir;
+        };
         systemd = c.systemd.user.services ? xmsg;
         failed = failedAssertions c;
       };
       expected = {
         launchd = true;
+        logs = {
+          StandardOutPath = "/Users/alice/Library/Logs/xmsg/stdout.log";
+          StandardErrorPath = "/Users/alice/Library/Logs/xmsg/stderr.log";
+          Umask = 63;
+          dir = {
+            after = [ "writeBoundary" ];
+            before = [ "setupLaunchAgents" ];
+            data = "run mkdir -p -m 0700 /Users/alice/Library/Logs/xmsg";
+          };
+        };
         launchdArgs = [
           "/Users/alice/.local/share/xmsg/serve/xmsg"
           "serve"
@@ -209,7 +223,7 @@ in
         warnSuggest = (hmEval "x86_64-linux" { systemd.user.startServices = "suggest"; }).warnings;
         warnSdSwitch = (hmEval "x86_64-linux" { systemd.user.startServices = "sd-switch"; }).warnings;
         launchd = linux.launchd.agents ? xmsg;
-        stableExeActivation = lib.filter (n: lib.hasSuffix "StableExe" n) (
+        darwinOnlyActivation = lib.filter (n: lib.hasSuffix "StableExe" n || n == "xmsgLogDir") (
           lib.attrNames linux.home.activation
         );
         failed = failedAssertions linux;
@@ -227,7 +241,7 @@ in
         ];
         warnSdSwitch = [ ];
         launchd = false;
-        stableExeActivation = [ ];
+        darwinOnlyActivation = [ ];
         failed = [ ];
       };
     };
