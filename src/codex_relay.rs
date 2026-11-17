@@ -718,6 +718,9 @@ where
     };
 
     // Revalidate peer and lease after response before acknowledging acceptance (§2.4).
+    // On Darwin LOCAL_PEERPID stays valid while any copy of the peer fd survives, including
+    // copies inside codex's own process, so downgrading a close-after-ACK to Uncertain is
+    // best-effort there.
     if let Err(reason) =
         verify_stream_peer(&stream, &job.proc_root, job.owner_pid, &job.owner_starttime)
     {

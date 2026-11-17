@@ -117,6 +117,13 @@ enrollment disabled, are informational; missing tables with enabled/unknown enro
 still warn. This does not certify the rest of the loaded configuration. No migration,
 checkpoint, VACUUM or recovery is run by doctor.
 
+## Intermittent agy delivery timeouts on macOS (planned)
+
+On macOS, an Antigravity delivery could time out or leave its `agy` child running when another
+delivery or connection was being set up at the same moment: the child inherited descriptors it
+should not have held. The fix marks those descriptors close-on-exec before `agy` starts and kills
+the child when a delivery times out. Linux was not affected.
+
 ## What remains unchecked
 
 Doctor reports the running daemon's version and build revision when its Unix health
