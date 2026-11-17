@@ -2265,3 +2265,70 @@ async fn grt4_ambiguous_alias_never_uses_default_route() {
         );
     }
 }
+
+#[test]
+fn grt4_wildcard_identity_cannot_claim_the_hubs_own_alias() {
+    use rustls::server::danger::ClientCertVerifier;
+    let (params, key, _, pem) = generate_ca("grt4 own reservation CA");
+    let (_temp, config) = grt4_mixed_config(&pem);
+    let mut config: serde_json::Value = serde_json::from_str(&config).unwrap();
+    config["hub"]["patterns"] = serde_json::json!(["spiffe://example.invalid/host/*/user/*"]);
+    config["hub"]["rules"] = serde_json::json!([{"pattern": "spiffe://example.invalid/host/*/user/*", "allow": ["send"]}]);
+    let peers = Arc::new(
+        PeersMap::load_from_json_for(
+            &config.to_string(),
+            Some(&xmsg::fed::OwnNode {
+                name: "hub.pods".into(),
+                pin: None,
+            }),
+        )
+        .unwrap(),
+    );
+    let verifier = xmsg::fed::CombinedClientCertVerifier::new(peers.clone());
+    let ordinary_uri = "spiffe://example.invalid/host/normal/user/alice";
+    let (ordinary, _) = issue_cert(&params, &key, "alice.normal", &[ordinary_uri]);
+    let ordinary = rustls::pki_types::CertificateDer::from(ordinary);
+    assert!(
+        verifier
+            .verify_client_cert(&ordinary, &[], rustls::pki_types::UnixTime::now())
+            .is_ok(),
+        "grt4 own-name fixture rejected an unrelated client certificate"
+    );
+    assert!(
+        peers.resolve_incoming_peer(&ordinary, &[]).is_ok(),
+        "grt4 own-name fixture rejected ordinary registration"
+    );
+    let hostile_uri = "spiffe://example.invalid/host/pods/user/hub";
+    let (hostile, _) = issue_cert(&params, &key, "hub.pods", &[hostile_uri]);
+    let hostile = rustls::pki_types::CertificateDer::from(hostile);
+    assert!(
+        verifier
+            .verify_client_cert(&hostile, &[], rustls::pki_types::UnixTime::now())
+            .is_err(),
+        "grt4 TLS wildcard claimant captured this hubs own alias"
+    );
+    assert!(
+        matches!(
+            peers.resolve_incoming_peer(&hostile, &[]),
+            Err(AppError::PeerRejected(_))
+        ),
+        "grt4 request wildcard claimant captured this hubs own alias"
+    );
+    assert!(
+        peers.get_peer_config("hub.pods").is_none(),
+        "grt4 own alias remained externally routable"
+    );
+    assert_eq!(
+        peers.admitted_names(),
+        vec!["alice.normal"],
+        "grt4 own alias leaked into admitted listings"
+    );
+    assert!(
+        !peers
+            .admitted_clients
+            .read()
+            .unwrap()
+            .contains_key(hostile_uri),
+        "grt4 refused own-name claimant left a registered identity"
+    );
+}
