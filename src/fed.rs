@@ -466,6 +466,7 @@ pub struct PeersMap {
     /// Entry key -> canonical node name, and back (B5's nickname translation).
     canonical_by_name: HashMap<String, String>,
     name_by_canonical: HashMap<String, String>,
+    own_name: Option<String>,
     pub hub: Option<HubConfig>,
     hub_bundles: HashMap<PathBuf, Vec<rustls::pki_types::TrustAnchor<'static>>>,
     pub admitted_clients: Arc<std::sync::RwLock<HashMap<String, AdmittedClient>>>,
@@ -796,7 +797,11 @@ impl PeersMap {
             .map(|hub| crate::node::ambiguous_alias_classes(&hub.patterns))
             .unwrap_or_default()
             .into_iter()
-            .filter(|class| class.alias.contains('*') || !self.contains_concrete_name(&class.alias))
+            .filter(|class| {
+                class.alias.contains('*')
+                    || (self.own_name.as_deref() != Some(class.alias.as_str())
+                        && !self.contains_concrete_name(&class.alias))
+            })
             .collect()
     }
 
@@ -812,7 +817,8 @@ impl PeersMap {
     }
 
     pub fn is_ambiguous_alias(&self, name: &str) -> bool {
-        self.get(name).is_none()
+        self.own_name.as_deref() != Some(name)
+            && self.get(name).is_none()
             && self.hub.as_ref().is_some_and(|hub| {
                 matches!(
                     crate::node::pattern_alias_owner(name, &hub.patterns),
@@ -845,7 +851,8 @@ impl PeersMap {
     }
 
     fn dynamic_uri_owns_alias(&self, uri: &str, name: &str) -> bool {
-        self.get(name).is_none()
+        self.own_name.as_deref() != Some(name)
+            && self.get(name).is_none()
             && self.hub.as_ref().is_some_and(|hub| {
                 matches!(
                     crate::node::pattern_alias_owner(name, &hub.patterns),
@@ -1549,6 +1556,7 @@ impl PeersMap {
         }
 
         let mut map = Self::empty();
+        map.own_name = own.map(|node| node.name.clone());
         for (peer_config, ca_anchors, _, _) in parsed {
             if let Some(anchors) = ca_anchors {
                 map.insert_with_anchors(peer_config, anchors)?;
