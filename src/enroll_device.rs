@@ -295,20 +295,25 @@ impl Service {
         if body.user != p.user() || body.host != p.host() || body.spki_sha256 != p.spki_sha256() {
             return Err(Failure(StatusCode::FORBIDDEN, "approval_mismatch"));
         }
-        let result = self.ca.issue_device_approved_with_name_authority(
-            &approval.claims,
-            &session.csr,
-            &session.host,
-            &[],
-            p,
-            self.clock.now(),
-            || !session.expired(self.clock.as_ref()) && !session.cancelled.load(Ordering::Acquire),
-            |uri, _| {
-                self.fed
-                    .lease_enrollment_name(uri, false)
-                    .map_err(|_| crate::enroll_ca::Error::ReservedName)
-            },
-        );
+        let result = self
+            .ca
+            .issue_device_approved_with_name_authority::<crate::fed::NameAuthorityLease<'_>>(
+                &approval.claims,
+                &session.csr,
+                &session.host,
+                &[],
+                p,
+                self.clock.now(),
+                || {
+                    !session.expired(self.clock.as_ref())
+                        && !session.cancelled.load(Ordering::Acquire)
+                },
+                |uri, _| {
+                    self.fed
+                        .lease_enrollment_name(uri, false)
+                        .map_err(|_| crate::enroll_ca::Error::ReservedName)
+                },
+            );
         let response = result
             .as_ref()
             .map(|_| serde_json::json!({"status":"approved"}))
