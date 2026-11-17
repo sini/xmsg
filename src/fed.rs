@@ -4882,7 +4882,7 @@ pub fn make_tls_connector(
         key_der.to_vec(),
     ));
 
-    let client_config = rustls::ClientConfig::builder_with_provider(
+    let mut client_config = rustls::ClientConfig::builder_with_provider(
         rustls::crypto::ring::default_provider().into(),
     )
     .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
@@ -4891,6 +4891,7 @@ pub fn make_tls_connector(
     .with_custom_certificate_verifier(verifier)
     .with_client_auth_cert(client_cert, key)
     .map_err(|e| AppError::Internal(format!("Client cert error: {e}")))?;
+    client_config.enable_sni = false;
 
     Ok(tokio_rustls::TlsConnector::from(Arc::new(client_config)))
 }
@@ -4934,7 +4935,7 @@ pub fn make_tls_connector_with_credentials(
             )));
         };
 
-    let client_config = rustls::ClientConfig::builder_with_provider(
+    let mut client_config = rustls::ClientConfig::builder_with_provider(
         rustls::crypto::ring::default_provider().into(),
     )
     .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
@@ -4943,6 +4944,7 @@ pub fn make_tls_connector_with_credentials(
     .with_custom_certificate_verifier(verifier)
     .with_client_auth_cert(client_cert, key)
     .map_err(|e| AppError::Internal(format!("Client cert error: {e}")))?;
+    client_config.enable_sni = false;
 
     Ok(tokio_rustls::TlsConnector::from(Arc::new(client_config)))
 }
@@ -7268,7 +7270,7 @@ impl CredentialReloader {
         let acceptor = make_tls_acceptor(&certs, &key_der, new_peers_arc.clone())?;
 
         // Also validate client auth config with certs & key (ensures key matches cert)
-        let _ = rustls::ClientConfig::builder_with_provider(
+        let mut validation_client_config = rustls::ClientConfig::builder_with_provider(
             rustls::crypto::ring::default_provider().into(),
         )
         .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
@@ -7279,6 +7281,7 @@ impl CredentialReloader {
         .map_err(|e| {
             AppError::Internal(format!("Client cert error (key does not match cert): {e}"))
         })?;
+        validation_client_config.enable_sni = false;
 
         Ok(DynamicTls {
             cert_der,

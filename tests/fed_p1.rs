@@ -28,6 +28,75 @@ use xmsg::pi::new_pi_store;
 use xmsg::storage;
 use xmsg::svc::new_svc_store;
 
+async fn capture_federation_client_hello(connector: tokio_rustls::TlsConnector) -> Option<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move {
+        let tcp = tokio::net::TcpStream::connect(address).await.unwrap();
+        connector
+            .connect(ServerName::try_from("user.device").unwrap(), tcp)
+            .await
+            .is_err()
+    });
+    let (tcp, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+        .await
+        .expect("ClientHello fixture accept deadline")
+        .unwrap();
+    let accepted = tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio_rustls::LazyConfigAcceptor::new(rustls::server::Acceptor::default(), tcp),
+    )
+    .await
+    .expect("ClientHello capture deadline")
+    .unwrap();
+    let hello = accepted.client_hello();
+    assert!(
+        !hello.cipher_suites().is_empty(),
+        "fixture must parse an actual ClientHello"
+    );
+    let name = hello.server_name().map(str::to_owned);
+    drop(accepted);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), client)
+            .await
+            .expect("ClientHello fixture client deadline")
+            .unwrap(),
+        "capture intentionally ends before server TLS completion"
+    );
+    name
+}
+
+#[tokio::test]
+async fn federation_legacy_client_hello_omits_sni() {
+    let (cert, key, pin) = generate_self_signed_ed25519("client").unwrap();
+    let connector = make_tls_connector(&cert, &key, &pin).unwrap();
+    assert_eq!(capture_federation_client_hello(connector).await, None);
+}
+
+#[tokio::test]
+async fn federation_peer_client_hello_omits_sni() {
+    let (cert, key, pin) = generate_self_signed_ed25519("client").unwrap();
+    let peer: PeerConfig = serde_json::from_value(serde_json::json!({
+        "name": "user.device",
+        "address": "127.0.0.1:1",
+        "pin": pin,
+        "allow": []
+    }))
+    .unwrap();
+    let peers = Arc::new(PeersMap::new(HashMap::from([(
+        peer.name.clone(),
+        peer.clone(),
+    )])));
+    let connector = xmsg::fed::make_tls_connector_with_credentials(
+        vec![rustls::pki_types::CertificateDer::from(cert)],
+        key,
+        &peer,
+        peers,
+    )
+    .unwrap();
+    assert_eq!(capture_federation_client_hello(connector).await, None);
+}
+
 pub struct TestNode {
     pub name: String,
     pub fed_addr: SocketAddr,
