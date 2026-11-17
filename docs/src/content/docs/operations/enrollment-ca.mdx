@@ -367,7 +367,6 @@ flags and saved state as above; renewal does not contact the provider.
 With `--enroll-state`, the daemon starts one renewal task. It renews after two
 thirds of the lifetime, normally 16 hours, retaining the key and URI while issuing
 a fresh serial. It writes the certificate atomically and forces credential reload.
-
 **Planned renewal ownership check:** renewal preserves the trust domain in the CA-signed
 certificate, even if the policy's domain has changed. Its exact canonical
 `/host/<host>/user/<user>` path must match the stored user and host; a namespace/service-account

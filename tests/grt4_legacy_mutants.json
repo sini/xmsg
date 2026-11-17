@@ -517,14 +517,14 @@
       {
         "file": "src/enroll_ca.rs",
         "needle": "params.not_after =",
-        "replacement": "params.not_before =",
+        "replacement": "let _ =",
         "start": "    fn sign(",
         "end": "    pub fn reserved_uri("
       }
     ],
-    "expected_literal": "panicked at src/enroll_ca/tests.rs:128:",
+    "expected_literal": "panicked at src/enroll_ca/tests.rs:137:",
     "assertion_file": "src/enroll_ca/tests.rs",
-    "assertion_line": 128,
+    "assertion_line": 137,
     "assertion_sha256": "66de4162812075b1764ce42d05b6d66da8dfdeff4aa617b23d210915bfa7c42c",
     "assertion_rule": "exact-named-test-location",
     "historical_manifest": "tests/enroll_mutants.json",
@@ -1630,7 +1630,7 @@
   {
     "label": "legacy-hub-name-overlap",
     "target": "enroll_hub",
-    "test": "cross_bundle_restart_takeover_cannot_be_configured",
+    "test": "cross_bundle_names_and_spanning_rules_are_refused",
     "test_file": "tests/enroll_hub.rs",
     "edits": [
       {
@@ -1641,17 +1641,18 @@
         "end": ""
       }
     ],
-    "expected_literal": "cross-bundle restart takeover observed",
+    "expected_literal": "panicked at tests/enroll_hub.rs:120:",
     "assertion_file": "tests/enroll_hub.rs",
-    "assertion_line": 627,
+    "assertion_line": 120,
     "assertion_sha256": "78cb41bd93b0e43e219c6db3a72bd97cfd4be77c9f3b446384e0634785e045f8",
-    "assertion_rule": "unique-static-source-fragment",
+    "assertion_rule": "exact-named-test-location",
     "historical_manifest": "tests/enroll_mutants.json",
     "historical_label": "hub-name-overlap",
     "impact_files": [
       "src/fed.rs",
       "tests/enroll_hub.rs"
-    ]
+    ],
+    "oracle": "G4 loader refuses cross-bundle alias overlap: fault loads Ok and unwrap_err120 panics; restore returns Err(alias); prospective admission independently blocks the historical takeover"
   },
   {
     "label": "legacy-hub-keyword-stars",
@@ -2359,10 +2360,10 @@
         "end": "async fn code("
       }
     ],
-    "expected_literal": "panicked at src/enroll_protocol_tests.rs:746:",
+    "expected_literal": "panicked at src/enroll_protocol_tests.rs:751:",
     "oracle": "O19 default-disabled classification: bypassing this guard changes device_disabled to device_unsupported; remaining independent refusal guards stay active, no auth-bypass claim",
     "assertion_file": "src/enroll_protocol_tests.rs",
-    "assertion_line": 746,
+    "assertion_line": 751,
     "assertion_sha256": "d66f77895e00f4f7beaf6e089aa4b662865a6243d94a9c9ac7e62b4dddc54c46",
     "assertion_rule": "exact-named-test-location",
     "historical_manifest": "tests/enroll_mutants.json",
@@ -3096,7 +3097,7 @@
       {
         "file": "src/main.rs",
         "needle": "let app = build_router(state.clone());",
-        "replacement": "let app = build_unix_router(state.clone());"
+        "replacement": "let app = xmsg::http::build_unix_router(state.clone());"
       }
     ],
     "expected_literal": "actual public listener exposed local approval route",
@@ -4330,7 +4331,10 @@
     "test_file": "tests/gate_reverse_observe.rs",
     "label": "legacy-reverse-control-per-poll-capability",
     "test": "concurrent_legacy_poll_cannot_take_observe_and_capability_is_not_cached",
-    "expected_literal": "panicked at tests/gate_reverse_observe.rs:1192:",
+    "expected_literal": [
+      "panicked at tests/gate_reverse_observe.rs:1192:",
+      "panicked at tests/gate_reverse_observe.rs:1218:"
+    ],
     "edits": [
       {
         "file": "src/fed.rs",
@@ -4344,11 +4348,15 @@
     "assertion_file": "tests/gate_reverse_observe.rs",
     "assertion_line": 1192,
     "assertion_sha256": "c4690bfe076d26d3350eb5c32e2064786c5ec74f6b3b9b5a6aca3723fc67f82e",
-    "assertion_rule": "exact-named-test-location",
+    "assertion_rule": "fixed-same-test-location-set",
     "historical_manifest": "tests/reverse_observe_control_mutants.json",
     "historical_label": "reverse-control-per-poll-capability",
     "impact_files": [
       "src/fed.rs"
+    ],
+    "assertion_lines": [
+      1192,
+      1218
     ]
   },
   {
@@ -5054,7 +5062,7 @@
   },
   {
     "label": "legacy-transport-immutable-handshake-config",
-    "oracle": "E05",
+    "oracle": "E05 authority uses immutable handshake config rather than raw mutable shared-cache grants; current get_peer_config is now a safe recomputation and no longer models that hazard",
     "target": "gate_dtxj_export",
     "test": "stale_hub_resolver_cannot_restore_revoked_observe_authority",
     "test_file": "tests/gate_dtxj_export.rs",
@@ -5062,7 +5070,7 @@
       {
         "file": "src/observe_fed.rs",
         "needle": "let config = tls.config.clone();",
-        "replacement": "let config = peers.get_peer_config(&peer.name).ok_or_else(denied)?;"
+        "replacement": "let config = peer.uri.as_deref().and_then(|uri| { let clients = peers.admitted_clients.read().ok()?; clients.get(uri).map(|client| client.config.clone()) }).ok_or_else(denied)?;"
       }
     ],
     "expected_literal": "old shared hub cache restored revoked observe authority",

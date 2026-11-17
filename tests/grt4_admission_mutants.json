@@ -27,7 +27,7 @@
       {
         "file": "src/node.rs",
         "needle": "witnesses.insert(uri);",
-        "replacement": "if witnesses.iter().any(|old| node_name_from_uri(old).ok() == node_name_from_uri(&uri).ok()) { continue; }\n                    witnesses.insert(uri);"
+        "replacement": "if witnesses.iter().any(|old: &String| node_name_from_uri(old).ok() == node_name_from_uri(&uri).ok()) { continue; }\n                    witnesses.insert(uri);"
       }
     ],
     "assertion_file": "src/node_authority_tests.rs",
