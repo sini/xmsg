@@ -81,6 +81,11 @@ path = "tests/agent_sock.rs"
 required-features = ["daemon"]
 
 [[test]]
+name = "agy_darwin_presence"
+path = "tests/agy_darwin_presence.rs"
+required-features = ["daemon"]
+
+[[test]]
 name = "agy_proc_locks"
 path = "tests/agy_proc_locks.rs"
 required-features = ["daemon"]

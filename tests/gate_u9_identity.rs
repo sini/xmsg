@@ -489,9 +489,10 @@ fn cell_10_pi_uid_matching_accepted() {
     assert_eq!(res.expect("matching peer UID should be accepted"), "1000");
 }
 
-/// Live macOS probe verification test (runnable on macOS hosts with `-- --ignored`).
+/// Live macOS probe: this process's exe and open files, and the lock flag `flock` sets. It reads
+/// only this process, so it needs no `agy` binary.
 #[test]
-#[ignore]
+#[cfg(target_os = "macos")]
 fn test_live_macos_agy_probe() {
     let me = std::process::id();
     let proc_root = Path::new(xmsg::process::LIVE_PROC_ROOT);
@@ -513,6 +514,22 @@ fn test_live_macos_agy_probe() {
         expected_id.0,
         expected_id.1
     );
+
+    let flagged = |pid| {
+        xmsg::process::open_file_vnodes(proc_root, pid, None)
+            .expect("read open file vnodes")
+            .iter()
+            .any(|v| (v.dev, v.ino) == expected_id && v.has_flock)
+    };
+    let locked = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(tmp_file.path())
+        .unwrap();
+    assert!(!flagged(me), "control: no lock flag before flock");
+    use std::os::fd::AsRawFd;
+    assert_eq!(unsafe { libc::flock(locked.as_raw_fd(), libc::LOCK_EX) }, 0);
+    assert!(flagged(me), "has_flock must be set after flock");
 }
 
 /// A15 ordering: the walk to the agy ancestor steps to a parent only when that parent started

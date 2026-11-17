@@ -225,10 +225,183 @@ impl std::fmt::Debug for AgyRegisterRequest {
 pub const LIVE_PROC_LOCKS: &str = "/proc/locks";
 
 /// Whether presence locks can be checked through `proc_locks_path`: always on
-/// Linux, and elsewhere only against a fixture. macOS has no way to read
-/// another process's `flock` holders, so agy is Linux only there.
+/// Linux and macOS, and elsewhere only against a fixture. Linux reads the holder
+/// from `fdinfo`; macOS from a watched lock flag (`darwin_holder`).
 pub fn locks_supported(proc_locks_path: &Path) -> bool {
-    cfg!(target_os = "linux") || proc_locks_path != Path::new(LIVE_PROC_LOCKS)
+    cfg!(any(target_os = "linux", target_os = "macos"))
+        || proc_locks_path != Path::new(LIVE_PROC_LOCKS)
+}
+
+/// The macOS presence-lock holder state of one file, keyed by `(dev, ino)`.
+///
+/// macOS cannot list another process's `flock` holders. `proc_pidfdinfo` shows an open file's
+/// `FWASLOCKED` flag, but the flag is sticky: set by `flock`, it stays set after `LOCK_UN`
+/// until that open file closes. So the flag only nominates a holder; it is held from the moment a
+/// kqueue `NOTE_FUNLOCK` watch is in place, and released when the watch fires. A released
+/// `(pid, starttime)` is never attested again, whatever its flag still reads.
+#[cfg(target_os = "macos")]
+enum DarwinEntry {
+    Live {
+        pid: u32,
+        starttime: String,
+        kq: std::os::fd::OwnedFd,
+        _evt: std::os::fd::OwnedFd,
+    },
+    Released {
+        pid: u32,
+        starttime: String,
+    },
+}
+
+#[cfg(target_os = "macos")]
+impl DarwinEntry {
+    fn id(&self) -> (u32, &str) {
+        match self {
+            DarwinEntry::Live { pid, starttime, .. } | DarwinEntry::Released { pid, starttime } => {
+                (*pid, starttime)
+            }
+        }
+    }
+}
+
+/// Every entry per file: at most one `Live`, and each released holder, so an older holder whose
+/// flag is still set stays released after a newer one is watched.
+#[cfg(target_os = "macos")]
+type DarwinCache = HashMap<(u64, u64), Vec<DarwinEntry>>;
+
+#[cfg(target_os = "macos")]
+static DARWIN_HOLDERS: std::sync::OnceLock<Mutex<DarwinCache>> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "macos")]
+const DARWIN_RELEASE: u32 =
+    libc::NOTE_FUNLOCK | libc::NOTE_DELETE | libc::NOTE_RENAME | libc::NOTE_REVOKE;
+
+/// The path under which `pid`, pinned at `st`, has `(dev, ino)` open with the lock flag set.
+#[cfg(target_os = "macos")]
+fn darwin_flocked_path(pid: u32, st: &str, dev: u64, ino: u64) -> Option<PathBuf> {
+    crate::process::open_file_vnodes(Path::new(crate::process::LIVE_PROC_ROOT), pid, Some(st))
+        .ok()?
+        .into_iter()
+        .find(|v| v.dev == dev && v.ino == ino && v.has_flock)
+        .map(|v| v.path)
+}
+
+/// An `O_EVTONLY` handle on `path`, confirmed to be `(dev, ino)`, and its release watch.
+#[cfg(target_os = "macos")]
+fn darwin_watch(
+    path: &Path,
+    dev: u64,
+    ino: u64,
+) -> Option<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: c_path is NUL-terminated.
+    let raw = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_EVTONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return None;
+    }
+    // SAFETY: open returned a new descriptor.
+    let evt = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: fst is a properly sized stat buffer.
+    let mut fst: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(evt.as_raw_fd(), &mut fst) } != 0
+        || (fst.st_dev as u64, fst.st_ino) != (dev, ino)
+    {
+        return None;
+    }
+    let kq = crate::codex::kqueue_vnode(evt.as_raw_fd(), DARWIN_RELEASE).ok()?;
+    Some((kq, evt))
+}
+
+/// The `flock` holder of `(dev, ino)` on live macOS: `owner` alone, or every process of this
+/// UID, when `owner` is `None`. A holder is reported only while its release watch is unfired.
+/// More than one nominee is ambiguous and an error.
+#[cfg(target_os = "macos")]
+fn darwin_holder(owner: Option<u32>, dev: u64, ino: u64) -> io::Result<Option<u32>> {
+    let live = Path::new(crate::process::LIVE_PROC_ROOT);
+    let released = |kq: &std::os::fd::OwnedFd| {
+        crate::codex::kqueue_drain(kq).map_or(true, |fired| fired & DARWIN_RELEASE != 0)
+    };
+    let mut cache = DARWIN_HOLDERS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // 1. A dead or recycled pid's entry goes; dropping a Live one closes its descriptors.
+    for entries in cache.values_mut() {
+        entries.retain(|e| {
+            let (pid, st) = e.id();
+            crate::process::starttime(live, pid).ok().as_deref() == Some(st)
+        });
+    }
+    cache.retain(|_, entries| !entries.is_empty());
+    let entries = cache.entry((dev, ino)).or_default();
+
+    // 2. A watched holder holds until its watch fires or its flag is gone.
+    if let Some(i) = entries
+        .iter()
+        .position(|e| matches!(e, DarwinEntry::Live { .. }))
+    {
+        if let DarwinEntry::Live {
+            pid, starttime, kq, ..
+        } = &entries[i]
+        {
+            if !released(kq) && darwin_flocked_path(*pid, starttime, dev, ino).is_some() {
+                return Ok(Some(*pid));
+            }
+            let (pid, starttime) = (*pid, starttime.clone());
+            // Replacing the entry drops, and so closes, its watch.
+            entries[i] = DarwinEntry::Released { pid, starttime };
+        }
+    }
+
+    // 3. Nominees: the lock flag set, and not released.
+    let pids = match owner {
+        Some(pid) => vec![pid],
+        None => crate::process::same_uid_pids()?,
+    };
+    let mut nominees = Vec::new();
+    for pid in pids {
+        let Ok(st) = crate::process::starttime(live, pid) else {
+            continue;
+        };
+        if entries.iter().any(|e| e.id() == (pid, st.as_str())) {
+            continue;
+        }
+        if let Some(path) = darwin_flocked_path(pid, &st, dev, ino) {
+            nominees.push((pid, st, path));
+        }
+    }
+    let (pid, starttime, path) = match nominees.len() {
+        0 => return Ok(None),
+        1 => nominees.remove(0),
+        _ => {
+            return Err(io::Error::other(
+                "multiple lock holders detected for presence lock",
+            ))
+        }
+    };
+
+    // 4. Watch, then confirm the nominee still has the flag and nothing fired meanwhile.
+    let Some((kq, evt)) = darwin_watch(&path, dev, ino) else {
+        return Ok(None);
+    };
+    if darwin_flocked_path(pid, &starttime, dev, ino).is_none() || released(&kq) {
+        entries.push(DarwinEntry::Released { pid, starttime });
+        return Ok(None);
+    }
+    entries.push(DarwinEntry::Live {
+        pid,
+        starttime,
+        kq,
+        _evt: evt,
+    });
+    Ok(Some(pid))
 }
 
 const DEFAULT_AGY_BIN: &str = "agy";
@@ -430,6 +603,16 @@ pub fn attested_lock_holder(
     ino: u64,
 ) -> io::Result<Option<u32>> {
     let (maj, min) = (dev_major(dev), dev_minor(dev));
+    // The watched lock flag stands in for `fdinfo`, with the same fixture fallback.
+    #[cfg(target_os = "macos")]
+    if proc_root == Path::new(crate::process::LIVE_PROC_ROOT) {
+        return match darwin_holder(Some(pid), dev, ino)? {
+            None if proc_locks_path != Path::new(LIVE_PROC_LOCKS) => {
+                find_lock_holder(proc_locks_path, maj, min, ino)
+            }
+            holder => Ok(holder),
+        };
+    }
     use std::os::unix::fs::MetadataExt;
     let proc_dir = proc_root.join(pid.to_string());
     let mut holders = HashSet::new();
@@ -485,6 +668,16 @@ pub fn find_lock_holder_fdinfo(
     ino: u64,
 ) -> io::Result<Option<u32>> {
     let (maj, min) = (dev_major(dev), dev_minor(dev));
+    // The watched lock flag stands in for `fdinfo`, with the same fixture fallback.
+    #[cfg(target_os = "macos")]
+    if proc_root == Path::new(crate::process::LIVE_PROC_ROOT) {
+        return match darwin_holder(None, dev, ino)? {
+            None if proc_locks_path != Path::new(LIVE_PROC_LOCKS) => {
+                find_lock_holder(proc_locks_path, maj, min, ino)
+            }
+            holder => Ok(holder),
+        };
+    }
     let mut holders = HashSet::new();
     let my_uid = current_uid();
     let is_live_proc = proc_root == Path::new(crate::process::LIVE_PROC_ROOT);
@@ -549,7 +742,7 @@ pub fn find_lock_holder_fdinfo(
 }
 
 /// Lists all active agy sessions: registered sessions from store (live via starttime),
-/// plus on Linux any unregistered presence lock holders.
+/// plus, where presence locks can be checked, any unregistered presence lock holders.
 pub fn list_agy_sessions(
     config: &AgyConfig,
     store: &AgyStore,
@@ -632,7 +825,7 @@ pub fn list_agy_sessions(
         }
     }
 
-    // 2. Unregistered sessions in presence_dir (on Linux where /proc/locks is supported)
+    // 2. Unregistered sessions in presence_dir (where presence locks can be checked)
     if locks_supported(&config.proc_locks_path) {
         if let Ok(entries) = fs::read_dir(&config.presence_dir) {
             for entry in entries.flatten() {
@@ -880,8 +1073,8 @@ pub fn verify_registration_peer(
         }
     };
 
-    // 6. Linux additional check: a FLOCK holder line must exist AND equal chosen_pid
-    // (`attested_lock_holder`: chosen_pid's fdinfo on live /proc, else the fixture).
+    // 6. A FLOCK holder must exist AND equal chosen_pid (`attested_lock_holder`: chosen_pid's
+    // fdinfo on live Linux, the watched lock flag on live macOS, else the fixture).
     if locks_supported(proc_locks) {
         match attested_lock_holder(proc_root, proc_locks, chosen_pid, target_dev, target_ino) {
             Ok(Some(flock_holder)) => {
@@ -1013,20 +1206,17 @@ pub fn attest_mcp_caller_peer(
             let open_ids = crate::process::open_file_ids(proc_root, curr_pid).unwrap_or_default();
             for (conv_id, target_dev, target_ino) in &presence_locks {
                 if open_ids.contains(&(*target_dev, *target_ino)) {
-                    let flock_ok = if locks_supported(proc_locks) {
-                        match attested_lock_holder(
-                            proc_root,
-                            proc_locks,
-                            curr_pid,
-                            *target_dev,
-                            *target_ino,
-                        ) {
-                            Ok(Some(holder)) => holder == curr_pid,
-                            _ => false,
-                        }
-                    } else {
-                        true
-                    };
+                    let flock_ok = locks_supported(proc_locks)
+                        && matches!(
+                            attested_lock_holder(
+                                proc_root,
+                                proc_locks,
+                                curr_pid,
+                                *target_dev,
+                                *target_ino,
+                            ),
+                            Ok(Some(holder)) if holder == curr_pid
+                        );
 
                     if flock_ok {
                         chosen = Some((curr_pid, st1, conv_id.clone()));
@@ -1751,9 +1941,10 @@ pub fn default_register_sock_path() -> Result<PathBuf, AppError> {
 /// well under a millisecond, so 100ms keeps an armed conversation's cost below 1% of a core.
 pub const AGY_PROC_WATCH_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Checks whether Arm A is actively watching `conv_id` (Linux, locks supported, presence lock
-/// held by an attested agy process, and that process's `task/*/children` readable). Without the
-/// `children` file the watcher reads nothing, so B′'s hook fires from the first turn.
+/// Checks whether Arm A is actively watching `conv_id` (locks supported, presence lock held by an
+/// attested agy process, and that process's children listable: `task/*/children` on Linux,
+/// `proc_listchildpids` on macOS). Without a listing the watcher reads nothing, so B′'s hook
+/// fires from the first turn.
 pub fn is_conversation_proc_watched(config: &AgyConfig, conv_id: &str) -> bool {
     if !crate::claim::is_uuid_shaped(conv_id) {
         return false;
@@ -1902,20 +2093,9 @@ fn stale_agy_conversations(store: &AgyStore) -> Vec<String> {
         .collect()
 }
 
-/// The children of `pid`, from `/proc/<pid>/task/<tid>/children` over all of its threads (a child
-/// is listed under the thread that forked it). `None` where the kernel provides no such file
-/// (`CONFIG_PROC_CHILDREN` off) or the process is gone.
+/// The children of `pid` ([`crate::process::child_pids`]).
 fn proc_children(proc_root: &Path, pid: u32) -> Option<Vec<u32>> {
-    let tasks = fs::read_dir(proc_root.join(pid.to_string()).join("task")).ok()?;
-    let mut found = false;
-    let mut kids = Vec::new();
-    for task in tasks.flatten() {
-        if let Ok(s) = fs::read_to_string(task.path().join("children")) {
-            found = true;
-            kids.extend(s.split_whitespace().filter_map(|t| t.parse::<u32>().ok()));
-        }
-    }
-    found.then_some(kids)
+    crate::process::child_pids(proc_root, pid)
 }
 
 /// Reads ONLY `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` from an `environ` image.
@@ -2002,7 +2182,7 @@ async fn register_from_subtree(
             continue;
         }
 
-        let (creds, env_label) = match fs::read(proc_root.join(p.to_string()).join("environ")) {
+        let (creds, env_label) = match crate::process::environ(proc_root, p) {
             Ok(bytes) => (
                 agy_credentials_from_environ(&bytes),
                 agy_label_from_environ(&bytes),
@@ -2148,7 +2328,7 @@ pub async fn run_agy_proc_watcher(
 ) {
     if !locks_supported(&config.proc_locks_path) {
         tracing::info!(
-            "agy proc watcher off (no /proc/locks on this platform); agy conversations register through the hook request"
+            "agy proc watcher off (presence locks cannot be checked on this platform); agy conversations register through the hook request"
         );
         return;
     }
@@ -2821,7 +3001,7 @@ mod tests {
         assert!(locks_supported(Path::new("/tmp/fixture/locks")));
         assert_eq!(
             locks_supported(Path::new(LIVE_PROC_LOCKS)),
-            cfg!(target_os = "linux")
+            cfg!(any(target_os = "linux", target_os = "macos"))
         );
     }
 

@@ -1,7 +1,7 @@
 # macOS Antigravity (`agy`) Support Verification Probe
 
 - **Target:** Antigravity CLI (`agy`) process identity on macOS (Darwin)
-- **Status:** Implemented, unverified on macOS hardware (verified on Linux)
+- **Status:** Implemented; lock semantics measured on macOS 26.5 (aarch64)
 
 ---
 
@@ -13,7 +13,7 @@ On macOS, `xmsg` implements the equivalent identity proof using Darwin kernel AP
 - `proc_pidpath(pid, ...)` for the executable path;
 - `proc_pidinfo(pid, PROC_PIDLISTFDS, ...)` and `proc_pidfdinfo(pid, fd, PROC_PIDFDVNODEPATHINFO, ...)` for inspecting open file descriptor vnodes `(vst_dev, vst_ino)`.
 
-Because neither build orchestrator currently runs on a macOS host, macOS `agy` support is classified as **implemented, unverified**. A user on macOS should execute the following probes to confirm behavior on real Darwin hardware.
+The lock semantics in section 4 were measured on macOS 26.5 (aarch64). The steps below confirm a live `agy` on real Darwin hardware.
 
 ---
 
@@ -74,18 +74,22 @@ else:
 **Expected Output:**
 A clean, absolute, canonical path to the `agy` executable binary (e.g. `/opt/homebrew/bin/agy` or `/nix/store/.../bin/agy`).
 
-### Step 3: Run the ignored Rust test against a live `agy` process
+### Step 3: Run the live macOS probe tests
 
-Run the integration probe test in the `xmsg` repository:
+The probes run in every macOS `cargo test`; they need no `agy` binary:
 
 ```bash
-AGY_PID=<AGY_PID> cargo test --test gate_u9_identity -- --ignored test_live_macos_agy_probe
+cargo test --all-features --test gate_u9_identity test_live_macos_agy_probe
+cargo test --all-features --test agy_darwin_presence
 ```
 
-This test asserts:
+`test_live_macos_agy_probe` asserts, on the test process itself:
 
 1. `crate::process::exe_path(Path::new("/proc"), pid)` succeeds and resolves the binary.
-2. `crate::process::open_file_ids(Path::new("/proc"), pid)` contains the `(dev, ino)` of the lock file in `~/.gemini/antigravity-cli/presence/*.lock`.
+2. `crate::process::open_file_ids(Path::new("/proc"), pid)` contains the `(dev, ino)` of an open temporary file.
+3. `has_flock` is clear on that file before `flock(LOCK_EX)` and set after it.
+
+`agy_darwin_presence` runs the holder, release, ambiguity and delivery cases of section 4 with real locks held by this process and by re-executed children.
 
 ---
 
@@ -115,25 +119,26 @@ Both devices and inodes match identically.
 
 ---
 
-## 4. Lock Inspection Investigation (Source Reading; Not Executed on Darwin) & Option B Ruling
+## 4. Lock Holder Semantics on macOS (Measured)
 
-During gate review for Unit U9/U9.1, whether macOS can verify `flock(2)` ownership (Option C) was investigated via Darwin XNU source analysis (`apple-oss-distributions/xnu`):
+The earlier source reading concluded that unprivileged Darwin APIs expose no advisory lock state, and adopted **Option B** (executable path plus open vnode, no lock check). Measurement on macOS 26.5.2 (aarch64) supersedes it.
 
-### Option C Source Analysis (Derived from XNU Source; Not Executed on Darwin)
+### Measured
 
-- **Darwin Kernel Lock Tables:** Unlike Linux `/proc/locks`, the Darwin XNU kernel does not expose BSD `flock(2)` advisory lock tables to unprivileged userspace.
-- **`proc_pidfdinfo` Limits:** The `proc_pidfdinfo(pid, fd, PROC_PIDFDVNODEPATHINFO, ...)` API returns vnode details (`vnode_info.vi_stat.vst_dev`, `vnode_info.vi_stat.vst_ino`) and file flags, but exposes no advisory lock state.
-- **`fcntl(F_GETLK)` and `lf_getlock`:** In Darwin XNU (`bsd/kern/kern_lockf.c`), `fcntl(F_GETLK)` calls `lf_getlock()`, which walks the per-vnode `lockf` list and can detect the presence of an `F_FLOCK` write lock placed by `flock(2)` via `VNOP_ADVLOCK`. However, because `lf_owner` is NULL for non-POSIX flock locks, `lf_getlock` sets `fl->l_pid = -1`. Thus `F_GETLK` can report that a conflicting flock exists on the vnode, but cannot identify which PID holds the lock.
-- **Holder Distinction Gap:** Because `F_GETLK` only reports existence without attributing ownership to a PID, an existence-only signal cannot distinguish the active lock holder from a child process that inherited an open file descriptor across `exec` while the real session holds the lock.
-- **Privilege Boundary:** Querying kernel lock structures directly or tracing lock state requires `root` privileges or DTrace probes, which violates `xmsg`'s unprivileged same-UID trust model.
-- **Result:** Public unprivileged Darwin APIs cannot attribute `flock(2)` ownership to a specific PID or distinguish the active holder from an exec-inheritor.
+- **`fi_openflags` `FWASLOCKED` (`0x4000`) is sticky.** `proc_pidfdinfo(PROC_PIDFDVNODEPATHINFO)` reports it on an open file once `flock(2)` has been called on it. It stays set after `LOCK_UN` while that open file (or a dup of it) lives, and clears only when it closes. It is per open file: a sibling descriptor opened separately on the same file reads `0`.
+- **kqueue `EVFILT_VNODE` `NOTE_FUNLOCK`** on an `O_EVTONLY` descriptor fires on `LOCK_UN` with the locked descriptor still open, and on the close of a locked descriptor. It does not fire on a lock, a relock, a failed `LOCK_NB` attempt, or a never-locked open and close. It also fires when a descriptor that was locked and then unlocked is closed, even while another process holds the lock. A watcher must never take a test lock itself: its own unlock fires the event.
+- **A spawning parent shares its descriptors.** While a child is being spawned, `proc_pidfdinfo` on the child briefly shows the parent's descriptors, close-on-exec ones included, until the exec closes them.
+- **`KERN_PROCARGS2`** returns a same-UID child's environment for ad-hoc signed and hardened-runtime binaries, and strips it for Apple platform binaries (`/bin/*`).
 
-### Option B Adoption (Owner Ruling 2026-10-07)
+### What xmsg does
 
-Per owner ruling, `xmsg` adopts **Option B**:
+- The flag only **nominates** a holder: a same-UID process whose open file on the presence lock's `(dev, ino)` has `FWASLOCKED` and write access. More than one nominee is ambiguous and fails closed.
+- A sole nominee is **held** once xmsg has an `O_EVTONLY` handle on the file (its `(dev, ino)` confirmed by `fstat`) with a `NOTE_FUNLOCK | NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE` watch, has re-read the nominee's flag, and has drained the watch with nothing fired.
+- Each later check drains the watch and re-reads the holder's flag. A fired watch, a drain error or a cleared flag **releases** that `(pid, start time)`, and a released process is never attested again, whatever its flag reads. The flag alone is never taken as a live lock.
+- A dead or recycled PID's entry is dropped by start time.
 
-- macOS accepts the proof composed of:
-  1. Process executable path (`proc_pidpath`) matches a trusted `--agy-exe` binary.
-  2. Open file descriptor table (`proc_pidinfo` + `proc_pidfdinfo`) contains the matching vnode `(vst_dev, vst_ino)` of `<presence_dir>/<conversation_id>.lock`.
-- **Known Limitation:** On macOS, an inherited file descriptor across `exec` satisfies the check without active FLOCK ownership verification. This known gap is accepted in trade for cross-platform support without requiring root privileges.
-- macOS refusal is **not** reintroduced. Option B is the active and supported behavior.
+### Known limits
+
+- A lock taken and released before xmsg first sees it reads as held: the watch arrives after the event.
+- If a former holder that unlocked without closing later closes its descriptor while another process holds the lock, the event releases the current holder, which then stays hidden until it restarts. This fails closed.
+- A holder that is spawning a child at the first check reads as ambiguous for that check.

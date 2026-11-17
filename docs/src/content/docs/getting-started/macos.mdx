@@ -150,7 +150,9 @@ MacOS Unix sockets check peer UIDs with `getpeereid` and peer PIDs with `LOCAL_P
 process start times with `proc_pidinfo`.
 
 For [Antigravity](/harnesses/antigravity/), macOS cannot expose `flock(2)` owner PIDs to an
-unprivileged process. xmsg instead checks the open file's vnode (and the optional `--agy-exe` pin), with the `PreInvocation` registration hook. For [Codex](/harnesses/codex/), writer-lock
+unprivileged process. xmsg checks the open file's vnode (and the optional `--agy-exe` pin) and,
+planned, the presence lock's holder through the open file's lock flag and a `kqueue` release
+watch, which also runs the command watcher on macOS. For [Codex](/harnesses/codex/), writer-lock
 watching uses `kqueue` and descriptor paths from `fcntl(F_GETPATH)`.
 
 The macOS CI job builds the package (including Rust tests), shared service client checks, the

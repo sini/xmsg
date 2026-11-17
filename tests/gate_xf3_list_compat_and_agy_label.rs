@@ -62,6 +62,16 @@ struct Inbox {
     received: Arc<Mutex<Vec<String>>>,
 }
 
+/// Opens an agy presence lock read-write, as agy does: on macOS the holder check reads the lock
+/// flag only on a writable open file.
+fn presence_lock_rw(path: &Path) -> fs::File {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap()
+}
+
 fn inbox() -> Inbox {
     let dir = tempdir().unwrap();
     let sock = short_sock::sock_path(dir.path(), "in");
@@ -1095,7 +1105,7 @@ async fn test_oracle_2_harness_on_every_kind_live_and_inactive() {
     let conv_agy = "cccc3333-3333-4333-8333-333333333333";
     let lock_file = node.presence_dir.join(format!("{conv_agy}.lock"));
     fs::write(&lock_file, "lock").unwrap();
-    let _open_lock = fs::File::open(&lock_file).unwrap();
+    let _open_lock = presence_lock_rw(&lock_file);
     let meta = fs::metadata(&lock_file).unwrap();
     let locks_line = format!(
         "1: FLOCK ADVISORY WRITE {my_pid} {:02x}:{:02x}:{} 0 EOF\n",
@@ -1412,7 +1422,7 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
     let conv_1 = "1111aaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     let lock_1 = node.presence_dir.join(format!("{conv_1}.lock"));
     fs::write(&lock_1, "lock").unwrap();
-    let open_lock_1 = fs::File::open(&lock_1).unwrap();
+    let open_lock_1 = presence_lock_rw(&lock_1);
     unsafe {
         use std::os::unix::io::AsRawFd;
         libc::flock(open_lock_1.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB);
@@ -1530,7 +1540,7 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
     let conv_2 = "2222bbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     let lock_2 = node.presence_dir.join(format!("{conv_2}.lock"));
     fs::write(&lock_2, "lock").unwrap();
-    let open_lock_2 = fs::File::open(&lock_2).unwrap();
+    let open_lock_2 = presence_lock_rw(&lock_2);
     unsafe {
         use std::os::unix::io::AsRawFd;
         libc::flock(open_lock_2.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB);
@@ -2218,7 +2228,7 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
     let conv_agy = "cccc3333-3333-4333-8333-333333333333";
     let lock_agy = node.presence_dir.join(format!("{conv_agy}.lock"));
     fs::write(&lock_agy, "lock").unwrap();
-    let open_lock_agy = fs::File::open(&lock_agy).unwrap();
+    let open_lock_agy = presence_lock_rw(&lock_agy);
     unsafe {
         use std::os::unix::io::AsRawFd;
         libc::flock(open_lock_agy.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB);
