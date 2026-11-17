@@ -2581,7 +2581,7 @@ async fn deliver_send(
                 )));
             }
             let is_direct = if let Some(p) = peers.get(n) {
-                p.leaf || !p.address.is_empty()
+                crate::discovery::dial::is_direct(fs, p)
             } else {
                 peers.get_peer_config(n).is_some()
             };
