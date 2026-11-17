@@ -3,6 +3,9 @@
 //! A candidate is only an address. It never admits, names or routes a peer: whoever answers at
 //! it must still prove an identity in the federation handshake.
 
+pub mod dial;
+pub mod state;
+
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};

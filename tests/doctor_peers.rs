@@ -230,6 +230,7 @@ impl Fixture {
         std::fs::set_permissions(db_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let db = Arc::new(Mutex::new(connection));
         let fed = Arc::new(FedState {
+            discovery: Default::default(),
             node_name: NODE.into(),
             peers: Arc::new(peers).into(),
             cert_der: identity.cert,

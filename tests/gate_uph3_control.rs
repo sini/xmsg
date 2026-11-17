@@ -31,6 +31,7 @@ impl Node {
         storage::init_db(&db.lock().unwrap()).unwrap();
         let (notify, _) = tokio::sync::broadcast::channel(64);
         let fs = Arc::new(FedState {
+            discovery: Default::default(),
             node_name: name.into(),
             peers: Arc::new(PeersMap::empty()).into(),
             cert_der: cert,
