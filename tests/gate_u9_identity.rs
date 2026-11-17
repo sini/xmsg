@@ -265,9 +265,9 @@ fn cell_4_refuse_non_ancestor_holder() {
     assert!(matches!(res, Err(AppError::NotRecipient(_))));
 }
 
-/// Cell 5: Refuse - no trusted exe configured.
+/// Cell 5: Refuse - no pin and no ancestor holding the lock.
 #[test]
-fn cell_5_refuse_no_trusted_exe_configured() {
+fn cell_5_refuse_no_pin_and_no_lock_holder() {
     let tmp = tempdir().unwrap();
     let proc_root = tmp.path().join("proc");
     let proc_locks = tmp.path().join("locks");
@@ -294,12 +294,12 @@ fn cell_5_refuse_no_trusted_exe_configured() {
         &req,
     );
 
-    match res {
-        Err(AppError::BadRequest(msg)) => {
-            assert!(msg.contains("no trusted agy executable configured"));
-        }
-        other => panic!("expected BadRequest for empty trusted exes, got: {other:?}"),
-    }
+    // No pin no longer refuses on configuration; with no lock holder among the ancestors it
+    // still refuses.
+    assert!(
+        matches!(res, Err(AppError::NotRecipient(_))),
+        "expected NotRecipient for an empty pin list with no holder, got: {res:?}"
+    );
 }
 
 /// Cell 6: Refuse - symlinked presence path pointing elsewhere (inode differs).

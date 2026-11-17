@@ -30,7 +30,7 @@ To install the CLI and the harness integrations without a local `xmsg serve` dae
 |---|---|---|
 | `programs.xmsg.package` | — | `inputs.xmsg.packages.${system}.default` |
 | `programs.xmsg.server.httpSocket` | `--http-sock` | `$XDG_RUNTIME_DIR/xmsg/http.sock` (on macOS, the Darwin user temp directory, `getconf DARWIN_USER_TEMP_DIR`) |
-| `programs.xmsg.server.agyExe` | `--agy-exe` (repeated) | `programs.antigravity-cli.package`'s `bin/agy` when `harnesses.agy.enable = true` |
+| `programs.xmsg.server.agyExe` | `--agy-exe` (repeated, optional pin) | `programs.antigravity-cli.package`'s `bin/agy` when `harnesses.agy.enable = true` |
 | `programs.xmsg.server.codexExe` | `--codex-exe` (repeated) | `programs.codex.package`'s `bin/codex` when `harnesses.codex.enable = true` |
 | `programs.xmsg.server.codexHome` | `--codex-home` (repeated) | `[ "${config.home.homeDirectory}/.codex" ]` |
 | `programs.xmsg.server.svcExe` | `--svc-exe NAME=PATH` | `{ }` |

@@ -1,5 +1,6 @@
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -844,4 +845,150 @@ async fn xa6_nonzero_exit_phrases_on_stderr_with_non_auth_error_not_stale() {
         "rpc error: code = Unauthenticated desc = unauthenticated: invalid CSRF token; code = Unavailable; connection refused; Connection refused\n",
     )
     .await;
+}
+
+/// Which fake agy scripts ran.
+#[derive(Default, Debug)]
+struct Ran {
+    holder: bool,
+    pinned: bool,
+    explicit: bool,
+}
+
+/// Re-runs the named test in a child whose PATH is the minimal launchd one and holds no `agy`.
+fn in_minimal_path_child(test: &str, child_var: &str) -> bool {
+    if std::env::var_os(child_var).is_some() {
+        return true;
+    }
+    assert!(!Path::new("/usr/bin/agy").exists() && !Path::new("/bin/agy").exists());
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env(child_var, "1")
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
+        "child failed: {stdout} {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    false
+}
+
+// No --agy-exe: delivery runs the attested holder's own executable, not a PATH lookup.
+#[tokio::test]
+async fn delivery_runs_the_holder_exe_under_minimal_path_without_agy_exe() {
+    if !in_minimal_path_child(
+        "delivery_runs_the_holder_exe_under_minimal_path_without_agy_exe",
+        "XMSG_AGY_HOLDER_CHILD",
+    ) {
+        return;
+    }
+    let ran = deliver_with(true, false, false).await;
+    assert!(ran.holder, "holder exe was not run: {ran:?}");
+}
+
+// Holderless platform (macOS today) with a pin: falls back to the first pinned exe.
+#[tokio::test]
+async fn delivery_without_a_holder_falls_back_to_the_first_pinned_exe() {
+    if !in_minimal_path_child(
+        "delivery_without_a_holder_falls_back_to_the_first_pinned_exe",
+        "XMSG_AGY_PINNED_CHILD",
+    ) {
+        return;
+    }
+    let ran = deliver_with(false, true, false).await;
+    assert!(ran.pinned, "pinned exe was not run: {ran:?}");
+}
+
+#[tokio::test]
+async fn explicit_agy_bin_wins_over_holder_and_pin() {
+    let ran = deliver_with(true, true, true).await;
+    assert!(
+        ran.explicit && !ran.holder && !ran.pinned,
+        "explicit agy_bin must win: {ran:?}"
+    );
+}
+
+/// `holder`: the synthetic proc entry of the session's pid has an `exe` link to a fake agy.
+/// `pin`: `trusted_agy_exes = [fake]`. `explicit`: `agy_bin` is a third fake (else the default).
+async fn deliver_with(holder: bool, pin: bool, explicit: bool) -> Ran {
+    let tmp = tempdir().unwrap();
+    let presence_dir = tmp.path().join("presence");
+    fs::create_dir_all(&presence_dir).unwrap();
+    let my_pid = std::process::id();
+    let proc_root = tmp.path().join("proc");
+    let pid_dir = proc_root.join(my_pid.to_string());
+    fs::create_dir_all(&pid_dir).unwrap();
+    fs::write(
+        pid_dir.join("stat"),
+        format!("{my_pid} (proc) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 100 0 0 0 0 0 0 0 0 0 0\n"),
+    )
+    .unwrap();
+    let fake = |name: &str| {
+        let bin = tmp.path().join(format!("{name}.sh"));
+        let log = tmp.path().join(format!("{name}.ran"));
+        fs::write(
+            &bin,
+            format!("#!/bin/sh\necho ran > \"{}\"\necho '{{}}'\n", log.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        (bin, log)
+    };
+    let (holder_bin, holder_log) = fake("holder");
+    let (pinned_bin, pinned_log) = fake("pinned");
+    let (explicit_bin, explicit_log) = fake("explicit");
+    if holder {
+        std::os::unix::fs::symlink(&holder_bin, pid_dir.join("exe")).unwrap();
+    }
+    let config = AgyConfig {
+        presence_dir,
+        proc_locks_path: tmp.path().join("locks"),
+        proc_root,
+        agy_bin: if explicit {
+            explicit_bin.to_string_lossy().to_string()
+        } else {
+            "agy".to_string()
+        },
+        trusted_agy_exes: if pin { vec![pinned_bin] } else { Vec::new() },
+        brain_dir: PathBuf::new(),
+    };
+    let store = new_agy_store();
+    let conv_id = "e904fe8e-df56-5cf9-8285-e2d97512d4e9";
+    let info = xmsg::agy::AgySessionInfo::new(
+        conv_id.to_string(),
+        my_pid,
+        "100".to_string(),
+        Some(AgyCredentials {
+            ls_address: "127.0.0.1:9999".to_string(),
+            csrf_token: "t".to_string(),
+            is_stale: false,
+        }),
+    );
+    let key = info.session_key.clone();
+    store.write().unwrap().insert(key.clone(), info);
+    let session = xmsg::registry::Session {
+        session_id: key,
+        name: Some(conv_id.to_string()),
+        pid: 0,
+        cwd: "/".to_string(),
+        status: "idle".to_string(),
+        kind: "interactive".to_string(),
+        entrypoint: None,
+        version: None,
+        started_at: 0,
+        updated_at: 0,
+        harness: "agy".to_string(),
+        registered: Some(true),
+    };
+    xmsg::agy::deliver_agy_envelope(&config, &store, &session, "t", "hello")
+        .await
+        .unwrap();
+    Ran {
+        holder: holder_log.exists(),
+        pinned: pinned_log.exists(),
+        explicit: explicit_log.exists(),
+    }
 }

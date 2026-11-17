@@ -231,17 +231,55 @@ pub fn locks_supported(proc_locks_path: &Path) -> bool {
     cfg!(target_os = "linux") || proc_locks_path != Path::new(LIVE_PROC_LOCKS)
 }
 
+const DEFAULT_AGY_BIN: &str = "agy";
+
+/// Whether the default bare `agy` resolves to an executable regular file on this process's PATH.
+fn agy_on_path() -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|dir| {
+            fs::metadata(dir.join(DEFAULT_AGY_BIN))
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct AgyConfig {
     pub presence_dir: PathBuf,
     pub brain_dir: PathBuf,
     pub proc_locks_path: PathBuf,
     pub proc_root: PathBuf,
+    /// An explicit value wins; the default bare name falls back to the holder's exe, then the first pinned exe.
     pub agy_bin: String,
     pub trusted_agy_exes: Vec<PathBuf>,
 }
 
 impl AgyConfig {
+    /// The program delivery spawns. An explicit `agy_bin` wins; then the bare `agy` when it
+    /// resolves on the daemon's own PATH (a wrapper script keeps its environment); then the first
+    /// pinned exe; then the attested holder's executable; else the bare name, which fails as before.
+    fn delivery_program(&self, holder_exe: Option<PathBuf>) -> std::ffi::OsString {
+        self.delivery_program_with(holder_exe, agy_on_path())
+    }
+
+    fn delivery_program_with(
+        &self,
+        holder_exe: Option<PathBuf>,
+        agy_on_path: bool,
+    ) -> std::ffi::OsString {
+        if self.agy_bin != DEFAULT_AGY_BIN || agy_on_path {
+            return self.agy_bin.clone().into();
+        }
+        match self.trusted_agy_exes.first().cloned().or(holder_exe) {
+            Some(exe) => exe.into_os_string(),
+            None => {
+                tracing::debug!("no pinned agy exe or holder exe; delivering via PATH lookup");
+                self.agy_bin.clone().into()
+            }
+        }
+    }
+
     pub fn effective_brain_dir(&self) -> PathBuf {
         if !self.brain_dir.as_os_str().is_empty() {
             self.brain_dir.clone()
@@ -262,7 +300,7 @@ impl Default for AgyConfig {
             brain_dir: PathBuf::from(home).join(".gemini/antigravity-cli/brain"),
             proc_locks_path: PathBuf::from(LIVE_PROC_LOCKS),
             proc_root: PathBuf::from(crate::process::LIVE_PROC_ROOT),
-            agy_bin: "agy".to_string(),
+            agy_bin: DEFAULT_AGY_BIN.to_string(),
             trusted_agy_exes: Vec::new(),
         }
     }
@@ -778,13 +816,6 @@ pub fn verify_registration_peer(
         )));
     }
 
-    // 2. Configuration requirement: refuse if no trusted agy executable configured
-    if trusted_exes.is_empty() {
-        return Err(AppError::BadRequest(
-            "no trusted agy executable configured; set --agy-exe or XMSG_AGY_EXE".to_string(),
-        ));
-    }
-
     // 3. Resolve presence lock file and canonical (dev, inode)
     let lock_file = presence_dir.join(format!("{}.lock", req.conversation_id));
     let meta = match fs::metadata(&lock_file) {
@@ -822,10 +853,7 @@ pub fn verify_registration_peer(
 
         // (a) EXECUTABLE check: kernel-reported executable path matches a trusted exe
         let exe_matches = match crate::process::exe_path(proc_root, curr_pid) {
-            Ok(exe) => {
-                let exe_canon = fs::canonicalize(&exe).unwrap_or(exe);
-                trusted_canons.contains(&exe_canon)
-            }
+            Ok(exe) => exe_trusted(&trusted_canons, exe),
             Err(_) => false,
         };
 
@@ -937,13 +965,6 @@ pub fn attest_mcp_caller_peer(
         )));
     }
 
-    // 2. Configuration requirement: refuse if no trusted agy executable configured
-    if trusted_exes.is_empty() {
-        return Err(AppError::BadRequest(
-            "no trusted agy executable configured; set --agy-exe or XMSG_AGY_EXE".to_string(),
-        ));
-    }
-
     // 3. Canonicalize trusted exes
     let trusted_canons: Vec<PathBuf> = trusted_exes
         .iter()
@@ -983,10 +1004,7 @@ pub fn attest_mcp_caller_peer(
 
         // (a) EXECUTABLE check: kernel-reported executable path matches a trusted exe
         let exe_matches = match crate::process::exe_path(proc_root, curr_pid) {
-            Ok(exe) => {
-                let exe_canon = fs::canonicalize(&exe).unwrap_or(exe);
-                trusted_canons.contains(&exe_canon)
-            }
+            Ok(exe) => exe_trusted(&trusted_canons, exe),
             Err(_) => false,
         };
 
@@ -1573,7 +1591,7 @@ pub async fn deliver_agy_envelope(
     envelope: &str,
 ) -> Result<(), AppError> {
     // 1. Liveness check via pid + starttime (no per-message lock check)
-    let (is_alive, conv_target, creds) = {
+    let (is_alive, conv_target, creds, holder_pid) = {
         let store_lock = store.read().unwrap();
         let maybe_info = store_lock.get(&session.session_id).cloned().or_else(|| {
             store_lock
@@ -1592,7 +1610,7 @@ pub async fn deliver_agy_envelope(
                 } else {
                     session.session_id.clone()
                 };
-                (alive, target, info.credentials.clone())
+                (alive, target, info.credentials.clone(), info.pid)
             }
             None => {
                 let alive = if session.pid > 0 {
@@ -1600,7 +1618,7 @@ pub async fn deliver_agy_envelope(
                 } else {
                     false
                 };
-                (alive, session.session_id.clone(), None)
+                (alive, session.session_id.clone(), None, session.pid)
             }
         }
     };
@@ -1636,7 +1654,9 @@ pub async fn deliver_agy_envelope(
     }
 
     // 2. Spawn agy agentapi send-message directly as argv vector with NO shell
-    let mut cmd = tokio::process::Command::new(&config.agy_bin);
+    let holder_exe = crate::process::exe_path(&config.proc_root, holder_pid).ok();
+    let program = config.delivery_program(holder_exe);
+    let mut cmd = tokio::process::Command::new(&program);
     cmd.arg("agentapi")
         .arg("send-message")
         .arg("--title")
@@ -1657,7 +1677,7 @@ pub async fn deliver_agy_envelope(
         Ok(Err(e)) => {
             return Err(AppError::InboxUnavailable(format!(
                 "failed to execute {}: {e}",
-                config.agy_bin
+                program.to_string_lossy()
             )));
         }
         Err(_) => return Err(AppError::InboxTimeout),
@@ -1741,9 +1761,6 @@ pub fn is_conversation_proc_watched(config: &AgyConfig, conv_id: &str) -> bool {
     if !locks_supported(&config.proc_locks_path) {
         return false;
     }
-    if config.trusted_agy_exes.is_empty() {
-        return false;
-    }
     let lock_path = config.presence_dir.join(format!("{conv_id}.lock"));
     let Ok(meta) = fs::metadata(&lock_path) else {
         return false;
@@ -1768,10 +1785,7 @@ pub fn is_conversation_proc_watched(config: &AgyConfig, conv_id: &str) -> bool {
         .collect();
 
     let exe_matches = match crate::process::exe_path(&config.proc_root, holder_pid) {
-        Ok(exe) => {
-            let exe_canon = fs::canonicalize(&exe).unwrap_or(exe);
-            trusted_canons.contains(&exe_canon)
-        }
+        Ok(exe) => exe_trusted(&trusted_canons, exe),
         Err(_) => false,
     };
     if !exe_matches {
@@ -1796,6 +1810,12 @@ pub struct AgyProcWatch {
     unreadable_logged: HashSet<String>,
     /// Labels recorded from hook `check` requests before credentials are registered.
     labels: HashMap<String, Option<String>>,
+}
+
+/// An empty pin list trusts any executable: the lock-holder attestation and the UID check still
+/// apply. A non-empty list is an opt-in pin on the holder's executable.
+fn exe_trusted(trusted_canons: &[PathBuf], exe: PathBuf) -> bool {
+    trusted_canons.is_empty() || trusted_canons.contains(&fs::canonicalize(&exe).unwrap_or(exe))
 }
 
 fn trusted_canons(config: &AgyConfig) -> Vec<PathBuf> {
@@ -1837,7 +1857,7 @@ fn eligible_holder(
     .ok()??;
 
     let exe = crate::process::exe_path(&config.proc_root, holder_pid).ok()?;
-    if !trusted_canons.contains(&fs::canonicalize(&exe).unwrap_or(exe)) {
+    if !exe_trusted(trusted_canons, exe) {
         return None;
     }
     let ids = crate::process::open_file_ids(&config.proc_root, holder_pid).ok()?;
@@ -2094,7 +2114,7 @@ pub async fn scan_and_register_agy_proc(
     watch: &mut AgyProcWatch,
     reply_ttl: Duration,
 ) -> Result<Vec<String>, AppError> {
-    if !locks_supported(&config.proc_locks_path) || config.trusted_agy_exes.is_empty() {
+    if !locks_supported(&config.proc_locks_path) {
         return Ok(Vec::new());
     }
     let canons = trusted_canons(config);
@@ -2126,9 +2146,9 @@ pub async fn run_agy_proc_watcher(
     mut arm_rx: tokio::sync::mpsc::UnboundedReceiver<(String, Option<String>)>,
     reply_ttl: Duration,
 ) {
-    if !locks_supported(&config.proc_locks_path) || config.trusted_agy_exes.is_empty() {
+    if !locks_supported(&config.proc_locks_path) {
         tracing::info!(
-            "agy proc watcher off (no /proc/locks on this platform, or no trusted agy executable); agy conversations register through the hook request"
+            "agy proc watcher off (no /proc/locks on this platform); agy conversations register through the hook request"
         );
         return;
     }
@@ -2602,6 +2622,20 @@ pub async fn run_register_server_with_listener(
 mod tests {
     use super::*;
 
+    #[test]
+    fn delivery_program_precedence() {
+        let holder = || Some(PathBuf::from("/holder/agy"));
+        let mut c = AgyConfig::default();
+        assert_eq!(c.delivery_program_with(None, false), "agy");
+        assert_eq!(c.delivery_program_with(holder(), false), "/holder/agy");
+        assert_eq!(c.delivery_program_with(holder(), true), "agy");
+        c.trusted_agy_exes = vec![PathBuf::from("/opt/agy"), PathBuf::from("/other")];
+        assert_eq!(c.delivery_program_with(holder(), false), "/opt/agy");
+        assert_eq!(c.delivery_program_with(holder(), true), "agy");
+        c.agy_bin = "/explicit/agy".to_string();
+        assert_eq!(c.delivery_program_with(holder(), false), "/explicit/agy");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn attested_lock_holder_reads_the_live_flock_from_fdinfo() {
@@ -2791,8 +2825,60 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
-    fn registration_without_trusted_exes_is_rejected() {
+    fn no_pin_trusts_the_real_lock_holder_and_a_pin_mismatch_or_non_holder_is_refused() {
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::io::AsRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        let presence_dir = dir.path().join("presence");
+        fs::create_dir_all(&presence_dir).unwrap();
+        let conv_id = "0199cecf-0099-7000-8000-000000000003";
+        let f = fs::File::create(presence_dir.join(format!("{conv_id}.lock"))).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let _ = f.metadata().unwrap().ino();
+        let (proc_root, locks) = (Path::new("/proc"), Path::new(LIVE_PROC_LOCKS));
+        let (uid, pid) = (current_uid(), std::process::id());
+        let req = AgyRegisterRequest {
+            conversation_id: conv_id.to_string(),
+            ls_address: "127.0.0.1:1".to_string(),
+            csrf_token: "t".to_string(),
+        };
+        let register = |pins: &[PathBuf], peer_pid: u32| {
+            verify_registration(
+                proc_root,
+                locks,
+                &presence_dir,
+                pins,
+                uid,
+                uid,
+                peer_pid,
+                &req,
+            )
+        };
+        let mcp = |pins: &[PathBuf], peer_pid: u32| {
+            attest_mcp_caller(proc_root, locks, &presence_dir, pins, uid, uid, peer_pid)
+        };
+        // No pin: the real holder is attested by the lock alone.
+        assert_eq!(register(&[], pid).unwrap().pid, pid);
+        assert_eq!(mcp(&[], pid).unwrap().0.pid, pid);
+        // A pin naming some other exe still refuses the holder.
+        let wrong = [PathBuf::from("/nonexistent/agy")];
+        assert!(register(&wrong, pid).is_err());
+        assert!(mcp(&wrong, pid).is_err());
+        // A pin naming the holder's own exe accepts it.
+        let right = [std::env::current_exe().unwrap()];
+        assert_eq!(register(&right, pid).unwrap().pid, pid);
+        // A process that is not the lock holder (nor its descendant) is refused with no pin.
+        assert!(register(&[], 1).is_err());
+        assert!(mcp(&[], 1).is_err());
+    }
+
+    #[test]
+    fn registration_without_pin_and_without_a_lock_holder_is_refused() {
         let req = AgyRegisterRequest {
             conversation_id: "0199cecf-0099-7000-8000-000000000002".to_string(),
             ls_address: "127.0.0.1:1".to_string(),
@@ -2811,7 +2897,8 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(err, AppError::BadRequest(ref d) if d.contains("no trusted agy executable configured"))
+            matches!(err, AppError::Gone { .. }),
+            "with no pin the request is refused for the missing lock, not for configuration: {err:?}"
         );
     }
 }

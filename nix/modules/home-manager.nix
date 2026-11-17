@@ -584,7 +584,7 @@ in
           cfg.harnesses.agy.enable && config.programs.antigravity-cli.package != null
         ) "${config.programs.antigravity-cli.package}/bin/agy";
         defaultText = lib.literalExpression ''[ "''${config.programs.antigravity-cli.package}/bin/agy" ] when harnesses.agy is on'';
-        description = "`--agy-exe`: the agy executables whose sessions xmsg attests (the identity anchor).";
+        description = "`--agy-exe`: optional pin: only agy executables listed here are attested; empty trusts the presence-lock holder.";
       };
       codexExe = mkOption {
         type = types.listOf types.str;

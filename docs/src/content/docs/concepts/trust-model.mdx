@@ -67,10 +67,10 @@ sessions do not collide, and one session cannot pose as another:
     app-server daemon under the same UID. Then they share that daemon's process ancestry and
     writer-lock descriptors. `codex --no-daemon` gives each root its own owner process. All Codex
     delivery paths add a fixed untrusted-peer-data preamble outside the escaped message bodies.
-- **[Antigravity](/harnesses/antigravity/):** xmsg checks the ancestor executable
-  (`--agy-exe`). It also checks for an open file descriptor to
+- **[Antigravity](/harnesses/antigravity/):** xmsg checks for an open file descriptor to
   `<presence_dir>/<conversation_id>.lock`, matched by device and inode `(dev, ino)`. On Linux, it
-  also checks for an exclusive `FLOCK` in `/proc/locks`.
+  also checks for an exclusive `FLOCK` in `/proc/locks`. The optional `--agy-exe` flag pins the
+  ancestor executable; without it the lock holder is trusted by UID and lock attestation.
 - **[Pi](/harnesses/pi/), [opencode](/harnesses/opencode/) and [Hermes](/harnesses/hermes/):**
   xmsg admits them on `register.sock` after a UID check with `SO_PEERCRED` / `getpeereid`. It
   makes a new UUID v4 for each registered session. All tool calls and `continues`/`subagent`

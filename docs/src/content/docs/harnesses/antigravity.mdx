@@ -13,7 +13,7 @@ external hooks do not get them. Thus `xmsg` registers an Antigravity session in 
 
 1. **Stage 1 — Identity at MCP start:**
    When `xmsg mcp` starts as an `agy` child, `xmsg serve` walks its ancestor process chain. It
-   looks for a trusted `--agy-exe` binary with an open file descriptor to
+   looks for an ancestor with an open file descriptor to
    `~/.gemini/antigravity-cli/presence/<conversation_id>.lock`. The match uses the canonical
    `(dev, ino)`. On Linux, xmsg also checks for exclusive `FLOCK` ownership in `/proc/locks`.
    The session is then immediately addressable by its conversation UUID (`registered: false`).
@@ -102,8 +102,23 @@ this:
 connects to `agent.sock` again, with backoff. This restores the stage 1 registration. Incoming
 messages queue safely until the next turn registers the push credentials again.
 
+`--agy-exe` is an optional pin. Without it, xmsg trusts the process that holds the conversation's
+presence lock (same UID, lock attestation unchanged). With it set, only a holder whose executable
+matches a pinned path is trusted.
+
+Delivery picks the program to run in this order:
+
+1. an explicitly configured agy binary;
+2. the bare `agy`, when it resolves on the daemon's own `PATH` (so a wrapper script keeps its
+   environment);
+3. the first `--agy-exe` path;
+4. the executable of the process holding the presence lock;
+5. the bare `agy`, which fails if nothing resolves.
+
+Steps 3 and 4 make delivery work under launchd's minimal `PATH` on macOS.
+
 ## Home Manager switch
 
 Set `programs.xmsg.harnesses.agy.enable = true`. This needs `programs.antigravity-cli.enable = true`.
-The switch configures the MCP server, the skill, `--agy-exe` and `~/.gemini/config/hooks.json`.
+The switch configures the MCP server, the skill, the optional `--agy-exe` pin and `~/.gemini/config/hooks.json`.
 See [NixOS & Home Manager](/operations/nixos-and-home-manager/#per-harness-switches).
