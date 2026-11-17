@@ -281,6 +281,21 @@ jobs:
         run: |
           echo "::warning::Attic cache ci publication failed; attempts started: ${{ steps.attic_publish.outputs.attempts || 'unknown' }}"
 
+  # Native cargo test, outside any nix build: the runner's default TMPDIR (under the
+  # /var -> private/var symlink) exposes path bugs the nix build directory hides.
+  native-tests:
+    if: ${{ !inputs.lock_probe }}
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal && rustup default 1.95.0
+      - name: cargo test
+        run: cargo test --locked --no-fail-fast
+
   lock-probe:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.lock_probe }}
     runs-on: macos-latest
