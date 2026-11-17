@@ -1,0 +1,703 @@
+{
+  "description": "Public RFC8032 test keys; synthetic design vectors only, no live credentials or TLS exporter.",
+  "runtime": {
+    "node": "v22.23.4",
+    "openssl": "3.5.9"
+  },
+  "publicKeys": [
+    "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
+  ],
+  "spki": [
+    "302a300506032b6570032100d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "302a300506032b65700321003d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
+  ],
+  "deviceIDs": [
+    "xmsg-spki1:a3r73d62fg5wbk2zkv66mhw3blwnwiyrgs7dbz23ivpy4g3zf6uq",
+    "xmsg-spki1:32zn5u45yjx44dtaqw3pynf7nnmudej3x7rouykbcph7tyaeyfya"
+  ],
+  "exposures": [
+    {
+      "decoded": {
+        "0": 1,
+        "1": "xmsg-exposure-v1",
+        "2": "contact",
+        "3": [
+          "receiver"
+        ],
+        "4": [
+          "*"
+        ],
+        "5": 65536,
+        "6": 8388608,
+        "7": 10,
+        "8": 60,
+        "9": "ingress"
+      },
+      "canonicalCBOR": "aa00010170786d73672d6578706f737572652d76310267636f6e7461637403816872656365697665720481612a051a00010000061a00800000070a08183c0967696e6772657373",
+      "sha256": "ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd"
+    },
+    {
+      "decoded": {
+        "0": 1,
+        "1": "xmsg-exposure-v1",
+        "2": "owner-device",
+        "3": [
+          "*"
+        ],
+        "4": [
+          "*"
+        ],
+        "5": 65536,
+        "6": 8388608,
+        "7": 10,
+        "8": 60,
+        "9": "ingress"
+      },
+      "canonicalCBOR": "aa00010170786d73672d6578706f737572652d7631026c6f776e65722d6465766963650381612a0481612a051a00010000061a00800000070a08183c0967696e6772657373",
+      "sha256": "7ed6c2015c9c52c05e255eefecb69db09e45a346f9c9fef029db014f1e5a70d7"
+    }
+  ],
+  "exporter": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "transcript": "af0001016b786d73672d706169722f3102582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9035820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c170045820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f055820202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f068367636f6e74616374f65820ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd07836c6f776e65722d646576696365f658207ed6c2015c9c52c05e255eefecb69db09e45a346f9c9fef029db014f1e5a70d7081a6553f100091a6553f1780a070b090c5820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0d50a0a1a2a3a4a5a6a7a8a9aaabacadaeaf0e50b0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+  "transactionID": "3cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f",
+  "externalAAD": "8274786d73672d706169722d726563656970742d76315820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "receipts": [
+    {
+      "protectedBytes": "a3013203706170706c69636174696f6e2f63626f7204582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9",
+      "payloadBytes": "ae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f030004582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9055820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c1700667636f6e7461637407f6085820ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd0950c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c10a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d07",
+      "sigStructure": "846a5369676e6174757265315838a3013203706170706c69636174696f6e2f63626f7204582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa958388274786d73672d706169722d726563656970742d76315820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f58edae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f030004582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9055820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c1700667636f6e7461637407f6085820ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd0950c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c10a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d07",
+      "signature": "3f2ebdadc2807905f9a070cfdbf6b1addc5cd69f3b4dee7904c69059cba902a4d659c8b373ea2f1d614648ac87b312c1ca852d85dee1048ae58f157db0683306",
+      "cose": "d2845838a3013203706170706c69636174696f6e2f63626f7204582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9a058edae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f030004582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9055820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c1700667636f6e7461637407f6085820ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd0950c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c10a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d0758403f2ebdadc2807905f9a070cfdbf6b1addc5cd69f3b4dee7904c69059cba902a4d659c8b373ea2f1d614648ac87b312c1ca852d85dee1048ae58f157db0683306"
+    },
+    {
+      "protectedBytes": "a3013203706170706c69636174696f6e2f63626f72045820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c170",
+      "payloadBytes": "ae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f0301045820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c17005582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9066c6f776e65722d64657669636507f60858207ed6c2015c9c52c05e255eefecb69db09e45a346f9c9fef029db014f1e5a70d70950c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c20a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d09",
+      "sigStructure": "846a5369676e6174757265315838a3013203706170706c69636174696f6e2f63626f72045820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c17058388274786d73672d706169722d726563656970742d76315820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f58f2ae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f0301045820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c17005582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9066c6f776e65722d64657669636507f60858207ed6c2015c9c52c05e255eefecb69db09e45a346f9c9fef029db014f1e5a70d70950c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c20a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d09",
+      "signature": "4b994795c13d1262d8cce163d6e59e5c88cdd9119977039db8b679ae6fd0807e05dcaa6a2b23d76a594e34b1ae1c7543c7c59cacd08263b6f625bff170fa0304",
+      "cose": "d2845838a3013203706170706c69636174696f6e2f63626f72045820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c170a058f2ae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f0301045820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c17005582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9066c6f776e65722d64657669636507f60858207ed6c2015c9c52c05e255eefecb69db09e45a346f9c9fef029db014f1e5a70d70950c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c20a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d0958404b994795c13d1262d8cce163d6e59e5c88cdd9119977039db8b679ae6fd0807e05dcaa6a2b23d76a594e34b1ae1c7543c7c59cacd08263b6f625bff170fa0304"
+    }
+  ],
+  "cases": [
+    {
+      "name": "RFC8032 test 1",
+      "inputs": {
+        "fixture": "top-level transcript and receipts; explicit signed overrides in cose where supplied",
+        "now": 1700000002,
+        "exporter": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "transactionID": "3cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f",
+        "currentPolicy": 7,
+        "cose": "d2845838a3013203706170706c69636174696f6e2f63626f7204582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9a058edae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f030004582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9055820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c1700667636f6e7461637407f6085820ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd0950c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c10a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d0758403f2ebdadc2807905f9a070cfdbf6b1addc5cd69f3b4dee7904c69059cba902a4d659c8b373ea2f1d614648ac87b312c1ca852d85dee1048ae58f157db0683306",
+        "blocked": false,
+        "revoked": false,
+        "bilateral": true
+      },
+      "expected": "accept",
+      "actual": "accept"
+    },
+    {
+      "name": "valid receipt 0",
+      "inputs": {
+        "cose": "d2845838a3013203706170706c69636174696f6e2f63626f7204582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9a058edae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f030004582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9055820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c1700667636f6e7461637407f6085820ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd0950c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c10a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d0758403f2ebdadc2807905f9a070cfdbf6b1addc5cd69f3b4dee7904c69059cba902a4d659c8b373ea2f1d614648ac87b312c1ca852d85dee1048ae58f157db0683306",
+        "context": {
+          "now": 1700000002,
+          "exporter": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+          "transactionID": "3cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f",
+          "currentPolicy": 7,
+          "blocked": false,
+          "revoked": false,
+          "bilateral": true
+        }
+      },
+      "expected": "accept",
+      "actual": "accept"
+    },
+    {
+      "name": "valid receipt 1",
+      "inputs": {
+        "cose": "d2845838a3013203706170706c69636174696f6e2f63626f72045820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c170a058f2ae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f0301045820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c17005582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9066c6f776e65722d64657669636507f60858207ed6c2015c9c52c05e255eefecb69db09e45a346f9c9fef029db014f1e5a70d70950c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c20a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d0958404b994795c13d1262d8cce163d6e59e5c88cdd9119977039db8b679ae6fd0807e05dcaa6a2b23d76a594e34b1ae1c7543c7c59cacd08263b6f625bff170fa0304",
+        "context": {
+          "now": 1700000002,
+          "exporter": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+          "transactionID": "3cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f",
+          "currentPolicy": 9,
+          "blocked": false,
+          "revoked": false,
+          "bilateral": true
+        }
+      },
+      "expected": "accept",
+      "actual": "accept"
+    },
+    {
+      "name": "valid identical repeat",
+      "inputs": {
+        "cose": "d2845838a3013203706170706c69636174696f6e2f63626f7204582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9a058edae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f030004582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9055820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c1700667636f6e7461637407f6085820ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd0950c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c10a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d0758403f2ebdadc2807905f9a070cfdbf6b1addc5cd69f3b4dee7904c69059cba902a4d659c8b373ea2f1d614648ac87b312c1ca852d85dee1048ae58f157db0683306",
+        "repetitions": 2,
+        "context": {
+          "now": 1700000002,
+          "exporter": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+          "transactionID": "3cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f",
+          "currentPolicy": 7,
+          "blocked": false,
+          "revoked": false,
+          "bilateral": true
+        }
+      },
+      "expected": "accept",
+      "actual": "accept"
+    },
+    {
+      "name": "swapped subject",
+      "inputs": {
+        "cose": "d2845838a3013203706170706c69636174696f6e2f63626f7204582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9a058edae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f030004582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa905582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa90667636f6e7461637407f6085820ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd0950c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c10a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d075840919cb24180b180a6015bbbfb15482f49df77571e08bc4d98c7d56b825a0bca971c6fe80d7a6add69d8cf4416027f125fd8991a11ae3794ad95fa7d9af8b44c0e",
+        "context": {
+          "now": 1700000002,
+          "exporter": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+          "transactionID": "3cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f",
+          "currentPolicy": 7,
+          "blocked": false,
+          "revoked": false,
+          "bilateral": true
+        }
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "classification": "semantically-invalid",
+      "signatureValid": true,
+      "error": "Expected values to be strictly deep-equal:\n+ actual - expected\n\n  Buffer(32) [Uint8Array] [\n+   6,\n+   227,\n+   253,\n+   143,\n+   218,\n+   41,\n+   187,\n-   222,\n-   178,\n-   222,\n-   211,\n-   157,\n-   194,\n-   111,\n-   206,\n-   14,\n    96,\n+   171,\n+   89,\n+   85,\n+   125,\n+   230,\n+   30,\n+   219,\n+   10,\n+   236,\n+   219,\n+   35,\n+   17,\n-   133,\n-   182,\n-   252,\n    52,\n+   190,\n+   48,\n+   231,\n+   91,\n+   69,\n+   95,\n+   142,\n+   27,\n+   121,\n+   47,\n+   169\n-   191,\n-   107,\n-   89,\n-   65,\n-   145,\n-   59,\n-   191,\n-   226,\n-   234,\n-   97,\n-   65,\n-   19,\n-   207,\n-   249,\n-   224,\n-   4,\n-   193,\n-   112\n  ]\n"
+    },
+    {
+      "name": "swapped role",
+      "inputs": {
+        "cose": "d2845838a3013203706170706c69636174696f6e2f63626f7204582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9a058edae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f030104582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9055820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c1700667636f6e7461637407f6085820ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd0950c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c10a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d075840025259cb0af54e28f9ef7e77bb2dfa9acc3a3b74503b43a066a40bddeb6bc0d14036b7afa7e6b45d9d1a5e64c1a762daf57ac504fc5ac7c2f01fc5ee968dd80b",
+        "context": {
+          "now": 1700000002,
+          "exporter": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+          "transactionID": "3cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f",
+          "currentPolicy": 7,
+          "blocked": false,
+          "revoked": false,
+          "bilateral": true
+        }
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "classification": "semantically-invalid",
+      "signatureValid": true,
+      "error": "payload role differs from protected signer\n\n1 !== 0\n"
+    },
+    {
+      "name": "scope changed",
+      "inputs": {
+        "cose": "d2845838a3013203706170706c69636174696f6e2f63626f7204582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9a058f2ae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f030004582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9055820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c170066c6f776e65722d64657669636507f6085820ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd0950c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c10a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d07584080c98e81fe165f0d3b961ef4b9515d3dad4fbe671a44d3d3581a7de45d908d10e2aa518867f19d523fbf44bd511e237185322a73e0c1d962dbdfcf5308dc1c07",
+        "context": {
+          "now": 1700000002,
+          "exporter": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+          "transactionID": "3cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f",
+          "currentPolicy": 7,
+          "blocked": false,
+          "revoked": false,
+          "bilateral": true
+        }
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "classification": "semantically-invalid",
+      "signatureValid": true,
+      "error": "Expected values to be strictly equal:\n+ actual - expected\n\n+ 'owner-device'\n- 'contact'\n"
+    },
+    {
+      "name": "provenance HIGH",
+      "inputs": {
+        "cose": "d2845838a3013203706170706c69636174696f6e2f63626f7204582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9a058d8ae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f030004582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9055820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c1700667636f6e7461637407f6085820ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd0950c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c10a1a6553f1010b1a6553f1780c64484947480d075840966ec51f9c3c31719369828b57a6c44412e7355a85b186f12d0ce7d3c5b30796217bec47908875c39a05e93a279bb0237142f65a243f0527e6caf9d8f1fd8502",
+        "context": {
+          "now": 1700000002,
+          "exporter": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+          "transactionID": "3cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f",
+          "currentPolicy": 7,
+          "blocked": false,
+          "revoked": false,
+          "bilateral": true
+        }
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "classification": "semantically-invalid",
+      "signatureValid": true,
+      "error": "Expected values to be strictly equal:\n+ actual - expected\n\n+ 'HIGH'\n- 'manual_authenticated_oob'\n"
+    },
+    {
+      "name": "unknown payload key",
+      "inputs": {
+        "cose": "d2845838a3013203706170706c69636174696f6e2f63626f7204582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9a058efaf00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f030004582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9055820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c1700667636f6e7461637407f6085820ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd0950c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c10a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d070e015840c8d21bddb489a4a1f7985a42d0d69e6f57c12614eec0b88fe35045a9f18f80badfa1200d19ef5bb710c2da5b0f7a4a7d2f31f68d2204aa125b32a82d3aa0c507",
+        "context": {
+          "now": 1700000002,
+          "exporter": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+          "transactionID": "3cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f",
+          "currentPolicy": 7,
+          "blocked": false,
+          "revoked": false,
+          "bilateral": true
+        }
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "classification": "semantically-invalid",
+      "signatureValid": true,
+      "error": "Expected values to be strictly deep-equal:\n+ actual - expected\n... Skipped lines\n\n  [\n    0,\n    1,\n    2,\n    3,\n...\n    13,\n+   14\n  ]\n"
+    },
+    {
+      "name": "reconnect exporter",
+      "inputs": {
+        "cose": "d2845838a3013203706170706c69636174696f6e2f63626f7204582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9a058edae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f030004582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9055820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c1700667636f6e7461637407f6085820ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd0950c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c10a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d0758403f2ebdadc2807905f9a070cfdbf6b1addc5cd69f3b4dee7904c69059cba902a4d659c8b373ea2f1d614648ac87b312c1ca852d85dee1048ae58f157db0683306",
+        "context": {
+          "now": 1700000002,
+          "exporter": "0909090909090909090909090909090909090909090909090909090909090909",
+          "transactionID": "3cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f",
+          "currentPolicy": 7,
+          "blocked": false,
+          "revoked": false,
+          "bilateral": true
+        }
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "classification": "crypto-invalid",
+      "error": "signature"
+    },
+    {
+      "name": "expired",
+      "inputs": {
+        "cose": "d2845838a3013203706170706c69636174696f6e2f63626f7204582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9a058edae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f030004582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9055820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c1700667636f6e7461637407f6085820ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd0950c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c10a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d0758403f2ebdadc2807905f9a070cfdbf6b1addc5cd69f3b4dee7904c69059cba902a4d659c8b373ea2f1d614648ac87b312c1ca852d85dee1048ae58f157db0683306",
+        "context": {
+          "now": 1700000121,
+          "exporter": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+          "transactionID": "3cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f",
+          "currentPolicy": 7,
+          "blocked": false,
+          "revoked": false,
+          "bilateral": true
+        }
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "classification": "semantically-invalid",
+      "error": "expired"
+    },
+    {
+      "name": "changed retry",
+      "inputs": {
+        "cose": "d2845838a3013203706170706c69636174696f6e2f63626f7204582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9a058edae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f030004582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9055820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c1700667636f6e7461637407f6085820ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd0950c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c10a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d0758403f2ebdadc2807905f9a070cfdbf6b1addc5cd69f3b4dee7904c69059cba902a4d659c8b373ea2f1d614648ac87b312c1ca852d85dee1048ae58f157db0683306",
+        "context": {
+          "now": 1700000002,
+          "exporter": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+          "transactionID": "3cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f",
+          "currentPolicy": 7,
+          "blocked": false,
+          "revoked": false,
+          "bilateral": true,
+          "tx": "f30cdf0767e61abd7ecf21271096f6884013d56418f16d8bdb7f76ca4c8205ab"
+        }
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "classification": "semantically-invalid",
+      "error": "Expected values to be strictly deep-equal:\n+ actual - expected\n\n  Buffer(32) [Uint8Array] [\n+   60,\n+   182,\n-   243,\n    12,\n+   190,\n+   196,\n+   73,\n+   201,\n+   50,\n+   49,\n+   192,\n+   120,\n+   125,\n+   8,\n-   223,\n-   7,\n-   103,\n-   230,\n-   26,\n    189,\n+   210,\n-   126,\n-   207,\n-   33,\n    39,\n+   105,\n+   1,\n+   199,\n+   255,\n+   240,\n+   166,\n+   12,\n+   115,\n+   155,\n+   158,\n+   56,\n+   125,\n+   41,\n+   175,\n+   166,\n-   16,\n-   150,\n-   246,\n-   136,\n-   64,\n-   19,\n-   213,\n-   100,\n-   24,\n-   241,\n-   109,\n-   139,\n-   219,\n    127,\n-   118,\n-   202,\n-   76,\n-   130,\n-   5,\n-   171\n  ]\n"
+    },
+    {
+      "name": "unilateral",
+      "inputs": {
+        "cose": "d2845838a3013203706170706c69636174696f6e2f63626f7204582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9a058edae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f030004582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9055820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c1700667636f6e7461637407f6085820ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd0950c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c10a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d0758403f2ebdadc2807905f9a070cfdbf6b1addc5cd69f3b4dee7904c69059cba902a4d659c8b373ea2f1d614648ac87b312c1ca852d85dee1048ae58f157db0683306",
+        "context": {
+          "now": 1700000002,
+          "exporter": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+          "transactionID": "3cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f",
+          "currentPolicy": 7,
+          "blocked": false,
+          "revoked": false,
+          "bilateral": false
+        }
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "classification": "semantically-invalid",
+      "error": "unilateral"
+    },
+    {
+      "name": "block before activation",
+      "inputs": {
+        "cose": "d2845838a3013203706170706c69636174696f6e2f63626f7204582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9a058edae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f030004582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9055820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c1700667636f6e7461637407f6085820ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd0950c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c10a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d0758403f2ebdadc2807905f9a070cfdbf6b1addc5cd69f3b4dee7904c69059cba902a4d659c8b373ea2f1d614648ac87b312c1ca852d85dee1048ae58f157db0683306",
+        "context": {
+          "now": 1700000002,
+          "exporter": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+          "transactionID": "3cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f",
+          "currentPolicy": 7,
+          "blocked": true,
+          "revoked": false,
+          "bilateral": true
+        }
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "classification": "semantically-invalid",
+      "error": "blocked"
+    },
+    {
+      "name": "revoked before activation",
+      "inputs": {
+        "cose": "d2845838a3013203706170706c69636174696f6e2f63626f7204582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9a058edae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f030004582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9055820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c1700667636f6e7461637407f6085820ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd0950c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c10a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d0758403f2ebdadc2807905f9a070cfdbf6b1addc5cd69f3b4dee7904c69059cba902a4d659c8b373ea2f1d614648ac87b312c1ca852d85dee1048ae58f157db0683306",
+        "context": {
+          "now": 1700000002,
+          "exporter": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+          "transactionID": "3cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f",
+          "currentPolicy": 7,
+          "blocked": false,
+          "revoked": true,
+          "bilateral": true
+        }
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "classification": "semantically-invalid",
+      "error": "revoked"
+    },
+    {
+      "name": "policy changed before activation",
+      "inputs": {
+        "cose": "d2845838a3013203706170706c69636174696f6e2f63626f7204582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9a058edae00010174786d73672d706169722d726563656970742d76310258203cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f030004582006e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9055820deb2ded39dc26fce0e6085b6fc34bf6b5941913bbfe2ea614113cff9e004c1700667636f6e7461637407f6085820ef13ff847e7b8a79fa6e6188ab6deee11e8ee1278665aecd7e342198d2dddefd0950c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c10a1a6553f1010b1a6553f1780c78186d616e75616c5f61757468656e746963617465645f6f6f620d0758403f2ebdadc2807905f9a070cfdbf6b1addc5cd69f3b4dee7904c69059cba902a4d659c8b373ea2f1d614648ac87b312c1ca852d85dee1048ae58f157db0683306",
+        "context": {
+          "now": 1700000002,
+          "exporter": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+          "transactionID": "3cb60cbec449c93231c0787d08bdd2276901c7fff0a60c739b9e387d29afa67f",
+          "currentPolicy": 8,
+          "blocked": false,
+          "revoked": false,
+          "bilateral": true
+        }
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "classification": "semantically-invalid",
+      "error": "policy revision changed\n\n8 !== 7\n"
+    },
+    {
+      "name": "duplicate map",
+      "inputs": {
+        "cbor": "a200010002"
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "error": "duplicate/noninteger key"
+    },
+    {
+      "name": "noncanonical integer",
+      "inputs": {
+        "cbor": "1801"
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "error": "noncanonical"
+    },
+    {
+      "name": "float",
+      "inputs": {
+        "cbor": "f90000"
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "error": "float/tag/unsupported"
+    },
+    {
+      "name": "time reflection valid",
+      "inputs": {
+        "HelloI": {
+          "created": 1700000000,
+          "expires": 1700000120
+        },
+        "T": {
+          "created": 1700000000,
+          "expires": 1700000120
+        },
+        "context": {
+          "intentDeadline": 500,
+          "firstArrival": 100,
+          "utcAtArrival": 1700000000,
+          "monoNow": 101,
+          "utcNow": 1700000001
+        }
+      },
+      "expected": "accept",
+      "actual": "accept",
+      "classification": "decoded time semantics; no framing or TLS"
+    },
+    {
+      "name": "HelloI created not reflected",
+      "inputs": {
+        "HelloI": {
+          "created": 1700000000,
+          "expires": 1700000120
+        },
+        "T": {
+          "created": 1700000001,
+          "expires": 1700000120
+        },
+        "context": {
+          "intentDeadline": 500,
+          "firstArrival": 100,
+          "utcAtArrival": 1700000000,
+          "monoNow": 101,
+          "utcNow": 1700000001
+        }
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "classification": "decoded time semantics; no framing or TLS",
+      "error": "created reflection\n+ actual - expected\n\n+ 1700000000\n- 1700000001\n           ^\n"
+    },
+    {
+      "name": "HelloI expiry not reflected",
+      "inputs": {
+        "HelloI": {
+          "created": 1700000000,
+          "expires": 1700000120
+        },
+        "T": {
+          "created": 1700000000,
+          "expires": 1700000119
+        },
+        "context": {
+          "intentDeadline": 500,
+          "firstArrival": 100,
+          "utcAtArrival": 1700000000,
+          "monoNow": 101,
+          "utcNow": 1700000001
+        }
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "classification": "decoded time semantics; no framing or TLS",
+      "error": "expiry reflection\n+ actual - expected\n\n+ 1700000120\n- 1700000119\n          ^\n"
+    },
+    {
+      "name": "responder deadline expired while UTC valid",
+      "inputs": {
+        "HelloI": {
+          "created": 1700000000,
+          "expires": 1700000120
+        },
+        "T": {
+          "created": 1700000000,
+          "expires": 1700000120
+        },
+        "context": {
+          "intentDeadline": 100,
+          "firstArrival": 100,
+          "utcAtArrival": 1700000000,
+          "monoNow": 101,
+          "utcNow": 1700000001
+        }
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "classification": "decoded time semantics; no framing or TLS",
+      "error": "responder local deadline"
+    },
+    {
+      "name": "repeat cannot reset first-arrival deadline",
+      "inputs": {
+        "HelloI": {
+          "created": 1700000000,
+          "expires": 1700000120
+        },
+        "T": {
+          "created": 1700000000,
+          "expires": 1700000120
+        },
+        "context": {
+          "intentDeadline": 500,
+          "firstArrival": 100,
+          "utcAtArrival": 1700000000,
+          "monoNow": 221,
+          "utcNow": 1700000100
+        }
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "classification": "decoded time semantics; no framing or TLS",
+      "error": "responder local deadline"
+    },
+    {
+      "name": "zero duration rejected",
+      "inputs": {
+        "HelloI": {
+          "created": 1700000000,
+          "expires": 1700000000
+        },
+        "T": {
+          "created": 1700000000,
+          "expires": 1700000000
+        },
+        "context": {
+          "intentDeadline": 500,
+          "firstArrival": 100,
+          "utcAtArrival": 1700000000,
+          "monoNow": 100,
+          "utcNow": 1700000000
+        }
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "classification": "decoded time semantics; no framing or TLS",
+      "error": "window"
+    },
+    {
+      "name": "no mixed grant list authority",
+      "inputs": {
+        "grants": [
+          {
+            "profile": "owner-device",
+            "expires": 1,
+            "provenance": "manual_authenticated_oob"
+          },
+          {
+            "profile": "contact",
+            "expires": 100,
+            "provenance": "manual_authenticated_oob"
+          }
+        ],
+        "operation": "list",
+        "now": 2
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "error": "The expression evaluated to a falsy value:\n\n  assert.ok(allowed([expiredOwner,freshContact],'list',2))\n"
+    },
+    {
+      "name": "independent owner grant list",
+      "inputs": {
+        "grants": [
+          {
+            "profile": "owner-device",
+            "expires": 1,
+            "provenance": "manual_authenticated_oob"
+          },
+          {
+            "profile": "contact",
+            "expires": 100,
+            "provenance": "manual_authenticated_oob"
+          },
+          {
+            "profile": "owner-device",
+            "expires": 100,
+            "provenance": "manual_authenticated_oob"
+          }
+        ],
+        "operation": "list",
+        "now": 2
+      },
+      "expected": "accept",
+      "actual": "accept"
+    },
+    {
+      "name": "manual no-account contact",
+      "inputs": {
+        "grants": [
+          {
+            "profile": "contact",
+            "expires": 100,
+            "provenance": "manual_authenticated_oob"
+          }
+        ],
+        "operation": "send",
+        "now": 2
+      },
+      "expected": "accept",
+      "actual": "accept"
+    },
+    {
+      "name": "contact reply",
+      "inputs": {
+        "grants": [
+          {
+            "profile": "contact",
+            "expires": 100,
+            "provenance": "manual_authenticated_oob"
+          }
+        ],
+        "operation": "reply",
+        "now": 2
+      },
+      "expected": "accept",
+      "actual": "accept"
+    },
+    {
+      "name": "contact cannot list",
+      "inputs": {
+        "grants": [
+          {
+            "profile": "contact",
+            "expires": 100,
+            "provenance": "manual_authenticated_oob"
+          }
+        ],
+        "operation": "list",
+        "now": 2
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "error": "The expression evaluated to a falsy value:\n\n  assert.ok(allowed([freshContact],'list',2))\n"
+    },
+    {
+      "name": "unknown operation refused",
+      "inputs": {
+        "grants": [
+          {
+            "profile": "owner-device",
+            "expires": 100,
+            "provenance": "manual_authenticated_oob"
+          }
+        ],
+        "operation": "contact",
+        "now": 2
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "error": "The expression evaluated to a falsy value:\n\n  assert.ok(allowed([freshOwner],'contact',2))\n"
+    },
+    {
+      "name": "HIGH auto unavailable v1a",
+      "inputs": {
+        "grants": [
+          {
+            "profile": "owner-device",
+            "expires": 100,
+            "provenance": "HIGH"
+          }
+        ],
+        "operation": "list",
+        "now": 2
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "error": "The expression evaluated to a falsy value:\n\n  assert.ok(allowed([{...freshOwner,provenance}],'list',2))\n"
+    },
+    {
+      "name": "LOW auto unavailable v1a",
+      "inputs": {
+        "grants": [
+          {
+            "profile": "owner-device",
+            "expires": 100,
+            "provenance": "LOW"
+          }
+        ],
+        "operation": "list",
+        "now": 2
+      },
+      "expected": "reject",
+      "actual": "reject",
+      "error": "The expression evaluated to a falsy value:\n\n  assert.ok(allowed([{...freshOwner,provenance}],'list',2))\n"
+    }
+  ]
+}

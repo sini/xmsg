@@ -60,6 +60,11 @@ pub mod observe_fed;
 pub mod observe_relay;
 #[cfg(feature = "daemon")]
 mod observe_snapshot;
+#[cfg(all(feature = "daemon", feature = "test-hooks"))]
+pub mod pairing;
+#[cfg(all(feature = "daemon", not(feature = "test-hooks")))]
+#[allow(dead_code)]
+pub(crate) mod pairing;
 #[cfg(feature = "daemon")]
 pub mod pi;
 #[cfg(feature = "daemon")]
