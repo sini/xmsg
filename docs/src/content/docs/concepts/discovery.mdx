@@ -1,0 +1,155 @@
+---
+title: LAN Discovery (planned)
+description: Candidate addresses learned from mDNS on the local network, bounded rotating announcements, and non-announcing Local Network detection.
+---
+
+**LAN discovery is planned, not yet released.** A node can browse `_xmsg._tcp.local.` over
+mDNS/DNS-SD on its local network segment, collect **candidates** (addresses where another
+xmsg node said it listens), and advertise itself during bounded local-activation windows.
+
+**Discovered candidates are collected and shown, but not yet dialled.** Federation still
+dials the `address` configured for each peer. Using candidates to reach a peer comes in
+a later release. Today a candidate appears only in the local health response,
+[`xmsg doctor`](/operations/troubleshooting/#lan-discovery-on-macos-local-network-permission-planned)
+and the debug log.
+
+## What a candidate is (planned)
+
+A candidate is an address and nothing else. A record on the LAN never admits, names or
+routes anyone:
+
+- it does not add a peer, a name or a route;
+- it does not change who the federation listener accepts;
+- it carries no trusted CA-root fingerprint (`root` keys in peer TXT records are ignored);
+- whoever answers at a candidate address still has to prove its identity in the mutual-TLS
+  handshake against your peer rules.
+
+A forged announcement can only point at an address, and the handshake refuses anyone
+your rules do not already trust.
+
+Bounds keep LAN floods contained:
+
+- **Candidates:** at most `64` mDNS candidates (`64` total across compiled sources),
+  evicting the oldest `seen_at` first.
+- **Lifetime:** each candidate lives at most `ttl_secs` (`600` seconds by default, `1` to
+  `600`) after the source last saw it, and is removed when no remaining instance announces
+  that address.
+- **Handshake and resolution caps (for the upcoming dialer):** at most `4` concurrent
+  handshakes at `2` seconds each, within an `8`-second resolution budget.
+- **Address filter:** loopback, unspecified, multicast and link-local addresses (IPv4
+  `169.254.0.0/16` and IPv6 `fe80::/10`) are never kept. **IPv6 link-local addresses are
+  not used in v1:** dialling a link-local address needs an interface scope, and scoped
+  candidate addresses are not retained.
+
+## Browse-only at rest and rotating announcements (planned)
+
+By default (`discovery.announce = "timed"`), enabling `discovery.mdns` starts **browse-only
+at rest** (`announce_state: "at_rest"`). The daemon never announces itself at startup.
+An announcement runs only during a bounded **`120`-second** window opened by an explicit
+local activation (`announce_state: {"window_open": <remaining_secs>}`), and withdraws its
+record and returns to `at_rest` as soon as the window expires.
+
+While announcing (`window_open` or `always`), the advertisement is `_xmsg._tcp.local.` on
+the `--fed-listen` port, carrying only dialable interface addresses:
+
+- a specific `--fed-listen` address announces just that address (when present on an active
+  non-loopback interface);
+- `0.0.0.0` announces the node's dialable IPv4 interface addresses;
+- `[::]` announces its dialable IPv4 and IPv6 interface addresses;
+- loopback and link-local addresses are never announced;
+- no CA peer entry is required, so pinned-only nodes can announce too.
+
+To reduce passive LAN linkability, announcements carry **no CA-root hash, node name, user
+name, OS hostname, email or stable device ID**. The TXT record holds only two keys:
+
+| Key | Value |
+| --- | --- |
+| `v` | Protocol version (`1`). Records with any other `v` value are ignored. |
+| `id` | A fresh `128`-bit (`32` lowercase hex characters) CSPRNG opaque handle. |
+
+The opaque `id`, the DNS-SD service instance (`<id>._xmsg._tcp.local.`), and the SRV
+target hostname (`<id>.local.`) rotate together:
+
+- **Interval:** every **`30` seconds** while an announcement is active;
+- **Triggers:** window activation, the `30`-second rotation timer, and any change in the
+  host's active network interface addresses;
+- **Cleanup:** every rotation, window expiry, interface loss, config disable and daemon
+  shutdown (bounded to `1` second) explicitly unregisters the previous service record. If
+  OS randomness (`getrandom`) fails at activation or rotation, any active record is
+  withdrawn and the source degrades to `at_rest` browse-only with a single warning.
+
+## The `discovery` key (planned)
+
+Discovery is off unless the peers file asks for it. It is a top-level key in the wrapped
+peers file, beside `peers`:
+
+```json
+{
+  "peers": { "...": {} },
+  "discovery": {
+    "mdns": { "browse": true },
+    "announce": "timed",
+    "ttl_secs": 600
+  }
+}
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `mdns` | absent (off) | Turns the mDNS source on. `{}` enables browsing with bounded timed announce posture. |
+| `mdns.browse` | `true` | Collect candidates from other nodes' announcements. |
+| `mdns.announce` | `true` | Compatibility switch: `false` forces `browse_only` regardless of `discovery.announce`. |
+| `announce` | `"timed"` | `"timed"` (browse-only at rest; `120` s window on local activation), `"browse_only"` (never announce), or `"always"` (continuous announcement; emits a standing `discovery.announce` warning in `xmsg doctor`). |
+| `ttl_secs` | `600` | How long a candidate lives without a fresh sighting, `1` to `600`. |
+
+Unknown fields are refused, so a typo fails loudly. `tailnet` is refused with `"not
+supported by this build"`. `xmsg check-peers` applies the same rules. Reloading the peers
+file applies changes on the next `30`-second reconcile tick without restarting the daemon.
+
+A build compiled without the `mdns` Cargo feature (enabled by default) still loads a
+`discovery.mdns` key, logs one warning, and reports `state: "off"` with detail `"not
+compiled into this build"`.
+
+## Non-announcing Local Network detection (planned)
+
+The mDNS responder runs on its own thread, started after the node's listeners are up.
+Serving never waits on it: federation, the agent socket and the hub work the same
+whether discovery is starting, unverified, blocked or failed. It binds UDP `5353` beside
+the system responder (`mDNSResponder` on macOS) via `SO_REUSEADDR`/`SO_REUSEPORT`.
+
+Because the default posture is browse-only at rest, xmsg checks outbound multicast
+without announcing itself. On startup, interface changes, and each `30`-second tick, it
+sends an IPv4 multicast DNS `A` query (`224.0.0.251:5353`, `IP_MULTICAST_TTL=255`,
+`400` ms receive bound) from an ephemeral UDP socket (unicast-to-self is not used because
+macOS answers it even when Local Network access is denied):
+
+- **Query name privacy:** controlled by a single compile-time constant (`LN_QUERY_MODE`),
+  defaulting to a fresh random opaque `<label>.local` so the OS hostname is not disclosed
+  on the LAN while owner-run macOS Deny/Allow discrimination is verified; `<hostname>.local`
+  is the documented fallback only if random labels do not discriminate explicit denial.
+- **Debounce:** a single transient `EHOSTUNREACH` has been observed on an allowed macOS
+  interface, so send errors are retried every `2` seconds and require **`3` consecutive**
+  failures before reporting `permission_suspected`.
+- **IPv6 limits:** the detector probes IPv4 multicast (`224.0.0.251:5353`) only; IPv6-only
+  multicast gating is not measured by this probe and reports `unverified` when no IPv4 LAN
+  interface is up.
+
+The local [health response](/reference/http-and-sockets/#lan-discovery-health-planned)
+reports `state` and `announce_state` separately:
+
+| `state` | Meaning |
+| --- | --- |
+| `off` | The key is absent, or the build lacks `mdns`. |
+| `starting` | The responder is starting (`xmsg doctor` warns if stuck past `15` seconds). |
+| `active` | A genuine DNS response arrived from one of this host's own non-loopback LAN IPv4 addresses. |
+| `unverified` | Outbound multicast `sendto` succeeded without an own-LAN reply (expected with the default random-label probe, a pending macOS prompt, or no LAN responder), or no IPv4 LAN interface is up. `xmsg doctor` never reports `unverified` as `pass`. |
+| `permission_suspected` | `3` consecutive outbound multicast send failures (such as `EHOSTUNREACH` under an explicit macOS Local Network denial, or a host firewall rule). Suspected, never proven; see [troubleshooting](/operations/troubleshooting/#lan-discovery-on-macos-local-network-permission-planned). |
+| `failed` | Responder or UDP `5353` bind failure; retries on the next `30`-second tick and warns once per distinct cause. |
+
+| `announce_state` | Meaning |
+| --- | --- |
+| `"at_rest"` | Not announcing (startup/idle `timed`, `browse_only`, `off`, or no dialable `--fed-listen`). |
+| `{"window_open": N}` | Bounded `120`-second local-activation window open with `N` seconds remaining. |
+| `"always"` | Continuous announcement (`discovery.announce = "always"`). |
+
+LAN discovery reaches one network segment only: not a tailnet and not across k8s pods.

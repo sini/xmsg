@@ -10,6 +10,7 @@
     "tests/agy_spawn_fds.rs",
     "tests/ancestor_walk.rs",
     "tests/claude_lstart_macos.rs",
+    "tests/discovery_mdns.rs",
     "tests/doctor.rs",
     "tests/doctor_liveness.rs",
     "tests/doctor_peers.rs",

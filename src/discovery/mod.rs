@@ -3,20 +3,49 @@
 //! A candidate is only an address. It never admits, names or routes a peer: whoever answers at
 //! it must still prove an identity in the federation handshake.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
+
+#[cfg(feature = "mdns")]
+pub mod mdns;
 
 /// The longest a candidate lives without a fresh sighting.
 pub const MAX_TTL_SECS: u64 = 600;
 /// A LAN announcer can flood, so the mDNS source keeps at most this many candidates.
 pub const MDNS_CAP: usize = 64;
+/// Total candidates retained across all compiled discovery sources.
+pub const GLOBAL_CANDIDATE_CAP: usize = 64;
+/// Bounded announcement window after a local discoverable activation.
+pub const ANNOUNCE_WINDOW_SECS: u64 = 120;
+/// Handle, service-instance and target-hostname rotation interval during announcement.
+pub const HANDLE_ROTATE_SECS: u64 = 30;
+/// Handshake concurrency, per-handshake timeout and resolution budget bounds.
+pub const MAX_PAIRING_HANDSHAKES: usize = 4;
+pub const PAIRING_HANDSHAKE_TIMEOUT_SECS: u64 = 2;
+pub const RESOLVE_BUDGET_SECS: u64 = 8;
+
+/// Controls when an enabled discovery source advertises this node (`discovery.announce`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnounceMode {
+    /// Browse-only at rest; announces only during a bounded local-activation window (120 s).
+    #[default]
+    Timed,
+    /// Never announce; browse only.
+    BrowseOnly,
+    /// Announce continuously (human-only loosening; surfaces a standing doctor warning).
+    Always,
+}
 
 /// The peers file's top-level `discovery` value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub mdns: Option<MdnsConfig>,
+    pub announce: AnnounceMode,
     pub ttl_secs: u64,
 }
 
@@ -24,6 +53,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             mdns: None,
+            announce: AnnounceMode::Timed,
             ttl_secs: MAX_TTL_SECS,
         }
     }
@@ -48,6 +78,8 @@ struct RawConfig {
     #[serde(default)]
     mdns: Option<MdnsConfig>,
     #[serde(default)]
+    announce: AnnounceMode,
+    #[serde(default)]
     ttl_secs: Option<u64>,
 }
 
@@ -70,6 +102,7 @@ impl Config {
         }
         let config = Self {
             mdns: raw.mdns,
+            announce: raw.announce,
             ttl_secs,
         };
         if config.configured(Source::Mdns) && !config.source_enabled(Source::Mdns) {
@@ -83,18 +116,28 @@ impl Config {
         Ok(config)
     }
 
+    /// Effective announce posture for mDNS (`mdns.announce: false` maps to `BrowseOnly`).
+    pub fn mdns_announce_mode(&self) -> AnnounceMode {
+        match self.mdns {
+            Some(m) if !m.announce => AnnounceMode::BrowseOnly,
+            Some(_) => self.announce,
+            None => AnnounceMode::BrowseOnly,
+        }
+    }
+
     /// The peers file turns this source on.
     pub fn configured(&self, source: Source) -> bool {
         match source {
-            Source::Mdns => self.mdns.is_some_and(|m| m.browse || m.announce),
+            Source::Mdns => self
+                .mdns
+                .is_some_and(|m| m.browse || self.mdns_announce_mode() != AnnounceMode::BrowseOnly),
         }
     }
 
     /// The source is configured on and compiled into this build.
     pub fn source_enabled(&self, source: Source) -> bool {
         match source {
-            // shortcut: no mDNS backend exists yet, so nothing may claim the source runs.
-            Source::Mdns => false,
+            Source::Mdns => self.configured(source) && cfg!(feature = "mdns"),
         }
     }
 }
@@ -230,6 +273,174 @@ impl CandidateTable {
     fn live(&self, now: Instant) -> impl Iterator<Item = &Candidate> {
         self.entries.values().filter(move |c| c.expires_at > now)
     }
+}
+
+/// The mDNS source's detector/runtime state, as health and doctor report it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum State {
+    #[default]
+    Off,
+    Starting,
+    /// A genuine reply from one of our own non-loopback LAN addresses answered our multicast query.
+    Active,
+    /// Outbound multicast sent without error, or no LAN IPv4 interface; permission not proven.
+    Unverified,
+    /// Debounced outbound multicast failures: Local Network permission suspected, never proven.
+    PermissionSuspected,
+    Failed,
+}
+
+/// Announce posture reported separately from [`State`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnounceState {
+    #[default]
+    AtRest,
+    WindowOpen(u64),
+    Always,
+}
+
+/// Monotonic announce posture stored inside [`Status`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AnnouncePosture {
+    #[default]
+    AtRest,
+    WindowOpen {
+        until: Instant,
+    },
+    Always,
+}
+
+impl AnnouncePosture {
+    pub fn snapshot(self, now: Instant) -> AnnounceState {
+        match self {
+            Self::AtRest => AnnounceState::AtRest,
+            Self::WindowOpen { until } => match until.checked_duration_since(now) {
+                Some(rem) if !rem.is_zero() => {
+                    let secs = rem.as_secs() + u64::from(rem.subsec_nanos() > 0);
+                    AnnounceState::WindowOpen(secs)
+                }
+                _ => AnnounceState::AtRest,
+            },
+            Self::Always => AnnounceState::Always,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Status {
+    pub state: State,
+    pub posture: AnnouncePosture,
+    pub detail: String,
+    /// Unix seconds of the last state change.
+    pub since: Option<u64>,
+}
+
+impl Status {
+    pub fn set(&mut self, state: State, detail: impl Into<String>) {
+        if state != self.state || self.since.is_none() {
+            self.since = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs());
+        }
+        self.state = state;
+        self.detail = detail.into();
+    }
+
+    pub fn set_posture(&mut self, posture: AnnouncePosture) {
+        self.posture = posture;
+    }
+}
+
+pub type SharedStatus = Arc<Mutex<Status>>;
+
+static RUNNING: OnceLock<(SharedStatus, SharedCandidates, Arc<AtomicBool>)> = OnceLock::new();
+
+/// The `discovery` health field: `{mdns: {state, announce_state, announce_mode, detail, since, candidates}}`.
+pub fn health(fed: Option<&crate::fed::FedState>) -> serde_json::Value {
+    let now = Instant::now();
+    let (mut status, candidates) = match RUNNING.get() {
+        Some((status, table, _)) => (
+            status
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+            table
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .snapshot(now)
+                .iter()
+                .filter(|c| c.source == Source::Mdns)
+                .count(),
+        ),
+        None => (Status::default(), 0),
+    };
+    let config = fed.map(|f| f.current_peers().discovery.clone());
+    let announce_mode = config
+        .as_ref()
+        .map_or(AnnounceMode::Timed, Config::mdns_announce_mode);
+    if config.is_some_and(|c| c.configured(Source::Mdns) && !c.source_enabled(Source::Mdns)) {
+        status.state = State::Off;
+        status.posture = AnnouncePosture::AtRest;
+        status.detail = "not compiled into this build".into();
+    }
+    let announce_state = status.posture.snapshot(now);
+    serde_json::json!({"mdns": {
+        "state": status.state,
+        "announce_state": announce_state,
+        "announce_mode": announce_mode,
+        "detail": status.detail,
+        "since": status.since,
+        "candidates": candidates,
+    }})
+}
+
+/// Starts the discovery sources on their own thread. It never blocks the caller, and serve
+/// never waits on it.
+pub fn spawn(
+    fed: Option<Arc<crate::fed::FedState>>,
+    fed_listen: Option<SocketAddr>,
+    candidates: SharedCandidates,
+) {
+    #[cfg(feature = "mdns")]
+    if let Some(fed) = fed {
+        let status = SharedStatus::default();
+        let trigger = Arc::new(AtomicBool::new(false));
+        if RUNNING
+            .set((status.clone(), candidates.clone(), trigger.clone()))
+            .is_ok()
+        {
+            mdns::spawn(fed, fed_listen, status, candidates, trigger);
+        }
+    }
+    #[cfg(not(feature = "mdns"))]
+    {
+        let _ = (fed, fed_listen, candidates, &RUNNING, Ordering::SeqCst);
+    }
+}
+
+/// Local activation hook: requests a bounded 120 s announcement window when `discovery.announce`
+/// is `timed` (used by local pairing activation and operator controls).
+pub fn trigger_announce() -> bool {
+    #[cfg(feature = "mdns")]
+    if let Some((_, _, trigger)) = RUNNING.get() {
+        trigger.store(true, Ordering::SeqCst);
+        return true;
+    }
+    false
+}
+
+/// Withdraws the mDNS announcement and stops the source, waiting at most `bound`. Does
+/// nothing when no source was started.
+pub fn stop(bound: std::time::Duration) {
+    #[cfg(feature = "mdns")]
+    if RUNNING.get().is_some() {
+        mdns::stop(bound);
+    }
+    #[cfg(not(feature = "mdns"))]
+    let _ = bound;
 }
 
 #[cfg(test)]
@@ -397,9 +608,33 @@ mod tests {
     }
 
     #[test]
-    fn mdns_is_not_enabled_without_a_backend() {
+    fn mdns_is_enabled_only_when_configured_and_compiled() {
+        let off = Config::default();
+        assert!(!off.source_enabled(Source::Mdns));
+        assert_eq!(off.announce, AnnounceMode::Timed);
+        let neither =
+            Config::parse(serde_json::json!({"mdns": {"browse": false, "announce": false}}));
+        assert!(!neither.unwrap().source_enabled(Source::Mdns));
+        let browse_off_mode_off = Config::parse(
+            serde_json::json!({"mdns": {"browse": false}, "announce": "browse_only"}),
+        )
+        .unwrap();
+        assert!(!browse_off_mode_off.configured(Source::Mdns));
         let on = Config::parse(serde_json::json!({"mdns": {}})).unwrap();
         assert!(on.configured(Source::Mdns));
+        assert_eq!(on.mdns_announce_mode(), AnnounceMode::Timed);
+        assert_eq!(on.source_enabled(Source::Mdns), cfg!(feature = "mdns"));
+        let compat_off = Config::parse(serde_json::json!({"mdns": {"announce": false}})).unwrap();
+        assert_eq!(compat_off.mdns_announce_mode(), AnnounceMode::BrowseOnly);
+        let always = Config::parse(serde_json::json!({"mdns": {}, "announce": "always"})).unwrap();
+        assert_eq!(always.mdns_announce_mode(), AnnounceMode::Always);
+        assert!(Config::parse(serde_json::json!({"mdns": {}, "announce": "bogus"})).is_err());
+    }
+
+    #[cfg(not(feature = "mdns"))]
+    #[test]
+    fn configured_but_not_compiled_reports_off() {
+        let on = Config::parse(serde_json::json!({"mdns": {}})).unwrap();
         assert!(!on.source_enabled(Source::Mdns));
     }
 }

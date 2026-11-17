@@ -100,6 +100,7 @@ export default defineConfig({
 						{ label: 'Sessions, Services & Subagents', slug: 'concepts/sessions-services-subagents' },
 						{ label: 'Delivery, Queueing & Replies', slug: 'concepts/replies' },
 						{ label: 'Federation', slug: 'concepts/federation' },
+						{ label: 'LAN Discovery (planned)', slug: 'concepts/discovery' },
 						{ label: 'Fleet Observer (planned)', slug: 'concepts/fleet-observer' },
 						{ label: 'Hubs, Leaves & Gateways', slug: 'concepts/hubs-and-leaves' },
 						{ label: 'Security & Trust Model', slug: 'concepts/trust-model' },

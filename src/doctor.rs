@@ -244,6 +244,9 @@ async fn health(report: &mut Report, path: &Path) {
                 if !known { Some("Use builds with revision metadata to compare client and daemon.") }
                 else if !matches { Some("Client and daemon revisions differ; check the installed pins and restart the intended daemon.") }
                 else { None });
+            if let Some(mdns) = value["discovery"]["mdns"].as_object() {
+                discovery(report, mdns);
+            }
             let good = value["sessions_dir"] == "ok";
             report.add("daemon.sessions_directory",if good {Status::Pass}else{Status::Warn},if good {"A configured sessions directory exists."}else{"Sessions directory is missing or this daemon does not report it."},if good {None}else{Some("Check --sessions-dir if using a harness; a service-only node may not need one.")});
         }
@@ -253,6 +256,69 @@ async fn health(report: &mut Report, path: &Path) {
             "Daemon health is unavailable, invalid, or timed out.",
             Some("Start the node or pass its actual --http-sock; check the node service logs."),
         ),
+    }
+}
+fn discovery(report: &mut Report, mdns: &serde_json::Map<String, Value>) {
+    let state = mdns
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let detail = mdns.get("detail").and_then(Value::as_str).unwrap_or("");
+    let candidates = mdns.get("candidates").and_then(Value::as_u64).unwrap_or(0);
+    let posture = match mdns.get("announce_state") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Object(map)) if map.contains_key("window_open") => {
+            let rem = map["window_open"].as_u64().unwrap_or(0);
+            format!("window_open({rem}s)")
+        }
+        _ => "at_rest".into(),
+    };
+    let announce_always = mdns.get("announce_state").and_then(Value::as_str) == Some("always")
+        || (state != "off" && mdns.get("announce_mode").and_then(Value::as_str) == Some("always"));
+    // Past the 15 s startup window a source still `starting` is stuck.
+    let since = mdns.get("since").and_then(Value::as_u64);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let stuck = state == "starting" && since.is_some_and(|t| now.saturating_sub(t) > 15);
+    let (status, hint) = match state {
+        "starting" if stuck => (
+            Status::Warn,
+            Some("The mDNS responder is still starting; check the node log. Serving continues without it."),
+        ),
+        "active" | "off" | "starting" => (Status::Pass, None),
+        // Maps to Status::Info once #145 lands on main; Warn here so unverified never reads as Pass.
+        "unverified" => (
+            Status::Warn,
+            Some("Outbound LAN multicast is unverified (Local Network permission pending, random-label probe, or no LAN responder); serving continues."),
+        ),
+        "permission_suspected" => (
+            Status::Warn,
+            Some("Outbound LAN multicast is blocked (Local Network permission suspected): on macOS check System Settings › Privacy & Security › Local Network; on Linux open UDP 5353."),
+        ),
+        _ => (
+            Status::Warn,
+            Some("Check the node log for the LAN discovery error; serving continues without it."),
+        ),
+    };
+    let detail = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(": {detail}")
+    };
+    report.add(
+        "discovery.mdns",
+        status,
+        format!("LAN discovery {state} (announce {posture}){detail}; {candidates} candidates."),
+        hint,
+    );
+    if announce_always {
+        report.add(
+            "discovery.announce",
+            Status::Warn,
+            "discovery.announce is 'always', advertising continuous presence on the local network.",
+            Some("Use 'timed' (default) or 'browse_only' unless continuous LAN presence is intended."),
+        );
     }
 }
 async fn sessions(report: &mut Report, path: &Path) {
