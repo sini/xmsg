@@ -319,16 +319,6 @@ impl LockLeaseWatch {
             }
             let lock_evtonly_fd = unsafe { OwnedFd::from_raw_fd(raw_evtonly) };
 
-            let raw_kq = unsafe { libc::kqueue() };
-            if raw_kq < 0 {
-                return Err(format!(
-                    "kqueue() failed: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            let kq_fd = unsafe { OwnedFd::from_raw_fd(raw_kq) };
-            let _ = unsafe { libc::fcntl(kq_fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
-
             let omit_funlock = FORCE_OMIT_NOTE_FUNLOCK.with(|c| c.get());
             let mut fflags: u32 = libc::NOTE_DELETE
                 | libc::NOTE_RENAME
@@ -340,30 +330,8 @@ impl LockLeaseWatch {
             if !omit_funlock {
                 fflags |= libc::NOTE_FUNLOCK;
             }
-            let kev = libc::kevent {
-                ident: lock_evtonly_fd.as_raw_fd() as libc::uintptr_t,
-                filter: libc::EVFILT_VNODE,
-                flags: libc::EV_ADD | libc::EV_ENABLE | libc::EV_CLEAR,
-                fflags,
-                data: 0,
-                udata: std::ptr::null_mut(),
-            };
-            let rc_k = unsafe {
-                libc::kevent(
-                    kq_fd.as_raw_fd(),
-                    &kev as *const libc::kevent,
-                    1,
-                    std::ptr::null_mut(),
-                    0,
-                    std::ptr::null(),
-                )
-            };
-            if rc_k < 0 {
-                return Err(format!(
-                    "kevent EVFILT_VNODE registration failed: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
+            let kq_fd =
+                kqueue_vnode(lock_evtonly_fd.as_raw_fd(), fflags).map_err(|e| e.to_string())?;
 
             let mut fst: libc::stat = unsafe { std::mem::zeroed() };
             if unsafe { libc::fstat(lock_evtonly_fd.as_raw_fd(), &mut fst) } != 0 {
@@ -468,53 +436,19 @@ impl LockLeaseWatch {
         #[cfg(target_os = "macos")]
         {
             let ignore_fflags = FORCE_IGNORE_KEVENT_FFLAGS.with(|c| c.get());
-            let zero_ts = libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            };
-            let mut events: [libc::kevent; 16] = unsafe { std::mem::zeroed() };
-            loop {
-                let n = unsafe {
-                    libc::kevent(
-                        self.kq_fd.as_raw_fd(),
-                        std::ptr::null(),
-                        0,
-                        events.as_mut_ptr(),
-                        events.len() as libc::c_int,
-                        &zero_ts as *const libc::timespec,
-                    )
-                };
-                if n < 0 {
-                    let err = std::io::Error::last_os_error();
-                    if err.raw_os_error() == Some(libc::EINTR) {
-                        continue;
-                    }
-                    return Err(format!("kevent poll error: {err}"));
-                }
-                if n == 0 {
-                    break;
-                }
-                let fatal_fflags: u32 = libc::NOTE_DELETE
-                    | libc::NOTE_RENAME
-                    | libc::NOTE_REVOKE
-                    | libc::NOTE_LINK
-                    | libc::NOTE_WRITE
-                    | libc::NOTE_EXTEND
-                    | libc::NOTE_ATTRIB
-                    | libc::NOTE_FUNLOCK;
-                for ev in &events[..(n as usize)] {
-                    let flags = ev.flags;
-                    let fflags = ev.fflags;
-                    let data = ev.data;
-                    if (flags & libc::EV_ERROR) != 0 {
-                        return Err(format!("kevent returned EV_ERROR data={data}"));
-                    }
-                    if !ignore_fflags && (fflags & fatal_fflags) != 0 {
-                        return Err(format!(
-                            "writer-lock lease discontinuity kevent fflags=0x{fflags:x}"
-                        ));
-                    }
-                }
+            let fatal_fflags: u32 = libc::NOTE_DELETE
+                | libc::NOTE_RENAME
+                | libc::NOTE_REVOKE
+                | libc::NOTE_LINK
+                | libc::NOTE_WRITE
+                | libc::NOTE_EXTEND
+                | libc::NOTE_ATTRIB
+                | libc::NOTE_FUNLOCK;
+            let fflags = kqueue_drain(&self.kq_fd).map_err(|e| e.to_string())?;
+            if !ignore_fflags && (fflags & fatal_fflags) != 0 {
+                return Err(format!(
+                    "writer-lock lease discontinuity kevent fflags=0x{fflags:x}"
+                ));
             }
 
             let mut fst: libc::stat = unsafe { std::mem::zeroed() };
@@ -564,6 +498,88 @@ impl LockLeaseWatch {
         }
         self.drain_events()?;
         Ok(())
+    }
+}
+
+/// A close-on-exec `kqueue` with one `EVFILT_VNODE` `EV_CLEAR` registration of `fd` for `fflags`.
+#[cfg(target_os = "macos")]
+pub(crate) fn kqueue_vnode(fd: std::os::fd::RawFd, fflags: u32) -> std::io::Result<OwnedFd> {
+    let raw_kq = unsafe { libc::kqueue() };
+    if raw_kq < 0 {
+        return Err(std::io::Error::other(format!(
+            "kqueue() failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let kq_fd = unsafe { OwnedFd::from_raw_fd(raw_kq) };
+    let _ = unsafe { libc::fcntl(kq_fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+    let kev = libc::kevent {
+        ident: fd as libc::uintptr_t,
+        filter: libc::EVFILT_VNODE,
+        flags: libc::EV_ADD | libc::EV_ENABLE | libc::EV_CLEAR,
+        fflags,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    };
+    let rc_k = unsafe {
+        libc::kevent(
+            kq_fd.as_raw_fd(),
+            &kev as *const libc::kevent,
+            1,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+        )
+    };
+    if rc_k < 0 {
+        return Err(std::io::Error::other(format!(
+            "kevent EVFILT_VNODE registration failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(kq_fd)
+}
+
+/// Polls `kq` without blocking until it is empty and returns the OR of the fired `fflags`;
+/// an `EV_ERROR` event is an error.
+#[cfg(target_os = "macos")]
+pub(crate) fn kqueue_drain(kq: &OwnedFd) -> std::io::Result<u32> {
+    let zero_ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let mut events: [libc::kevent; 16] = unsafe { std::mem::zeroed() };
+    let mut fired = 0u32;
+    loop {
+        let n = unsafe {
+            libc::kevent(
+                kq.as_raw_fd(),
+                std::ptr::null(),
+                0,
+                events.as_mut_ptr(),
+                events.len() as libc::c_int,
+                &zero_ts as *const libc::timespec,
+            )
+        };
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(std::io::Error::other(format!("kevent poll error: {err}")));
+        }
+        if n == 0 {
+            return Ok(fired);
+        }
+        for ev in &events[..(n as usize)] {
+            if (ev.flags & libc::EV_ERROR) != 0 {
+                let data = ev.data;
+                return Err(std::io::Error::other(format!(
+                    "kevent returned EV_ERROR data={data}"
+                )));
+            }
+            fired |= ev.fflags;
+        }
     }
 }
 
