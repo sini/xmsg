@@ -574,3 +574,7 @@ required-features = ["daemon"]
 name = "grt4_concrete_ca_leaf"
 path = "tests/grt4_concrete_ca_leaf.rs"
 required-features = ["daemon"]
+[[test]]
+name = "grt4_standalone_enrollment"
+path = "tests/grt4_standalone_enrollment.rs"
+required-features = ["daemon"]
