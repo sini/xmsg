@@ -1040,3 +1040,331 @@ fn device_deadline_during_issuance_rolls_back_all_effects_and_supersession() {
     s.ca.issue_device_approved(&c, &request, "laptop", &[], &proposed, NOW, || true)
         .unwrap();
 }
+
+fn grt4_file_setup() -> (Setup, PathBuf) {
+    let mut setup = Setup::new();
+    let file = setup._dir.path().join("authority.db");
+    setup.db = Arc::new(Mutex::new(Connection::open(&file).unwrap()));
+    setup.ca =
+        EnrollCa::open_at(&setup.dir, setup.db.clone(), &setup.policy, "team.hub", NOW).unwrap();
+    (setup, file)
+}
+
+#[test]
+fn grt4_name_authority_refusal_has_no_issuance_effects() {
+    let s = Setup::new();
+    let result = s.ca.issue_with_name_authority(
+        &claims("alice-id"),
+        &csr(false),
+        "laptop",
+        &[],
+        NOW,
+        |uri, name| {
+            assert_eq!(
+                uri, "spiffe://example.org/host/laptop/user/alice",
+                "grt4 ownership callback saw wrong computed URI"
+            );
+            assert_eq!(
+                name, "alice.laptop",
+                "grt4 ownership callback saw wrong computed name"
+            );
+            assert!(
+                s.db.try_lock().is_err(),
+                "grt4 ownership callback ran before SQL acquisition"
+            );
+            Err::<(), _>(Error::ReservedName)
+        },
+    );
+    assert!(
+        matches!(result, Err(Error::ReservedName)),
+        "grt4 ownership refusal did not retain reserved_name classification"
+    );
+    assert_eq!(
+        effect_counts(&s),
+        [0, 0, 0],
+        "grt4 refused ownership spent issuance effects"
+    );
+    let issued =
+        s.ca.issue_with_name_authority(
+            &claims("alice-id"),
+            &csr(false),
+            "laptop",
+            &[],
+            NOW,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+    let before = effect_counts(&s);
+    assert!(
+        matches!(
+            s.ca.issue_with_name_authority(
+                &claims("alice-id"),
+                &csr(false),
+                "laptop",
+                &[],
+                NOW + 1,
+                |_, _| Err::<(), _>(Error::ReservedName)
+            ),
+            Err(Error::ReservedName)
+        ),
+        "grt4 replacement issuance bypassed name ownership"
+    );
+    assert_eq!(
+        effect_counts(&s),
+        before,
+        "grt4 refused replacement spent authority effects"
+    );
+    let superseded: Option<i64> =
+        s.db.lock()
+            .unwrap()
+            .query_row(
+                "SELECT superseded_at FROM enroll_certs WHERE serial=?1",
+                [&issued.serial],
+                |r| r.get(0),
+            )
+            .unwrap();
+    assert_eq!(
+        superseded, None,
+        "grt4 refused ownership superseded an existing certificate"
+    );
+}
+
+#[test]
+fn grt4_name_authority_is_observed_after_sql_wait() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (s, file) = grt4_file_setup();
+    let allowed = AtomicBool::new(true);
+    let called = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let locked = s.db.lock().unwrap();
+        let positive = Connection::open(&file).unwrap();
+        positive
+            .execute_batch("BEGIN IMMEDIATE; ROLLBACK")
+            .expect("grt4 SQL write-lease positive control failed before worker admission");
+        drop(positive);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (s, allowed, called, file) = (&s, &allowed, &called, &file);
+        let worker = scope.spawn(move || {
+            tx.send(()).unwrap();
+            s.ca.issue_with_name_authority(
+                &claims("alice-id"),
+                &csr(false),
+                "laptop",
+                &[],
+                NOW,
+                |_, _| {
+                    assert!(
+                        s.db.try_lock().is_err(),
+                        "grt4 ownership lease was obtained before SQL wait"
+                    );
+                    let observer = Connection::open(file).unwrap();
+                    observer.busy_timeout(std::time::Duration::ZERO).unwrap();
+                    let outcome = observer.execute_batch("BEGIN IMMEDIATE");
+                    if outcome.is_ok() { observer.execute_batch("ROLLBACK").unwrap(); }
+                    assert!(
+                        matches!(outcome, Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == rusqlite::ErrorCode::DatabaseBusy),
+                        "grt4 ownership callback ran before the SQL transaction acquired its write lease"
+                    );
+                    called.store(true, Ordering::SeqCst);
+                    if allowed.load(Ordering::SeqCst) {
+                        Ok(())
+                    } else {
+                        Err(Error::ReservedName)
+                    }
+                },
+            )
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        allowed.store(false, Ordering::SeqCst);
+        drop(locked);
+        assert!(
+            matches!(worker.join().unwrap(), Err(Error::ReservedName)),
+            "grt4 stale pre-SQL ownership authorized issuance"
+        );
+    });
+    assert!(
+        called.load(Ordering::SeqCst),
+        "grt4 final ownership callback was skipped"
+    );
+    assert_eq!(
+        effect_counts(&s),
+        [0, 0, 0],
+        "grt4 changed ownership spent effects after SQL wait"
+    );
+}
+
+#[test]
+fn grt4_ownership_lease_covers_signing_commit_and_error_release() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for expire in [false, true] {
+        let s = device_setup();
+        let c = claims("alice-id");
+        let request = csr(false);
+        let proposed = s.ca.project_device(&c, &request, "laptop", &[]).unwrap();
+        let publication = std::sync::RwLock::new(());
+        let calls = AtomicUsize::new(0);
+        let result = s.ca.issue_device_approved_with_name_authority(
+            &c,
+            &request,
+            "laptop",
+            &[],
+            &proposed,
+            NOW,
+            || {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return true;
+                }
+                assert!(
+                    publication.try_write().is_err(),
+                    "grt4 ownership lease was released before the commit guard"
+                );
+                !expire
+            },
+            |_, _| Ok(publication.read().unwrap()),
+        );
+        if expire {
+            assert!(
+                matches!(result, Err(Error::ApprovalExpired)),
+                "grt4 deadline lost its approval_expired classification"
+            );
+            assert_eq!(
+                effect_counts(&s),
+                [0, 0, 0],
+                "grt4 guarded failure retained issuance effects"
+            );
+        } else {
+            assert!(result.is_ok(), "grt4 valid leased issuance was refused");
+            assert_eq!(
+                effect_counts(&s),
+                [1, 1, 1],
+                "grt4 successful leased issuance did not commit"
+            );
+        }
+        assert!(
+            publication.try_write().is_ok(),
+            "grt4 ownership lease leaked after completion"
+        );
+    }
+}
+
+#[test]
+fn grt4_renewal_canonical_uri_form_and_ownership_are_authoritative() {
+    let s = Setup::new();
+    let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let request = VerifiedCsr::parse_pem(
+        &CertificateParams::default()
+            .serialize_request(&key)
+            .unwrap()
+            .pem()
+            .unwrap(),
+    )
+    .unwrap();
+    let issued =
+        s.ca.issue(&claims("alice-id"), &request, "lap", &[], NOW)
+            .unwrap();
+    let original = chain(&issued.cert_chain_pem);
+    {
+        let uri = "spiffe://example.org/ns/lap/sa/alice";
+        let mut params = CertificateParams::default();
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        params.subject_alt_names = vec![rcgen::SanType::URI(uri.try_into().unwrap())];
+        params.is_ca = rcgen::IsCa::ExplicitNoCa;
+        params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![
+            rcgen::ExtendedKeyUsagePurpose::ClientAuth,
+            rcgen::ExtendedKeyUsagePurpose::ServerAuth,
+        ];
+        params.serial_number = Some(rcgen::SerialNumber::from_slice(
+            &hex::decode(&issued.serial).unwrap(),
+        ));
+        params.not_before = time::OffsetDateTime::from_unix_timestamp(NOW - 300).unwrap();
+        params.not_after = time::OffsetDateTime::from_unix_timestamp(NOW + 86400).unwrap();
+        let cert = params.signed_by(&key, &s.ca.signer).unwrap();
+        let presented = vec![cert.der().to_vec(), s.ca.root_der.clone()];
+        let before = effect_counts(&s);
+        assert!(
+            matches!(
+                s.ca.renew(&presented, NOW + 1),
+                Err(Error::ReenrollRequired)
+            ),
+            "grt4 namespace URI alias substitution was renewed"
+        );
+        assert_eq!(
+            effect_counts(&s),
+            before,
+            "grt4 rejected renewal wrote authority state"
+        );
+    }
+    let before = effect_counts(&s);
+    assert!(
+        matches!(
+            s.ca.renew_with_name_authority(&original, NOW + 1, |_, _| Err::<(), _>(
+                Error::ReservedName
+            )),
+            Err(Error::ReservedName)
+        ),
+        "grt4 renewal skipped current ownership"
+    );
+    assert_eq!(
+        effect_counts(&s),
+        before,
+        "grt4 reserved renewal consumed authority effects"
+    );
+    let renewed =
+        s.ca.renew_with_name_authority(&original, NOW + 1, |uri, name| {
+            assert_eq!(
+                uri, issued.uri,
+                "grt4 valid renewal callback saw foreign URI"
+            );
+            assert_eq!(
+                name, "alice.lap",
+                "grt4 valid renewal callback saw foreign name"
+            );
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        renewed.uri, issued.uri,
+        "grt4 normal renewal changed identity"
+    );
+}
+
+#[test]
+fn grt4_name_lease_drop_observes_committed_certificate() {
+    struct CommitLease<'a> {
+        _guard: std::sync::RwLockReadGuard<'a, ()>,
+        file: PathBuf,
+    }
+    impl Drop for CommitLease<'_> {
+        fn drop(&mut self) {
+            let connection = Connection::open(&self.file).unwrap();
+            let count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM enroll_certs", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(
+                count, 1,
+                "grt4 ownership lease was dropped before committed certificate visibility"
+            );
+        }
+    }
+    let (s, file) = grt4_file_setup();
+    let publication = std::sync::RwLock::new(());
+    s.ca.issue_with_name_authority(
+        &claims("alice-id"),
+        &csr(false),
+        "laptop",
+        &[],
+        NOW,
+        |_, _| {
+            Ok(CommitLease {
+                _guard: publication.read().unwrap(),
+                file: file.clone(),
+            })
+        },
+    )
+    .unwrap();
+    assert!(
+        publication.try_write().is_ok(),
+        "grt4 publication lock remained leased after committed return"
+    );
+}

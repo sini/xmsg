@@ -835,3 +835,109 @@ async fn protocol_unverified_email_cannot_issue_under_email_rule() {
         }
     }
 }
+
+pub(crate) fn grt4_publish_ambiguous_names(h: &Harness, host: &str) {
+    let ca = h._directory.path().join("ca/root.crt");
+    let host_pattern = "spiffe://enroll.example/host/*/user/alice";
+    let pod_pattern = format!("spiffe://enroll.example/ns/{host}/sa/*");
+    let peers = Arc::new(
+        fed::PeersMap::load_from_json(
+            &json!({
+                "peers": {},
+                "hub": {"patterns": [
+                    {"pattern":host_pattern,"ca":ca},
+                    {"pattern":pod_pattern,"ca":ca}
+                ],"rules": [
+                    {"pattern":host_pattern,"allow":["send"],"leaf":true},
+                    {"pattern":pod_pattern,"allow":["send"],"leaf":true}
+                ]}
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    let chain = h.service.fed.cert_chain();
+    let key = h.service.fed.key_der();
+    let acceptor = fed::make_tls_acceptor(&chain, &key, peers.clone()).unwrap();
+    *h.service.fed.dynamic_tls.write().unwrap() = Some(fed::DynamicTls {
+        cert_der: chain[0].to_vec(),
+        cert_chain_der: chain.iter().map(|c| c.to_vec()).collect(),
+        key_der: key,
+        ca_anchors: std::collections::HashMap::new(),
+        acceptor,
+        peers,
+    });
+}
+
+#[tokio::test]
+async fn grt4_http_renewal_rechecks_current_name_ownership() {
+    use rustls::pki_types::pem::PemObject;
+    let h = Harness::new().await;
+    let (status, created, _) = h.start("laptop", 1).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "grt4 renewal positive setup refused"
+    );
+    let (status, collected) = h.complete(&created).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "grt4 renewal positive issuance refused"
+    );
+    let chain: Vec<Vec<u8>> = rustls::pki_types::CertificateDer::pem_slice_iter(
+        collected["cert_chain_pem"].as_str().unwrap().as_bytes(),
+    )
+    .map(|certificate| certificate.unwrap().to_vec())
+    .collect();
+    async fn request(h: &Harness, chain: &[Vec<u8>]) -> Response {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/enroll/v1/renew")
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(Peer {
+            ip: std::net::Ipv4Addr::LOCALHOST.into(),
+            certificates: chain.to_vec(),
+        });
+        router(h.service.clone()).oneshot(request).await.unwrap()
+    }
+    assert_eq!(
+        request(&h, &chain).await.status(),
+        StatusCode::OK,
+        "grt4 valid HTTP renewal was refused"
+    );
+    let before = {
+        let db = h.db.lock().unwrap();
+        ["enroll_bindings", "enroll_rates", "enroll_certs"].map(|table| {
+            db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+        })
+    };
+    grt4_publish_ambiguous_names(&h, "laptop");
+    let response = request(&h, &chain).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "grt4 HTTP renewal bypassed current ownership"
+    );
+    let body = to_bytes(response.into_body(), 65536).await.unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        body["error"]["reason"], "reserved_name",
+        "grt4 HTTP renewal lost ownership refusal class"
+    );
+    let db = h.db.lock().unwrap();
+    let after = ["enroll_bindings", "enroll_rates", "enroll_certs"].map(|table| {
+        db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap()
+    });
+    assert_eq!(
+        after, before,
+        "grt4 HTTP renewal refusal wrote authority state"
+    );
+}
