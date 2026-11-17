@@ -247,14 +247,34 @@ and a rule may grant a durable leaf mailbox:
   pattern can match.
 - **Names.** The client's node name comes from its URI, as for a CA entry. At load, xmsg refuses a
   pattern without `*` that gives this node's own name or a concrete entry's name. At connect, it
-  refuses a client whose name is a concrete entry's name. When two different URIs give the same
-  name, it refuses the second client.
+  refuses a client whose name is a concrete entry's name.
+- **Planned: prospective name ownership.** A dynamic client is refused if another full URI
+  allowed by the configured patterns could derive its name, even before either client connects.
+  The check retains the trust domain and the `host/user` or `ns/sa` form. Several patterns that
+  describe the same exact URI are not a collision. The configuration may still load, but an
+  ambiguous dynamic alias cannot be claimed by arriving first or reconnecting after a restart.
 - After an admitted client connects, its name is in this node's view of known nodes.
 - **Cross-bundle name checks:** patterns under distinct bundles must not derive a common
   canonical name. The check ignores trust domains and covers both `host/…/user/…` and
   `ns/…/sa/…`, including wildcards in keyword positions. Refusal prevents another bundle from
   reclaiming a queued mailbox name after restart. See
   [enrolled hub mailboxes](/concepts/hubs-and-leaves/#planned-enrolled-nodes-and-bounded-hub-mailboxes).
+
+### Planned: check ambiguous aliases before an upgrade
+
+Before upgrading a hub that mixes host/user and namespace/service-account patterns, check
+for names that those patterns could share. **Enrollment being disabled is no exemption.**
+Use the new binary's `xmsg check-peers PEERS_FILE [--fed-cert CERT]` before replacing the
+running hub. It warns on stderr about ambiguous alias classes while keeping exit `0` for an
+otherwise valid configuration. Existing load errors still fail validation.
+
+Startup and successful reload also emit one warning per ambiguous alias class, naming the
+alias pattern and colliding forms without full URI witnesses. Doctor's federation section warns:
+`pattern admits ambiguous aliases; give pods concrete CA leaf entries`.
+
+Reserve affected pods with concrete CA leaf entries, or partition the patterns, before upgrading.
+A concrete entry reserves its exact name and identity while the pod is offline and keeps the
+existing node spelling. See the [pod reservation example](/concepts/hubs-and-leaves/#planned-reserve-pod-names-before-upgrading).
 
 ## Mesh `list` across peers
 
