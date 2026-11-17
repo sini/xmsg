@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "run 43984074132 job 133709450135 on 811b4987fbb8c50695c09bb74de77a5ac4a2cec1: measured 1282 passed/8 ignored/0 failed, 104 summaries; only the prior census guard failed",
-    "darwin": "run 43984074196 job 133707599885 on 811b4987fbb8c50695c09bb74de77a5ac4a2cec1: measured 1284 passed/10 ignored/0 failed, 104 summaries; only the prior census guard failed"
+    "linux": "run 43995651793 job 133749961622 and immutable cargo test on 7bcdc8fa6ff9a57a488d5b423e0694db9c61938b:1294 passed/8 ignored/0 failed/104 summaries; all101 executed targets passed inventory before stale count guard",
+    "darwin": "run 43995651849 job 133746925009 on 7bcdc8fa6ff9a57a488d5b423e0694db9c61938b:1296 passed/10 ignored/0 failed/104 summaries; all101 executed targets passed inventory before stale count guard"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -108,13 +108,13 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1282,
+      "passed": 1294,
       "failed": 0,
       "ignored": 8,
       "summaries": 104
     },
     "darwin": {
-      "passed": 1284,
+      "passed": 1296,
       "failed": 0,
       "ignored": 10,
       "summaries": 104
