@@ -541,6 +541,7 @@ pub struct PeersMap {
     peers_by_name: HashMap<String, PeerConfig>,
     name_by_pin: HashMap<String, String>,
     ca_bundles_by_name: HashMap<String, Vec<rustls::pki_types::TrustAnchor<'static>>>,
+    discovery_roots: HashMap<String, Vec<[u8; 32]>>,
     /// Entry key -> canonical node name, and back (B5's nickname translation).
     canonical_by_name: HashMap<String, String>,
     name_by_canonical: HashMap<String, String>,
@@ -714,6 +715,13 @@ impl PeersMap {
             .values()
             .filter(|p| p.ca.is_some() || self.ca_bundles_by_name.contains_key(&p.name))
             .collect()
+    }
+
+    pub(crate) fn discovery_roots(&self, peer: &str) -> &[[u8; 32]] {
+        self.discovery_roots
+            .get(peer)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     pub fn get_ca_anchors(&self, name: &str) -> Option<&[rustls::pki_types::TrustAnchor<'static>]> {
@@ -1235,6 +1243,7 @@ impl PeersMap {
         let mut reverse_observe = crate::observe_relay::Config::default();
         let mut deny = DenyPolicy::default();
         let mut discovery = crate::discovery::Config::default();
+        let mut discovery_roots = HashMap::new();
         let mut is_wrapped = false;
         let owned_entries: PeerObjects = match &val {
             serde_json::Value::Object(map) => {
@@ -1401,6 +1410,7 @@ impl PeersMap {
                 })?;
                 let anchors =
                     parse_ca_bundle_pem(&pem_bytes).map_err(|e| format!("peer '{name}': {e}"))?;
+                discovery_roots.insert(name.clone(), ca_root_fingerprints(&pem_bytes)?);
 
                 let ids_val = obj
                     .get("identities")
@@ -1659,6 +1669,7 @@ impl PeersMap {
         map.reverse_observe = reverse_observe;
         map.deny = deny;
         map.discovery = discovery;
+        map.discovery_roots = discovery_roots;
         if let Some(mut hub) = hub_config {
             map.bind_hub_patterns(&mut hub)?;
             map.hub = Some(hub);
@@ -1934,6 +1945,17 @@ pub fn extract_uri_sans(cert_der: &[u8]) -> Result<Vec<String>, String> {
         }
     }
     Ok(uris)
+}
+
+fn ca_root_fingerprints(pem: &[u8]) -> Result<Vec<[u8; 32]>, String> {
+    use rustls::pki_types::pem::PemObject;
+    use sha2::Digest;
+    CertificateDer::pem_slice_iter(pem)
+        .map(|cert| {
+            cert.map(|der| sha2::Sha256::digest(der.as_ref()).into())
+                .map_err(|e| format!("failed to parse CA PEM bundle: {e}"))
+        })
+        .collect()
 }
 
 pub fn parse_ca_bundle_pem(
@@ -3027,6 +3049,15 @@ mod initial_peers {
     }
 
     impl super::FedState {
+        pub(super) fn dial_initial_peers(&self) -> Arc<PeersMap> {
+            self.peers
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .expect("startup peers available before dynamic TLS")
+        }
+
         pub(super) fn clear_initial_peers(&self) {
             *self.peers.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
         }
@@ -3090,6 +3121,7 @@ pub struct NameAuthorityLease<'a> {
 }
 
 pub struct FedState {
+    pub discovery: Arc<crate::discovery::state::State>,
     pub node_name: String,
     pub peers: InitialPeers,
     pub cert_der: Vec<u8>,
@@ -3119,6 +3151,26 @@ pub struct FedState {
 }
 
 impl FedState {
+    pub(crate) fn dial_credentials(
+        &self,
+    ) -> (Vec<CertificateDer<'static>>, Vec<u8>, Arc<PeersMap>) {
+        let guard = self.dynamic_tls.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(tls) = guard.as_ref() {
+            return (tls.cert_chain(), tls.key_der.clone(), tls.peers.clone());
+        }
+        let peers = self.dial_initial_peers();
+        let chain = if self.cert_chain_der.is_empty() {
+            vec![CertificateDer::from(self.cert_der.clone())]
+        } else {
+            self.cert_chain_der
+                .iter()
+                .cloned()
+                .map(CertificateDer::from)
+                .collect()
+        };
+        (chain, self.key_der.clone(), peers)
+    }
+
     pub fn cert_chain(&self) -> Vec<CertificateDer<'static>> {
         let guard = self.dynamic_tls.read().unwrap_or_else(|e| e.into_inner());
         if let Some(ref dyn_tls) = *guard {
@@ -5250,7 +5302,7 @@ pub fn make_tls_acceptor(
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(server_config)))
 }
 
-fn map_tls_connect_error(peer_name: &str, e: std::io::Error) -> AppError {
+pub(crate) fn map_tls_connect_error(peer_name: &str, e: std::io::Error) -> AppError {
     if let Some(rustls_err) = e
         .get_ref()
         .and_then(|err| err.downcast_ref::<rustls::Error>())
@@ -7570,6 +7622,10 @@ impl CredentialReloader {
                 )));
             }
             new_peers.update_ca_anchors(&peer_name, anchors.clone());
+            new_peers.discovery_roots.insert(
+                peer_name.clone(),
+                ca_root_fingerprints(&ca_pem).map_err(AppError::Internal)?,
+            );
             ca_anchors.insert(peer_name, anchors);
         }
 

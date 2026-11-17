@@ -362,6 +362,7 @@ async fn build_sender_fed_state(
         ..Default::default()
     };
     let fed_state = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: name.to_string(),
         peers: (peers_arc.clone()).into(),
@@ -941,6 +942,7 @@ async fn oracle_4_sighup_reload_bracket_and_failed_status() {
         let (pi_notify_tx, _) = tokio::sync::broadcast::channel(16);
         let (svc_notify_tx, _) = tokio::sync::broadcast::channel(16);
         let poison_fs = Arc::new(FedState {
+            discovery: Default::default(),
             max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
             node_name: "alice.srv".to_string(),
             peers: startup_pm.clone().into(),

@@ -219,6 +219,7 @@ async fn create_test_node_full_inner(
     let (svc_notify_tx, _) = broadcast::channel(16);
 
     let fed_state = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: name.to_string(),
         peers: (peers_arc).into(),
@@ -628,6 +629,7 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
     };
 
     let fed_state_a1 = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
@@ -728,6 +730,7 @@ async fn test_oracle_1_from_cidr_allowlist_enforced() {
     };
 
     let fed_state_a2 = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
@@ -837,6 +840,7 @@ async fn test_oracle_2_from_absent_pin_only_accepted() {
     };
 
     let fed_state_a = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
@@ -988,6 +992,7 @@ async fn test_oracle_4_reply_route_source_check() {
     }
 
     let fed_state_b = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-b".to_string(),
         peers: Arc::new(PeersMap::new(
@@ -1211,6 +1216,7 @@ async fn test_oracle_6_anonymous_from_with_colon_gives_400() {
     };
 
     let fed_state_a = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
@@ -1295,6 +1301,7 @@ async fn test_oracle_7_root_harness_rejected_and_badge_spoof_sanitized() {
     .await;
 
     let fed_state_a = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
@@ -1430,6 +1437,7 @@ async fn test_n4_attested_name_ascii_only_u0387() {
     .await;
 
     let fed_state_a = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
@@ -1530,6 +1538,7 @@ async fn test_oracle_8_no_forward_rejected() {
     .await;
 
     let fed_state_a = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
@@ -1630,6 +1639,7 @@ async fn test_oracle_9_forged_reply_id_gives_403() {
     .await;
 
     let fed_state_b = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-b".to_string(),
         peers: Arc::new(PeersMap::new(
@@ -1778,6 +1788,7 @@ async fn test_oracle_10_duplicate_id_delivered_once() {
     .await;
 
     let fed_state_a = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
@@ -1900,6 +1911,7 @@ async fn test_oracle_11_rate_limit_429() {
     .await;
 
     let fed_state_a = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
@@ -2092,6 +2104,7 @@ async fn test_amendment_a_peer_without_send_gets_403_op_denied() {
     .await;
 
     let fed_state_a = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-a".to_string(),
         peers: Arc::new(PeersMap::new(
@@ -2456,6 +2469,7 @@ fn make_client_fed_state(
     base_node: &TestNode,
 ) -> Arc<FedState> {
     Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: node_name.to_string(),
         peers: Arc::new(PeersMap::new(
@@ -3764,6 +3778,7 @@ async fn test_n1_offsource_flood_leaves_legit_bucket_intact() {
     )
     .await;
     let legit_state = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "host-r".to_string(),
         peers: Arc::new(PeersMap::new(

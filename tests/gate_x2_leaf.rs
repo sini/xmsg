@@ -205,6 +205,7 @@ async fn test_oracle_2_body_from_ignored_and_attributed_to_leaf_principal() {
     let (node_b_svc_notify_tx, _) = broadcast::channel(16);
 
     let node_b_fed_state = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "target-node".to_string(),
         peers: (Arc::new(PeersMap::new(node_b_peers))).into(),
@@ -305,6 +306,7 @@ async fn test_oracle_2_body_from_ignored_and_attributed_to_leaf_principal() {
     let (leaf_svc_notify_tx, _) = broadcast::channel(16);
 
     let leaf_fed_state = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "leaf-node".to_string(),
         peers: (Arc::new(PeersMap::new(leaf_peers))).into(),
@@ -469,6 +471,7 @@ async fn test_oracle_3_leaf_pull_replies_node_zero_outbound_connections() {
     let (node_b_svc_notify_tx, _) = broadcast::channel(16);
 
     let node_b_fed_state = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "target-node".to_string(),
         peers: (Arc::new(PeersMap::new(node_b_peers))).into(),
@@ -610,6 +613,7 @@ async fn test_oracle_3_leaf_pull_replies_node_zero_outbound_connections() {
     let (leaf_svc_notify_tx, _) = broadcast::channel(16);
 
     let leaf_fed_state = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "leaf-node".to_string(),
         peers: (Arc::new(PeersMap::new(leaf_peers))).into(),

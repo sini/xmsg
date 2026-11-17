@@ -596,6 +596,7 @@ async fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
     }
 
     let hub_fed_state = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "sini.hub".to_string(),
         peers: (hub_peers).into(),
@@ -683,6 +684,7 @@ async fn f5_hub_pull_and_handoff_step_enforce_check_origin_and_control_chars() {
     let leaf_peers = Arc::new(PeersMap::load_from_file_for(&leaf_peers_path, None).unwrap());
 
     let leaf_fed_state = Arc::new(FedState {
+        discovery: Default::default(),
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,
         node_name: "sini.leaf".to_string(),
         peers: (leaf_peers).into(),
