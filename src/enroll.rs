@@ -523,24 +523,20 @@ async fn code(
             return Err(SessionFailure::reason("expired"));
         }
         service.refresh();
-        let peers = service.fed.current_peers();
-        let names = peers
-            .iter()
-            .map(|(_, peer)| {
-                peers
-                    .canonical_name(&peer.name)
-                    .unwrap_or(&peer.name)
-                    .to_string()
-            })
-            .collect::<Vec<_>>();
         service
             .ca
-            .issue(
+            .issue_with_name_authority(
                 &claims,
                 &session.csr,
                 &session.host,
-                &names,
+                &[],
                 service.clock.now(),
+                |uri, _| {
+                    service
+                        .fed
+                        .lease_enrollment_name(uri, false)
+                        .map_err(|_| crate::enroll_ca::Error::ReservedName)
+                },
             )
             .map_err(|error| {
                 let rule = match &error {
@@ -651,7 +647,12 @@ async fn renew(
     service.refresh();
     let issued = service
         .ca
-        .renew(&peer.certificates, service.clock.now())
+        .renew_with_name_authority(&peer.certificates, service.clock.now(), |uri, _| {
+            service
+                .fed
+                .lease_enrollment_name(uri, true)
+                .map_err(|_| crate::enroll_ca::Error::ReservedName)
+        })
         .map_err(core_failure)?;
     Ok(Json(serde_json::json!({"cert_chain_pem":issued.cert_chain_pem,"serial":issued.serial,"not_after":issued.not_after})).into_response())
 }
