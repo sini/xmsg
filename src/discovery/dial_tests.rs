@@ -783,6 +783,13 @@ async fn x6_surface_send(discovery_succeeds: bool, post_fails: bool) {
     );
     let result = result.unwrap();
     assert_eq!(result.outcome, "queued");
+    if discovery_succeeds {
+        assert_eq!(
+            target.accepted.load(Ordering::SeqCst),
+            1,
+            "verified discovery directness was lost"
+        );
+    }
     let receiver = if discovery_succeeds {
         &mut target.received
     } else {
