@@ -6,6 +6,7 @@
   "integration_targets": [
     "tests/agent_sock.rs",
     "tests/agy_proc_locks.rs",
+    "tests/agy_spawn_fds.rs",
     "tests/ancestor_walk.rs",
     "tests/claude_lstart_macos.rs",
     "tests/doctor.rs",
