@@ -13,6 +13,7 @@ use crate::fed::{FedState, PeerConfig, PeersMap};
 
 pub struct Dial {
     inner: Route,
+    policy: Arc<PeersMap>,
 }
 
 enum Route {
@@ -21,6 +22,13 @@ enum Route {
 }
 
 impl Dial {
+    pub(crate) fn current_policy(&self, fs: &FedState) -> Result<Arc<PeersMap>, AppError> {
+        if !Arc::ptr_eq(&fs.current_peers(), &self.policy) {
+            return Err(AppError::PeerRejected("discovery policy changed".into()));
+        }
+        Ok(self.policy.clone())
+    }
+
     pub fn into_direct(self) -> Result<TlsStream<TcpStream>, AppError> {
         match self.inner {
             Route::Direct(stream) => Ok(*stream),
@@ -162,11 +170,32 @@ pub async fn resolve_dial(fs: &FedState, peer: &PeerConfig) -> Result<Dial, AppE
     let peer = policy
         .get_peer_config(&peer.name)
         .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
+    resolve_with_policy(fs, peer, policy).await
+}
+
+pub(crate) async fn prepare_send(fs: &FedState, name: &str) -> Result<Option<Dial>, AppError> {
+    let policy = fs.current_peers();
+    let Some(peer) = policy.get(name).filter(|peer| {
+        !peer.leaf && peer.address.is_empty() && peer.ca.is_some() && exact_uri(peer).is_some()
+    }) else {
+        return Ok(None);
+    };
+    resolve_with_policy(fs, peer.clone(), policy)
+        .await
+        .map(Some)
+}
+
+async fn resolve_with_policy(
+    fs: &FedState,
+    peer: PeerConfig,
+    policy: Arc<PeersMap>,
+) -> Result<Dial, AppError> {
     if !peer.address.is_empty() {
-        return connect(fs, &peer, policy, &peer.address)
+        return connect(fs, &peer, policy.clone(), &peer.address)
             .await
             .map(|tls| Dial {
                 inner: Route::Direct(Box::new(tls)),
+                policy,
             });
     }
     let work = async {
@@ -231,12 +260,14 @@ pub async fn resolve_dial(fs: &FedState, peer: &PeerConfig) -> Result<Dial, AppE
     if let Ok(Some(tls)) = result {
         return Ok(Dial {
             inner: Route::Direct(Box::new(tls)),
+            policy,
         });
     }
     if let Some(hub) = &policy.default_route_peer {
         if hub != &peer.name {
             return Ok(Dial {
                 inner: Route::ViaHub(hub.clone()),
+                policy,
             });
         }
     }
