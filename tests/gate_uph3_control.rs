@@ -437,7 +437,7 @@ impl Node {
                             let certificates=tls.get_ref().1.peer_certificates().unwrap();
                             let (peer,uri)=fs.current_peers().resolve_incoming_peer(&certificates[0],&certificates[1..]).unwrap();
                             let certificate_has_uri=fed::extract_uri_sans(certificates[0].as_ref()).map_or(true,|uris|!uris.is_empty());
-                            let authenticated=Arc::new(fed::AuthenticatedPeer{name:peer.name,pin:String::new(),uri,certificate_has_uri,user:String::new(),remote_ip:remote.ip()});
+                            let authenticated=Arc::new(fed::AuthenticatedPeer{name:peer.name,pin:fed::spki_sha256_from_der(certificates[0].as_ref()).unwrap(),uri,certificate_has_uri,user:String::new(),remote_ip:remote.ip()});
                             let service=hyper::service::service_fn(move|mut request:hyper::Request<hyper::body::Incoming>|{
                                 let router=router.clone();let authenticated=authenticated.clone();let observed=observed.clone();
                                 async move{
