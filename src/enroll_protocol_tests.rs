@@ -837,6 +837,13 @@ async fn protocol_unverified_email_cannot_issue_under_email_rule() {
 }
 
 pub(crate) fn grt4_publish_ambiguous_names(h: &Harness, host: &str) {
+    assert!(
+        grt4_try_publish_ambiguous_names(h, host),
+        "grt4 fixture failed to publish ambiguous name configuration"
+    );
+}
+
+pub(crate) fn grt4_try_publish_ambiguous_names(h: &Harness, host: &str) -> bool {
     let ca = h._directory.path().join("ca/root.crt");
     let host_pattern = "spiffe://enroll.example/host/*/user/alice";
     let pod_pattern = format!("spiffe://enroll.example/ns/{host}/sa/*");
@@ -856,10 +863,32 @@ pub(crate) fn grt4_publish_ambiguous_names(h: &Harness, host: &str) {
         )
         .unwrap(),
     );
+    grt4_try_publish_peer_map(h, peers)
+}
+
+pub(crate) fn grt4_try_publish_concrete_name(h: &Harness, host: &str) -> bool {
+    let mut entries = serde_json::Map::new();
+    entries.insert(
+        format!("alice.{host}"),
+        json!({
+            "ca":h._directory.path().join("ca/root.crt"),
+            "identities":[format!("spiffe://enroll.example/host/{host}/user/alice")],
+            "allow":["send","reply","list"], "leaf":true
+        }),
+    );
+    let peers =
+        Arc::new(fed::PeersMap::load_from_json(&json!({"peers":entries}).to_string()).unwrap());
+    grt4_try_publish_peer_map(h, peers)
+}
+
+fn grt4_try_publish_peer_map(h: &Harness, peers: Arc<fed::PeersMap>) -> bool {
     let chain = h.service.fed.cert_chain();
     let key = h.service.fed.key_der();
     let acceptor = fed::make_tls_acceptor(&chain, &key, peers.clone()).unwrap();
-    *h.service.fed.dynamic_tls.write().unwrap() = Some(fed::DynamicTls {
+    let Ok(mut current) = h.service.fed.dynamic_tls.try_write() else {
+        return false;
+    };
+    *current = Some(fed::DynamicTls {
         cert_der: chain[0].to_vec(),
         cert_chain_der: chain.iter().map(|c| c.to_vec()).collect(),
         key_der: key,
@@ -867,6 +896,7 @@ pub(crate) fn grt4_publish_ambiguous_names(h: &Harness, host: &str) {
         acceptor,
         peers,
     });
+    true
 }
 
 #[tokio::test]
@@ -907,6 +937,15 @@ async fn grt4_http_renewal_rechecks_current_name_ownership() {
         StatusCode::OK,
         "grt4 valid HTTP renewal was refused"
     );
+    assert!(
+        grt4_try_publish_concrete_name(&h, "laptop"),
+        "grt4 fixture failed to publish concrete renewal reservation"
+    );
+    assert_eq!(
+        request(&h, &chain).await.status(),
+        StatusCode::OK,
+        "grt4 same-URI concrete reservation blocked normal renewal"
+    );
     let before = {
         let db = h.db.lock().unwrap();
         ["enroll_bindings", "enroll_rates", "enroll_certs"].map(|table| {
@@ -940,4 +979,34 @@ async fn grt4_http_renewal_rechecks_current_name_ownership() {
         after, before,
         "grt4 HTTP renewal refusal wrote authority state"
     );
+}
+
+#[tokio::test]
+async fn grt4_fresh_http_issuance_preserves_concrete_name_reservation() {
+    let h = Harness::new().await;
+    assert!(
+        grt4_try_publish_concrete_name(&h, "laptop"),
+        "grt4 fixture failed to publish fresh-issuance reservation"
+    );
+    let (status, created, _) = h.start("laptop", 1).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "grt4 concrete fresh-issuance setup refused"
+    );
+    let (_, refused) = h.complete(&created).await;
+    assert_eq!(
+        refused["error"]["reason"], "reserved_name",
+        "grt4 fresh HTTP issuance bypassed the unconditional concrete-name reservation"
+    );
+    let db = h.db.lock().unwrap();
+    for table in ["enroll_bindings", "enroll_rates", "enroll_certs"] {
+        assert_eq!(
+            db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "grt4 concrete fresh-issuance refusal wrote authority state"
+        );
+    }
 }

@@ -1062,31 +1062,41 @@ async fn grt4_device_approval_refuses_prospective_alias_before_any_pod_admission
 
 #[tokio::test]
 async fn grt4_actual_device_approval_refreshes_ownership_after_sql_wait() {
-    let h = enabled().await;
-    let (created, view) = awaiting(&h).await;
-    let pending = session(&h, &created);
-    let locked = h.db.lock().unwrap();
-    let service = h.service.clone();
-    let id = created["request_id"].as_str().unwrap().to_owned();
-    let (tx, rx) = std::sync::mpsc::channel();
-    let worker = std::thread::spawn(move || {
-        tx.send(service.approve_device(&id, approval(&view)))
-            .unwrap();
-    });
-    wait_for_approval_lock(&pending);
-    crate::enroll::protocol_tests::grt4_publish_ambiguous_names(&h, "remote");
-    drop(locked);
-    let result = bounded_result(rx);
-    join_worker(worker);
-    assert!(
-        matches!(result, Err(Failure(_, "reserved_name"))),
-        "grt4 actual approval retained stale pre-SQL name ownership"
-    );
-    assert_eq!(
-        effects(&h),
-        [0, 0, 0],
-        "grt4 stale actual approval wrote authority effects"
-    );
+    for concrete in [false, true] {
+        let h = enabled().await;
+        let (created, view) = awaiting(&h).await;
+        let pending = session(&h, &created);
+        let locked = h.db.lock().unwrap();
+        let service = h.service.clone();
+        let id = created["request_id"].as_str().unwrap().to_owned();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send(service.approve_device(&id, approval(&view)))
+                .unwrap();
+        });
+        wait_for_approval_lock(&pending);
+        let published = if concrete {
+            crate::enroll::protocol_tests::grt4_try_publish_concrete_name(&h, "remote")
+        } else {
+            crate::enroll::protocol_tests::grt4_try_publish_ambiguous_names(&h, "remote")
+        };
+        drop(locked);
+        let result = bounded_result(rx);
+        join_worker(worker);
+        assert!(
+            published,
+            "grt4 actual approval leased TLS before acquiring the SQL transaction"
+        );
+        assert!(
+            matches!(result, Err(Failure(_, "reserved_name"))),
+            "grt4 actual approval retained stale pre-SQL name ownership"
+        );
+        assert_eq!(
+            effects(&h),
+            [0, 0, 0],
+            "grt4 stale actual approval wrote authority effects"
+        );
+    }
 }
 
 #[tokio::test]
