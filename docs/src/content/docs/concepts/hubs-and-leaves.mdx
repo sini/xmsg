@@ -279,7 +279,7 @@ inbound address: it dials the hub, pulls its mailbox and acknowledges messages.
 The mailbox key is the certificate's canonical node name. The hub can send to the
 admitted name, including attachment queries, without a concrete per-node entry.
 Rows survive a hub restart; until the client reconnects, the in-memory admission
-is unknown. The first reconnect restores access to the queued rows.
+is unknown. A reconnect that still owns that name restores access to the queued rows.
 
 Each admission pattern binds a CA bundle, for example:
 
@@ -302,6 +302,42 @@ derive `sini.x`; a pattern such as `*/x/*/sini` can match both forms. Keyword st
 are included in the overlap check. A rule spanning distinct bundles is refused;
 split it into rules for each population. A bare string pattern is supported only
 when the peers file uses one CA bundle.
+
+### Planned: reserve pod names before upgrading
+
+Dynamic admission will reject a name if another allowed full URI could derive it, including
+on the first connection after a restart. For example, `host/pods/user/guard` and
+`ns/pods/sa/guard` both derive `guard.pods`. Different trust domains can collide too. Matching
+the same exact URI through several patterns is allowed; first arrival does not choose an owner.
+
+Check mixed patterns **before upgrading the hub, even if enrollment is disabled**. The new
+binary's `xmsg check-peers PEERS_FILE [--fed-cert CERT]` reports ambiguous alias classes;
+startup, successful reload and doctor also warn. The file can remain valid while the
+ambiguous dynamic identities are refused.
+
+A concrete CA entry reserves a pod's existing name before it connects. It needs no inbound
+address and keeps the normal leaf mailbox:
+
+```json
+{
+  "peers": {
+    "guard.pods": {
+      "ca": "/etc/xmsg/pod-ca.pem",
+      "identities": ["spiffe://example.org/ns/pods/sa/guard"],
+      "leaf": true,
+      "allow": ["send", "reply", "list"],
+      "targets": ["worker"]
+    }
+  }
+}
+```
+
+Keep any host enrollment patterns in the file's separate `hub` block. Remove unused pod
+patterns and their orphaned rules if replacing them with concrete entries. Concrete entries do
+not inherit hub-rule permissions: set their intended `allow` and `targets` explicitly. This
+example grants no `observe` right. Observation and `observe_labels` require their own explicit
+grant; a wildcard admission pattern never supplies it. See
+[observation authorization](/concepts/federation/#planned-observation-grants).
 
 Per-leaf limits remain `--peer-mailbox-max-rows 10000` and
 `--peer-mailbox-max-bytes 67108864` (64 MiB).
