@@ -41,6 +41,147 @@ pub fn node_name_from_uri(uri: &str) -> Result<String, String> {
     Ok(format!("{first}.{second}"))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatternAliasOwner {
+    Unclaimed,
+    Unique(String),
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AmbiguousAliasClass {
+    pub alias: String,
+    pub forms: Vec<String>,
+    pub multiple_domains: bool,
+}
+
+#[derive(Clone, Copy)]
+struct NameProjection<'a> {
+    domain: &'a str,
+    form: &'static str,
+    first_keyword: &'static str,
+    second_keyword: &'static str,
+    first: &'a str,
+    second: &'a str,
+}
+
+fn name_projections(pattern: &str) -> Vec<NameProjection<'_>> {
+    if crate::fed::validate_spiffe_pattern(pattern).is_err() {
+        return Vec::new();
+    }
+    let segments: Vec<_> = pattern
+        .strip_prefix("spiffe://")
+        .unwrap()
+        .split('/')
+        .collect();
+    let [domain, first_keyword, second, second_keyword, first] = segments.as_slice() else {
+        return Vec::new();
+    };
+    if [first, second]
+        .iter()
+        .any(|part| part.is_empty() || part.contains('.'))
+    {
+        return Vec::new();
+    }
+    [("host", "user", "host/user"), ("ns", "sa", "ns/sa")]
+        .into_iter()
+        .filter(|(a, b, _)| {
+            (*first_keyword == *a || *first_keyword == "*")
+                && (*second_keyword == *b || *second_keyword == "*")
+        })
+        .map(|(a, b, form)| NameProjection {
+            domain,
+            form,
+            first_keyword: a,
+            second_keyword: b,
+            first,
+            second,
+        })
+        .collect()
+}
+
+pub fn pattern_alias_owner(alias: &str, patterns: &[String]) -> PatternAliasOwner {
+    let Some((first, second)) = alias.split_once('.') else {
+        return PatternAliasOwner::Unclaimed;
+    };
+    if first.is_empty() || second.is_empty() || second.contains('.') {
+        return PatternAliasOwner::Unclaimed;
+    }
+    let mut witnesses = std::collections::BTreeSet::new();
+    for pattern in patterns {
+        for projection in name_projections(pattern) {
+            let domains: &[&str] = if projection.domain == "*" {
+                &["witness-one.invalid", "witness-two.invalid"]
+            } else {
+                std::slice::from_ref(&projection.domain)
+            };
+            for domain in domains {
+                let uri = format!(
+                    "spiffe://{domain}/{}/{second}/{}/{first}",
+                    projection.first_keyword, projection.second_keyword
+                );
+                if crate::fed::spiffe_uri_matches_pattern(&uri, pattern)
+                    && node_name_from_uri(&uri).is_ok_and(|name| name == alias)
+                {
+                    witnesses.insert(uri);
+                    if witnesses.len() > 1 {
+                        return PatternAliasOwner::Ambiguous;
+                    }
+                }
+            }
+        }
+    }
+    match witnesses.into_iter().next() {
+        Some(uri) => PatternAliasOwner::Unique(uri),
+        None => PatternAliasOwner::Unclaimed,
+    }
+}
+
+fn intersect_name_part<'a>(a: &'a str, b: &'a str) -> Option<&'a str> {
+    if a == b || b == "*" {
+        Some(a)
+    } else if a == "*" {
+        Some(b)
+    } else {
+        None
+    }
+}
+
+pub fn ambiguous_alias_classes(patterns: &[String]) -> Vec<AmbiguousAliasClass> {
+    let projections: Vec<_> = patterns
+        .iter()
+        .flat_map(|pattern| name_projections(pattern))
+        .collect();
+    let mut classes =
+        std::collections::BTreeMap::<String, (std::collections::BTreeSet<String>, bool)>::new();
+    for (index, a) in projections.iter().enumerate() {
+        for b in &projections[index..] {
+            let multiple_domains = a.domain != b.domain || a.domain == "*";
+            if a.form == b.form && !multiple_domains {
+                continue;
+            }
+            let (Some(first), Some(second)) = (
+                intersect_name_part(a.first, b.first),
+                intersect_name_part(a.second, b.second),
+            ) else {
+                continue;
+            };
+            let (forms, domains) = classes.entry(format!("{first}.{second}")).or_default();
+            forms.insert(a.form.to_owned());
+            forms.insert(b.form.to_owned());
+            *domains |= multiple_domains;
+        }
+    }
+    classes
+        .into_iter()
+        .map(|(alias, (forms, multiple_domains))| AmbiguousAliasClass {
+            alias,
+            forms: forms.into_iter().collect(),
+            multiple_domains,
+        })
+        .collect()
+}
+
 /// The key-derived node name of a pin (`sha256:<hex>` or bare hex of the key's SHA-256).
 pub fn node_name_from_pin(pin: &str) -> Result<String, String> {
     let norm = crate::fed::normalize_pin(pin);
@@ -186,3 +327,7 @@ mod tests {
         assert!(user.is_some_and(|u| !u.is_empty()), "{local}");
     }
 }
+
+#[cfg(test)]
+#[path = "node_authority_tests.rs"]
+mod authority_tests;
