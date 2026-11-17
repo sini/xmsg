@@ -439,7 +439,7 @@ fn live_wal_reads_the_latest_schema_while_preserving_main_wal_and_directory_entr
 
 #[test]
 fn live_daemon_without_an_existing_wal_shm_pair_stays_unopened() {
-    let fixture = Fixture::new(3, Shape::Current, Health::Live, Mode::Closed);
+    let fixture = Fixture::new(3, Shape::Current, Health::Live, Mode::ClosedWal);
     let before = snapshot(&fixture.db_dir, false);
     let (_, report) = fixture.report();
     assert_mode(&report, "unopened");
@@ -468,5 +468,17 @@ fn an_ordinary_held_rollback_journal_reports_presence_and_size_without_recovery(
         journal.contains("regular"),
         "journal type was not reported: {report}"
     );
+    assert_eq!(snapshot(&fixture.db_dir, false), before);
+}
+
+#[test]
+fn live_rollback_schema_is_current_without_any_file_or_byte_change() {
+    let fixture = Fixture::new(3, Shape::Current, Health::Live, Mode::Closed);
+    let before = snapshot(&fixture.db_dir, false);
+    let (_, report) = fixture.report();
+    assert_mode(&report, "ro");
+    status(&report, "database.schema_view", "pass");
+    status(&report, "database.schema_version", "pass");
+    status(&report, "database.additive", "pass");
     assert_eq!(snapshot(&fixture.db_dir, false), before);
 }

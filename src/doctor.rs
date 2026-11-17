@@ -13,6 +13,7 @@ const MAX_FILE: u64 = 1_048_576;
 const MAX_HEALTH: usize = 65_536;
 const MAX_SESSION_BODY: usize = 2 * 1024 * 1024;
 const MAX_SESSIONS: usize = 1000;
+const MAX_GONE_SESSIONS: usize = 20;
 const MAX_FED_BODY: usize = 512 * 1024;
 const MAX_PEERS: usize = 32;
 
@@ -279,42 +280,75 @@ async fn sessions(report: &mut Report, path: &Path) {
     let mut live = 0;
     let mut gone = 0;
     let mut unknown = 0;
+    let mut warning_unknown = 0;
+    let mut gone_shown = 0;
     let mut unavailable = false;
+    let mut states = BTreeMap::<&str, usize>::new();
+    let mut reasons = BTreeMap::<&str, usize>::new();
     for row in rows.iter().take(MAX_SESSIONS) {
-        let Some(address) = row["address"]
+        let address = row["address"]
             .as_str()
-            .filter(|address| !address.is_empty() && address.len() <= 1024)
-        else {
-            unknown += 1;
-            continue;
+            .filter(|address| !address.is_empty() && address.len() <= 1024);
+        let registration = match row["status"].as_str() {
+            Some("seen") => "seen",
+            Some("registered") => "registered",
+            _ => "unknown",
         };
+        *states.entry(registration).or_default() += 1;
         let observation = &row["process_liveness"];
-        let (state, status) = match observation["state"].as_str() {
-            Some("live") => {
-                live += 1;
-                ("live", Status::Pass)
-            }
+        let reason = if address.is_none() {
+            "invalid_row"
+        } else {
+            observation["reason"]
+                .as_str()
+                .filter(|reason| !reason.is_empty() && reason.len() <= 128)
+                .unwrap_or("missing_reason")
+        };
+        *reasons.entry(reason).or_default() += 1;
+        unavailable |= reason == "backend_unavailable";
+        match observation["state"].as_str().filter(|_| address.is_some()) {
+            Some("live") => live += 1,
             Some("gone") => {
                 gone += 1;
-                ("gone", Status::Warn)
+                if gone_shown < MAX_GONE_SESSIONS {
+                    report.add(
+                        format!("session.process.{}", address.unwrap()),
+                        Status::Warn,
+                        "process gone",
+                        None,
+                    );
+                    gone_shown += 1;
+                }
             }
-            _ => {
+            state => {
                 unknown += 1;
-                ("unknown", Status::Warn)
+                if !(state == Some("unknown")
+                    && registration == "seen"
+                    && reason == "missing_identity")
+                {
+                    warning_unknown += 1;
+                }
             }
-        };
-        unavailable |= observation["reason"] == "backend_unavailable";
-        report.add(
-            format!("session.process.{address}"),
-            status,
-            format!("process {state}"),
-            None,
-        );
+        }
     }
-    let partial =
-        snapshot["partial"] == true || snapshot["truncated"] == true || rows.len() > MAX_SESSIONS;
-    report.add("sessions.process", if gone > 0 || unknown > 0 || partial { Status::Warn } else { Status::Pass },
-        format!("Registered process snapshot: {live} live, {gone} gone, {unknown} unknown; {}. Process liveness is not harness or delivery readiness.", if partial { "partial coverage; absent rows are unknown" } else { "returned catalogue only" }),
+    let truncated = snapshot["truncated"] == true || rows.len() > MAX_SESSIONS;
+    let states = states
+        .iter()
+        .map(|(state, count)| format!("{state}={count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let reasons = reasons
+        .iter()
+        .map(|(reason, count)| format!("{reason}={count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = if gone > gone_shown {
+        format!("; and {} more gone sessions", gone - gone_shown)
+    } else {
+        String::new()
+    };
+    report.add("sessions.process", if gone > 0 || warning_unknown > 0 || truncated { Status::Warn } else { Status::Pass },
+        format!("Process catalogue: {live} live, {gone} gone, {unknown} unknown; states: {states}; reasons: {reasons}{more}; {}. Historical seen rows without identity are informational. Process liveness is not harness or delivery readiness.", if truncated { "truncated coverage; absent rows are unknown" } else { "local catalogue scope; absent rows are not checked" }),
         (gone > 0).then_some("Check stale registrations; doctor does not reconcile or deliver queued work."));
     if unavailable {
         report.add("sessions.process_backend", Status::Warn, "Process inspection is unavailable for some rows on this platform; those processes are unknown, not gone.", Some("Native process inspection is optional; /proc is not required. Retain unknown where the backend is unavailable."));
@@ -333,7 +367,7 @@ fn requirement_label(name: &str) -> String {
     }
 }
 
-fn database(report: &mut Report, path: &Path) {
+fn database(report: &mut Report, path: &Path, enrollment_enabled: Option<bool>) {
     use xmsg::schema_status::DaemonState;
     let state = match report.daemon_liveness {
         "live" => DaemonState::Live,
@@ -441,10 +475,21 @@ fn database(report: &mut Report, path: &Path) {
     }
     let optional = if view.optional_enrollment.is_empty() {
         "Optional enrollment tables are structurally present; loaded enrollment configuration remains unknown.".to_owned()
+    } else if enrollment_enabled == Some(false) {
+        "Optional enrollment tables are not required while the daemon reports enrollment disabled; the rest of its loaded configuration was not inspected.".to_owned()
     } else {
         format!("Optional enrollment schema is conditional/unknown: {} would be required if enrollment is configured.",view.optional_enrollment.iter().map(|name|requirement_label(name)).collect::<Vec<_>>().join("; "))
     };
-    report.add("database.enrollment_schema", Status::Warn, optional, None);
+    report.add(
+        "database.enrollment_schema",
+        if view.optional_enrollment.is_empty() || enrollment_enabled == Some(false) {
+            Status::Pass
+        } else {
+            Status::Warn
+        },
+        optional,
+        None,
+    );
 }
 
 fn observe(report: &mut Report, path: &Path) {
@@ -558,6 +603,16 @@ async fn federation(report: &mut Report, path: Option<&Path>, configured_names: 
             partial = true;
             continue;
         };
+        if row["reason"] == "outbound_only" {
+            report.add(
+                format!("peer.federation.{name}"),
+                Status::Pass,
+                "outbound-only leaf; not probed (reachable through its own outbound link)",
+                None,
+            );
+            shown += 1;
+            continue;
+        }
         let reach = match row["reachability"].as_str() {
             Some("reachable") => "reachable",
             Some("unreachable") => "unreachable",
@@ -639,7 +694,11 @@ async fn enrollment(report: &mut Report, directory: &Path) {
         Err(_)=>report.add("enrollment.ca_tls",Status::Warn,"CA TLS endpoint could not be verified; current identity expiry is unchanged.",Some("Check the saved CA URL, trust pin and network; TLS reachability is not enrollment-service readiness.")),
     }
 }
-async fn ca_application(report: &mut Report, socket: Option<&Path>, directory: Option<&Path>) {
+async fn ca_application(
+    report: &mut Report,
+    socket: Option<&Path>,
+    directory: Option<&Path>,
+) -> Option<bool> {
     let live = if let Some(socket) = socket {
         read_json(
             socket,
@@ -653,6 +712,7 @@ async fn ca_application(report: &mut Report, socket: Option<&Path>, directory: O
     } else {
         None
     };
+    let enrollment_enabled = live.as_ref().and_then(|ca| ca.enabled);
     let ca = live.or_else(|| {
         directory.map(|directory| {
             report.path("enrollment_ca", directory);
@@ -677,6 +737,7 @@ async fn ca_application(report: &mut Report, socket: Option<&Path>, directory: O
     } else {
         report.add("ca.application", Status::Warn, "CA application health, enabled state and pending approval count are unknown.", Some("Use a current daemon's private HTTP socket, or --enroll-ca-dir PATH for installed public-root and signing-key metadata only."));
     }
+    enrollment_enabled
 }
 
 async fn inspect(args: &DoctorArgs) -> Report {
@@ -748,7 +809,6 @@ async fn inspect(args: &DoctorArgs) -> Report {
             Some("Pass --http-sock PATH."),
         );
     }
-    database(&mut report, &db);
     let sidecar = suffix(&db, ".observe.sqlite");
     report.path("observation_sidecar", &sidecar);
     observe(&mut report, &sidecar);
@@ -765,12 +825,13 @@ async fn inspect(args: &DoctorArgs) -> Report {
         &configured_peers,
     )
     .await;
-    ca_application(
+    let enrollment_enabled = ca_application(
         &mut report,
         http.as_deref().filter(|_| http_good),
         args.enroll_ca_dir.as_deref(),
     )
     .await;
+    database(&mut report, &db, enrollment_enabled);
     let default = xmsg::enroll_client::default_state_directory();
     let enrolled = args
         .enroll_state

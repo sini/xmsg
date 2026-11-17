@@ -48,6 +48,10 @@ impl Peer {
     }
 }
 
+fn outbound_only(peer: &PeerConfig) -> bool {
+    peer.leaf && peer.address.is_empty()
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct Report {
     available: bool,
@@ -299,9 +303,15 @@ pub(crate) async fn collect(fed: Option<Arc<FedState>>) -> Report {
     configured.truncate(MAX_PEERS);
     let progress = configured
         .iter()
-        .map(|peer| Arc::new(Mutex::new(Peer::new(&peer.name))))
+        .map(|peer| {
+            let mut row = Peer::new(&peer.name);
+            if outbound_only(peer) {
+                row.reason = "outbound_only";
+            }
+            Arc::new(Mutex::new(row))
+        })
         .collect::<Vec<_>>();
-    let mut completed = vec![false; configured.len()];
+    let mut completed = configured.iter().map(outbound_only).collect::<Vec<_>>();
     let mut pending = Vec::<Probe>::new();
     let mut next = 0;
     let mut budget_exhausted = false;
@@ -311,6 +321,10 @@ pub(crate) async fn collect(fed: Option<Arc<FedState>>) -> Report {
             break;
         }
         while next < configured.len() && pending.len() < CONCURRENT_PEERS {
+            if completed[next] {
+                next += 1;
+                continue;
+            }
             let index = next;
             let fed = fed.clone();
             let peer = configured[index].clone();
@@ -320,6 +334,9 @@ pub(crate) async fn collect(fed: Option<Arc<FedState>>) -> Report {
                 index
             }));
             next += 1;
+        }
+        if pending.is_empty() {
+            continue;
         }
         match tokio::time::timeout_at(deadline, next_probe(&mut pending)).await {
             Ok(index) => completed[index] = true,
@@ -345,9 +362,10 @@ pub(crate) async fn collect(fed: Option<Arc<FedState>>) -> Report {
         || budget_exhausted
         || own_expiry == "unknown"
         || peers.iter().any(|peer| {
-            peer.reachability == "unknown"
-                || peer.expiry == "unknown"
-                || peer.offset_state == "unknown"
+            peer.reason != "outbound_only"
+                && (peer.reachability == "unknown"
+                    || peer.expiry == "unknown"
+                    || peer.offset_state == "unknown")
         });
     Report {
         available: true,

@@ -150,13 +150,20 @@ checks; its CA probe makes a TLS handshake only. Doctor does not repair files, i
 or migrate a database, register a service, renew credentials or send messages. It does not
 call the ordinary recipient listing or enrollment-pending endpoints, which can change daemon state.
 
-The liveness check reports registered **process** evidence as `live`, `gone` or `unknown`.
-It does not establish harness addressability, a usable Codex writer lease, message delivery
-or task completion. A gone or stale registration warns rather than fails. An older daemon,
-a cold runtime (`503`), unsupported evidence or a bounded/partial response remains unknown;
-doctor never retries through the ordinary live listing. The roster can omit registrations,
-so absence is not evidence that a process is gone. Services use only their existing stored
-witness, without registration changes. Rows without usable evidence stay unknown.
+The planned liveness check aggregates **process** evidence as `live`, `gone` or `unknown`,
+with counts by catalogue state and observation reason. A historical `seen` row with
+`unknown` / `missing_identity` is informational: it has no stored process identity to probe,
+so available `/proc` support does not make it live or gone. Other unknown evidence,
+including registered rows, probe errors and unavailable backends, still warns. Gone rows
+warn and have at most 20 individual lines; the aggregate reports the full total and
+`and N more` when details are capped. Live and unknown rows have no individual lines.
+
+This does not establish harness addressability, a usable Codex writer lease, message
+delivery or task completion. The snapshot's `partial` flag describes catalogue scope and
+is not itself a warning. Truncation, an older daemon, a cold runtime (`503`) or an unavailable
+source still warns; doctor never retries through the ordinary live listing. The roster can
+omit registrations, so absence is not evidence that a process is gone. Services use only
+their existing stored witness, without registration changes.
 
 Process inspection is optional: missing `/proc`, an unavailable platform API or denied
 inspection does not become a hard dependency. Doctor gives one portability warning per run
@@ -171,8 +178,11 @@ there is no fallback to CLI peer dials if the daemon is down or lacks this endpo
 
 The invocation probes at most 32 configured peers in sorted order, with at most four
 concurrent attempts, two seconds per peer and an eight-second total deadline. Doctor's
-IPC deadline is nine seconds. Addressless, unattempted or outbound-only client entries
-remain unknown; no address is guessed. Peer failures and uncertain observations warn,
+IPC deadline is nine seconds. A configured `leaf` without an address is reported as
+`outbound-only leaf; not probed (reachable through its own outbound link)`. This is
+informational and does not make coverage partial; its TLS, certificate expiry and clock
+offset remain unobserved. Addressless non-leaves and other unattempted entries remain
+unknown; no address is guessed. Peer failures and uncertain observations warn,
 rather than fail. An already-expired leaf certificate actually loaded by this daemon
 fails; an approaching expiry warns within the smaller of seven days or one-third of that
 certificate's lifetime. Only subject, issuer and `notAfter` certificate metadata is exposed,
@@ -194,14 +204,20 @@ Missing same-version additions warn. A schema newer than the binary fails becaus
 refuses it. An older version fails with `schema 3 message-state rebuild (destructive)` and a
 backup hint: that startup path recreates message state. Doctor never performs that work.
 These are structural requirements from startup declarations, not a chronological migration
-ledger or certification of data backfills. Optional enrollment tables are reported separately
-as conditional while the loaded enrollment configuration is unknown. Other databases and
-integrity are outside this check.
+ledger or certification of data backfills. Present optional enrollment tables are
+informational, without certifying the rest of the loaded configuration. Missing optional
+tables are also informational when the daemon's existing CA diagnostic explicitly reports
+enrollment disabled; otherwise their conditional requirements warn. No second configuration
+fetch is made. Other databases and integrity are outside this check.
 
 Reader mode depends on the health response. With a live daemon and existing regular WAL and
 SHM files, an ordinary read-only connection observes committed WAL metadata. It creates no
 new entry and does not change the main database or WAL; SQLite's normal SHM read marks may
-change. A missing or inconsistent live view stays unknown. When the daemon is down or its
+change. A live rollback-journal database with no journal, WAL or SHM also permits `mode=ro`;
+its main-file fingerprints and absent sidecars are rechecked for concurrent changes. A live
+WAL database missing its pair, an observed rollback journal or any inconsistent view stays
+unknown. Normal readers can take SQLite read locks but never a writer reservation.
+When the daemon is down or its
 liveness is unknown and sidecars exist, doctor reports their presence/type/size by stat only,
 warns about an unclean/uncertain shutdown and leaves recovery to the next normal SQLite
 startup. It does not open or read those sidecars. With no sidecars, the offline probe uses

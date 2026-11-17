@@ -238,7 +238,7 @@ fn sidecars_unchanged(
     after: &[ObservedSidecar],
     immutable: bool,
 ) -> bool {
-    if immutable {
+    if immutable || before.iter().all(|sidecar| !sidecar.public.present) {
         return after.iter().all(|sidecar| !sidecar.public.present);
     }
     live_wal_files(after)
@@ -432,7 +432,8 @@ pub fn inspect(path: &Path, state: DaemonState) -> Report {
     if immutable && before.iter().any(|sidecar| sidecar.public.present) {
         return report.uncertain("sidecars_present", "Sidecar files are present; SQLite recovery status is unknown and no SQLite connection was opened.");
     }
-    if !immutable && !live_wal_files(&before) {
+    let no_sidecars = before.iter().all(|sidecar| !sidecar.public.present);
+    if !immutable && !no_sidecars && !live_wal_files(&before) {
         return report.uncertain("live_view_unavailable", "A live read-only WAL view requires pre-existing regular WAL and SHM files and no rollback journal; no SQLite connection was opened.");
     }
     let mut main = match MainFile::open(path) {
@@ -444,11 +445,17 @@ pub fn inspect(path: &Path, state: DaemonState) -> Report {
             )
         }
     };
+    let rollback = !immutable && no_sidecars;
+    if rollback && main.header[18..20] != [1, 1] {
+        return report.uncertain("live_view_unavailable", "A live WAL database requires pre-existing regular WAL and SHM files; no SQLite connection was opened.");
+    }
     report.mode = if immutable { "ro_immutable" } else { "ro" };
     let result = open_metadata(path, immutable).and_then(|connection| read_metadata(&connection));
     let after = sidecars(path);
     report.sidecars = after.iter().map(|value| value.public.clone()).collect();
-    if !main.unchanged(path, immutable) || !sidecars_unchanged(&before, &after, immutable) {
+    if !main.unchanged(path, immutable || rollback)
+        || !sidecars_unchanged(&before, &after, immutable)
+    {
         return report.uncertain("changed_during_probe", "The main file or sidecar metadata changed during the probe; this observation is uncertain.");
     }
     let view =
@@ -465,6 +472,8 @@ pub fn inspect(path: &Path, state: DaemonState) -> Report {
     report.consistent = true;
     report.note = if immutable {
         "Lockless immutable main-file metadata snapshot; no integrity or data-backfill certification. Optional enrollment requirements depend on configuration."
+    } else if rollback {
+        "Consistent read-only rollback-journal metadata snapshot; main-file fingerprints and absent sidecars rechecked. No integrity or data-backfill certification. Optional enrollment requirements depend on configuration."
     } else {
         "Consistent read-only WAL metadata snapshot; SQLite may update existing SHM read marks. No integrity or data-backfill certification. Optional enrollment requirements depend on configuration."
     };
@@ -664,5 +673,50 @@ mod tests {
             .unwrap();
         drop(writer);
         assert!(inspect(&path, DaemonState::Down).consistent);
+    }
+
+    #[test]
+    fn live_rollback_reader_creates_no_files_or_writer_reservation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("main.sqlite");
+        let writer = fixture(&path, false);
+        let before_entries = entries(directory.path());
+        let before_main = fs::read(&path).unwrap();
+        let report = inspect(&path, DaemonState::Live);
+        assert!(report.consistent, "{report:?}");
+        assert_eq!(report.mode, "ro");
+        let connection = open_metadata(&path, false).unwrap();
+        read_metadata(&connection).unwrap();
+        writer
+            .execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
+            .expect("read-only metadata probe reserved the writer slot");
+        assert!(connection.is_readonly("main").unwrap());
+        assert_eq!(entries(directory.path()), before_entries);
+        assert_eq!(fs::read(&path).unwrap(), before_main);
+        drop(connection);
+        assert_eq!(entries(directory.path()), before_entries);
+        assert_eq!(fs::read(&path).unwrap(), before_main);
+    }
+
+    #[test]
+    fn rollback_recheck_rejects_new_journal_or_changed_main() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("main.sqlite");
+        let writer = fixture(&path, false);
+        let before = sidecars(&path);
+        let mut main = MainFile::open(&path).unwrap();
+        writer
+            .execute_batch("BEGIN IMMEDIATE; CREATE TABLE concurrent_metadata(value TEXT);")
+            .unwrap();
+        assert!(!sidecars_unchanged(&before, &sidecars(&path), false));
+        assert_eq!(
+            inspect(&path, DaemonState::Live).error_class,
+            Some("live_view_unavailable")
+        );
+        writer.execute_batch("COMMIT").unwrap();
+        assert!(sidecars(&path)
+            .iter()
+            .all(|sidecar| !sidecar.public.present));
+        assert!(!main.unchanged(&path, true));
     }
 }
