@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "539fcd303d3b41c1ad5ce3a5de3e970ee9a01e0f baseline 1375 plus this change's 2 tests (write_exe_writer_child, the ETXTBSY control), measured +2 in run 44184023135 job 134398094604 on the pre-rebase head; confirmed exact by this PR's own count guard",
-    "darwin": "539fcd303d3b41c1ad5ce3a5de3e970ee9a01e0f baseline 1387 plus this change's 2 tests, measured +2 in run 44184023082 job 134395593487 on the pre-rebase head; confirmed exact by this PR's own count guard"
+    "linux": "30ef3a6e89b84e858a89713301f1cc1809e21b75 baseline 1377/108 plus this change's test_home_isolation target (2 tests, 1 summary), measured +2/+1 on the pre-rebase head in run 44200942928; confirmed exact by this PR's own count guard",
+    "darwin": "30ef3a6e89b84e858a89713301f1cc1809e21b75 baseline 1389/108 plus this change's test_home_isolation target (2 tests, 1 summary), measured +2/+1 on the pre-rebase head in run 44200943286; confirmed exact by this PR's own count guard"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -113,16 +113,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1377,
+      "passed": 1379,
       "failed": 0,
       "ignored": 7,
-      "summaries": 108
+      "summaries": 109
     },
     "darwin": {
-      "passed": 1389,
+      "passed": 1391,
       "failed": 0,
       "ignored": 9,
-      "summaries": 108
+      "summaries": 109
     }
   }
 }
