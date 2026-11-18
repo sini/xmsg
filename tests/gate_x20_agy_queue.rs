@@ -1,3 +1,5 @@
+mod write_exe;
+
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -104,8 +106,7 @@ exit 0
         delivered_log.display(),
         delivered_log.display()
     );
-    fs::write(&fake_agy_bin, script_content).unwrap();
-    fs::set_permissions(&fake_agy_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    write_exe::write_exe(&fake_agy_bin, script_content);
     fake_agy_bin
 }
 
@@ -600,8 +601,7 @@ async fn create_fed_test_node(
     let my_proc_start =
         xmsg::process::starttime(&live_proc, my_pid).unwrap_or_else(|_| "1000".to_string());
     let caller_bin = temp.path().join("caller_bin");
-    fs::write(&caller_bin, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&caller_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    write_exe::write_exe(&caller_bin, "#!/bin/sh\nexit 0\n");
     setup_mock_process(
         &proc_root,
         my_pid,

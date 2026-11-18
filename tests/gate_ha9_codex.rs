@@ -1,6 +1,10 @@
 //! HA9-A.codex gating tests (`tests/gate_ha9_codex.rs`), covering cells C1–C7, C9–C11, and C13–C15
 //! on both Linux and Darwin (`HA9-A.codex.darwin`).
 
+mod agy_env;
+mod write_exe;
+use agy_env::ScrubAgyEnv;
+
 use std::collections::HashMap;
 use std::fs;
 use std::os::fd::AsRawFd;
@@ -109,6 +113,7 @@ fn codex_subcommand_and_serve_flags_present_and_reach_server_refusal() {
 
     // 2. Verify `xmsg serve --codex-exe ... --codex-home ...` parses flags without clap refusal.
     let out_serve = std::process::Command::new(bin)
+        .scrub_agy_env()
         .args([
             "serve",
             "--codex-exe",
@@ -294,8 +299,7 @@ impl CodexTestEnv {
         fs::create_dir_all(&bin_dir).unwrap();
 
         let codex_exe = bin_dir.join("codex-real");
-        fs::write(&codex_exe, b"#!/bin/sh\n").unwrap();
-        fs::set_permissions(&codex_exe, fs::Permissions::from_mode(0o755)).unwrap();
+        write_exe::write_exe(&codex_exe, b"#!/bin/sh\n");
 
         let conn = Connection::open_in_memory().unwrap();
         storage::init_db(&conn).unwrap();
@@ -7737,8 +7741,7 @@ async fn va41_owner_starttime_change_clears_recovery_durably() {
             xmsg::process::starttime(Path::new(xmsg::process::LIVE_PROC_ROOT), pid).unwrap();
         if changed_executable {
             let untrusted = env.codex_home.join("untrusted-executable");
-            fs::write(&untrusted, b"#!/bin/sh\n").unwrap();
-            fs::set_permissions(&untrusted, fs::Permissions::from_mode(0o755)).unwrap();
+            write_exe::write_exe(&untrusted, b"#!/bin/sh\n");
             env.write_fake_proc(pid, 1, &start, &untrusted);
         } else {
             env.write_fake_proc(pid, 1, "999999999", &env.codex_exe);
@@ -8215,6 +8218,7 @@ async fn va41_cli_starts_production_retry_scheduler_without_new_message() {
     let log = fs::File::create(&log_path).unwrap();
     let mut child = Va41Child(
         std::process::Command::new(env!("CARGO_BIN_EXE_xmsg"))
+            .scrub_agy_env()
             .args(["serve", "--db-path"])
             .arg(&db_path)
             .arg("--http-sock")

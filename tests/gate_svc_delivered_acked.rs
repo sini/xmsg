@@ -5,6 +5,8 @@
 //! `register.sock`, and sends from a process outside every tree (`http_child`), since this
 //! process is the service.
 
+mod agy_env;
+use agy_env::ScrubAgyEnv;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -47,6 +49,7 @@ impl Node {
         let register_sock = run.join("register.sock");
         let exe = std::env::current_exe().unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+            .scrub_agy_env()
             .env("XDG_RUNTIME_DIR", &run)
             .env("HOME", dir)
             .env_remove("XMSG_HOST_LABEL")

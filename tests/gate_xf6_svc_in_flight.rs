@@ -22,8 +22,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 
+mod agy_env;
 mod http_child;
 
+use agy_env::ScrubAgyEnv;
 use http_child::Via;
 
 const SVC: &str = "xf6-svc";
@@ -51,6 +53,7 @@ impl Node {
         let register_sock = run.join("register.sock");
         let exe = std::env::current_exe().unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+            .scrub_agy_env()
             .env("XDG_RUNTIME_DIR", &run)
             .env("HOME", dir)
             .env_remove("XMSG_HOST_LABEL")

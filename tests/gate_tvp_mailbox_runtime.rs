@@ -1,6 +1,8 @@
 #![cfg(unix)]
+mod agy_env;
 mod hop_client;
 mod short_sock;
+use agy_env::ScrubAgyEnv;
 
 use base64::Engine;
 
@@ -76,6 +78,7 @@ impl Node {
         let database = directory.path().join("state.db");
         let codex = directory.path().join("codex");
         let mut child = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+            .scrub_agy_env()
             .env("CODEX_HOME", &codex)
             .env_remove("XMSG_CODEX_HOME")
             .env_remove("XMSG_CODEX_EXE")

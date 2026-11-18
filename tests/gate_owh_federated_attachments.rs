@@ -1,4 +1,6 @@
+mod agy_env;
 mod short_sock;
+use agy_env::ScrubAgyEnv;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rustls::pki_types::ServerName;
@@ -107,7 +109,7 @@ impl Node {
         fs::write(&peers, config.to_string()).unwrap();
         let leaf = extra.contains(&"--leaf");
         let mut command = Command::new(env!("CARGO_BIN_EXE_xmsg"));
-        command.arg("serve");
+        command.scrub_agy_env().arg("serve");
         if !leaf {
             command.args(["--fed-listen", "127.0.0.1:0"]);
         }

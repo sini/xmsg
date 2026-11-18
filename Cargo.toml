@@ -596,3 +596,8 @@ required-features = ["daemon"]
 name = "pairing_vectors"
 path = "tests/pairing_vectors.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "test_write_exe_guard"
+path = "tests/test_write_exe_guard.rs"
+required-features = ["daemon"]

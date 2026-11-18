@@ -17,7 +17,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 
+mod agy_env;
 mod http_child;
+use agy_env::ScrubAgyEnv;
 
 extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
@@ -75,7 +77,8 @@ impl Node {
     fn spawn(&mut self, services: &[&str]) {
         let exe = std::env::current_exe().unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_xmsg"));
-        cmd.env("XDG_RUNTIME_DIR", self.dir.join("run"))
+        cmd.scrub_agy_env()
+            .env("XDG_RUNTIME_DIR", self.dir.join("run"))
             .env("HOME", &self.dir)
             .arg("serve")
             .arg("--db-path")
