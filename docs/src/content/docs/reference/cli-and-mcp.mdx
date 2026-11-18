@@ -390,7 +390,17 @@ Answers the other party of `message_id`. If you received the message, the reply 
 sender. If you sent it, the reply is a follow-up to the recipient in the same exchange:
 
 - **Returns:** `{ bytes, messageId, inReplyTo, outcome }`, where `messageId` is the new reply's
-  ULID and `inReplyTo` is `message_id`.
+  ULID (or `null` when `outcome` is `"stored"` for pull-only callers) and `inReplyTo` is `message_id`.
+- **Delivery errors:** xmsg stores the reply first, then attempts to push it. If the push fails
+  (`pushOutcome` is `"sender_gone"` or `"push_failed"`), the tool returns a classified error:
+  - `gone: …` / `not_found: …` (`sender_gone`): the recipient session exited or its inbox socket is
+    missing. Do not keep retrying the push; the reply is stored for `replies`, or use `list` and
+    `send` to reach a live session.
+  - `inbox_unavailable: …` / `inbox_timeout: …` (`push_failed`): the recipient's live inbox
+    refused the push or timed out (for example, an `agy` delivery failure or socket error). Check
+    the recipient's harness health or daemon logs before retrying.
+  - `internal: …` or `reply delivery failed: push_failed`: an internal daemon error occurred while
+    formatting or queueing the push (or an older daemon omitted detail). Inspect daemon logs.
 
 ### `replies(message_id, wait?)`
 
