@@ -718,6 +718,16 @@ async fn answer_inner(state: Arc<RelayState>, id: String, request: Request) -> R
             .map_err(|_| Failure::Unreachable)
             .and_then(|result| result)
     };
+    #[cfg(any(test, feature = "test-hooks"))]
+    if body.is_err() {
+        let delay_ms = state
+            .controls
+            .before_deadline_release_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+    }
     let mut queue = state.queue.lock().unwrap();
     let w = queue.waiting.remove(&id).ok_or(Failure::Invalid)?;
     let result = (|| {
@@ -835,6 +845,7 @@ pub mod test_hooks {
         pub after_answer_chunk: crate::observe_fed::test_hooks::Gate,
         pub waiter_cleanup_attempts: std::sync::atomic::AtomicUsize,
         pub clock_offset_ms: std::sync::atomic::AtomicU64,
+        pub before_deadline_release_ms: std::sync::atomic::AtomicU64,
         pub max_buffered_answer: std::sync::atomic::AtomicUsize,
         pub max_buffered_control: std::sync::atomic::AtomicUsize,
         pub answer_read_attempts: std::sync::atomic::AtomicUsize,
