@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "6b19529ba2cbb5e470a6342d6e32e0ac56c0f0dc baseline 1386/110 plus 16 cross-platform write_exe::writer_child entries and 2 test_write_exe_guard tests (+18/+1), measured +18/+1 in run 44254319873 job 134639587396 on the pre-rebase head; confirmed exact by this PR's own count guard",
-    "darwin": "6b19529ba2cbb5e470a6342d6e32e0ac56c0f0dc baseline 1398/110 plus 17 write_exe::writer_child entries (including macOS-only agy_darwin_presence) and 2 test_write_exe_guard tests (+19/+1), measured +19/+1 in run 44254320081 job 134632230087 on the pre-rebase head; confirmed exact by this PR's own count guard"
+    "linux": "Measured on 21ac842ea18e5aeb3e96bbc99e4c17c1e4d03b44, run 44351588395 job 134973982483; 1426 passed, 0 failed, 7 ignored, 112 summaries; all 109 integration targets executed",
+    "darwin": "Measured on 21ac842ea18e5aeb3e96bbc99e4c17c1e4d03b44, run 44351588519 job 134968385309; 1439 passed, 0 failed, 9 ignored, 112 summaries; all 109 integration targets executed"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -24,6 +24,7 @@
     "tests/encoding_properties.rs",
     "tests/enroll_hub.rs",
     "tests/fed_p1.rs",
+    "tests/federation_deny.rs",
     "tests/gate2_agent.rs",
     "tests/gate2_comm.rs",
     "tests/gate2_http.rs",
@@ -116,13 +117,13 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1411,
+      "passed": 1430,
       "failed": 0,
       "ignored": 7,
       "summaries": 112
     },
     "darwin": {
-      "passed": 1424,
+      "passed": 1443,
       "failed": 0,
       "ignored": 9,
       "summaries": 112
