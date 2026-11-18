@@ -3623,3 +3623,67 @@ async fn actual_ca_leaf_expiry_refuses_keepalive_and_parked_poll_publication() {
     );
     assert!(String::from_utf8_lossy(&second.1).contains("expired"));
 }
+
+#[tokio::test]
+async fn outbound_denied_after_tls_cannot_send_the_request() {
+    let f = Arc::new(RelayFixture::new().await);
+    let gates = xmsg::observe_relay::test_hooks::controls(&f.leaf_state);
+    gates.before_outbound_send.arm(1);
+    let hub_gates = xmsg::observe_relay::test_hooks::controls(&f.state);
+    let read = {
+        let f = f.clone();
+        tokio::spawn(
+            async move { xmsg::fed::get_federated_inbox(&f.leaf_state, &f.hub.node, 0).await },
+        )
+    };
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        gates.before_outbound_send.wait_for(1),
+    )
+    .await
+    .expect("outbound TLS finished before send");
+    reload(&f.leaf_state, |config| {
+        config["deny"] = json!({"spkis":[f.hub.pin]})
+    });
+    gates.before_outbound_send.release();
+    let result = read.await.unwrap();
+    assert!(
+        result.is_err(),
+        "denied server must not receive the outbound request after TLS"
+    );
+    assert_eq!(
+        hub_gates
+            .custody_polls
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "pre-send refusal must precede the actual server request effect"
+    );
+}
+
+#[tokio::test]
+async fn outbound_denied_after_headers_cannot_publish_or_parse_response_body() {
+    let f = Arc::new(RelayFixture::new().await);
+    let gates = xmsg::observe_relay::test_hooks::controls(&f.leaf_state);
+    gates.after_outbound_headers.arm(1);
+    let read = {
+        let f = f.clone();
+        tokio::spawn(
+            async move { xmsg::fed::get_federated_inbox(&f.leaf_state, &f.hub.node, 0).await },
+        )
+    };
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        gates.after_outbound_headers.wait_for(1),
+    )
+    .await
+    .expect("actual authenticated HTTP response headers reached client");
+    reload(&f.leaf_state, |config| {
+        config["deny"] = json!({"spkis":[f.hub.pin]})
+    });
+    gates.after_outbound_headers.release();
+    let result = read.await.unwrap();
+    assert!(
+        result.is_err(),
+        "denied post-header bytes must not parse as a successful inbox result"
+    );
+}

@@ -173,7 +173,15 @@ new issuance or renewal immediately there; there is no CRL or OCSP distribution
 to peers. Renewal does not query the IdP, and fresh login is required after
 90 days. Disabling an IdP account is not an immediate revocation of an existing
 certificate. **Pinned peers bypass certificate expiry**: pinning an enrolled key
-also bypasses these CA expiry/revocation bounds.
+also bypasses these CA expiry/revocation bounds. The daemon federation peers-file
+`deny` is separate from the CA issuance deny: an exact actual URI SAN or SPKI deny
+wins over pins, concrete CA entries and hub patterns. Current request and response
+checks use the actual admitted leaf; CA-mode sockets expire at their original
+`not_after`, while explicit pins remain expiry-independent. Each operation already
+past its applicable check may finish its bounded effect; concurrent operations are
+not reduced to a global one-request allowance, and committed effects are not undone.
+Idle sockets are not closed. This does not cover the standalone collector client.
+See the [offboarding procedure](/operations/enrollment-ca/#offboard-a-teammate-or-a-lost-or-stolen-device).
 
 Both browser flows request an explicit interaction: Google uses
 `consent select_account`; Kanidm and other providers use `login`. An attacker can

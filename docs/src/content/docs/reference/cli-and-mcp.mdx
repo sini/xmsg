@@ -329,6 +329,12 @@ exits non-zero and names the failure. Use it in CI or before a deploy:
 xmsg check-peers /path/to/peers.json --fed-cert /path/to/node.crt
 ```
 
+The wrapped peers file also accepts global `deny.uris` and `deny.spkis` lists.
+Validation rejects malformed deny fields and fingerprints; it does not prove that
+an exact selector matches the intended certificate or that another daemon has
+loaded it. See the [deny reference](/concepts/federation/#global-deny-and-current-certificate-authority)
+and [offboarding runbook](/operations/enrollment-ca/#offboard-a-teammate-or-a-lost-or-stolen-device).
+
 Planned: an otherwise valid file with ambiguous dynamic aliases still exits `0`, but prints
 one warning per alias class to stderr. Such identities will be refused even on their first
 connection. Run the new binary's check before upgrading a mixed-pattern hub, including when
