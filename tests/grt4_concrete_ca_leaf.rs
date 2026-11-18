@@ -259,12 +259,19 @@ async fn concrete_addressless_ca_leaf_survives_mixed_patterns_and_hub_restart() 
             runtime.path(),
             true,
         );
-        assert!(
-            xmsg::fed::get_federated_inbox(&hostile, HUB, 0)
-                .await
-                .is_err(),
-            "grt4 concrete cycle hostile host captured the pod alias"
-        );
+        let started = std::time::Instant::now();
+        match xmsg::fed::get_federated_inbox(&hostile, HUB, 10).await {
+            Err(xmsg::error::AppError::PeerUnreachable(_)) => {}
+            Err(err) => {
+                panic!("grt4 concrete cycle hostile host failed with unexpected error: {err:?}")
+            }
+            Ok(_) if started.elapsed() >= Duration::from_secs(14) => {
+                panic!("grt4 concrete cycle hostile host check timed out before hub refusal")
+            }
+            Ok(item) => {
+                panic!("grt4 concrete cycle hostile host was admitted (captured the pod alias): {item:?}")
+            }
+        }
         assert!(xmsg::fed::get_federated_inbox(&leaf, HUB, 0)
             .await
             .expect("grt4 concrete CA leaf failed to authenticate and poll")
