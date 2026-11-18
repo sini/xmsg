@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -1106,13 +1105,7 @@ pub fn bind_ucred_unix_listener(
         let _ = fs::remove_file(sock_path);
     }
 
-    let listener = tokio::net::UnixListener::bind(sock_path)?;
-    fs::set_permissions(sock_path, fs::Permissions::from_mode(0o600)).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("failed to set permissions on {}: {e}", sock_path.display()),
-        )
-    })?;
+    let listener = crate::agent::bind_private_socket(sock_path)?;
 
     Ok(UcredUnixListener {
         listener,

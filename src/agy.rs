@@ -2414,18 +2414,7 @@ pub async fn bind_register_listener(
         let _ = fs::remove_file(sock_path);
     }
 
-    let listener = tokio::net::UnixListener::bind(sock_path)?;
-    fs::set_permissions(
-        sock_path,
-        std::os::unix::fs::PermissionsExt::from_mode(0o600),
-    )
-    .map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!("failed to set permissions on {}: {e}", sock_path.display()),
-        )
-    })?;
-    Ok(listener)
+    crate::agent::bind_private_socket(sock_path)
 }
 
 /// Runs the registration Unix domain socket server multiplexing agy and pi harnesses.

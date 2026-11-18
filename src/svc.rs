@@ -783,9 +783,7 @@ pub fn bind_leaf_register_listener(
         let _ = std::fs::remove_file(sock_path);
     }
 
-    let listener = tokio::net::UnixListener::bind(sock_path)?;
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o600));
+    let listener = crate::agent::bind_private_socket(sock_path)?;
 
     tracing::info!(path = %sock_path.display(), "bound leaf register socket (mode 0600)");
     Ok(listener)

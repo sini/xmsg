@@ -1068,3 +1068,102 @@ async fn test_xr4_resolve_caller_session_refuses_ambiguous_multi_svc_pid() {
         "ambiguous svc caller must not record a message"
     );
 }
+
+fn private_dir() -> tempfile::TempDir {
+    let dir = tempdir().unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    dir
+}
+
+fn dir_entries(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+fn assert_private_socket(sock: &std::path::Path) {
+    use std::os::unix::fs::FileTypeExt;
+    let meta = fs::symlink_metadata(sock).unwrap();
+    assert!(
+        meta.file_type().is_socket(),
+        "{} is a socket",
+        sock.display()
+    );
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_agent_sock_never_visible_before_mode_0600() {
+    let dir = private_dir();
+    let sock = dir.path().join("agent.sock");
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    xmsg::agent::socket_publish_hook::pause_once(sock.clone(), barrier.clone());
+    let bind = tokio::spawn({
+        let sock = sock.clone();
+        async move { xmsg::agent::bind_agent_listener(&sock, current_uid()).await }
+    });
+
+    let reached = barrier.clone();
+    tokio::task::spawn_blocking(move || reached.wait())
+        .await
+        .unwrap();
+    let paused = fs::symlink_metadata(&sock);
+    // Release before asserting, so a failure reports instead of leaving the bind parked.
+    tokio::task::spawn_blocking(move || barrier.wait())
+        .await
+        .unwrap();
+    match paused {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(meta) => assert_eq!(
+            meta.permissions().mode() & 0o777,
+            0o600,
+            "agent.sock is visible at its final path before its mode is 0600"
+        ),
+        Err(e) => panic!("stat {}: {e}", sock.display()),
+    }
+
+    let listener = bind.await.unwrap().unwrap();
+    assert_private_socket(&sock);
+    let _client = UnixStream::connect(&sock).await.unwrap();
+    listener.accept().await.unwrap();
+    assert_eq!(dir_entries(dir.path()), ["agent.sock"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_socket_binds_refuse_live_listener_and_replace_stale() {
+    let dir = private_dir();
+    let sock = dir.path().join("live.sock");
+    let uid = current_uid();
+    let live = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+
+    let refusals = [
+        xmsg::agent::bind_agent_listener(&sock, uid).await.err(),
+        xmsg::agy::bind_register_listener(&sock, uid).await.err(),
+        xmsg::http::bind_ucred_unix_listener(&sock, uid, None).err(),
+    ];
+    for refusal in refusals {
+        assert_eq!(
+            refusal.expect("a live listener is refused").kind(),
+            std::io::ErrorKind::AddrInUse
+        );
+    }
+    // The live listener still owns the path.
+    let _client = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+    live.accept().unwrap();
+    assert_eq!(dir_entries(dir.path()), ["live.sock"]);
+
+    // Bound but never listening, so a forked child holding the fd cannot make it look live.
+    let stale_sock = dir.path().join("stale.sock");
+    let stale = tokio::net::UnixSocket::new_stream().unwrap();
+    stale.bind(&stale_sock).unwrap();
+    let listener = xmsg::agent::bind_agent_listener(&stale_sock, uid)
+        .await
+        .unwrap();
+    assert_private_socket(&stale_sock);
+    let _client = UnixStream::connect(&stale_sock).await.unwrap();
+    listener.accept().await.unwrap();
+    assert_eq!(dir_entries(dir.path()), ["live.sock", "stale.sock"]);
+}
