@@ -820,8 +820,14 @@ mod mdns_tests {
         assert_eq!(rig.fake.0.lock().unwrap().registers.len(), 4);
         assert_eq!(rig.announce_state(129), AnnounceState::WindowOpen(1));
 
-        // At t = 130 s (120 s elapsed): window expires, handle #4 unregisters, returns to at_rest
-        // AND state resets from Active to Unverified because no window is open.
+        // At t = 130 s (120 s elapsed): even if the reprobe's first send fails (N-3), window
+        // expiry drops `Active` to `Unverified` immediately without lingering ~4 s.
+        rig.fake
+            .0
+            .lock()
+            .unwrap()
+            .probe_outcomes
+            .push_back(ProbeOutcome::SendBlocked("EHOSTUNREACH".into()));
         rig.step(&cfg, 130);
         assert_eq!(rig.announce_state(130), AnnounceState::AtRest);
         assert_eq!(rig.engine.active_handle(), None);
@@ -914,7 +920,24 @@ mod mdns_tests {
             "foreign or loopback echo must not mark Active"
         );
 
-        // Genuine own-LAN echo (10.9.3.2 on en0) while window is open -> Active.
+        // N-1: our own LAN IP (10.9.3.2) arriving only over loopback (`via = ["lo0"]`) must NOT
+        // mark Active either.
+        rig.event(
+            Event::Resolved {
+                fullname: format!("{active_id}.{SERVICE_TYPE}"),
+                port: 7788,
+                addrs: vec![("10.9.3.2".parse().unwrap(), vec!["lo0".into()])],
+                txt: vec![("v".into(), "1".into()), ("id".into(), active_id.clone())],
+            },
+            61,
+        );
+        assert_eq!(
+            rig.state().0,
+            State::Unverified,
+            "loopback-arriving own IP must not mark Active"
+        );
+
+        // Genuine own-LAN echo (10.9.3.2 arriving on en0) while window is open -> Active.
         rig.event(
             resolved(&active_id, &["10.9.3.2"], &[("v", "1"), ("id", &active_id)]),
             62,
@@ -983,6 +1006,46 @@ mod mdns_tests {
             "transient register failure must recover on retry"
         );
         assert!(rig.engine.active_handle().is_some());
+
+        // N-2: backoff growth (2, 4, 8, 16, 30, 30 s cap), restoring a non-Unverified prior state
+        // (`PermissionSuspected`), and window expiry mid-retry.
+        let mut rig2 = Rig::new();
+        rig2.fake.0.lock().unwrap().default_probe =
+            Some(ProbeOutcome::SendBlocked("EHOSTUNREACH".into()));
+        rig2.tick(&cfg, 0);
+        rig2.step(&cfg, 2);
+        rig2.step(&cfg, 4);
+        assert_eq!(rig2.state().0, State::PermissionSuspected);
+
+        // Activate window at t = 10 with register failing: backoff steps at +2, +4, +8, +16, +30, +30.
+        rig2.fake.0.lock().unwrap().register_err = Some("register busy".into());
+        assert!(!rig2.engine.activate_announce_window(&cfg, rig2.at(10)));
+        assert_eq!(rig2.state().0, State::Failed);
+        for (before, due) in [(11, 12), (15, 16), (23, 24), (39, 40), (69, 70), (99, 100)] {
+            rig2.step(&cfg, before);
+            assert_eq!(rig2.state().0, State::Failed);
+            rig2.step(&cfg, due);
+            assert_eq!(rig2.state().0, State::Failed);
+        }
+        // Clear error before the next 30 s retry; if retry succeeds before expiry (at t = 129? next
+        // retry is at 130 == window expiry!). First verify window expiry mid-retry at t = 130
+        // restores the prior non-Unverified state (`PermissionSuspected`) and closes the window:
+        rig2.step(&cfg, 130);
+        assert_eq!(rig2.announce_state(130), AnnounceState::AtRest);
+        assert_eq!(
+            rig2.state().0,
+            State::PermissionSuspected,
+            "window expiry mid-retry must restore prior PermissionSuspected state"
+        );
+
+        // And when retry succeeds mid-window from prior `PermissionSuspected`, it restores
+        // `PermissionSuspected` rather than overwriting with `Unverified`:
+        assert!(!rig2.engine.activate_announce_window(&cfg, rig2.at(140)));
+        assert_eq!(rig2.state().0, State::Failed);
+        rig2.fake.0.lock().unwrap().register_err = None;
+        rig2.step(&cfg, 142);
+        assert_eq!(rig2.state().0, State::PermissionSuspected);
+        assert!(rig2.engine.active_handle().is_some());
     }
 
     /// M6: interface change re-runs the multicast probe, resets own-echo until the new interface
@@ -1270,14 +1333,72 @@ mod mdns_tests {
 
     #[test]
     fn the_bind_probe_reports_a_held_port() {
-        let held = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let port = held.local_addr().unwrap().port();
-        drop(held);
-        let exclusive = std::net::UdpSocket::bind(("0.0.0.0", port)).unwrap();
+        // 1. Exclusive UDP holder on 0.0.0.0:0 (no drop-and-rebind gap) refuses `probe_bind`.
+        let exclusive = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        let port = exclusive.local_addr().unwrap().port();
         let err = probe_bind(port).expect_err("exclusive socket held the port");
         assert!(err.contains(&port.to_string()), "{err}");
+
+        // 2. Forced-race control: dropping `exclusive` returns `port` to the OS ephemeral pool,
+        // where a concurrent exclusive `UdpSocket::bind` can grab it before `probe_bind(port)`.
         drop(exclusive);
-        probe_bind(port).expect("free port binds");
+        if let Ok(_interloper) = std::net::UdpSocket::bind(("0.0.0.0", port)) {
+            assert!(
+                probe_bind(port).is_err(),
+                "forced exclusive interloper must fail probe_bind"
+            );
+        }
+
+        // 3. Race-free positive arms: `probe_bind(0)` selects a kernel-free port, and a
+        // reuse-enabled (`SO_REUSEADDR` + `SO_REUSEPORT`) peer keeps its port out of the OS
+        // exclusive ephemeral pool while allowing `probe_bind` to coexist under UDP churn.
+        probe_bind(0).expect("kernel-assigned port binds");
+        let shared = {
+            use std::os::fd::FromRawFd;
+            let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+            assert!(fd >= 0, "open UDP socket");
+            let one: libc::c_int = 1;
+            unsafe {
+                assert_eq!(
+                    libc::setsockopt(
+                        fd,
+                        libc::SOL_SOCKET,
+                        libc::SO_REUSEADDR,
+                        (&raw const one).cast(),
+                        std::mem::size_of_val(&one) as libc::socklen_t,
+                    ),
+                    0
+                );
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_REUSEPORT,
+                    (&raw const one).cast(),
+                    std::mem::size_of_val(&one) as libc::socklen_t,
+                );
+                let mut addr: libc::sockaddr_in = std::mem::zeroed();
+                #[cfg(target_os = "macos")]
+                {
+                    addr.sin_len = std::mem::size_of_val(&addr) as u8;
+                }
+                addr.sin_family = libc::AF_INET as libc::sa_family_t;
+                assert_eq!(
+                    libc::bind(
+                        fd,
+                        (&raw const addr).cast(),
+                        std::mem::size_of_val(&addr) as libc::socklen_t,
+                    ),
+                    0
+                );
+                std::net::UdpSocket::from_raw_fd(fd)
+            }
+        };
+        let shared_port = shared.local_addr().unwrap().port();
+        for _ in 0..100 {
+            let _churn = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+            probe_bind(shared_port).expect("reuse-shared port binds without ephemeral race");
+        }
+        drop(shared);
     }
 
     #[test]
@@ -1368,16 +1489,29 @@ mod mdns_tests {
         assert_eq!(rig2.fake.0.lock().unwrap().current_registered, None);
     }
 
-    /// M5 (macOS): the real responder binds beside mDNSResponder and receives a record
-    /// registered with `dns-sd -R`.
+    /// M5 & S-1 (macOS): the real responder binds beside mDNSResponder, receives a record
+    /// registered with `dns-sd -R`, and keeps ONE long-lived browse receiver across `register`
+    /// rotations so a `ServiceRemoved` queued right before a rotation is still applied.
     #[cfg(target_os = "macos")]
     #[test]
     fn m5_receives_a_record_registered_with_dns_sd() {
         use xmsg::discovery::mdns::MdnsSd;
-        let mut backend = MdnsSd::default();
-        backend
-            .start()
-            .expect("mdns-sd starts beside mDNSResponder");
+        let candidates = SharedCandidates::default();
+        let status = SharedStatus::default();
+        let mut engine = Engine::new(
+            MdnsSd::default(),
+            Box::new(random_id),
+            status,
+            candidates.clone(),
+        );
+        let cfg = inputs_mode(true, AnnounceMode::Timed);
+        engine.reconcile(&cfg, Instant::now());
+        assert_ne!(
+            engine.state(),
+            State::Failed,
+            "mdns-sd starts beside mDNSResponder"
+        );
+
         let name = format!("xmsg-m5-{}", std::process::id());
         let child = Kill(
             Command::new("/usr/bin/dns-sd")
@@ -1390,23 +1524,92 @@ mod mdns_tests {
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut got = None;
         while got.is_none() && Instant::now() < deadline {
-            if let Some(Event::Resolved {
-                fullname,
-                port,
-                txt,
-                ..
-            }) = backend.recv(Duration::from_secs(1))
-            {
-                if fullname.starts_with(&name) {
-                    got = Some((port, txt));
+            if let Some(ev) = engine.backend.recv(Duration::from_secs(1)) {
+                if let Event::Resolved {
+                    ref fullname,
+                    port,
+                    ref txt,
+                    ..
+                } = ev
+                {
+                    if fullname.starts_with(&name) {
+                        got = Some((port, txt.clone()));
+                    }
                 }
+                engine.handle(ev, Instant::now());
             }
         }
-        drop(child);
-        backend.stop();
-        let (port, txt) = got.expect("no record from dns-sd -R within 20 s");
+        let (port, got_txt) = got.expect("no record from dns-sd -R within 20 s");
         assert_eq!(port, 47791);
-        assert!(txt.contains(&("v".into(), "1".into())), "{txt:?}");
-        assert!(txt.contains(&("id".into(), "m5".into())), "{txt:?}");
+        assert!(got_txt.contains(&("v".into(), "1".into())), "{got_txt:?}");
+        assert!(got_txt.contains(&("id".into(), "m5".into())), "{got_txt:?}");
+
+        // Drain any remaining initial events before stopping `dns-sd -R`.
+        while let Some(ev) = engine.backend.recv(Duration::from_millis(200)) {
+            engine.handle(ev, Instant::now());
+        }
+
+        // S-1 forced control: stop `dns-sd -R` so `ServiceRemoved` queues in `backend.events`
+        // BEFORE we rotate/register our own service, then rotate, then drain and verify removal.
+        drop(child);
+        let q_deadline = Instant::now() + Duration::from_secs(15);
+        while !engine.backend.has_queued_events() && Instant::now() < q_deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            engine.backend.has_queued_events(),
+            "goodbye event did not queue in mdns-sd receiver within 15 s"
+        );
+        // Let macOS mDNSResponder finish its 3× 2 s goodbye burst into the receiver queue before
+        // rotating, so a per-register re-browse would drop all of them.
+        std::thread::sleep(Duration::from_millis(4500));
+
+        let rot_id = random_id().unwrap();
+        let mut reg_addrs = announce_addrs(
+            "0.0.0.0:47792".parse().unwrap(),
+            &engine.backend.interfaces(),
+        );
+        if reg_addrs.is_empty() {
+            reg_addrs.push("10.0.0.1".parse().unwrap());
+        }
+        engine
+            .backend
+            .register(&rot_id, 47792, &reg_addrs, &txt(&rot_id))
+            .expect("register rotation on real MdnsSd");
+        engine.backend.unregister();
+
+        let mut saw_removed = false;
+        let drain_until = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < drain_until {
+            let Some(ev) = engine.backend.recv(Duration::from_millis(250)) else {
+                if saw_removed {
+                    break;
+                }
+                continue;
+            };
+            if let Event::Removed { ref fullname } = ev {
+                if fullname.starts_with(&name) {
+                    saw_removed = true;
+                }
+            }
+            engine.handle(ev, Instant::now());
+        }
+        engine.backend.stop();
+        assert!(
+            saw_removed,
+            "ServiceRemoved queued before register rotation was lost"
+        );
+        let remaining: Vec<SocketAddr> = candidates
+            .read()
+            .unwrap()
+            .snapshot(Instant::now())
+            .into_iter()
+            .map(|c| c.addr)
+            .filter(|a| a.port() == 47791)
+            .collect();
+        assert!(
+            remaining.is_empty(),
+            "stale candidate survived after queued ServiceRemoved: {remaining:?}"
+        );
     }
 }

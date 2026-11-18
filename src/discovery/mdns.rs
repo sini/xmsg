@@ -469,12 +469,24 @@ impl<B: Backend> Engine<B> {
         self.next_rotate = None;
         let had_echo = std::mem::replace(&mut self.own_echo_seen, false);
         let recovering_failed = self.register_failures > 0;
+        let restored = self.prior_state.take();
         self.register_failures = 0;
         self.register_retry_at = None;
-        self.prior_state = None;
-        if (had_echo && self.state() == State::Active)
-            || (recovering_failed && self.state() == State::Failed)
-        {
+        if had_echo && self.state() == State::Active {
+            self.set(
+                State::Unverified,
+                "announcement stopped; Local Network permission unverified while at rest",
+            );
+            self.probe_due = Some(now);
+        } else if recovering_failed && self.state() == State::Failed {
+            if let Some((prev_state, prev_detail)) = restored {
+                self.set(prev_state, prev_detail);
+            } else {
+                self.set(
+                    State::Unverified,
+                    "announcement window closed; Local Network permission unverified while at rest",
+                );
+            }
             self.probe_due = Some(now);
         }
     }
@@ -967,11 +979,17 @@ impl<B: Backend> Engine<B> {
         let id = value("id");
         if self.is_own_handle(id, &fullname) {
             // Positive Local Network arm (only while actively announcing): our own _xmsg
-            // announcement resolving back on one of our own non-loopback LAN interface addresses.
+            // announcement resolving back over a non-loopback LAN interface (`via`) with one of
+            // our own non-loopback LAN interface addresses.
             if self.is_active_handle(id, &fullname) {
-                let own_lan_ip = addrs.iter().map(|(ip, _)| *ip).find(|ip| {
-                    acceptable_ip(*ip)
-                        && self.interfaces.iter().any(|(_, iface_ip)| *iface_ip == *ip)
+                let own_lan_ip = addrs.iter().find_map(|(ip, via)| {
+                    let on_lan_iface = via
+                        .iter()
+                        .any(|ifname| self.interfaces.iter().any(|(n, _)| n == ifname));
+                    (on_lan_iface
+                        && acceptable_ip(*ip)
+                        && self.interfaces.iter().any(|(_, iface_ip)| *iface_ip == *ip))
+                    .then_some(*ip)
                 });
                 if let Some(ip) = own_lan_ip {
                     self.own_echo_seen = true;
@@ -1132,6 +1150,13 @@ pub struct MdnsSd {
     registered: Option<String>,
 }
 
+impl MdnsSd {
+    /// Whether any browse event is currently queued in the long-lived receiver.
+    pub fn has_queued_events(&self) -> bool {
+        self.events.as_ref().is_some_and(|rx| !rx.is_empty())
+    }
+}
+
 /// Binds UDP `port` on `0.0.0.0` with the reuse options `mdns-sd` uses, then closes it.
 /// `mdns-sd` 0.21.7 only debug-logs bind errors on startup, and treats `[::]:5353` bind failures
 /// as non-fatal on IPv4-only / IPv6-disabled hosts, so probing IPv4 `0.0.0.0:5353` catches an
@@ -1184,10 +1209,6 @@ impl Backend for MdnsSd {
             .register(info)
             .map_err(|e| format!("mDNS announce failed: {e}"))?;
         self.registered = Some(fullname);
-        // Re-subscribing replays cached records so a fast LAN echo of our own handle is delivered.
-        if let Ok(events) = daemon.browse(SERVICE_TYPE) {
-            self.events = Some(events);
-        }
         Ok(())
     }
 
