@@ -399,7 +399,7 @@ fn doctor_reports_the_discovery_state_and_standing_always_notice() {
         "unverified",
         json!({"window_open": 95}),
         "timed",
-        "no own-LAN reply",
+        "at rest",
     ));
     let uv = doctor_check(&unverified, "discovery.mdns").unwrap();
     assert_eq!(uv["status"], "warn", "unverified must never pass: {uv}");
@@ -469,9 +469,9 @@ mod mdns_tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::{Arc, Mutex};
     use xmsg::discovery::mdns::{
-        announce_addrs, build_mdns_a_query, ln_query_name, probe_bind, random_id, txt, Backend,
-        Engine, Event, Inputs, LnQueryMode, ProbeOutcome, ANNOUNCE_WINDOW, IP_CHECK_SECS,
-        LN_DEBOUNCE_CONSECUTIVE, LN_PROBE_RETRY_INTERVAL, LN_QUERY_MODE, PROTOCOL_VERSION,
+        announce_addrs, build_mdns_a_query, probe_bind, random_id, random_query_name, txt, Backend,
+        Engine, Event, Inputs, ProbeOutcome, ANNOUNCE_WINDOW, IP_CHECK_SECS,
+        LN_DEBOUNCE_CONSECUTIVE, LN_PROBE_RETRY_INTERVAL, PROTOCOL_VERSION, REGISTER_RETRY_BASE,
         ROTATE_INTERVAL, SERVICE_TYPE,
     };
     use xmsg::discovery::{
@@ -575,10 +575,7 @@ mod mdns_tests {
             if let Some(next) = inner.probe_outcomes.pop_front() {
                 return next;
             }
-            inner
-                .default_probe
-                .clone()
-                .unwrap_or(ProbeOutcome::SentNoReply)
+            inner.default_probe.clone().unwrap_or(ProbeOutcome::SentOk)
         }
     }
 
@@ -606,10 +603,9 @@ mod mdns_tests {
             let status = SharedStatus::default();
             let candidates = SharedCandidates::default();
             let trigger = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let engine = Engine::with_trigger_and_query(
+            let engine = Engine::with_trigger(
                 fake.clone(),
                 id_gen,
-                LN_QUERY_MODE,
                 status.clone(),
                 candidates.clone(),
                 trigger.clone(),
@@ -709,8 +705,8 @@ mod mdns_tests {
         assert_eq!(rig.announce_state(0), AnnounceState::AtRest);
     }
 
-    /// M2 & P14: TXT carries only `v=1` and a 128-bit hex `id` — never `root`, node name, user
-    /// or host name; incoming `root` keys from peers are ignored (`root_fp == None`).
+    /// M2: TXT carries only `v=1` and a 128-bit hex `id` — never `root`, node name, user or host
+    /// name; incoming `root` keys from peers are ignored (`root_fp == None`).
     #[test]
     fn m2_txt_carries_no_root_or_names_and_ignores_peer_root() {
         let id = random_id().expect("128-bit random handle");
@@ -757,9 +753,9 @@ mod mdns_tests {
         );
     }
 
-    /// P14: At startup, `timed` (default) is browse-only at rest; `activate_announce_window` (or
-    /// the local trigger hook) opens a 120 s window, rotates handle + instance + target hostname
-    /// every 30 s and unregisters the old record each time, then expires back to `at_rest`.
+    /// At startup, `timed` (default) is browse-only at rest; local activation opens a 120 s
+    /// window, rotates handle + instance + target hostname every 30 s and unregisters the old
+    /// record each time, then expires back to `at_rest` (and `Unverified` state).
     #[test]
     fn p14_timed_startup_is_at_rest_rotates_every_30s_and_expires_at_120s() {
         assert_eq!(ANNOUNCE_WINDOW, Duration::from_secs(120));
@@ -768,54 +764,50 @@ mod mdns_tests {
         let mut rig = Rig::new();
         let cfg = inputs_mode(true, AnnounceMode::Timed);
 
-        // Startup: browse-only at rest — zero registrations.
+        // Startup: browse-only at rest — zero registrations, state is Unverified.
         rig.tick(&cfg, 0);
         assert_eq!(rig.announce_state(0), AnnounceState::AtRest);
+        assert_eq!(rig.state().0, State::Unverified);
         assert!(
             rig.fake.0.lock().unwrap().registers.is_empty(),
             "timed mode must never announce at startup"
         );
 
         // Local activation via trigger hook at t = 10 s opens [10, 130).
+        // Note: id #1 was used for startup's random deny query, so handle #1 here is id #2.
         rig.trigger.store(true, std::sync::atomic::Ordering::SeqCst);
         rig.step(&cfg, 10);
         assert_eq!(rig.announce_state(10), AnnounceState::WindowOpen(120));
         assert_eq!(rig.announce_state(25), AnnounceState::WindowOpen(105));
+        let h1 = rig.engine.active_handle().unwrap().to_string();
         {
             let inner = rig.fake.0.lock().unwrap();
             assert_eq!(inner.registers.len(), 1);
-            assert_eq!(inner.registers[0].id, format!("{:032x}", 1));
-            assert_eq!(
-                inner.registers[0].fullname,
-                format!("{:032x}.{SERVICE_TYPE}", 1)
-            );
-            assert_eq!(inner.registers[0].host, format!("{:032x}.local.", 1));
+            assert_eq!(inner.registers[0].id, h1);
+            assert_eq!(inner.registers[0].fullname, format!("{h1}.{SERVICE_TYPE}"));
+            assert_eq!(inner.registers[0].host, format!("{h1}.local."));
             assert!(inner.unregisters.is_empty());
         }
 
-        // Self-echo of active handle must never enter CandidateTable.
-        let h1 = format!("{:032x}", 1);
+        // Self-echo of active handle on our own LAN IP marks Active and never enters CandidateTable.
         rig.event(resolved(&h1, &["10.9.3.2"], &[("v", "1"), ("id", &h1)]), 15);
         assert!(rig.candidates(15).is_empty(), "own handle entered table");
+        assert_eq!(rig.state().0, State::Active);
 
-        // At t = 40 s (+30 s): rotates to handle #2 and unregisters handle #1.
+        // At t = 40 s (+30 s): rotates to a fresh handle and unregisters `h1`.
         rig.step(&cfg, 40);
+        let h2 = rig.engine.active_handle().unwrap().to_string();
+        assert_ne!(h1, h2);
         {
             let inner = rig.fake.0.lock().unwrap();
             assert_eq!(inner.registers.len(), 2);
-            assert_eq!(
-                inner.unregisters,
-                vec![format!("{:032x}.{SERVICE_TYPE}", 1)]
-            );
-            assert_eq!(inner.registers[1].id, format!("{:032x}", 2));
-            assert_eq!(
-                inner.registers[1].fullname,
-                format!("{:032x}.{SERVICE_TYPE}", 2)
-            );
-            assert_eq!(inner.registers[1].host, format!("{:032x}.local.", 2));
+            assert_eq!(inner.unregisters, vec![format!("{h1}.{SERVICE_TYPE}")]);
+            assert_eq!(inner.registers[1].id, h2);
+            assert_eq!(inner.registers[1].fullname, format!("{h2}.{SERVICE_TYPE}"));
+            assert_eq!(inner.registers[1].host, format!("{h2}.local."));
         }
 
-        // Delayed cached replay of retired handle #1 is still ignored.
+        // Delayed cached replay of retired handle `h1` is still ignored.
         rig.event(resolved(&h1, &["10.9.3.2"], &[("v", "1"), ("id", &h1)]), 45);
         assert!(
             rig.candidates(45).is_empty(),
@@ -828,10 +820,12 @@ mod mdns_tests {
         assert_eq!(rig.fake.0.lock().unwrap().registers.len(), 4);
         assert_eq!(rig.announce_state(129), AnnounceState::WindowOpen(1));
 
-        // At t = 130 s (120 s elapsed): window expires, handle #4 unregisters, returns to at_rest.
+        // At t = 130 s (120 s elapsed): window expires, handle #4 unregisters, returns to at_rest
+        // AND state resets from Active to Unverified because no window is open.
         rig.step(&cfg, 130);
         assert_eq!(rig.announce_state(130), AnnounceState::AtRest);
         assert_eq!(rig.engine.active_handle(), None);
+        assert_eq!(rig.state().0, State::Unverified);
         {
             let inner = rig.fake.0.lock().unwrap();
             assert_eq!(inner.unregisters.len(), 4);
@@ -844,11 +838,12 @@ mod mdns_tests {
         assert_eq!(rig.fake.0.lock().unwrap().registers.len(), 4);
     }
 
-    /// M4 & P15: Debounced non-announcing multicast detector:
-    /// - 1 or 2 `EHOSTUNREACH` errors followed by `SentNoReply` reset the streak (debounced);
-    /// - 3 consecutive `EHOSTUNREACH` errors report `permission_suspected`, never proven;
-    /// - `SentNoReply` reports `unverified`, never `active`;
-    /// - only a genuine own-LAN IPv4 reply reports `active` (foreign or loopback replies do not).
+    /// M4 & B1: Complementary Local Network detector arms:
+    /// - Deny arm (at all times): 1 transient `EHOSTUNREACH` is debounced; 3 consecutive
+    ///   `EHOSTUNREACH` errors report `permission_suspected`, never proven;
+    /// - At rest (`SentOk` without an open announce window): reports `unverified`, never `active`;
+    /// - Positive arm (only while announcing): own `_xmsg` announcement echo on our own LAN IP
+    ///   marks `active`, while loopback or foreign-IP echoes do not.
     #[test]
     fn m4_p15_multicast_detector_debounces_and_requires_own_lan_reply() {
         assert_eq!(LN_DEBOUNCE_CONSECUTIVE, 3);
@@ -857,13 +852,13 @@ mod mdns_tests {
         let mut rig = Rig::new();
         {
             let mut inner = rig.fake.0.lock().unwrap();
-            // Transient single EHOSTUNREACH (as observed in `allowed-3`), then SentNoReply.
+            // Transient single EHOSTUNREACH (as observed in `allowed-3`), then SentOk.
             inner
                 .probe_outcomes
                 .push_back(ProbeOutcome::SendBlocked("EHOSTUNREACH".into()));
-            inner.probe_outcomes.push_back(ProbeOutcome::SentNoReply);
+            inner.probe_outcomes.push_back(ProbeOutcome::SentOk);
         }
-        let cfg = inputs_mode(true, AnnounceMode::BrowseOnly);
+        let cfg = inputs_mode(true, AnnounceMode::Timed);
 
         // t = 0: first EHOSTUNREACH -> still Starting (debounced, streak = 1).
         rig.tick(&cfg, 0);
@@ -874,7 +869,7 @@ mod mdns_tests {
         );
         assert_eq!(rig.engine.warnings(), 0);
 
-        // t = 2: retry gets SentNoReply -> resets streak, state is Unverified (never Active).
+        // t = 2: retry gets SentOk -> resets streak, state is Unverified at rest (never Active).
         rig.step(&cfg, 2);
         assert_eq!(rig.state().0, State::Unverified);
 
@@ -900,39 +895,41 @@ mod mdns_tests {
         );
         assert_eq!(rig.engine.warnings(), 1);
 
-        // Foreign LAN IP reply (not our en0 10.9.3.2) must NOT become Active.
-        rig.fake
-            .0
-            .lock()
-            .unwrap()
-            .probe_outcomes
-            .push_back(ProbeOutcome::OwnLanReply("10.9.99.99".parse().unwrap()));
+        // Open a timed announce window at t = 60: loopback or foreign-IP echo of our active
+        // handle must NOT mark Active; only our own interface IP (10.9.3.2) marks Active.
         rig.tick(&cfg, 60);
+        assert!(rig.engine.activate_announce_window(&cfg, rig.at(60)));
+        let active_id = rig.engine.active_handle().unwrap().to_string();
+        rig.event(
+            resolved(
+                &active_id,
+                &["127.0.0.1", "10.9.99.99"],
+                &[("v", "1"), ("id", &active_id)],
+            ),
+            61,
+        );
         assert_eq!(
             rig.state().0,
             State::Unverified,
-            "foreign LAN reply must not mark Active"
+            "foreign or loopback echo must not mark Active"
         );
 
-        // Genuine own-LAN reply (10.9.3.2 on en0) -> Active.
-        rig.fake
-            .0
-            .lock()
-            .unwrap()
-            .probe_outcomes
-            .push_back(ProbeOutcome::OwnLanReply("10.9.3.2".parse().unwrap()));
-        rig.tick(&cfg, 90);
+        // Genuine own-LAN echo (10.9.3.2 on en0) while window is open -> Active.
+        rig.event(
+            resolved(&active_id, &["10.9.3.2"], &[("v", "1"), ("id", &active_id)]),
+            62,
+        );
         assert_eq!(rig.state().0, State::Active);
     }
 
-    /// Privacy: default `LN_QUERY_MODE` is `RandomLabel`, and the wire query packet
-    /// discloses zero OS hostname bytes while encoding a valid `A IN` (`RD=0`) DNS query.
+    /// Privacy: the multicast deny query always uses a fresh CSPRNG opaque label and never
+    /// discloses any OS hostname bytes on the wire.
     #[test]
     fn p15_default_query_is_random_label_and_hides_hostname() {
-        assert_eq!(LN_QUERY_MODE, LnQueryMode::RandomLabel);
-        let q1 = ln_query_name(LN_QUERY_MODE);
-        let q2 = ln_query_name(LN_QUERY_MODE);
-        assert!(q1.ends_with(".local"), "{q1}");
+        let mut gen = random_id;
+        let q1 = random_query_name(&mut gen).expect("random query label");
+        let q2 = random_query_name(&mut gen).expect("random query label");
+        assert!(q1.starts_with("xmsg-") && q1.ends_with(".local"), "{q1}");
         assert_ne!(q1, q2, "random-label queries should be freshly generated");
 
         let pkt = build_mdns_a_query(&q1, 0x1234).expect("encode mDNS A query");
@@ -951,14 +948,14 @@ mod mdns_tests {
                 "random-label probe leaked OS hostname '{base}'"
             );
         }
-
-        // Documented fallback constant produces `<sanitized-host>.local`.
-        let fallback = ln_query_name(LnQueryMode::OsHostname);
-        assert!(fallback.ends_with(".local"), "{fallback}");
     }
 
+    /// M4 & S2: responder start errors retry on the next tick, and a transient `register` error
+    /// retries with bounded backoff (`REGISTER_RETRY_BASE = 2s`) and recovers to the prior state
+    /// rather than leaving `Failed` stuck.
     #[test]
     fn m4_responder_failure_is_reported_and_retried() {
+        assert_eq!(REGISTER_RETRY_BASE, Duration::from_secs(2));
         let mut rig = Rig::new();
         rig.fake.0.lock().unwrap().start_err = Some("bind 5353: address in use".into());
         rig.tick(&inputs(true, true), 0);
@@ -968,9 +965,28 @@ mod mdns_tests {
         rig.fake.0.lock().unwrap().start_err = None;
         rig.tick(&inputs(true, true), 30);
         assert_eq!(rig.state().0, State::Unverified);
+
+        // S2 forced control: transient `register` failure once while `Unverified`, followed by
+        // success on the 2 s backoff retry -> recovers out of `Failed` to `Unverified`.
+        let cfg = inputs_mode(true, AnnounceMode::Timed);
+        rig.fake.0.lock().unwrap().register_err = Some("transient register error".into());
+        assert!(!rig.engine.activate_announce_window(&cfg, rig.at(35)));
+        assert_eq!(rig.state().0, State::Failed);
+        assert_eq!(rig.announce_state(35), AnnounceState::WindowOpen(120));
+
+        // Clear the transient error; after 2 s backoff, `step_timers` retries and recovers.
+        rig.fake.0.lock().unwrap().register_err = None;
+        rig.step(&cfg, 37);
+        assert_eq!(
+            rig.state().0,
+            State::Unverified,
+            "transient register failure must recover on retry"
+        );
+        assert!(rig.engine.active_handle().is_some());
     }
 
-    /// M6: interface change re-runs the multicast probe and rotates any open announcement handle.
+    /// M6: interface change re-runs the multicast probe, resets own-echo until the new interface
+    /// echoes, and rotates any open announcement handle.
     #[test]
     fn m6_interface_change_reprobes_and_rotates_open_announcement() {
         const { assert!(IP_CHECK_SECS <= 30) };
@@ -978,30 +994,34 @@ mod mdns_tests {
         let cfg = inputs_mode(true, AnnounceMode::Timed);
         rig.tick(&cfg, 0);
         assert!(rig.engine.activate_announce_window(&cfg, rig.at(1)));
+        let h1 = rig.engine.active_handle().unwrap().to_string();
+        rig.event(resolved(&h1, &["10.9.3.2"], &[("v", "1"), ("id", &h1)]), 2);
+        assert_eq!(rig.state().0, State::Active);
         assert_eq!(rig.fake.0.lock().unwrap().registers.len(), 1);
         let probes_before = rig.fake.0.lock().unwrap().probed_queries.len();
 
-        // Roam en0 to a new IP and inject an own-LAN reply for the new IP.
-        {
-            let mut inner = rig.fake.0.lock().unwrap();
-            inner.interfaces = vec![("en0".into(), "10.20.0.5".parse().unwrap())];
-            inner
-                .probe_outcomes
-                .push_back(ProbeOutcome::OwnLanReply("10.20.0.5".parse().unwrap()));
-        }
+        // Roam en0 to a new IP: handle rotates, old echo clears to Unverified until new IP echoes.
+        rig.fake.0.lock().unwrap().interfaces = vec![("en0".into(), "10.20.0.5".parse().unwrap())];
         rig.tick(&cfg, 10);
-        let inner = rig.fake.0.lock().unwrap();
-        assert!(inner.probed_queries.len() > probes_before);
-        assert_eq!(
-            inner.registers.len(),
-            2,
-            "interface change must rotate handle"
+        let h2 = rig.engine.active_handle().unwrap().to_string();
+        {
+            let inner = rig.fake.0.lock().unwrap();
+            assert!(inner.probed_queries.len() > probes_before);
+            assert_eq!(
+                inner.registers.len(),
+                2,
+                "interface change must rotate handle"
+            );
+            assert_eq!(
+                inner.registers[1].addrs,
+                vec!["10.20.0.5".parse::<IpAddr>().unwrap()]
+            );
+        }
+        assert_eq!(rig.state().0, State::Unverified);
+        rig.event(
+            resolved(&h2, &["10.20.0.5"], &[("v", "1"), ("id", &h2)]),
+            11,
         );
-        assert_eq!(
-            inner.registers[1].addrs,
-            vec!["10.20.0.5".parse::<IpAddr>().unwrap()]
-        );
-        drop(inner);
         assert_eq!(rig.state().0, State::Active);
     }
 
@@ -1198,6 +1218,9 @@ mod mdns_tests {
         assert!(rig.candidates(30).is_empty());
     }
 
+    /// Review C & N4: a shared address survives one instance removal, and 300 rotated instances
+    /// sharing a live address without goodbyes evict the oldest instance rather than wedging the
+    /// 256-instance cap.
     #[test]
     fn a_shared_address_survives_one_instance_removal() {
         let mut rig = Rig::new();
@@ -1218,6 +1241,20 @@ mod mdns_tests {
             4,
         );
         assert!(rig.candidates(4).is_empty());
+
+        for i in 0..300u64 {
+            rig.event(
+                resolved(&format!("rot-{i}"), &["10.9.4.2"], &[("id", "rot")]),
+                10 + i,
+            );
+        }
+        assert!(rig.engine.instance_count() <= 256);
+        rig.event(resolved("fresh-peer", &["10.9.4.99"], &[("id", "f")]), 400);
+        let cands = rig.candidates(400);
+        assert!(
+            cands.contains(&"10.9.4.99:7788".parse().unwrap()),
+            "{cands:?}"
+        );
     }
 
     #[test]
@@ -1296,23 +1333,29 @@ mod mdns_tests {
         assert!(rig.fake.0.lock().unwrap().registers.is_empty());
     }
 
-    /// Review C: `getrandom` failure at activation or on a 30 s rotation withdraws any active
-    /// announcement and falls back to browse-only at rest while keeping browse active.
+    /// Review C & N3: `getrandom` failure skips sending any predictable/all-zero multicast probe,
+    /// and at activation or on a 30 s rotation withdraws any active announcement and falls back to
+    /// browse-only at rest while keeping browse active.
     #[test]
     fn getrandom_failure_degrades_to_browse_only_at_start_and_rotation() {
         let mut rig = Rig::with_id_gen(Box::new(|| Err("entropy unavailable".into())));
         let cfg = inputs_mode(true, AnnounceMode::Timed);
         rig.tick(&cfg, 0);
+        // N3: probe is skipped rather than emitting an all-zero query label.
+        assert!(rig.fake.0.lock().unwrap().probed_queries.is_empty());
+        assert_eq!(rig.state().0, State::Unverified);
         assert!(!rig.engine.activate_announce_window(&cfg, rig.at(1)));
         assert!(rig.fake.0.lock().unwrap().registers.is_empty());
         assert_eq!(rig.announce_state(1), AnnounceState::AtRest);
         assert_eq!(rig.engine.warnings(), 1);
 
-        // Succeeds on first handle, fails on the 30 s rotation -> withdraws old record & at_rest.
+        // Succeeds for startup probe + first handle (2 calls), fails on the 30 s rotation ->
+        // withdraws old record & returns to at_rest.
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut rig2 = Rig::with_id_gen(Box::new(move || {
-            if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                Ok("11".repeat(16))
+            let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < 2 {
+                Ok(format!("{:032x}", n + 1))
             } else {
                 Err("entropy exhausted".into())
             }

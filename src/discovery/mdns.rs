@@ -14,11 +14,14 @@
 //!   service instance (`<id>._xmsg._tcp.local.`) and SRV target host (`<id>.local.`) every
 //!   [`ROTATE_INTERVAL`] (30 s), at window start, and on interface changes, unregistering the
 //!   previous record each time.
-//! - Outbound multicast reachability / macOS Local Network state is probed without announcing via
-//!   an IPv4 multicast DNS `A` query to `224.0.0.251:5353`, debounced across
-//!   [`LN_DEBOUNCE_CONSECUTIVE`] consecutive send failures into [`State::PermissionSuspected`].
-//!   IPv6 multicast gating and IPv6 link-local (`fe80::/10`) candidates are not probed or dialled
-//!   in v1.
+//! - **Deny arm (always active, zero disclosure):** an IPv4 multicast DNS `A` query for a fresh
+//!   random opaque label `xmsg-<32-hex>.local` to `224.0.0.251:5353`, debounced across
+//!   [`LN_DEBOUNCE_CONSECUTIVE`] consecutive send failures (`EHOSTUNREACH`) into
+//!   [`State::PermissionSuspected`]. The OS hostname is never queried or disclosed.
+//! - **Positive arm (only while announcing):** our own `_xmsg._tcp.local.` announcement resolving
+//!   back on one of this host's own non-loopback LAN addresses transitions [`State`] to
+//!   [`State::Active`]. At rest (no open announce window), the state is [`State::Unverified`].
+//! - IPv6 multicast gating and IPv6 link-local (`fe80::/10`) candidates are not probed or dialled.
 
 use super::{
     acceptable_ip, AnnounceMode, AnnouncePosture, Candidate, MdnsConfig, SharedCandidates,
@@ -46,38 +49,21 @@ pub const IP_CHECK_SECS: u32 = 30;
 pub const LN_DEBOUNCE_CONSECUTIVE: u32 = 3;
 /// Spacing between debounce retries after a multicast send error.
 pub const LN_PROBE_RETRY_INTERVAL: Duration = Duration::from_secs(2);
-/// Per-probe socket wait bound so a stalled or silent LAN never blocks the discovery thread.
-pub const LN_PROBE_RECV_TIMEOUT: Duration = Duration::from_millis(400);
+/// Bounded exponential backoff range for retrying a transient `register` failure.
+pub const REGISTER_RETRY_BASE: Duration = Duration::from_secs(2);
+pub const REGISTER_RETRY_MAX: Duration = Duration::from_secs(30);
 pub const MDNS_MULTICAST_V4: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 pub const MDNS_PORT: u16 = 5353;
 
 const MAX_INSTANCES: usize = 256;
 const MAX_ID_LEN: usize = 64;
 
-/// Query-name selection for the non-announcing IPv4 multicast Local Network detector.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LnQueryMode {
-    /// Query `<opaque-hex>.local` so the OS hostname is never disclosed on the LAN.
-    /// Gated on an owner-run macOS Deny/Allow check confirming `EHOSTUNREACH` still fires on Deny.
-    RandomLabel,
-    /// Fallback: query `<os-hostname>.local`, which elicits an own-LAN `A` reply from the system
-    /// responder when allowed, at the cost of disclosing the OS hostname.
-    OsHostname,
-}
-
-/// Single constant controlling the detector's query name (default: [`LnQueryMode::RandomLabel`]).
-/// Switch to [`LnQueryMode::OsHostname`] only if owner-run macOS Deny/Allow testing shows random
-/// labels do not discriminate explicit Deny.
-pub const LN_QUERY_MODE: LnQueryMode = LnQueryMode::RandomLabel;
-
-/// Outcome of one non-announcing IPv4 multicast query to `224.0.0.251:5353`.
+/// Outcome of one non-announcing random-label IPv4 multicast send to `224.0.0.251:5353`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProbeOutcome {
-    /// A DNS response arrived from one of this host's own non-loopback IPv4 LAN addresses.
-    OwnLanReply(Ipv4Addr),
-    /// `sendto` succeeded, with no own-LAN response within [`LN_PROBE_RECV_TIMEOUT`].
-    SentNoReply,
-    /// Host has no up, non-loopback, dialable IPv4 interface to classify against.
+    /// `sendto` to `224.0.0.251:5353` succeeded without error.
+    SentOk,
+    /// Host has no up, non-loopback, dialable IPv4 interface to probe on.
     NoLanInterface,
     /// `sendto` or multicast socket setup failed (e.g. `EHOSTUNREACH` under macOS DenyMulticast).
     SendBlocked(String),
@@ -165,40 +151,24 @@ pub fn txt(id: &str) -> Vec<(String, String)> {
     ]
 }
 
-/// A fresh 128-bit (32 hex chars) CSPRNG opaque handle for one announcement rotation slice.
+/// A fresh 128-bit (32 hex chars) CSPRNG opaque handle.
 pub fn random_id() -> Result<String, String> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(|e| e.to_string())?;
     Ok(hex::encode(bytes))
 }
 
-/// Builds the `.local` query name for the non-announcing multicast detector from `mode`.
-pub fn ln_query_name(mode: LnQueryMode) -> String {
-    match mode {
-        LnQueryMode::RandomLabel => match random_id() {
-            Ok(id) => format!("xmsg-{id}.local"),
-            Err(_) => "xmsg-00000000000000000000000000000000.local".into(),
-        },
-        LnQueryMode::OsHostname => {
-            let raw = gethostname::gethostname().to_string_lossy().into_owned();
-            let base = raw
-                .trim_end_matches('.')
-                .trim_end_matches(".local")
-                .split('.')
-                .next()
-                .unwrap_or("");
-            let clean: String = base
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-                .take(63)
-                .collect();
-            if clean.is_empty() {
-                "localhost.local".into()
-            } else {
-                format!("{clean}.local")
-            }
-        }
+/// Builds a fresh random opaque `.local` query name (`xmsg-<32-hex>.local`) for the deny detector.
+/// Never falls back to an all-zero or OS-hostname label: if CSPRNG fails, returns `Err` so the
+/// caller skips sending the probe packet.
+pub fn random_query_name(
+    id_gen: &mut dyn FnMut() -> Result<String, String>,
+) -> Result<String, String> {
+    let id = id_gen()?;
+    if id.is_empty() {
+        return Err("empty random query label".into());
     }
+    Ok(format!("xmsg-{id}.local"))
 }
 
 /// Encodes a minimal standard DNS `A` (`IN`, `RD=0`) query packet for `qname`.
@@ -228,13 +198,9 @@ pub fn build_mdns_a_query(qname: &str, txid: u16) -> Result<Vec<u8>, String> {
 }
 
 /// Sends one IPv4 multicast `A` query to `224.0.0.251:5353` (`IP_MULTICAST_TTL=255`) from an
-/// ephemeral UDP socket and waits up to `recv_timeout` for a response from one of `lan_v4`.
-/// Never sends unicast-to-self (which answers even when macOS Local Network is denied).
-pub fn probe_multicast_ipv4(
-    qname: &str,
-    lan_v4: &[Ipv4Addr],
-    recv_timeout: Duration,
-) -> ProbeOutcome {
+/// ephemeral UDP socket to detect kernel/TCC `EHOSTUNREACH` on explicit Local Network denial.
+/// Never queries the OS hostname and never sends unicast-to-self.
+pub fn probe_multicast_ipv4(qname: &str, lan_v4: &[Ipv4Addr]) -> ProbeOutcome {
     if lan_v4.is_empty() {
         return ProbeOutcome::NoLanInterface;
     }
@@ -251,46 +217,19 @@ pub fn probe_multicast_ipv4(
     };
     let _ = socket.set_multicast_ttl_v4(255);
     let dest = SocketAddrV4::new(MDNS_MULTICAST_V4, MDNS_PORT);
-    if let Err(e) = socket.send_to(&pkt, dest) {
-        let is_unreach = e.kind() == std::io::ErrorKind::HostUnreachable
-            || e.raw_os_error() == Some(libc::EHOSTUNREACH);
-        let msg = if is_unreach {
-            format!("EHOSTUNREACH ({e})")
-        } else {
-            e.to_string()
-        };
-        return ProbeOutcome::SendBlocked(msg);
-    }
-    let deadline = Instant::now() + recv_timeout;
-    let mut buf = [0u8; 1500];
-    for _ in 0..8 {
-        let Some(rem) = deadline.checked_duration_since(Instant::now()) else {
-            break;
-        };
-        if rem.is_zero() {
-            break;
-        }
-        if socket.set_read_timeout(Some(rem)).is_err() {
-            break;
-        }
-        let Ok((n, from)) = socket.recv_from(&mut buf) else {
-            break;
-        };
-        let IpAddr::V4(src_v4) = from.ip() else {
-            continue;
-        };
-        if src_v4.is_loopback() || !lan_v4.contains(&src_v4) || !acceptable_ip(IpAddr::V4(src_v4)) {
-            continue;
-        }
-        // Require a DNS response (QR=1) matching our query ID or mDNS ID 0.
-        if n >= 12 && (buf[2] & 0x80) != 0 {
-            let resp_id = u16::from_be_bytes([buf[0], buf[1]]);
-            if resp_id == txid || resp_id == 0 {
-                return ProbeOutcome::OwnLanReply(src_v4);
-            }
+    match socket.send_to(&pkt, dest) {
+        Ok(_) => ProbeOutcome::SentOk,
+        Err(e) => {
+            let is_unreach = e.kind() == std::io::ErrorKind::HostUnreachable
+                || e.raw_os_error() == Some(libc::EHOSTUNREACH);
+            let msg = if is_unreach {
+                format!("EHOSTUNREACH ({e})")
+            } else {
+                e.to_string()
+            };
+            ProbeOutcome::SendBlocked(msg)
         }
     }
-    ProbeOutcome::SentNoReply
 }
 
 /// The addresses a node listening on `listen` can be dialled at: that IP when it is specific;
@@ -338,12 +277,17 @@ fn permission_suspected_detail(cause: &str, streak: u32, v4_ifaces: usize) -> St
     }
 }
 
+#[derive(Clone, Debug)]
+struct InstanceEntry {
+    addrs: Vec<(SocketAddr, Vec<String>)>,
+    seen_at: Instant,
+}
+
 pub type IdGen = Box<dyn FnMut() -> Result<String, String> + Send>;
 
 pub struct Engine<B> {
     pub backend: B,
     id_gen: IdGen,
-    query_mode: LnQueryMode,
     status: SharedStatus,
     candidates: SharedCandidates,
     trigger: Arc<AtomicBool>,
@@ -351,12 +295,16 @@ pub struct Engine<B> {
     browse: bool,
     active_handle: Option<String>,
     retired_handles: VecDeque<(String, Instant)>,
+    own_echo_seen: bool,
     window_until: Option<Instant>,
     next_rotate: Option<Instant>,
+    register_failures: u32,
+    register_retry_at: Option<Instant>,
+    prior_state: Option<(State, String)>,
     probe_due: Option<Instant>,
     host_unreach_streak: u32,
     interfaces: Vec<(String, IpAddr)>,
-    instances: HashMap<String, Vec<(SocketAddr, Vec<String>)>>,
+    instances: HashMap<String, InstanceEntry>,
     ttl: Duration,
     warned: Option<String>,
     warnings: u64,
@@ -370,20 +318,18 @@ impl<B: Backend> Engine<B> {
         status: SharedStatus,
         candidates: SharedCandidates,
     ) -> Self {
-        Self::with_trigger_and_query(
+        Self::with_trigger(
             backend,
             id_gen,
-            LN_QUERY_MODE,
             status,
             candidates,
             Arc::new(AtomicBool::new(false)),
         )
     }
 
-    pub fn with_trigger_and_query(
+    pub fn with_trigger(
         backend: B,
         id_gen: IdGen,
-        query_mode: LnQueryMode,
         status: SharedStatus,
         candidates: SharedCandidates,
         trigger: Arc<AtomicBool>,
@@ -391,7 +337,6 @@ impl<B: Backend> Engine<B> {
         Self {
             backend,
             id_gen,
-            query_mode,
             status,
             candidates,
             trigger,
@@ -399,8 +344,12 @@ impl<B: Backend> Engine<B> {
             browse: false,
             active_handle: None,
             retired_handles: VecDeque::new(),
+            own_echo_seen: false,
             window_until: None,
             next_rotate: None,
+            register_failures: 0,
+            register_retry_at: None,
+            prior_state: None,
             probe_due: None,
             host_unreach_streak: 0,
             interfaces: Vec::new(),
@@ -419,6 +368,11 @@ impl<B: Backend> Engine<B> {
             .state
     }
 
+    fn status_pair(&self) -> (State, String) {
+        let s = self.status.lock().unwrap_or_else(PoisonError::into_inner);
+        (s.state, s.detail.clone())
+    }
+
     pub fn posture(&self) -> AnnouncePosture {
         self.status
             .lock()
@@ -428,6 +382,10 @@ impl<B: Backend> Engine<B> {
 
     pub fn active_handle(&self) -> Option<&str> {
         self.active_handle.as_deref()
+    }
+
+    pub fn instance_count(&self) -> usize {
+        self.instances.len()
     }
 
     fn set(&self, state: State, detail: impl Into<String>) {
@@ -479,22 +437,49 @@ impl<B: Backend> Engine<B> {
         }
     }
 
-    fn is_own_handle(&self, id: Option<&str>, fullname: &str) -> bool {
-        let matches = |h: &str| {
-            id == Some(h)
-                || fullname
-                    .strip_suffix(&format!(".{SERVICE_TYPE}"))
-                    .is_some_and(|inst| inst == h)
-        };
-        if let Some(active) = &self.active_handle {
-            if matches(active) {
-                return true;
-            }
-        }
-        self.retired_handles.iter().any(|(h, _)| matches(h))
+    fn matches_handle(h: &str, id: Option<&str>, fullname: &str) -> bool {
+        id == Some(h)
+            || fullname
+                .strip_suffix(&format!(".{SERVICE_TYPE}"))
+                .is_some_and(|inst| inst == h)
     }
 
-    fn withdraw_announcement(&mut self, now: Instant) {
+    fn is_active_handle(&self, id: Option<&str>, fullname: &str) -> bool {
+        self.active_handle
+            .as_deref()
+            .is_some_and(|h| Self::matches_handle(h, id, fullname))
+    }
+
+    fn is_own_handle(&self, id: Option<&str>, fullname: &str) -> bool {
+        self.is_active_handle(id, fullname)
+            || self
+                .retired_handles
+                .iter()
+                .any(|(h, _)| Self::matches_handle(h, id, fullname))
+    }
+
+    /// Withdraws any active announcement and, when exiting an announce window to at-rest, drops
+    /// `own_echo_seen` so at-rest state honestly reports `Unverified` (unless `PermissionSuspected`).
+    fn stop_announcing(&mut self, now: Instant) {
+        if let Some(prev) = self.active_handle.take() {
+            self.retired_handles
+                .push_back((prev, now + RETIRED_HANDLE_RETENTION));
+            self.backend.unregister();
+        }
+        self.next_rotate = None;
+        let had_echo = std::mem::replace(&mut self.own_echo_seen, false);
+        let recovering_failed = self.register_failures > 0;
+        self.register_failures = 0;
+        self.register_retry_at = None;
+        self.prior_state = None;
+        if (had_echo && self.state() == State::Active)
+            || (recovering_failed && self.state() == State::Failed)
+        {
+            self.probe_due = Some(now);
+        }
+    }
+
+    fn unregister_for_rotation(&mut self, now: Instant) {
         if let Some(prev) = self.active_handle.take() {
             self.retired_handles
                 .push_back((prev, now + RETIRED_HANDLE_RETENTION));
@@ -510,8 +495,12 @@ impl<B: Backend> Engine<B> {
         self.running = false;
         self.active_handle = None;
         self.retired_handles.clear();
+        self.own_echo_seen = false;
         self.window_until = None;
         self.next_rotate = None;
+        self.register_failures = 0;
+        self.register_retry_at = None;
+        self.prior_state = None;
         self.probe_due = None;
         self.host_unreach_streak = 0;
         self.set_posture(AnnouncePosture::AtRest);
@@ -524,14 +513,15 @@ impl<B: Backend> Engine<B> {
     }
 
     /// Opens a bounded 120 s announcement window on local activation when running in `timed`
-    /// mode. Returns `true` when an announcement is active afterwards.
+    /// mode. Returns `true` when an announcement is immediately registered (a transient `register`
+    /// failure keeps the window open and retries with bounded backoff).
     pub fn activate_announce_window(&mut self, inputs: &Inputs, now: Instant) -> bool {
         if !self.running || inputs.effective_announce_mode() != AnnounceMode::Timed {
             return false;
         }
         if let Some(reason) = self.announce_precondition_refusal(inputs) {
-            self.withdraw_announcement(now);
             self.window_until = None;
+            self.stop_announcing(now);
             self.set_posture(AnnouncePosture::AtRest);
             self.warn_once(
                 &reason,
@@ -544,18 +534,22 @@ impl<B: Backend> Engine<B> {
         };
         let until = now + ANNOUNCE_WINDOW;
         self.window_until = Some(until);
-        if self.rotate_announcement(listen, now) {
-            self.set_posture(AnnouncePosture::WindowOpen { until });
-            true
-        } else {
-            self.window_until = None;
-            self.set_posture(AnnouncePosture::AtRest);
-            false
+        self.own_echo_seen = false;
+        self.set_posture(AnnouncePosture::WindowOpen { until });
+        match self.rotate_announcement(listen, now) {
+            AnnounceAttempt::Registered => true,
+            AnnounceAttempt::TransientError => false,
+            AnnounceAttempt::Unusable => {
+                self.window_until = None;
+                self.stop_announcing(now);
+                self.set_posture(AnnouncePosture::AtRest);
+                false
+            }
         }
     }
 
     /// One reconcile tick: start, stop or toggle from the current config, follow interface
-    /// changes, schedule the non-announcing Local Network probe, refresh and expire candidates.
+    /// changes, schedule the non-announcing Local Network deny probe, refresh and expire candidates.
     pub fn reconcile(&mut self, inputs: &Inputs, now: Instant) {
         self.prune_retired_handles(now);
         if !inputs.configured() {
@@ -591,6 +585,7 @@ impl<B: Backend> Engine<B> {
         let changed = interfaces != self.interfaces;
         if changed {
             self.interfaces = interfaces;
+            self.own_echo_seen = false;
             self.drop_gone_interfaces();
             self.probe_due = Some(now);
         } else if self.probe_due.is_none() {
@@ -607,8 +602,7 @@ impl<B: Backend> Engine<B> {
         let live: HashSet<SocketAddr> = self
             .instances
             .values()
-            .flatten()
-            .map(|(addr, _)| *addr)
+            .flat_map(|entry| entry.addrs.iter().map(|(addr, _)| *addr))
             .collect();
         for mut c in table.snapshot(now) {
             if c.source == Source::Mdns && live.contains(&c.addr) {
@@ -623,7 +617,7 @@ impl<B: Backend> Engine<B> {
             AnnounceMode::BrowseOnly => {
                 let _ = self.trigger.swap(false, Ordering::SeqCst);
                 self.window_until = None;
-                self.withdraw_announcement(now);
+                self.stop_announcing(now);
                 self.set_posture(AnnouncePosture::AtRest);
             }
             AnnounceMode::Timed => {
@@ -631,30 +625,33 @@ impl<B: Backend> Engine<B> {
                 if let Some(until) = self.window_until {
                     if now >= until {
                         self.window_until = None;
-                        self.withdraw_announcement(now);
+                        self.stop_announcing(now);
                         self.set_posture(AnnouncePosture::AtRest);
                     } else if let Some(reason) = self.announce_precondition_refusal(inputs) {
                         self.window_until = None;
-                        self.withdraw_announcement(now);
+                        self.stop_announcing(now);
                         self.set_posture(AnnouncePosture::AtRest);
                         self.warn_once(
                             &reason,
                             "LAN discovery cannot announce; returning to browse-only at rest",
                         );
-                    } else if interfaces_changed || self.active_handle.is_none() {
+                    } else if interfaces_changed
+                        || (self.active_handle.is_none() && self.register_retry_at.is_none())
+                    {
                         if let Some(listen) = inputs.fed_listen {
-                            if self.rotate_announcement(listen, now) {
-                                self.set_posture(AnnouncePosture::WindowOpen { until });
-                            } else {
+                            if self.rotate_announcement(listen, now) == AnnounceAttempt::Unusable {
                                 self.window_until = None;
+                                self.stop_announcing(now);
                                 self.set_posture(AnnouncePosture::AtRest);
+                            } else {
+                                self.set_posture(AnnouncePosture::WindowOpen { until });
                             }
                         }
                     } else {
                         self.set_posture(AnnouncePosture::WindowOpen { until });
                     }
                 } else {
-                    self.withdraw_announcement(now);
+                    self.stop_announcing(now);
                     self.set_posture(AnnouncePosture::AtRest);
                 }
             }
@@ -662,18 +659,23 @@ impl<B: Backend> Engine<B> {
                 let _ = self.trigger.swap(false, Ordering::SeqCst);
                 self.window_until = None;
                 if let Some(reason) = self.announce_precondition_refusal(inputs) {
-                    self.withdraw_announcement(now);
+                    self.stop_announcing(now);
                     self.set_posture(AnnouncePosture::AtRest);
                     self.warn_once(&reason, "LAN discovery is browse-only");
                 } else if let Some(listen) = inputs.fed_listen {
-                    if interfaces_changed
-                        || self.active_handle.is_none()
-                        || self.next_rotate.is_some_and(|r| now >= r)
-                    {
-                        if self.rotate_announcement(listen, now) {
-                            self.set_posture(AnnouncePosture::Always);
-                        } else {
-                            self.set_posture(AnnouncePosture::AtRest);
+                    let retry_ready = self.register_retry_at.is_none_or(|t| now >= t);
+                    let need_register = interfaces_changed
+                        || (self.active_handle.is_none() && retry_ready)
+                        || self.next_rotate.is_some_and(|r| now >= r);
+                    if need_register {
+                        match self.rotate_announcement(listen, now) {
+                            AnnounceAttempt::Registered | AnnounceAttempt::TransientError => {
+                                self.set_posture(AnnouncePosture::Always);
+                            }
+                            AnnounceAttempt::Unusable => {
+                                self.stop_announcing(now);
+                                self.set_posture(AnnouncePosture::AtRest);
+                            }
                         }
                     } else {
                         self.set_posture(AnnouncePosture::Always);
@@ -684,7 +686,7 @@ impl<B: Backend> Engine<B> {
     }
 
     /// Advances due timers between 30 s reconcile ticks: local announce triggers, 120 s window
-    /// expiry, 30 s handle rotations, and debounced Local Network multicast probes.
+    /// expiry, 30 s handle rotations, bounded `register` retries, and debounced deny probes.
     pub fn step_timers(&mut self, inputs: &Inputs, now: Instant) {
         self.prune_retired_handles(now);
         if !self.running {
@@ -696,17 +698,20 @@ impl<B: Backend> Engine<B> {
         if let Some(until) = self.window_until {
             if now >= until {
                 self.window_until = None;
-                self.withdraw_announcement(now);
+                self.stop_announcing(now);
                 self.set_posture(AnnouncePosture::AtRest);
             }
         }
-        let announcing = self.window_until.is_some()
+        let should_announce = self.window_until.is_some()
             || (inputs.effective_announce_mode() == AnnounceMode::Always
-                && self.active_handle.is_some());
-        if announcing && self.next_rotate.is_some_and(|r| now >= r) {
+                && self.announce_precondition_refusal(inputs).is_none());
+        let retry_due = self.register_retry_at.is_some_and(|t| now >= t);
+        let rotate_due = self.active_handle.is_some() && self.next_rotate.is_some_and(|r| now >= r);
+        if should_announce && (retry_due || rotate_due) {
             if let Some(listen) = inputs.fed_listen {
-                if !self.rotate_announcement(listen, now) {
+                if self.rotate_announcement(listen, now) == AnnounceAttempt::Unusable {
                     self.window_until = None;
+                    self.stop_announcing(now);
                     self.set_posture(AnnouncePosture::AtRest);
                 }
             }
@@ -734,75 +739,113 @@ impl<B: Backend> Engine<B> {
 
     /// Unregisters any prior handle, mints a fresh 128-bit handle, and registers the rotated
     /// service instance + target hostname + TXT. On `getrandom` failure, falls back to
-    /// browse-only at rest (`warn_once`).
-    fn rotate_announcement(&mut self, listen: SocketAddr, now: Instant) -> bool {
-        self.withdraw_announcement(now);
+    /// browse-only (`Unusable`). On transient `register` failure, schedules bounded backoff
+    /// retry (`TransientError`) and restores the prior non-failed state once retry succeeds.
+    fn rotate_announcement(&mut self, listen: SocketAddr, now: Instant) -> AnnounceAttempt {
+        self.unregister_for_rotation(now);
         let id = match (self.id_gen)() {
             Ok(id) if !id.is_empty() => id,
             Ok(_) => {
                 let reason = "empty random handle for the announcement";
                 self.warn_once(reason, "LAN discovery is browse-only");
-                return false;
+                return AnnounceAttempt::Unusable;
             }
             Err(error) => {
                 let reason = format!("no random id for the announcement: {error}");
                 self.warn_once(&reason, "LAN discovery is browse-only");
-                return false;
+                return AnnounceAttempt::Unusable;
             }
         };
         let addrs = announce_addrs(listen, &self.interfaces);
         if addrs.is_empty() {
             let reason = format!("--fed-listen {} has no dialable LAN address", listen.ip());
             self.warn_once(&reason, "LAN discovery is browse-only");
-            return false;
+            return AnnounceAttempt::Unusable;
         }
         match self.backend.register(&id, listen.port(), &addrs, &txt(&id)) {
             Ok(()) => {
                 self.active_handle = Some(id);
                 self.next_rotate = Some(now + ROTATE_INTERVAL);
-                true
+                self.register_retry_at = None;
+                if self.register_failures > 0 {
+                    self.register_failures = 0;
+                    self.warned = None;
+                    if let Some((prev_state, prev_detail)) = self.prior_state.take() {
+                        self.set(prev_state, prev_detail);
+                    } else {
+                        self.set(
+                            State::Unverified,
+                            "announcement registered after retry; Local Network permission unverified",
+                        );
+                    }
+                    self.probe_due = Some(now);
+                }
+                AnnounceAttempt::Registered
             }
             Err(error) => {
-                self.warn_once(&error, "LAN discovery could not announce");
+                if self.register_failures == 0 && self.state() != State::Failed {
+                    let cur = self.status_pair();
+                    if cur.0 != State::Starting {
+                        self.prior_state = Some(cur);
+                    }
+                }
+                self.register_failures = self.register_failures.saturating_add(1);
+                let shift = (self.register_failures - 1).min(4);
+                let backoff = (REGISTER_RETRY_BASE * (1 << shift)).min(REGISTER_RETRY_MAX);
+                self.register_retry_at = Some(now + backoff);
+                self.warn_once(&error, "LAN discovery could not announce; retrying");
                 self.set(State::Failed, error);
-                false
+                AnnounceAttempt::TransientError
             }
         }
     }
 
     fn run_probe_step(&mut self, now: Instant) {
         let lan_v4 = lan_ipv4_addrs(&self.interfaces);
-        let qname = ln_query_name(self.query_mode);
-        let outcome = self.backend.probe_multicast(&qname, &lan_v4);
-        // If announcing failed (`register` error), don't overwrite `Failed` until next start/announce.
-        let preserve_failed = self.state() == State::Failed;
-        match outcome {
-            ProbeOutcome::OwnLanReply(ip)
-                if lan_v4.contains(&ip) && acceptable_ip(IpAddr::V4(ip)) =>
-            {
-                self.host_unreach_streak = 0;
-                self.probe_due = None;
-                if !preserve_failed {
-                    self.warned = None;
-                    self.set(
-                        State::Active,
-                        format!("multicast query answered from own LAN address {ip}"),
-                    );
-                }
+        let preserve_failed = self.register_failures > 0 && self.state() == State::Failed;
+        if lan_v4.is_empty() {
+            self.host_unreach_streak = 0;
+            self.probe_due = None;
+            self.own_echo_seen = false;
+            if !preserve_failed {
+                self.set(
+                    State::Unverified,
+                    "no non-loopback IPv4 interface (0 IPv4 interfaces); Local Network permission unverified",
+                );
             }
-            ProbeOutcome::OwnLanReply(_) | ProbeOutcome::SentNoReply => {
-                self.host_unreach_streak = 0;
+            return;
+        }
+        let qname = match random_query_name(&mut *self.id_gen) {
+            Ok(q) => q,
+            Err(error) => {
+                // N3: never fall back to an all-zero or predictable label; skip the probe instead.
                 self.probe_due = None;
-                if !preserve_failed {
+                if !preserve_failed && !(self.active_handle.is_some() && self.own_echo_seen) {
                     self.set(
                         State::Unverified,
-                        "outbound multicast sent without error, no own-LAN reply; Local Network permission unverified or no LAN responder",
+                        format!("multicast deny probe skipped (no random label: {error}); Local Network permission unverified"),
+                    );
+                }
+                return;
+            }
+        };
+        match self.backend.probe_multicast(&qname, &lan_v4) {
+            ProbeOutcome::SentOk => {
+                self.host_unreach_streak = 0;
+                self.probe_due = None;
+                // Keep `Active` while an open announcement has already echoed on our own LAN IP;
+                // otherwise at rest (or before our _xmsg echo arrives) report `Unverified`.
+                if !preserve_failed && !(self.active_handle.is_some() && self.own_echo_seen) {
+                    self.set(
+                        State::Unverified,
+                        "outbound multicast sent without error; Local Network permission unverified while at rest",
                     );
                 }
             }
             ProbeOutcome::NoLanInterface => {
                 self.host_unreach_streak = 0;
                 self.probe_due = None;
+                self.own_echo_seen = false;
                 if !preserve_failed {
                     self.set(
                         State::Unverified,
@@ -814,6 +857,7 @@ impl<B: Backend> Engine<B> {
                 self.host_unreach_streak = self.host_unreach_streak.saturating_add(1);
                 if self.host_unreach_streak >= LN_DEBOUNCE_CONSECUTIVE {
                     self.probe_due = None;
+                    self.own_echo_seen = false;
                     let detail =
                         permission_suspected_detail(&cause, self.host_unreach_streak, lan_v4.len());
                     self.warn_once(
@@ -831,17 +875,22 @@ impl<B: Backend> Engine<B> {
     }
 
     fn next_wake(&self, next_tick: Instant) -> Instant {
-        [self.window_until, self.next_rotate, self.probe_due]
-            .into_iter()
-            .flatten()
-            .fold(next_tick, Instant::min)
+        [
+            self.window_until,
+            self.next_rotate,
+            self.register_retry_at,
+            self.probe_due,
+        ]
+        .into_iter()
+        .flatten()
+        .fold(next_tick, Instant::min)
     }
 
     fn drop_gone_interfaces(&mut self) {
         let names: HashSet<&str> = self.interfaces.iter().map(|(n, _)| n.as_str()).collect();
         let mut gone = Vec::new();
-        for addrs in self.instances.values_mut() {
-            addrs.retain(|(addr, via)| {
+        for entry in self.instances.values_mut() {
+            entry.addrs.retain(|(addr, via)| {
                 let keep = via.is_empty() || via.iter().any(|n| names.contains(n.as_str()));
                 if !keep {
                     gone.push(*addr);
@@ -849,7 +898,7 @@ impl<B: Backend> Engine<B> {
                 keep
             });
         }
-        self.instances.retain(|_, addrs| !addrs.is_empty());
+        self.instances.retain(|_, entry| !entry.addrs.is_empty());
         let held = self.held();
         let gone: HashSet<SocketAddr> = gone.into_iter().filter(|a| !held.contains(a)).collect();
         self.table()
@@ -860,8 +909,7 @@ impl<B: Backend> Engine<B> {
     fn held(&self) -> HashSet<SocketAddr> {
         self.instances
             .values()
-            .flatten()
-            .map(|(addr, _)| *addr)
+            .flat_map(|entry| entry.addrs.iter().map(|(addr, _)| *addr))
             .collect()
     }
 
@@ -873,8 +921,12 @@ impl<B: Backend> Engine<B> {
                 self.running = false;
                 self.active_handle = None;
                 self.retired_handles.clear();
+                self.own_echo_seen = false;
                 self.window_until = None;
                 self.next_rotate = None;
+                self.register_failures = 0;
+                self.register_retry_at = None;
+                self.prior_state = None;
                 self.probe_due = None;
                 self.set_posture(AnnouncePosture::AtRest);
                 self.forget_all();
@@ -892,10 +944,10 @@ impl<B: Backend> Engine<B> {
 
     fn remove_instance(&mut self, fullname: &str) {
         // Another instance (a restarted or rotated peer) may announce the same address: keep it then.
-        if let Some(addrs) = self.instances.remove(fullname) {
+        if let Some(entry) = self.instances.remove(fullname) {
             let held = self.held();
             let mut table = self.table();
-            for (addr, _) in addrs {
+            for (addr, _) in entry.addrs {
                 if !held.contains(&addr) {
                     table.remove(Source::Mdns, addr);
                 }
@@ -914,6 +966,25 @@ impl<B: Backend> Engine<B> {
         let value = |key: &str| txt.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
         let id = value("id");
         if self.is_own_handle(id, &fullname) {
+            // Positive Local Network arm (only while actively announcing): our own _xmsg
+            // announcement resolving back on one of our own non-loopback LAN interface addresses.
+            if self.is_active_handle(id, &fullname) {
+                let own_lan_ip = addrs.iter().map(|(ip, _)| *ip).find(|ip| {
+                    acceptable_ip(*ip)
+                        && self.interfaces.iter().any(|(_, iface_ip)| *iface_ip == *ip)
+                });
+                if let Some(ip) = own_lan_ip {
+                    self.own_echo_seen = true;
+                    self.host_unreach_streak = 0;
+                    if self.register_failures == 0 {
+                        self.warned = None;
+                        self.set(
+                            State::Active,
+                            format!("own _xmsg announcement echoed on LAN address {ip}"),
+                        );
+                    }
+                }
+            }
             return;
         }
         if !self.browse {
@@ -936,9 +1007,18 @@ impl<B: Backend> Engine<B> {
             let held: HashSet<SocketAddr> = table.snapshot(now).iter().map(|c| c.addr).collect();
             drop(table);
             self.instances
-                .retain(|_, addrs| addrs.iter().any(|(a, _)| held.contains(a)));
+                .retain(|_, entry| entry.addrs.iter().any(|(a, _)| held.contains(a)));
+            // N4: lost goodbyes from rotated handles sharing a live address must not wedge the
+            // instance cap; evict the oldest instance sighting to make room.
             if self.instances.len() >= MAX_INSTANCES {
-                return;
+                if let Some(oldest_name) = self
+                    .instances
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.seen_at)
+                    .map(|(name, _)| name.clone())
+                {
+                    self.remove_instance(&oldest_name);
+                }
             }
         }
         let fresh: Vec<(SocketAddr, Vec<String>)> = addrs
@@ -947,7 +1027,11 @@ impl<B: Backend> Engine<B> {
             .collect();
         let ttl = self.ttl;
         let hint = id.map(str::to_string);
-        let previous = self.instances.remove(&fullname).unwrap_or_default();
+        let previous = self
+            .instances
+            .remove(&fullname)
+            .map(|e| e.addrs)
+            .unwrap_or_default();
         let held = self.held();
         let mut kept = Vec::new();
         let mut dropped = 0;
@@ -986,7 +1070,13 @@ impl<B: Backend> Engine<B> {
             "LAN discovery candidate"
         );
         if !kept.is_empty() {
-            self.instances.insert(fullname, kept);
+            self.instances.insert(
+                fullname,
+                InstanceEntry {
+                    addrs: kept,
+                    seen_at: now,
+                },
+            );
         }
     }
 
@@ -1025,6 +1115,13 @@ impl<B: Backend> Engine<B> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnnounceAttempt {
+    Registered,
+    TransientError,
+    Unusable,
+}
+
 /// The real backend, on mdns-sd. Interface filtering is ours: it never calls
 /// `disable_interface`.
 #[derive(Default)]
@@ -1035,8 +1132,10 @@ pub struct MdnsSd {
     registered: Option<String>,
 }
 
-/// Binds UDP `port` on 0.0.0.0 with the reuse options mdns-sd uses, then lets it go. mdns-sd
-/// only debug-logs its own bind failure, so this is how one is seen.
+/// Binds UDP `port` on `0.0.0.0` with the reuse options `mdns-sd` uses, then closes it.
+/// `mdns-sd` 0.21.7 only debug-logs bind errors on startup, and treats `[::]:5353` bind failures
+/// as non-fatal on IPv4-only / IPv6-disabled hosts, so probing IPv4 `0.0.0.0:5353` catches an
+/// exclusive UDP 5353 holder without false-failing IPv4-only environments.
 pub fn probe_bind(port: u16) -> Result<(), String> {
     let socket = socket2::Socket::new(
         socket2::Domain::IPV4,
@@ -1085,6 +1184,10 @@ impl Backend for MdnsSd {
             .register(info)
             .map_err(|e| format!("mDNS announce failed: {e}"))?;
         self.registered = Some(fullname);
+        // Re-subscribing replays cached records so a fast LAN echo of our own handle is delivered.
+        if let Ok(events) = daemon.browse(SERVICE_TYPE) {
+            self.events = Some(events);
+        }
         Ok(())
     }
 
@@ -1154,7 +1257,7 @@ impl Backend for MdnsSd {
     }
 
     fn probe_multicast(&mut self, qname: &str, lan_v4: &[Ipv4Addr]) -> ProbeOutcome {
-        probe_multicast_ipv4(qname, lan_v4, LN_PROBE_RECV_TIMEOUT)
+        probe_multicast_ipv4(qname, lan_v4)
     }
 }
 
@@ -1179,10 +1282,9 @@ pub fn spawn(
     candidates: SharedCandidates,
     trigger: Arc<AtomicBool>,
 ) {
-    let engine = Engine::with_trigger_and_query(
+    let engine = Engine::with_trigger(
         MdnsSd::default(),
         Box::new(random_id),
-        LN_QUERY_MODE,
         status,
         candidates,
         trigger,

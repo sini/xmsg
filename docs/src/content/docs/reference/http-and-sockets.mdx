@@ -67,13 +67,14 @@ On `http.sock`, `GET /healthz` also includes the detector state and announce pos
 [LAN discovery](/concepts/discovery/):
 
 ```json
-{"discovery":{"mdns":{"state":"unverified","announce_state":"at_rest","announce_mode":"timed","detail":"outbound multicast sent without error, no own-LAN reply; Local Network permission unverified or no LAN responder","since":1763400000,"candidates":2}}}
+{"discovery":{"mdns":{"state":"unverified","announce_state":"at_rest","announce_mode":"timed","detail":"outbound multicast sent without error; Local Network permission unverified while at rest","since":1763400000,"candidates":2}}}
 ```
 
 - `state` is one of `off`, `starting`, `active`, `unverified`, `permission_suspected` or `failed`.
 - `announce_state` reports the announcement posture separately: `"at_rest"`,
-  `{"window_open": <remaining_secs>}` during a `120`-second local-activation window, or
-  `"always"`.
+  `{"window_open": <remaining_secs>}` during a `120`-second pairing window (no production
+  entry point opens a timed window until the pairing release lands, so `"timed"` nodes stay
+  `"at_rest"` until then), or `"always"`.
 - `announce_mode` reports the effective configured mode (`"timed"`, `"browse_only"` or
   `"always"`).
 - `detail` explains the current state and, for `permission_suspected` and `failed`, names

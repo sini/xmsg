@@ -163,15 +163,17 @@ whenever `discovery.announce` is loosened to `"always"`):
 
 - `active` and `off` pass, as does `starting` within its first `15` seconds (past `15`
   seconds, a stuck `starting` responder warns).
-- `unverified` warns rather than passing: outbound IPv4 multicast `sendto` succeeded, but no
-  reply arrived from the node's own LAN IPv4 address (for example under the default
-  privacy-preserving random-label query, while a macOS Local Network prompt is unanswered
-  and silently dropping outbound multicast, on an IPv6-only interface, or with no responder).
+- `unverified` is the normal at-rest state when no announcement window is open (outbound
+  random-label IPv4 multicast `sendto` succeeded without error, and positive LAN echo is
+  checked only while announcing). Because an allowed browse-only Mac at rest is not a
+  fault, `unverified` is informational (`info` once `xmsg doctor` adds the `info`
+  severity; `warn` until then so it never reads as `pass`).
 - `permission_suspected` warns after `3` consecutive debounced outbound multicast send
   failures (such as `EHOSTUNREACH` when macOS Local Network access is explicitly toggled
   off, or a firewall rule). Because network errors cannot prove TCC state by themselves,
   xmsg labels the condition *permission suspected*, never proven.
-- `failed` warns and names the responder or UDP `5353` bind error.
+- `failed` warns and names the responder, UDP `5353` bind, or registration error (which
+  retries automatically with bounded backoff).
 
 Serving continues in every state; federation, `agent.sock` and `http.sock` never block on
 LAN discovery.

@@ -287,10 +287,11 @@ fn discovery(report: &mut Report, mdns: &serde_json::Map<String, Value>) {
             Some("The mDNS responder is still starting; check the node log. Serving continues without it."),
         ),
         "active" | "off" | "starting" => (Status::Pass, None),
-        // Maps to Status::Info once #145 lands on main; Warn here so unverified never reads as Pass.
+        // Uses Status::Info once the Info severity lands on main (an allowed browse-only Mac at
+        // rest is unverified, not a fault); kept as Status::Warn until then so it never reads as Pass.
         "unverified" => (
             Status::Warn,
-            Some("Outbound LAN multicast is unverified (Local Network permission pending, random-label probe, or no LAN responder); serving continues."),
+            Some("LAN multicast is unverified while browse-only at rest (or before our own _xmsg announcement echoes during pairing); serving continues."),
         ),
         "permission_suspected" => (
             Status::Warn,
