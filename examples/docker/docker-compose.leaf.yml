@@ -1,6 +1,6 @@
 services:
   node-a:
-    image: ${XMSG_IMAGE:-ghcr.io/sini/xmsg:latest}
+    image: ${XMSG_IMAGE:-ghcr.io/json64-dev/xmsg:latest}
     user: "${XMSG_UID:?Run prepare.py}:${XMSG_GID:?Run prepare.py}"
     command: ["serve"]
     environment:
@@ -19,7 +19,7 @@ services:
       - ./.local/a/peers.leaf.json:/etc/xmsg/peers.json:ro
   leaf:
     container_name: "${COMPOSE_PROJECT_NAME:-xmsg-demo}-leaf"
-    image: ${XMSG_IMAGE:-ghcr.io/sini/xmsg:latest}
+    image: ${XMSG_IMAGE:-ghcr.io/json64-dev/xmsg:latest}
     user: "${XMSG_UID:?Run prepare.py}:${XMSG_GID:?Run prepare.py}"
     command: ["serve", "--leaf", "--leaf-principal", "svc:demo", "--listen", "127.0.0.1:7787"]
     environment:
@@ -37,7 +37,7 @@ services:
       - ./.local/leaf/peers.json:/etc/xmsg/peers.json:ro
     depends_on: [node-a]
   demo-service:
-    image: ${XMSG_IMAGE:-ghcr.io/sini/xmsg:latest}
+    image: ${XMSG_IMAGE:-ghcr.io/json64-dev/xmsg:latest}
     user: "${XMSG_UID:?Run prepare.py}:${XMSG_GID:?Run prepare.py}"
     command: ["service", "exec", "--name", "demo", "--", "/bin/xmsg", "--version"]
     environment:

@@ -27,7 +27,7 @@ sh rustup-init.sh -y --profile minimal --default-toolchain stable
 rm rustup-init.sh
 . "$HOME/.cargo/env"
 rustc --version
-cargo install --locked --git https://github.com/sini/xmsg \
+cargo install --locked --git https://github.com/json64-dev/xmsg \
   --rev d25b0feb85576d93977b47b8c9ed1afa97d5cf02 xmsg
 xmsg --help
 ```

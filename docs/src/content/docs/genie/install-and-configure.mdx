@@ -10,13 +10,13 @@ Genie needs four things around it:
 - an **xmsg daemon**, for the bus every part registers on (see
   [NixOS & Home Manager](/operations/nixos-and-home-manager/));
 - an **OpenAI-compatible model endpoint** for tier 1 and the guards, ending in `/v1`;
-- the **Matrix bot**, [`matrix-xmsg`](https://github.com/sini/matrix-xmsg), for the room;
+- the **Matrix bot**, [`matrix-xmsg`](https://github.com/json64-dev/matrix-xmsg), for the room;
 - optionally, **Claude Code** and a Claude subscription token per expert tier, and a SearXNG
   instance for web search.
 
 ## Packages and images
 
-The [genie-agent flake](https://github.com/sini/genie-agent) builds:
+The [genie-agent flake](https://github.com/json64-dev/genie-agent) builds:
 
 | Output | What it is |
 |---|---|
@@ -24,8 +24,8 @@ The [genie-agent flake](https://github.com/sini/genie-agent) builds:
 | `packages.<linux>.genie-root` | Root as a Node single executable (SEA), so xmsg can pin its exact binary. |
 | `packages.<linux>.genie-guard` | The inbound guard service, as a single executable with its prompts bundled. |
 | `packages.<linux>.genie-dispatcher` | The expert dispatcher, as a single executable. |
-| `packages.<linux>.root-image` | OCI image `ghcr.io/sini/genie-root`. Runs as `65532:65532`, ships the operating memory read-only at `/memory`, and no credentials. |
-| `packages.<linux>.image` | OCI image `ghcr.io/sini/genie-guard`. |
+| `packages.<linux>.root-image` | OCI image `ghcr.io/json64-dev/genie-root`. Runs as `65532:65532`, ships the operating memory read-only at `/memory`, and no credentials. |
+| `packages.<linux>.image` | OCI image `ghcr.io/json64-dev/genie-guard`. |
 | `nixosModules.default` | The NixOS module, `services.genie-agent`. |
 
 Each service is its own single executable because xmsg attests a
@@ -35,7 +35,7 @@ shared `node` binary would let any Node program claim the name.
 ## Try the portable launcher
 
 ```sh
-nix build github:sini/genie-agent#genie-root-node
+nix build github:json64-dev/genie-agent#genie-root-node
 ./result/bin/genie-root-node --config ./genie.json
 ```
 
@@ -155,7 +155,7 @@ For root in a pod:
 - set `tier1.memoryRoot` to `/memory`, and mount nothing writable over it;
 - for evaluations as Kubernetes Jobs, set `eval.backend = "kubernetes"` with the API, namespace,
   image, storage claims and a root-only `tokenFile`. See
-  [configured executors](https://github.com/sini/genie-agent/blob/main/docs/executors.md).
+  [configured executors](https://github.com/json64-dev/genie-agent/blob/main/docs/executors.md).
 
 Network policy, the runtime class (for example gVisor), namespace permissions and storage are the
 deployment's to provide. Genie creates none of them.

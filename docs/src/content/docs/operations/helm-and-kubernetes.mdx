@@ -24,14 +24,14 @@ network-plugin behavior.
 The verified disposable kind cluster was named `xmsg-fei9`; use its explicit
 kubeconfig at `examples/helm/.local/kubeconfig`. Before these commands, build
 and load the checkout's [container image](/operations/docker/) onto its nodes under
-`ghcr.io/sini/xmsg:latest`. The `Never` pull policy below assumes that image is
+`ghcr.io/json64-dev/xmsg:latest`. The `Never` pull policy below assumes that image is
 already present; the helper's `--image` must match the loaded repository and tag.
 
 From the repository root, with Python 3, OpenSSL, kubectl and Helm available:
 
 ```sh
 export KUBECONFIG="examples/helm/.local/kubeconfig"
-python3 examples/helm/prepare.py --image ghcr.io/sini/xmsg:latest
+python3 examples/helm/prepare.py --image ghcr.io/json64-dev/xmsg:latest
 kubectl create namespace xmsg-helm-demo --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n xmsg-helm-demo create secret tls xmsg-a-tls \
   --cert=examples/helm/.local/a/node.crt --key=examples/helm/.local/a/node.key \

@@ -75,7 +75,7 @@
           );
 
           image = pkgs.dockerTools.buildLayeredImage {
-            name = "ghcr.io/sini/xmsg";
+            name = "ghcr.io/json64-dev/xmsg";
             tag = "latest";
             contents = [
               pkgs.cacert

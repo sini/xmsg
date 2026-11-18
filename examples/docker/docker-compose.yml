@@ -1,6 +1,6 @@
 services:
   node:
-    image: ${XMSG_IMAGE:-ghcr.io/sini/xmsg:latest}
+    image: ${XMSG_IMAGE:-ghcr.io/json64-dev/xmsg:latest}
     user: "${XMSG_UID:?Run prepare.py}:${XMSG_GID:?Run prepare.py}"
     command: ["serve", "--svc-exe", "status=/bin/xmsg"]
     environment:

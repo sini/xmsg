@@ -79,7 +79,7 @@ export default defineConfig({
 				}),
 			],
 			social: [
-				{ icon: 'github', label: 'GitHub', href: 'https://github.com/sini/xmsg' }
+				{ icon: 'github', label: 'GitHub', href: 'https://github.com/json64-dev/xmsg' }
 			],
 			sidebar: [
 				{
@@ -177,7 +177,7 @@ export default defineConfig({
 				ThemeSelect: './src/components/ThemeSelect.astro',
 			},
 			editLink: {
-				baseUrl: 'https://github.com/sini/xmsg/edit/main/docs/',
+				baseUrl: 'https://github.com/json64-dev/xmsg/edit/main/docs/',
 			},
 			customCss: [
 				'katex/dist/katex.min.css',

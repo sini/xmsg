@@ -3,7 +3,7 @@ title: NixOS & Home Manager
 description: Installing and configuring xmsg, agent harness switches, and mTLS federation with the flake's Home Manager and NixOS modules.
 ---
 
-The `github:sini/xmsg` flake provides two declarative modules:
+The `github:json64-dev/xmsg` flake provides two declarative modules:
 
 - **`homeManagerModules.xmsg`** (also `homeManagerModules.default`): Installs `xmsg`. Runs
   `xmsg serve` as a user service (`systemd.user.services.xmsg` on Linux, `launchd.agents.xmsg` on
@@ -15,7 +15,7 @@ The `github:sini/xmsg` flake provides two declarative modules:
 
 ```nix
 {
-  inputs.xmsg.url = "github:sini/xmsg";
+  inputs.xmsg.url = "github:json64-dev/xmsg";
 
   # In a Home Manager configuration:
   imports = [ inputs.xmsg.homeManagerModules.xmsg ];

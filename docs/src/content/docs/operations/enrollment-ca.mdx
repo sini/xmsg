@@ -469,7 +469,7 @@ cutoff. Data already delivered cannot be recalled.
    not load a newly edited policy, and a pass does not prove its selectors match.
    The local `list` command opens a fresh CA object and can check that the selected
    policy parses, but cannot prove remote admission has stopped. See the
-   [CA denial and renewal checks](https://github.com/sini/xmsg/blob/2fe05f828f0a3050c2bd4beaf2b03e8751b64b9d/src/enroll_ca.rs#L670-L960).
+   [CA denial and renewal checks](https://github.com/json64-dev/xmsg/blob/2fe05f828f0a3050c2bd4beaf2b03e8751b64b9d/src/enroll_ca.rs#L670-L960).
 
 2. **For an urgent cutoff, retire every admission path and existing connection.**
    Remove or narrow **every applicable** concrete pin/CA entry, hub pattern and
@@ -486,7 +486,7 @@ cutoff. Data already delivered cannot be recalled.
    connections. SIGHUP or periodic reload alone does not disconnect them; the
    reload interval defaults to 30 seconds and `0` disables periodic reload. Reload
    retains active sockets and the hub admission cache. See the
-   [listener and reload paths](https://github.com/sini/xmsg/blob/2fe05f828f0a3050c2bd4beaf2b03e8751b64b9d/src/fed.rs#L6688-L7049).
+   [listener and reload paths](https://github.com/json64-dev/xmsg/blob/2fe05f828f0a3050c2bd4beaf2b03e8751b64b9d/src/fed.rs#L6688-L7049).
 
    **Planned, not implemented here:** explicit peer denial will be checked at
    request entry and response publication for CA and pinned admissions, without
@@ -512,7 +512,7 @@ cutoff. Data already delivered cannot be recalled.
    `renew_grace_secs=604800` permits renewal eligibility after expiry; it is not
    seven extra days of CA admission, and CA denial still blocks renewal in that
    grace period. Pins bypass this expiry bound, as the
-   [CA and pin verifiers](https://github.com/sini/xmsg/blob/2fe05f828f0a3050c2bd4beaf2b03e8751b64b9d/src/fed.rs#L1773-L2025)
+   [CA and pin verifiers](https://github.com/json64-dev/xmsg/blob/2fe05f828f0a3050c2bd4beaf2b03e8751b64b9d/src/fed.rs#L1773-L2025)
    show.
 
 4. **If the CA host or root key is lost or compromised, replace that root.** Use a
@@ -529,7 +529,7 @@ cutoff. Data already delivered cannot be recalled.
    migration, not revocation. The cost is re-enrollment for all identities under
    the removed root; independent root bundles are unaffected. Keep the new root's
    private key on its CA host, never copy it to clients. See
-   [root initialization](https://github.com/sini/xmsg/blob/2fe05f828f0a3050c2bd4beaf2b03e8751b64b9d/src/enroll_ca.rs#L436-L524).
+   [root initialization](https://github.com/json64-dev/xmsg/blob/2fe05f828f0a3050c2bd4beaf2b03e8751b64b9d/src/enroll_ca.rs#L436-L524).
 
 5. **For pinned identities, remove the complete peer entry manually.** Pins ignore
    certificate expiry. Replacing a pin under the same name can leave an old socket

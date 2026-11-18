@@ -38,7 +38,7 @@ Web content uses a separate prompt, `guard-web`, because all web text is third-p
 ### The five injection rules
 
 `guard-in` rejects text only when it does one of five things. The rules live in
-[`prompts/guard-in.md`](https://github.com/sini/genie-agent/blob/main/prompts/guard-in.md):
+[`prompts/guard-in.md`](https://github.com/json64-dev/genie-agent/blob/main/prompts/guard-in.md):
 
 1. **Directs a model** (`directs_model`): tells a model to drop its rules, take on a persona or
    tier, or treat someone as trusted. Forged system markers and hidden markup count.
@@ -87,7 +87,7 @@ times out, the guard returns an error rather than a verdict. An error never coun
 - the broker's write proposals (gist create, update and comment, and pull requests).
 
 Its prompt is
-[`prompts/guard-out.md`](https://github.com/sini/genie-agent/blob/main/prompts/guard-out.md). It
+[`prompts/guard-out.md`](https://github.com/json64-dev/genie-agent/blob/main/prompts/guard-out.md). It
 blocks four kinds of answer:
 
 - **leak**: credentials, private memory, private repository contents, internal addresses and

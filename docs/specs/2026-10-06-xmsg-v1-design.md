@@ -133,7 +133,7 @@ Every error is `{"error": "<code>", "detail": "…"}`.
 
 ## 6. Packaging and nix-config integration
 
-- **A public repository, `github:sini/xmsg`.** It is a Rust crate at the repository root, and this spec
+- **A public repository, `github:json64-dev/xmsg`.** It is a Rust crate at the repository root, and this spec
   moves into `docs/` when the repository is created.
 - **Its flake** exposes `packages.<system>.default`, built with `rustPlatform.buildRustPackage` and
   `cargoLock.lockFile` from the committed lockfile.
@@ -148,7 +148,7 @@ Each step names its file and the existing file it copies. The paths are relative
    { ... }:
    {
      flake-file.inputs.xmsg = {
-       url = "github:sini/xmsg";
+       url = "github:json64-dev/xmsg";
        inputs.nixpkgs.follows = "nixpkgs-unstable";
      };
    }

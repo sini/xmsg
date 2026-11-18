@@ -3,7 +3,7 @@ title: Run xmsg in Docker
 description: Run a node, connect it to another node, and put a leaf next to a service with the minimal xmsg image.
 ---
 
-The image at `ghcr.io/sini/xmsg` runs an xmsg [node](/glossary/#node). Use it for a
+The image at `ghcr.io/json64-dev/xmsg` runs an xmsg [node](/glossary/#node). Use it for a
 containerised node or a [leaf](/glossary/#leaf) next to a service. Keep the full node that runs
 harness hooks on the host where those sessions live.
 
@@ -13,7 +13,7 @@ harness hooks on the host where those sessions live.
 | A node that federates with other nodes | The container example below |
 | A service in its own container | A leaf sidecar sharing the service's network namespace |
 
-The examples live in [`examples/docker`](https://github.com/sini/xmsg/tree/main/examples/docker).
+The examples live in [`examples/docker`](https://github.com/json64-dev/xmsg/tree/main/examples/docker).
 They use the same image for a small version-reporting service, so you can try a message and
 reply without another application image.
 
@@ -24,7 +24,7 @@ as a non-root user from a checkout of this repository:
 
 ```bash
 cd examples/docker
-python3 prepare.py --image ghcr.io/sini/xmsg:latest
+python3 prepare.py --image ghcr.io/json64-dev/xmsg:latest
 export COMPOSE_PROJECT_NAME=xmsg-demo
 ```
 
@@ -78,7 +78,7 @@ Stop Compose before using the same state through another container:
 
 ```bash
 docker compose down
-./run-single.sh ghcr.io/sini/xmsg:latest
+./run-single.sh ghcr.io/json64-dev/xmsg:latest
 docker exec xmsg-single /bin/xmsg list --json
 docker stop xmsg-single
 docker rm xmsg-single

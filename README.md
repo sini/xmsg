@@ -22,7 +22,7 @@
 
 ```nix
 {
-  inputs.xmsg.url = "github:sini/xmsg";
+  inputs.xmsg.url = "github:json64-dev/xmsg";
 
   imports = [ inputs.xmsg.homeManagerModules.xmsg ];
   programs.xmsg = {

@@ -2,7 +2,7 @@
 set -euo pipefail
 cd -- "$(dirname -- "$0")"
 engine=${DOCKER:-docker}
-image=${1:-ghcr.io/sini/xmsg:latest}
+image=${1:-ghcr.io/json64-dev/xmsg:latest}
 exec "$engine" run --detach --name "${XMSG_CONTAINER_NAME:-xmsg-single}" \
   --user "$(id -u):$(id -g)" \
   --env XDG_RUNTIME_DIR=/run \

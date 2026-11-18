@@ -12,7 +12,7 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image", default="ghcr.io/sini/xmsg:latest")
+    parser.add_argument("--image", default="ghcr.io/json64-dev/xmsg:latest")
     args = parser.parse_args()
     uid, gid = os.getuid(), os.getgid()
     if uid == 0:

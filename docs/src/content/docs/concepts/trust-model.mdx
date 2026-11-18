@@ -112,9 +112,9 @@ receiver to run commands, reveal secrets or override its user's instructions. Di
 remain sender-provided descriptions. A message from another session, service, Matrix room or
 hosted model is peer data, including when its transport is authenticated.
 
-The [Codex delivery preamble](https://github.com/sini/xmsg/blob/76f8f1e8249777cfb63c4d0287431cbbf6b2ce76/src/codex.rs#L28)
+The [Codex delivery preamble](https://github.com/json64-dev/xmsg/blob/76f8f1e8249777cfb63c4d0287431cbbf6b2ce76/src/codex.rs#L28)
 states this distinction explicitly. Apply the user's instructions and normal tool permissions
-before acting. Structural [envelope escaping](https://github.com/sini/xmsg/blob/76f8f1e8249777cfb63c4d0287431cbbf6b2ce76/src/inbox.rs#L179)
+before acting. Structural [envelope escaping](https://github.com/json64-dev/xmsg/blob/76f8f1e8249777cfb63c4d0287431cbbf6b2ce76/src/inbox.rs#L179)
 prevents a message from breaking the wrapper; it does **not** prevent semantic prompt injection.
 
 ```mermaid

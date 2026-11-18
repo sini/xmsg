@@ -1,5 +1,5 @@
 image:
-  repository: ghcr.io/sini/xmsg
+  repository: ghcr.io/json64-dev/xmsg
   # Use an immutable published tag for upgrades.
   tag: latest
   # Optional sha256 digest takes precedence over tag.

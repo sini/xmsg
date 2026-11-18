@@ -5,7 +5,7 @@ description: What genie-agent is, the parts it is made of, and how a question tr
 
 import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-[`genie-agent`](https://github.com/sini/genie-agent) is the support agent behind the `@genie` bot
+[`genie-agent`](https://github.com/json64-dev/genie-agent) is the support agent behind the `@genie` bot
 in Matrix. People ask it questions about Nix, NixOS, den and the gen libraries, often in public
 rooms. It answers in the thread.
 
@@ -17,7 +17,7 @@ messages and [replies](/concepts/replies/) to each other.
 
 | Term | Meaning |
 |---|---|
-| **Matrix bot** | [`matrix-xmsg`](https://github.com/sini/matrix-xmsg), a separate program. It reads the Matrix room, decides which messages to forward, and posts genie's answers back. |
+| **Matrix bot** | [`matrix-xmsg`](https://github.com/json64-dev/matrix-xmsg), a separate program. It reads the Matrix room, decides which messages to forward, and posts genie's answers back. |
 | **Sender tier** | `trusted` or `public`. The Matrix bot computes it from the authenticated Matrix sender id: senders on its trusted list are `trusted`, everyone else is `public`. Message text never sets it. |
 | **Thread tier** | The lowest sender tier among everyone whose text is in the thread. One public line makes the thread public. |
 | **Guard** | A separate model session that screens text. `guard-in` screens text coming in; `guard-out` screens answers going out. See [Guard model](/genie/guard-model/). |

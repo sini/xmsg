@@ -3,7 +3,7 @@ title: Hosted models with xmsg-mcp-gateway
 description: Connect a hosted MCP client through OAuth, explicit grants, owner-set outbound policy and optional Events wake hints.
 ---
 
-[xmsg-mcp-gateway](https://github.com/sini/xmsg-mcp-gateway) is a separate Rust service. It
+[xmsg-mcp-gateway](https://github.com/json64-dev/xmsg-mcp-gateway) is a separate Rust service. It
 connects hosted MCP clients to an xmsg node over the local
 [Rust service client](/reference/service-client/). The gateway handles the outside HTTPS and OAuth
 edge. The xmsg node next to it handles bus identity, local delivery and federation.
@@ -37,7 +37,7 @@ flowchart LR
 
 These are capabilities of the implementation, not a promise that a particular hosted platform
 or deployment is connected. Follow the gateway's own
-[hosted setup guide](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/hosted-dots-setup.md)
+[hosted setup guide](https://github.com/json64-dev/xmsg-mcp-gateway/blob/main/docs/hosted-dots-setup.md)
 and provider requirements. Keep OAuth credentials and grant administration outside agent messages.
 
 ## Protocol bootstrap
@@ -65,9 +65,9 @@ Grant coexistence requires an explicit owner-run store migration and inspect rea
 
 With remote introspection profiles, token verification happens once at public entry. Before effects, local checks enforce expiry and the captured grant's current revision; provider-side revocation after entry applies to the next call. Events keeps its separate authentication contract.
 
-Live outbound reservation recovery is also scoped to its grant and registered sender: a foreign sender receives `Denied`, while the owning sender still receives `Pending` under contention. See [outbound authorization](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/outbound.md) for this intended narrowing.
+Live outbound reservation recovery is also scoped to its grant and registered sender: a foreign sender receives `Denied`, while the owning sender still receives `Pending` under contention. See [outbound authorization](https://github.com/json64-dev/xmsg-mcp-gateway/blob/main/docs/outbound.md) for this intended narrowing.
 
-See the gateway's [profile reference and cutover example](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/auth-profiles.md) before configuring a migration. Acceptance of an issuer is separate from permission to read custody, subscribe to Events or send messages.
+See the gateway's [profile reference and cutover example](https://github.com/json64-dev/xmsg-mcp-gateway/blob/main/docs/auth-profiles.md) before configuring a migration. Acceptance of an issuer is separate from permission to read custody, subscribe to Events or send messages.
 
 ## Gateway authorization server
 
@@ -96,7 +96,7 @@ The liveness service account can read personal information across Kanidm account
 
 Cutover uses a **new** connector and its exact per-connector redirect URI. AS discovery and `/oauth/*` need public HTTPS even when MCP uses the private tunnel. Owner steps drain and acknowledge the old inbox, stop/quiesce the gateway, run the unread-custody cutover guard, start on the new selected grant, then authorize the new connector and explicitly subscribe/renew Events with its new token. Existing unread custody is not silently reassigned. A dead family remains held until explicit renewal; another live family for the same owner must not revive its old callback.
 
-See the [authorization-server reference](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/authorization-server.md) for configuration, retry/reuse rules, caps, revocation bounds, query-log redaction, guarded cutover and rollback. The owner performs deployments, connector setup and hosted acceptance.
+See the [authorization-server reference](https://github.com/json64-dev/xmsg-mcp-gateway/blob/main/docs/authorization-server.md) for configuration, retry/reuse rules, caps, revocation bounds, query-log redaction, guarded cutover and rollback. The owner performs deployments, connector setup and hosted acceptance.
 
 ## File exchange
 
@@ -146,7 +146,7 @@ must cover that read operation too.
 
 Recovery remains status/ack and same-key client retry. An autonomous resubmission worker
 is separate work. See [file attachments](/concepts/attachments/) and the gateway's
-[file-tool reference](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/serving.md#file-tools-planned).
+[file-tool reference](https://github.com/json64-dev/xmsg-mcp-gateway/blob/main/docs/serving.md#file-tools-planned).
 
 ## Events callback hosts
 
@@ -170,7 +170,7 @@ refused renewal leaves that old subscription active and does not extend its expi
 Its default TTL is 1 hour; a requested TTL is capped at 24 hours.
 Setting the list does not cut delivery immediately; use the gateway's owner
 controls for an immediate stop. See the
-[gateway Events reference](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/events.md).
+[gateway Events reference](https://github.com/json64-dev/xmsg-mcp-gateway/blob/main/docs/events.md).
 
 ## Renewal failures and credential recovery
 
@@ -189,14 +189,14 @@ makes delivery due again without resetting attempts, event IDs, saved payloads o
 consumer observations. Reading status does not introspect or replace a credential.
 The hosted client must successfully renew through `events/subscribe`; an ordinary
 tool call does not replace the stored credential. See the
-[gateway Events guide](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/events.md).
+[gateway Events guide](https://github.com/json64-dev/xmsg-mcp-gateway/blob/main/docs/events.md).
 
 ## Source and setup
 
-- [Gateway repository and profiles](https://github.com/sini/xmsg-mcp-gateway).
-- [Serving configuration](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/serving.md).
-- [Outbound authorization](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/outbound.md).
-- [Events, custody and deployment limits](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/events.md).
+- [Gateway repository and profiles](https://github.com/json64-dev/xmsg-mcp-gateway).
+- [Serving configuration](https://github.com/json64-dev/xmsg-mcp-gateway/blob/main/docs/serving.md).
+- [Outbound authorization](https://github.com/json64-dev/xmsg-mcp-gateway/blob/main/docs/outbound.md).
+- [Events, custody and deployment limits](https://github.com/json64-dev/xmsg-mcp-gateway/blob/main/docs/events.md).
 
 The gateway owns external authentication and grant policy. The bus's
 [UID/network trust model](/concepts/trust-model/) still applies behind it, and a hosted model's

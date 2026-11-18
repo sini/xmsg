@@ -11,7 +11,7 @@ import subprocess
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--image', default='ghcr.io/sini/xmsg:latest')
+    parser.add_argument('--image', default='ghcr.io/json64-dev/xmsg:latest')
     parser.add_argument('--namespace', default='xmsg-helm-demo')
     args = parser.parse_args()
     os.umask(0o077)
