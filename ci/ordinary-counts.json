@@ -55,6 +55,7 @@
     "tests/gate_u9_1_repairs.rs",
     "tests/gate_u9_identity.rs",
     "tests/gate_uph3_control.rs",
+    "tests/gate_whrh_reply_error.rs",
     "tests/gate_x10_idempotent_send.rs",
     "tests/gate_x12_origin.rs",
     "tests/gate_x13_agy_reregister.rs",
@@ -115,16 +116,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1407,
+      "passed": 1410,
       "failed": 0,
       "ignored": 7,
-      "summaries": 111
+      "summaries": 112
     },
     "darwin": {
-      "passed": 1420,
+      "passed": 1423,
       "failed": 0,
       "ignored": 9,
-      "summaries": 111
+      "summaries": 112
     }
   }
 }

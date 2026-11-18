@@ -123,10 +123,8 @@ async fn mcp_reply_to_agy_and_claude_delivery_failures_surface_classified_errors
 
     // Register a live Claude recipient (pid 5000) and make our process descend from it.
     let my_pid = std::process::id();
-    let real_stat = fs::read_to_string(format!("/proc/{my_pid}/stat")).expect("read own stat");
-    let after_comm = real_stat.rfind(") ").expect("stat comm");
-    let fields: Vec<&str> = real_stat[after_comm + 2..].split_whitespace().collect();
-    let my_start = fields[19].to_string();
+    let my_start = xmsg::process::starttime(Path::new(xmsg::process::LIVE_PROC_ROOT), my_pid)
+        .expect("read own starttime");
     let target_pid: u32 = 5000;
     let target_start = "100";
     let my_proc_dir = proc_dir.join(my_pid.to_string());
