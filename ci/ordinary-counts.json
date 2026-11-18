@@ -101,6 +101,7 @@
     "tests/observe_arrival.rs",
     "tests/observe_http.rs",
     "tests/operator_cli.rs",
+    "tests/pairing_vectors.rs",
     "tests/pi_proc.rs",
     "tests/pi_queue.rs",
     "tests/recipient_snapshot.rs",
