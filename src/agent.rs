@@ -96,6 +96,85 @@ pub fn create_private_dir(dir: &Path) -> io::Result<()> {
         .create(dir)
 }
 
+/// Binds a unix listener and publishes it at `sock_path` already at mode 0600. It binds at a
+/// temporary sibling in the same directory, sets the mode there, then renames it into place, so
+/// no client ever sees the final path at the umask mode. The caller has already refused a live
+/// listener at `sock_path`; the rename replaces only a stale file.
+pub fn bind_private_socket(sock_path: &Path) -> io::Result<UnixListener> {
+    let mut random = [0u8; 4];
+    getrandom::fill(&mut random).map_err(io::Error::other)?;
+    let tmp = sock_path.with_file_name(format!(
+        ".{:x}.{:08x}",
+        std::process::id(),
+        u32::from_ne_bytes(random)
+    ));
+    if std::os::unix::net::SocketAddr::from_pathname(&tmp).is_err() {
+        // The temp name overflows sun_path (104 bytes on macOS) where the final path may still
+        // fit: bind in place and accept the bind-to-chmod window rather than refuse a path that
+        // binds today. A final path that does not fit fails in this bind as it did before.
+        let listener = UnixListener::bind(sock_path)?;
+        #[cfg(any(test, feature = "test-hooks"))]
+        socket_publish_hook::hit(sock_path);
+        set_socket_private(sock_path)?;
+        return Ok(listener);
+    }
+    let listener = UnixListener::bind(&tmp)?;
+    #[cfg(any(test, feature = "test-hooks"))]
+    socket_publish_hook::hit(sock_path);
+    let published = set_socket_private(&tmp).and_then(|()| {
+        fs::rename(&tmp, sock_path).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("failed to publish socket at {}: {e}", sock_path.display()),
+            )
+        })
+    });
+    if let Err(e) = published {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(listener)
+}
+
+fn set_socket_private(sock_path: &Path) -> io::Result<()> {
+    fs::set_permissions(sock_path, fs::Permissions::from_mode(0o600)).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("failed to set permissions on {}: {e}", sock_path.display()),
+        )
+    })
+}
+
+/// Pauses [`bind_private_socket`] between its bind and its publish, for the test that proves the
+/// final path is never visible at a non-0600 mode.
+#[cfg(any(test, feature = "test-hooks"))]
+pub mod socket_publish_hook {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Barrier, Mutex};
+
+    static PAUSE: Mutex<Option<(PathBuf, Arc<Barrier>)>> = Mutex::new(None);
+
+    /// The next bind of `sock_path` waits on `barrier` twice: once on reaching the pause, once
+    /// to be released.
+    pub fn pause_once(sock_path: PathBuf, barrier: Arc<Barrier>) {
+        *PAUSE.lock().unwrap() = Some((sock_path, barrier));
+    }
+
+    pub(crate) fn hit(sock_path: &Path) {
+        let barrier = {
+            let mut pause = PAUSE.lock().unwrap();
+            match pause.as_ref() {
+                Some((path, _)) if path == sock_path => pause.take().map(|(_, b)| b),
+                _ => None,
+            }
+        };
+        if let Some(barrier) = barrier {
+            barrier.wait();
+            barrier.wait();
+        }
+    }
+}
+
 pub fn ensure_secure_socket_dir(dir: &Path, expected_uid: u32) -> Result<(), AppError> {
     if !dir.exists() {
         create_private_dir(dir).map_err(|e| {
@@ -468,14 +547,7 @@ pub async fn bind_agent_listener(sock_path: &Path, my_uid: u32) -> io::Result<Un
         let _ = fs::remove_file(sock_path);
     }
 
-    let listener = UnixListener::bind(sock_path)?;
-    fs::set_permissions(sock_path, fs::Permissions::from_mode(0o600)).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("failed to set permissions on {}: {e}", sock_path.display()),
-        )
-    })?;
-    Ok(listener)
+    bind_private_socket(sock_path)
 }
 
 pub async fn run_agent_server(
