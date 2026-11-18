@@ -489,7 +489,7 @@
     "target": "gate_h5_hub_admission",
     "test": "grt4_keepalive_uri_cannot_borrow_a_replacement_alias",
     "test_file": "tests/gate_h5_hub_admission.rs",
-    "expected_literal": "grt4 old keep-alive URI borrowed replacement ownership",
+    "expected_literal": "grt4 stale keep-alive URI reached router before outer admission refused it",
     "edits": [
       {
         "file": "src/fed.rs",
@@ -499,8 +499,8 @@
       }
     ],
     "assertion_file": "tests/gate_h5_hub_admission.rs",
-    "assertion_line": 1917,
-    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_line": 1952,
+    "assertion_sha256": "d47282bec1a258b11ba76456506631344dee2ea2b02ab7a5f6a41f297c206285",
     "assertion_rule": "unique-static-source-fragment"
   },
   {

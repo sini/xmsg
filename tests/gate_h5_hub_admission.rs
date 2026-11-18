@@ -1918,6 +1918,39 @@ async fn grt4_keepalive_uri_cannot_borrow_a_replacement_alias() {
         hyper::StatusCode::FORBIDDEN,
         "grt4 old keep-alive URI borrowed replacement ownership"
     );
+    let admitted_polls = controls
+        .custody_polls
+        .load(std::sync::atomic::Ordering::Acquire);
+    tokio::time::timeout(Duration::from_secs(3), sender_a.ready())
+        .await
+        .unwrap()
+        .unwrap();
+    let stale_inbox = hyper::Request::get("/fed/v2/inbox?wait=0")
+        .header("host", "fixture")
+        .body(http_body_util::Full::new(bytes::Bytes::new()))
+        .unwrap();
+    let stale_inbox =
+        tokio::time::timeout(Duration::from_secs(3), sender_a.send_request(stale_inbox))
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        stale_inbox.status(),
+        hyper::StatusCode::FORBIDDEN,
+        "grt4 stale inbox request must remain forbidden"
+    );
+    use http_body_util::BodyExt;
+    tokio::time::timeout(Duration::from_secs(3), stale_inbox.into_body().collect())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        controls
+            .custody_polls
+            .load(std::sync::atomic::Ordering::Acquire),
+        admitted_polls,
+        "grt4 stale keep-alive URI reached router before outer admission refused it"
+    );
     let (mut sender_b, connection_b) = grt4_keepalive(&cert_b, &key_b, &hub).await;
     let fresh = grt4_unknown_list(&mut sender_b).await;
     assert_eq!(
