@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "30ef3a6e89b84e858a89713301f1cc1809e21b75 baseline 1377/108 plus this change's test_home_isolation target (2 tests, 1 summary), measured +2/+1 on the pre-rebase head in run 44200942928; confirmed exact by this PR's own count guard",
-    "darwin": "30ef3a6e89b84e858a89713301f1cc1809e21b75 baseline 1389/108 plus this change's test_home_isolation target (2 tests, 1 summary), measured +2/+1 on the pre-rebase head in run 44200943286; confirmed exact by this PR's own count guard"
+    "linux": "fcd68211b2b6a1d74dd9a0310388e146851fa51f baseline 1380 plus this change's 2 agent_sock tests; confirmed exact by this PR's own count guard",
+    "darwin": "fcd68211b2b6a1d74dd9a0310388e146851fa51f baseline 1392 plus this change's 2 agent_sock tests (local full suite measured 1394/0/9, 109 summaries); confirmed exact by this PR's own count guard"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -113,13 +113,13 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1380,
+      "passed": 1382,
       "failed": 0,
       "ignored": 7,
       "summaries": 109
     },
     "darwin": {
-      "passed": 1392,
+      "passed": 1394,
       "failed": 0,
       "ignored": 9,
       "summaries": 109
