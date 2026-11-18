@@ -3687,3 +3687,75 @@ async fn outbound_denied_after_headers_cannot_publish_or_parse_response_body() {
         "denied post-header bytes must not parse as a successful inbox result"
     );
 }
+
+#[tokio::test]
+async fn header_only_list_answer_rechecks_deny_after_server_headers_arrive() {
+    for denied in [false, true] {
+        let f = Arc::new(RelayFixture::new().await);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        reload(&f.leaf_state, |config| {
+            config["peers"][&f.hub.node]["address"] = json!(address.to_string())
+        });
+        let acceptor = xmsg::fed::make_tls_acceptor(
+            &f.state.cert_chain(),
+            &f.state.key_der(),
+            f.state.current_peers(),
+        )
+        .unwrap();
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        let seen_tx = Arc::new(Mutex::new(Some(seen_tx)));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let server_release = release.clone();
+        let _server = AbortTask(tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let tls = acceptor.accept(tcp).await.unwrap();
+            let service = hyper::service::service_fn(
+                move |request: hyper::Request<hyper::body::Incoming>| {
+                    let seen_tx = seen_tx.clone();
+                    let release = server_release.clone();
+                    async move {
+                        assert_eq!(request.uri().path(), "/fed/v2/list/header-check");
+                        seen_tx.lock().unwrap().take().unwrap().send(()).unwrap();
+                        release.notified().await;
+                        Ok::<_, std::convert::Infallible>(hyper::Response::new(Full::new(
+                            Bytes::new(),
+                        )))
+                    }
+                },
+            );
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(hyper_util::rt::TokioIo::new(tls), service)
+                .await
+                .unwrap();
+        }));
+        let controls = xmsg::observe_relay::test_hooks::controls(&f.leaf_state);
+        let answer = {
+            let f = f.clone();
+            tokio::spawn(async move {
+                xmsg::fed::answer_list_query(&f.leaf_state, &f.hub.node, "header-check", true).await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(2), seen_rx)
+            .await
+            .expect("real header-only POST reached server before reload")
+            .unwrap();
+        if denied {
+            reload(&f.leaf_state, |config| {
+                config["deny"] = json!({"spkis":[f.hub.pin]})
+            });
+        }
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), answer)
+            .await
+            .expect("server released actual response headers")
+            .unwrap();
+        assert_eq!(
+            controls
+                .list_answer_successes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            usize::from(!denied),
+            "denied header-only response must not mark the list answer successful"
+        );
+    }
+}

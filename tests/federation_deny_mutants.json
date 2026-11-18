@@ -145,7 +145,7 @@
     ],
     "assertion_file": "tests/gate_reverse_observe.rs",
     "assertion_line": 3291,
-    "assertion_sha256": "dbe1612c86f7e331eaddae5e4ade0fc807026c001ba952166027e72af8f6991e",
+    "assertion_sha256": "b36aacf3b26dd02d0f59aeab3bc2fdeb83621e42756cdf6ad6f198870effad48",
     "assertion_rule": "unique-static-source-fragment"
   },
   {
@@ -163,7 +163,7 @@
     ],
     "assertion_file": "tests/gate_reverse_observe.rs",
     "assertion_line": 3319,
-    "assertion_sha256": "dbe1612c86f7e331eaddae5e4ade0fc807026c001ba952166027e72af8f6991e",
+    "assertion_sha256": "b36aacf3b26dd02d0f59aeab3bc2fdeb83621e42756cdf6ad6f198870effad48",
     "assertion_rule": "unique-static-source-fragment"
   },
   {
@@ -183,7 +183,7 @@
     ],
     "assertion_file": "tests/gate_reverse_observe.rs",
     "assertion_line": 3374,
-    "assertion_sha256": "dbe1612c86f7e331eaddae5e4ade0fc807026c001ba952166027e72af8f6991e",
+    "assertion_sha256": "b36aacf3b26dd02d0f59aeab3bc2fdeb83621e42756cdf6ad6f198870effad48",
     "assertion_rule": "unique-static-source-fragment"
   },
   {
@@ -202,7 +202,7 @@
     ],
     "assertion_file": "tests/gate_reverse_observe.rs",
     "assertion_line": 3587,
-    "assertion_sha256": "dbe1612c86f7e331eaddae5e4ade0fc807026c001ba952166027e72af8f6991e",
+    "assertion_sha256": "b36aacf3b26dd02d0f59aeab3bc2fdeb83621e42756cdf6ad6f198870effad48",
     "assertion_rule": "unique-static-source-fragment"
   },
   {
@@ -221,7 +221,7 @@
     ],
     "assertion_file": "tests/gate_reverse_observe.rs",
     "assertion_line": 3615,
-    "assertion_sha256": "dbe1612c86f7e331eaddae5e4ade0fc807026c001ba952166027e72af8f6991e",
+    "assertion_sha256": "b36aacf3b26dd02d0f59aeab3bc2fdeb83621e42756cdf6ad6f198870effad48",
     "assertion_rule": "unique-static-source-fragment"
   },
   {
@@ -239,7 +239,7 @@
     ],
     "assertion_file": "tests/gate_reverse_observe.rs",
     "assertion_line": 3544,
-    "assertion_sha256": "dbe1612c86f7e331eaddae5e4ade0fc807026c001ba952166027e72af8f6991e",
+    "assertion_sha256": "b36aacf3b26dd02d0f59aeab3bc2fdeb83621e42756cdf6ad6f198870effad48",
     "assertion_rule": "unique-static-source-fragment"
   },
   {
@@ -257,7 +257,7 @@
     ],
     "assertion_file": "tests/gate_reverse_observe.rs",
     "assertion_line": 3433,
-    "assertion_sha256": "dbe1612c86f7e331eaddae5e4ade0fc807026c001ba952166027e72af8f6991e",
+    "assertion_sha256": "b36aacf3b26dd02d0f59aeab3bc2fdeb83621e42756cdf6ad6f198870effad48",
     "assertion_rule": "unique-static-source-fragment"
   },
   {
@@ -276,7 +276,26 @@
     ],
     "assertion_file": "tests/gate_reverse_observe.rs",
     "assertion_line": 3397,
-    "assertion_sha256": "dbe1612c86f7e331eaddae5e4ade0fc807026c001ba952166027e72af8f6991e",
+    "assertion_sha256": "b36aacf3b26dd02d0f59aeab3bc2fdeb83621e42756cdf6ad6f198870effad48",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "deny-outbound-header-only-publication",
+    "target": "gate_reverse_observe",
+    "test": "header_only_list_answer_rechecks_deny_after_server_headers_arrive",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "denied header-only response must not mark the list answer successful",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "        self.authority.check()?;\n        #[cfg(any(test, feature = \"test-hooks\"))]\n        if let Some(controls) = &self.authority.controls {\n            controls.after_outbound_headers.pause().await;",
+        "replacement": "        #[cfg(any(test, feature = \"test-hooks\"))]\n        if let Some(controls) = &self.authority.controls {\n            controls.after_outbound_headers.pause().await;",
+        "start": "impl<B> CheckedSender<B>"
+      }
+    ],
+    "assertion_file": "tests/gate_reverse_observe.rs",
+    "assertion_line": 3686,
+    "assertion_sha256": "b36aacf3b26dd02d0f59aeab3bc2fdeb83621e42756cdf6ad6f198870effad48",
     "assertion_rule": "unique-static-source-fragment"
   }
 ]

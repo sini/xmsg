@@ -854,6 +854,7 @@ pub mod test_hooks {
     pub struct Controls {
         pub before_outbound_send: crate::observe_fed::test_hooks::Gate,
         pub after_outbound_headers: crate::observe_fed::test_hooks::Gate,
+        pub list_answer_successes: std::sync::atomic::AtomicUsize,
         pub before_admission: crate::observe_fed::test_hooks::Gate,
         pub before_dispatch: crate::observe_fed::test_hooks::Gate,
         pub before_forward: crate::observe_fed::test_hooks::Gate,
