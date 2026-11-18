@@ -481,7 +481,7 @@
     ],
     "assertion_file": "tests/gate_h5_hub_admission.rs",
     "assertion_line": 1907,
-    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_sha256": "a276ddb6a747e225f50c2cf67fc94816ec21baeb2017defde4b369022ca27c94",
     "assertion_rule": "unique-static-source-fragment"
   },
   {
@@ -499,8 +499,8 @@
       }
     ],
     "assertion_file": "tests/gate_h5_hub_admission.rs",
-    "assertion_line": 1951,
-    "assertion_sha256": "0ee378f4a6b86c4af04baaf1b80bb570585c0f1760c9f172867f0b07e7aada40",
+    "assertion_line": 1955,
+    "assertion_sha256": "a276ddb6a747e225f50c2cf67fc94816ec21baeb2017defde4b369022ca27c94",
     "assertion_rule": "unique-static-source-fragment"
   },
   {
@@ -508,7 +508,7 @@
     "target": "gate_h5_hub_admission",
     "test": "grt4_keepalive_uri_cannot_borrow_a_replacement_alias",
     "test_file": "tests/gate_h5_hub_admission.rs",
-    "expected_literal": "grt4 body-completion handler borrowed a replacement URI grant:",
+    "expected_literal": "grt4 stale body acquired durable message custody before effect authorization",
     "edits": [
       {
         "file": "src/fed.rs",
@@ -519,8 +519,8 @@
       }
     ],
     "assertion_file": "tests/gate_h5_hub_admission.rs",
-    "assertion_line": 1907,
-    "assertion_sha256": "4767db79abd9ef56206aeefe5320959557c145e51db7ee5b792be669e9ab621a",
+    "assertion_line": 1913,
+    "assertion_sha256": "a276ddb6a747e225f50c2cf67fc94816ec21baeb2017defde4b369022ca27c94",
     "assertion_rule": "unique-static-source-fragment"
   },
   {
