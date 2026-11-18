@@ -1406,6 +1406,7 @@ async fn slow_busy_answer_does_not_block_list_or_attachment_controls() {
         let controls = async {
             assert_shared_read_bound(&reads).await;
             gates.before_send.wait_for(1).await;
+            wait_for_control_poll(&f.state).await;
             let list = xmsg::fed::list_peer(&f.state, &f.leaf.node);
             let attachment = xmsg::fed::fetch_attachment_chunk(
                 &f.state,
@@ -2364,6 +2365,7 @@ async fn refusal_budget_survives_worker_restart_and_full_lane_keeps_controls_pro
         8,
         "eight empty refusal tasks occupy the per-node lane"
     );
+    wait_for_control_poll(&f.state).await;
     let (list, attachment) = tokio::time::timeout(Duration::from_secs(1), async {
         tokio::join!(
             xmsg::fed::list_peer(&f.state, &f.leaf.node),
@@ -2793,8 +2795,19 @@ async fn stalled_partial_answer_terminates_at_original_five_second_deadline() {
     );
     tokio::time::pause();
     gates.after_answer_chunk.release();
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    assert_eq!(xmsg::observe_relay::test_hooks::reservations(&f.state),(0,0),"production read deadline releases original slot and buffers without producer EOF or client abort");
+    tokio::time::sleep(Duration::from_millis(4900)).await;
+    assert_eq!(
+        xmsg::observe_relay::test_hooks::reservations(&f.state),
+        (1, 512 * 1024),
+        "stalled partial reader must still hold its original slot shortly before the 5s deadline"
+    );
+    tokio::time::timeout(Duration::from_millis(2100), async {
+        while xmsg::observe_relay::test_hooks::reservations(&f.state) != (0, 0) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("production read deadline releases original slot and buffers without producer EOF or client abort");
     assert_eq!(
         xmsg::observe_relay::test_hooks::pending(&f.state),
         0,
