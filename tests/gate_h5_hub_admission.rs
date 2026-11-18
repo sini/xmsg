@@ -2180,6 +2180,7 @@ fn grt4_serve_startup_reports_its_ambiguity_class_once() {
         .env_remove("LISTEN_FDNAMES")
         .env("RUST_LOG", "warn")
         .env("XDG_RUNTIME_DIR", temp.path().join("run"))
+        .env("HOME", temp.path().join("home"))
         .arg("serve")
         .arg("--http-sock")
         .arg(&http)
