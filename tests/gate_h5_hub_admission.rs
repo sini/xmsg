@@ -1939,7 +1939,6 @@ async fn grt4_keepalive_uri_cannot_borrow_a_replacement_alias() {
         hyper::StatusCode::FORBIDDEN,
         "grt4 stale inbox request must remain forbidden"
     );
-    use http_body_util::BodyExt;
     tokio::time::timeout(Duration::from_secs(3), stale_inbox.into_body().collect())
         .await
         .unwrap()
