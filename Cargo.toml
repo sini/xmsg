@@ -583,3 +583,7 @@ required-features = ["daemon"]
 name = "grt4_standalone_enrollment"
 path = "tests/grt4_standalone_enrollment.rs"
 required-features = ["daemon"]
+[[test]]
+name = "federation_deny"
+path = "tests/federation_deny.rs"
+required-features = ["daemon"]

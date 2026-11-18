@@ -588,10 +588,12 @@ async fn post(
             .connect(name, tcp)
             .await
             .map_err(|e| unreachable("TLS with", &e))?;
-        let (mut sender, conn) =
+        let authority = crate::fed::CurrentLeaf::outbound(fs, connector.admission_mode(), &tls)?;
+        let (sender, conn) =
             hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls))
                 .await
                 .map_err(|e| unreachable("HTTP with", &e))?;
+        let mut sender = authority.sender(sender);
         tokio::spawn(async move {
             let _ = conn.await;
         });
