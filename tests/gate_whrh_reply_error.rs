@@ -1,3 +1,5 @@
+mod write_exe;
+
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -38,14 +40,10 @@ fn reply_record_backwards_compat_without_push_error() {
 
 fn write_fake_agy_failing(dir: &Path) -> PathBuf {
     let bin = dir.join("agy");
-    fs::write(
+    write_exe::write_exe(
         &bin,
         "#!/usr/bin/env sh\necho 'synthetic agy delivery failure' >&2\nexit 1\n",
-    )
-    .expect("write fake agy");
-    let mut perms = fs::metadata(&bin).expect("stat fake agy").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&bin, perms).expect("chmod fake agy");
+    );
     bin
 }
 
