@@ -2597,7 +2597,12 @@ fn grt4_dynamic_registry_uses_current_uri_and_rule_grants() {
         .resolve_incoming_peer(&rustls::pki_types::CertificateDer::from(cert_b), &[])
         .unwrap();
     let old_peer = xmsg::fed::AuthenticatedPeer {
-        leaf_authority: None,
+        leaf_authority: xmsg::fed::LeafAuthority {
+            pin: admitted_a.pin.clone().unwrap(),
+            uris: vec![uri_a.into()],
+            not_after: i64::MAX,
+            mode: xmsg::fed::AdmissionMode::Ca,
+        },
         name: "alice.normal".into(),
         pin: admitted_a.pin.unwrap(),
         uri: Some(uri_a.into()),

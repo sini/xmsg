@@ -3214,3 +3214,340 @@ async fn same_pair_race_refuses_duplicate_with_global_slots_available() {
         "sole admitted pair still progresses"
     );
 }
+
+async fn persistent_caller(
+    f: &RelayFixture,
+    caller: &Identity,
+) -> (
+    hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+    AbortTask,
+) {
+    let connector = xmsg::fed::make_tls_connector(&caller.cert, &caller.key, &f.hub.pin).unwrap();
+    let tcp = tokio::net::TcpStream::connect(f.address).await.unwrap();
+    let tls = connector
+        .connect(
+            rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+            tcp,
+        )
+        .await
+        .unwrap();
+    let (sender, connection) =
+        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls))
+            .await
+            .unwrap();
+    (
+        sender,
+        AbortTask(tokio::spawn(async move {
+            let _ = connection.await;
+        })),
+    )
+}
+
+async fn persistent_request(
+    sender: &mut hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+    uri: &str,
+) -> (u16, Vec<u8>) {
+    tokio::time::timeout(Duration::from_secs(12), async {
+        let response = sender
+            .send_request(
+                hyper::Request::get(uri)
+                    .header("host", "localhost")
+                    .body(Full::new(Bytes::new()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        (
+            response.status().as_u16(),
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+    })
+    .await
+    .expect("bounded persistent request")
+}
+
+#[tokio::test]
+async fn deny_reload_refuses_request_two_on_the_same_pinned_connection() {
+    let f = RelayFixture::new().await;
+    let (mut sender, _driver) = persistent_caller(&f, &f.leaf).await;
+    assert_eq!(
+        persistent_request(&mut sender, "/fed/v2/inbox?wait=0")
+            .await
+            .0,
+        200
+    );
+    reload(&f.state, |config| {
+        config["deny"] = json!({"spkis":[f.leaf.pin]})
+    });
+    let response = persistent_request(&mut sender, "/fed/v2/inbox?wait=0").await;
+    assert_eq!(
+        response.0, 403,
+        "keep-alive request two must use current global deny"
+    );
+    assert!(String::from_utf8_lossy(&response.1).contains("denied"));
+}
+
+#[tokio::test]
+async fn deny_reload_withholds_a_poll_already_parked_after_admission() {
+    let f = Arc::new(RelayFixture::new().await);
+    let gates = xmsg::observe_relay::test_hooks::controls(&f.state);
+    gates.before_dispatch.arm(1);
+    let poll = {
+        let f = f.clone();
+        tokio::spawn(async move {
+            f.request(&f.leaf, "GET", "/fed/v2/inbox?wait=10", vec![], &[])
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(2), gates.before_dispatch.wait_for(1))
+        .await
+        .expect("poll subscribed before deny");
+    reload(&f.state, |config| {
+        config["deny"] = json!({"spkis":[f.leaf.pin]})
+    });
+    f.state.notify_tx.send(f.leaf.node.clone()).unwrap();
+    gates.before_dispatch.release();
+    let response = poll.await.unwrap();
+    assert_eq!(
+        response.0, 403,
+        "a request admitted before deny must not publish its parked answer"
+    );
+    assert!(String::from_utf8_lossy(&response.1).contains("denied"));
+}
+
+#[tokio::test]
+async fn deny_mid_upload_refuses_the_next_frame_before_buffering_or_progress() {
+    for denied in [false, true] {
+        let f = Arc::new(RelayFixture::new().await);
+        let gates = xmsg::observe_relay::test_hooks::controls(&f.state);
+        gates.after_answer_chunk.arm(1);
+        let caller = {
+            let f = f.clone();
+            tokio::spawn(async move {
+                f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
+                    .await
+            })
+        };
+        let request = control(&f).await;
+        let body = empty_snapshot(&f);
+        let middle = body.len() / 2;
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        let answer = streamed_answer(f.clone(), request, receiver);
+        sender
+            .send(Bytes::copy_from_slice(&body[..middle]))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), gates.after_answer_chunk.wait_for(1))
+            .await
+            .expect("first frame actually appended");
+        assert_eq!(
+            gates
+                .max_buffered_answer
+                .load(std::sync::atomic::Ordering::Relaxed),
+            middle
+        );
+        if denied {
+            reload(&f.state, |config| {
+                config["deny"] = json!({"spkis":[f.leaf.pin]})
+            });
+        }
+        sender
+            .send(Bytes::copy_from_slice(&body[middle..]))
+            .await
+            .unwrap();
+        drop(sender);
+        gates.after_answer_chunk.release();
+        let answer = answer.await.unwrap();
+        let response = caller.await.unwrap();
+        if denied {
+            assert_eq!(
+                gates
+                    .max_buffered_answer
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                middle,
+                "denied post-await frame must not append or advance the progress witness"
+            );
+            assert_ne!(answer.0, 200);
+            assert_ne!(response.0, 200, "denied uploaded answer is withheld");
+        } else {
+            assert_eq!(answer.0, 200);
+            assert_eq!(response, (200, body));
+        }
+    }
+}
+
+#[tokio::test]
+async fn connector_uses_one_current_entry_for_stale_caller_trust_and_mode() {
+    let f = RelayFixture::new().await;
+    let mut stale = f
+        .leaf_state
+        .current_peers()
+        .get(&f.hub.node)
+        .unwrap()
+        .clone();
+    stale.pin = None;
+    stale.ca = Some("obsolete-ca.pem".into());
+    let connector = xmsg::fed::make_tls_connector_for_peer(&f.leaf_state, &stale)
+        .expect("current configured pin must replace stale caller CA trust");
+    let tcp = tokio::net::TcpStream::connect(f.address).await.unwrap();
+    let tls = connector
+        .connect(
+            rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+            tcp,
+        )
+        .await
+        .expect("selected current verifier must authenticate the actual pinned server");
+    let actual = tls.get_ref().1.peer_certificates().unwrap();
+    assert_eq!(
+        xmsg::fed::spki_sha256_from_der(actual[0].as_ref()).unwrap(),
+        f.hub.pin
+    );
+}
+
+#[tokio::test]
+async fn expired_explicit_pin_still_authorizes_on_a_real_connection() {
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::default();
+    params.not_after = time::OffsetDateTime::now_utc() - time::Duration::seconds(1);
+    let cert = params.self_signed(&key).unwrap().der().to_vec();
+    let pin = xmsg::fed::spki_sha256_from_der(&cert).unwrap();
+    let caller = Identity {
+        node: xmsg::node::node_name_from_pin(&pin).unwrap(),
+        cert,
+        key: key.serialize_der(),
+        pin,
+        ca_identity: None,
+    };
+    let f = RelayFixture::with_nodes(Identity::new(), caller).await;
+    assert_eq!(
+        f.request(&f.leaf, "GET", "/fed/v2/inbox?wait=0", vec![], &[])
+            .await
+            .0,
+        200,
+        "explicit pin remains date-independent at both handshake and request checks"
+    );
+}
+
+#[tokio::test]
+async fn actual_ca_leaf_expiry_refuses_keepalive_and_parked_poll_publication() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let directory = tempfile::tempdir().unwrap();
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    let mut ca_params = rcgen::CertificateParams::default();
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::DigitalSignature,
+    ];
+    let bundle = directory.path().join("ca.pem");
+    std::fs::write(&bundle, ca_params.self_signed(&ca_key).unwrap().pem()).unwrap();
+    let issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
+    let uri = "spiffe://realm-one/ns/leaves/sa/leaf";
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::default();
+    params.subject_alt_names = vec![rcgen::SanType::URI(uri.try_into().unwrap())];
+    params.extended_key_usages = vec![
+        rcgen::ExtendedKeyUsagePurpose::ClientAuth,
+        rcgen::ExtendedKeyUsagePurpose::ServerAuth,
+    ];
+    let deadline = time::OffsetDateTime::now_utc().unix_timestamp() + 8;
+    params.not_after = time::OffsetDateTime::from_unix_timestamp(deadline).unwrap();
+    let cert = params.signed_by(&key, &issuer).unwrap().der().to_vec();
+    let leaf = Identity {
+        pin: xmsg::fed::spki_sha256_from_der(&cert).unwrap(),
+        node: xmsg::node::node_name_from_uri(uri).unwrap(),
+        cert,
+        key: key.serialize_der(),
+        ca_identity: Some((uri.into(), bundle.clone())),
+    };
+    let hub = ca_identity("spiffe://realm-one/host/hub/user/owner", &bundle, &issuer);
+    let collector = ca_identity(
+        "spiffe://realm-one/host/collector/user/owner",
+        &bundle,
+        &issuer,
+    );
+    let f = Arc::new(RelayFixture::with_identities(hub, leaf, collector).await);
+    reload(&f.state, |config| {
+        config["peers"]
+            .as_object_mut()
+            .unwrap()
+            .remove(&f.leaf.node);
+        config["hub"] = json!({
+            "patterns":[{"pattern":uri,"ca":bundle}],
+            "rules":[{"pattern":uri,"allow":["list"],"leaf":true}]
+        });
+    });
+    let (mut persistent, _driver) = persistent_caller(&f, &f.leaf).await;
+    assert_eq!(
+        persistent_request(&mut persistent, "/fed/v2/inbox?wait=0")
+            .await
+            .0,
+        200
+    );
+    let gates = xmsg::observe_relay::test_hooks::controls(&f.state);
+    gates.before_dispatch.arm(1);
+    let poll = {
+        let f = f.clone();
+        tokio::spawn(async move {
+            f.request(&f.leaf, "GET", "/fed/v2/inbox?wait=10", vec![], &[])
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(2), gates.before_dispatch.wait_for(1))
+        .await
+        .expect("actual admitted CA poll reached the causal barrier before expiry");
+    let renewed = ca_identity(uri, &bundle, &issuer);
+    let renewed_cert = rustls::pki_types::CertificateDer::from(renewed.cert.clone());
+    f.state
+        .current_peers()
+        .resolve_incoming_peer(&renewed_cert, &[])
+        .unwrap();
+    assert_eq!(
+        f.state
+            .current_peers()
+            .admitted_clients
+            .read()
+            .unwrap()
+            .get(uri)
+            .unwrap()
+            .pin,
+        renewed.pin,
+        "new actual CA leaf replaced the hub cache before the old socket expired"
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while time::OffsetDateTime::now_utc().unix_timestamp() < deadline {
+            if time::OffsetDateTime::now_utc().unix_timestamp() < deadline - 1 {
+                assert_eq!(
+                    persistent_request(&mut persistent, "/fed/v2/inbox?wait=0")
+                        .await
+                        .0,
+                    200,
+                    "same admitted socket remains active before its actual deadline"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("real certificate notAfter elapsed");
+    f.state.notify_tx.send(f.leaf.node.clone()).unwrap();
+    gates.before_dispatch.release();
+    let parked = poll.await.unwrap();
+    assert_eq!(
+        parked.0, 403,
+        "CA poll crossing its actual leaf expiry must not publish"
+    );
+    assert!(String::from_utf8_lossy(&parked.1).contains("expired"));
+    let second = persistent_request(&mut persistent, "/fed/v2/inbox?wait=0").await;
+    assert_eq!(
+        second.0, 403,
+        "keepalive does not renew the old socket's actual expiry"
+    );
+    assert!(String::from_utf8_lossy(&second.1).contains("expired"));
+}

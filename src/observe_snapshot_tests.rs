@@ -89,7 +89,12 @@ impl PostAuthFixture {
         let peers = self.state.current_peers();
         let config = peers.get_peer_config("collector").unwrap();
         let peer = Arc::new(AuthenticatedPeer {
-            leaf_authority: None,
+            leaf_authority: crate::fed::LeafAuthority {
+                pin: config.pin.clone().unwrap(),
+                uris: vec![],
+                not_after: i64::MAX,
+                mode: crate::fed::AdmissionMode::Pin,
+            },
             name: config.name.clone(),
             pin: config.pin.clone().unwrap(),
             uri: None,
