@@ -115,13 +115,13 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1404,
+      "passed": 1405,
       "failed": 0,
       "ignored": 7,
       "summaries": 111
     },
     "darwin": {
-      "passed": 1417,
+      "passed": 1418,
       "failed": 0,
       "ignored": 9,
       "summaries": 111
