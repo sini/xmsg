@@ -1,3 +1,5 @@
+mod write_exe;
+
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -73,8 +75,7 @@ async fn test_oracle_1_local_attested_session_origin() {
     fs::write(&proc_locks, "").unwrap();
 
     let trusted_bin = temp.path().join("trusted_dispatcher");
-    fs::write(&trusted_bin, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&trusted_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    write_exe::write_exe(&trusted_bin, "#!/bin/sh\nexit 0\n");
 
     let service_name = "local-worker";
     let mut trusted_svc_exes: HashMap<String, PathBuf> = HashMap::new();
@@ -312,8 +313,7 @@ async fn create_fed_test_node(
     fs::write(&proc_locks, "").unwrap();
 
     let trusted_bin = temp.path().join("trusted_dispatcher");
-    fs::write(&trusted_bin, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&trusted_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    write_exe::write_exe(&trusted_bin, "#!/bin/sh\nexit 0\n");
 
     let mut trusted_svc_exes: HashMap<String, PathBuf> = HashMap::new();
     for svc in &service_names {

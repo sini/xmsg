@@ -1,6 +1,8 @@
+mod agy_env;
 #[allow(dead_code)]
 mod observe_support;
 mod short_sock;
+use agy_env::ScrubAgyEnv;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -217,6 +219,7 @@ async fn spawn_hub_node_observer(
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
     let mut child = tokio::process::Command::new(bin)
+        .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
         .env("RUST_LOG", "info")
@@ -367,7 +370,9 @@ async fn spawn_client_node_observer(
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
     let mut cmd = tokio::process::Command::new(bin);
-    cmd.env("XDG_RUNTIME_DIR", &run_dir).env("HOME", &run_dir);
+    cmd.scrub_agy_env()
+        .env("XDG_RUNTIME_DIR", &run_dir)
+        .env("HOME", &run_dir);
     cmd.args([
         "serve",
         "--listen",
@@ -824,6 +829,7 @@ async fn test_oracle_4_off_by_default_no_pull_loop() {
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
     let child = tokio::process::Command::new(bin)
+        .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
         .env("RUST_LOG", "info")

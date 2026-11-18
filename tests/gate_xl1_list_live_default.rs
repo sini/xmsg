@@ -18,7 +18,9 @@
 //! - 4b: `instance_seen` growth: a row older than the cap (`reply_ttl`) is pruned on sync.
 //! - 5: `send` to a parked instance by its ID still queues exactly as before.
 
+mod agy_env;
 mod short_sock;
+use agy_env::ScrubAgyEnv;
 
 use std::collections::HashMap;
 use std::fs;
@@ -261,6 +263,7 @@ async fn start_node(p: Prepared, creds: &Creds, peers: Value) -> Node {
     ];
 
     let mut child = tokio::process::Command::new(BIN)
+        .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
         .env("RUST_LOG", "info")

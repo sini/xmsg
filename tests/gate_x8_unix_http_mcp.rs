@@ -1,3 +1,5 @@
+mod agy_env;
+use agy_env::ScrubAgyEnv;
 use std::fs;
 use std::io::Cursor;
 use std::os::unix::fs::PermissionsExt;
@@ -184,6 +186,7 @@ async fn test_oracle_2_no_flag_no_tcp_bound() {
 
     // Sub-oracle 2A: CLI help shows --listen has NO default value
     let help_output = Command::new(bin)
+        .scrub_agy_env()
         .args(["serve", "--help"])
         .output()
         .expect("run xmsg serve --help");
@@ -251,6 +254,7 @@ async fn test_oracle_2_no_flag_no_tcp_bound() {
     let db_path = temp_dir.path().join("db.sqlite");
 
     let mut server = Command::new(bin)
+        .scrub_agy_env()
         .env("HOME", temp_dir.path())
         .args([
             "serve",

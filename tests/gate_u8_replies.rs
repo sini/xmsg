@@ -16,6 +16,7 @@ use xmsg::pi::{new_pi_store, PiSessionInfo};
 use xmsg::storage;
 
 mod reused_stat;
+mod write_exe;
 
 fn get_self_proc_start() -> String {
     xmsg::process::starttime(
@@ -182,8 +183,7 @@ async fn setup_test_env() -> TestEnv {
     let script_content = r#"#!/bin/sh
 exit 0
 "#;
-    fs::write(&fake_agy_bin, script_content).unwrap();
-    fs::set_permissions(&fake_agy_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    write_exe::write_exe(&fake_agy_bin, script_content);
 
     let agy_config = AgyConfig {
         presence_dir: presence_dir.clone(),

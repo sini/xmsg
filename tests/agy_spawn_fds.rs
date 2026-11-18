@@ -1,8 +1,9 @@
 //! The agy delivery child must not inherit stray descriptors, must report a failed exec, and must
 //! not outlive a delivery timeout.
 
+mod write_exe;
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -63,8 +64,7 @@ fn fixture(root: &Path, agy_bin: &str) -> (AgyConfig, AgyStore, Session) {
 }
 
 fn write_script(path: &Path, body: &str) {
-    fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    write_exe::write_exe(path, format!("#!/bin/sh\n{body}\n"));
 }
 
 #[cfg(target_os = "macos")]

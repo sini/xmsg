@@ -22,8 +22,10 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 
+mod agy_env;
 mod http_child;
 mod short_sock;
+use agy_env::ScrubAgyEnv;
 use http_child::{FakeParent, Via};
 
 const CHILD: &str = "http_child_entry";
@@ -89,7 +91,8 @@ impl Node {
         let register_sock = run.join("register.sock");
         let exe = std::env::current_exe().unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_xmsg"));
-        cmd.env("XDG_RUNTIME_DIR", &run)
+        cmd.scrub_agy_env()
+            .env("XDG_RUNTIME_DIR", &run)
             .env("HOME", &run)
             .env("RUST_LOG", "info")
             .env_remove("XMSG_HOST_LABEL")

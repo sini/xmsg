@@ -1,4 +1,6 @@
+mod agy_env;
 mod short_sock;
+use agy_env::ScrubAgyEnv;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -767,6 +769,7 @@ where
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
     let child = tokio::process::Command::new(bin)
+        .scrub_agy_env()
         .env("RUST_LOG", "info")
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)

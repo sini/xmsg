@@ -9,7 +9,10 @@
 //!   step-3 label resolution (`to: "agy"`, `to: "agy@<node>"`, custom label, ambiguity on 2
 //!   live `agy` sessions sharing `"agy"`), and sender header `<label> · <id>@<node>`.
 
+mod agy_env;
 mod short_sock;
+mod write_exe;
+use agy_env::ScrubAgyEnv;
 
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -391,14 +394,14 @@ async fn start_node_with_bin(
     let bin_dir = tmp.path().join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
     let fake_agy = bin_dir.join("agy");
-    fs::write(&fake_agy, "#!/bin/sh\necho 'delivered'\nexit 0\n").unwrap();
-    fs::set_permissions(&fake_agy, fs::Permissions::from_mode(0o755)).unwrap();
+    write_exe::write_exe(&fake_agy, "#!/bin/sh\necho 'delivered'\nexit 0\n");
     let path_env = match std::env::var("PATH") {
         Ok(p) => format!("{}:{p}", bin_dir.display()),
         Err(_) => bin_dir.display().to_string(),
     };
 
     let mut child = tokio::process::Command::new(bin_path)
+        .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
         .env("PATH", &path_env)
