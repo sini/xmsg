@@ -392,8 +392,10 @@ at the IdP therefore applies on the next fresh login, not every renewal. CA
 `deny.users`, `deny.hosts`, `deny.subs` and `deny.spkis` stop new issuance/renewal
 at that CA. Match keys by SPKI, not serial: renewals change serials. An already
 issued certificate can still authenticate a **new CA-mode connection** until its
-expiry, normally at most 24 hours after issuance. Existing connections and in-flight
-requests can outlast that expiry. There is no CRL/OCSP distribution, and a peer
+expiry, normally at most 24 hours after issuance. Federation requests and response
+publication also check the actual CA leaf's expiry on an existing connection. An
+operation already beyond its applicable check can still complete its bounded effect;
+there is no rollback of an effect already committed. There is no CRL/OCSP distribution, and a peer
 that pins the key bypasses certificate expiry and these CA admission bounds.
 Use the [offboarding procedure](#offboard-a-teammate-or-a-lost-or-stolen-device)
 when access must stop sooner.
@@ -471,49 +473,74 @@ cutoff. Data already delivered cannot be recalled.
    policy parses, but cannot prove remote admission has stopped. See the
    [CA denial and renewal checks](https://github.com/sini/xmsg/blob/2fe05f828f0a3050c2bd4beaf2b03e8751b64b9d/src/enroll_ca.rs#L670-L960).
 
-2. **For an urgent cutoff, retire every admission path and existing connection.**
-   Remove or narrow **every applicable** concrete pin/CA entry, hub pattern and
-   root trust path for the identity on affected nodes. A remaining independent
-   entry or bundle can still admit it. Validate each edited peers file, using that
-   daemon's actual paths:
+2. **For an urgent cutoff, deny the actual peer identity on every affected peer and hub.**
+   Add a top-level `deny` beside `peers` in each affected node's peers file:
+
+   ```json
+   {
+     "peers": {},
+     "deny": {
+       "uris": ["spiffe://example.org/host/lost-laptop/user/alice"],
+       "spkis": []
+     }
+   }
+   ```
+
+   Keep the existing `peers` entries in the real file. `uris` matches **any exact
+   literal URI SAN** in the actual leaf, including a renewed leaf with a new key.
+   `spkis` matches the actual key's SHA-256 DER-SPKI fingerprint, as 64 lowercase
+   hexadecimal characters without the `sha256:` prefix. Neither list performs
+   pattern or alias matching. A matching deny takes precedence over explicit pins,
+   concrete CA entries and hub patterns, in both federation TLS directions.
+   Missing or empty deny lists preserve existing policy.
+
+   Validate the edited peers file using the daemon's actual paths:
 
    ```sh
    xmsg check-peers ./hub-peers.json --fed-cert ./hub.crt
    ```
 
-   This checks configuration syntax, not connectivity or revocation. Restart the
-   affected daemons, or use your deployment's drain procedure, to retire existing
-   connections. SIGHUP or periodic reload alone does not disconnect them; the
-   reload interval defaults to 30 seconds and `0` disables periodic reload. Reload
-   retains active sockets and the hub admission cache. See the
-   [listener and reload paths](https://github.com/sini/xmsg/blob/2fe05f828f0a3050c2bd4beaf2b03e8751b64b9d/src/fed.rs#L6688-L7049).
+   This checks configuration syntax, not connectivity or whether the selectors
+   match the intended certificate. Reload with SIGHUP or wait for periodic reload
+   (30 seconds by default; `0` disables it). A malformed file retains the complete
+   previous policy, so confirm that reload succeeded. The cut-off starts when the
+   new policy is loaded, not when the file is edited.
 
-   **Planned, not implemented here:** explicit peer denial will be checked at
-   request entry and response publication for CA and pinned admissions, without
-   dropping the socket. CA-mode expiry checks at those boundaries will use the
-   actual admitted leaf's `not_after`; pin-mode expiry will remain unchanged, while
-   explicit denial will still apply to pins. **Already-checked-request grace
-   (planned):** at most one request already past its applicable check may complete;
-   a parked poll that becomes denied or whose CA admission expires must not publish.
-   Until that behavior is available, use the current connection-retirement
-   procedure above.
+   The daemon checks the current deny at request entry and response publication,
+   including parked polls and internal list, attachment and reverse-observe
+   answers. A reverse answer upload is checked after each awaited input frame,
+   before buffering it. Outbound requests check before send and before response
+   bytes are accepted. The actual leaf's original CA expiry is checked at these
+   boundaries too; a renewed cache entry cannot extend an old socket's authority.
 
-3. **If relying on certificate expiry, bound only new CA-authenticated connections.**
-   After CA denial prevents renewal, an already issued certificate can still pass
-   a new CA handshake for `max(0, not_after - now)`. For a freshly issued certificate:
+   **Already-checked-operation grace:** each in-flight operation already past its
+   applicable check may complete that bounded effect. Concurrent operations can
+   each have passed a check; this is not a global one-request allowance. Committed
+   effects are not undone. A parked poll that crosses a deny or CA expiry cannot
+   publish its answer. Idle sockets are not dropped; restart or drain if closing
+   them is required. The standalone fleet-collector HTTPS client is outside this
+   daemon federation policy; change its own trust configuration separately.
 
-   | Issued `lifetime_secs` | Maximum remaining window for NEW CA-authenticated connections |
+   On an older daemon without these checks, remove or narrow **every applicable**
+   concrete pin/CA entry, hub pattern and root trust path, then restart or drain
+   affected daemons. Reload alone does not retire established sockets.
+
+3. **If relying on expiry, use the actual remaining CA certificate lifetime.**
+   After CA denial prevents renewal, an issued leaf remains eligible until
+   `max(0, not_after - now)`. This bounds new CA-authenticated connections and the
+   existing daemon federation connections' next request or response check:
+
+   | Issued `lifetime_secs` | Maximum remaining CA admission/publication window |
    | --- | --- |
    | Default `86400` | Up to 24 hours |
    | Configured `604800` | Up to 7 days |
 
-   These are not deadlines for old sockets or in-flight requests. The default
+   The already-checked-operation grace above still applies. The default
    five-minute `not_before` backdating adds no time to `not_after - now`.
    `renew_grace_secs=604800` permits renewal eligibility after expiry; it is not
    seven extra days of CA admission, and CA denial still blocks renewal in that
-   grace period. Pins bypass this expiry bound, as the
-   [CA and pin verifiers](https://github.com/sini/xmsg/blob/2fe05f828f0a3050c2bd4beaf2b03e8751b64b9d/src/fed.rs#L1773-L2025)
-   show.
+   grace period. Explicit pin-mode trust bypasses expiry; use peer-side denial
+   or remove the pin instead.
 
 4. **If the CA host or root key is lost or compromised, replace that root.** Use a
    new directory; initializing the existing directory preserves its key:
@@ -531,11 +558,11 @@ cutoff. Data already delivered cannot be recalled.
    private key on its CA host, never copy it to clients. See
    [root initialization](https://github.com/sini/xmsg/blob/2fe05f828f0a3050c2bd4beaf2b03e8751b64b9d/src/enroll_ca.rs#L436-L524).
 
-5. **For pinned identities, remove the complete peer entry manually.** Pins ignore
-   certificate expiry. Replacing a pin under the same name can leave an old socket
-   authorized; remove the entire entry and any other applicable trust paths, then
-   restart or drain affected daemons. Do not wait for a CA deny, certificate expiry
-   or reload to retire the old connection or cached hub admission.
+5. **For pinned identities, deny the actual key or remove the pin manually.**
+   Explicit pins ignore certificate expiry. The global peer-side deny above still
+   applies to them. Without that deny, remove the complete entry and every other
+   applicable trust path, then restart or drain affected daemons. Do not wait for
+   a CA deny or certificate expiry to retire pin-mode authority.
 
 ## Rotate the root
 

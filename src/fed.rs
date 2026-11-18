@@ -4994,6 +4994,8 @@ async fn resolve_target_session_fed(
 
 #[derive(Clone)]
 pub(crate) struct CurrentLeaf {
+    #[cfg(any(test, feature = "test-hooks"))]
+    controls: Option<Arc<crate::observe_relay::test_hooks::Controls>>,
     leaf: LeafAuthority,
     initial: Arc<PeersMap>,
     dynamic: Arc<std::sync::RwLock<Option<DynamicTls>>>,
@@ -5013,6 +5015,8 @@ impl CurrentLeaf {
             .ok_or_else(|| AppError::PeerRejected("missing server leaf".into()))?;
         let leaf = LeafAuthority::from_certificate(cert, mode)?;
         let current = Self {
+            #[cfg(any(test, feature = "test-hooks"))]
+            controls: crate::observe_relay::test_hooks::controls_for_borrowed(fs),
             leaf,
             initial: fs.current_peers(),
             dynamic: fs.dynamic_tls.clone(),
@@ -5055,6 +5059,10 @@ where
         &mut self,
         request: hyper::Request<B>,
     ) -> Result<hyper::Response<CheckedBody>, AppError> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        if let Some(controls) = &self.authority.controls {
+            controls.before_outbound_send.pause().await;
+        }
         self.authority.check()?;
         let response = self
             .sender
@@ -5062,6 +5070,10 @@ where
             .await
             .map_err(|error| AppError::PeerUnreachable(error.to_string()))?;
         self.authority.check()?;
+        #[cfg(any(test, feature = "test-hooks"))]
+        if let Some(controls) = &self.authority.controls {
+            controls.after_outbound_headers.pause().await;
+        }
         Ok(response.map(|body| CheckedBody {
             body,
             authority: self.authority.clone(),
