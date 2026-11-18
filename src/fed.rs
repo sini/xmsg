@@ -6822,7 +6822,16 @@ pub async fn answer_list_query(fed_state: &FedState, peer_key: &str, query: &str
         }
     };
     match tokio::time::timeout(LIST_TIMEOUT, posted).await {
-        Ok(Ok(())) => {}
+        Ok(Ok(())) => {
+            #[cfg(any(test, feature = "test-hooks"))]
+            if let Some(controls) =
+                crate::observe_relay::test_hooks::controls_for_borrowed(fed_state)
+            {
+                controls
+                    .list_answer_successes
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
         Ok(Err(e)) => tracing::warn!("list answer to '{peer_key}' failed: {e}"),
         Err(_) => tracing::warn!("list answer to '{peer_key}' timed out"),
     }
