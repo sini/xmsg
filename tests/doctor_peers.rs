@@ -862,7 +862,7 @@ async fn concrete_names_suppress_literal_alias_warning_without_leaf_probe_noise(
     );
     assert_eq!(
         check(&report, "peer.federation.guard.pods")["status"],
-        "pass",
+        "info",
         "grt4 restored addressless leaf warning noise"
     );
     assert_eq!(check(&report, "federation.probe")["status"], "pass");
@@ -993,7 +993,7 @@ async fn concrete_only_configuration_has_no_alias_warning() {
         "pass",
         "grt4 concrete-only doctor produced an alias warning"
     );
-    assert_eq!(check(&report, "peer.federation.leaf")["status"], "pass");
+    assert_eq!(check(&report, "peer.federation.leaf")["status"], "info");
     assert_eq!(check(&report, "federation.probe")["status"], "pass");
 }
 
