@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "539fcd303d3b41c1ad5ce3a5de3e970ee9a01e0f baseline 1375 plus this change's 2 tests (write_exe_writer_child, the ETXTBSY control), measured +2 in run 44184023135 job 134398094604 on the pre-rebase head; confirmed exact by this PR's own count guard",
-    "darwin": "539fcd303d3b41c1ad5ce3a5de3e970ee9a01e0f baseline 1387 plus this change's 2 tests, measured +2 in run 44184023082 job 134395593487 on the pre-rebase head; confirmed exact by this PR's own count guard"
+    "linux": "f221b97bbe82fce9143cdeaa1e7bcdb82cda57bc baseline 1377 plus 16 cross-platform write_exe::writer_child entries and 2 test_write_exe_guard tests (+18); confirmed exact by CI ordinary-counts check",
+    "darwin": "f221b97bbe82fce9143cdeaa1e7bcdb82cda57bc baseline 1389 plus 17 write_exe::writer_child entries (including macOS-only agy_darwin_presence) and 2 test_write_exe_guard tests (+19); measured 1408 passed/9 ignored/0 failed, 109 summaries on darwin"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -108,20 +108,21 @@
     "tests/service_exec.rs",
     "tests/shared_client.rs",
     "tests/shared_client_live.rs",
-    "tests/svc_liveness.rs"
+    "tests/svc_liveness.rs",
+    "tests/test_write_exe_guard.rs"
   ],
   "platforms": {
     "linux": {
-      "passed": 1377,
+      "passed": 1395,
       "failed": 0,
       "ignored": 7,
-      "summaries": 108
+      "summaries": 109
     },
     "darwin": {
-      "passed": 1389,
+      "passed": 1408,
       "failed": 0,
       "ignored": 9,
-      "summaries": 108
+      "summaries": 109
     }
   }
 }
