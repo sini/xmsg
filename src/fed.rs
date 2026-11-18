@@ -989,9 +989,7 @@ impl PeersMap {
         &self,
         peer: &AuthenticatedPeer,
     ) -> Result<PeerConfig, AppError> {
-        if let Some(leaf) = &peer.leaf_authority {
-            leaf.check(self)?;
-        }
+        peer.leaf_authority.check(self)?;
         let config = self
             .get_peer_config(&peer.name)
             .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
@@ -2967,7 +2965,7 @@ impl ListQueries {
 
 #[derive(Debug, Clone)]
 pub struct AuthenticatedPeer {
-    pub leaf_authority: Option<LeafAuthority>,
+    pub leaf_authority: LeafAuthority,
     pub name: String,
     pub pin: String,
     pub uri: Option<String>,
@@ -5145,6 +5143,9 @@ pub fn make_tls_connector_for_peer(
     peer: &PeerConfig,
 ) -> Result<FederationConnector, AppError> {
     let peers = fed_state.current_peers();
+    let selected = peers
+        .get_peer_config(&peer.name)
+        .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
     // Only a configured pin is pin-mode; a learned hub key retains CA provenance.
     let mode = if peers
         .get(&peer.name)
@@ -5158,7 +5159,7 @@ pub fn make_tls_connector_for_peer(
         connector: make_tls_connector_with_credentials(
             fed_state.cert_chain(),
             fed_state.key_der(),
-            peer,
+            &selected,
             peers,
         )?,
         mode,
@@ -7059,7 +7060,7 @@ pub async fn run_fed_listener_with_acceptor(
                 Err(_) => return,
             };
             let peer_info = Arc::new(AuthenticatedPeer {
-                leaf_authority: Some(leaf_authority),
+                leaf_authority,
                 name: peer_config.name.clone(),
                 pin: client_pin,
                 uri: verified_uri,
