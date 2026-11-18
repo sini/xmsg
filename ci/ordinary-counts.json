@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "run 44166427172 job 134339394343 on be3bcd0ec797b67f0f2999ce5668b7249c893f8f: measured 1333 passed/7 ignored/0 failed, 106 summaries; only the stale count guard failed",
-    "darwin": "run 44166427244 job 134333604034 on be3bcd0ec797b67f0f2999ce5668b7249c893f8f: measured 1345 passed/9 ignored/0 failed, 106 summaries; only the stale count guard failed"
+    "linux": "539fcd303d3b41c1ad5ce3a5de3e970ee9a01e0f baseline 1375 plus this change's 2 tests (write_exe_writer_child, the ETXTBSY control), measured +2 in run 44184023135 job 134398094604 on the pre-rebase head; confirmed exact by this PR's own count guard",
+    "darwin": "539fcd303d3b41c1ad5ce3a5de3e970ee9a01e0f baseline 1387 plus this change's 2 tests, measured +2 in run 44184023082 job 134395593487 on the pre-rebase head; confirmed exact by this PR's own count guard"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -112,13 +112,13 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1375,
+      "passed": 1377,
       "failed": 0,
       "ignored": 7,
       "summaries": 108
     },
     "darwin": {
-      "passed": 1387,
+      "passed": 1389,
       "failed": 0,
       "ignored": 9,
       "summaries": 108
