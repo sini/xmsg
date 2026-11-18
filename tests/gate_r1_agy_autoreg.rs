@@ -19,6 +19,7 @@ use xmsg::http::{build_router, AppState};
 use xmsg::storage;
 
 mod reused_stat;
+mod write_exe;
 
 fn setup_mock_process(
     proc_root: &Path,
@@ -342,8 +343,7 @@ exit 0
         delivered_log.display(),
         delivered_log.display()
     );
-    fs::write(&fake_agy_bin, script_content).unwrap();
-    fs::set_permissions(&fake_agy_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    write_exe::write_exe(&fake_agy_bin, script_content);
 
     let proc_root = tmp.path().join("proc");
     let pid_dir = proc_root.join("5555");

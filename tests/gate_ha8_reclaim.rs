@@ -13,6 +13,8 @@
 //! - Change 4: Cross-harness reclaim refused (`pi` secret on `opencode`, `opencode` secret on `hermes`) with identical `denied`
 //! - Change 5: Reclaimable row older than 1 hour (`> 3600s`) survives `sync_claims` / purge
 
+mod agy_env;
+use agy_env::ScrubAgyEnv;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -52,7 +54,8 @@ impl Node {
         let http_sock = run.join("http.sock");
         let register_sock = run.join("register.sock");
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_xmsg"));
-        cmd.env("XDG_RUNTIME_DIR", &run)
+        cmd.scrub_agy_env()
+            .env("XDG_RUNTIME_DIR", &run)
             .env("HOME", &run)
             .env_remove("XMSG_HOST_LABEL")
             .arg("serve")

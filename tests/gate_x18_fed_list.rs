@@ -1,4 +1,5 @@
 mod short_sock;
+mod write_exe;
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -94,8 +95,7 @@ async fn create_fed_test_node(
     fs::write(&proc_locks, "").unwrap();
 
     let trusted_bin = temp.path().join("trusted_dispatcher");
-    fs::write(&trusted_bin, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&trusted_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    write_exe::write_exe(&trusted_bin, "#!/bin/sh\nexit 0\n");
 
     let mut trusted_svc_map: HashMap<String, PathBuf> = HashMap::new();
     for svc in &trusted_svc_exes {

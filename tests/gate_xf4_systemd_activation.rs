@@ -1,3 +1,5 @@
+mod agy_env;
+use agy_env::ScrubAgyEnv;
 use std::collections::HashMap;
 use std::fs;
 use std::net::{SocketAddr, TcpListener as StdTcpListener, UdpSocket as StdUdpSocket};
@@ -395,7 +397,7 @@ async fn build_sender_fed_state(
 
 fn new_xmsg_cmd(set_child_listen_pid: bool) -> tokio::process::Command {
     let bin = env!("CARGO_BIN_EXE_xmsg");
-    if set_child_listen_pid {
+    let mut cmd = if set_child_listen_pid {
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c")
             .arg("export LISTEN_PID=$$; exec \"$0\" \"$@\"")
@@ -403,7 +405,9 @@ fn new_xmsg_cmd(set_child_listen_pid: bool) -> tokio::process::Command {
         cmd
     } else {
         tokio::process::Command::new(bin)
-    }
+    };
+    cmd.scrub_agy_env();
+    cmd
 }
 
 /// Configure `pre_exec` to place `raw_fds` at `3..3+N` and clear `FD_CLOEXEC`.

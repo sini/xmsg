@@ -36,6 +36,8 @@
 //!     (descriptor present, no `presence/<X>.lock`) is refused; `agy_store` holds exactly one entry
 //!     for the `agy` pid; `P`'s send is still labelled `P`.
 
+mod write_exe;
+
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -198,8 +200,7 @@ impl AgyTestHarness {
         fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700)).unwrap();
 
         let fake_agy = tmp.path().join("fake-agy");
-        fs::write(&fake_agy, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&fake_agy, fs::Permissions::from_mode(0o755)).unwrap();
+        write_exe::write_exe(&fake_agy, "#!/bin/sh\nexit 0\n");
 
         let db_path = tmp.path().join("xmsg.db");
         let conn = rusqlite::Connection::open(&db_path).unwrap();

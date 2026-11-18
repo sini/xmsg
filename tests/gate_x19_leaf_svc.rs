@@ -1,6 +1,8 @@
+mod agy_env;
 #[allow(dead_code)]
 mod observe_support;
 mod short_sock;
+use agy_env::ScrubAgyEnv;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -1355,6 +1357,7 @@ async fn test_oracle_7_startup_refusal_leaf_with_svc_exe() {
     fs::write(&peers_file, "{}").unwrap();
 
     let output = std::process::Command::new(bin)
+        .scrub_agy_env()
         .env("HOME", tmp.path())
         .args([
             "serve",

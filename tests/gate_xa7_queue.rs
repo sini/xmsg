@@ -6,8 +6,10 @@
 //! oracle needs a fault between two nodes (a lost acknowledgement, a crash), the asker
 //! reaches the holder through an in-process mTLS proxy that presents the holder's identity
 //! and forwards as the asker, and the fault happens there.
+mod agy_env;
 #[allow(dead_code)]
 mod observe_support;
+use agy_env::ScrubAgyEnv;
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -235,6 +237,7 @@ impl Node {
         let _ = fs::remove_file(&agent_sock);
         let _ = fs::remove_file(&http_sock);
         let mut child = tokio::process::Command::new(BIN)
+            .scrub_agy_env()
             .env("XDG_RUNTIME_DIR", &self.run_dir)
             .env("HOME", &self.run_dir)
             .env("RUST_LOG", "xmsg=info")

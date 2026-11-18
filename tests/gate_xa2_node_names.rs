@@ -3,7 +3,9 @@
 //! Every oracle runs the real `xmsg serve` (or `xmsg check-peers`) binary. Node names are
 //! never assigned here: CA nodes hold CA-issued leaves with SPIFFE URI SANs, pinned nodes
 //! hold self-signed keys, and each node's name is whatever xmsg derives from those.
+mod agy_env;
 mod short_sock;
+use agy_env::ScrubAgyEnv;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -186,7 +188,8 @@ async fn spawn_node(spec: NodeSpec, prepared: Option<(TempDir, PathBuf)>) -> Res
     args.extend(spec.extra_args.iter().cloned());
 
     let mut cmd = tokio::process::Command::new(BIN);
-    cmd.env("XDG_RUNTIME_DIR", &run_dir)
+    cmd.scrub_agy_env()
+        .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
         .env("RUST_LOG", "info")
         .env_remove("XMSG_HOST_LABEL")

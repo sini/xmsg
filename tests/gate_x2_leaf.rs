@@ -1,4 +1,6 @@
+mod agy_env;
 mod short_sock;
+use agy_env::ScrubAgyEnv;
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -57,6 +59,7 @@ async fn test_oracle_1_leaf_binds_no_harness_sockets_or_fed_listener() {
         .build()
         .unwrap();
     let mut child = std::process::Command::new(bin)
+        .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &runtime_dir)
         .env("HOME", &runtime_dir)
         .env("RUST_LOG", "info")
@@ -795,6 +798,7 @@ async fn test_oracle_4_leaf_with_fed_listen_refused_at_start() {
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
     let child = tokio::process::Command::new(bin)
+        .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", tmp.path())
         .env("HOME", tmp.path())
         .args([

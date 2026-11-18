@@ -1,3 +1,5 @@
+mod agy_env;
+use agy_env::ScrubAgyEnv;
 use std::process::Command;
 
 #[test]
@@ -92,6 +94,7 @@ impl Fixture {
         let socket = dir.path().join("run/http.sock");
         let daemon = Process(
             Command::new(env!("CARGO_BIN_EXE_xmsg"))
+                .scrub_agy_env()
                 .env("HOME", dir.path())
                 .env("CODEX_HOME", dir.path().join("codex"))
                 .env_remove("XMSG_CODEX_HOME")
