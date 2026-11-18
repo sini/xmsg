@@ -1874,11 +1874,9 @@ async fn grt4_keepalive_uri_cannot_borrow_a_replacement_alias() {
         )
         .await
         .unwrap();
-    let body = serde_json::to_vec(&make_envelope(
-        "target",
-        "late body must not borrow new grants",
-    ))
-    .unwrap();
+    let held_envelope = make_envelope("target", "late body must not borrow new grants");
+    let held_message_id = held_envelope.id.clone();
+    let body = serde_json::to_vec(&held_envelope).unwrap();
     let headers = format!("POST /fed/v2/messages HTTP/1.1\r\nHost: fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
     raw.write_all(headers.as_bytes()).await.unwrap();
     raw.flush().await.unwrap();
@@ -1907,6 +1905,12 @@ async fn grt4_keepalive_uri_cannot_borrow_a_replacement_alias() {
         late_response.starts_with("HTTP/1.1 403")
             && late_response.contains("authenticated identity no longer owns"),
         "grt4 body-completion handler borrowed a replacement URI grant: {late_response}"
+    );
+    assert!(
+        storage::get_message(&hub.fed_state.db.lock().unwrap(), &held_message_id)
+            .unwrap()
+            .is_none(),
+        "grt4 stale body acquired durable message custody before effect authorization"
     );
     assert!(
         received.lock().unwrap().is_empty(),
