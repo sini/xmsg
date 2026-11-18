@@ -169,9 +169,12 @@ whenever `discovery.announce` is loosened to `"always"`):
   fault, `unverified` is informational (`info` once `xmsg doctor` adds the `info`
   severity; `warn` until then so it never reads as `pass`).
 - `permission_suspected` warns after `3` consecutive debounced outbound multicast send
-  failures (such as `EHOSTUNREACH` when macOS Local Network access is explicitly toggled
-  off, or a firewall rule). Because network errors cannot prove TCC state by themselves,
-  xmsg labels the condition *permission suspected*, never proven.
+  failures (measured on macOS `26.5.2` under `launchd`: toggling Local Network off makes
+  random-label multicast `sendto` return `EHOSTUNREACH` on every round, `4/4`, while
+  allowed runs succeed with no reply, `3/3`, after at most one initial post-launch
+  `EHOSTUNREACH`; a host firewall rule can also block `sendto`). Because network errors
+  cannot prove TCC state by themselves, xmsg labels the condition *permission suspected*,
+  never proven.
 - `failed` warns and names the responder, UDP `5353` bind, or registration error (which
   retries automatically with bounded backoff).
 

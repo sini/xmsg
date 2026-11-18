@@ -127,9 +127,13 @@ Detection uses two complementary arms that never disclose the OS hostname:
   `30`-second tick, xmsg sends an IPv4 multicast DNS `A` query (`224.0.0.251:5353`,
   `IP_MULTICAST_TTL=255`) for a fresh CSPRNG opaque label `xmsg-<32-hex>.local` (if OS
   randomness is unavailable, the probe is skipped rather than sending a predictable label;
-  unicast-to-self and OS-hostname queries are never used). Because a single transient
-  `EHOSTUNREACH` can occur on an allowed macOS interface, send failures retry every `2`
-  seconds and require **`3` consecutive** errors before reporting `permission_suspected`.
+  unicast-to-self and OS-hostname queries are never used). Measured on macOS `26.5.2` under
+  `launchd` with System Settings › Privacy & Security › Local Network toggled: when
+  allowed, `sendto` succeeds with no reply (`3/3` rounds); when explicitly denied, `sendto`
+  fails immediately with `EHOSTUNREACH` (`4/4` rounds), matching the hostname query's deny
+  signal without disclosing a hostname. Because the first multicast send after launch can
+  fail once with `EHOSTUNREACH` even while allowed, send failures retry every `2` seconds
+  and require **`3` consecutive** errors before reporting `permission_suspected`.
 - **Positive arm (only while announcing):** while an announce window (or `"always"`) is
   active, seeing our own `_xmsg._tcp.local.` announcement resolve back on one of this
   host's own non-loopback LAN addresses transitions `state` to `active` (adding no extra
