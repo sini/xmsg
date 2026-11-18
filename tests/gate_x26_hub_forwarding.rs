@@ -1,4 +1,6 @@
+mod agy_env;
 mod short_sock;
+use agy_env::ScrubAgyEnv;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -221,6 +223,7 @@ async fn spawn_test_node(name: &str, cert_pem: &str, key_pem: &str, peers_json: 
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
     let mut child = tokio::process::Command::new(bin)
+        .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
         .env("CODEX_HOME", &codex_home)

@@ -1,3 +1,5 @@
+mod write_exe;
+
 use axum::http::StatusCode;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -63,12 +65,10 @@ async fn setup_harness(service_name: &str) -> SvcTestHarness {
     fs::write(&proc_locks, "").unwrap();
 
     let trusted_bin = temp.path().join("trusted_dispatcher");
-    fs::write(&trusted_bin, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&trusted_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    write_exe::write_exe(&trusted_bin, "#!/bin/sh\nexit 0\n");
 
     let untrusted_bin = temp.path().join("untrusted_binary");
-    fs::write(&untrusted_bin, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&untrusted_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    write_exe::write_exe(&untrusted_bin, "#!/bin/sh\nexit 0\n");
 
     let mut trusted_svc_exes: HashMap<String, PathBuf> = HashMap::new();
     trusted_svc_exes.insert(service_name.to_string(), trusted_bin.clone());

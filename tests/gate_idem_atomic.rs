@@ -5,6 +5,8 @@
 //! A slow recipient is a Claude fake whose inbox reads nothing for a while: a body larger
 //! than the socket buffer keeps the delivery's write blocked until the inbox reads.
 
+mod agy_env;
+use agy_env::ScrubAgyEnv;
 use std::fs;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
@@ -78,7 +80,8 @@ impl Node {
         );
         let exe = std::env::current_exe().unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_xmsg"));
-        cmd.env("XDG_RUNTIME_DIR", &run)
+        cmd.scrub_agy_env()
+            .env("XDG_RUNTIME_DIR", &run)
             .env("HOME", dir)
             .arg("serve")
             .arg("--db-path")

@@ -1,5 +1,7 @@
+mod agy_env;
 mod hop_client;
 mod short_sock;
+use agy_env::ScrubAgyEnv;
 
 use std::collections::HashSet;
 use std::fs;
@@ -231,6 +233,7 @@ async fn spawn_test_node(name: &str, cert_pem: &str, key_pem: &str, peers_json: 
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
     let mut child = tokio::process::Command::new(bin)
+        .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
         .env("RUST_LOG", "xmsg=info")

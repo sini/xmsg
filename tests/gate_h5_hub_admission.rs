@@ -1,6 +1,8 @@
 //! Gating test suite for Unit H5: Hub admission by CA identity pattern, names from identities,
 //! and closed-by-default rules table.
 
+mod agy_env;
+use agy_env::ScrubAgyEnv;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -2175,6 +2177,7 @@ fn grt4_serve_startup_reports_its_ambiguity_class_once() {
         }
     }
     command
+        .scrub_agy_env()
         .env_remove("LISTEN_PID")
         .env_remove("LISTEN_FDS")
         .env_remove("LISTEN_FDNAMES")
