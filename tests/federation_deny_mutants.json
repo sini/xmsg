@@ -144,8 +144,8 @@
       }
     ],
     "assertion_file": "tests/gate_reverse_observe.rs",
-    "assertion_line": 3291,
-    "assertion_sha256": "b36aacf3b26dd02d0f59aeab3bc2fdeb83621e42756cdf6ad6f198870effad48",
+    "assertion_line": 3363,
+    "assertion_sha256": "c21f97f3cfb1567c1e5c1b98b5ba5e97d47592680b609f05b4187edbadc8c377",
     "assertion_rule": "unique-static-source-fragment"
   },
   {
@@ -162,8 +162,8 @@
       }
     ],
     "assertion_file": "tests/gate_reverse_observe.rs",
-    "assertion_line": 3319,
-    "assertion_sha256": "b36aacf3b26dd02d0f59aeab3bc2fdeb83621e42756cdf6ad6f198870effad48",
+    "assertion_line": 3391,
+    "assertion_sha256": "c21f97f3cfb1567c1e5c1b98b5ba5e97d47592680b609f05b4187edbadc8c377",
     "assertion_rule": "unique-static-source-fragment"
   },
   {
@@ -182,8 +182,8 @@
       }
     ],
     "assertion_file": "tests/gate_reverse_observe.rs",
-    "assertion_line": 3374,
-    "assertion_sha256": "b36aacf3b26dd02d0f59aeab3bc2fdeb83621e42756cdf6ad6f198870effad48",
+    "assertion_line": 3446,
+    "assertion_sha256": "c21f97f3cfb1567c1e5c1b98b5ba5e97d47592680b609f05b4187edbadc8c377",
     "assertion_rule": "unique-static-source-fragment"
   },
   {
@@ -201,8 +201,8 @@
       }
     ],
     "assertion_file": "tests/gate_reverse_observe.rs",
-    "assertion_line": 3587,
-    "assertion_sha256": "b36aacf3b26dd02d0f59aeab3bc2fdeb83621e42756cdf6ad6f198870effad48",
+    "assertion_line": 3659,
+    "assertion_sha256": "c21f97f3cfb1567c1e5c1b98b5ba5e97d47592680b609f05b4187edbadc8c377",
     "assertion_rule": "unique-static-source-fragment"
   },
   {
@@ -220,8 +220,8 @@
       }
     ],
     "assertion_file": "tests/gate_reverse_observe.rs",
-    "assertion_line": 3615,
-    "assertion_sha256": "b36aacf3b26dd02d0f59aeab3bc2fdeb83621e42756cdf6ad6f198870effad48",
+    "assertion_line": 3687,
+    "assertion_sha256": "c21f97f3cfb1567c1e5c1b98b5ba5e97d47592680b609f05b4187edbadc8c377",
     "assertion_rule": "unique-static-source-fragment"
   },
   {
@@ -238,8 +238,8 @@
       }
     ],
     "assertion_file": "tests/gate_reverse_observe.rs",
-    "assertion_line": 3544,
-    "assertion_sha256": "b36aacf3b26dd02d0f59aeab3bc2fdeb83621e42756cdf6ad6f198870effad48",
+    "assertion_line": 3616,
+    "assertion_sha256": "c21f97f3cfb1567c1e5c1b98b5ba5e97d47592680b609f05b4187edbadc8c377",
     "assertion_rule": "unique-static-source-fragment"
   },
   {
@@ -256,8 +256,8 @@
       }
     ],
     "assertion_file": "tests/gate_reverse_observe.rs",
-    "assertion_line": 3433,
-    "assertion_sha256": "b36aacf3b26dd02d0f59aeab3bc2fdeb83621e42756cdf6ad6f198870effad48",
+    "assertion_line": 3505,
+    "assertion_sha256": "c21f97f3cfb1567c1e5c1b98b5ba5e97d47592680b609f05b4187edbadc8c377",
     "assertion_rule": "unique-static-source-fragment"
   },
   {
@@ -275,8 +275,8 @@
       }
     ],
     "assertion_file": "tests/gate_reverse_observe.rs",
-    "assertion_line": 3397,
-    "assertion_sha256": "b36aacf3b26dd02d0f59aeab3bc2fdeb83621e42756cdf6ad6f198870effad48",
+    "assertion_line": 3469,
+    "assertion_sha256": "c21f97f3cfb1567c1e5c1b98b5ba5e97d47592680b609f05b4187edbadc8c377",
     "assertion_rule": "unique-static-source-fragment"
   },
   {
@@ -294,8 +294,8 @@
       }
     ],
     "assertion_file": "tests/gate_reverse_observe.rs",
-    "assertion_line": 3686,
-    "assertion_sha256": "b36aacf3b26dd02d0f59aeab3bc2fdeb83621e42756cdf6ad6f198870effad48",
+    "assertion_line": 3758,
+    "assertion_sha256": "c21f97f3cfb1567c1e5c1b98b5ba5e97d47592680b609f05b4187edbadc8c377",
     "assertion_rule": "unique-static-source-fragment"
   }
 ]
