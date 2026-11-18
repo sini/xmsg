@@ -1,4 +1,7 @@
+mod agy_env;
 mod short_sock;
+mod write_exe;
+use agy_env::ScrubAgyEnv;
 use std::collections::HashMap;
 use std::fs;
 use std::net::SocketAddr;
@@ -2215,8 +2218,7 @@ exit 0
         delivered_log.display(),
         delivered_log.display()
     );
-    fs::write(&fake_agy_bin, script_content).unwrap();
-    fs::set_permissions(&fake_agy_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    write_exe::write_exe(&fake_agy_bin, script_content);
 
     let (cert_b, key_b, pin_b) = generate_self_signed_ed25519("host-b").unwrap();
     let (cert_a, key_a, pin_a) = generate_self_signed_ed25519("host-a").unwrap();
@@ -3952,6 +3954,7 @@ async fn test_n5_tls_key_load_failure_fatal_at_startup() {
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
     let mut child = tokio::process::Command::new(bin)
+        .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", tmp.path())
         .env("HOME", tmp.path())
         .args([
@@ -4162,6 +4165,7 @@ async fn test_n7_f6_bind_fatal() {
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
     let output = std::process::Command::new(bin)
+        .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", tmp.path())
         .env("HOME", tmp.path())
         .args([
@@ -4206,6 +4210,7 @@ async fn test_n7_f6_unspecified_address_binds() {
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
     let mut child = std::process::Command::new(bin)
+        .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", tmp.path())
         .env("HOME", tmp.path())
         .env("RUST_LOG", "info")
@@ -4270,6 +4275,7 @@ async fn test_n7_f6_cert_key_required() {
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
     let output = std::process::Command::new(bin)
+        .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", tmp.path())
         .env("HOME", tmp.path())
         .args([

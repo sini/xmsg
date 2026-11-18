@@ -1,78 +1,17 @@
+mod write_exe;
+
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::tempdir;
 use tokio::sync::broadcast;
+use write_exe::write_exe;
 
 use xmsg::agy::{dev_major, dev_minor, new_agy_store, AgyConfig, AgyCredentials};
 use xmsg::http::{build_router, AppState};
-
-/// Writes an executable fixture from a child process (this test binary in writer mode), so this
-/// process never holds a write descriptor on it: a sibling test's fork can never carry one into an
-/// exec window, and exec never hits ETXTBSY. No external tools, so a minimal PATH doesn't matter.
-fn write_exe(path: &Path, contents: &str) {
-    use std::io::Write;
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "write_exe_writer_child",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env(WRITE_EXE_TARGET, path)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(contents.as_bytes())
-        .unwrap();
-    assert!(
-        child.wait().unwrap().success(),
-        "write_exe {}",
-        path.display()
-    );
-    let meta = fs::metadata(path).unwrap();
-    assert!(
-        meta.permissions().mode() & 0o111 != 0,
-        "write_exe left {} non-executable",
-        path.display()
-    );
-}
-
-const WRITE_EXE_TARGET: &str = "XMSG_TEST_WRITE_EXE_TARGET";
-
-/// The writer half of [`write_exe`]; a no-op unless re-exec'd with its target set.
-#[test]
-fn write_exe_writer_child() {
-    use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
-    let Some(target) = std::env::var_os(WRITE_EXE_TARGET) else {
-        return;
-    };
-    let target = PathBuf::from(target);
-    let tmp = target.with_extension("write-exe-tmp");
-    let mut body = Vec::new();
-    std::io::stdin().read_to_end(&mut body).unwrap();
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o755)
-        .open(&tmp)
-        .unwrap();
-    std::io::Write::write_all(&mut f, &body).unwrap();
-    f.sync_all().unwrap();
-    drop(f);
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).unwrap();
-    fs::rename(&tmp, &target).unwrap();
-}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_agy_delivery_env_isolation_and_credentials_lifecycle() {
@@ -991,7 +930,7 @@ async fn deliver_with(holder: bool, pin: bool, explicit: bool) -> Ran {
         let log = tmp.path().join(format!("{name}.ran"));
         write_exe(
             &bin,
-            &format!("#!/bin/sh\necho ran > \"{}\"\necho '{{}}'\n", log.display()),
+            format!("#!/bin/sh\necho ran > \"{}\"\necho '{{}}'\n", log.display()),
         );
         (bin, log)
     };

@@ -7,7 +7,9 @@
 //! test peer certificate (`sini.o`), since nothing in xmsg originates a hop until H6 (A3,
 //! B4). Two oracles add an in-process stub peer: one lists another user's entry (P-3), and
 //! one stands for a node still on `/fed/v1` (`ee1b6ca`, the deployed release).
+mod agy_env;
 mod short_sock;
+use agy_env::ScrubAgyEnv;
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -200,6 +202,7 @@ async fn start(
     }
 
     let mut child = tokio::process::Command::new(BIN)
+        .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
         .env("RUST_LOG", "info")

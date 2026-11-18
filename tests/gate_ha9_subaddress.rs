@@ -27,6 +27,8 @@
 //!   `PostToolUse(SendMessage)` (`reassert_resume`) with id-shaped `to` and `pin_name == id`
 //!   binds no name.
 
+mod agy_env;
+use agy_env::ScrubAgyEnv;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -1054,6 +1056,7 @@ impl ServeProcess {
         let _ = fs::remove_file(&register_sock);
 
         let mut child = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+            .scrub_agy_env()
             .env("XDG_RUNTIME_DIR", run_dir)
             .env("HOME", run_dir)
             .env_remove("XMSG_HOST_LABEL")

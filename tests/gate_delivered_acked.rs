@@ -5,6 +5,8 @@
 //! Every cell runs a real `xmsg serve` and speaks the plugin or pi frames on its
 //! `register.sock` from this test process.
 
+mod agy_env;
+use agy_env::ScrubAgyEnv;
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -39,6 +41,7 @@ impl Node {
         let http_sock = run.join("http.sock");
         let register_sock = run.join("register.sock");
         let mut child = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+            .scrub_agy_env()
             .env("XDG_RUNTIME_DIR", &run)
             .env("HOME", tmp.path())
             .env_remove("XMSG_HOST_LABEL")

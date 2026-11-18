@@ -12,6 +12,8 @@
 //! - C11 (`c11_subagent_frame_is_opencode_only`): On a `{"harness":"hermes"}` connection `subagent`
 //!   is refused `bad_request`; on `opencode` it is accepted.
 
+mod agy_env;
+use agy_env::ScrubAgyEnv;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -50,7 +52,8 @@ impl Node {
         let http_sock = run.join("http.sock");
         let register_sock = run.join("register.sock");
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_xmsg"));
-        cmd.env("XDG_RUNTIME_DIR", &run)
+        cmd.scrub_agy_env()
+            .env("XDG_RUNTIME_DIR", &run)
             .env("HOME", &run)
             .env_remove("XMSG_HOST_LABEL")
             .arg("serve")

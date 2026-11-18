@@ -2,10 +2,12 @@
 //! agy presence locks on live macOS: the holder is nominated by the open file's sticky
 //! `FWASLOCKED` flag and held only while a kqueue `NOTE_FUNLOCK` watch on the file is unfired.
 
+mod write_exe;
+
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::AtomicU64;
@@ -405,15 +407,13 @@ async fn unregistered_conversation_is_listed_queued_and_delivered_before_any_hoo
     let path = p.lock(conv);
     let delivered = tmp.path().join("delivered.log");
     let agy_bin = tmp.path().join("fake_agy.sh");
-    fs::write(
+    write_exe::write_exe(
         &agy_bin,
         format!(
             "#!/bin/sh\necho ===DELIVERY=== >> '{0}'\necho \"$@\" >> '{0}'\nexit 0\n",
             delivered.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&agy_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     let h = Holder::spawn(
         &path,

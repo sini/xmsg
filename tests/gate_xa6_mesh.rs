@@ -25,7 +25,9 @@ use tokio::net::{UnixListener, UnixStream};
 
 use xmsg::fed::{normalize_pin, spki_sha256_from_der, PeerConfig, PeersMap};
 
+mod agy_env;
 mod hop_client;
+use agy_env::ScrubAgyEnv;
 use hop_client::Origin;
 mod short_sock;
 
@@ -217,6 +219,7 @@ async fn start(p: Prepared, creds: &Creds, peers: Value, svc: Option<&str>) -> N
     }
 
     let mut child = tokio::process::Command::new(BIN)
+        .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
         .env("RUST_LOG", "xmsg=info")

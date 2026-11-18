@@ -1,3 +1,5 @@
+mod write_exe;
+
 use serde_json::Value;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -334,8 +336,7 @@ fn create_fake_agy_bin(dir: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
         env_log.display(),
         fail_file.display()
     );
-    fs::write(&fake_agy, script).unwrap();
-    fs::set_permissions(&fake_agy, fs::Permissions::from_mode(0o755)).unwrap();
+    write_exe::write_exe(&fake_agy, script);
     (fake_agy, argv_log, env_log, fail_file)
 }
 

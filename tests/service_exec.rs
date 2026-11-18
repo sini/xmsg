@@ -7,7 +7,10 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tempfile::{tempdir, TempDir};
 
+mod agy_env;
 mod http_child;
+mod write_exe;
+use agy_env::ScrubAgyEnv;
 
 #[test]
 fn http_child_entry() {
@@ -31,7 +34,8 @@ struct Node {
 }
 
 fn isolated(cmd: &mut Command, dir: &Path) {
-    cmd.env("HOME", dir)
+    cmd.scrub_agy_env()
+        .env("HOME", dir)
         .env("CODEX_HOME", dir.join("codex"))
         .env_remove("XMSG_CODEX_HOME")
         .env_remove("XMSG_HOST_LABEL")
@@ -88,8 +92,7 @@ impl Node {
 
     fn script(&self, body: &str) -> PathBuf {
         let script = self.dir.path().join("producer.sh");
-        fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        write_exe::write_exe(&script, format!("#!/bin/sh\n{body}\n"));
         script
     }
 
@@ -458,12 +461,10 @@ async fn lost_ack_response_reconnects_without_repeating_reply_or_command() {
     let register = UnixListener::bind(&register_path).unwrap();
     let agent = UnixListener::bind(&agent_path).unwrap();
     let script = temp.path().join("producer.sh");
-    fs::write(
+    write_exe::write_exe(
         &script,
         "#!/bin/sh\nprintf x >> invocations\nprintf 'retained response\\n'\n",
-    )
-    .unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let mut command = Command::new(env!("CARGO_BIN_EXE_xmsg"));
     isolated(&mut command, temp.path());
     command
@@ -558,12 +559,10 @@ async fn permanent_reply_refusal_exits_without_retrying() {
     let register = UnixListener::bind(&register_path).unwrap();
     let agent = UnixListener::bind(&agent_path).unwrap();
     let script = temp.path().join("producer.sh");
-    fs::write(
+    write_exe::write_exe(
         &script,
         "#!/bin/sh\nprintf x >> invocations\nprintf 'response'\n",
-    )
-    .unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let mut command = Command::new(env!("CARGO_BIN_EXE_xmsg"));
     isolated(&mut command, temp.path());
     command
@@ -634,12 +633,10 @@ async fn mailbox_full_reply_retains_stdout_key_and_ack_order_until_recovery() {
     let register = UnixListener::bind(&register_path).unwrap();
     let agent = UnixListener::bind(&agent_path).unwrap();
     let script = temp.path().join("producer.sh");
-    fs::write(
+    write_exe::write_exe(
         &script,
         "#!/bin/sh\nprintf x >> invocations\nprintf 'retained after capacity refusal\\n'\n",
-    )
-    .unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let mut command = Command::new(env!("CARGO_BIN_EXE_xmsg"));
     isolated(&mut command, temp.path());
     command
