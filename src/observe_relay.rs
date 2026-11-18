@@ -713,10 +713,13 @@ async fn answer_inner(state: Arc<RelayState>, id: String, request: Request) -> R
     let body = if invalid_length {
         Err(Failure::Invalid)
     } else {
-        tokio::time::timeout_at(deadline, read_answer_body(request.into_body(), &state))
-            .await
-            .map_err(|_| Failure::Unreachable)
-            .and_then(|result| result)
+        tokio::time::timeout_at(
+            deadline,
+            read_answer_body(request.into_body(), &state, &peer),
+        )
+        .await
+        .map_err(|_| Failure::Unreachable)
+        .and_then(|result| result)
     };
     #[cfg(any(test, feature = "test-hooks"))]
     if body.is_err() {
@@ -749,6 +752,12 @@ async fn answer_inner(state: Arc<RelayState>, id: String, request: Request) -> R
             }
         }
     })();
+    let result = state
+        .fed
+        .current_peers()
+        .get_authenticated_peer_config(&peer)
+        .map_err(|_| Failure::Denied)
+        .and(result);
     let accepted = match &result {
         Ok(_) => Ok(()),
         Err(e) => Err(*e),
@@ -759,6 +768,7 @@ async fn answer_inner(state: Arc<RelayState>, id: String, request: Request) -> R
 async fn read_answer_body(
     mut body: axum::body::Body,
     state: &RelayState,
+    peer: &AuthenticatedPeer,
 ) -> Result<Vec<u8>, Failure> {
     use http_body_util::BodyExt;
     #[cfg(not(any(test, feature = "test-hooks")))]
@@ -770,6 +780,11 @@ async fn read_answer_body(
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut bytes = Vec::with_capacity(MAX_BYTES);
     while let Some(frame) = body.frame().await {
+        state
+            .fed
+            .current_peers()
+            .get_authenticated_peer_config(peer)
+            .map_err(|_| Failure::Denied)?;
         let chunk = frame
             .map_err(|_| Failure::Invalid)?
             .into_data()
@@ -1375,10 +1390,13 @@ async fn post_answer(
     if !certificate_matches(cert.as_ref(), &control.hub) {
         return Err(Failure::Denied);
     }
-    let (mut sender, connection) =
+    let authority = crate::fed::CurrentLeaf::outbound(fs, connector.admission_mode(), &tls)
+        .map_err(|_| Failure::Denied)?;
+    let (sender, connection) =
         hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls))
             .await
             .map_err(|_| Failure::Unreachable)?;
+    let mut sender = authority.sender(sender);
     let connection = tokio::spawn(async move {
         let _ = connection.await;
     });

@@ -89,6 +89,7 @@ impl PostAuthFixture {
         let peers = self.state.current_peers();
         let config = peers.get_peer_config("collector").unwrap();
         let peer = Arc::new(AuthenticatedPeer {
+            leaf_authority: None,
             name: config.name.clone(),
             pin: config.pin.clone().unwrap(),
             uri: None,

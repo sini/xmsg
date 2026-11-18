@@ -458,8 +458,86 @@ fn certificate_not_after(der: &[u8]) -> Result<i64, AppError> {
     Ok(cert.validity().not_after.timestamp())
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DenyPolicy {
+    #[serde(default)]
+    pub uris: Vec<String>,
+    #[serde(default)]
+    pub spkis: Vec<String>,
+}
+
+impl DenyPolicy {
+    fn validate(&self) -> Result<(), String> {
+        if self.uris.iter().any(|uri| uri.is_empty()) {
+            return Err("deny.uris entries must be nonempty exact URI strings".into());
+        }
+        if self.spkis.iter().any(|pin| {
+            pin.len() != 64
+                || !pin
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }) {
+            return Err("deny.spkis entries must be 64 lowercase hexadecimal characters".into());
+        }
+        Ok(())
+    }
+
+    pub fn rejects(&self, pin: &str, uris: &[String]) -> bool {
+        self.spkis
+            .iter()
+            .any(|denied| denied == &normalize_pin(pin))
+            || uris.iter().any(|uri| self.uris.contains(uri))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionMode {
+    Pin,
+    Ca,
+}
+
+#[derive(Debug, Clone)]
+pub struct LeafAuthority {
+    pub pin: String,
+    pub uris: Vec<String>,
+    pub not_after: i64,
+    pub mode: AdmissionMode,
+}
+
+impl LeafAuthority {
+    pub fn from_certificate(
+        leaf: &CertificateDer<'_>,
+        mode: AdmissionMode,
+    ) -> Result<Self, AppError> {
+        Ok(Self {
+            pin: spki_sha256_from_der(leaf.as_ref()).map_err(AppError::Internal)?,
+            uris: extract_uri_sans(leaf.as_ref()).map_err(AppError::Internal)?,
+            not_after: certificate_not_after(leaf.as_ref())?,
+            mode,
+        })
+    }
+
+    pub fn check(&self, peers: &PeersMap) -> Result<(), AppError> {
+        self.check_at(peers, UnixTime::now().as_secs() as i64)
+    }
+
+    pub fn check_at(&self, peers: &PeersMap, now: i64) -> Result<(), AppError> {
+        if peers.deny.rejects(&self.pin, &self.uris) {
+            return Err(AppError::PeerRejected("peer certificate is denied".into()));
+        }
+        if self.mode == AdmissionMode::Ca && now >= self.not_after {
+            return Err(AppError::PeerRejected(
+                "peer CA certificate has expired".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PeersMap {
+    pub deny: DenyPolicy,
     peers_by_name: HashMap<String, PeerConfig>,
     name_by_pin: HashMap<String, String>,
     ca_bundles_by_name: HashMap<String, Vec<rustls::pki_types::TrustAnchor<'static>>>,
@@ -911,6 +989,9 @@ impl PeersMap {
         &self,
         peer: &AuthenticatedPeer,
     ) -> Result<PeerConfig, AppError> {
+        if let Some(leaf) = &peer.leaf_authority {
+            leaf.check(self)?;
+        }
         let config = self
             .get_peer_config(&peer.name)
             .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
@@ -1153,6 +1234,7 @@ impl PeersMap {
         };
         let mut hub_config: Option<HubConfig> = None;
         let mut reverse_observe = crate::observe_relay::Config::default();
+        let mut deny = DenyPolicy::default();
         let mut is_wrapped = false;
         let owned_entries: PeerObjects = match &val {
             serde_json::Value::Object(map) => {
@@ -1161,7 +1243,7 @@ impl PeersMap {
                 if is_wrapped {
                     for k in map.keys() {
                         match k.as_str() {
-                            "peers" | "hub" | "reverse_observe" => {}
+                            "peers" | "hub" | "reverse_observe" | "deny" => {}
                             other => {
                                 return Err(format!("unknown field '{other}' in peers config"));
                             }
@@ -1176,11 +1258,15 @@ impl PeersMap {
                     struct Wrapped {
                         peers: Members,
                         #[serde(default)]
+                        deny: DenyPolicy,
+                        #[serde(default)]
                         reverse_observe: crate::observe_relay::Config,
                     }
                     let w: Wrapped = serde_json::from_str(json_str)
                         .map_err(|_| "'peers' field must be an object".to_string())?;
                     w.reverse_observe.validate()?;
+                    w.deny.validate()?;
+                    deny = w.deny;
                     reverse_observe = w.reverse_observe;
                     member_objects(w.peers)?
                 } else {
@@ -1568,6 +1654,7 @@ impl PeersMap {
         }
         map.default_route_peer = default_routes.into_iter().next();
         map.reverse_observe = reverse_observe;
+        map.deny = deny;
         if let Some(mut hub) = hub_config {
             map.bind_hub_patterns(&mut hub)?;
             map.hub = Some(hub);
@@ -1613,11 +1700,21 @@ impl PeersMap {
             .collect()
     }
 
+    pub fn check_certificate_deny(&self, leaf: &CertificateDer<'_>) -> Result<(), AppError> {
+        let pin = spki_sha256_from_der(leaf.as_ref()).map_err(AppError::Internal)?;
+        let uris = extract_uri_sans(leaf.as_ref()).map_err(AppError::Internal)?;
+        if self.deny.rejects(&pin, &uris) {
+            return Err(AppError::PeerRejected("peer certificate is denied".into()));
+        }
+        Ok(())
+    }
+
     pub fn resolve_incoming_peer(
         &self,
         leaf: &CertificateDer<'_>,
         intermediates: &[CertificateDer<'_>],
     ) -> Result<(PeerConfig, Option<String>), AppError> {
+        self.check_certificate_deny(leaf)?;
         let client_pin = spki_sha256_from_der(leaf.as_ref())
             .map_err(|e| AppError::Internal(format!("Failed to compute SPKI pin: {e}")))?;
         let norm_pin = normalize_pin(&client_pin);
@@ -2022,6 +2119,11 @@ impl rustls::client::danger::ServerCertVerifier for PinnedServerCertVerifier {
         _ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        if let Some(peers) = &self.peers {
+            peers
+                .check_certificate_deny(end_entity)
+                .map_err(|error| rustls::Error::General(error.to_string()))?;
+        }
         let pin = spki_sha256_from_der(end_entity.as_ref()).map_err(|_| {
             rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
         })?;
@@ -2105,6 +2207,9 @@ impl rustls::server::danger::ClientCertVerifier for CombinedClientCertVerifier {
         intermediates: &[CertificateDer<'_>],
         now: UnixTime,
     ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+        self.peers
+            .check_certificate_deny(end_entity)
+            .map_err(|error| rustls::Error::General(error.to_string()))?;
         let pin = spki_sha256_from_der(end_entity.as_ref()).map_err(|_| {
             rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
         })?;
@@ -2236,6 +2341,7 @@ fn one_node_two_names<'a>(pinned: &str, ca: impl Iterator<Item = &'a str>) -> St
 
 #[derive(Debug)]
 pub struct CaServerCertVerifier {
+    deny: DenyPolicy,
     anchors: Vec<rustls::pki_types::TrustAnchor<'static>>,
     allowed_identities: Vec<String>,
     /// This CA entry's key, and the peers file's pinned keys (pin -> entry key), for AM-6.
@@ -2249,11 +2355,17 @@ impl CaServerCertVerifier {
         allowed_identities: Vec<String>,
     ) -> Self {
         Self {
+            deny: DenyPolicy::default(),
             anchors,
             allowed_identities,
             peer_name: String::new(),
             pinned: HashMap::new(),
         }
+    }
+
+    pub fn with_deny(mut self, deny: DenyPolicy) -> Self {
+        self.deny = deny;
+        self
     }
 
     /// Refuse a server whose key is pinned by another entry of the peers file (AM-6).
@@ -2273,6 +2385,13 @@ impl rustls::client::danger::ServerCertVerifier for CaServerCertVerifier {
         _ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let pin = spki_sha256_from_der(end_entity.as_ref())
+            .map_err(|error| rustls::Error::General(error.to_string()))?;
+        let uris = extract_uri_sans(end_entity.as_ref())
+            .map_err(|error| rustls::Error::General(error.to_string()))?;
+        if self.deny.rejects(&pin, &uris) {
+            return Err(rustls::Error::General("peer certificate is denied".into()));
+        }
         verify_cert_chain(
             end_entity,
             intermediates,
@@ -2848,6 +2967,7 @@ impl ListQueries {
 
 #[derive(Debug, Clone)]
 pub struct AuthenticatedPeer {
+    pub leaf_authority: Option<LeafAuthority>,
     pub name: String,
     pub pin: String,
     pub uri: Option<String>,
@@ -4470,6 +4590,9 @@ async fn fed_list_answer_handler(
     AxumPath(query): AxumPath<String>,
     Json(answer): Json<FedListAnswer>,
 ) -> Result<Response, AppError> {
+    fed_state
+        .current_peers()
+        .get_authenticated_peer_config(&peer)?;
     if !fed_state
         .list_queries
         .answer(&query, &peer.name, answer, peer.user.clone())
@@ -4871,6 +4994,109 @@ async fn resolve_target_session_fed(
 // Outbound Federated Client
 // -----------------------------------------------------------------------------
 
+#[derive(Clone)]
+pub(crate) struct CurrentLeaf {
+    leaf: LeafAuthority,
+    initial: Arc<PeersMap>,
+    dynamic: Arc<std::sync::RwLock<Option<DynamicTls>>>,
+}
+
+impl CurrentLeaf {
+    pub(crate) fn outbound(
+        fs: &FedState,
+        mode: AdmissionMode,
+        tls: &tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+    ) -> Result<Self, AppError> {
+        let cert = tls
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(|certs| certs.first())
+            .ok_or_else(|| AppError::PeerRejected("missing server leaf".into()))?;
+        let leaf = LeafAuthority::from_certificate(cert, mode)?;
+        let current = Self {
+            leaf,
+            initial: fs.current_peers(),
+            dynamic: fs.dynamic_tls.clone(),
+        };
+        current.check()?;
+        Ok(current)
+    }
+
+    pub(crate) fn check(&self) -> Result<(), AppError> {
+        let dynamic = self
+            .dynamic
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        self.leaf
+            .check(dynamic.as_ref().map_or(&self.initial, |tls| &tls.peers))
+    }
+
+    pub(crate) fn sender<B>(
+        &self,
+        sender: hyper::client::conn::http1::SendRequest<B>,
+    ) -> CheckedSender<B> {
+        CheckedSender {
+            sender,
+            authority: self.clone(),
+        }
+    }
+}
+
+pub(crate) struct CheckedSender<B> {
+    sender: hyper::client::conn::http1::SendRequest<B>,
+    authority: CurrentLeaf,
+}
+
+impl<B> CheckedSender<B>
+where
+    B: hyper::body::Body + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    pub(crate) async fn send_request(
+        &mut self,
+        request: hyper::Request<B>,
+    ) -> Result<hyper::Response<CheckedBody>, AppError> {
+        self.authority.check()?;
+        let response = self
+            .sender
+            .send_request(request)
+            .await
+            .map_err(|error| AppError::PeerUnreachable(error.to_string()))?;
+        self.authority.check()?;
+        Ok(response.map(|body| CheckedBody {
+            body,
+            authority: self.authority.clone(),
+        }))
+    }
+}
+
+pub(crate) struct CheckedBody {
+    body: hyper::body::Incoming,
+    authority: CurrentLeaf,
+}
+
+impl hyper::body::Body for CheckedBody {
+    type Data = bytes::Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        use std::task::Poll;
+        let frame = std::pin::Pin::new(&mut self.body).poll_frame(cx);
+        if frame.is_ready() {
+            if let Err(error) = self.authority.check() {
+                return Poll::Ready(Some(Err(std::io::Error::other(error.to_string()))));
+            }
+        }
+        frame.map(|frame| {
+            frame.map(|result| result.map_err(|error| std::io::Error::other(error.to_string())))
+        })
+    }
+}
+
 pub fn make_tls_connector(
     cert_der: &[u8],
     key_der: &[u8],
@@ -4895,16 +5121,48 @@ pub fn make_tls_connector(
     Ok(tokio_rustls::TlsConnector::from(Arc::new(client_config)))
 }
 
+#[derive(Clone)]
+pub struct FederationConnector {
+    connector: tokio_rustls::TlsConnector,
+    mode: AdmissionMode,
+}
+
+impl std::ops::Deref for FederationConnector {
+    type Target = tokio_rustls::TlsConnector;
+    fn deref(&self) -> &Self::Target {
+        &self.connector
+    }
+}
+
+impl FederationConnector {
+    pub(crate) fn admission_mode(&self) -> AdmissionMode {
+        self.mode
+    }
+}
+
 pub fn make_tls_connector_for_peer(
     fed_state: &FedState,
     peer: &PeerConfig,
-) -> Result<tokio_rustls::TlsConnector, AppError> {
-    make_tls_connector_with_credentials(
-        fed_state.cert_chain(),
-        fed_state.key_der(),
-        peer,
-        fed_state.current_peers(),
-    )
+) -> Result<FederationConnector, AppError> {
+    let peers = fed_state.current_peers();
+    // Only a configured pin is pin-mode; a learned hub key retains CA provenance.
+    let mode = if peers
+        .get(&peer.name)
+        .is_some_and(|entry| entry.pin.is_some())
+    {
+        AdmissionMode::Pin
+    } else {
+        AdmissionMode::Ca
+    };
+    Ok(FederationConnector {
+        connector: make_tls_connector_with_credentials(
+            fed_state.cert_chain(),
+            fed_state.key_der(),
+            peer,
+            peers,
+        )?,
+        mode,
+    })
 }
 
 pub fn make_tls_connector_with_credentials(
@@ -4925,6 +5183,7 @@ pub fn make_tls_connector_with_credentials(
             let identities = peer.identities.clone().unwrap_or_default();
             Arc::new(
                 CaServerCertVerifier::new(anchors, identities)
+                    .with_deny(peers.deny.clone())
                     .refusing_pinned(&peer.name, peers.pinned_entries()),
             )
         } else {
@@ -5058,10 +5317,13 @@ pub async fn send_federated_message_with(
                 .await
                 .map_err(|e| map_tls_connect_error(peer_name, e))?;
 
+            let authority =
+                CurrentLeaf::outbound(fed_state, connector_clone.admission_mode(), &tls_stream)?;
             let io = hyper_util::rt::TokioIo::new(tls_stream);
             let (sender, conn) = hyper::client::conn::http1::handshake(io)
                 .await
                 .map_err(|e| AppError::PeerUnreachable(format!("HTTP handshake failed: {e}")))?;
+            let sender = authority.sender(sender);
 
             tokio::spawn(async move {
                 if let Err(e) = conn.await {
@@ -5204,10 +5466,12 @@ pub async fn send_federated_reply(
             .await
             .map_err(|e| map_tls_connect_error(peer_name, e))?;
 
+        let authority = CurrentLeaf::outbound(fed_state, connector.admission_mode(), &tls_stream)?;
         let io = hyper_util::rt::TokioIo::new(tls_stream);
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+        let (sender, conn) = hyper::client::conn::http1::handshake(io)
             .await
             .map_err(|e| AppError::PeerUnreachable(format!("HTTP handshake failed: {e}")))?;
+        let mut sender = authority.sender(sender);
 
         tokio::spawn(async move {
             if let Err(e) = conn.await {
@@ -5314,10 +5578,12 @@ pub async fn poll_federated_replies(
             .await
             .map_err(|e| map_tls_connect_error(peer_name, e))?;
 
+        let authority = CurrentLeaf::outbound(fed_state, connector.admission_mode(), &tls_stream)?;
         let io = hyper_util::rt::TokioIo::new(tls_stream);
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+        let (sender, conn) = hyper::client::conn::http1::handshake(io)
             .await
             .map_err(|e| AppError::PeerUnreachable(format!("HTTP handshake failed: {e}")))?;
+        let mut sender = authority.sender(sender);
 
         tokio::spawn(async move {
             if let Err(e) = conn.await {
@@ -5514,10 +5780,12 @@ pub(crate) async fn get_federated_inbox_witnessed(
         } else {
             None
         };
+        let authority = CurrentLeaf::outbound(fed_state, connector.admission_mode(), &tls_stream)?;
         let io = hyper_util::rt::TokioIo::new(tls_stream);
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+        let (sender, conn) = hyper::client::conn::http1::handshake(io)
             .await
             .map_err(|e| AppError::PeerUnreachable(format!("HTTP handshake failed: {e}")))?;
+        let mut sender = authority.sender(sender);
 
         tokio::spawn(async move {
             if let Err(e) = conn.await {
@@ -5666,10 +5934,12 @@ pub async fn ack_federated_inbox(
             .await
             .map_err(|e| map_tls_connect_error(peer_name, e))?;
 
+        let authority = CurrentLeaf::outbound(fed_state, connector.admission_mode(), &tls_stream)?;
         let io = hyper_util::rt::TokioIo::new(tls_stream);
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+        let (sender, conn) = hyper::client::conn::http1::handshake(io)
             .await
             .map_err(|e| AppError::PeerUnreachable(format!("HTTP handshake failed: {e}")))?;
+        let mut sender = authority.sender(sender);
 
         tokio::spawn(async move {
             if let Err(e) = conn.await {
@@ -6426,14 +6696,16 @@ pub async fn list_direct_peer(
         .and_then(|leaf| crate::node::user_from_cert(leaf.as_ref()).ok())
         .unwrap_or_default();
 
+    let authority = CurrentLeaf::outbound(fed_state, connector.admission_mode(), &tls_stream)?;
     let io = hyper_util::rt::TokioIo::new(tls_stream);
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+    let (sender, conn) = hyper::client::conn::http1::handshake(io)
         .await
         .map_err(|e| {
             AppError::PeerUnreachable(format!(
                 "HTTP handshake failed with peer '{peer_name}': {e}"
             ))
         })?;
+    let mut sender = authority.sender(sender);
     tokio::spawn(async move {
         if let Err(e) = conn.await {
             debug!("HTTP connection closed: {e}");
@@ -6508,10 +6780,12 @@ pub async fn answer_list_query(fed_state: &FedState, peer_key: &str, query: &str
             .connect(server_name, tcp)
             .await
             .map_err(|e| map_tls_connect_error(&peer.name, e))?;
-        let (mut sender, conn) =
+        let authority = CurrentLeaf::outbound(fed_state, connector.admission_mode(), &tls)?;
+        let (sender, conn) =
             hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls))
                 .await
                 .map_err(|e| AppError::PeerUnreachable(e.to_string()))?;
+        let mut sender = authority.sender(sender);
         tokio::spawn(async move {
             let _ = conn.await;
         });
@@ -6773,7 +7047,19 @@ pub async fn run_fed_listener_with_acceptor(
                 }
             };
 
+            let leaf_authority = match LeafAuthority::from_certificate(
+                leaf,
+                if verified_uri.is_some() {
+                    AdmissionMode::Ca
+                } else {
+                    AdmissionMode::Pin
+                },
+            ) {
+                Ok(authority) => authority,
+                Err(_) => return,
+            };
             let peer_info = Arc::new(AuthenticatedPeer {
+                leaf_authority: Some(leaf_authority),
                 name: peer_config.name.clone(),
                 pin: client_pin,
                 uri: verified_uri,
@@ -6822,10 +7108,17 @@ pub async fn run_fed_listener_with_acceptor(
                             req.uri().query(),
                         );
                         let mut req = req.map(axum::body::Body::new);
-                        req.extensions_mut().insert(peer_info);
+                        req.extensions_mut().insert(peer_info.clone());
                         req.extensions_mut().insert(tls_admission);
                         use tower::Service;
-                        router.call(req).await
+                        let response = router.call(req).await;
+                        if let Err(error) = fed_state_req
+                            .current_peers()
+                            .get_authenticated_peer_config(&peer_info)
+                        {
+                            return Ok(error.into_response());
+                        }
+                        response
                     }
                 });
 
@@ -7468,6 +7761,7 @@ async fn fed_attachment_answer_handler(
             limit,
         });
     }
+    fs.current_peers().get_authenticated_peer_config(&peer)?;
     attachment_queries(&fs).answer(&query, &peer.name, &body, raw)?;
     Ok(StatusCode::OK.into_response())
 }
@@ -7574,10 +7868,12 @@ async fn attachment_http(
             .connect(name, tcp)
             .await
             .map_err(|e| map_tls_connect_error(&peer.name, e))?;
-        let (mut sender, conn) =
+        let authority = CurrentLeaf::outbound(fs, connector.admission_mode(), &tls)?;
+        let (sender, conn) =
             hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls))
                 .await
                 .map_err(|e| AppError::PeerUnreachable(e.to_string()))?;
+        let mut sender = authority.sender(sender);
         tokio::spawn(async move {
             let _ = conn.await;
         });

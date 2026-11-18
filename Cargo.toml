@@ -601,3 +601,7 @@ required-features = ["daemon"]
 name = "test_write_exe_guard"
 path = "tests/test_write_exe_guard.rs"
 required-features = ["daemon"]
+[[test]]
+name = "federation_deny"
+path = "tests/federation_deny.rs"
+required-features = ["daemon"]
