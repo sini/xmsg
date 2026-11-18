@@ -149,6 +149,41 @@ message there. In both cases the hub stores the message in its `peer_mailbox`, a
 returns `outcome: "queued"`, not `"delivered"`. The message stays queued until the leaf collects
 it and acknowledges it.
 
+### Global deny and current certificate authority
+
+The wrapped file form accepts `deny` beside `peers` and `hub`:
+
+```json
+{
+  "peers": {},
+  "deny": {
+    "uris": ["spiffe://example.org/host/lost-laptop/user/alice"],
+    "spkis": []
+  }
+}
+```
+
+`deny.uris` contains nonempty exact URI SAN strings. Every actual URI SAN is
+checked; there is no pattern, alias or normalization match. `deny.spkis` contains
+64 lowercase hexadecimal SHA-256 DER-SPKI fingerprints without `sha256:`. Missing
+or empty lists add no denial. Unknown fields, wrong types and malformed
+fingerprints reject the complete reload and retain the previous policy.
+
+A matching deny wins over explicit pins, concrete CA entries and hub patterns,
+for inbound and outbound federation. A loaded deny is checked again at request
+entry and response publication, including parked polls and internal answer
+publication. Reverse answer uploads check each awaited frame before append.
+Outbound response frames are checked before parsing or accepting their bytes.
+
+CA-mode connections also retain their actual leaf's `not_after` and refuse after
+that deadline at those same boundaries. A renewed leaf or learned cached pin
+cannot extend the old connection's expiry. Explicit pin-mode connections continue
+to ignore certificate expiry, but still obey deny. An operation already beyond
+its applicable check can finish its bounded effect; parallel operations may each
+have passed a check, and committed effects are not rolled back. This does not
+close idle sockets. CA issuance/renewal policy and the standalone fleet-collector
+HTTPS client are separate. See the [offboarding runbook](/operations/enrollment-ca/#offboard-a-teammate-or-a-lost-or-stolen-device).
+
 ### Entry fields
 
 | Field | Type | Description |

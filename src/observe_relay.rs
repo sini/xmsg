@@ -842,6 +842,8 @@ pub mod test_hooks {
     use super::*;
     #[derive(Default)]
     pub struct Controls {
+        pub before_outbound_send: crate::observe_fed::test_hooks::Gate,
+        pub after_outbound_headers: crate::observe_fed::test_hooks::Gate,
         pub before_admission: crate::observe_fed::test_hooks::Gate,
         pub before_dispatch: crate::observe_fed::test_hooks::Gate,
         pub before_forward: crate::observe_fed::test_hooks::Gate,

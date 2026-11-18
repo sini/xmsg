@@ -1,0 +1,282 @@
+[
+  {
+    "label": "deny-exact-uri-all-sans",
+    "target": "federation_deny",
+    "test": "deny_matches_all_literal_sans_and_exact_spki",
+    "test_file": "tests/federation_deny.rs",
+    "expected_literal": "secondary URI SAN must deny pinned leaf",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "|| uris.iter().any(|uri| self.uris.contains(uri))",
+        "replacement": "|| false && uris.iter().any(|uri| self.uris.contains(uri))"
+      }
+    ],
+    "assertion_file": "tests/federation_deny.rs",
+    "assertion_line": 32,
+    "assertion_sha256": "4f7433b4b1ce6afed6025a45e79e1f3c4df141fdd0556d4a71f675a959f019e8",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "deny-exact-spki",
+    "target": "federation_deny",
+    "test": "hub_pattern_deny_precedes_verifier_and_roster_but_allows_sibling",
+    "test_file": "tests/federation_deny.rs",
+    "expected_literal": "denied hub-pattern leaf must fail TLS verifier",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": ".any(|denied| denied == &normalize_pin(pin))",
+        "replacement": ".any(|denied| false && denied == &normalize_pin(pin))"
+      }
+    ],
+    "assertion_file": "tests/federation_deny.rs",
+    "assertion_line": 174,
+    "assertion_sha256": "4f7433b4b1ce6afed6025a45e79e1f3c4df141fdd0556d4a71f675a959f019e8",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "deny-before-roster",
+    "target": "federation_deny",
+    "test": "hub_pattern_deny_precedes_verifier_and_roster_but_allows_sibling",
+    "test_file": "tests/federation_deny.rs",
+    "expected_literal": "denied hub-pattern leaf must fail before roster mutation",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "        self.check_certificate_deny(leaf)?;",
+        "replacement": "        // source fault: omit resolver deny",
+        "start": "    pub fn resolve_incoming_peer("
+      }
+    ],
+    "assertion_file": "tests/federation_deny.rs",
+    "assertion_line": 179,
+    "assertion_sha256": "4f7433b4b1ce6afed6025a45e79e1f3c4df141fdd0556d4a71f675a959f019e8",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "deny-inbound-tls",
+    "target": "federation_deny",
+    "test": "hub_pattern_deny_precedes_verifier_and_roster_but_allows_sibling",
+    "test_file": "tests/federation_deny.rs",
+    "expected_literal": "denied hub-pattern leaf must fail TLS verifier",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "        self.peers\n            .check_certificate_deny(end_entity)\n            .map_err(|error| rustls::Error::General(error.to_string()))?;",
+        "replacement": "        // source fault: omit inbound verifier deny",
+        "start": "impl rustls::server::danger::ClientCertVerifier for CombinedClientCertVerifier"
+      }
+    ],
+    "assertion_file": "tests/federation_deny.rs",
+    "assertion_line": 174,
+    "assertion_sha256": "4f7433b4b1ce6afed6025a45e79e1f3c4df141fdd0556d4a71f675a959f019e8",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "deny-pinned-outbound-tls",
+    "target": "federation_deny",
+    "test": "explicit_pin_deny_and_allowed_multiple_sans_apply_to_both_tls_directions",
+    "test_file": "tests/federation_deny.rs",
+    "expected_literal": "pin-mode outbound TLS must honor all-SAN/SPKI deny and otherwise preserve multi-SAN compatibility",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "            peers\n                .check_certificate_deny(end_entity)\n                .map_err(|error| rustls::Error::General(error.to_string()))?;",
+        "replacement": "            let _ = peers;",
+        "start": "impl rustls::client::danger::ServerCertVerifier for PinnedServerCertVerifier",
+        "end": "pub struct CombinedClientCertVerifier"
+      }
+    ],
+    "assertion_file": "tests/federation_deny.rs",
+    "assertion_line": 242,
+    "assertion_sha256": "4f7433b4b1ce6afed6025a45e79e1f3c4df141fdd0556d4a71f675a959f019e8",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "deny-ca-outbound-tls",
+    "target": "federation_deny",
+    "test": "ca_server_verifier_denies_actual_uri_and_spki_before_chain_acceptance",
+    "test_file": "tests/federation_deny.rs",
+    "expected_literal": "CA outbound verifier must apply deny to the actual leaf before accepting it",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if self.deny.rejects(&pin, &uris) {",
+        "replacement": "if false && self.deny.rejects(&pin, &uris) {",
+        "start": "impl rustls::client::danger::ServerCertVerifier for CaServerCertVerifier"
+      }
+    ],
+    "assertion_file": "tests/federation_deny.rs",
+    "assertion_line": 290,
+    "assertion_sha256": "4f7433b4b1ce6afed6025a45e79e1f3c4df141fdd0556d4a71f675a959f019e8",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "deny-malformed-atomic-reload",
+    "target": "federation_deny",
+    "test": "malformed_reload_retains_the_entire_previous_policy_and_hashes",
+    "test_file": "tests/federation_deny.rs",
+    "expected_literal": "malformed deny must reject whole publication",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "                    w.deny.validate()?;",
+        "replacement": "                    let _ = &w.deny;"
+      }
+    ],
+    "assertion_file": "tests/federation_deny.rs",
+    "assertion_line": 332,
+    "assertion_sha256": "4f7433b4b1ce6afed6025a45e79e1f3c4df141fdd0556d4a71f675a959f019e8",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "deny-current-keepalive-entry",
+    "target": "gate_reverse_observe",
+    "test": "deny_reload_refuses_request_two_on_the_same_pinned_connection",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "keep-alive request two must use current global deny",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "        peer.leaf_authority.check(self)?;",
+        "replacement": "        // source fault: omit current leaf authority"
+      }
+    ],
+    "assertion_file": "tests/gate_reverse_observe.rs",
+    "assertion_line": 3291,
+    "assertion_sha256": "dbe1612c86f7e331eaddae5e4ade0fc807026c001ba952166027e72af8f6991e",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "deny-post-await-publication",
+    "target": "gate_reverse_observe",
+    "test": "deny_reload_withholds_a_poll_already_parked_after_admission",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "a request admitted before deny must not publish its parked answer",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "                        if let Err(error) = fed_state_req\n                            .current_peers()\n                            .get_authenticated_peer_config(&peer_info)\n                        {\n                            return Ok(error.into_response());\n                        }",
+        "replacement": "                        // source fault: omit post-await publication check"
+      }
+    ],
+    "assertion_file": "tests/gate_reverse_observe.rs",
+    "assertion_line": 3319,
+    "assertion_sha256": "dbe1612c86f7e331eaddae5e4ade0fc807026c001ba952166027e72af8f6991e",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "deny-reverse-frame-before-progress",
+    "target": "gate_reverse_observe",
+    "test": "deny_mid_upload_refuses_the_next_frame_before_buffering_or_progress",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "denied post-await frame must not append or advance the progress witness",
+    "edits": [
+      {
+        "file": "src/observe_relay.rs",
+        "needle": "        state\n            .fed\n            .current_peers()\n            .get_authenticated_peer_config(peer)\n            .map_err(|_| Failure::Denied)?;",
+        "replacement": "        let _ = peer;",
+        "start": "async fn read_answer_body(",
+        "end": "fn validate_dto("
+      }
+    ],
+    "assertion_file": "tests/gate_reverse_observe.rs",
+    "assertion_line": 3374,
+    "assertion_sha256": "dbe1612c86f7e331eaddae5e4ade0fc807026c001ba952166027e72af8f6991e",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "deny-outbound-pre-send",
+    "target": "gate_reverse_observe",
+    "test": "outbound_denied_after_tls_cannot_send_the_request",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "pre-send refusal must precede the actual server request effect",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "        self.authority.check()?;\n        let response = self",
+        "replacement": "        let response = self",
+        "start": "impl<B> CheckedSender<B>"
+      }
+    ],
+    "assertion_file": "tests/gate_reverse_observe.rs",
+    "assertion_line": 3587,
+    "assertion_sha256": "dbe1612c86f7e331eaddae5e4ade0fc807026c001ba952166027e72af8f6991e",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "deny-outbound-response-body",
+    "target": "gate_reverse_observe",
+    "test": "outbound_denied_after_headers_cannot_publish_or_parse_response_body",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "denied post-header bytes must not parse as a successful inbox result",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "        if frame.is_ready() {\n            if let Err(error) = self.authority.check() {\n                return Poll::Ready(Some(Err(std::io::Error::other(error.to_string()))));\n            }\n        }",
+        "replacement": "        let _ = &self.authority;",
+        "start": "impl hyper::body::Body for CheckedBody"
+      }
+    ],
+    "assertion_file": "tests/gate_reverse_observe.rs",
+    "assertion_line": 3615,
+    "assertion_sha256": "dbe1612c86f7e331eaddae5e4ade0fc807026c001ba952166027e72af8f6991e",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "deny-ca-actual-socket-expiry",
+    "target": "gate_reverse_observe",
+    "test": "actual_ca_leaf_expiry_refuses_keepalive_and_parked_poll_publication",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "CA poll crossing its actual leaf expiry must not publish",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if self.mode == AdmissionMode::Ca && now >= self.not_after {",
+        "replacement": "if false && self.mode == AdmissionMode::Ca && now >= self.not_after {"
+      }
+    ],
+    "assertion_file": "tests/gate_reverse_observe.rs",
+    "assertion_line": 3544,
+    "assertion_sha256": "dbe1612c86f7e331eaddae5e4ade0fc807026c001ba952166027e72af8f6991e",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "deny-pin-expiry-exemption",
+    "target": "gate_reverse_observe",
+    "test": "expired_explicit_pin_still_authorizes_on_a_real_connection",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "explicit pin remains date-independent at both handshake and request checks",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if self.mode == AdmissionMode::Ca && now >= self.not_after {",
+        "replacement": "if now >= self.not_after {"
+      }
+    ],
+    "assertion_file": "tests/gate_reverse_observe.rs",
+    "assertion_line": 3433,
+    "assertion_sha256": "dbe1612c86f7e331eaddae5e4ade0fc807026c001ba952166027e72af8f6991e",
+    "assertion_rule": "unique-static-source-fragment"
+  },
+  {
+    "label": "deny-connector-current-selection",
+    "target": "gate_reverse_observe",
+    "test": "connector_uses_one_current_entry_for_stale_caller_trust_and_mode",
+    "test_file": "tests/gate_reverse_observe.rs",
+    "expected_literal": "current configured pin must replace stale caller CA trust",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "            &selected,\n            peers,",
+        "replacement": "            peer,\n            peers,",
+        "start": "pub fn make_tls_connector_for_peer("
+      }
+    ],
+    "assertion_file": "tests/gate_reverse_observe.rs",
+    "assertion_line": 3397,
+    "assertion_sha256": "dbe1612c86f7e331eaddae5e4ade0fc807026c001ba952166027e72af8f6991e",
+    "assertion_rule": "unique-static-source-fragment"
+  }
+]
