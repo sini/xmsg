@@ -120,13 +120,13 @@
       "passed": 1437,
       "failed": 0,
       "ignored": 7,
-      "summaries": 112
+      "summaries": 113
     },
     "darwin": {
       "passed": 1450,
       "failed": 0,
       "ignored": 9,
-      "summaries": 112
+      "summaries": 113
     }
   }
 }
