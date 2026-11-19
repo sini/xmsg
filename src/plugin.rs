@@ -119,6 +119,8 @@ enum Frame {
         status: Option<String>,
         #[serde(default)]
         within: Option<u64>,
+        #[serde(default)]
+        limit: Option<usize>,
     },
     Attach {
         request_id: String,
@@ -686,6 +688,7 @@ where
                 kind,
                 status,
                 within,
+                limit,
             } => {
                 let _ = as_agent;
                 let caller =
@@ -702,11 +705,14 @@ where
                         kind,
                         status,
                         within,
+                        limit,
                         host: None,
                     };
-                    let res = surface::list(&state, &query).await.map(
-                        |r| json!({ "status": "ok", "recipients": r.recipients, "nodes": r.nodes }),
-                    );
+                    let res = surface::list(&state, &query).await.map(|r| {
+                        let mut value = serde_json::to_value(r).expect("list serializes");
+                        value["status"] = json!("ok");
+                        value
+                    });
                     let _ = tx.send(answer(res, &request_id));
                 });
             }

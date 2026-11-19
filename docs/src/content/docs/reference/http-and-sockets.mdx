@@ -215,7 +215,7 @@ service client's `AgentClient` use it:
 
 | Request Frame | Response Frame |
 |---|---|
-| `{"action":"list","name"?,"node"?,"kind"?,"status"?,"within"?}` | `{"status":"ok","recipients":[…],"nodes":[…]}` |
+| `{"action":"list","name"?,"node"?,"kind"?,"status"?,"within"?,"limit"?}` | `{"status":"ok","recipients":[…],"nodes":[…],"total":N,"truncated":B}` (planned) |
 | `{"action":"send","to","text","idempotency_key"?,"as_agent"?}` | `{"status":"ok","message_id","address","outcome"}` |
 | `{"action":"reply","message_id","text","idempotency_key"?,"as_agent"?}` | `{"status":"ok","reply":{…}}` |
 | `{"action":"replies","message_id","wait"?,"after"?}` | `{"status":"ok","replies":[…]}` |
@@ -446,3 +446,17 @@ The view sends CSP with scripts disabled, no-store and nosniff. Its static CSS a
 HTML/SVG have no browser bearer store or action routes. A non-loopback listener
 requires configured server TLS. See [collector operations](/operations/fleet-observer/)
 for configuration, cache retention and restart revalidation states.
+
+## Bounded recipient listings (planned)
+
+Ordinary `GET /v1/recipients` and agent/plugin `list` accept `limit` (integer,
+1–500, default 50). They return `total` and `truncated` alongside `recipients`
+and `nodes`, even when `limit` is omitted. Filtering and federation aggregation
+precede the single global cap. Live recipients sort by descending `registered_at`;
+inactive recipients sort by descending `last_seen`, with address as the tie breaker.
+For example, `/v1/recipients?kind=service&limit=100` returns at most 100 matching services.
+
+Deploy the daemon and CLI/MCP/SDK clients together: strict older clients and servers
+are not compatible with this response/query change. The schema version remains 2.
+Federation `/fed/v2/sessions` and dial-out list answers retain their existing unbounded
+vector wire format. Read-only snapshots, watch and doctor retain their separate behavior.

@@ -582,7 +582,7 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "list",
-            "description": "List the recipients you can message, on this node and every node it can reach. By default (`status` omitted or \"live\"), shows only live recipients, each carrying `registered_at` (epoch seconds when it registered on its node). With `status: \"inactive\"`, shows parked and closed instances seen within `within` seconds (default 86400 = 24h, capped at the reply TTL), each carrying `last_seen` (a peer older than XL1 lists no inactive entries). Each entry gives its address (`id@node` for an instance, `name@node` for a service, `<parent>/<child>@node` for a subagent), kind (`service`, `instance` or `subagent`), harness (`claude`, `agy`, `pi`, `opencode`, `hermes` or `svc`; omitted when a pre-XL1 peer did not report it), label, status (`live`, `parked` or `closed`), user, and `registered_at` or `last_seen`; `nodes` gives each node asked as `ok`, `unreachable` or `timeout` (a node that withholds list is `unreachable`, detail `withholds list`). Filter by `name`, `node` or `kind`; `node` asks only that node.",
+            "description": "List the recipients you can message, on this node and every node it can reach. By default (`status` omitted or \"live\"), shows only live recipients, each carrying `registered_at` (epoch seconds when it registered on its node). With `status: \"inactive\"`, shows parked and closed instances seen within `within` seconds (default 86400 = 24h, capped at the reply TTL), each carrying `last_seen` (a peer older than XL1 lists no inactive entries). Each entry gives its address (`id@node` for an instance, `name@node` for a service, `<parent>/<child>@node` for a subagent), kind (`service`, `instance` or `subagent`), harness (`claude`, `agy`, `pi`, `opencode`, `hermes` or `svc`; omitted when a pre-XL1 peer did not report it), label, status (`live`, `parked` or `closed`), user, and `registered_at` or `last_seen`; `nodes` gives each node asked as `ok`, `unreachable` or `timeout` (a node that withholds list is `unreachable`, detail `withholds list`). Returns at most `limit` recipients (default 50, maximum 500), newest first across all nodes after filtering, with `total` and `truncated`. If truncated, narrow with `name`, `node` or `kind`, or raise `limit`. `node` asks only that node.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -590,6 +590,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     "node": { "type": "string", "description": "Ask only this node (this one or a federated peer)" },
                     "kind": { "type": "string", "enum": ["service", "instance", "subagent"], "description": "Only services, only instances, or only subagents" },
                     "status": { "type": "string", "enum": ["live", "inactive"], "description": "Whether to list live recipients (default) or inactive (parked and closed) instances" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50, "description": "Maximum recipients across all nodes after filtering; narrow name/node/kind or raise this if truncated" },
                     "within": { "type": "integer", "minimum": 0, "description": "For status='inactive', include entries seen within this many seconds (default 86400 = 24h, capped at reply TTL)" },
                     "as_agent": as_agent_prop
                 },
@@ -793,6 +794,13 @@ pub fn execute_tool_with_meta(
 
     match name {
         "list" => {
+            let limit = match args.get("limit") {
+                None => 50,
+                Some(value) => match value.as_u64().filter(|n| (1..=500).contains(n)) {
+                    Some(n) => n as usize,
+                    None => return tool_err("limit must be an integer between 1 and 500".into()),
+                },
+            };
             let within = match args.get("within") {
                 Some(within_val) => match within_val.as_u64() {
                     Some(w) => Some(w),
@@ -807,6 +815,7 @@ pub fn execute_tool_with_meta(
             let mut agent_payload = json!({
                 "action": "list",
                 "schema_version": crate::surface::MCP_SCHEMA_VERSION,
+                "limit": limit,
             });
             for k in ["name", "node", "kind", "status"] {
                 if let Some(v) = str_arg(k) {
@@ -875,6 +884,8 @@ pub fn execute_tool_with_meta(
             if let Some(w) = within {
                 url.query_pairs_mut().append_pair("within", &w.to_string());
             }
+            url.query_pairs_mut()
+                .append_pair("limit", &limit.to_string());
             let path = match url.query() {
                 Some(q) => format!("{}?{q}", url.path()),
                 None => url.path().to_string(),
@@ -886,7 +897,12 @@ pub fn execute_tool_with_meta(
             if let Some(ref sock) = sock_path {
                 if sock.exists() {
                     match crate::http::http_get_unix(sock, &path) {
-                        Ok((status, text)) if status.is_success() => return tool_ok(text),
+                        Ok((status, text)) if status.is_success() => {
+                            return match serde_json::from_str(&text) {
+                                Ok(value) => format_list_resp(value),
+                                Err(_) => tool_err("invalid list response".into()),
+                            }
+                        }
                         Ok((status, text)) => return tool_err(format!("HTTP {status}: {text}")),
                         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
                             tracing::warn!(
@@ -900,11 +916,14 @@ pub fn execute_tool_with_meta(
 
             let url = format!("{}{path}", config.xmsg_url.trim_end_matches('/'));
             match client.get(&url).send() {
-                Ok(resp) => {
-                    let status = resp.status();
-                    let text = resp.text().unwrap_or_default();
+                Ok(response) => {
+                    let status = response.status();
+                    let text = response.text().unwrap_or_default();
                     if status.is_success() {
-                        tool_ok(text)
+                        match serde_json::from_str(&text) {
+                            Ok(value) => format_list_resp(value),
+                            Err(_) => tool_err("invalid list response".into()),
+                        }
                     } else {
                         tool_err(format!("HTTP {status}: {text}"))
                     }

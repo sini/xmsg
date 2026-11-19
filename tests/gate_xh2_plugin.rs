@@ -361,7 +361,14 @@ async fn r2_list_answer_shape() {
     keys.sort_unstable();
     assert_eq!(
         keys,
-        ["nodes", "recipients", "request_id", "status"],
+        [
+            "nodes",
+            "recipients",
+            "request_id",
+            "status",
+            "total",
+            "truncated"
+        ],
         "{answer}"
     );
     assert_eq!(answer["status"], "ok", "{answer}");

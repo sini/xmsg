@@ -141,6 +141,8 @@ pub enum AgentFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         within: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         #[allow(dead_code)]
         as_agent: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -354,6 +356,8 @@ pub struct Recipient {
 pub struct ListResult {
     pub recipients: Vec<Recipient>,
     pub nodes: Vec<NodeStatus>,
+    pub total: usize,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

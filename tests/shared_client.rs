@@ -433,7 +433,7 @@ async fn socket_specific_exact_frame_keys() {
         for response in [
             json!({"status":"ok","message_id":"sent","address":"receiver@fixture","outcome":"pending"}),
             json!({"status":"ok","reply":{"seq":1,"messageId":"msg","createdAt":1,"replierSessionId":"bridge","text":"reply","pushOutcome":"queued","pushedMessageId":"reply-id"}}),
-            json!({"status":"ok","recipients":[],"nodes":[]}),
+            json!({"status":"ok","recipients":[],"nodes":[],"total":0,"truncated":false}),
         ] {
             let mut stream = BufReader::new(agent.accept().await.unwrap().0);
             frames.push(request(&mut stream, response).await);

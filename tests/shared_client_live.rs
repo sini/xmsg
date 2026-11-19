@@ -176,11 +176,21 @@ async fn exercise(binary: &Path, expects_effective_limits: bool) {
         assert_eq!(reg.max_body_bytes, None);
     }
     let address = client.address().unwrap().to_owned();
-    let listed = client.list(ListQuery::default()).await.unwrap();
-    assert!(listed
-        .recipients
-        .iter()
-        .any(|r| r.address == address && r.kind == "service"));
+    let listed = client.list(ListQuery::default()).await;
+    if expects_effective_limits {
+        let listed = listed.unwrap();
+        assert!(listed
+            .recipients
+            .iter()
+            .any(|r| r.address == address && r.kind == "service"));
+        assert_eq!(listed.total, listed.recipients.len());
+        assert!(!listed.truncated);
+    } else {
+        assert!(
+            matches!(listed, Err(xmsg::client::ClientError::Protocol)),
+            "old baseline list must refuse missing bounded-list metadata"
+        );
+    }
     let sent = client
         .send(&address, "bounded live body", Some("durable-key"))
         .await

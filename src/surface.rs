@@ -331,6 +331,7 @@ pub struct ListQuery {
     pub within: Option<u64>,
     #[serde(default)]
     pub host: Option<String>,
+    pub limit: Option<usize>,
 }
 
 fn live_entry(
@@ -441,6 +442,11 @@ fn peer_keys_for_host(peers: &crate::fed::PeersMap, host: &str) -> Vec<String> {
 /// (`status` omitted or `"live"`) returns only live recipients; `status: "inactive"` returns
 /// parked and closed instances seen within `within` seconds (default 24h, capped at `reply_ttl`).
 pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, AppError> {
+    if query.limit.is_some_and(|limit| !(1..=500).contains(&limit)) {
+        return Err(AppError::BadRequest(
+            "limit must be between 1 and 500".into(),
+        ));
+    }
     if query.host.is_some() {
         return Err(AppError::BadRequest(
             "unknown parameter 'host'; use 'node' instead (or omit it to list all nodes)"
@@ -554,7 +560,27 @@ pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, App
                 r.label.as_deref() == Some(n) || (r.kind == "service" && local == n)
             })
     });
-    Ok(ListResult { recipients, nodes })
+    recipients.sort_by(|a, b| {
+        let timestamp = |r: &Recipient| {
+            if inactive_mode {
+                r.last_seen
+            } else {
+                r.registered_at
+            }
+        };
+        timestamp(b)
+            .cmp(&timestamp(a))
+            .then_with(|| a.address.cmp(&b.address))
+    });
+    let total = recipients.len();
+    let limit = query.limit.unwrap_or(50);
+    recipients.truncate(limit);
+    Ok(ListResult {
+        recipients,
+        nodes,
+        total,
+        truncated: total > limit,
+    })
 }
 
 /// This node's live recipients (XL1, XF3): live Claude, agy and pi instances, plugin

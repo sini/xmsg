@@ -27,6 +27,9 @@ pub struct ListArgs {
     kind: Option<String>,
     #[arg(long, value_parser = ["live", "inactive"])]
     status: Option<String>,
+    /// Maximum recipients after filtering (newest first)
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=500))]
+    limit: u16,
 }
 
 #[derive(Args, Debug)]
@@ -125,6 +128,8 @@ pub fn list(args: ListArgs) -> Result<()> {
             url.query_pairs_mut().append_pair(key, &value);
         }
     }
+    url.query_pairs_mut()
+        .append_pair("limit", &args.limit.to_string());
     let value = request(&args.options, "GET", url, None, Duration::from_secs(5))?;
     if args.options.json {
         return print_json(&value, true);

@@ -18,7 +18,7 @@ These commands use the daemon's HTTP Unix socket, on Linux and macOS. To select 
 runtime-directory default, which includes the macOS fallback.
 
 ```bash
-xmsg list [--node NODE] [--kind service|instance|subagent] [--status live|inactive] [--json]
+xmsg list [--node NODE] [--kind service|instance|subagent] [--status live|inactive] [--limit 1..500] [--json]
 xmsg send RECIPIENT [TEXT|-] [--from LABEL] [--idempotency-key KEY] [--json]
 xmsg replies MESSAGE_ID [--wait SECONDS] [--json]
 xmsg show MESSAGE_ID [--json]
@@ -386,7 +386,7 @@ Reads a bounded byte range of attachment `index` (`>= 0`) on `message_id`. Attac
   where `encoding` is `"utf-8"` or `"base64"` and `next` is the next byte offset when more bytes
   remain, or `{ state: "pending" }` while a planned federated fetch is in progress.
 
-### `list(name?, node?, kind?, status?, within?)`
+### `list(name?, node?, kind?, status?, within?, limit?)`
 
 Lists recipients the caller may see on this node and every reachable peer:
 
@@ -400,7 +400,10 @@ Lists recipients the caller may see on this node and every reachable peer:
 - **`kind`:** Filter by `"service"`, `"instance"`, or `"subagent"`.
 - **`name`:** Filter by service name or instance label.
 - **`node`:** An exact canonical name or local nickname queries one node. A bare-host selector queries all matching nodes in the current view; see [node selectors](/concepts/addressing/#node-selectors).
-- **Returns:** `{ recipients: [{ address, kind, harness?, label?, status, node, user, registered_at | last_seen }], nodes: [{ node, status, detail? }] }`.
+- **`limit` (planned):** Default `50`, maximum `500`; must be at least `1`. Applies once across all nodes after filters. Live entries sort by newest `registered_at`, inactive entries by newest `last_seen`; equal timestamps sort by address.
+- **Returns (planned):** `{ recipients: [{ address, kind, harness?, label?, status, node, user, registered_at | last_seen }], nodes: [{ node, status, detail? }], total, truncated }`. `total` counts matching recipients before the cap. When `truncated` is true, narrow with `name`, `node` or `kind`, or raise `limit`.
+
+Planned CLI example: `xmsg list --node alice.laptop --limit 100 --json`. CLI and MCP default to 50. This response change requires updating daemon and clients together.
 
 ### `send(to, text, attachments?, as_agent?)`
 

@@ -814,6 +814,7 @@ async fn c2_mcp_environment_and_attributed_tool_paths() {
         &env.state,
         &peer,
         AgentFrame::List {
+            limit: None,
             schema_version: None,
             name: None,
             node: None,
@@ -927,6 +928,7 @@ async fn c2_mcp_environment_and_attributed_tool_paths() {
         &env.state,
         &peer,
         AgentFrame::List {
+            limit: None,
             schema_version: None,
             name: None,
             node: None,
@@ -1064,6 +1066,7 @@ async fn c3_registration_xb2_and_continuous_lease_watch() {
         &env.state,
         &peer,
         AgentFrame::List {
+            limit: None,
             schema_version: None,
             name: None,
             node: None,
@@ -1097,6 +1100,7 @@ async fn c3_registration_xb2_and_continuous_lease_watch() {
         &env.state,
         &peer,
         AgentFrame::List {
+            limit: None,
             schema_version: None,
             name: None,
             node: None,
@@ -1288,6 +1292,7 @@ async fn c3_registration_xb2_and_continuous_lease_watch() {
         &env.state,
         &peer,
         AgentFrame::List {
+            limit: None,
             schema_version: None,
             name: None,
             node: None,
@@ -1336,6 +1341,7 @@ async fn c3_registration_xb2_and_continuous_lease_watch() {
         &env.state,
         &peer,
         AgentFrame::List {
+            limit: None,
             schema_version: None,
             name: None,
             node: None,
@@ -1359,6 +1365,7 @@ async fn c3_registration_xb2_and_continuous_lease_watch() {
         &env.state,
         &peer,
         AgentFrame::List {
+            limit: None,
             schema_version: None,
             name: None,
             node: None,
@@ -1406,6 +1413,7 @@ async fn c3_registration_xb2_and_continuous_lease_watch() {
         &env.state,
         &peer,
         AgentFrame::List {
+            limit: None,
             schema_version: None,
             name: None,
             node: None,
@@ -2152,6 +2160,7 @@ async fn c11_session_start_sources_and_fresh_roots() {
         &env.state,
         &peer,
         AgentFrame::List {
+            limit: None,
             schema_version: None,
             name: None,
             node: None,
@@ -3458,6 +3467,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
             &env.state,
             &peer_o1,
             AgentFrame::List {
+                limit: None,
                 schema_version: None,
                 name: None,
                 node: None,
@@ -3479,6 +3489,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
             &env.state,
             &peer_o2,
             AgentFrame::List {
+                limit: None,
                 schema_version: None,
                 name: None,
                 node: None,
@@ -3547,6 +3558,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
         &env.state,
         &peer_o2,
         AgentFrame::List {
+            limit: None,
             schema_version: None,
             name: None,
             node: None,
@@ -3747,6 +3759,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
             &env.state,
             &peer_o3,
             AgentFrame::List {
+                limit: None,
                 schema_version: None,
                 name: None,
                 node: None,
@@ -4452,6 +4465,7 @@ async fn c19_shared_home_sibling_flock_scan_and_unlocked_fd_rejection() {
         &env.state,
         &peer_o1,
         AgentFrame::List {
+            limit: None,
             schema_version: None,
             name: None,
             node: None,
@@ -4889,6 +4903,7 @@ async fn c19_3_post_admission_owner_release_without_unlink() {
             &env.state,
             &peer_o1,
             AgentFrame::List {
+                limit: None,
                 schema_version: None,
                 name: None,
                 node: None,
@@ -4910,6 +4925,7 @@ async fn c19_3_post_admission_owner_release_without_unlink() {
             &env.state,
             &peer_o2,
             AgentFrame::List {
+                limit: None,
                 schema_version: None,
                 name: None,
                 node: None,
@@ -5074,6 +5090,7 @@ async fn c19_3_post_admission_owner_release_without_unlink() {
             &live_state,
             &peer_child,
             AgentFrame::List {
+                limit: None,
                 schema_version: None,
                 name: None,
                 node: None,
@@ -5136,6 +5153,7 @@ async fn c19_3_post_admission_owner_release_without_unlink() {
             &live_state,
             &peer_child,
             AgentFrame::List {
+                limit: None,
                 schema_version: None,
                 name: None,
                 node: None,
@@ -5157,6 +5175,7 @@ async fn c19_3_post_admission_owner_release_without_unlink() {
             &live_state,
             &peer_child,
             AgentFrame::List {
+                limit: None,
                 schema_version: None,
                 name: None,
                 node: None,
@@ -5197,6 +5216,7 @@ async fn c19_3_post_admission_owner_release_without_unlink() {
             &live_state,
             &peer_child,
             AgentFrame::List {
+                limit: None,
                 schema_version: None,
                 name: None,
                 node: None,
@@ -5512,6 +5532,7 @@ async fn c3_live_distinct_child_same_inode_flock_reopen_and_mutants() {
             &env.state,
             &peer_child,
             AgentFrame::List {
+                limit: None,
                 schema_version: None,
                 name: None,
                 node: None,
@@ -7082,6 +7103,7 @@ async fn bare_mcp_reattestation_pushes_queued_reply_once_against_racing_hook() {
     .await
     .unwrap();
     let list = |session: Option<&str>, thread: Option<&str>| AgentFrame::List {
+        limit: None,
         schema_version: None,
         name: None,
         node: None,
@@ -7180,6 +7202,7 @@ async fn bare_mcp_reattestation_pushes_queued_reply_once_against_racing_hook() {
             &state,
             &peer_for_call,
             AgentFrame::List {
+                limit: None,
                 schema_version: None,
                 name: None,
                 node: None,
@@ -7727,6 +7750,7 @@ async fn va41_auto_recovery_races_mcp_and_hook_with_one_carrier() {
         &env.state,
         &env.peer(std::process::id()),
         AgentFrame::List {
+            limit: None,
             schema_version: None,
             name: None,
             node: None,
