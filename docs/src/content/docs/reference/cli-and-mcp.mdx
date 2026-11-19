@@ -6,9 +6,9 @@ description: Operator commands, optional command-backed services, daemon and har
 ## Command-line interface (`src/main.rs`)
 
 The `xmsg` binary exposes `list`, `watch`, `doctor`, `send`, `replies`, `show`, `service`, `serve`, `mcp`,
-`register`, `unregister`, `check-peers`, and `enroll-ca`.
+`register`, `unregister`, `check-peers`, `enroll` (planned), `enroll-ca`, and `observe-collector` (planned).
 
-```rust file=<rootDir>/src/main.rs#L21-L76
+```rust file=<rootDir>/src/main.rs#L21-L79
 ```
 
 ### Operator commands
@@ -349,24 +349,38 @@ patterns; see the [upgrade example](/concepts/hubs-and-leaves/#planned-reserve-p
 
 ---
 
-## Hosted gateway discovery (planned)
+## Hosted gateway protocol bootstrap
 
-The separate HTTP [gateway](/extensions/gateway/#protocol-bootstrap) provides
-`server/discover` as an authenticated bootstrap RPC. Its parameters are omitted,
-empty, or contain only standard `_meta`. The result contains the implemented legacy
-`supportedVersions`, caller-scoped `capabilities`, server identity under
-`_meta["io.modelcontextprotocol/serverInfo"]`, `instructions`, `resultType: "complete"`,
-`ttlMs: 0` and `cacheScope: "private"`.
+The separate HTTP [gateway](/extensions/gateway/#protocol-bootstrap) uses `initialize`
+with the supported transport revisions `2025-03-26`, `2025-06-18` and `2025-11-25`,
+followed by `tools/list` and `tools/call`. It leaves `server/discover` unanswered and
+does not implement `2026-07-28` transport, so hosted clients fall back to `initialize`.
 
-This planned discovery-only version-header exception lets modern clients choose a
-legacy `initialize` revision. The supported transport versions remain the three
-2025 revisions; every other gateway method retains its version gate. The following
-section documents the local harness-associated stdio adapter's tools.
+An authenticated discovery probe with `MCP-Protocol-Version: 2026-07-28` receives an
+empty HTTP `400`; without that header, or with a supported version, `server/discover`
+receives JSON-RPC `-32601` (`Method not found`) after bearer verification and live-grant
+authorization. The following section documents the local harness-associated stdio
+adapter's tools.
 
 ## MCP server tools (`xmsg mcp`)
 
-`xmsg mcp` gives five tools over stdio JSON-RPC. With `--reply-only` / `XMSG_REPLY_ONLY=1`, it
-gives only `reply` and `replies`:
+`xmsg mcp` gives six tools over stdio JSON-RPC (`read_attachment`, `list`, `send`, `reply`,
+`replies`, and `inbox`). With `--reply-only` / `XMSG_REPLY_ONLY=1`, it gives only `reply` and
+`replies`:
+
+### `read_attachment(message_id, index, offset?, length?, as_agent?)`
+
+Reads a bounded byte range of attachment `index` (`>= 0`) on `message_id`. Attachment contents are
+[untrusted peer data](/concepts/attachments/):
+
+- **`offset` / `length`:** `offset` defaults to `0`; `length` (`>= 1`) defaults to, and is capped
+  at, the node's `max_body` limit. UTF-8 reads end on a character boundary; an offset inside a
+  multi-byte UTF-8 character is refused.
+- **`as_agent`:** When a subagent calls the tool, the harness `PreToolUse` hook sets it
+  automatically.
+- **Returns:** `{ attachment: { name, size, media_type, sha256 }, offset, length, next?, encoding, data }`,
+  where `encoding` is `"utf-8"` or `"base64"` and `next` is the next byte offset when more bytes
+  remain, or `{ state: "pending" }` while a planned federated fetch is in progress.
 
 ### `list(name?, node?, kind?, status?, within?)`
 
@@ -384,13 +398,18 @@ Lists recipients the caller may see on this node and every reachable peer:
 - **`node`:** An exact canonical name or local nickname queries one node. A bare-host selector queries all matching nodes in the current view; see [node selectors](/concepts/addressing/#node-selectors).
 - **Returns:** `{ recipients: [{ address, kind, harness?, label?, status, node, user, registered_at | last_seen }], nodes: [{ node, status, detail? }] }`.
 
-### `send(to, text, as_agent?)`
+### `send(to, text, attachments?, as_agent?)`
 
 Sends a message to `<id or name>[@<node>]` (at most one `@`):
 
 - **`to`:** An instance UUID (with an optional `~n`), a delegated sub-address (`<P>/<child>`), a
   service name, or a unique live instance label. `@node` can follow it. xmsg refuses `ref`, `from`
   and a label that contains `' · '`, with a migration hint.
+- **`attachments`:** Optional array of up to `8` [file attachments](/concepts/attachments/). Each
+  entry is either `{ path, name?, media_type? }` (an absolute path to a regular file readable by
+  `xmsg mcp`, defaulting `media_type` to `application/octet-stream`) or
+  `{ name, text, media_type? }` (inline UTF-8 text, defaulting `media_type` to
+  `text/plain; charset=utf-8`).
 - **`as_agent`:** When a subagent calls the tool, the harness `PreToolUse` hook sets it
   automatically.
 - **Returns:** `{ message_id, address, outcome }` where `outcome` is `"delivered"`, `"queued"`, or `"pending"`.
@@ -398,11 +417,15 @@ Sends a message to `<id or name>[@<node>]` (at most one `@`):
   returns `queued` when xmsg proves custody for the live root's current generation,
   including an idle subagent's parent fallback.
 
-### `reply(message_id, text, as_agent?)`
+### `reply(message_id, text, attachments?, as_agent?)`
 
 Answers the other party of `message_id`. If you received the message, the reply goes to the
 sender. If you sent it, the reply is a follow-up to the recipient in the same exchange:
 
+- **`attachments`:** Optional array of up to `8` `{ path, name?, media_type? }` or
+  `{ name, text, media_type? }` entries, staged the same way as on `send`.
+- **`as_agent`:** When a subagent calls the tool, the harness `PreToolUse` hook sets it
+  automatically.
 - **Returns:** `{ bytes, messageId, inReplyTo, outcome }`, where `messageId` is the new reply's
   ULID (or `null` when `outcome` is `"stored"` for pull-only callers) and `inReplyTo` is `message_id`.
 - **Delivery errors:** xmsg stores the reply first, then attempts to push it. If the push fails
