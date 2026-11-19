@@ -161,6 +161,16 @@ pub fn list(args: ListArgs) -> Result<()> {
                 .unwrap_or_default()
         );
     }
+    if value["truncated"] == true {
+        println!(
+            "\nShowing {} of {}; narrow filters or raise --limit.",
+            value["recipients"]
+                .as_array()
+                .ok_or("missing recipients")?
+                .len(),
+            value["total"]
+        );
+    }
     Ok(())
 }
 

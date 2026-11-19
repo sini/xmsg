@@ -1035,7 +1035,7 @@ async fn list_limit_local_oracles() {
     assert_eq!(
         bounded["recipients"].as_array().unwrap().len(),
         50,
-        "default opt-in limit"
+        "default limit"
     );
     assert_eq!(bounded["total"], 60);
     assert_eq!(bounded["truncated"], true);
@@ -1091,13 +1091,17 @@ async fn list_limit_local_oracles() {
     assert_eq!(mcp["recipients"].as_array().unwrap().len(), 50);
     assert_eq!(mcp["total"], 60);
     assert_eq!(mcp["truncated"], true);
-    let legacy = limit_get(&node, "/v1/recipients").await;
+    let default_result = limit_get(&node, "/v1/recipients").await;
     assert_eq!(
-        legacy["recipients"].as_array().unwrap().len(),
+        default_result["recipients"].as_array().unwrap().len(),
         50,
         "default bounded"
     );
-    assert_eq!(legacy.as_object().unwrap().len(), 4, "always metadata");
+    assert_eq!(
+        default_result.as_object().unwrap().len(),
+        4,
+        "always metadata"
+    );
     for limit in [0, 501] {
         let (status, body) = http_request_unix_within(
             &node.http_sock,

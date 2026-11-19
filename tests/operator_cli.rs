@@ -312,3 +312,69 @@ fn check_peers_help_explains_validation() {
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("Validate a peers file (the same rules `serve` applies at startup); exit 0 if valid, otherwise print the failing rule. Use it in CI or before a deploy."), "{help}");
 }
+
+#[test]
+fn list_limit_reports_truncation_in_text_and_metadata_in_json() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("http.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let expected = json!({"recipients":[{"address":"one@node","kind":"service","status":"live","node":"node"}],"nodes":[],"total":2,"truncated":true});
+    let body = expected.to_string();
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.contains("limit=1"), "{line}");
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        }
+    });
+    for json_output in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_xmsg"));
+        command.args([
+            "list",
+            "--limit",
+            "1",
+            "--http-sock",
+            socket.to_str().unwrap(),
+        ]);
+        if json_output {
+            command.arg("--json");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        if json_output {
+            assert_eq!(serde_json::from_str::<Value>(&stdout).unwrap(), expected);
+        } else {
+            assert!(
+                stdout.contains("Showing 1 of 2; narrow filters or raise --limit."),
+                "{stdout}"
+            );
+        }
+    }
+    server.join().unwrap();
+    for limit in ["0", "501"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+            .args(["list", "--limit", limit])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("--limit"));
+    }
+}
