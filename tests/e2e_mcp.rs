@@ -311,6 +311,16 @@ async fn test_mcp_initialize_and_tools_list() {
         "Exactly 6 tools listed, including read_attachment"
     );
 
+    let list_tool = tools.iter().find(|tool| tool["name"] == "list").unwrap();
+    let limit_schema = &list_tool["inputSchema"]["properties"]["limit"];
+    assert_eq!(limit_schema["default"], 50);
+    assert_eq!(limit_schema["minimum"], 1);
+    assert_eq!(limit_schema["maximum"], 500);
+    assert!(list_tool["description"]
+        .as_str()
+        .unwrap()
+        .contains("truncated"));
+
     let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(
         tool_names,

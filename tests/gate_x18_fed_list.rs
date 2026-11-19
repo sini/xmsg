@@ -986,3 +986,214 @@ async fn test_oracle_6_source_outside_from_cidr_refused() {
         "Detail must indicate source CIDR refusal: {detail}"
     );
 }
+
+async fn limit_get(node: &FedTestNode, query: &str) -> Value {
+    let (status, body) =
+        http_request_unix_within(&node.http_sock, "GET", query, None, Duration::from_secs(10))
+            .unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    serde_json::from_str(&body).unwrap()
+}
+
+async fn limit_fixtures(node: &FedTestNode, count: usize) {
+    for index in 0..count {
+        let id = format!("0199cecf-000a-7000-8000-{index:012}");
+        create_claude_session_fixture(
+            &node.sessions_dir,
+            &id,
+            if index < 3 { "oldest" } else { "other" },
+        );
+    }
+    limit_get(node, "/v1/recipients").await;
+    let conn = node.db.lock().unwrap();
+    for index in 0..count {
+        conn.execute(
+            "UPDATE instance_claims SET created_at=?1 WHERE id=?2",
+            rusqlite::params![
+                1000 + index as i64,
+                format!("0199cecf-000a-7000-8000-{index:012}")
+            ],
+        )
+        .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn list_limit_local_oracles() {
+    let node = create_fed_test_node(
+        "local",
+        vec![],
+        generate_self_signed_ed25519("local").unwrap(),
+        vec![],
+        None,
+        None,
+    )
+    .await;
+    limit_fixtures(&node, 60).await;
+    let bounded = limit_get(&node, "/v1/recipients?limit=50").await;
+    assert_eq!(
+        bounded["recipients"].as_array().unwrap().len(),
+        50,
+        "default opt-in limit"
+    );
+    assert_eq!(bounded["total"], 60);
+    assert_eq!(bounded["truncated"], true);
+    let filtered = limit_get(&node, "/v1/recipients?limit=50&name=oldest").await;
+    assert_eq!(
+        filtered["recipients"].as_array().unwrap().len(),
+        3,
+        "filter before limit"
+    );
+    assert_eq!(filtered["total"], 3);
+    assert_eq!(filtered["truncated"], false);
+    assert_eq!(
+        bounded["recipients"][0]["registered_at"], 1059,
+        "newest first"
+    );
+    assert_eq!(
+        bounded["recipients"][49]["registered_at"], 1010,
+        "oldest dropped"
+    );
+    let config = McpConfig {
+        sessions_dirs: vec![node.sessions_dir.clone()],
+        xmsg_url: "http://127.0.0.1:0".into(),
+        http_sock: Some(node.http_sock.clone()),
+        agent_sock: node.agent_sock.clone(),
+        proc_root: node._temp.path().join("proc"),
+        presence_dir: node._temp.path().join("presence"),
+        proc_locks_path: node._temp.path().join("proc_locks"),
+        reply_only: false,
+    };
+    let mcp = tokio::task::spawn_blocking(move || {
+        let client = reqwest::blocking::Client::new();
+        let response = execute_tool(&config, &client, "list", &serde_json::json!({}));
+        assert_eq!(response["isError"], false, "{response}");
+        for limit in [
+            serde_json::json!(0),
+            serde_json::json!(501),
+            serde_json::json!(1.5),
+        ] {
+            assert_eq!(
+                execute_tool(
+                    &config,
+                    &client,
+                    "list",
+                    &serde_json::json!({"limit":limit})
+                )["isError"],
+                true
+            );
+        }
+        serde_json::from_str::<Value>(response["content"][0]["text"].as_str().unwrap()).unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(mcp["recipients"].as_array().unwrap().len(), 50);
+    assert_eq!(mcp["total"], 60);
+    assert_eq!(mcp["truncated"], true);
+    let legacy = limit_get(&node, "/v1/recipients").await;
+    assert_eq!(
+        legacy["recipients"].as_array().unwrap().len(),
+        50,
+        "default bounded"
+    );
+    assert_eq!(legacy.as_object().unwrap().len(), 4, "always metadata");
+    for limit in [0, 501] {
+        let (status, body) = http_request_unix_within(
+            &node.http_sock,
+            "GET",
+            &format!("/v1/recipients?limit={limit}"),
+            None,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+    let now = xmsg::storage::now_epoch_secs();
+    {
+        let conn = node.db.lock().unwrap();
+        for index in 0..3 {
+            xmsg::storage::mark_live(
+                &conn,
+                &format!("0199cecf-000b-7000-8000-{index:012}"),
+                "claude",
+                now - 100 + index,
+            )
+            .unwrap();
+        }
+    }
+    let inactive = limit_get(&node, "/v1/recipients?status=inactive&limit=2").await;
+    assert_eq!(inactive["total"], 3);
+    assert_eq!(
+        inactive["recipients"][0]["last_seen"],
+        now - 98,
+        "inactive newest first"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn list_limit_federation_oracle() {
+    let creds_a = generate_self_signed_ed25519("a").unwrap();
+    let creds_b = generate_self_signed_ed25519("b").unwrap();
+    let listener_a = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener_b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = |name: &str, listener: &TcpListener, pin: String| PeerConfig {
+        observe_labels: false,
+        name: name.into(),
+        address: listener.local_addr().unwrap().to_string(),
+        pin: Some(pin),
+        ca: None,
+        identities: None,
+        allow: vec!["list".into()],
+        from: None,
+        leaf: false,
+        principals: vec![],
+        targets: None,
+        dial: None,
+    };
+    let a = create_fed_test_node(
+        "a",
+        vec![peer("b", &listener_b, creds_b.2.clone())],
+        creds_a.clone(),
+        vec![],
+        Some(listener_a),
+        None,
+    )
+    .await;
+    let b = create_fed_test_node(
+        "b",
+        vec![PeerConfig {
+            observe_labels: false,
+            name: "a".into(),
+            address: a.fed_addr.to_string(),
+            pin: Some(creds_a.2),
+            ca: None,
+            identities: None,
+            allow: vec!["list".into()],
+            from: None,
+            leaf: false,
+            principals: vec![],
+            targets: None,
+            dial: None,
+        }],
+        creds_b,
+        vec![],
+        Some(listener_b),
+        None,
+    )
+    .await;
+    limit_fixtures(&a, 40).await;
+    limit_fixtures(&b, 40).await;
+    let result = limit_get(&a, "/v1/recipients?limit=50").await;
+    assert_eq!(
+        result["recipients"].as_array().unwrap().len(),
+        50,
+        "single global federation cap"
+    );
+    assert_eq!(result["total"], 80, "all nodes aggregated before cap");
+    assert_eq!(result["truncated"], true);
+    assert_eq!(
+        list_peer(&a.fed_state, "b").await.0.len(),
+        40,
+        "raw peer vector unchanged"
+    );
+}

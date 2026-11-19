@@ -746,6 +746,7 @@ struct RecipientListQuery {
     status: Option<String>,
     within: Option<u64>,
     host: Option<String>,
+    limit: Option<usize>,
 }
 
 async fn list_recipients_handler(
@@ -787,6 +788,11 @@ async fn list_recipients_handler(
         status: request.status,
         within: request.within,
         host: request.host,
+        limit: if request.read_only {
+            None
+        } else {
+            request.limit
+        },
     };
     if request.read_only {
         let entries = crate::recipient_snapshot::collect(&state, &query, request.liveness)?;

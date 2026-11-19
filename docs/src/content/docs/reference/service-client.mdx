@@ -127,3 +127,11 @@ match agent.read_attachment(message_id, 0, 0, Some(8192)).await? {
 Choose an operation timeout above the daemon's ten-second pending wait, such as fifteen
 seconds, to leave room for response delivery. This timeout remains bounded by the calling
 application. See [file attachments](/concepts/attachments/) for range and file-size bounds.
+
+## Bounded list results (planned)
+
+`ListQuery.limit` accepts `Some(1..=500)`; `None` uses the daemon default of 50.
+`ListResult.total` counts matching recipients before the global cap, and
+`ListResult.truncated` reports omitted matches. The daemon filters all local and
+federated results before selecting the newest entries. Update the SDK and daemon
+together; older list responses without these fields are not accepted.

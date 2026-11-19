@@ -133,3 +133,11 @@ time, with a 5-second list timeout:
   those 60 seconds, a bare send to that ID goes directly to that peer, marked **live-only**. If the
   session is now parked (`not_live`), or delivery fails, xmsg removes the cache entry. Then the
   send resolves again over the full view.
+
+## Finding recipients (planned)
+
+`xmsg list` and the MCP `list` tool return the newest 50 matching recipients across
+all reachable nodes by default. Filters run before this global limit. Check `total`
+and `truncated` in JSON/MCP output; narrow by name, node or kind when truncated,
+or raise `limit` to at most 500. For example, `xmsg list --kind service --limit 100`
+shows more services while retaining the per-node reachability summary.

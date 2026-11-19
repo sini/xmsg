@@ -1186,6 +1186,7 @@ pub async fn handle_agent_frame(
             kind,
             status,
             within,
+            limit,
             codex_session,
             codex_thread,
             codex_turn,
@@ -1221,10 +1222,13 @@ pub async fn handle_agent_frame(
                         kind,
                         status,
                         within,
+                        limit,
                         host: None,
                     };
                     surface::list(state, &query).await.map(|r| {
-                        serde_json::json!({ "status": "ok", "recipients": r.recipients, "nodes": r.nodes })
+                        let mut value = serde_json::to_value(r).expect("list serializes");
+                        value["status"] = serde_json::json!("ok");
+                        value
                     })
                 }
                 Err(e) => Err(e),

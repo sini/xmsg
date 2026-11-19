@@ -143,6 +143,7 @@ pub struct ListQuery {
     pub kind: Option<String>,
     pub status: Option<String>,
     pub within: Option<u64>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -627,6 +628,7 @@ impl AgentClient {
                 kind: query.kind,
                 status: query.status,
                 within: query.within,
+                limit: query.limit,
                 as_agent: None,
                 codex_session: None,
                 codex_thread: None,
