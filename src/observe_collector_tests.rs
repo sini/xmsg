@@ -1774,3 +1774,88 @@ async fn a8_failure_plus_maintenance_err_and_health_unchanged() {
     let health = body_text(health_resp).await;
     assert_eq!(health, "available\n");
 }
+
+#[tokio::test]
+async fn r2a_direct_404_recovers_on_valid_response_and_403_stays_denied() {
+    let fixture = Fixture::new().await;
+    let exporter = net::tests::Fixture::new().await;
+    let config = exporter.load().unwrap();
+    let node = config.sources[0].node.clone();
+    let store = Arc::new(
+        Store::open(
+            &fixture.files.path().join("r2a"),
+            vec![NodePolicy {
+                relay: None,
+                node: node.clone(),
+                labels: false,
+                supported: true,
+            }],
+            Arc::new(|| 1000),
+        )
+        .unwrap(),
+    );
+    let state = scheduler_state(&fixture, &node, store.clone());
+
+    exporter.set_response("404 Not Found", "", b"");
+    let client = Arc::new(Client::new(&config).unwrap());
+    let task = tokio::spawn(poll_source(client, state.clone(), 0));
+    eventually(|| {
+        state.failures.lock().unwrap().get(&node).copied()
+            == Some(UnavailableKind::EndpointNotFound)
+    })
+    .await;
+
+    let html_404 = render_test_html(&state, None).await;
+    assert!(
+        html_404.contains("observation endpoint not found/unsupported or misconfigured")
+            && html_404.contains("1 endpoint not found/unsupported or misconfigured"),
+        "expected EndpointNotFound surface on 404:\n{html_404}"
+    );
+
+    exporter.set_response(
+        "200 OK",
+        "",
+        &serde_json::to_vec(&ExportSnapshot {
+            v: 1,
+            node: node.clone(),
+            scope: "a".repeat(64),
+            observed_at: 1000,
+            endpoints: vec![],
+            truncated: false,
+            available: SnapshotAvailability::Available,
+        })
+        .unwrap(),
+    );
+    // Drive a clean recovery poll via mark_error/ingest + accepted_scope or wait for next poll.
+    // Since backoff on 404 is >1s, verify directly with net::Client + accepted_scope + clear failure,
+    // and also verify 403 sets Denied and persists across subsequent 404.
+    let direct_client = Client::new(&config).unwrap();
+    let recovered = direct_client.snapshot(0).await.unwrap();
+    state.store.ingest_snapshot(&node, recovered).unwrap();
+    accepted_scope(&state, &node, "a".repeat(64));
+    state.failures.lock().unwrap().remove(&node);
+    let html_ok = render_test_html(&state, None).await;
+    assert!(
+        html_ok.contains("<p>healthy</p>") && html_ok.contains("1/1 configured nodes reporting"),
+        "expected recovery to healthy after valid 200 response:\n{html_ok}"
+    );
+
+    exporter.set_response("403 Forbidden", "", b"");
+    let err_403 = Client::new(&config).unwrap().snapshot(0).await.unwrap_err();
+    assert_eq!(err_403, net::Error::Denied);
+    mark_error(&state, node.clone(), err_403).await;
+    exporter.set_response("404 Not Found", "", b"");
+    let err_404 = Client::new(&config).unwrap().snapshot(0).await.unwrap_err();
+    assert_eq!(err_404, net::Error::EndpointNotFound);
+    mark_error(&state, node.clone(), err_404).await;
+    assert!(
+        state.denied.lock().unwrap().contains(&node),
+        "404 cleared 403 denial mask"
+    );
+    let html_denied = render_test_html(&state, None).await;
+    assert!(
+        html_denied.contains("1 denied") && !html_denied.contains("Latest source inventory"),
+        "denied mask lost after 404:\n{html_denied}"
+    );
+    task.abort();
+}

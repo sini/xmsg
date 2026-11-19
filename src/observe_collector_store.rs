@@ -51,6 +51,7 @@ pub struct Cursor {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeStatus {
+    Loading,
     HiddenPendingRevalidation,
     Healthy,
     Stale,
@@ -66,6 +67,7 @@ pub enum UnavailableKind {
     RateLimited,
     StorageFull,
     Unsupported,
+    EndpointNotFound,
 }
 #[derive(Clone, Debug)]
 pub struct CachedEvent {
@@ -89,6 +91,7 @@ pub struct NodeView {
     pub failure: Option<UnavailableKind>,
     pub origin_hub: Option<String>,
     pub history_hidden: bool,
+    pub has_stored_history: bool,
     pub node: String,
     pub status: NodeStatus,
     pub events: Vec<CachedEvent>,
@@ -843,10 +846,16 @@ impl Store {
             }
             let key = state.policy.storage_key();
             let origin = state.policy.origin_hub();
+            let has_stored_history: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM events WHERE node=?1) OR EXISTS(SELECT 1 FROM nodes WHERE node=?1 AND snapshot IS NOT NULL)",
+                params![&key],
+                |r| r.get(0),
+            )?;
             let mut v = NodeView {
                 failure: state.failure,
                 origin_hub: origin.map(str::to_owned),
                 history_hidden: !state.validated,
+                has_stored_history,
                 node: name.clone(),
                 status: state.status,
                 events: Vec::new(),

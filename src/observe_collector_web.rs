@@ -93,6 +93,7 @@ fn event_kind(value: crate::observe_export::EventKind) -> String {
 }
 fn status(node: &NodeView) -> &'static str {
     match node.status {
+        NodeStatus::Loading => "loading: first observation pending",
         NodeStatus::HiddenPendingRevalidation => "pending revalidation",
         NodeStatus::Healthy => "healthy",
         NodeStatus::Stale => "stale: exporter unavailable",
@@ -114,6 +115,9 @@ fn failure(node: &NodeView) -> &'static str {
         Some(UnavailableKind::RateLimited) => "<p>Observation rate limited.</p>",
         Some(UnavailableKind::Unreachable) => "<p>Observation exporter unavailable.</p>",
         Some(UnavailableKind::Unsupported) => "<p>Observation transport unsupported.</p>",
+        Some(UnavailableKind::EndpointNotFound) => {
+            "<p>observation endpoint not found/unsupported or misconfigured</p>"
+        }
         Some(UnavailableKind::StorageFull) => "<p>Collector storage full.</p>",
         None => "",
     }
@@ -173,12 +177,7 @@ fn status_line(node: &NodeView, freshness: Option<&NodeFreshness>) -> String {
 }
 
 fn last_success_line(node: &NodeView, freshness: Option<&NodeFreshness>) -> String {
-    if is_masked(node) {
-        return String::new();
-    }
-    let show = node.failure.is_some()
-        || freshness.is_some_and(|f| f.stale_for_secs.is_some() || f.stale_since_start);
-    if !show {
+    if is_masked(node) || node.status == NodeStatus::Loading {
         return String::new();
     }
     match freshness.and_then(|f| f.last_success) {
@@ -188,6 +187,72 @@ fn last_success_line(node: &NodeView, freshness: Option<&NodeFreshness>) -> Stri
         ),
         None => "<p class=\"muted\">last successful poll none since collector start</p>".into(),
     }
+}
+
+fn gap_and_loss_lines(node: &NodeView) -> String {
+    if is_masked(node) || node.status == NodeStatus::Loading {
+        return String::new();
+    }
+    format!(
+        "<p class=\"muted\">gaps: {} · loss counters: not exported/unknown</p>",
+        node.gaps.len()
+    )
+}
+
+fn coverage_banner(summaries: &[NodeView]) -> String {
+    let total = summaries.len();
+    let mut reporting = 0usize;
+    let mut unreachable = 0usize;
+    let mut endpoint_not_found = 0usize;
+    let mut loading = 0usize;
+    let mut denied = 0usize;
+    let mut hidden = 0usize;
+    let mut rate_limited = 0usize;
+    let mut malformed = 0usize;
+    let mut storage_full = 0usize;
+
+    for node in summaries {
+        if node.status == NodeStatus::Denied {
+            denied += 1;
+        } else if node.status == NodeStatus::Unsupported
+            || node.failure == Some(UnavailableKind::EndpointNotFound)
+        {
+            endpoint_not_found += 1;
+        } else if node.status == NodeStatus::StorageFull
+            || node.failure == Some(UnavailableKind::StorageFull)
+        {
+            storage_full += 1;
+        } else if node.failure == Some(UnavailableKind::RateLimited) {
+            rate_limited += 1;
+        } else if node.failure == Some(UnavailableKind::Malformed) {
+            malformed += 1;
+        } else if node.failure.is_some() || node.status == NodeStatus::Stale {
+            unreachable += 1;
+        } else if node.status == NodeStatus::Loading {
+            loading += 1;
+        } else if node.status == NodeStatus::HiddenPendingRevalidation {
+            hidden += 1;
+        } else {
+            reporting += 1;
+        }
+    }
+
+    let mut banner = format!(
+        "{reporting}/{total} configured nodes reporting · {unreachable} unreachable · {endpoint_not_found} endpoint not found/unsupported or misconfigured"
+    );
+    for (count, label) in [
+        (loading, "loading"),
+        (denied, "denied"),
+        (hidden, "hidden"),
+        (rate_limited, "rate limited"),
+        (malformed, "malformed"),
+        (storage_full, "storage full"),
+    ] {
+        if count > 0 {
+            let _ = write!(banner, " · {count} {label}");
+        }
+    }
+    format!("<p class=\"muted\">{banner}</p>")
 }
 
 fn collector_line(health: &CollectorHealth) -> String {
@@ -244,7 +309,7 @@ fn render_with_health_and_cap(
         cap,
         truncated: false,
     };
-    out.push(&format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"refresh\" content=\"5\"><title>xmsg fleet observer</title><style>{CSS}</style></head><body><main><h1>Fleet observer</h1><p class=\"muted\">Read-only metadata from configured exporters. Source clocks are independent; these observations do not establish agent reads or completion.</p><nav><a href=\"/\">All nodes</a></nav>{}<div class=\"tiles\">", collector_line(health)));
+    out.push(&format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"refresh\" content=\"5\"><title>xmsg fleet observer</title><style>{CSS}</style></head><body><main><h1>Fleet observer</h1><p class=\"muted\">Read-only metadata from configured exporters. Source clocks are independent; these observations do not establish agent reads or completion.</p><nav><a href=\"/\">All nodes</a></nav>{}{}<div class=\"tiles\">", coverage_banner(summaries), collector_line(health)));
     for (index, node) in summaries.iter().take(64).enumerate() {
         let freshness = health.nodes.get(&node.node);
         let mut tile = format!(
@@ -255,13 +320,20 @@ fn render_with_health_and_cap(
         tile.push_str(&provenance(node.origin_hub.as_deref()));
         tile.push_str(failure(node));
         tile.push_str(&last_success_line(node, freshness));
+        tile.push_str(&gap_and_loss_lines(node));
         if node.failure.is_some() && !node.history_hidden {
             tile.push_str("<p>Previously validated history is stale.</p>");
         }
         if node.history_hidden
             && (node.status != NodeStatus::Unsupported || node.origin_hub.is_some())
         {
-            tile.push_str("<p class=\"warning\">history hidden until this node answers</p>");
+            if node.has_stored_history {
+                tile.push_str(
+                    "<p class=\"warning\">stored history hidden until this node answers</p>",
+                );
+            } else {
+                tile.push_str("<p class=\"warning\">history hidden until this node answers</p>");
+            }
         }
         tile.push_str("</article>");
         out.push(&tile);
@@ -277,6 +349,7 @@ fn render_with_health_and_cap(
         out.push(&provenance(node.origin_hub.as_deref()));
         out.push(failure(node));
         out.push(&last_success_line(node, freshness));
+        out.push(&gap_and_loss_lines(node));
         if node.failure.is_some() && !node.history_hidden {
             out.push("<p>Previously validated history is stale.</p>");
         }

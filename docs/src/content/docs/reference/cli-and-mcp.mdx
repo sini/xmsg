@@ -73,8 +73,11 @@ use `xmsg list --node REMOTE` for a live remote listing, with its reconciliation
 side effects. The [fleet observer](/concepts/fleet-observer/) is the planned remote view once
 its collector is deployed. Watch does not contact federation peers.
 
-The roster shows truncation and the age of its last successful snapshot. A failed refresh
-keeps old rows visibly stale; a successful health check alone does not make the roster fresh.
+The roster shows `scope: local node only`, truncation, and the age of its last successful snapshot.
+A first-fetch failure before any snapshot marks the roster `UNAVAILABLE`; once a
+snapshot exists, a failed refresh marks it `STALE`, prefixes node lines with
+`last known:`, and keeps old rows visibly stale; a successful health check alone
+does not make the roster fresh.
 An older daemon that rejects the snapshot query leaves the roster unavailable: watch never
 retries with the ordinary, mutating listing. It retains at most 1,000 rows and rejects response
 bodies over 4 MiB. Server-supplied names, labels and other fields have terminal controls escaped
@@ -85,7 +88,8 @@ through `GET /v1/observe/events`. It shows source/destination references, messag
 correlation, times, event kinds and stored outcomes. The planned `arrival` kind means the
 daemon committed a queued item's delivery mark for an inbox result. It is not proof of client
 receipt, agent-read or task-complete. Each refresh fetches at most two bounded
-pages and keeps at most 1,000 timeline rows. It displays gaps, dropped counters, local
+pages and keeps at most 1,000 timeline rows. It displays gaps, dropped counters
+(`Loss counters: unknown` before the first successful timeline page), local
 truncation and whether it is still catching up. Roster and timeline have separate freshness
 ages; a failed timeline refresh keeps its old cursor and visibly stale rows. Older daemons
 returning `404` leave the roster usable and mark the timeline unsupported.

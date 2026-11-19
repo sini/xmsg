@@ -471,9 +471,13 @@ fn render(state: &State, now: Instant, epoch: i64) -> String {
         .map(|t| now.saturating_duration_since(t).as_secs());
     let _ = writeln!(
         out,
-        "{} | roster age: {}",
+        "{} | roster age: {} | scope: local node only",
         if state.error.is_some() {
-            "STALE"
+            if state.snapshot.is_some() {
+                "STALE"
+            } else {
+                "UNAVAILABLE"
+            }
         } else {
             "CURRENT"
         },
@@ -505,10 +509,15 @@ fn render(state: &State, now: Instant, epoch: i64) -> String {
     {
         let _ = writeln!(out, "TRUNCATED: limit {MAX_ROWS} recipient rows / {MAX_ROWS} node responses; source node responses={}", snapshot.node_count);
     }
+    let prefix = if state.error.is_some() {
+        "last known: "
+    } else {
+        ""
+    };
     for (source, node) in &snapshot.nodes {
         let _ = writeln!(
             out,
-            "Node [{}] {}: {} {}",
+            "{prefix}Node [{}] {}: {} {}",
             source,
             terminal_text(&node.node),
             terminal_text(&node.status),
@@ -580,11 +589,15 @@ fn render_timeline(state: &TimelineState, now: Instant) -> String {
     if let Some(error) = &state.error {
         let _ = writeln!(out, "Observation refresh error: {}", terminal_text(error));
     }
-    let _ = writeln!(
-        out,
-        "Loss counters: capacity={} ttl={} queue={}",
-        state.losses.capacity, state.losses.ttl, state.losses.queue
-    );
+    if state.updated.is_none() {
+        out.push_str("Loss counters: unknown\n");
+    } else {
+        let _ = writeln!(
+            out,
+            "Loss counters: capacity={} ttl={} queue={}",
+            state.losses.capacity, state.losses.ttl, state.losses.queue
+        );
+    }
     if state.initial_omitted > 0 {
         let _ = writeln!(
             out,
@@ -1276,5 +1289,62 @@ mod tests {
             assert!(initial.error.is_some());
             task.await.unwrap();
         }
+    }
+
+    #[test]
+    fn r4_r7_watch_unknown_losses_last_known_and_unavailable() {
+        let now = Instant::now();
+        let initial = State::default();
+        let timeline = TimelineState::default();
+        let out_initial = render(&initial, now, 1000);
+        let out_timeline = render_timeline(&timeline, now);
+        assert!(
+            out_initial.contains("scope: local node only"),
+            "missing local scope marker:\n{out_initial}"
+        );
+        assert!(
+            out_timeline.contains("Loss counters: unknown"),
+            "missing unknown loss counters before first page:\n{out_timeline}"
+        );
+
+        let unavail = State {
+            error: Some("connection refused".into()),
+            ..State::default()
+        };
+        let out_unavail = render(&unavail, now, 1000);
+        assert!(
+            out_unavail.contains("UNAVAILABLE | roster age: never refreshed")
+                && out_unavail.contains("Refresh error: connection refused"),
+            "expected UNAVAILABLE when first fetch fails without snapshot:\n{out_unavail}"
+        );
+        assert!(
+            !out_unavail.contains("STALE"),
+            "first-fetch failure must not claim STALE:\n{out_unavail}"
+        );
+
+        let stale = State {
+            snapshot: Some(Snapshot {
+                nodes: vec![(
+                    "local.node".into(),
+                    NodeStatus {
+                        node: "local.node".into(),
+                        status: "healthy".into(),
+                        detail: None,
+                    },
+                )],
+                ..Snapshot::default()
+            }),
+            error: Some("timed out".into()),
+            ..State::default()
+        };
+        let out_stale = render(&stale, now, 1000);
+        assert!(
+            out_stale.contains("STALE |") && out_stale.contains("Refresh error: timed out"),
+            "expected STALE when refresh fails after snapshot:\n{out_stale}"
+        );
+        assert!(
+            out_stale.contains("last known: Node [local.node]"),
+            "expected last known prefix on node line under STALE:\n{out_stale}"
+        );
     }
 }
