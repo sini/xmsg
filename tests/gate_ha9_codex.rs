@@ -315,6 +315,7 @@ impl CodexTestEnv {
             proc_root: proc_root.clone(),
             proc_locks_path: proc_root.join("locks"),
             agy_bin: "agy".to_string(),
+            ..Default::default()
         };
         fs::write(&agy_config.proc_locks_path, "").unwrap();
 
@@ -342,6 +343,7 @@ impl CodexTestEnv {
             trusted_codex_exes: vec![codex_exe.clone()],
             codex_homes: vec![codex_home.clone()],
             proc_root: proc_root.clone(),
+            ..Default::default()
         };
         init_for_state(&state, codex_cfg);
 
@@ -1383,6 +1385,7 @@ async fn c3_registration_xb2_and_continuous_lease_watch() {
             trusted_codex_exes: vec![env.codex_exe.clone()],
             codex_homes: vec![env.codex_home.clone()],
             proc_root: env.proc_root.clone(),
+            ..Default::default()
         },
     );
     {
@@ -2801,6 +2804,7 @@ async fn c15_delivery_races_unknown_state_and_batch_limits() {
                     trusted_codex_exes: vec![env.codex_exe.clone()],
                     codex_homes: vec![env.codex_home.clone()],
                     proc_root: env.proc_root.clone(),
+                    ..Default::default()
                 },
                 root_live,
                 None,
@@ -2882,6 +2886,7 @@ async fn c15_delivery_races_unknown_state_and_batch_limits() {
                     trusted_codex_exes: vec![env.codex_exe.clone()],
                     codex_homes: vec![env.codex_home.clone()],
                     proc_root: env.proc_root.clone(),
+                    ..Default::default()
                 },
                 root_live,
                 None,
@@ -3000,6 +3005,7 @@ async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() 
             trusted_codex_exes: vec![real_test_exe],
             codex_homes: vec![env.codex_home.clone()],
             proc_root: real_proc,
+            ..Default::default()
         },
     );
 
@@ -3564,6 +3570,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
             trusted_codex_exes: vec![env.codex_exe.clone()],
             codex_homes: vec![env.codex_home.clone()],
             proc_root: env.proc_root.clone(),
+            ..Default::default()
         },
     );
     // Re-admit sender_p after bus restart so sender_p can send in Case 3:
@@ -3628,6 +3635,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
             trusted_codex_exes: vec![env.codex_exe.clone()],
             codex_homes: vec![env.codex_home.clone()],
             proc_root: env.proc_root.clone(),
+            ..Default::default()
         },
     );
     let c4_ups = handle_codex_hook_frame(
@@ -3801,6 +3809,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
             trusted_codex_exes: vec![env.codex_exe.clone()],
             codex_homes: vec![env.codex_home.clone()],
             proc_root: env.proc_root.clone(),
+            ..Default::default()
         },
     );
     assert!(
@@ -3912,6 +3921,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
                 trusted_codex_exes: vec![env.codex_exe.clone()],
                 codex_homes: vec![env.codex_home.clone()],
                 proc_root: env.proc_root.clone(),
+                ..Default::default()
             },
         );
         env.create_writer_lock(&env.codex_home, pid_o3, root_v3, 6);
@@ -4671,6 +4681,7 @@ async fn c19_2_live_unlocked_o_rdwr_descriptor_rejected() {
         trusted_codex_exes: vec![my_exe.clone()],
         codex_homes: vec![env.codex_home.clone()],
         proc_root: live_proc_root.clone(),
+        ..Default::default()
     };
     init_for_state(&env.state, live_cfg);
 
@@ -5007,6 +5018,7 @@ async fn c19_3_post_admission_owner_release_without_unlink() {
                 proc_root: PathBuf::from(xmsg::process::LIVE_PROC_ROOT),
                 proc_locks_path: PathBuf::from(xmsg::agy::LIVE_PROC_LOCKS),
                 agy_bin: "agy".to_string(),
+                ..Default::default()
             },
             agy_store: Arc::new(RwLock::new(HashMap::new())),
             pi_store: Arc::new(RwLock::new(HashMap::new())),
@@ -5024,6 +5036,7 @@ async fn c19_3_post_admission_owner_release_without_unlink() {
                 trusted_codex_exes: vec![canon_test_exe.clone()],
                 codex_homes: vec![live_home.clone()],
                 proc_root: PathBuf::from(xmsg::process::LIVE_PROC_ROOT),
+                ..Default::default()
             },
         );
         let peer_child = env.peer(child_pid);
@@ -5340,6 +5353,7 @@ async fn c3_live_distinct_child_same_inode_flock_reopen_and_mutants() {
         trusted_codex_exes: vec![my_exe.clone()],
         codex_homes: vec![env.codex_home.clone()],
         proc_root: live_proc_root.clone(),
+        ..Default::default()
     };
     init_for_state(&env.state, live_cfg.clone());
 
@@ -6456,6 +6470,7 @@ fn restart_codex_fixture(env: &CodexTestEnv) {
             trusted_codex_exes: vec![env.codex_exe.clone()],
             codex_homes: vec![env.codex_home.clone()],
             proc_root: env.proc_root.clone(),
+            ..Default::default()
         },
     );
 }

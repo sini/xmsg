@@ -93,6 +93,7 @@ async fn start_test_server(
         agy_bin: "agy".to_string(),
         trusted_agy_exes: vec![trusted_agy],
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
     let agy_store = new_agy_store();
     let conn = rusqlite::Connection::open_in_memory().unwrap();

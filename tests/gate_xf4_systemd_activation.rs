@@ -359,6 +359,7 @@ async fn build_sender_fed_state(
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: PathBuf::new(),
+        ..Default::default()
     };
     let fed_state = Arc::new(FedState {
         max_attachment_bytes: xmsg::attachments::DEFAULT_MAX_ATTACHMENT_BYTES,

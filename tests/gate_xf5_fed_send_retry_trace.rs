@@ -141,6 +141,7 @@ async fn create_test_node(
             agy_bin: "agy".to_string(),
             trusted_agy_exes: Vec::new(),
             brain_dir: std::path::PathBuf::new(),
+            ..Default::default()
         },
         agy_store: new_agy_store(),
         pi_store: new_pi_store(),

@@ -60,6 +60,7 @@ impl PostAuthFixture {
                 agy_bin: "unused".into(),
                 trusted_agy_exes: Vec::new(),
                 brain_dir: "/synthetic-unused/brain".into(),
+                ..Default::default()
             },
             agy_store: crate::agy::new_agy_store(),
             pi_store: crate::pi::new_pi_store(),

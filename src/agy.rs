@@ -428,6 +428,10 @@ pub struct AgyConfig {
     /// An explicit value wins; the default bare name falls back to the holder's exe, then the first pinned exe.
     pub agy_bin: String,
     pub trusted_agy_exes: Vec<PathBuf>,
+    /// Require exact canonical path match instead of default canonical file-name match (`--agy-exe-strict`).
+    pub agy_exe_strict: bool,
+    /// Last observed executable path drift for `xmsg doctor`.
+    pub exe_drift: crate::process::ExeDriftSlot,
 }
 
 impl AgyConfig {
@@ -477,6 +481,8 @@ impl Default for AgyConfig {
             proc_root: PathBuf::from(crate::process::LIVE_PROC_ROOT),
             agy_bin: DEFAULT_AGY_BIN.to_string(),
             trusted_agy_exes: Vec::new(),
+            agy_exe_strict: false,
+            exe_drift: crate::process::new_exe_drift_slot(),
         }
     }
 }
@@ -959,41 +965,28 @@ pub fn resolve_agy_session(
 }
 
 /// Verifies registration parameters decoupled from socket I/O for direct testability.
-#[allow(clippy::too_many_arguments)]
 pub fn verify_registration(
-    proc_root: &Path,
-    proc_locks: &Path,
-    presence_dir: &Path,
-    trusted_exes: &[PathBuf],
+    config: &AgyConfig,
     my_uid: u32,
     peer_uid: u32,
     peer_pid: u32,
     req: &AgyRegisterRequest,
 ) -> Result<AgyRegistration, AppError> {
     let peer = crate::process::PeerCred::unpinned(peer_uid, peer_pid);
-    verify_registration_peer(
-        proc_root,
-        proc_locks,
-        presence_dir,
-        trusted_exes,
-        my_uid,
-        &peer,
-        req,
-    )
+    verify_registration_peer(config, my_uid, &peer, req)
 }
 
 /// Like [`verify_registration`], starting from a [`crate::process::PeerCred`] whose root
 /// pid may be pinned by an `SO_PEERPIDFD` file descriptor.
-#[allow(clippy::too_many_arguments)]
 pub fn verify_registration_peer(
-    proc_root: &Path,
-    proc_locks: &Path,
-    presence_dir: &Path,
-    trusted_exes: &[PathBuf],
+    config: &AgyConfig,
     my_uid: u32,
     peer: &crate::process::PeerCred,
     req: &AgyRegisterRequest,
 ) -> Result<AgyRegistration, AppError> {
+    let proc_root = &config.proc_root;
+    let proc_locks = &config.proc_locks_path;
+    let presence_dir = &config.presence_dir;
     let peer_uid = peer.uid;
     let peer_pid = peer.pid.unwrap_or(0);
     // 1. Peer UID verification
@@ -1032,13 +1025,10 @@ pub fn verify_registration_peer(
     let target_ino = meta.ino();
 
     // 4. Canonicalize trusted exes
-    let trusted_canons: Vec<PathBuf> = trusted_exes
-        .iter()
-        .map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
-        .collect();
+    let trusted_canons = trusted_canons(config);
 
     // 5. Ancestor walk from peer to find an ancestor satisfying BOTH (a) and (b)
-    let mut chosen_ancestor = None;
+    let mut chosen_ancestor: Option<(u32, String, AgyPinMatch)> = None;
 
     // `st1` is the start the walk read; the step 7 re-read must still equal it.
     for (curr_pid, st1) in crate::process::Ancestry::from_peer(proc_root, peer).take(32) {
@@ -1046,28 +1036,43 @@ pub fn verify_registration_peer(
             break;
         }
 
-        // (a) EXECUTABLE check: kernel-reported executable path matches a trusted exe
-        let exe_matches = match crate::process::exe_path(proc_root, curr_pid) {
-            Ok(exe) => exe_trusted(&trusted_canons, exe),
+        // (a) EXECUTABLE check: kernel-reported executable matches a trusted exe (by name by default, or exact path if strict)
+        let exe_eval = match crate::process::exe_path(proc_root, curr_pid) {
+            Ok(exe) => evaluate_agy_exe(&trusted_canons, exe, config.agy_exe_strict),
+            Err(_) => Err(None),
+        };
+
+        // (b) OPEN FILE check: ancestor has presence lock (target_dev, target_ino) open
+        let has_file_open = || match crate::process::open_file_ids(proc_root, curr_pid) {
+            Ok(ids) => ids.contains(&(target_dev, target_ino)),
             Err(_) => false,
         };
 
-        if exe_matches {
-            // (b) OPEN FILE check: ancestor has presence lock (target_dev, target_ino) open
-            let has_file_open = match crate::process::open_file_ids(proc_root, curr_pid) {
-                Ok(ids) => ids.contains(&(target_dev, target_ino)),
-                Err(_) => false,
-            };
-
-            if has_file_open {
-                chosen_ancestor = Some((curr_pid, st1));
-                break;
+        match exe_eval {
+            Ok(pin_match) => {
+                if has_file_open() {
+                    chosen_ancestor = Some((curr_pid, st1, pin_match));
+                    break;
+                }
             }
+            Err(Some(drifted_canon)) => {
+                if has_file_open() {
+                    crate::process::record_exe_drift(
+                        &config.exe_drift,
+                        curr_pid,
+                        &st1,
+                        drifted_canon,
+                        true,
+                        crate::storage::now_epoch_secs(),
+                    );
+                }
+            }
+            Err(None) => {}
         }
     }
 
-    let (chosen_pid, initial_starttime) = match chosen_ancestor {
-        Some(pair) => pair,
+    let (chosen_pid, initial_starttime, chosen_pin_match) = match chosen_ancestor {
+        Some(triple) => triple,
         None => {
             return Err(AppError::NotRecipient(format!(
                 "peer PID {peer_pid} has no ancestor matching a trusted agy executable with presence lock open"
@@ -1108,6 +1113,7 @@ pub fn verify_registration_peer(
             "process starttime changed during verification for PID {chosen_pid}"
         )));
     }
+    record_chosen_agy_exe_match(config, chosen_pid, &st2, chosen_pin_match);
     let session_key = req.conversation_id.clone();
 
     Ok(AgyRegistration {
@@ -1120,35 +1126,25 @@ pub fn verify_registration_peer(
 /// Attests that a connecting peer (e.g. `xmsg mcp`) descends from an Antigravity process
 /// holding a valid presence lock.
 pub fn attest_mcp_caller(
-    proc_root: &Path,
-    proc_locks: &Path,
-    presence_dir: &Path,
-    trusted_exes: &[PathBuf],
+    config: &AgyConfig,
     my_uid: u32,
     peer_uid: u32,
     peer_pid: u32,
 ) -> Result<(AgyRegistration, String), AppError> {
     let peer = crate::process::PeerCred::unpinned(peer_uid, peer_pid);
-    attest_mcp_caller_peer(
-        proc_root,
-        proc_locks,
-        presence_dir,
-        trusted_exes,
-        my_uid,
-        &peer,
-    )
+    attest_mcp_caller_peer(config, my_uid, &peer)
 }
 
 /// Like [`attest_mcp_caller`], starting from a [`crate::process::PeerCred`] whose root pid
 /// may be pinned by an `SO_PEERPIDFD` file descriptor.
 pub fn attest_mcp_caller_peer(
-    proc_root: &Path,
-    proc_locks: &Path,
-    presence_dir: &Path,
-    trusted_exes: &[PathBuf],
+    config: &AgyConfig,
     my_uid: u32,
     peer: &crate::process::PeerCred,
 ) -> Result<(AgyRegistration, String), AppError> {
+    let proc_root = &config.proc_root;
+    let proc_locks = &config.proc_locks_path;
+    let presence_dir = &config.presence_dir;
     let peer_uid = peer.uid;
     let peer_pid = peer.pid.unwrap_or(0);
     // 1. Peer UID verification
@@ -1159,10 +1155,7 @@ pub fn attest_mcp_caller_peer(
     }
 
     // 3. Canonicalize trusted exes
-    let trusted_canons: Vec<PathBuf> = trusted_exes
-        .iter()
-        .map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
-        .collect();
+    let trusted_canons = trusted_canons(config);
 
     // 4. Read presence directory entries to know target locks
     let mut presence_locks = Vec::new();
@@ -1187,7 +1180,7 @@ pub fn attest_mcp_caller_peer(
     }
 
     // 5. Ancestor walk from peer to find an ancestor satisfying BOTH (a) and (b)
-    let mut chosen = None;
+    let mut chosen: Option<(u32, String, String, AgyPinMatch)> = None;
 
     // `st1` is the start the walk read; the final re-read must still equal it.
     for (curr_pid, st1) in crate::process::Ancestry::from_peer(proc_root, peer).take(32) {
@@ -1195,43 +1188,64 @@ pub fn attest_mcp_caller_peer(
             break;
         }
 
-        // (a) EXECUTABLE check: kernel-reported executable path matches a trusted exe
-        let exe_matches = match crate::process::exe_path(proc_root, curr_pid) {
-            Ok(exe) => exe_trusted(&trusted_canons, exe),
-            Err(_) => false,
+        // (a) EXECUTABLE check: kernel-reported executable matches a trusted exe (by name by default, or exact path if strict)
+        let exe_eval = match crate::process::exe_path(proc_root, curr_pid) {
+            Ok(exe) => evaluate_agy_exe(&trusted_canons, exe, config.agy_exe_strict),
+            Err(_) => Err(None),
         };
 
-        if exe_matches {
-            // (b) OPEN FILE check: ancestor has presence lock open
-            let open_ids = crate::process::open_file_ids(proc_root, curr_pid).unwrap_or_default();
-            for (conv_id, target_dev, target_ino) in &presence_locks {
-                if open_ids.contains(&(*target_dev, *target_ino)) {
-                    let flock_ok = locks_supported(proc_locks)
-                        && matches!(
-                            attested_lock_holder(
-                                proc_root,
-                                proc_locks,
-                                curr_pid,
-                                *target_dev,
-                                *target_ino,
-                            ),
-                            Ok(Some(holder)) if holder == curr_pid
-                        );
+        match exe_eval {
+            Ok(pin_match) => {
+                // (b) OPEN FILE check: ancestor has presence lock open
+                let open_ids =
+                    crate::process::open_file_ids(proc_root, curr_pid).unwrap_or_default();
+                for (conv_id, target_dev, target_ino) in &presence_locks {
+                    if open_ids.contains(&(*target_dev, *target_ino)) {
+                        let flock_ok = locks_supported(proc_locks)
+                            && matches!(
+                                attested_lock_holder(
+                                    proc_root,
+                                    proc_locks,
+                                    curr_pid,
+                                    *target_dev,
+                                    *target_ino,
+                                ),
+                                Ok(Some(holder)) if holder == curr_pid
+                            );
 
-                    if flock_ok {
-                        chosen = Some((curr_pid, st1, conv_id.clone()));
-                        break;
+                        if flock_ok {
+                            chosen = Some((curr_pid, st1, conv_id.clone(), pin_match));
+                            break;
+                        }
                     }
                 }
+                if chosen.is_some() {
+                    break;
+                }
             }
-            if chosen.is_some() {
-                break;
+            Err(Some(drifted_canon)) => {
+                let open_ids =
+                    crate::process::open_file_ids(proc_root, curr_pid).unwrap_or_default();
+                let holds_any = presence_locks
+                    .iter()
+                    .any(|(_, dev, ino)| open_ids.contains(&(*dev, *ino)));
+                if holds_any {
+                    crate::process::record_exe_drift(
+                        &config.exe_drift,
+                        curr_pid,
+                        &st1,
+                        drifted_canon,
+                        true,
+                        crate::storage::now_epoch_secs(),
+                    );
+                }
             }
+            Err(None) => {}
         }
     }
 
-    let (chosen_pid, initial_starttime, conv_id) = match chosen {
-        Some(triple) => triple,
+    let (chosen_pid, initial_starttime, conv_id, chosen_pin_match) = match chosen {
+        Some(quad) => quad,
         None => {
             return Err(AppError::NotRecipient(format!(
                 "peer PID {peer_pid} has no ancestor matching a trusted agy executable with presence lock open"
@@ -1250,6 +1264,7 @@ pub fn attest_mcp_caller_peer(
             "process starttime changed during verification for PID {chosen_pid}"
         )));
     }
+    record_chosen_agy_exe_match(config, chosen_pid, &st2, chosen_pin_match);
     let session_key = conv_id.clone();
 
     Ok((
@@ -1969,19 +1984,12 @@ pub fn is_conversation_proc_watched(config: &AgyConfig, conv_id: &str) -> bool {
         return false;
     };
 
-    let trusted_canons: Vec<PathBuf> = config
-        .trusted_agy_exes
-        .iter()
-        .map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
-        .collect();
+    let trusted_canons = trusted_canons(config);
 
-    let exe_matches = match crate::process::exe_path(&config.proc_root, holder_pid) {
-        Ok(exe) => exe_trusted(&trusted_canons, exe),
-        Err(_) => false,
+    let exe_eval = match crate::process::exe_path(&config.proc_root, holder_pid) {
+        Ok(exe) => evaluate_agy_exe(&trusted_canons, exe, config.agy_exe_strict),
+        Err(_) => return false,
     };
-    if !exe_matches {
-        return false;
-    }
 
     let has_file_open = match crate::process::open_file_ids(&config.proc_root, holder_pid) {
         Ok(ids) => ids.contains(&(target_dev, target_ino)),
@@ -1989,6 +1997,28 @@ pub fn is_conversation_proc_watched(config: &AgyConfig, conv_id: &str) -> bool {
     };
     if !has_file_open {
         return false;
+    }
+
+    match exe_eval {
+        Ok(pin_match) => {
+            if let Ok(st) = crate::process::starttime(&config.proc_root, holder_pid) {
+                record_chosen_agy_exe_match(config, holder_pid, &st, pin_match);
+            }
+        }
+        Err(Some(drifted_canon)) => {
+            if let Ok(st) = crate::process::starttime(&config.proc_root, holder_pid) {
+                crate::process::record_exe_drift(
+                    &config.exe_drift,
+                    holder_pid,
+                    &st,
+                    drifted_canon,
+                    true,
+                    crate::storage::now_epoch_secs(),
+                );
+            }
+            return false;
+        }
+        Err(None) => return false,
     }
 
     proc_children(&config.proc_root, holder_pid).is_some()
@@ -2003,10 +2033,54 @@ pub struct AgyProcWatch {
     labels: HashMap<String, Option<String>>,
 }
 
-/// An empty pin list trusts any executable: the lock-holder attestation and the UID check still
-/// apply. A non-empty list is an opt-in pin on the holder's executable.
-fn exe_trusted(trusted_canons: &[PathBuf], exe: PathBuf) -> bool {
-    trusted_canons.is_empty() || trusted_canons.contains(&fs::canonicalize(&exe).unwrap_or(exe))
+type AgyPinMatch = Option<(crate::process::ExeMatch, PathBuf)>;
+
+/// Evaluates an `agy` candidate executable against `trusted_canons`.
+/// An empty pin list trusts any executable (`Ok(None)`): the lock-holder attestation and UID check
+/// still apply. With a non-empty list, returns `Ok(Some((ExeMatch, canon_exe)))` when admitted,
+/// `Err(Some(canon_exe))` when refused due to strict path drift, or `Err(None)` on non-match.
+fn evaluate_agy_exe(
+    trusted_canons: &[PathBuf],
+    exe: PathBuf,
+    strict: bool,
+) -> Result<AgyPinMatch, Option<PathBuf>> {
+    if trusted_canons.is_empty() {
+        return Ok(None);
+    }
+    let Ok(canon_exe) = fs::canonicalize(&exe) else {
+        return Err(None);
+    };
+    match crate::process::evaluate_trusted_exe(trusted_canons, &canon_exe, strict) {
+        m @ (crate::process::ExeMatch::ExactPath | crate::process::ExeMatch::NameOnly) => {
+            Ok(Some((m, canon_exe)))
+        }
+        crate::process::ExeMatch::RefusedPathDrift => Err(Some(canon_exe)),
+        crate::process::ExeMatch::NoMatch => Err(None),
+    }
+}
+
+fn record_chosen_agy_exe_match(
+    config: &AgyConfig,
+    pid: u32,
+    starttime: &str,
+    pin_match: AgyPinMatch,
+) {
+    match pin_match {
+        Some((crate::process::ExeMatch::NameOnly, canon_exe)) => {
+            crate::process::record_exe_drift(
+                &config.exe_drift,
+                pid,
+                starttime,
+                canon_exe,
+                false,
+                crate::storage::now_epoch_secs(),
+            );
+        }
+        Some((crate::process::ExeMatch::ExactPath, _)) => {
+            crate::process::clear_exe_drift_if_replaced(&config.exe_drift, &config.proc_root, pid);
+        }
+        _ => {}
+    }
 }
 
 fn trusted_canons(config: &AgyConfig) -> Vec<PathBuf> {
@@ -2048,15 +2122,29 @@ fn eligible_holder(
     .ok()??;
 
     let exe = crate::process::exe_path(&config.proc_root, holder_pid).ok()?;
-    if !exe_trusted(trusted_canons, exe) {
-        return None;
-    }
     let ids = crate::process::open_file_ids(&config.proc_root, holder_pid).ok()?;
     if !ids.contains(&(target_dev, target_ino)) {
         return None;
     }
     let st = crate::process::starttime(&config.proc_root, holder_pid).ok()?;
-    Some((holder_pid, st))
+    match evaluate_agy_exe(trusted_canons, exe, config.agy_exe_strict) {
+        Ok(pin_match) => {
+            record_chosen_agy_exe_match(config, holder_pid, &st, pin_match);
+            Some((holder_pid, st))
+        }
+        Err(Some(drifted_canon)) => {
+            crate::process::record_exe_drift(
+                &config.exe_drift,
+                holder_pid,
+                &st,
+                drifted_canon,
+                true,
+                crate::storage::now_epoch_secs(),
+            );
+            None
+        }
+        Err(None) => None,
+    }
 }
 
 /// Every conversation in `presence_dir` that is eligible for the watcher now. The watcher runs this
@@ -2224,16 +2312,7 @@ async fn register_from_subtree(
                 };
                 // The same verification `xmsg register agy` gets, with the process that supplied the
                 // credentials as the peer: its ancestry must reach the lock-holding agy.
-                match verify_registration(
-                    proc_root,
-                    &config.proc_locks_path,
-                    &config.presence_dir,
-                    &config.trusted_agy_exes,
-                    my_uid,
-                    my_uid,
-                    p,
-                    &req,
-                ) {
+                match verify_registration(config, my_uid, my_uid, p, &req) {
                     Ok(reg) => {
                         let mut session_info = AgySessionInfo::new_with_credentials(
                             conv_id.to_string(),
@@ -2681,15 +2760,7 @@ pub async fn run_register_server_with_listener(
                                         writer.write_all(format!("{err_resp}\n").as_bytes()).await;
                                     return;
                                 }
-                                match verify_registration_peer(
-                                    &config_clone.proc_root,
-                                    &config_clone.proc_locks_path,
-                                    &config_clone.presence_dir,
-                                    &config_clone.trusted_agy_exes,
-                                    my_uid,
-                                    &peer,
-                                    &req,
-                                ) {
+                                match verify_registration_peer(&config_clone, my_uid, &peer, &req) {
                                     Ok(reg) => {
                                         let mut session_info = AgySessionInfo::new_with_credentials(
                                             req.conversation_id.clone(),
@@ -2909,6 +2980,7 @@ mod tests {
             agy_bin: "agy".to_string(),
             trusted_agy_exes: vec![my_exe.clone()],
             brain_dir: PathBuf::new(),
+            ..Default::default()
         };
         let store = new_agy_store();
 
@@ -2963,30 +3035,13 @@ mod tests {
             ls_address: "127.0.0.1:41111".to_string(),
             csrf_token: "tok".to_string(),
         };
-        let reg = verify_registration(
-            Path::new("/proc"),
-            &missing_line_locks,
-            &presence_dir,
-            std::slice::from_ref(&my_exe),
-            my_uid,
-            my_uid,
-            hp,
-            &req,
-        )
-        .expect("XR2: verify_registration must succeed from fdinfo when proc_locks omits line");
+        let reg = verify_registration(&config, my_uid, my_uid, hp, &req)
+            .expect("XR2: verify_registration must succeed from fdinfo when proc_locks omits line");
         assert_eq!(reg.pid, hp);
 
         // 2. attest_mcp_caller_peer (`attested_lock_holder`) succeeds via fdinfo despite missing line.
-        let (mcp_reg, mcp_conv) = attest_mcp_caller(
-            Path::new("/proc"),
-            &missing_line_locks,
-            &presence_dir,
-            std::slice::from_ref(&my_exe),
-            my_uid,
-            my_uid,
-            hp,
-        )
-        .expect("XR2: attest_mcp_caller must succeed from fdinfo when proc_locks omits line");
+        let (mcp_reg, mcp_conv) = attest_mcp_caller(&config, my_uid, my_uid, hp)
+            .expect("XR2: attest_mcp_caller must succeed from fdinfo when proc_locks omits line");
         assert_eq!(mcp_reg.pid, hp);
         assert_eq!(mcp_conv, conv_id);
 
@@ -3071,21 +3126,18 @@ mod tests {
             ls_address: "127.0.0.1:1".to_string(),
             csrf_token: "t".to_string(),
         };
+        let cfg_for = |pins: &[PathBuf]| AgyConfig {
+            presence_dir: presence_dir.clone(),
+            proc_locks_path: locks.to_path_buf(),
+            proc_root: proc_root.to_path_buf(),
+            trusted_agy_exes: pins.to_vec(),
+            ..Default::default()
+        };
         let register = |pins: &[PathBuf], peer_pid: u32| {
-            verify_registration(
-                proc_root,
-                locks,
-                &presence_dir,
-                pins,
-                uid,
-                uid,
-                peer_pid,
-                &req,
-            )
+            verify_registration(&cfg_for(pins), uid, uid, peer_pid, &req)
         };
-        let mcp = |pins: &[PathBuf], peer_pid: u32| {
-            attest_mcp_caller(proc_root, locks, &presence_dir, pins, uid, uid, peer_pid)
-        };
+        let mcp =
+            |pins: &[PathBuf], peer_pid: u32| attest_mcp_caller(&cfg_for(pins), uid, uid, peer_pid);
         // No pin: the real holder is attested by the lock alone.
         assert_eq!(register(&[], pid).unwrap().pid, pid);
         assert_eq!(mcp(&[], pid).unwrap().0.pid, pid);
@@ -3109,17 +3161,13 @@ mod tests {
             csrf_token: "t".to_string(),
         };
         let uid = current_uid();
-        let err = verify_registration(
-            Path::new(crate::process::LIVE_PROC_ROOT),
-            Path::new(LIVE_PROC_LOCKS),
-            Path::new("/nonexistent"),
-            &[],
-            uid,
-            uid,
-            std::process::id(),
-            &req,
-        )
-        .unwrap_err();
+        let cfg = AgyConfig {
+            presence_dir: PathBuf::from("/nonexistent"),
+            proc_locks_path: PathBuf::from(LIVE_PROC_LOCKS),
+            proc_root: PathBuf::from(crate::process::LIVE_PROC_ROOT),
+            ..Default::default()
+        };
+        let err = verify_registration(&cfg, uid, uid, std::process::id(), &req).unwrap_err();
         assert!(
             matches!(err, AppError::Gone { .. }),
             "with no pin the request is refused for the missing lock, not for configuration: {err:?}"

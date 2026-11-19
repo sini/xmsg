@@ -23,6 +23,7 @@
     "tests/e2e_replies.rs",
     "tests/encoding_properties.rs",
     "tests/enroll_hub.rs",
+    "tests/exe_name_match.rs",
     "tests/fed_p1.rs",
     "tests/federation_deny.rs",
     "tests/gate2_agent.rs",
@@ -118,16 +119,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1443,
+      "passed": 1448,
       "failed": 0,
       "ignored": 7,
-      "summaries": 114
+      "summaries": 115
     },
     "darwin": {
-      "passed": 1456,
+      "passed": 1461,
       "failed": 0,
       "ignored": 9,
-      "summaries": 114
+      "summaries": 115
     }
   }
 }

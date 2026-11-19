@@ -102,6 +102,7 @@ async fn start_hub_with_svc_receiver(
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: PathBuf::new(),
+        ..Default::default()
     };
 
     let agy_store = new_agy_store();
@@ -243,6 +244,7 @@ async fn start_leaf_with_unavailable_proc(
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: PathBuf::new(),
+        ..Default::default()
     };
 
     let agy_store = new_agy_store();
@@ -613,6 +615,7 @@ async fn leaf_svc_without_proc_and_pidfd_dead_controls() {
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: PathBuf::new(),
+        ..Default::default()
     };
     let nonleaf_db = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()));
     storage::init_db(&nonleaf_db.lock().unwrap()).unwrap();

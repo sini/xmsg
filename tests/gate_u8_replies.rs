@@ -192,6 +192,7 @@ exit 0
         agy_bin: fake_agy_bin.to_string_lossy().to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
 
     let state = Arc::new(AppState {

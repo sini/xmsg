@@ -79,6 +79,7 @@ impl Harness {
                 agy_bin: "agy".into(),
                 trusted_agy_exes: Vec::new(),
                 brain_dir: PathBuf::new(),
+                ..Default::default()
             },
             agy_store: xmsg::agy::new_agy_store(),
             pi_store: xmsg::pi::new_pi_store(),

@@ -368,6 +368,42 @@ async fn sessions(report: &mut Report, path: &Path) {
     if unavailable {
         report.add("sessions.process_backend", Status::Warn, "Process inspection is unavailable for some rows on this platform; those processes are unknown, not gone.", Some("Native process inspection is optional; /proc is not required. Retain unknown where the backend is unavailable."));
     }
+    if let Some(drifts) = snapshot["harness_exe_drift"].as_array() {
+        for entry in drifts.iter().take(4) {
+            let Some(harness) = entry["harness"]
+                .as_str()
+                .filter(|h| matches!(*h, "codex" | "agy"))
+            else {
+                continue;
+            };
+            let Some(strict) = entry["strict"].as_bool() else {
+                continue;
+            };
+            let id = format!("harness.{harness}_exe");
+            if strict {
+                let hint = if harness == "codex" {
+                    "Restart the codex CLI and its managed app-server on the configured binary, or omit --codex-exe-strict."
+                } else {
+                    "Restart Antigravity on the configured binary, or omit --agy-exe-strict."
+                };
+                report.add(
+                    id,
+                    Status::Warn,
+                    format!("{harness} binary path differs from configured; strict mode refused admission"),
+                    Some(hint),
+                );
+            } else {
+                report.add(
+                    id,
+                    Status::Info,
+                    format!(
+                        "{harness} binary path differs from configured (upgrade?); matched by name"
+                    ),
+                    None,
+                );
+            }
+        }
+    }
 }
 
 fn requirement_label(name: &str) -> String {

@@ -12,6 +12,22 @@ use xmsg::agy::{
 };
 use xmsg::error::AppError;
 
+fn agy_cfg(
+    proc_root: &Path,
+    proc_locks: &Path,
+    presence_dir: &Path,
+    trusted_exes: &[std::path::PathBuf],
+) -> AgyConfig {
+    AgyConfig {
+        proc_root: proc_root.to_path_buf(),
+        proc_locks_path: proc_locks.to_path_buf(),
+        presence_dir: presence_dir.to_path_buf(),
+        brain_dir: std::path::PathBuf::new(),
+        trusted_agy_exes: trusted_exes.to_vec(),
+        ..Default::default()
+    }
+}
+
 fn setup_mock_proc(
     proc_root: &Path,
     pid: u32,
@@ -57,10 +73,7 @@ fn test_verify_registration_uid_mismatch() {
     };
 
     let res = verify_registration(
-        &proc_root,
-        &proc_locks,
-        &presence_dir,
-        &trusted_exes,
+        &agy_cfg(&proc_root, &proc_locks, &presence_dir, &trusted_exes),
         1000, // my_uid
         1001, // peer_uid mismatch!
         5000,
@@ -90,16 +103,8 @@ fn test_verify_registration_missing_or_dead_lock() {
     };
 
     // 1. Missing lock file -> Err(Gone)
-    let res1 = verify_registration(
-        &proc_root,
-        &proc_locks,
-        &presence_dir,
-        &trusted_exes,
-        1000,
-        1000,
-        5000,
-        &req,
-    );
+    let cfg = agy_cfg(&proc_root, &proc_locks, &presence_dir, &trusted_exes);
+    let res1 = verify_registration(&cfg, 1000, 1000, 5000, &req);
     assert!(matches!(res1, Err(AppError::Gone { .. })));
 
     // 2. Lock file exists, but no ancestor holds it open -> Err(NotRecipient)
@@ -113,16 +118,7 @@ fn test_verify_registration_missing_or_dead_lock() {
         ls_address: "127.0.0.1:1234".to_string(),
         csrf_token: "secret".to_string(),
     };
-    let res2 = verify_registration(
-        &proc_root,
-        &proc_locks,
-        &presence_dir,
-        &trusted_exes,
-        1000,
-        1000,
-        5000,
-        &req_dead,
-    );
+    let res2 = verify_registration(&cfg, 1000, 1000, 5000, &req_dead);
     assert!(matches!(res2, Err(AppError::NotRecipient(_))));
 }
 
@@ -170,42 +166,16 @@ fn test_verify_registration_ancestor_walk() {
     };
 
     // 1. Direct holder (peer_pid == holder_pid == 2000) -> OK
-    let res_direct = verify_registration(
-        &proc_root,
-        &proc_locks,
-        &presence_dir,
-        &trusted_exes,
-        1000,
-        1000,
-        2000,
-        &req,
-    );
+    let cfg = agy_cfg(&proc_root, &proc_locks, &presence_dir, &trusted_exes);
+    let res_direct = verify_registration(&cfg, 1000, 1000, 2000, &req);
     assert_eq!(res_direct.unwrap(), 2000);
 
     // 2. Descendant (peer_pid == 4000) -> OK
-    let res_descendant = verify_registration(
-        &proc_root,
-        &proc_locks,
-        &presence_dir,
-        &trusted_exes,
-        1000,
-        1000,
-        4000,
-        &req,
-    );
+    let res_descendant = verify_registration(&cfg, 1000, 1000, 4000, &req);
     assert_eq!(res_descendant.unwrap(), 2000);
 
     // 3. Non-descendant (peer_pid == 9000) -> Err(NotRecipient)
-    let res_non = verify_registration(
-        &proc_root,
-        &proc_locks,
-        &presence_dir,
-        &trusted_exes,
-        1000,
-        1000,
-        9000,
-        &req,
-    );
+    let res_non = verify_registration(&cfg, 1000, 1000, 9000, &req);
     assert!(matches!(res_non, Err(AppError::NotRecipient(_))));
 }
 
@@ -251,6 +221,7 @@ async fn test_registration_server_e2e_and_atomic_replacement() {
         agy_bin: "agy".to_string(),
         trusted_agy_exes: vec![dummy_exe],
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
     let store = new_agy_store();
 

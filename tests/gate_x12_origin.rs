@@ -119,6 +119,7 @@ async fn test_oracle_1_local_attested_session_origin() {
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
     let agy_store = new_agy_store();
     let pi_store = new_pi_store();
@@ -375,6 +376,7 @@ async fn create_fed_test_node(
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
     let agy_store = new_agy_store();
     let pi_store = new_pi_store();

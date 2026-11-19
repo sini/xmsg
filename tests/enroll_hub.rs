@@ -302,6 +302,7 @@ fn node_state(
             agy_bin: "agy".into(),
             trusted_agy_exes: vec![],
             brain_dir: PathBuf::new(),
+            ..Default::default()
         },
         agy_store: agy::new_agy_store(),
         pi_store: pi::new_pi_store(),

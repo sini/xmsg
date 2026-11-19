@@ -318,13 +318,21 @@ pub struct ServeArgs {
     #[arg(long, env = "XMSG_LEAF_REGISTER_SOCK")]
     pub leaf_register_sock: Option<PathBuf>,
 
-    /// Trusted Antigravity executable paths (comma-separated or multiple flags)
+    /// Trusted Antigravity executable paths (comma-separated or multiple flags; matched by canonical file name unless --agy-exe-strict is set)
     #[arg(long = "agy-exe", env = "XMSG_AGY_EXE", value_delimiter = ',')]
     pub agy_exes: Vec<PathBuf>,
 
-    /// Trusted Codex executable paths (comma-separated or multiple flags)
+    /// Require exact canonical path match for --agy-exe instead of default file-name match
+    #[arg(long = "agy-exe-strict", env = "XMSG_AGY_EXE_STRICT")]
+    pub agy_exe_strict: bool,
+
+    /// Trusted Codex executable paths (comma-separated or multiple flags; matched by canonical file name unless --codex-exe-strict is set)
     #[arg(long = "codex-exe", env = "XMSG_CODEX_EXE", value_delimiter = ',')]
     pub codex_exes: Vec<PathBuf>,
+
+    /// Require exact canonical path match for --codex-exe instead of default file-name match
+    #[arg(long = "codex-exe-strict", env = "XMSG_CODEX_EXE_STRICT")]
+    pub codex_exe_strict: bool,
 
     /// Trusted Codex home directories (repeatable, or separated by ':' in env XMSG_CODEX_HOME; defaults to $CODEX_HOME or ~/.codex)
     #[arg(long = "codex-home", env = "XMSG_CODEX_HOME", value_delimiter = ':')]
@@ -1321,6 +1329,7 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
 
     let agy_config = xmsg::agy::AgyConfig {
         trusted_agy_exes: args.agy_exes,
+        agy_exe_strict: args.agy_exe_strict,
         ..Default::default()
     };
     let agy_store = xmsg::agy::new_agy_store();
@@ -1749,8 +1758,10 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         };
         let codex_config = xmsg::codex::CodexConfig {
             trusted_codex_exes: args.codex_exes,
+            codex_exe_strict: args.codex_exe_strict,
             codex_homes,
             proc_root: agy_config.proc_root.clone(),
+            ..Default::default()
         };
         let enabled = !codex_config.trusted_codex_exes.is_empty();
         let _ = xmsg::codex::init_for_state(&state, codex_config);

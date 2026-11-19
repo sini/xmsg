@@ -88,16 +88,15 @@ fn cell_g1_linux_refuses_when_no_flock_holder() {
         csrf_token: "token123".to_string(),
     };
 
-    let res = verify_registration(
-        &proc_root,
-        &proc_locks,
-        &presence_dir,
-        &trusted_exes,
-        1000,
-        1000,
-        2000,
-        &req,
-    );
+    let cfg = AgyConfig {
+        proc_root,
+        proc_locks_path: proc_locks,
+        presence_dir,
+        brain_dir: std::path::PathBuf::new(),
+        trusted_agy_exes: trusted_exes,
+        ..Default::default()
+    };
+    let res = verify_registration(&cfg, 1000, 1000, 2000, &req);
 
     match res {
         Err(AppError::NotRecipient(msg)) => {
@@ -148,6 +147,7 @@ fn cell_g2_agent_sock_refuses_unregistered_lock_holder() {
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
     let agy_store = new_agy_store(); // Empty: NOT registered
     let pi_store = new_pi_store();
@@ -229,16 +229,15 @@ fn delta_minor_1_starttime_changes_between_reads() {
         ls_address: "127.0.0.1:1".into(),
         csrf_token: "t".into(),
     };
-    let res = verify_registration(
-        &proc_root,
-        &locks,
-        &presence,
-        &[agy],
-        1000,
-        1000,
-        2000,
-        &req,
-    );
+    let cfg = AgyConfig {
+        proc_root,
+        proc_locks_path: locks,
+        presence_dir: presence,
+        brain_dir: std::path::PathBuf::new(),
+        trusted_agy_exes: vec![agy],
+        ..Default::default()
+    };
+    let res = verify_registration(&cfg, 1000, 1000, 2000, &req);
     match res {
         Err(e) => assert!(
             format!("{e:?}").contains("starttime changed"),

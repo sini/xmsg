@@ -117,6 +117,7 @@ async fn mcp_reply_to_agy_and_claude_delivery_failures_surface_classified_errors
         agy_bin: agy_bin.to_string_lossy().to_string(),
         trusted_agy_exes: vec![agy_bin.clone()],
         brain_dir: PathBuf::new(),
+        ..Default::default()
     };
 
     // Register a live Claude recipient (pid 5000) and make our process descend from it.

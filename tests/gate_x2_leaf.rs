@@ -221,6 +221,7 @@ async fn test_oracle_2_body_from_ignored_and_attributed_to_leaf_principal() {
             agy_bin: "agy".to_string(),
             trusted_agy_exes: Vec::new(),
             brain_dir: std::path::PathBuf::new(),
+            ..Default::default()
         },
         agy_store: new_agy_store(),
         pi_store: new_pi_store(),
@@ -320,6 +321,7 @@ async fn test_oracle_2_body_from_ignored_and_attributed_to_leaf_principal() {
             agy_bin: "agy".to_string(),
             trusted_agy_exes: Vec::new(),
             brain_dir: std::path::PathBuf::new(),
+            ..Default::default()
         },
         agy_store: new_agy_store(),
         pi_store: new_pi_store(),
@@ -483,6 +485,7 @@ async fn test_oracle_3_leaf_pull_replies_node_zero_outbound_connections() {
             agy_bin: "agy".to_string(),
             trusted_agy_exes: Vec::new(),
             brain_dir: std::path::PathBuf::new(),
+            ..Default::default()
         },
         agy_store: new_agy_store(),
         pi_store: new_pi_store(),
@@ -623,6 +626,7 @@ async fn test_oracle_3_leaf_pull_replies_node_zero_outbound_connections() {
             agy_bin: "agy".to_string(),
             trusted_agy_exes: Vec::new(),
             brain_dir: std::path::PathBuf::new(),
+            ..Default::default()
         },
         agy_store: new_agy_store(),
         pi_store: new_pi_store(),

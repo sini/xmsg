@@ -178,6 +178,7 @@ fn test_resolve_caller_session_ancestor_walk() {
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
     let agy_store = new_agy_store();
     let pi_store = new_pi_store();
@@ -296,6 +297,7 @@ fn resolve_with_middle_link(
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
     let stat = |pid: u32, ppid: u32, start: &str| {
         let dir = proc_root.join(pid.to_string());
@@ -458,6 +460,7 @@ async fn test_agent_sock_reply_and_send_flow() {
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
 
     let app_state = Arc::new(AppState {
@@ -686,6 +689,7 @@ async fn test_xs2_svc_store_admits_only_hop0_while_refusing_child_of_svc() {
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
 
     // 1. Unit check over synthetic proc_root: hop 0 resolves to `svc:genie`, hop 1 and hop 2
@@ -977,6 +981,7 @@ async fn test_xr4_resolve_caller_session_refuses_ambiguous_multi_svc_pid() {
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
 
     // 1. Direct unit check on resolve_caller_session

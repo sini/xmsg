@@ -55,7 +55,8 @@ sessions do not collide, and one session cannot pose as another:
   UTC `ps -o lstart` time in `<pid>.json`. Duplicate conversation IDs get deterministic `X~2`,
   `X~3` fork claims in `instance_claims`.
 - **[Codex](/harnesses/codex/):** xmsg makes three checks:
-  - ancestor executable attestation (`--codex-exe`);
+  - ancestor executable attestation (`--codex-exe`, matching the canonical executable `file_name`
+    by default across store-path upgrades, or the exact canonical path with `--codex-exe-strict`);
   - an open `<H>/thread-writer-locks/<P>.lock` descriptor under a configured `--codex-home` `<H>`,
     with a continuous lease watch. On Linux, the watch uses `inotify`. On macOS, it uses `kqueue`
     on an `O_EVTONLY` descriptor. On macOS, a process that releases the lock without closing it
@@ -71,8 +72,9 @@ sessions do not collide, and one session cannot pose as another:
     delivery paths add a fixed untrusted-peer-data preamble outside the escaped message bodies.
 - **[Antigravity](/harnesses/antigravity/):** xmsg checks for an open file descriptor to
   `<presence_dir>/<conversation_id>.lock`, matched by device and inode `(dev, ino)`. On Linux, it
-  also checks for an exclusive `FLOCK` in `/proc/locks`. The optional `--agy-exe` flag pins the
-  ancestor executable; without it the lock holder is trusted by UID and lock attestation.
+  also checks for an exclusive `FLOCK` in `/proc/locks`. The optional `--agy-exe` flag checks the
+  ancestor's canonical executable `file_name` by default (or its exact canonical path with
+  `--agy-exe-strict`); without `--agy-exe` the lock holder is trusted by UID and lock attestation.
 - **[Pi](/harnesses/pi/), [opencode](/harnesses/opencode/) and [Hermes](/harnesses/hermes/):**
   xmsg admits them on `register.sock` after a UID check with `SO_PEERCRED` / `getpeereid`. It
   makes a new UUID v4 for each registered session. All tool calls and `continues`/`subagent`

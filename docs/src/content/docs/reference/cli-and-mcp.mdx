@@ -289,8 +289,14 @@ enablement for each user are deployment configuration.
 
 Starts the local IPC and optional mTLS federation daemon:
 
-```rust file=<rootDir>/src/main.rs#L232-L365
+```rust file=<rootDir>/src/main.rs#L235-L376
 ```
+
+Planned: `--codex-exe` and `--agy-exe` compare canonical executable `file_name`s by default
+so open sessions survive store-path upgrades (`xmsg doctor` notes path drift as `info` under
+`harness.codex_exe` / `harness.agy_exe`); pass `--codex-exe-strict` (`XMSG_CODEX_EXE_STRICT`)
+or `--agy-exe-strict` (`XMSG_AGY_EXE_STRICT`) to require exact canonical path matching
+(`xmsg doctor` then warns when a live candidate was refused on path drift).
 
 Planned: federation reload (`SIGHUP` or `--fed-reload-interval-secs`) accepts only
 certificates with the running node's derived name. Different-name credentials are
@@ -308,7 +314,7 @@ for accounting, duplicates and cleanup cadence.
 
 Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
 
-```rust file=<rootDir>/src/main.rs#L367-L392
+```rust file=<rootDir>/src/main.rs#L378-L403
 ```
 
 ### `xmsg register`

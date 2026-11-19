@@ -66,6 +66,7 @@ fn make_test_state(tmp: &std::path::Path) -> Arc<AppState> {
             proc_root,
             agy_bin: "agy".to_string(),
             trusted_agy_exes: Vec::new(),
+            ..Default::default()
         },
         agy_store: Arc::new(RwLock::new(HashMap::new())),
         pi_store: Arc::new(RwLock::new(HashMap::new())),

@@ -16,6 +16,16 @@ pub(crate) struct Snapshot {
     truncated: bool,
     recipients: Vec<SnapshotRecipient>,
     nodes: Vec<NodeStatus>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    harness_exe_drift: Vec<HarnessExeDrift>,
+}
+
+#[derive(Debug, Serialize)]
+struct HarnessExeDrift {
+    harness: &'static str,
+    strict: bool,
+    canonical_path: String,
+    observed_at: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -310,6 +320,41 @@ pub(crate) fn collect(
             );
         }
     }
+    let mut harness_exe_drift = Vec::new();
+    if liveness {
+        let codex_drift = {
+            let rt_arc = crate::codex::for_state(state);
+            let rt = rt_arc
+                .lock()
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            if rt.config.is_enabled() {
+                crate::process::live_exe_drift(&rt.config.exe_drift, &rt.config.proc_root)
+            } else {
+                None
+            }
+        };
+        if let Some(rec) = codex_drift {
+            harness_exe_drift.push(HarnessExeDrift {
+                harness: "codex",
+                strict: rec.strict,
+                canonical_path: rec.canonical_path.to_string_lossy().into_owned(),
+                observed_at: rec.observed_at,
+            });
+        }
+        if !state.agy_config.trusted_agy_exes.is_empty() {
+            if let Some(rec) = crate::process::live_exe_drift(
+                &state.agy_config.exe_drift,
+                &state.agy_config.proc_root,
+            ) {
+                harness_exe_drift.push(HarnessExeDrift {
+                    harness: "agy",
+                    strict: rec.strict,
+                    canonical_path: rec.canonical_path.to_string_lossy().into_owned(),
+                    observed_at: rec.observed_at,
+                });
+            }
+        }
+    }
     Ok(Snapshot {
         read_only: true,
         partial: true,
@@ -324,5 +369,6 @@ pub(crate) fn collect(
             })
             .collect(),
         nodes: vec![NodeStatus::ok(&state.node_name)],
+        harness_exe_drift,
     })
 }

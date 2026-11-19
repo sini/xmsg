@@ -32,6 +32,7 @@ fn state(proc_root: PathBuf) -> Arc<AppState> {
             proc_locks_path: proc_root.join("locks"),
             proc_root,
             agy_bin: "agy".into(),
+            ..Default::default()
         },
         agy_store: xmsg::agy::new_agy_store(),
         pi_store: xmsg::pi::new_pi_store(),

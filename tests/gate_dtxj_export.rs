@@ -88,6 +88,7 @@ impl Fixture {
                 agy_bin: "synthetic-agy".into(),
                 trusted_agy_exes: Vec::new(),
                 brain_dir: directory.path().join("brain"),
+                ..Default::default()
             },
             agy_store: xmsg::agy::new_agy_store(),
             pi_store: xmsg::pi::new_pi_store(),

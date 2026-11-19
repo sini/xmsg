@@ -220,6 +220,7 @@ impl AgyTestHarness {
                 proc_root: proc_root.clone(),
                 agy_bin: fake_agy.display().to_string(),
                 trusted_agy_exes: vec![fake_agy.clone()],
+                ..Default::default()
             },
             agy_store: new_agy_store(),
             pi_store: xmsg::pi::new_pi_store(),

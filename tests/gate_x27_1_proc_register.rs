@@ -120,6 +120,7 @@ impl Tree {
             agy_bin: "agy".to_string(),
             trusted_agy_exes: vec![self.trusted_exe.clone()],
             brain_dir: std::path::PathBuf::new(),
+            ..Default::default()
         }
     }
 }
@@ -372,16 +373,7 @@ async fn oracle_1c_verification_runs_on_the_supplying_process() {
     };
     let uid = xmsg::agent::current_uid();
     let c = t.config();
-    let direct = xmsg::agy::verify_registration(
-        &c.proc_root,
-        &c.proc_locks_path,
-        &c.presence_dir,
-        &c.trusted_agy_exes,
-        uid,
-        uid,
-        5902,
-        &req,
-    );
+    let direct = xmsg::agy::verify_registration(&c, uid, uid, 5902, &req);
     assert!(
         direct.is_err(),
         "fixture: register agy from 5902 is refused"
@@ -483,7 +475,7 @@ async fn oracle_1b_serve_watcher_registers_without_hook() {
 // Oracle 2: the variables in a process OUTSIDE the attested agy's subtree => not registered, and
 // that process is never even read: FIFOs count the opens of its `environ` and its `stat`.
 //   2a: a sibling of the attested agy (ppid 1).
-//   2b: the child of a NON-attested agy binary (same file name, other path) holding a lock.
+//   2b: the child of a NON-attested binary (different file name) holding a lock.
 // Each runs with the kernel's children files (descent) and without them. Without them nothing is
 // read at all, nothing registers, and `check` reports `watching: false`, so the hook injects on
 // turn 1.
@@ -502,7 +494,7 @@ async fn oracle_2_outside(non_attested: bool, children: bool) {
 
     let other_dir = tempdir().unwrap();
     let outsider = if non_attested {
-        let other_exe = other_dir.path().join(t.trusted_exe.file_name().unwrap());
+        let other_exe = other_dir.path().join("untrusted-holder");
         fs::write(&other_exe, "").unwrap();
         t.agy("0199cecf-002b-7000-8000-00000000002b", 2100, &other_exe);
         t.hold("0199cecf-002b-7000-8000-00000000002b", 2100);

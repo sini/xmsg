@@ -908,10 +908,7 @@ pub async fn run_agent_server_with_listener(
                             || label.is_some()
                             || registered_at.is_some();
                         match crate::agy::attest_mcp_caller_peer(
-                            &state_clone.agy_config.proc_root,
-                            &state_clone.agy_config.proc_locks_path,
-                            &state_clone.agy_config.presence_dir,
-                            &state_clone.agy_config.trusted_agy_exes,
+                            &state_clone.agy_config,
                             my_uid,
                             &peer,
                         ) {

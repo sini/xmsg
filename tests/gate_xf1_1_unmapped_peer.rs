@@ -210,6 +210,7 @@ fn xf1_1_pidns_server_helper() {
             agy_bin: "false".to_string(),
             trusted_agy_exes: Vec::new(),
             brain_dir: std::path::PathBuf::new(),
+            ..Default::default()
         };
         let db_conn = rusqlite::Connection::open(base_dir.join("xmsg.db")).unwrap();
         storage::init_db(&db_conn).unwrap();
@@ -619,6 +620,7 @@ async fn test_xf1_1_unmapped_peer_pid_namespace_and_ancestry_oracles() {
         agy_bin: "false".to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
     let db_conn = rusqlite::Connection::open_in_memory().unwrap();
     storage::init_db(&db_conn).unwrap();
@@ -779,16 +781,12 @@ async fn test_xf1_1_unmapped_peer_pid_namespace_and_ancestry_oracles() {
         "non-leaf verify_svc_process_peer must reject alive-unmapped peer"
     );
 
+    let unmapped_agy_config = AgyConfig {
+        proc_root: proc_root.clone(),
+        ..agy_config.clone()
+    };
     assert!(
-        xmsg::agy::attest_mcp_caller_peer(
-            &proc_root,
-            &agy_config.proc_locks_path,
-            &agy_config.presence_dir,
-            &agy_config.trusted_agy_exes,
-            uid,
-            &unmapped_peer,
-        )
-        .is_err(),
+        xmsg::agy::attest_mcp_caller_peer(&unmapped_agy_config, uid, &unmapped_peer).is_err(),
         "agy attest_mcp_caller_peer must reject alive-unmapped peer"
     );
 

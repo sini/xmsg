@@ -83,18 +83,24 @@ pub fn set_force_ignore_kevent_fflags_for_test(ignore: bool) {
 pub struct CodexConfig {
     /// Canonicalized paths of trusted Codex binaries (`--codex-exe`).
     pub trusted_codex_exes: Vec<PathBuf>,
+    /// Require exact canonical path match instead of default canonical file-name match (`--codex-exe-strict`).
+    pub codex_exe_strict: bool,
     /// Configured Codex home directories (`--codex-home`).
     pub codex_homes: Vec<PathBuf>,
     /// `/proc` root (overridable in unit tests).
     pub proc_root: PathBuf,
+    /// Last observed executable path drift for `xmsg doctor`.
+    pub exe_drift: crate::process::ExeDriftSlot,
 }
 
 impl Default for CodexConfig {
     fn default() -> Self {
         Self {
             trusted_codex_exes: Vec::new(),
+            codex_exe_strict: false,
             codex_homes: Vec::new(),
             proc_root: PathBuf::from(crate::process::LIVE_PROC_ROOT),
+            exe_drift: crate::process::new_exe_drift_slot(),
         }
     }
 }
@@ -143,8 +149,10 @@ impl CodexConfig {
 
         Ok(Self {
             trusted_codex_exes,
+            codex_exe_strict: false,
             codex_homes,
             proc_root: PathBuf::from(crate::process::LIVE_PROC_ROOT),
+            exe_drift: crate::process::new_exe_drift_slot(),
         })
     }
 
@@ -1219,8 +1227,9 @@ fn read_bounded_first_line(
     })
 }
 
-/// Check whether `pid` in `proc_root` has an executable canonicalizing to one of
-/// `config.trusted_codex_exes`, rechecking `starttime` after canonicalization.
+/// Check whether `pid` in `proc_root` has a canonical executable matching
+/// `config.trusted_codex_exes` (by canonical file name by default, or exact canonical path when
+/// `config.codex_exe_strict` is set), rechecking `starttime` and `exe` after canonicalization.
 pub fn is_trusted_codex_owner_step(
     config: &CodexConfig,
     pid: u32,
@@ -1231,12 +1240,31 @@ pub fn is_trusted_codex_owner_step(
     }
     let exe = crate::process::exe_path(&config.proc_root, pid).ok()?;
     let canon_exe = std::fs::canonicalize(&exe).ok()?;
-    if !config
-        .trusted_codex_exes
-        .iter()
-        .any(|t| t == &canon_exe || std::fs::canonicalize(t).ok().as_ref() == Some(&canon_exe))
-    {
-        return None;
+    let matched = crate::process::evaluate_trusted_exe(
+        &config.trusted_codex_exes,
+        &canon_exe,
+        config.codex_exe_strict,
+    );
+    match matched {
+        crate::process::ExeMatch::NoMatch => return None,
+        crate::process::ExeMatch::RefusedPathDrift => {
+            if crate::process::starttime(&config.proc_root, pid)
+                .ok()
+                .as_deref()
+                == Some(expected_start)
+            {
+                crate::process::record_exe_drift(
+                    &config.exe_drift,
+                    pid,
+                    expected_start,
+                    canon_exe,
+                    true,
+                    crate::storage::now_epoch_secs(),
+                );
+            }
+            return None;
+        }
+        crate::process::ExeMatch::ExactPath | crate::process::ExeMatch::NameOnly => {}
     }
     if crate::process::starttime(&config.proc_root, pid)
         .ok()
@@ -1248,6 +1276,22 @@ pub fn is_trusted_codex_owner_step(
     let exe_after = crate::process::exe_path(&config.proc_root, pid).ok()?;
     if std::fs::canonicalize(&exe_after).ok().as_ref() != Some(&canon_exe) {
         return None;
+    }
+    match matched {
+        crate::process::ExeMatch::NameOnly => {
+            crate::process::record_exe_drift(
+                &config.exe_drift,
+                pid,
+                expected_start,
+                canon_exe.clone(),
+                false,
+                crate::storage::now_epoch_secs(),
+            );
+        }
+        crate::process::ExeMatch::ExactPath => {
+            crate::process::clear_exe_drift_if_replaced(&config.exe_drift, &config.proc_root, pid);
+        }
+        _ => {}
     }
     Some(canon_exe)
 }

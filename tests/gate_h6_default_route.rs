@@ -958,6 +958,7 @@ async fn test_oracle_7_removed_pull_loop_exits_on_reload() {
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
 
     let fs = Arc::new(FedState {
@@ -1083,6 +1084,7 @@ async fn test_oracle_8_reload_adds_pull_loop() {
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
 
     let fs = Arc::new(FedState {

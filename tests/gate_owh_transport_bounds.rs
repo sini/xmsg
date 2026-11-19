@@ -82,6 +82,7 @@ async fn malicious_upstream_cannot_return_more_than_the_requested_chunk() {
             agy_bin: "agy".into(),
             trusted_agy_exes: vec![],
             brain_dir: Default::default(),
+            ..Default::default()
         },
         agy_store: xmsg::agy::new_agy_store(),
         pi_store: xmsg::pi::new_pi_store(),

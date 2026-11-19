@@ -146,6 +146,7 @@ async fn setup(max_body: usize) -> Env {
         agy_bin: "/tmp/nonexistent.sock-agy".into(),
         trusted_agy_exes: Vec::new(),
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     xmsg::storage::init_db(&conn).unwrap();

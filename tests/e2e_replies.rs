@@ -158,6 +158,7 @@ async fn start_replies_harness(reply_ttl: Duration) -> RepliesHarness {
             agy_bin: "agy".to_string(),
             trusted_agy_exes: Vec::new(),
             brain_dir: std::path::PathBuf::new(),
+            ..Default::default()
         },
         agy_store: xmsg::agy::new_agy_store(),
         pi_store: xmsg::pi::new_pi_store(),

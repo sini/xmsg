@@ -78,6 +78,7 @@ exit 0
         agy_bin: fake_agy_bin.to_string_lossy().to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
     let agy_store = new_agy_store();
 
@@ -296,6 +297,7 @@ exit 0
         agy_bin: fake_agy_bin.to_string_lossy().to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
     let agy_store = new_agy_store();
     let initial_info = xmsg::agy::AgySessionInfo::new(
@@ -477,6 +479,7 @@ exit 0
         agy_bin: fake_agy_bin.to_string_lossy().to_string(),
         trusted_agy_exes: vec![fake_agy_bin.clone()],
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
     let agy_store = new_agy_store();
     let initial_info = xmsg::agy::AgySessionInfo::new(
@@ -746,6 +749,7 @@ async fn assert_nonzero_exit_not_stale(stdout_payload: &str, stderr_payload: &st
         agy_bin: fake_agy_bin.to_string_lossy().to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
     let agy_store = new_agy_store();
     let initial_info = xmsg::agy::AgySessionInfo::new(
@@ -951,6 +955,7 @@ async fn deliver_with(holder: bool, pin: bool, explicit: bool) -> Ran {
         },
         trusted_agy_exes: if pin { vec![pinned_bin] } else { Vec::new() },
         brain_dir: PathBuf::new(),
+        ..Default::default()
     };
     let store = new_agy_store();
     let conv_id = "e904fe8e-df56-5cf9-8285-e2d97512d4e9";

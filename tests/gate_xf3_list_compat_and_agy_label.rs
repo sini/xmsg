@@ -1729,6 +1729,7 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
                 proc_root: PathBuf::from(xmsg::process::LIVE_PROC_ROOT),
                 proc_locks_path: node.proc_locks.clone(),
                 agy_bin: "agy".to_string(),
+                ..Default::default()
             },
             agy_store: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             pi_store: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
@@ -1746,6 +1747,7 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
                 trusted_codex_exes: vec![my_exe.clone()],
                 codex_homes: vec![run_dir.join(".codex")],
                 proc_root: PathBuf::from(xmsg::process::LIVE_PROC_ROOT),
+                ..Default::default()
             },
         );
         let inproc_state_srv = inproc_state.clone();

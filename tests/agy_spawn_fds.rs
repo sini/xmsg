@@ -30,6 +30,7 @@ fn fixture(root: &Path, agy_bin: &str) -> (AgyConfig, AgyStore, Session) {
         proc_root,
         agy_bin: agy_bin.to_string(),
         trusted_agy_exes: Vec::new(),
+        ..Default::default()
     };
     let store = new_agy_store();
     let info = AgySessionInfo::new(

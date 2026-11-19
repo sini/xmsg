@@ -112,8 +112,11 @@ connects to `agent.sock` again, with backoff. This restores the stage 1 registra
 messages queue safely until the next turn registers the push credentials again.
 
 `--agy-exe` is an optional pin. Without it, xmsg trusts the process that holds the conversation's
-presence lock (same UID, lock attestation unchanged). With it set, only a holder whose executable
-matches a pinned path is trusted.
+presence lock (same UID, lock attestation unchanged). With it set, xmsg compares the `file_name` of
+the holder's canonical executable against the configured `--agy-exe` canonical `file_name` (for
+example, `agy`) by default, so open sessions remain admissible across Nix store-path upgrades while
+`xmsg doctor` notes the path difference as an `info` line (`harness.agy_exe`). Pass
+`--agy-exe-strict` (`XMSG_AGY_EXE_STRICT=true`) to require an exact canonical path match instead.
 
 Delivery picks the program to run in this order:
 

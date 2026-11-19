@@ -4,13 +4,29 @@ use std::path::Path;
 use tempfile::tempdir;
 
 use xmsg::agy::{
-    dev_major, dev_minor, is_agy_session_alive, verify_registration, AgyCredentials,
+    dev_major, dev_minor, is_agy_session_alive, verify_registration, AgyConfig, AgyCredentials,
     AgyRegisterRequest, AgySessionInfo,
 };
 use xmsg::error::AppError;
 use xmsg::pi::verify_pi_process;
 
 mod reused_stat;
+
+fn agy_cfg(
+    proc_root: &Path,
+    proc_locks: &Path,
+    presence_dir: &Path,
+    trusted_exes: &[std::path::PathBuf],
+) -> AgyConfig {
+    AgyConfig {
+        proc_root: proc_root.to_path_buf(),
+        proc_locks_path: proc_locks.to_path_buf(),
+        presence_dir: presence_dir.to_path_buf(),
+        brain_dir: std::path::PathBuf::new(),
+        trusted_agy_exes: trusted_exes.to_vec(),
+        ..Default::default()
+    }
+}
 
 fn setup_mock_process(
     proc_root: &Path,
@@ -95,10 +111,7 @@ fn cell_1_accept_trusted_exe_and_lock_open() {
     };
 
     let reg = verify_registration(
-        &proc_root,
-        &proc_locks,
-        &presence_dir,
-        &trusted_exes,
+        &agy_cfg(&proc_root, &proc_locks, &presence_dir, &trusted_exes),
         1000,
         1000,
         3000,
@@ -150,10 +163,7 @@ fn cell_2_refuse_untrusted_exe() {
     };
 
     let res = verify_registration(
-        &proc_root,
-        &proc_locks,
-        &presence_dir,
-        &trusted_exes,
+        &agy_cfg(&proc_root, &proc_locks, &presence_dir, &trusted_exes),
         1000,
         1000,
         3000,
@@ -196,10 +206,7 @@ fn cell_3_refuse_lock_not_open() {
     };
 
     let res = verify_registration(
-        &proc_root,
-        &proc_locks,
-        &presence_dir,
-        &trusted_exes,
+        &agy_cfg(&proc_root, &proc_locks, &presence_dir, &trusted_exes),
         1000,
         1000,
         3000,
@@ -252,10 +259,7 @@ fn cell_4_refuse_non_ancestor_holder() {
     };
 
     let res = verify_registration(
-        &proc_root,
-        &proc_locks,
-        &presence_dir,
-        &trusted_exes,
+        &agy_cfg(&proc_root, &proc_locks, &presence_dir, &trusted_exes),
         1000,
         1000,
         3000,
@@ -284,10 +288,7 @@ fn cell_5_refuse_no_pin_and_no_lock_holder() {
     };
 
     let res = verify_registration(
-        &proc_root,
-        &proc_locks,
-        &presence_dir,
-        &[], // Empty trusted exes!
+        &agy_cfg(&proc_root, &proc_locks, &presence_dir, &[]),
         1000,
         1000,
         3000,
@@ -341,10 +342,7 @@ fn cell_6_refuse_symlinked_presence_path_inode_mismatch() {
     };
 
     let res = verify_registration(
-        &proc_root,
-        &proc_locks,
-        &presence_dir,
-        &trusted_exes,
+        &agy_cfg(&proc_root, &proc_locks, &presence_dir, &trusted_exes),
         1000,
         1000,
         3000,
@@ -403,10 +401,7 @@ fn cell_7_refuse_linux_flock_mismatch() {
     };
 
     let res = verify_registration(
-        &proc_root,
-        &proc_locks,
-        &presence_dir,
-        &trusted_exes,
+        &agy_cfg(&proc_root, &proc_locks, &presence_dir, &trusted_exes),
         1000,
         1000,
         3000,
@@ -563,18 +558,8 @@ fn cell_parent_younger_than_child_or_unreadable_start_is_refused() {
         ls_address: "127.0.0.1:4000".to_string(),
         csrf_token: "secret".to_string(),
     };
-    let verify = || {
-        verify_registration(
-            &proc_root,
-            &proc_locks,
-            &presence_dir,
-            &trusted_exes,
-            1000,
-            1000,
-            3000,
-            &req,
-        )
-    };
+    let cfg = agy_cfg(&proc_root, &proc_locks, &presence_dir, &trusted_exes);
+    let verify = || verify_registration(&cfg, 1000, 1000, 3000, &req);
 
     // Peer 3000 -> agy 2000 (started at 1000) -> 1
     setup_mock_process(

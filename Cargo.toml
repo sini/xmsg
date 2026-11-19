@@ -155,6 +155,11 @@ path = "tests/encoding_properties.rs"
 required-features = ["daemon"]
 
 [[test]]
+name = "exe_name_match"
+path = "tests/exe_name_match.rs"
+required-features = ["daemon"]
+
+[[test]]
 name = "fed_p1"
 path = "tests/fed_p1.rs"
 required-features = ["daemon"]

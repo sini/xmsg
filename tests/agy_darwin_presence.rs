@@ -189,6 +189,7 @@ impl Presence {
             proc_root: PathBuf::from(LIVE_PROC_ROOT),
             agy_bin: agy_bin.to_string(),
             trusted_agy_exes: vec![std::env::current_exe().unwrap()],
+            ..Default::default()
         }
     }
 
@@ -288,10 +289,18 @@ fn an_unlocked_sibling_opener_is_not_the_holder() {
     let uid = xmsg::agent::current_uid();
     let trusted = vec![std::env::current_exe().unwrap()];
     let locks = Path::new(LIVE_PROC_LOCKS);
+    let cfg = AgyConfig {
+        proc_root: live().to_path_buf(),
+        proc_locks_path: locks.to_path_buf(),
+        presence_dir: p.dir.clone(),
+        brain_dir: PathBuf::new(),
+        trusted_agy_exes: trusted,
+        ..Default::default()
+    };
 
     // The order matters to neither: once from a cold cache, once with the child watched.
     for round in ["cold", "watched"] {
-        let attest = attest_mcp_caller(live(), locks, &p.dir, &trusted, uid, uid, me);
+        let attest = attest_mcp_caller(&cfg, uid, uid, me);
         assert!(
             matches!(attest, Err(AppError::NotRecipient(_))),
             "{round}: attest from the unlocked opener: {attest:?}"
@@ -301,7 +310,7 @@ fn an_unlocked_sibling_opener_is_not_the_holder() {
             ls_address: "127.0.0.1:1".to_string(),
             csrf_token: "t".to_string(),
         };
-        let reg = verify_registration(live(), locks, &p.dir, &trusted, uid, uid, me, &req);
+        let reg = verify_registration(&cfg, uid, uid, me, &req);
         assert!(
             matches!(reg, Err(AppError::NotRecipient(_))),
             "{round}: register from the unlocked opener: {reg:?}"
@@ -313,7 +322,7 @@ fn an_unlocked_sibling_opener_is_not_the_holder() {
         );
     }
     // Control: the child itself attests.
-    let ok = attest_mcp_caller(live(), locks, &p.dir, &trusted, uid, uid, h.pid());
+    let ok = attest_mcp_caller(&cfg, uid, uid, h.pid());
     assert_eq!(ok.expect("the holder attests").0.pid, h.pid());
 }
 
@@ -377,7 +386,15 @@ fn attesting_one_of_two_flagged_processes_finds_no_holder() {
     );
     let uid = xmsg::agent::current_uid();
     let trusted = vec![std::env::current_exe().unwrap()];
-    let attest = attest_mcp_caller(live(), locks, &p.dir, &trusted, uid, uid, h.pid());
+    let cfg = AgyConfig {
+        proc_root: live().to_path_buf(),
+        proc_locks_path: locks.to_path_buf(),
+        presence_dir: p.dir.clone(),
+        brain_dir: PathBuf::new(),
+        trusted_agy_exes: trusted,
+        ..Default::default()
+    };
+    let attest = attest_mcp_caller(&cfg, uid, uid, h.pid());
     assert!(
         matches!(attest, Err(AppError::NotRecipient(_))),
         "mcp_start from a flagged process is refused: {attest:?}"

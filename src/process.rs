@@ -772,6 +772,119 @@ pub fn exe_path(proc_root: &Path, pid: u32) -> io::Result<std::path::PathBuf> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExeMatch {
+    /// Candidate canonical path matches a configured canonical path.
+    ExactPath,
+    /// Candidate canonical file_name matches a configured canonical file_name,
+    /// while its canonical path differs from all configured paths (admitted in default mode).
+    NameOnly,
+    /// Candidate canonical file_name matches a configured canonical file_name,
+    /// while its canonical path differs and strict mode refused it.
+    RefusedPathDrift,
+    /// Candidate canonical file_name does not match any configured canonical file_name.
+    NoMatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExeDriftRecord {
+    pub pid: u32,
+    pub starttime: String,
+    pub canonical_path: std::path::PathBuf,
+    pub strict: bool,
+    pub observed_at: i64,
+}
+
+pub type ExeDriftSlot = std::sync::Arc<std::sync::Mutex<Option<ExeDriftRecord>>>;
+
+pub fn new_exe_drift_slot() -> ExeDriftSlot {
+    std::sync::Arc::new(std::sync::Mutex::new(None))
+}
+
+/// Evaluates `candidate_canon` (an already-canonicalized process executable path) against
+/// `trusted_exes`. Default (`!strict`) admits on exact `file_name()` equality of canonical paths;
+/// `strict` requires exact canonical path equality.
+pub fn evaluate_trusted_exe(
+    trusted_exes: &[std::path::PathBuf],
+    candidate_canon: &Path,
+    strict: bool,
+) -> ExeMatch {
+    if trusted_exes.is_empty() {
+        return ExeMatch::NoMatch;
+    }
+    let mut name_matched = false;
+    let cand_name = candidate_canon.file_name().filter(|n| !n.is_empty());
+    for t in trusted_exes {
+        let canon_t = fs::canonicalize(t).unwrap_or_else(|_| t.clone());
+        if canon_t == candidate_canon || t == candidate_canon {
+            return ExeMatch::ExactPath;
+        }
+        if let Some(cn) = cand_name {
+            if canon_t.file_name() == Some(cn) {
+                name_matched = true;
+            }
+        }
+    }
+    if name_matched {
+        if strict {
+            ExeMatch::RefusedPathDrift
+        } else {
+            ExeMatch::NameOnly
+        }
+    } else {
+        ExeMatch::NoMatch
+    }
+}
+
+pub fn record_exe_drift(
+    slot: &ExeDriftSlot,
+    pid: u32,
+    starttime: &str,
+    canonical_path: std::path::PathBuf,
+    strict: bool,
+    observed_at: i64,
+) {
+    if let Ok(mut guard) = slot.lock() {
+        *guard = Some(ExeDriftRecord {
+            pid,
+            starttime: starttime.to_string(),
+            canonical_path,
+            strict,
+            observed_at,
+        });
+    }
+}
+
+pub fn clear_exe_drift_if_replaced(slot: &ExeDriftSlot, proc_root: &Path, pid: u32) {
+    if let Ok(mut guard) = slot.lock() {
+        if guard
+            .as_ref()
+            .is_some_and(|rec| rec.pid == pid || !is_drift_record_live(proc_root, rec))
+        {
+            *guard = None;
+        }
+    }
+}
+
+fn is_drift_record_live(proc_root: &Path, rec: &ExeDriftRecord) -> bool {
+    if rec.pid == 0 {
+        return false;
+    }
+    match probe_starttime(proc_root, rec.pid) {
+        Ok(StartTimeProbe::Gone) => false,
+        Ok(StartTimeProbe::Known(cur)) => rec.starttime.is_empty() || cur == rec.starttime,
+        Ok(StartTimeProbe::Unavailable) | Err(_) => true,
+    }
+}
+
+/// Read-only inspection of the last recorded executable path drift for a harness, returning
+/// `Some` only while the observed process remains live.
+pub fn live_exe_drift(slot: &ExeDriftSlot, proc_root: &Path) -> Option<ExeDriftRecord> {
+    let guard = slot.lock().ok()?;
+    let rec = guard.as_ref()?;
+    is_drift_record_live(proc_root, rec).then(|| rec.clone())
+}
+
 /// One open file descriptor vnode entry read for a process (`P3`: shared across `agy` and `codex`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenVnode {

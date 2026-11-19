@@ -669,15 +669,15 @@ fn oracle_4_non_agy_ancestor_gets_no_identity_at_mcp_start() {
     );
     setup_mock_process(&proc_root, 4001, 4000, None, None, "200");
 
-    let res_wrong_exe = attest_mcp_caller(
-        &proc_root,
-        &proc_locks,
-        &presence_dir,
-        &trusted_exes,
-        1000,
-        1000,
-        4001,
-    );
+    let cfg = AgyConfig {
+        proc_root: proc_root.clone(),
+        proc_locks_path: proc_locks.clone(),
+        presence_dir: presence_dir.clone(),
+        brain_dir: std::path::PathBuf::new(),
+        trusted_agy_exes: trusted_exes.clone(),
+        ..Default::default()
+    };
+    let res_wrong_exe = attest_mcp_caller(&cfg, 1000, 1000, 4001);
     match res_wrong_exe {
         Err(AppError::NotRecipient(msg)) => {
             assert!(
@@ -699,15 +699,7 @@ fn oracle_4_non_agy_ancestor_gets_no_identity_at_mcp_start() {
     );
     setup_mock_process(&proc_root, 5001, 5000, None, None, "200");
 
-    let res_no_lock = attest_mcp_caller(
-        &proc_root,
-        &proc_locks,
-        &presence_dir,
-        &trusted_exes,
-        1000,
-        1000,
-        5001,
-    );
+    let res_no_lock = attest_mcp_caller(&cfg, 1000, 1000, 5001);
     match res_no_lock {
         Err(AppError::NotRecipient(msg)) => {
             assert!(
@@ -737,15 +729,7 @@ fn oracle_4_non_agy_ancestor_gets_no_identity_at_mcp_start() {
     );
     setup_mock_process(&proc_root, 6001, 6000, None, None, "200");
 
-    let res_ok = attest_mcp_caller(
-        &proc_root,
-        &proc_locks,
-        &presence_dir,
-        &trusted_exes,
-        1000,
-        1000,
-        6001,
-    );
+    let res_ok = attest_mcp_caller(&cfg, 1000, 1000, 6001);
     match res_ok {
         Ok((reg, conv_id)) => {
             assert_eq!(reg.pid, 6000);
@@ -783,17 +767,15 @@ fn attest_mcp_caller_refuses_parent_younger_than_child_or_unreadable_start() {
     let trusted_agy = tmp.path().join("trusted_agy");
     fs::write(&trusted_agy, "binary").unwrap();
     let trusted_exes = vec![trusted_agy.clone()];
-    let attest = || {
-        attest_mcp_caller(
-            &proc_root,
-            &proc_locks,
-            &presence_dir,
-            &trusted_exes,
-            1000,
-            1000,
-            6001,
-        )
+    let cfg = AgyConfig {
+        proc_root: proc_root.clone(),
+        proc_locks_path: proc_locks,
+        presence_dir,
+        brain_dir: std::path::PathBuf::new(),
+        trusted_agy_exes: trusted_exes,
+        ..Default::default()
     };
+    let attest = || attest_mcp_caller(&cfg, 1000, 1000, 6001);
 
     setup_mock_process(
         &proc_root,

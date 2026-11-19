@@ -151,6 +151,7 @@ async fn start_test_server(
         agy_bin: "agy".to_string(),
         trusted_agy_exes: Vec::new(),
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
     start_server_with(agent_sock, sessions_dir, agy_config, db_path).await
 }
@@ -1180,6 +1181,7 @@ async fn test_oracle_7_agy_conversation_uuid_across_restart() {
         agy_bin: "agy".to_string(),
         trusted_agy_exes: vec![trusted_agy.clone()],
         brain_dir: std::path::PathBuf::new(),
+        ..Default::default()
     };
     let server = start_server_with(
         sock_dir.join("agent.sock"),

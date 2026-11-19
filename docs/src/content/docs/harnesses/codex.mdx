@@ -10,7 +10,7 @@ On Linux and macOS, `xmsg` connects to the OpenAI Codex CLI (`codex`) with four 
 - a restricted live push relay, for sessions that run on the Codex app-server daemon;
 - hook-driven handoff, for embedded (`--no-daemon`) sessions.
 
-## Attestation and admission (`--codex-exe`, `--codex-home`)
+## Attestation and admission (`--codex-exe`, `--codex-exe-strict`, `--codex-home`)
 
 To admit Codex root sessions and their direct child subagents, give `xmsg serve` the trusted
 Codex executables and home directories:
@@ -21,6 +21,13 @@ xmsg serve \
   --codex-home "$HOME/.codex"
 ```
 
+- **Executable matching across upgrades:** By default, `--codex-exe` compares the `file_name` of
+  the ancestor's canonical executable against the `file_name` of each configured `--codex-exe`
+  canonical path (for example, `codex`), while still re-checking `starttime` and `exe` after
+  canonicalization. Running Codex sessions and app-server daemons therefore stay admissible when a
+  package or Nix store upgrade updates `--codex-exe` to a new store path, and `xmsg doctor` notes
+  the path difference as an `info` line (`harness.codex_exe`). Pass `--codex-exe-strict`
+  (`XMSG_CODEX_EXE_STRICT=true`) to require an exact canonical path match instead.
 - **Writer-lock & rollout verification:** xmsg admits a Codex root session `P` when two
   conditions are true:
   - An ancestor process that matches `--codex-exe` holds an open file descriptor to
