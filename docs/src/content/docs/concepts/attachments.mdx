@@ -34,9 +34,11 @@ On `agent.sock`, stage inline bytes with
 `{"action":"attach","name":"report.md","data":"<base64>"}`. Inline `data` is the portable form.
 It also works across container filesystems. On the same host, you can also use
 `{"action":"attach","name":"report.md","path":"/absolute/file"}`. The daemon resolves this path
-on its own host, which can be different from the caller's container. The answer contains
-`attachment`. Put that reference in the `attachments` array of a send or reply. Plugin harnesses
-use these operations on `register.sock`, with the held `session` and `request_id`, as for send.
+on its own host, which can be different from the caller's container, and on macOS a background
+`launchd` daemon does not inherit terminal access to TCC-protected folders such as `Documents`,
+`Desktop` or `Downloads`. The answer contains `attachment`. Put that reference in the
+`attachments` array of a send or reply. Plugin harnesses use these operations on `register.sock`,
+with the held `session` and `request_id`, as for send.
 
 For larger socket uploads, send `attach` for each chunk. Give an opaque `upload` ID, the byte
 `offset` and base64 `data`. Start at offset zero. A retry of the same bytes at the same offset
@@ -46,8 +48,10 @@ If you give an expected hash, the server checks it before it stages the complete
 
 MCP `send` and `reply` accept `attachments` entries. Each entry is
 `{"path":"/absolute/file","name":"optional-name"}` or
-`{"name":"report.md","text":"file contents"}`, with an optional `media_type`. MCP stages the files
-before it sends. It divides large inline text into chunks automatically.
+`{"name":"report.md","text":"file contents"}`, with an optional `media_type`. `xmsg mcp` opens
+`path` entries in the client process—using the caller's filesystem view and macOS TCC
+permissions—and divides large `path` and `text` entries into chunks over `agent.sock` before it
+sends.
 
 Read with `{"action":"read_attachment","message_id":"<id>","index":0,"offset":0,"length":4096}`.
 The default length, and the maximum, is the node's message-body limit. Offsets count bytes. A

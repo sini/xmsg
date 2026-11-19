@@ -100,6 +100,7 @@
     "tests/gate_xu1_api_ergonomics.rs",
     "tests/grt4_concrete_ca_leaf.rs",
     "tests/grt4_standalone_enrollment.rs",
+    "tests/mcp_client_attach.rs",
     "tests/observe_arrival.rs",
     "tests/observe_http.rs",
     "tests/operator_cli.rs",
@@ -117,16 +118,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1437,
+      "passed": 1443,
       "failed": 0,
       "ignored": 7,
-      "summaries": 113
+      "summaries": 114
     },
     "darwin": {
-      "passed": 1450,
+      "passed": 1456,
       "failed": 0,
       "ignored": 9,
-      "summaries": 113
+      "summaries": 114
     }
   }
 }

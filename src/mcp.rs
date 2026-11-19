@@ -445,60 +445,98 @@ pub fn call_agent_sock(sock_path: &std::path::Path, payload: &Value) -> Result<V
     call_agent_sock_within(sock_path, payload, Duration::from_secs(5))
 }
 
-fn call_agent_sock_within(
+fn format_agent_sock_read_err(err: io::Error, read_timeout: Duration) -> String {
+    if matches!(
+        err.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    ) {
+        let secs = if read_timeout.subsec_nanos() == 0 {
+            read_timeout.as_secs().to_string()
+        } else {
+            format!("{:.3}", read_timeout.as_secs_f64())
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string()
+        };
+        format!("timed out after {secs} s waiting for response from agent socket")
+    } else {
+        format!("failed to read response from agent socket: {err}")
+    }
+}
+
+struct AgentSockConn {
+    reader: BufReader<UnixStream>,
+    read_timeout: Duration,
+}
+
+impl AgentSockConn {
+    fn connect(sock_path: &std::path::Path, read_timeout: Duration) -> Result<Self, String> {
+        let my_uid = crate::agent::current_uid();
+        if let Some(parent) = sock_path.parent() {
+            crate::agent::ensure_secure_socket_dir(parent, my_uid)
+                .map_err(|e| format!("insecure agent socket directory: {e}"))?;
+        }
+
+        let stream = UnixStream::connect(sock_path).map_err(|e| {
+            format!(
+                "failed to connect to agent socket at {}: {e}",
+                sock_path.display()
+            )
+        })?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .map_err(|e| e.to_string())?;
+        stream
+            .set_read_timeout(Some(read_timeout))
+            .map_err(|e| e.to_string())?;
+
+        Ok(Self {
+            reader: BufReader::new(stream),
+            read_timeout,
+        })
+    }
+
+    fn call(&mut self, payload: &Value) -> Result<Value, String> {
+        let line = format!("{payload}\n");
+        self.reader
+            .get_mut()
+            .write_all(line.as_bytes())
+            .map_err(|e| format!("failed to write to agent socket: {e}"))?;
+        self.reader
+            .get_mut()
+            .flush()
+            .map_err(|e| format!("failed to flush agent socket: {e}"))?;
+
+        let mut resp_line = String::new();
+        self.reader
+            .read_line(&mut resp_line)
+            .map_err(|e| format_agent_sock_read_err(e, self.read_timeout))?;
+
+        let resp_val: Value = serde_json::from_str(&resp_line)
+            .map_err(|e| format!("invalid response JSON from agent socket: {e}"))?;
+
+        if resp_val.get("status").and_then(Value::as_str) == Some("error") {
+            let err_kind = resp_val
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("error");
+            let detail = resp_val
+                .get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error");
+            Err(format!("{err_kind}: {detail}"))
+        } else {
+            Ok(resp_val)
+        }
+    }
+}
+
+pub fn call_agent_sock_within(
     sock_path: &std::path::Path,
     payload: &Value,
     read_timeout: Duration,
 ) -> Result<Value, String> {
-    let my_uid = crate::agent::current_uid();
-    if let Some(parent) = sock_path.parent() {
-        crate::agent::ensure_secure_socket_dir(parent, my_uid)
-            .map_err(|e| format!("insecure agent socket directory: {e}"))?;
-    }
-
-    let mut stream = UnixStream::connect(sock_path).map_err(|e| {
-        format!(
-            "failed to connect to agent socket at {}: {e}",
-            sock_path.display()
-        )
-    })?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| e.to_string())?;
-    stream
-        .set_read_timeout(Some(read_timeout))
-        .map_err(|e| e.to_string())?;
-
-    let line = format!("{payload}\n");
-    stream
-        .write_all(line.as_bytes())
-        .map_err(|e| format!("failed to write to agent socket: {e}"))?;
-    stream
-        .flush()
-        .map_err(|e| format!("failed to flush agent socket: {e}"))?;
-
-    let mut reader = BufReader::new(stream);
-    let mut resp_line = String::new();
-    reader
-        .read_line(&mut resp_line)
-        .map_err(|e| format!("failed to read response from agent socket: {e}"))?;
-
-    let resp_val: Value = serde_json::from_str(&resp_line)
-        .map_err(|e| format!("invalid response JSON from agent socket: {e}"))?;
-
-    if resp_val.get("status").and_then(Value::as_str) == Some("error") {
-        let err_kind = resp_val
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("error");
-        let detail = resp_val
-            .get("detail")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown error");
-        Err(format!("{err_kind}: {detail}"))
-    } else {
-        Ok(resp_val)
-    }
+    AgentSockConn::connect(sock_path, read_timeout)?.call(payload)
 }
 
 /// The tools reply-only mode offers.
@@ -514,7 +552,7 @@ pub fn tool_definitions() -> Vec<Value> {
             "properties": {
                 "name": {"type": "string"},
                 "media_type": {"type": "string", "description": "Optional override; inline text defaults to text/plain; charset=utf-8, paths to application/octet-stream"},
-                "path": {"type": "string", "description": "Absolute path on the daemon host"},
+                "path": {"type": "string", "description": "Absolute path to a regular file readable by the MCP client"},
                 "text": {"type": "string"}
             },
             "oneOf": [{"required": ["path"], "not": {"required": ["text"]}}, {"required": ["name", "text"], "not": {"required": ["path"]}}],
@@ -1042,12 +1080,131 @@ pub fn execute_tool_with_meta(
     }
 }
 
+const MCP_ATTACH_CHUNK_BYTES: usize = 16 * 1024;
+
+fn open_client_attachment_file(path: &std::path::Path) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|e| {
+            if e.raw_os_error() == Some(libc::ELOOP) {
+                format!("attachment path '{}' must not be a symlink", path.display())
+            } else {
+                format!("failed to open attachment '{}': {e}", path.display())
+            }
+        })?;
+    let meta = file
+        .metadata()
+        .map_err(|e| format!("failed to stat attachment '{}': {e}", path.display()))?;
+    if !meta.is_file() {
+        return Err(format!(
+            "attachment path '{}' must name a regular file",
+            path.display()
+        ));
+    }
+    Ok(file)
+}
+
+fn read_up_to(reader: &mut impl io::Read, limit: usize) -> io::Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(limit.min(MCP_ATTACH_CHUNK_BYTES + 1));
+    let mut buf = [0u8; 8192];
+    while out.len() < limit {
+        let want = (limit - out.len()).min(buf.len());
+        match reader.read(&mut buf[..want]) {
+            Ok(0) => break,
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(out)
+}
+
+fn stage_reader_on_sock(
+    sock_path: &std::path::Path,
+    base_attach: &Value,
+    name: &str,
+    media_type: Option<&str>,
+    reader: &mut impl io::Read,
+    source_label: &str,
+) -> Result<Value, String> {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    let first = read_up_to(reader, MCP_ATTACH_CHUNK_BYTES + 1)
+        .map_err(|e| format!("failed to read attachment {source_label}: {e}"))?;
+
+    let mut conn = AgentSockConn::connect(sock_path, Duration::from_secs(20))?;
+    if first.len() <= MCP_ATTACH_CHUNK_BYTES {
+        let mut attach = base_attach.clone();
+        attach["data"] = json!(base64::engine::general_purpose::STANDARD.encode(&first));
+        attach["name"] = json!(name);
+        if let Some(mt) = media_type {
+            attach["media_type"] = json!(mt);
+        }
+        return conn.call(&attach);
+    }
+
+    let upload = ulid::Ulid::new().to_string();
+    let mut hasher = Sha256::new();
+    let mut offset = 0usize;
+
+    let send_chunk = |conn: &mut AgentSockConn,
+                      hasher: &mut Sha256,
+                      offset: &mut usize,
+                      chunk: &[u8]|
+     -> Result<(), String> {
+        let mut frame = base_attach.clone();
+        frame["upload"] = json!(upload);
+        frame["offset"] = json!(*offset);
+        frame["data"] = json!(base64::engine::general_purpose::STANDARD.encode(chunk));
+        conn.call(&frame)?;
+        hasher.update(chunk);
+        *offset = offset
+            .checked_add(chunk.len())
+            .ok_or_else(|| "attachment size overflow".to_string())?;
+        Ok(())
+    };
+
+    send_chunk(
+        &mut conn,
+        &mut hasher,
+        &mut offset,
+        &first[..MCP_ATTACH_CHUNK_BYTES],
+    )?;
+    let mut carry = first[MCP_ATTACH_CHUNK_BYTES..].to_vec();
+    loop {
+        let more = read_up_to(reader, MCP_ATTACH_CHUNK_BYTES - carry.len())
+            .map_err(|e| format!("failed to read attachment {source_label}: {e}"))?;
+        carry.extend_from_slice(&more);
+        if carry.is_empty() {
+            break;
+        }
+        let reached_eof = carry.len() < MCP_ATTACH_CHUNK_BYTES;
+        send_chunk(&mut conn, &mut hasher, &mut offset, &carry)?;
+        carry.clear();
+        if reached_eof {
+            break;
+        }
+    }
+
+    let mut finalize = base_attach.clone();
+    finalize["upload"] = json!(upload);
+    finalize["name"] = json!(name);
+    finalize["sha256"] = json!(hex::encode(hasher.finalize()));
+    if let Some(mt) = media_type {
+        finalize["media_type"] = json!(mt);
+    }
+    conn.call(&finalize)
+}
+
 fn stage_mcp_attachments(
     config: &McpConfig,
     args: &Value,
     payload: &mut Value,
 ) -> Result<(), String> {
-    use base64::Engine;
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Input {
@@ -1056,6 +1213,19 @@ fn stage_mcp_attachments(
         path: Option<String>,
         text: Option<String>,
     }
+    enum Source {
+        File {
+            path_display: String,
+            file: std::fs::File,
+        },
+        Text(String),
+    }
+    struct Prepared {
+        name: String,
+        media_type: Option<String>,
+        source: Source,
+    }
+
     let Some(entries) = args.get("attachments") else {
         return Ok(());
     };
@@ -1064,66 +1234,83 @@ fn stage_mcp_attachments(
     if entries.len() > 8 {
         return Err("at most 8 attachments are allowed".into());
     }
-    let mut refs = Vec::new();
+
+    let mut prepared = Vec::with_capacity(entries.len());
     for entry in entries {
-        let mut attach =
-            json!({ "action": "attach", "schema_version": crate::surface::MCP_SCHEMA_VERSION });
-        for key in ["as_agent", "codex_session", "codex_thread", "codex_turn"] {
-            if let Some(value) = payload.get(key) {
-                attach[key] = value.clone();
-            }
-        }
-        match (&entry.path, &entry.text) {
-            (Some(file), None) => {
-                let file = std::path::Path::new(file);
-                if !file.is_absolute() {
+        match (entry.path, entry.text) {
+            (Some(file_str), None) => {
+                let file_path = std::path::Path::new(&file_str);
+                if !file_path.is_absolute() {
                     return Err("attachment path must be absolute".into());
                 }
-                attach["path"] = json!(file);
-                attach["name"] = json!(entry
+                let name = entry
                     .name
                     .as_deref()
-                    .or_else(|| file.file_name().and_then(|n| n.to_str()))
-                    .ok_or("attachment name is required")?);
+                    .or_else(|| file_path.file_name().and_then(|n| n.to_str()))
+                    .ok_or("attachment name is required")?
+                    .to_string();
+                let file = open_client_attachment_file(file_path)?;
+                prepared.push(Prepared {
+                    name,
+                    media_type: entry.media_type,
+                    source: Source::File {
+                        path_display: format!("'{}'", file_path.display()),
+                        file,
+                    },
+                });
             }
             (None, Some(text)) => {
                 let name = entry
                     .name
                     .as_deref()
-                    .ok_or("text attachment name is required")?;
-                if text.len() > 16 * 1024 {
-                    let upload = ulid::Ulid::new().to_string();
-                    for (i, chunk) in text.as_bytes().chunks(16 * 1024).enumerate() {
-                        let mut frame = attach.clone();
-                        frame["upload"] = json!(upload);
-                        frame["offset"] = json!(i * 16 * 1024);
-                        frame["data"] =
-                            json!(base64::engine::general_purpose::STANDARD.encode(chunk));
-                        call_agent_sock_within(
-                            &config.agent_sock,
-                            &frame,
-                            Duration::from_secs(20),
-                        )?;
-                    }
-                    attach["upload"] = json!(upload);
-                } else {
-                    attach["data"] =
-                        json!(base64::engine::general_purpose::STANDARD.encode(text.as_bytes()));
-                }
-                attach["name"] = json!(name);
+                    .ok_or("text attachment name is required")?
+                    .to_string();
+                let media_type = Some(
+                    entry
+                        .media_type
+                        .unwrap_or_else(|| crate::attachments::TEXT_UTF8_MEDIA_TYPE.to_string()),
+                );
+                prepared.push(Prepared {
+                    name,
+                    media_type,
+                    source: Source::Text(text),
+                });
             }
             _ => return Err("each attachment requires exactly one of path and text".into()),
         }
-        let media_type = entry.media_type.or_else(|| {
-            entry
-                .text
-                .as_ref()
-                .map(|_| crate::attachments::TEXT_UTF8_MEDIA_TYPE.to_string())
-        });
-        if let Some(media_type) = media_type {
-            attach["media_type"] = json!(media_type);
+    }
+
+    let mut base_attach =
+        json!({ "action": "attach", "schema_version": crate::surface::MCP_SCHEMA_VERSION });
+    for key in ["as_agent", "codex_session", "codex_thread", "codex_turn"] {
+        if let Some(value) = payload.get(key) {
+            base_attach[key] = value.clone();
         }
-        let result = call_agent_sock_within(&config.agent_sock, &attach, Duration::from_secs(20))?;
+    }
+
+    let mut refs = Vec::with_capacity(prepared.len());
+    for mut item in prepared {
+        let result = match &mut item.source {
+            Source::File { path_display, file } => stage_reader_on_sock(
+                &config.agent_sock,
+                &base_attach,
+                &item.name,
+                item.media_type.as_deref(),
+                file,
+                path_display,
+            )?,
+            Source::Text(text) => {
+                let mut cursor = io::Cursor::new(text.as_bytes());
+                stage_reader_on_sock(
+                    &config.agent_sock,
+                    &base_attach,
+                    &item.name,
+                    item.media_type.as_deref(),
+                    &mut cursor,
+                    "inline text",
+                )?
+            }
+        };
         refs.push(
             result
                 .get("attachment")
@@ -1152,18 +1339,18 @@ mod attachment_tests {
             let listener = UnixListener::bind(&sock).unwrap();
             let expected_type = provided_type.unwrap_or("text/plain; charset=utf-8");
             let worker = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
                 for expected_offset in [Some(0), Some(16 * 1024), None] {
-                    let (mut stream, _) = listener.accept().unwrap();
                     let mut line = String::new();
-                    BufReader::new(stream.try_clone().unwrap())
-                        .read_line(&mut line)
-                        .unwrap();
+                    reader.read_line(&mut line).unwrap();
                     let frame: Value = serde_json::from_str(&line).unwrap();
                     assert_eq!(frame["action"], "attach");
                     assert_eq!(frame["codex_session"], "root");
                     assert_eq!(frame["codex_thread"], "child");
                     assert_eq!(frame["codex_turn"], "turn");
                     assert!(frame.get("as_agent").is_none());
+                    assert!(frame.get("path").is_none());
                     if let Some(offset) = expected_offset {
                         assert_eq!(frame["offset"], offset);
                         assert!(frame.get("name").is_none());
@@ -1171,9 +1358,15 @@ mod attachment_tests {
                     } else {
                         assert_eq!(frame["name"], "report.md");
                         assert_eq!(frame["media_type"], expected_type);
+                        assert_eq!(frame["sha256"].as_str().map(str::len), Some(64));
                         writeln!(stream, "{}", json!({"status":"ok","attachment":{"name":"report.md","size":16385,"media_type":expected_type,"sha256":"a".repeat(64)}})).unwrap();
                     }
                 }
+                listener.set_nonblocking(true).unwrap();
+                assert_eq!(
+                    listener.accept().unwrap_err().kind(),
+                    io::ErrorKind::WouldBlock
+                );
             });
             let config = McpConfig::new(vec![], "http://unused".into()).with_agent_sock(sock);
             let mut entry = json!({"name":"report.md","text":"x".repeat(16385)});
@@ -1209,6 +1402,7 @@ mod attachment_tests {
                         .read_line(&mut line)
                         .unwrap();
                     let frame: Value = serde_json::from_str(&line).unwrap();
+                    assert!(frame.get("path").is_none());
                     assert_eq!(frame.get("media_type").and_then(Value::as_str), expected);
                     writeln!(stream, "{}", json!({"status":"ok","attachment":{"name":"a.txt","size":6,"media_type":expected.unwrap_or("application/octet-stream"),"sha256":"a".repeat(64)}})).unwrap();
                 }

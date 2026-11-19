@@ -609,3 +609,7 @@ required-features = ["daemon"]
 name = "federation_deny"
 path = "tests/federation_deny.rs"
 required-features = ["daemon"]
+[[test]]
+name = "mcp_client_attach"
+path = "tests/mcp_client_attach.rs"
+required-features = ["daemon"]

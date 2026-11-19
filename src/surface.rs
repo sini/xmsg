@@ -2056,13 +2056,95 @@ async fn prepare_attachment_refs(
     Ok(())
 }
 
+const DAEMON_PATH_OPEN_TIMEOUT: Duration = Duration::from_secs(3);
+
+pub fn format_daemon_path_open_err(err: &std::io::Error, is_macos: bool) -> String {
+    if is_macos
+        && (err.raw_os_error() == Some(libc::EPERM)
+            || err.kind() == std::io::ErrorKind::PermissionDenied)
+    {
+        format!(
+            "{err} (hint: on macOS, background launchd daemons do not inherit terminal TCC access to protected folders such as Documents, Desktop, or Downloads; stage bytes via data/upload or use xmsg mcp)"
+        )
+    } else {
+        err.to_string()
+    }
+}
+
+pub fn format_daemon_path_timeout_err(timeout: Duration, is_macos: bool) -> String {
+    let secs = if timeout.subsec_nanos() == 0 {
+        timeout.as_secs().to_string()
+    } else {
+        format!("{:.3}", timeout.as_secs_f64())
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    };
+    if is_macos {
+        format!(
+            "timed out after {secs} s opening attachment path in daemon (hint: on macOS, background launchd daemons block on TCC prompts for protected folders such as Documents, Desktop, or Downloads; stage bytes via data/upload or use xmsg mcp)"
+        )
+    } else {
+        format!("timed out after {secs} s opening attachment path in daemon; stage bytes via data/upload")
+    }
+}
+
+async fn run_daemon_path_blocking<F>(
+    timeout: Duration,
+    is_macos: bool,
+    op: F,
+) -> Result<Vec<u8>, AppError>
+where
+    F: FnOnce() -> Result<Vec<u8>, AppError> + Send + 'static,
+{
+    match tokio::time::timeout(timeout, tokio::task::spawn_blocking(op)).await {
+        Ok(Ok(res)) => res,
+        Ok(Err(join_err)) => Err(db_err(join_err)),
+        Err(_) => Err(AppError::BadRequest(format_daemon_path_timeout_err(
+            timeout, is_macos,
+        ))),
+    }
+}
+
+async fn read_daemon_attachment_path(
+    file_path: &str,
+    max_attachment_bytes: usize,
+    timeout: Duration,
+) -> Result<Vec<u8>, AppError> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if !std::path::Path::new(file_path).is_absolute() {
+        return Err(AppError::BadRequest("path must be absolute".to_string()));
+    }
+    let owned_path = file_path.to_string();
+    let is_macos = cfg!(target_os = "macos");
+    run_daemon_path_blocking(timeout, is_macos, move || {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(&owned_path)
+            .map_err(|e| AppError::BadRequest(format_daemon_path_open_err(&e, is_macos)))?;
+        if !file.metadata().map_err(db_err)?.is_file() {
+            return Err(AppError::BadRequest(
+                "path must name a regular file".to_string(),
+            ));
+        }
+        let mut data = Vec::new();
+        file.take(max_attachment_bytes.saturating_add(1) as u64)
+            .read_to_end(&mut data)
+            .map_err(db_err)?;
+        Ok(data)
+    })
+    .await
+}
+
 pub async fn attach(
     state: &Arc<AppState>,
     sender: &Sender,
     request: AttachRequest,
 ) -> Result<serde_json::Value, AppError> {
     use base64::Engine;
-    use tokio::io::AsyncReadExt;
     let principal = sender.idempotency_principal();
     let limits = attachments::Limits {
         max_bytes: state.max_attachment_bytes,
@@ -2080,26 +2162,14 @@ pub async fn attach(
         ));
     }
     let data = if let Some(file_path) = request.path.as_deref() {
-        if !std::path::Path::new(file_path).is_absolute() {
-            return Err(AppError::BadRequest("path must be absolute".to_string()));
-        }
-        let file = tokio::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-            .open(file_path)
-            .await
-            .map_err(|e| AppError::BadRequest(e.to_string()))?;
-        if !file.metadata().await.map_err(db_err)?.is_file() {
-            return Err(AppError::BadRequest(
-                "path must name a regular file".to_string(),
-            ));
-        }
-        let mut data = Vec::new();
-        file.take(state.max_attachment_bytes.saturating_add(1) as u64)
-            .read_to_end(&mut data)
-            .await
-            .map_err(db_err)?;
-        Some(data)
+        Some(
+            read_daemon_attachment_path(
+                file_path,
+                state.max_attachment_bytes,
+                DAEMON_PATH_OPEN_TIMEOUT,
+            )
+            .await?,
+        )
     } else if let Some(encoded) = request.data.as_deref() {
         if encoded.len()
             > state
@@ -3877,4 +3947,45 @@ pub async fn inbox(state: &AppState, caller: &Session, wait: u64) -> Result<Inbo
     .await;
     let messages = drain(state)?;
     Ok(InboxResult { address, messages })
+}
+
+#[cfg(test)]
+mod daemon_path_guard_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn blocked_daemon_path_open_times_out_with_tcc_hint_on_macos() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let err = run_daemon_path_blocking(Duration::from_millis(50), true, move || {
+            let _ = rx.recv_timeout(Duration::from_secs(5));
+            Ok(Vec::new())
+        })
+        .await
+        .unwrap_err();
+        let _ = tx.send(());
+        match err {
+            AppError::BadRequest(msg) => {
+                assert!(msg.contains("timed out after 0.05 s"), "msg={msg}");
+                assert!(msg.contains("TCC"), "msg={msg}");
+                assert!(msg.contains("xmsg mcp"), "msg={msg}");
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+
+        let linux_msg = format_daemon_path_timeout_err(Duration::from_secs(3), false);
+        assert_eq!(
+            linux_msg,
+            "timed out after 3 s opening attachment path in daemon; stage bytes via data/upload"
+        );
+    }
+
+    #[test]
+    fn daemon_path_eperm_includes_tcc_hint_on_macos() {
+        let eperm = std::io::Error::from_raw_os_error(libc::EPERM);
+        let mac_msg = format_daemon_path_open_err(&eperm, true);
+        assert!(mac_msg.contains("TCC"), "mac_msg={mac_msg}");
+        assert!(mac_msg.contains("Documents"), "mac_msg={mac_msg}");
+        let non_mac_msg = format_daemon_path_open_err(&eperm, false);
+        assert!(!non_mac_msg.contains("TCC"), "non_mac_msg={non_mac_msg}");
+    }
 }
