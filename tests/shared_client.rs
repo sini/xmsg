@@ -434,6 +434,7 @@ async fn socket_specific_exact_frame_keys() {
             json!({"status":"ok","message_id":"sent","address":"receiver@fixture","outcome":"pending"}),
             json!({"status":"ok","reply":{"seq":1,"messageId":"msg","createdAt":1,"replierSessionId":"bridge","text":"reply","pushOutcome":"queued","pushedMessageId":"reply-id"}}),
             json!({"status":"ok","recipients":[],"nodes":[],"total":0,"truncated":false}),
+            json!({"status":"ok","recipients":[],"nodes":[],"total":80,"truncated":true}),
         ] {
             let mut stream = BufReader::new(agent.accept().await.unwrap().0);
             frames.push(request(&mut stream, response).await);
@@ -470,6 +471,15 @@ async fn socket_specific_exact_frame_keys() {
         .unwrap()
         .recipients
         .is_empty());
+    let bounded = client
+        .list(ListQuery {
+            limit: Some(3),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(bounded.total, 80);
+    assert!(bounded.truncated);
     release_tx.send(()).unwrap();
     let (reg, poll, ack) = svc.await.unwrap();
     assert_eq!(reg, json!({"harness":"svc","name":"bridge","cwd":"/"}));
@@ -485,6 +495,10 @@ async fn socket_specific_exact_frame_keys() {
         json!({"action":"reply","schema_version":2,"message_id":"msg","text":"reply","idempotency_key":"reply-key"})
     );
     assert_eq!(frames[2], json!({"action":"list","schema_version":2}));
+    assert_eq!(
+        frames[3],
+        json!({"action":"list","schema_version":2,"limit":3})
+    );
 }
 
 #[tokio::test]

@@ -965,7 +965,7 @@ async fn c2_mcp_environment_and_attributed_tool_paths() {
                     let action = v["action"].as_str().unwrap_or("").to_string();
                     seen_clone.lock().unwrap().push(v);
                     let reply = if action == "list" {
-                        json!({"status": "ok", "recipients": [], "nodes": []})
+                        json!({"status": "ok", "recipients": [], "nodes": [], "total": 0, "truncated": false})
                     } else {
                         json!({"status": "ok", "replies": []})
                     };

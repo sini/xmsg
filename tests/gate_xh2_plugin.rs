@@ -342,7 +342,7 @@ async fn oracle_3_only_the_holder_speaks() {
 }
 
 /// R2: the plugin `list` answer has agent.sock's list answer shape field for field,
-/// `{status, recipients, nodes}` (XA5), never the result nested under `recipients`.
+/// `{status, recipients, nodes, total, truncated}`, never the result nested under `recipients`.
 #[tokio::test(flavor = "multi_thread")]
 async fn r2_list_answer_shape() {
     let node = Node::start();

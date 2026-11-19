@@ -727,6 +727,18 @@ fn agent_tool(
     }
 }
 
+fn format_list_response(mut response: Value) -> Value {
+    if let Some(object) = response.as_object_mut() {
+        object.remove("status");
+    }
+    match serde_json::from_value::<crate::surface::ListResult>(response) {
+        Ok(result) => tool_ok(serde_json::to_string(&result).expect("list serializes")),
+        Err(_) => tool_err(
+            "invalid list response: expected recipients, nodes, total and truncated".into(),
+        ),
+    }
+}
+
 pub fn execute_tool(
     config: &McpConfig,
     client: &reqwest::blocking::Client,
@@ -787,19 +799,6 @@ pub fn execute_tool_with_meta(
             if let Some(w) = within {
                 agent_payload["within"] = Value::Number(w.into());
             }
-            let format_list_resp = |mut resp: Value| -> Value {
-                if let Some(obj) = resp.as_object_mut() {
-                    obj.remove("status");
-                }
-                if let Ok(typed) =
-                    serde_json::from_value::<crate::surface::ListResult>(resp.clone())
-                {
-                    if let Ok(s) = serde_json::to_string(&typed) {
-                        return tool_ok(s);
-                    }
-                }
-                tool_ok(resp.to_string())
-            };
             if codex_meta.present {
                 attach_codex_meta(&mut agent_payload, codex_meta);
                 return match call_agent_sock_within(
@@ -807,7 +806,7 @@ pub fn execute_tool_with_meta(
                     &agent_payload,
                     Duration::from_secs(10),
                 ) {
-                    Ok(resp) => format_list_resp(resp),
+                    Ok(resp) => format_list_response(resp),
                     Err(e) => tool_err(e),
                 };
             }
@@ -820,7 +819,7 @@ pub fn execute_tool_with_meta(
                     &agent_payload,
                     Duration::from_secs(10),
                 ) {
-                    Ok(resp) => return format_list_resp(resp),
+                    Ok(resp) => return format_list_response(resp),
                     Err(e)
                         if e.starts_with("not_recipient:")
                             || e.starts_with("bad_request:")
@@ -861,7 +860,7 @@ pub fn execute_tool_with_meta(
                     match crate::http::http_get_unix(sock, &path) {
                         Ok((status, text)) if status.is_success() => {
                             return match serde_json::from_str(&text) {
-                                Ok(value) => format_list_resp(value),
+                                Ok(value) => format_list_response(value),
                                 Err(_) => tool_err("invalid list response".into()),
                             }
                         }
@@ -883,7 +882,7 @@ pub fn execute_tool_with_meta(
                     let text = response.text().unwrap_or_default();
                     if status.is_success() {
                         match serde_json::from_str(&text) {
-                            Ok(value) => format_list_resp(value),
+                            Ok(value) => format_list_response(value),
                             Err(_) => tool_err("invalid list response".into()),
                         }
                     } else {
@@ -1158,6 +1157,23 @@ fn stage_mcp_attachments(
 
 #[cfg(test)]
 mod attachment_tests {
+    #[test]
+    fn list_response_requires_metadata_and_preserves_it() {
+        for response in [
+            serde_json::json!({"recipients":[],"nodes":[]}),
+            serde_json::json!({"recipients":[],"nodes":[],"total":"0","truncated":false}),
+            serde_json::json!({"recipients":[],"nodes":[],"total":0,"truncated":false,"extra":1}),
+        ] {
+            assert_eq!(super::format_list_response(response)["isError"], true);
+        }
+        let expected = serde_json::json!({"recipients":[],"nodes":[],"total":60,"truncated":true});
+        let response = super::format_list_response(expected.clone());
+        assert_eq!(response["isError"], false);
+        let actual: serde_json::Value =
+            serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(actual, expected);
+    }
+
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
