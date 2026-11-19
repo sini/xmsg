@@ -67,6 +67,8 @@ pub enum Error {
     Configuration,
     #[error("observation exporter unavailable")]
     Unavailable,
+    #[error("observation endpoint not found/unsupported or misconfigured")]
+    EndpointNotFound,
     #[error("observation exporter timed out")]
     Timeout,
     #[error("observation grant denied")]
@@ -471,6 +473,8 @@ impl Client {
                 if response.status() == hyper::StatusCode::BAD_REQUEST {
                     return Err(Error::Malformed);
                 }
+            } else if response.status() == hyper::StatusCode::NOT_FOUND {
+                return Err(Error::EndpointNotFound);
             }
             if response.status() != hyper::StatusCode::OK {
                 return Err(Error::Unavailable);

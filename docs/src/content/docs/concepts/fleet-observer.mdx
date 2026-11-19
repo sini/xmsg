@@ -89,6 +89,18 @@ snapshot) succeeded within the `15 s` monotonic freshness window; a TCP/TLS
 connection, `Pending`, or a busy store slot is not a success, and current
 authorization or scope masks always hide cached rows, gaps and last-success times.
 
+**Planned:** the collector view also summarizes fleet coverage at the top
+(`N/M configured nodes reporting · K unreachable · J endpoint not found/unsupported or misconfigured`,
+plus any non-zero `loading`, `denied`, `hidden`, `rate limited`, `malformed` or
+`storage full` buckets). Never-polled unmasked nodes show `loading: first observation pending`
+rather than `pending revalidation`, while nodes with retained history masked on
+restart or scope change show `stored history hidden until this node answers`.
+Direct HTTP `404` responses report `observation endpoint not found/unsupported or misconfigured`
+and recover automatically on the next valid response without clearing `403` denial
+masks. Unmasked non-loading tiles display `gaps`, `loss counters: not exported/unknown`,
+and the `last successful poll` line; relayed nodes keep `via <hub> (hub-attested)`
+provenance across loading, stale, and masked states.
+
 The journal defaults to seven days, 10,000 events or 16 MiB of logical metadata,
 whichever limit applies first. Export also excludes events older than seven days.
 Capture can lose observations, and eviction or restart can leave gaps. Policy

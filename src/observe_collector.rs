@@ -269,10 +269,21 @@ impl State {
                 let mut node_freshness = BTreeMap::new();
                 if let Ok(success) = self.success.lock() {
                     for view in summaries.iter_mut().chain(detail.iter_mut()) {
+                        if view.history_hidden
+                            && !view.has_stored_history
+                            && view.failure.is_none()
+                            && view.status == NodeStatus::HiddenPendingRevalidation
+                            && success.get(&view.node).is_none()
+                        {
+                            view.status = NodeStatus::Loading;
+                            view.history_hidden = false;
+                        }
                         let masked = view.history_hidden
                             || matches!(
                                 view.status,
-                                NodeStatus::Denied | NodeStatus::HiddenPendingRevalidation
+                                NodeStatus::Loading
+                                    | NodeStatus::Denied
+                                    | NodeStatus::HiddenPendingRevalidation
                             );
                         if masked {
                             continue;
@@ -497,6 +508,7 @@ async fn mark_error(state: &State, node: String, error: net::Error) {
     }
     let kind = match error {
         net::Error::Unsupported => UnavailableKind::Unsupported,
+        net::Error::EndpointNotFound => UnavailableKind::EndpointNotFound,
         net::Error::Timeout => UnavailableKind::Timeout,
         net::Error::Malformed => UnavailableKind::Malformed,
         net::Error::RateLimited(_) => UnavailableKind::RateLimited,

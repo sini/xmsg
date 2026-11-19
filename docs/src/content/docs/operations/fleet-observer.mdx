@@ -433,9 +433,9 @@ collector source opt-in. A route alone, or `list`/`leaf` rights alone, refuses
 observation.
 
 The view labels event, inventory and stale history `via` the configured hub and
-identifies it as hub-attested. Only validated cached history can remain visible
-during an outage; a restart hides history until revalidation. Denial and scope
-changes hide old history before purge. The nullable origin columns and separate
+identifies it as hub-attested across loading, stale, and masked views. Only validated cached history can remain visible
+during an outage; a restart hides history until revalidation (`stored history hidden until this node answers`), while never-polled nodes show `loading: first observation pending`. Denial (`403`) and scope
+changes hide old history before purge, whereas a direct `404` reports `observation endpoint not found/unsupported or misconfigured` in the coverage banner and tile until a valid response arrives (without clearing `403` denial masks). Unmasked non-loading tiles show `gaps`, `loss counters: not exported/unknown`, and `last successful poll`. The nullable origin columns and separate
 relay storage keys preserve this distinction without changing exporter JSON.
 Downgrading to an older collector **permanently deletes relay history**, including
 up to seven days of metadata; direct history remains subject to normal retention.

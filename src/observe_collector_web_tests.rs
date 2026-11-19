@@ -7,6 +7,7 @@ fn view() -> NodeView {
         failure: None,
         origin_hub: None,
         history_hidden: false,
+        has_stored_history: false,
         node: "fixture.node".into(),
         status: NodeStatus::Stale,
         events: vec![],
@@ -403,4 +404,190 @@ fn dynamic_relay_unsupported_retains_hidden_history_warning_in_tiles() {
         !html.contains("history hidden until this node answers"),
         "static direct unsupported presentation changed"
     );
+}
+
+#[test]
+fn r2_coverage_banner_seven_configured_nodes() {
+    let mut healthy = view();
+    healthy.node = "node-healthy".into();
+    healthy.status = NodeStatus::Healthy;
+    healthy.failure = None;
+
+    let mut stale = view();
+    stale.node = "node-stale".into();
+    stale.status = NodeStatus::Stale;
+    stale.failure = None;
+
+    let mut unreachable = view();
+    unreachable.node = "node-unreachable".into();
+    unreachable.status = NodeStatus::Stale;
+    unreachable.failure = Some(UnavailableKind::Unreachable);
+
+    let mut not_found = view();
+    not_found.node = "node-not-found".into();
+    not_found.status = NodeStatus::Stale;
+    not_found.failure = Some(UnavailableKind::EndpointNotFound);
+
+    let mut denied = view();
+    denied.node = "node-denied".into();
+    denied.status = NodeStatus::Denied;
+    denied.failure = None;
+    denied.history_hidden = true;
+
+    let mut loading = view();
+    loading.node = "node-loading".into();
+    loading.status = NodeStatus::Loading;
+    loading.failure = None;
+    loading.history_hidden = true;
+
+    let mut relayed_fail = view();
+    relayed_fail.node = "node-relayed-fail".into();
+    relayed_fail.status = NodeStatus::Stale;
+    relayed_fail.failure = Some(UnavailableKind::Unreachable);
+    relayed_fail.origin_hub = Some("hub-a".into());
+
+    let html = render(
+        &[
+            healthy,
+            stale,
+            unreachable,
+            not_found,
+            denied,
+            loading,
+            relayed_fail,
+        ],
+        None,
+        Filter::default(),
+    );
+    assert!(
+        html.contains(
+            "1/7 configured nodes reporting · 3 unreachable · 1 endpoint not found/unsupported or misconfigured · 1 loading · 1 denied"
+        ),
+        "unexpected coverage banner:\n{html}"
+    );
+    assert!(
+        !html.contains("· 0 "),
+        "zero-count bucket must not be rendered:\n{html}"
+    );
+}
+
+#[test]
+fn r3_loading_vs_scope_changed_pending_revalidation() {
+    let mut loading = view();
+    loading.node = "node-loading".into();
+    loading.status = NodeStatus::Loading;
+    loading.history_hidden = true;
+    loading.has_stored_history = false;
+    loading.failure = None;
+
+    let mut revalidating = view();
+    revalidating.node = "node-revalidating".into();
+    revalidating.status = NodeStatus::HiddenPendingRevalidation;
+    revalidating.history_hidden = true;
+    revalidating.has_stored_history = true;
+    revalidating.failure = None;
+
+    let mut healthy = view();
+    healthy.node = "node-healthy".into();
+    healthy.status = NodeStatus::Healthy;
+    healthy.history_hidden = false;
+    healthy.has_stored_history = true;
+    healthy.failure = None;
+
+    let html = render(&[loading, revalidating, healthy], None, Filter::default());
+    assert!(
+        html.contains("loading: first observation pending"),
+        "missing loading status:\n{html}"
+    );
+    assert!(
+        html.contains("pending revalidation")
+            && html.contains("stored history hidden until this node answers"),
+        "missing restart/scope-changed stored-history caption:\n{html}"
+    );
+}
+
+#[test]
+fn r4_gap_last_success_and_unknown_loss_respect_masks() {
+    let mut healthy = view();
+    healthy.node = "node-healthy".into();
+    healthy.status = NodeStatus::Healthy;
+    healthy.history_hidden = false;
+    healthy.failure = None;
+    healthy.gaps = vec![];
+
+    let mut denied = view();
+    denied.node = "node-denied".into();
+    denied.status = NodeStatus::Denied;
+    denied.history_hidden = true;
+    denied.failure = None;
+    denied.gaps = vec![crate::observe_export::ExportGap {
+        reason: crate::observe_export::Reason::SequenceGap,
+        unknown_loss: true,
+    }];
+
+    let mut loading = view();
+    loading.node = "node-loading".into();
+    loading.status = NodeStatus::Loading;
+    loading.history_hidden = true;
+    loading.failure = None;
+
+    let mut health = CollectorHealth::default();
+    health.nodes.insert(
+        "node-healthy".into(),
+        NodeFreshness {
+            stale_for_secs: None,
+            stale_since_start: false,
+            last_success: Some((1000, 5)),
+        },
+    );
+
+    let html_healthy = render_with_health(&[healthy], None, Filter::default(), &health);
+    assert!(
+        html_healthy.contains("gaps: 0 · loss counters: not exported/unknown"),
+        "missing gap/loss line on healthy node:\n{html_healthy}"
+    );
+    assert!(
+        html_healthy.contains("last successful poll 1970-01-01T00:16:40Z (5 s ago)"),
+        "missing last-success line on healthy node:\n{html_healthy}"
+    );
+
+    let html_masked = render_with_health(&[denied, loading], None, Filter::default(), &health);
+    assert!(
+        !html_masked.contains("gaps:")
+            && !html_masked.contains("loss counters:")
+            && !html_masked.contains("last successful poll"),
+        "masked or loading node leaked gap/loss/last-success:\n{html_masked}"
+    );
+}
+
+#[test]
+fn r5_relayed_node_retains_escaped_provenance() {
+    for status in [NodeStatus::Loading, NodeStatus::Stale, NodeStatus::Denied] {
+        let mut node = view();
+        node.node = "node-relayed".into();
+        node.status = status;
+        node.history_hidden = matches!(status, NodeStatus::Loading | NodeStatus::Denied);
+        node.failure = None;
+        node.origin_hub = Some("<script>hub-a</script>".into());
+
+        let summary_html = render(std::slice::from_ref(&node), None, Filter::default());
+        assert!(
+            summary_html.contains("via &lt;script&gt;hub-a&lt;/script&gt; (hub-attested)"),
+            "missing escaped provenance in summary for {status:?}:\n{summary_html}"
+        );
+        assert!(
+            !summary_html.contains("<script>hub-a</script>"),
+            "unescaped origin_hub in summary:\n{summary_html}"
+        );
+
+        let detail_html = render(std::slice::from_ref(&node), Some(&node), Filter::default());
+        assert!(
+            detail_html.contains("via &lt;script&gt;hub-a&lt;/script&gt; (hub-attested)"),
+            "missing escaped provenance in detail for {status:?}:\n{detail_html}"
+        );
+        assert!(
+            !detail_html.contains("<script>hub-a</script>"),
+            "unescaped origin_hub in detail:\n{detail_html}"
+        );
+    }
 }
