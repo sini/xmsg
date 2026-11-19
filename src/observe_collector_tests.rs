@@ -163,8 +163,11 @@ impl Fixture {
             truncated: false,
             available: SnapshotAvailability::Available,
         };
+        let mut initial_success = BTreeMap::new();
         if validated {
+            let utc = store.epoch_now();
             store.ingest_snapshot("fixture.node", snapshot).unwrap();
+            initial_success.insert("fixture.node".into(), (tokio::time::Instant::now(), utc));
         }
         let state = Arc::new(State {
             verifier: Verifier::new(config.auth.clone(), clock).unwrap(),
@@ -180,6 +183,11 @@ impl Fixture {
                 BTreeMap::new()
             }),
             scope_hidden: Mutex::new(BTreeSet::new()),
+            success: Mutex::new(initial_success),
+            pollers_alive: Arc::new(AtomicUsize::new(0)),
+            supported_sources: 1,
+            maintenance: Mutex::new(MaintenanceState::default()),
+            store_slot_refusals: Arc::new(AtomicU64::new(0)),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -730,6 +738,11 @@ fn scheduler_state(fixture: &Fixture, node: &str, store: Arc<Store>) -> Arc<Stat
         failures: Mutex::new(BTreeMap::new()),
         scopes: Mutex::new(BTreeMap::new()),
         scope_hidden: Mutex::new(BTreeSet::new()),
+        success: Mutex::new(BTreeMap::new()),
+        pollers_alive: Arc::new(AtomicUsize::new(0)),
+        supported_sources: 1,
+        maintenance: Mutex::new(MaintenanceState::default()),
+        store_slot_refusals: Arc::new(AtomicU64::new(0)),
     })
 }
 fn scheduler_page(node: &str) -> crate::observe_export::ExportPage {
@@ -1328,4 +1341,436 @@ async fn relay_failure_overlay_keeps_unvalidated_history_pending() {
         html.contains("Latest source inventory"),
         "validated relay timeout neighbor lost retained snapshot"
     );
+}
+
+async fn body_text(resp: Response<Full<Bytes>>) -> String {
+    use http_body_util::BodyExt;
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+async fn render_test_html(state: &State, node: Option<usize>) -> String {
+    body_text(state.render_page(Filter { node, page: 0 }).await).await
+}
+
+fn private_tempdir() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    dir
+}
+
+#[tokio::test(start_paused = true)]
+async fn a1_stale_after_fresh_without_failure() {
+    let fixture = Fixture::new().await;
+    fixture
+        .state
+        .store
+        .ingest_snapshot(
+            "fixture.node",
+            ExportSnapshot {
+                v: 1,
+                node: "fixture.node".into(),
+                scope: "a".repeat(64),
+                observed_at: 1000,
+                endpoints: vec![],
+                truncated: false,
+                available: SnapshotAvailability::Available,
+            },
+        )
+        .unwrap();
+    accepted_scope(&fixture.state, "fixture.node", "a".repeat(64));
+    tokio::time::advance(FRESH + Duration::from_secs(1)).await;
+
+    let html = render_test_html(&fixture.state, None).await;
+    assert!(
+        html.contains("stale: no successful poll for 16 s"),
+        "expected stale age 16 s, got:\n{html}"
+    );
+    assert!(
+        html.contains("last successful poll 1970-01-01T00:16:40Z (16 s ago)"),
+        "expected last successful poll UTC + age, got:\n{html}"
+    );
+    assert!(
+        !html.contains("<p>healthy</p>"),
+        "node must not read healthy after FRESH+1:\n{html}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a2_healthy_no_change_advances_last_success() {
+    let clock_secs = Arc::new(std::sync::atomic::AtomicI64::new(1000));
+    let clock: crate::observe_collector_store::EpochClock = {
+        let clock_secs = clock_secs.clone();
+        Arc::new(move || clock_secs.load(Ordering::Relaxed))
+    };
+    let dir = private_tempdir();
+    let store = Arc::new(
+        Store::open(
+            dir.path(),
+            vec![NodePolicy {
+                node: "fixture.node".into(),
+                supported: true,
+                labels: false,
+                relay: None,
+            }],
+            clock.clone(),
+        )
+        .unwrap(),
+    );
+    let fixture = Fixture::new().await;
+    let state = Arc::new(State {
+        verifier: Verifier::new(fixture.config.auth.clone(), clock).unwrap(),
+        store: store.clone(),
+        store_slots: Arc::new(Semaphore::new(1)),
+        requests: request_slots(),
+        nodes: vec!["fixture.node".into()],
+        denied: Mutex::new(BTreeSet::new()),
+        failures: Mutex::new(BTreeMap::new()),
+        scopes: Mutex::new(BTreeMap::new()),
+        scope_hidden: Mutex::new(BTreeSet::new()),
+        success: Mutex::new(BTreeMap::new()),
+        pollers_alive: Arc::new(AtomicUsize::new(0)),
+        supported_sources: 1,
+        maintenance: Mutex::new(MaintenanceState::default()),
+        store_slot_refusals: Arc::new(AtomicU64::new(0)),
+    });
+
+    let snap = ExportSnapshot {
+        v: 1,
+        node: "fixture.node".into(),
+        scope: "a".repeat(64),
+        observed_at: 1000,
+        endpoints: vec![],
+        truncated: false,
+        available: SnapshotAvailability::Available,
+    };
+    store.ingest_snapshot("fixture.node", snap.clone()).unwrap();
+    accepted_scope(&state, "fixture.node", "a".repeat(64));
+
+    let empty_page: crate::observe_export::ExportPage = serde_json::from_value(json!({
+        "v": 1,
+        "node": "fixture.node",
+        "epoch": "fixture-epoch",
+        "scope": "a".repeat(64),
+        "events": [],
+        "next": 0,
+        "has_more": false,
+        "gaps": [],
+        "available": true
+    }))
+    .unwrap();
+    for step in 1..=15 {
+        tokio::time::advance(Duration::from_secs(2)).await;
+        clock_secs.store(1000 + step * 2, Ordering::Relaxed);
+        let cursor = store.cursor("fixture.node").unwrap();
+        let outcome = store
+            .ingest_page("fixture.node", &cursor, empty_page.clone())
+            .unwrap();
+        assert_eq!(outcome.inserted, 0);
+        store.ingest_snapshot("fixture.node", snap.clone()).unwrap();
+        on_page_ingested(&state, "fixture.node", "a".repeat(64), outcome.inserted);
+    }
+
+    let (_, last_utc) = state
+        .success
+        .lock()
+        .unwrap()
+        .get("fixture.node")
+        .copied()
+        .unwrap();
+    assert_eq!(
+        last_utc, 1030,
+        "last_success UTC must advance on healthy no-change"
+    );
+
+    let html = render_test_html(&state, None).await;
+    assert!(
+        html.contains("<p>healthy</p>"),
+        "healthy no-change must stay healthy over 30 s, got:\n{html}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a3_connection_without_ingest_is_not_success() {
+    let fixture = Fixture::new().await;
+    // Initial validated snapshot at t0.
+    fixture
+        .state
+        .store
+        .ingest_snapshot(
+            "fixture.node",
+            ExportSnapshot {
+                v: 1,
+                node: "fixture.node".into(),
+                scope: "a".repeat(64),
+                observed_at: 1000,
+                endpoints: vec![],
+                truncated: false,
+                available: SnapshotAvailability::Available,
+            },
+        )
+        .unwrap();
+    accepted_scope(&fixture.state, "fixture.node", "a".repeat(64));
+
+    // Advance past FRESH while simulating HTTP 200 receipt whose ingest fails / is Pending (no accepted_scope).
+    tokio::time::advance(FRESH + Duration::from_secs(1)).await;
+    on_response_received(&fixture.state, "fixture.node");
+
+    let html = render_test_html(&fixture.state, None).await;
+    assert!(
+        html.contains("stale: no successful poll for 16 s"),
+        "expected stale after FRESH+1 without ingest, got:\n{html}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a4_permission_loss_and_scope_change_mask_last_success() {
+    let fixture = Fixture::new().await;
+    fixture
+        .state
+        .store
+        .ingest_snapshot(
+            "fixture.node",
+            ExportSnapshot {
+                v: 1,
+                node: "fixture.node".into(),
+                scope: "a".repeat(64),
+                observed_at: 1000,
+                endpoints: vec![],
+                truncated: false,
+                available: SnapshotAvailability::Available,
+            },
+        )
+        .unwrap();
+    accepted_scope(&fixture.state, "fixture.node", "a".repeat(64));
+
+    mark_error(&fixture.state, "fixture.node".into(), net::Error::Denied).await;
+    let html_denied = render_test_html(&fixture.state, Some(0)).await;
+    assert!(html_denied.contains("<p>denied</p>"), "{html_denied}");
+    assert!(
+        !html_denied.contains("last successful poll")
+            && !html_denied.contains("Latest source inventory")
+            && !html_denied.contains("Source boundary:"),
+        "denied mask leaked rows, gaps, or last-success:\n{html_denied}"
+    );
+
+    tokio::time::advance(FRESH + Duration::from_secs(1)).await;
+    let html_denied_later = render_test_html(&fixture.state, Some(0)).await;
+    assert!(
+        !html_denied_later.contains("last successful poll")
+            && !html_denied_later.contains("stale: no successful poll"),
+        "denied mask must still hide last-success after FRESH+1:\n{html_denied_later}"
+    );
+
+    // Scope change mask also hides rows, gaps, and last-success.
+    fixture.state.denied.lock().unwrap().clear();
+    observe_scope(&fixture.state, "fixture.node", &"b".repeat(64));
+    let html_scope = render_test_html(&fixture.state, Some(0)).await;
+    assert!(
+        html_scope.contains("<p>pending revalidation</p>")
+            && !html_scope.contains("last successful poll")
+            && !html_scope.contains("Latest source inventory"),
+        "scope change leaked rows or last-success:\n{html_scope}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a5_restart_with_history_shows_hidden_and_none_since_start() {
+    let dir = private_tempdir();
+    let clock: crate::observe_collector_store::EpochClock = Arc::new(|| 1000);
+    let policy = vec![NodePolicy {
+        node: "fixture.node".into(),
+        supported: true,
+        labels: false,
+        relay: None,
+    }];
+    {
+        let store = Store::open(dir.path(), policy.clone(), clock.clone()).unwrap();
+        store
+            .ingest_snapshot(
+                "fixture.node",
+                ExportSnapshot {
+                    v: 1,
+                    node: "fixture.node".into(),
+                    scope: "a".repeat(64),
+                    observed_at: 1000,
+                    endpoints: vec![],
+                    truncated: false,
+                    available: SnapshotAvailability::Available,
+                },
+            )
+            .unwrap();
+    }
+
+    let reopened = Arc::new(Store::open(dir.path(), policy, clock.clone()).unwrap());
+    let fixture = Fixture::new().await;
+    let initial_succ = initial_success(&reopened);
+    let state = Arc::new(State {
+        verifier: Verifier::new(fixture.config.auth.clone(), clock).unwrap(),
+        store: reopened,
+        store_slots: Arc::new(Semaphore::new(1)),
+        requests: request_slots(),
+        nodes: vec!["fixture.node".into()],
+        denied: Mutex::new(BTreeSet::new()),
+        failures: Mutex::new(BTreeMap::new()),
+        scopes: Mutex::new(BTreeMap::new()),
+        scope_hidden: Mutex::new(BTreeSet::new()),
+        success: Mutex::new(initial_succ),
+        pollers_alive: Arc::new(AtomicUsize::new(0)),
+        supported_sources: 1,
+        maintenance: Mutex::new(MaintenanceState::default()),
+        store_slot_refusals: Arc::new(AtomicU64::new(0)),
+    });
+
+    assert!(
+        state.success.lock().unwrap().is_empty(),
+        "fresh State after restart must not seed success from persisted receipt times"
+    );
+    let html_initial = render_test_html(&state, Some(0)).await;
+    assert!(
+        html_initial.contains("<p>pending revalidation</p>")
+            && html_initial.contains("history hidden until this node answers")
+            && !html_initial.contains("Latest source inventory"),
+        "restart with fresh State must hide history:\n{html_initial}"
+    );
+
+    mark_error(&state, "fixture.node".into(), net::Error::Timeout).await;
+    let html = render_test_html(&state, Some(0)).await;
+    assert!(
+        html.contains("Observation request timed out.")
+            && html.contains("history hidden until this node answers")
+            && !html.contains("Latest source inventory")
+            && !html.contains("last successful poll 1970-"),
+        "restart with fresh State must hide history and not seed last-success from disk:\n{html}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a6_monotonic_health_ignores_epoch_clock_shifts() {
+    let clock_secs = Arc::new(std::sync::atomic::AtomicI64::new(10_000));
+    let clock: crate::observe_collector_store::EpochClock = {
+        let clock_secs = clock_secs.clone();
+        Arc::new(move || clock_secs.load(Ordering::Relaxed))
+    };
+    let dir = private_tempdir();
+    let store = Arc::new(
+        Store::open(
+            dir.path(),
+            vec![NodePolicy {
+                node: "fixture.node".into(),
+                supported: true,
+                labels: false,
+                relay: None,
+            }],
+            clock.clone(),
+        )
+        .unwrap(),
+    );
+    let fixture = Fixture::new().await;
+    let state = Arc::new(State {
+        verifier: Verifier::new(fixture.config.auth.clone(), clock).unwrap(),
+        store: store.clone(),
+        store_slots: Arc::new(Semaphore::new(1)),
+        requests: request_slots(),
+        nodes: vec!["fixture.node".into()],
+        denied: Mutex::new(BTreeSet::new()),
+        failures: Mutex::new(BTreeMap::new()),
+        scopes: Mutex::new(BTreeMap::new()),
+        scope_hidden: Mutex::new(BTreeSet::new()),
+        success: Mutex::new(BTreeMap::new()),
+        pollers_alive: Arc::new(AtomicUsize::new(0)),
+        supported_sources: 1,
+        maintenance: Mutex::new(MaintenanceState::default()),
+        store_slot_refusals: Arc::new(AtomicU64::new(0)),
+    });
+
+    store
+        .ingest_snapshot(
+            "fixture.node",
+            ExportSnapshot {
+                v: 1,
+                node: "fixture.node".into(),
+                scope: "a".repeat(64),
+                observed_at: 10_000,
+                endpoints: vec![],
+                truncated: false,
+                available: SnapshotAvailability::Available,
+            },
+        )
+        .unwrap();
+    accepted_scope(&state, "fixture.node", "a".repeat(64));
+
+    // Shift wall clock +1h while monotonic clock does not advance.
+    clock_secs.store(13_600, Ordering::Relaxed);
+    let html_healthy = render_test_html(&state, None).await;
+    assert!(
+        html_healthy.contains("<p>healthy</p>"),
+        "wall clock shift must not mark monotonic-fresh node stale:\n{html_healthy}"
+    );
+
+    // Shift wall clock -1h (before ingest), ingest again at shifted wall time, and advance monotonic FRESH+1.
+    clock_secs.store(6_400, Ordering::Relaxed);
+    accepted_scope(&state, "fixture.node", "a".repeat(64));
+    tokio::time::advance(FRESH + Duration::from_secs(1)).await;
+    let html_stale = render_test_html(&state, None).await;
+    assert!(
+        html_stale.contains("stale: no successful poll for 16 s")
+            && html_stale.contains("last successful poll 1970-01-01T01:46:40Z (16 s ago)"),
+        "UTC display must follow EpochClock while age is monotonic:\n{html_stale}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a7_failure_plus_panicked_poller_shows_zero_alive() {
+    let fixture = Fixture::new().await;
+    let mut tasks = tokio::task::JoinSet::new();
+    let counter = fixture.state.pollers_alive.clone();
+    tasks.spawn(async move {
+        let _guard = PollerGuard::enter(counter);
+        panic!("synthetic poller panic");
+    });
+    let _ = tasks.join_next().await;
+
+    mark_error(&fixture.state, "fixture.node".into(), net::Error::Timeout).await;
+    let html = render_test_html(&fixture.state, None).await;
+    assert!(
+        html.contains("Observation request timed out."),
+        "expected timeout failure class:\n{html}"
+    );
+    assert!(
+        html.contains("Collector: pollers alive 0/1"),
+        "expected 0/1 pollers alive after poller panic:\n{html}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a8_failure_plus_maintenance_err_and_health_unchanged() {
+    let fixture = Fixture::new().await;
+    mark_error(&fixture.state, "fixture.node".into(), net::Error::Timeout).await;
+
+    // Hold the single store slot so maintain_once gets a store-slot refusal (Err).
+    let lease = fixture
+        .state
+        .store_slots
+        .clone()
+        .try_acquire_owned()
+        .unwrap();
+    maintain_once(&fixture.state).await;
+    drop(lease);
+
+    let html = render_test_html(&fixture.state, None).await;
+    assert!(
+        html.contains("Observation request timed out.")
+            && html.contains("last maintenance FAILED (last ok never)")
+            && html.contains("store-slot refusals 1"),
+        "expected node failure + FAILED maintenance + store-slot refusal:\n{html}"
+    );
+
+    let health_resp = fixture
+        .state
+        .prepare(Request::builder().uri("/health").body(()).unwrap())
+        .await;
+    let health = body_text(health_resp).await;
+    assert_eq!(health, "available\n");
 }

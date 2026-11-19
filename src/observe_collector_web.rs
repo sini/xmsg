@@ -1,7 +1,9 @@
 use crate::observe_collector_store::{NodeStatus, NodeView, UnavailableKind};
 use crate::observe_export::EndpointKind;
+use crate::storage::utc_rfc3339;
 use base64::Engine;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fmt::Write;
 
 pub const MAX_HTML: usize = 4 * 1024 * 1024;
@@ -131,13 +133,110 @@ impl Document {
     }
 }
 
-pub fn render(summaries: &[NodeView], detail: Option<&NodeView>, filter: Filter) -> String {
-    render_with_cap(summaries, detail, filter, MAX_HTML)
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NodeFreshness {
+    pub stale_for_secs: Option<u64>,
+    pub stale_since_start: bool,
+    pub last_success: Option<(i64, u64)>,
 }
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CollectorHealth {
+    pub pollers_alive: usize,
+    pub supported_sources: usize,
+    pub last_maintenance_ok_secs: Option<u64>,
+    pub last_maintenance_failed: bool,
+    pub store_slot_refusals: u64,
+    pub nodes: BTreeMap<String, NodeFreshness>,
+}
+
+fn is_masked(node: &NodeView) -> bool {
+    node.history_hidden
+        || matches!(
+            node.status,
+            NodeStatus::Denied | NodeStatus::HiddenPendingRevalidation
+        )
+}
+
+fn status_line(node: &NodeView, freshness: Option<&NodeFreshness>) -> String {
+    if node.status == NodeStatus::Stale && node.failure.is_none() {
+        if let Some(fresh) = freshness {
+            if let Some(secs) = fresh.stale_for_secs {
+                return format!("stale: no successful poll for {secs} s");
+            }
+            if fresh.stale_since_start {
+                return "stale: no successful poll since collector start".into();
+            }
+        }
+    }
+    status(node).into()
+}
+
+fn last_success_line(node: &NodeView, freshness: Option<&NodeFreshness>) -> String {
+    if is_masked(node) {
+        return String::new();
+    }
+    let show = node.failure.is_some()
+        || freshness.is_some_and(|f| f.stale_for_secs.is_some() || f.stale_since_start);
+    if !show {
+        return String::new();
+    }
+    match freshness.and_then(|f| f.last_success) {
+        Some((utc, age_secs)) => format!(
+            "<p class=\"muted\">last successful poll {} ({age_secs} s ago)</p>",
+            utc_rfc3339(utc)
+        ),
+        None => "<p class=\"muted\">last successful poll none since collector start</p>".into(),
+    }
+}
+
+fn collector_line(health: &CollectorHealth) -> String {
+    let maint = match (
+        health.last_maintenance_failed,
+        health.last_maintenance_ok_secs,
+    ) {
+        (true, Some(secs)) => format!("FAILED (last ok {secs} s ago)"),
+        (true, None) => "FAILED (last ok never)".into(),
+        (false, Some(secs)) => format!("{secs} s ago"),
+        (false, None) => "never".into(),
+    };
+    format!(
+        "<p class=\"muted\">Collector: pollers alive {}/{} · last maintenance {} · store-slot refusals {}</p>",
+        health.pollers_alive, health.supported_sources, maint, health.store_slot_refusals
+    )
+}
+
+pub fn render(summaries: &[NodeView], detail: Option<&NodeView>, filter: Filter) -> String {
+    render_with_health_and_cap(
+        summaries,
+        detail,
+        filter,
+        &CollectorHealth::default(),
+        MAX_HTML,
+    )
+}
+pub fn render_with_health(
+    summaries: &[NodeView],
+    detail: Option<&NodeView>,
+    filter: Filter,
+    health: &CollectorHealth,
+) -> String {
+    render_with_health_and_cap(summaries, detail, filter, health, MAX_HTML)
+}
+#[cfg(test)]
 fn render_with_cap(
     summaries: &[NodeView],
     detail: Option<&NodeView>,
     filter: Filter,
+    cap: usize,
+) -> String {
+    render_with_health_and_cap(summaries, detail, filter, &CollectorHealth::default(), cap)
+}
+fn render_with_health_and_cap(
+    summaries: &[NodeView],
+    detail: Option<&NodeView>,
+    filter: Filter,
+    health: &CollectorHealth,
     cap: usize,
 ) -> String {
     let mut out = Document {
@@ -145,15 +244,17 @@ fn render_with_cap(
         cap,
         truncated: false,
     };
-    out.push(&format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"refresh\" content=\"5\"><title>xmsg fleet observer</title><style>{CSS}</style></head><body><main><h1>Fleet observer</h1><p class=\"muted\">Read-only metadata from configured exporters. Source clocks are independent; these observations do not establish agent reads or completion.</p><nav><a href=\"/\">All nodes</a></nav><div class=\"tiles\">"));
+    out.push(&format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"refresh\" content=\"5\"><title>xmsg fleet observer</title><style>{CSS}</style></head><body><main><h1>Fleet observer</h1><p class=\"muted\">Read-only metadata from configured exporters. Source clocks are independent; these observations do not establish agent reads or completion.</p><nav><a href=\"/\">All nodes</a></nav>{}<div class=\"tiles\">", collector_line(health)));
     for (index, node) in summaries.iter().take(64).enumerate() {
+        let freshness = health.nodes.get(&node.node);
         let mut tile = format!(
             "<article class=\"tile\"><h2><a href=\"/?node={index}\">{}</a></h2><p>{}</p>",
             html_text(&node.node),
-            status(node)
+            status_line(node, freshness)
         );
         tile.push_str(&provenance(node.origin_hub.as_deref()));
         tile.push_str(failure(node));
+        tile.push_str(&last_success_line(node, freshness));
         if node.failure.is_some() && !node.history_hidden {
             tile.push_str("<p>Previously validated history is stale.</p>");
         }
@@ -167,13 +268,15 @@ fn render_with_cap(
     }
     out.push("</div>");
     if let Some(node) = detail {
+        let freshness = health.nodes.get(&node.node);
         out.push(&format!(
             "<section><h2>{}</h2><p>{}</p>",
             html_text(&node.node),
-            status(node)
+            status_line(node, freshness)
         ));
         out.push(&provenance(node.origin_hub.as_deref()));
         out.push(failure(node));
+        out.push(&last_success_line(node, freshness));
         if node.failure.is_some() && !node.history_hidden {
             out.push("<p>Previously validated history is stale.</p>");
         }

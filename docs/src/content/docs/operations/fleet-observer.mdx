@@ -321,6 +321,22 @@ masks old data before attempting a purge, and a failed purge keeps it hidden.
 Once validated in the current process, temporarily unreachable nodes may show
 retained data marked stale.
 
+**Planned (freshness and collector self-health):**
+- **Node state precedence:** authorization masks (`denied`, scope/restart `pending revalidation`)
+  always outrank cached metadata and hide events, snapshots, gaps and last-success times;
+  next is a current failure class (`Timeout`, `Malformed`, `RateLimited`, `Unreachable`,
+  `Unsupported`, `StorageFull`); next, if no validated ingest succeeded within `15 s`
+  on the monotonic clock (or since collector start), the tile reads
+  `stale: no successful poll for N s` (or `since collector start`); only otherwise is it
+  `healthy`. Failure and stale states display `last successful poll <UTC> (N s ago)` or
+  `none since collector start`.
+- **Success vs connection:** only a validated snapshot or decoded event page committed
+  by the store counts as a success (including healthy no-change empty pages or unchanged
+  fingerprints); an HTTP connection, `Pending`, decode failure or refused store slot does not.
+- **Collector line:** separate from every node tile, `GET /` prints
+  `Collector: pollers alive P/S · last maintenance <N s ago | FAILED> · store-slot refusals R`.
+  `GET /health` remains fixed `available` text.
+
 ## Read newer event kinds (planned)
 
 A collector with the planned [unknown event kind](/glossary/#unknown-event-kind)
