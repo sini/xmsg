@@ -547,6 +547,9 @@ impl Store {
     fn lock(&self) -> Result<MutexGuard<'_, Inner>, StoreError> {
         self.inner.lock().map_err(|_| StoreError::Storage)
     }
+    pub fn epoch_now(&self) -> i64 {
+        (self.clock)()
+    }
     fn now(&self) -> Result<i64, StoreError> {
         let now = (self.clock)();
         if valid_time(now) {

@@ -83,6 +83,12 @@ partial, unavailable, stale, denied and reset states must remain visible rather
 than becoming an empty healthy node. Shapes distinguish cached nodes, sessions and services; those colors do not imply
 process health. Source time and collector receipt age stay separate.
 
+**Planned:** collector freshness outranks cached status. A node is only `healthy`
+when a validated ingest (including a healthy no-change empty page or unchanged
+snapshot) succeeded within the `15 s` monotonic freshness window; a TCP/TLS
+connection, `Pending`, or a busy store slot is not a success, and current
+authorization or scope masks always hide cached rows, gaps and last-success times.
+
 The journal defaults to seven days, 10,000 events or 16 MiB of logical metadata,
 whichever limit applies first. Export also excludes events older than seven days.
 Capture can lose observations, and eviction or restart can leave gaps. Policy

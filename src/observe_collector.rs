@@ -1,7 +1,7 @@
 use crate::observe_collector_auth::Verifier;
 use crate::observe_collector_net::{self as net, Client, Config};
-use crate::observe_collector_store::{NodePolicy, Store, StoreError, UnavailableKind};
-use crate::observe_collector_web::{self as web, Filter};
+use crate::observe_collector_store::{NodePolicy, NodeStatus, Store, StoreError, UnavailableKind};
+use crate::observe_collector_web::{self as web, CollectorHealth, Filter, NodeFreshness};
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
 use hyper::{Request, Response, StatusCode};
@@ -9,9 +9,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Semaphore;
+
+const FRESH: Duration = Duration::from_secs(15);
 
 #[derive(clap::Parser, Debug)]
 pub struct Args {
@@ -50,6 +53,25 @@ impl From<StoreError> for Error {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct MaintenanceState {
+    last_ok: Option<tokio::time::Instant>,
+    last_failed: bool,
+}
+
+struct PollerGuard(Arc<AtomicUsize>);
+impl PollerGuard {
+    fn enter(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(counter)
+    }
+}
+impl Drop for PollerGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 struct State {
     verifier: Verifier,
     store: Arc<Store>,
@@ -60,14 +82,25 @@ struct State {
     failures: Mutex<BTreeMap<String, UnavailableKind>>,
     scopes: Mutex<BTreeMap<String, String>>,
     scope_hidden: Mutex<BTreeSet<String>>,
+    success: Mutex<BTreeMap<String, (tokio::time::Instant, i64)>>,
+    pollers_alive: Arc<AtomicUsize>,
+    supported_sources: usize,
+    maintenance: Mutex<MaintenanceState>,
+    store_slot_refusals: Arc<AtomicU64>,
 }
 
-async fn store_call<T: Send + 'static>(
+async fn store_call_counted<T: Send + 'static>(
     store: Arc<Store>,
     slots: Arc<Semaphore>,
+    refusals: Option<Arc<AtomicU64>>,
     call: impl FnOnce(&Store) -> Result<T, StoreError> + Send + 'static,
 ) -> Result<T, StoreError> {
-    let lease = slots.try_acquire_owned().map_err(|_| StoreError::Storage)?;
+    let lease = slots.try_acquire_owned().map_err(|_| {
+        if let Some(counter) = refusals {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        StoreError::Storage
+    })?;
     tokio::task::spawn_blocking(move || {
         // Keep admission while SQLite finishes even if its caller's deadline expires.
         let _lease = lease;
@@ -75,6 +108,15 @@ async fn store_call<T: Send + 'static>(
     })
     .await
     .map_err(|_| StoreError::Storage)?
+}
+
+#[cfg(test)]
+async fn store_call<T: Send + 'static>(
+    store: Arc<Store>,
+    slots: Arc<Semaphore>,
+    call: impl FnOnce(&Store) -> Result<T, StoreError> + Send + 'static,
+) -> Result<T, StoreError> {
+    store_call_counted(store, slots, None, call).await
 }
 
 fn response(status: StatusCode, body: impl Into<Bytes>, html: bool) -> Response<Full<Bytes>> {
@@ -141,18 +183,27 @@ impl State {
             Ok(filter) => filter,
             Err(_) => return response(StatusCode::BAD_REQUEST, "invalid filter\n", false),
         };
+        self.render_page(filter).await
+    }
+
+    async fn render_page(&self, filter: Filter) -> Response<Full<Bytes>> {
         let selected = filter.node.map(|index| self.nodes[index].clone());
-        let result = store_call(self.store.clone(), self.store_slots.clone(), move |store| {
-            let mut summaries = store.view(None, 0)?;
-            for node in &mut summaries {
-                node.latest_snapshot = None;
-            }
-            let detail = selected
-                .map(|node| store.view(Some(&node), filter.read_limit()))
-                .transpose()?
-                .and_then(|mut views| views.pop());
-            Ok((summaries, detail))
-        })
+        let result = store_call_counted(
+            self.store.clone(),
+            self.store_slots.clone(),
+            Some(self.store_slot_refusals.clone()),
+            move |store| {
+                let mut summaries = store.view(None, 0)?;
+                for node in &mut summaries {
+                    node.latest_snapshot = None;
+                }
+                let detail = selected
+                    .map(|node| store.view(Some(&node), filter.read_limit()))
+                    .transpose()?
+                    .and_then(|mut views| views.pop());
+                Ok((summaries, detail))
+            },
+        )
         .await;
         match result {
             Ok((mut summaries, mut detail)) => {
@@ -161,10 +212,10 @@ impl State {
                         if let Some(kind) = failures.get(&view.node) {
                             view.failure = Some(*kind);
                             view.status = match kind {
-                                UnavailableKind::Unsupported => crate::observe_collector_store::NodeStatus::Unsupported,
-                                UnavailableKind::StorageFull => crate::observe_collector_store::NodeStatus::StorageFull,
-                                _ if view.history_hidden => crate::observe_collector_store::NodeStatus::HiddenPendingRevalidation,
-                                _ => crate::observe_collector_store::NodeStatus::Stale,
+                                UnavailableKind::Unsupported => NodeStatus::Unsupported,
+                                UnavailableKind::StorageFull => NodeStatus::StorageFull,
+                                _ if view.history_hidden => NodeStatus::HiddenPendingRevalidation,
+                                _ => NodeStatus::Stale,
                             };
                         }
                     }
@@ -180,7 +231,7 @@ impl State {
                     for view in summaries.iter_mut().chain(detail.iter_mut()) {
                         if denied.contains(&view.node) {
                             view.history_hidden = true;
-                            view.status = crate::observe_collector_store::NodeStatus::Denied;
+                            view.status = NodeStatus::Denied;
                             view.failure = None;
                             view.events.clear();
                             view.latest_snapshot = None;
@@ -199,25 +250,91 @@ impl State {
                     for view in summaries.iter_mut().chain(detail.iter_mut()) {
                         if hidden.contains(&view.node) {
                             view.history_hidden = true;
-                            view.status = crate::observe_collector_store::NodeStatus::HiddenPendingRevalidation;
+                            view.status = NodeStatus::HiddenPendingRevalidation;
                             view.events.clear();
                             view.latest_snapshot = None;
                             view.cursor = None;
                             view.gaps.clear();
                         }
                     }
-                    response(
-                        StatusCode::OK,
-                        web::render(&summaries, detail.as_ref(), filter),
-                        true,
-                    )
                 } else {
-                    response(
+                    return response(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "collector unavailable\n",
                         false,
-                    )
+                    );
                 }
+
+                let now_mono = tokio::time::Instant::now();
+                let mut node_freshness = BTreeMap::new();
+                if let Ok(success) = self.success.lock() {
+                    for view in summaries.iter_mut().chain(detail.iter_mut()) {
+                        let masked = view.history_hidden
+                            || matches!(
+                                view.status,
+                                NodeStatus::Denied | NodeStatus::HiddenPendingRevalidation
+                            );
+                        if masked {
+                            continue;
+                        }
+                        let last_success = success.get(&view.node).map(|(mono, utc)| {
+                            (*utc, now_mono.saturating_duration_since(*mono).as_secs())
+                        });
+                        let mut entry = NodeFreshness {
+                            stale_for_secs: None,
+                            stale_since_start: false,
+                            last_success,
+                        };
+                        if view.failure.is_none() && view.status == NodeStatus::Healthy {
+                            match last_success {
+                                None => {
+                                    view.status = NodeStatus::Stale;
+                                    entry.stale_since_start = true;
+                                }
+                                Some((_, age_secs))
+                                    if Duration::from_secs(age_secs) > FRESH
+                                        || success.get(&view.node).is_some_and(|(mono, _)| {
+                                            now_mono.saturating_duration_since(*mono) > FRESH
+                                        }) =>
+                                {
+                                    view.status = NodeStatus::Stale;
+                                    entry.stale_for_secs = Some(age_secs);
+                                }
+                                Some(_) => {}
+                            }
+                        }
+                        node_freshness.insert(view.node.clone(), entry);
+                    }
+                } else {
+                    return response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "collector unavailable\n",
+                        false,
+                    );
+                }
+
+                let Ok(maint) = self.maintenance.lock() else {
+                    return response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "collector unavailable\n",
+                        false,
+                    );
+                };
+                let health = CollectorHealth {
+                    pollers_alive: self.pollers_alive.load(Ordering::SeqCst),
+                    supported_sources: self.supported_sources,
+                    last_maintenance_ok_secs: maint
+                        .last_ok
+                        .map(|t| now_mono.saturating_duration_since(t).as_secs()),
+                    last_maintenance_failed: maint.last_failed,
+                    store_slot_refusals: self.store_slot_refusals.load(Ordering::Relaxed),
+                    nodes: node_freshness,
+                };
+                response(
+                    StatusCode::OK,
+                    web::render_with_health(&summaries, detail.as_ref(), filter, &health),
+                    true,
+                )
             }
             Err(_) => response(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -388,9 +505,10 @@ async fn mark_error(state: &State, node: String, error: net::Error) {
     if error != net::Error::Denied {
         remember_failure(state, &node, kind);
     }
-    let _ = store_call(
+    if let Err(err) = store_call_counted(
         state.store.clone(),
         state.store_slots.clone(),
+        Some(state.store_slot_refusals.clone()),
         move |store| {
             if error == net::Error::Denied {
                 return store.deny(&node);
@@ -398,7 +516,10 @@ async fn mark_error(state: &State, node: String, error: net::Error) {
             store.unavailable(&node, kind)
         },
     )
-    .await;
+    .await
+    {
+        tracing::warn!(error = ?err, "failed to persist collector node error");
+    }
 }
 
 async fn mark_storage_error(state: &State, node: String, error: StoreError) {
@@ -408,12 +529,16 @@ async fn mark_storage_error(state: &State, node: String, error: StoreError) {
         UnavailableKind::Malformed
     };
     remember_failure(state, &node, kind);
-    let _ = store_call(
+    if let Err(err) = store_call_counted(
         state.store.clone(),
         state.store_slots.clone(),
+        Some(state.store_slot_refusals.clone()),
         move |store| store.unavailable(&node, kind),
     )
-    .await;
+    .await
+    {
+        tracing::warn!(error = ?err, "failed to persist collector storage error");
+    }
 }
 
 fn observe_scope(state: &State, node: &str, scope: &str) {
@@ -429,6 +554,16 @@ fn observe_scope(state: &State, node: &str, scope: &str) {
     }
 }
 
+fn on_response_received(_state: &State, _node: &str) {}
+
+fn on_page_ingested(state: &State, node: &str, scope: String, _inserted: usize) {
+    accepted_scope(state, node, scope);
+}
+
+fn initial_success(_store: &Store) -> BTreeMap<String, (tokio::time::Instant, i64)> {
+    BTreeMap::new()
+}
+
 fn accepted_scope(state: &State, node: &str, scope: String) {
     if let Ok(mut failures) = state.failures.lock() {
         failures.remove(node);
@@ -442,6 +577,12 @@ fn accepted_scope(state: &State, node: &str, scope: String) {
     if let Ok(mut denied) = state.denied.lock() {
         denied.remove(node);
     }
+    if let Ok(mut success) = state.success.lock() {
+        success.insert(
+            node.to_owned(),
+            (tokio::time::Instant::now(), state.store.epoch_now()),
+        );
+    }
 }
 
 async fn poll_source(client: Arc<Client>, state: Arc<State>, index: usize) {
@@ -449,6 +590,7 @@ async fn poll_source(client: Arc<Client>, state: Arc<State>, index: usize) {
     if !source.supported {
         return;
     }
+    let _poller_guard = PollerGuard::enter(state.pollers_alive.clone());
     let mut snapshot_due = true;
     let mut snapshot_at = tokio::time::Instant::now();
     let mut backfill = false;
@@ -461,12 +603,14 @@ async fn poll_source(client: Arc<Client>, state: Arc<State>, index: usize) {
             snapshot_at = started + Duration::from_secs(30);
             match client.snapshot(index).await {
                 Ok(snapshot) => {
+                    on_response_received(&state, &source.node);
                     let scope = snapshot.scope.clone();
                     observe_scope(&state, &source.node, &scope);
                     let node = source.node.clone();
-                    if let Err(error) = store_call(
+                    if let Err(error) = store_call_counted(
                         state.store.clone(),
                         state.store_slots.clone(),
+                        Some(state.store_slot_refusals.clone()),
                         move |store| store.ingest_snapshot(&node, snapshot),
                     )
                     .await
@@ -482,14 +626,15 @@ async fn poll_source(client: Arc<Client>, state: Arc<State>, index: usize) {
             }
         } else {
             let node = source.node.clone();
-            if let Ok(cursor) = store_call(
+            match store_call_counted(
                 state.store.clone(),
                 state.store_slots.clone(),
+                Some(state.store_slot_refusals.clone()),
                 move |store| store.cursor(&node),
             )
             .await
             {
-                match client
+                Ok(cursor) => match client
                     .events_decoded(
                         index,
                         cursor.epoch.as_deref(),
@@ -499,20 +644,22 @@ async fn poll_source(client: Arc<Client>, state: Arc<State>, index: usize) {
                     .await
                 {
                     Ok(page) => {
+                        on_response_received(&state, &source.node);
                         let scope = page.page.scope.clone();
                         observe_scope(&state, &source.node, &scope);
                         let has_more = page.page.has_more;
                         let node = source.node.clone();
-                        match store_call(
+                        match store_call_counted(
                             state.store.clone(),
                             state.store_slots.clone(),
+                            Some(state.store_slot_refusals.clone()),
                             move |store| store.ingest_decoded_page(&node, &cursor, page),
                         )
                         .await
                         {
-                            Ok(_) => {
+                            Ok(outcome) => {
                                 backfill = has_more;
-                                accepted_scope(&state, &source.node, scope);
+                                on_page_ingested(&state, &source.node, scope, outcome.inserted);
                             }
                             Err(error) => {
                                 mark_storage_error(&state, source.node.clone(), error).await
@@ -522,6 +669,9 @@ async fn poll_source(client: Arc<Client>, state: Arc<State>, index: usize) {
                     Err(error) => {
                         failure = Some(error);
                     }
+                },
+                Err(error) => {
+                    mark_storage_error(&state, source.node.clone(), error).await;
                 }
             }
         }
@@ -537,15 +687,33 @@ async fn poll_source(client: Arc<Client>, state: Arc<State>, index: usize) {
     }
 }
 
+async fn maintain_once(state: &State) {
+    let outcome = store_call_counted(
+        state.store.clone(),
+        state.store_slots.clone(),
+        Some(state.store_slot_refusals.clone()),
+        |store| store.maintain(),
+    )
+    .await;
+    if let Ok(mut maint) = state.maintenance.lock() {
+        match outcome {
+            Ok(_) => {
+                maint.last_ok = Some(tokio::time::Instant::now());
+                maint.last_failed = false;
+            }
+            Err(_) => {
+                maint.last_failed = true;
+            }
+        }
+    }
+}
+
 async fn maintain(state: Arc<State>) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         interval.tick().await;
-        let _ = store_call(state.store.clone(), state.store_slots.clone(), |store| {
-            store.maintain()
-        })
-        .await;
+        maintain_once(&state).await;
     }
 }
 
@@ -589,6 +757,8 @@ pub async fn run(args: Args) -> Result<(), Error> {
         .map(|source| source.node.clone())
         .collect::<Vec<_>>();
     nodes.sort();
+    let supported_sources = client.sources.iter().filter(|s| s.supported).count();
+    let initial_succ = initial_success(&store);
     let state = Arc::new(State {
         verifier,
         store: Arc::new(store),
@@ -599,6 +769,11 @@ pub async fn run(args: Args) -> Result<(), Error> {
         failures: Mutex::new(BTreeMap::new()),
         scopes: Mutex::new(BTreeMap::new()),
         scope_hidden: Mutex::new(BTreeSet::new()),
+        success: Mutex::new(initial_succ),
+        pollers_alive: Arc::new(AtomicUsize::new(0)),
+        supported_sources,
+        maintenance: Mutex::new(MaintenanceState::default()),
+        store_slot_refusals: Arc::new(AtomicU64::new(0)),
     });
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
