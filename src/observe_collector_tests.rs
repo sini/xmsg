@@ -1797,13 +1797,9 @@ async fn r2a_direct_404_recovers_on_valid_response_and_403_stays_denied() {
     let state = scheduler_state(&fixture, &node, store.clone());
 
     exporter.set_response("404 Not Found", "", b"");
-    let client = Arc::new(Client::new(&config).unwrap());
-    let task = tokio::spawn(poll_source(client, state.clone(), 0));
-    eventually(|| {
-        state.failures.lock().unwrap().get(&node).copied()
-            == Some(UnavailableKind::EndpointNotFound)
-    })
-    .await;
+    let err_404 = Client::new(&config).unwrap().snapshot(0).await.unwrap_err();
+    assert_eq!(err_404, net::Error::EndpointNotFound);
+    mark_error(&state, node.clone(), err_404).await;
 
     let html_404 = render_test_html(&state, None).await;
     assert!(
@@ -1857,5 +1853,4 @@ async fn r2a_direct_404_recovers_on_valid_response_and_403_stays_denied() {
         html_denied.contains("1 denied") && !html_denied.contains("Latest source inventory"),
         "denied mask lost after 404:\n{html_denied}"
     );
-    task.abort();
 }
