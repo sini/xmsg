@@ -378,3 +378,71 @@ fn list_limit_reports_truncation_in_text_and_metadata_in_json() {
         assert!(String::from_utf8_lossy(&output.stderr).contains("--limit"));
     }
 }
+
+#[test]
+fn locate_requires_both_viewer_config_and_request_for_detail_and_escapes_display() {
+    use std::os::unix::net::UnixListener;
+    for configured in [false, true] {
+        for requested in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let socket = root.path().join("http.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let config = root.path().join("locate.toml");
+            fs::write(&config,format!("[locate]\ndetail = {configured}\n[locate.reach]\n'local.example' = 'ssh local; touch SHOULD_NOT_EXECUTE'\n")).unwrap();
+            let server = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut first = String::new();
+                reader.read_line(&mut first).unwrap();
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let body=json!({"locators":[{"recipient":{"address":"id@local.example","kind":"instance","harness":"pi","label":"label\u{1b}[2J","status":"registered","node":"local.example","user":"owner"},"native_id":"native","resume":null,"reason":"live","env":{"kind":"tmux","ref":"%3"},"cwd":"/private"}],"nodes":[{"node":"local.example","status":"ok"}]}).to_string();
+                write!(reader.get_mut(),"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+                first
+            });
+            let mut command = Command::new(env!("CARGO_BIN_EXE_xmsg"));
+            command
+                .args(["locate", "id", "--http-sock"])
+                .arg(&socket)
+                .arg("--locate-config")
+                .arg(&config)
+                .arg("--json");
+            if requested {
+                command.arg("--detail");
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let expected = configured && requested;
+            let request = server.join().unwrap();
+            assert!(
+                request.contains(&format!("detail={expected}")),
+                "viewer detail conjunction was bypassed: {request}"
+            );
+            assert!(
+                !request.contains("ssh"),
+                "viewer config leaked into request"
+            );
+            let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                result["locators"][0]["cwd"].is_string(),
+                expected,
+                "viewer redaction mismatch"
+            );
+            assert_eq!(result["locators"][0]["env"]["ref"].is_string(), expected);
+            assert!(!result.to_string().contains("SHOULD_NOT_EXECUTE"));
+        }
+    }
+}

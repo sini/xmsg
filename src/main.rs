@@ -37,6 +37,9 @@ enum Commands {
     /// List mesh recipients and node status
     List(operator::ListArgs),
 
+    /// Find a session without attaching or resuming it
+    Locate(operator::LocateArgs),
+
     /// Inspect local setup without repairing state
     Doctor(doctor::DoctorArgs),
 
@@ -487,6 +490,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .block_on(xmsg::observe_collector::run(args))?;
         }
         Commands::List(args) => operator::list(args)?,
+        Commands::Locate(args) => operator::locate(args)?,
         Commands::Watch(args) => {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -774,6 +778,7 @@ fn run_register_agy(args: RegisterAgyArgs) -> Result<(), Box<dyn std::error::Err
             "ls_address": ls_addr,
             "csrf_token": csrf_token,
             "label": args.label,
+            "env": xmsg::locator::own_environment(),
         });
 
         writeln!(stream, "{payload}")?;

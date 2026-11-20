@@ -153,6 +153,7 @@ pub fn build_unix_router_with_enrollment(
                     "/v1/diagnostics/enrollment",
                     get(enrollment_diagnostics_handler),
                 )
+                .route("/v1/locate", get(locate_handler))
                 .route("/v1/observe/events", get(observe_events_handler))
                 .route("/v1/enrollment/pending", get(enrollment_pending_handler))
                 .route(
@@ -165,6 +166,23 @@ pub fn build_unix_router_with_enrollment(
         )
         .layer(Extension(LocalHealth))
         .layer(Extension(config))
+}
+
+async fn locate_handler(
+    State(state): State<Arc<AppState>>,
+    peer: PeerInfo,
+    Query(query): Query<crate::locator::Query>,
+) -> Result<Json<crate::locator::Located>, AppError> {
+    if !peer
+        .as_ref()
+        .and_then(|p| p.0 .0.peer.as_ref())
+        .is_some_and(|p| p.uid == crate::agent::current_uid())
+    {
+        return Err(AppError::Denied(
+            "locate requires a same-UID Unix connection".into(),
+        ));
+    }
+    Ok(Json(crate::locator::locate(&state, &query).await?))
 }
 
 async fn enrollment_diagnostics_handler(

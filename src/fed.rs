@@ -2902,6 +2902,8 @@ pub enum FedInboxItem {
         query: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         v: Option<u32>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        read_only: bool,
     },
 }
 
@@ -2958,7 +2960,7 @@ pub enum FedListAnswer {
 /// `list` queries waiting in dial-out clients' mailboxes, and the askers awaiting them.
 #[derive(Default)]
 pub struct ListQueries {
-    pending: Mutex<HashMap<String, Vec<String>>>,
+    pending: Mutex<HashMap<String, Vec<(String, bool)>>>,
     waiting: Mutex<HashMap<String, ListWaiter>>,
 }
 
@@ -2971,6 +2973,7 @@ impl ListQueries {
     fn ask(
         &self,
         peer: &str,
+        read_only: bool,
     ) -> (
         String,
         tokio::sync::oneshot::Receiver<(FedListAnswer, String)>,
@@ -2981,7 +2984,9 @@ impl ListQueries {
             w.insert(query.clone(), (peer.to_string(), tx));
         }
         if let Ok(mut p) = self.pending.lock() {
-            p.entry(peer.to_string()).or_default().push(query.clone());
+            p.entry(peer.to_string())
+                .or_default()
+                .push((query.clone(), read_only));
         }
         (query, rx)
     }
@@ -2992,12 +2997,12 @@ impl ListQueries {
         }
         if let Ok(mut p) = self.pending.lock() {
             for qs in p.values_mut() {
-                qs.retain(|q| q != query);
+                qs.retain(|(q, _)| q != query);
             }
         }
     }
 
-    fn next_for(&self, peer: &str) -> Option<String> {
+    fn next_for(&self, peer: &str) -> Option<(String, bool)> {
         let mut p = self.pending.lock().ok()?;
         let qs = p.get_mut(peer)?;
         (!qs.is_empty()).then(|| qs.remove(0))
@@ -4609,6 +4614,8 @@ async fn fed_get_replies_handler(
 pub struct FedListQuery {
     #[serde(default)]
     pub v: Option<u32>,
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 async fn fed_list_sessions_handler(
@@ -4638,7 +4645,13 @@ async fn fed_list_sessions_handler(
         return Err(AppError::RateLimited("Rate limit exceeded".to_string()));
     }
 
-    let entries = listing_for_peer(&fed_state, &peer_cfg, query.v.unwrap_or(1) >= 2).await?;
+    let entries = listing_for_peer(
+        &fed_state,
+        &peer_cfg,
+        query.v.unwrap_or(1) >= 2,
+        query.read_only,
+    )
+    .await?;
     Ok((StatusCode::OK, Json(entries)).into_response())
 }
 
@@ -4656,13 +4669,35 @@ async fn listing_for_peer(
     fed_state: &FedState,
     peer_cfg: &PeerConfig,
     v2: bool,
+    read_only: bool,
 ) -> Result<Vec<FedListEntry>, AppError> {
-    let mut entries = crate::surface::listing(
-        &fed_state.local(),
-        fed_state.reply_ttl,
-        &own_user(fed_state),
-    )
-    .await?;
+    let mut entries = if read_only {
+        crate::locator::local_entries(&fed_state.local(), &own_user(fed_state))?
+            .into_iter()
+            .map(|r| FedListEntry {
+                id: r
+                    .address
+                    .rsplit_once('@')
+                    .map(|(id, _)| id)
+                    .unwrap_or("")
+                    .into(),
+                kind: r.kind,
+                harness: r.harness,
+                label: r.label,
+                status: r.status,
+                user: r.user,
+                registered_at: r.registered_at,
+                last_seen: r.last_seen,
+            })
+            .collect()
+    } else {
+        crate::surface::listing(
+            &fed_state.local(),
+            fed_state.reply_ttl,
+            &own_user(fed_state),
+        )
+        .await?
+    };
     if let Some(ref allowed_targets) = peer_cfg.targets {
         entries.retain(|e| allowed_targets.contains(&e.id));
     }
@@ -4767,8 +4802,14 @@ async fn fed_get_inbox_handler(
                         }
                     }
                     2 => {
-                        if let Some(query) = fed_state.list_queries.next_for(&peer.name) {
-                            return Ok(Some(FedInboxItem::List { query, v: Some(2) }));
+                        if let Some((query, read_only)) =
+                            fed_state.list_queries.next_for(&peer.name)
+                        {
+                            return Ok(Some(FedInboxItem::List {
+                                query,
+                                v: Some(2),
+                                read_only,
+                            }));
                         }
                     }
                     _ => {}
@@ -6334,9 +6375,20 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                         .await;
                 });
             }
-            Ok(Some(FedInboxItem::List { query, v })) => {
+            Ok(Some(FedInboxItem::List {
+                query,
+                v,
+                read_only,
+            })) => {
                 backoff_millis = 100;
-                answer_list_query(&fed_state, &peer_name, &query, v.unwrap_or(1) >= 2).await;
+                answer_list_query_mode(
+                    &fed_state,
+                    &peer_name,
+                    &query,
+                    v.unwrap_or(1) >= 2,
+                    read_only,
+                )
+                .await;
             }
             Ok(Some(FedInboxItem::Message(msg))) => {
                 backoff_millis = 100;
@@ -6738,6 +6790,21 @@ pub use crate::client::wire::NodeStatus;
 /// direct peer over `/fed/v2/sessions`, a dial-out client through its mailbox. Returns the
 /// entries its certificate user may list (P-3) and its status.
 pub async fn list_peer(fed_state: &FedState, peer_key: &str) -> (Vec<FedListEntry>, NodeStatus) {
+    list_peer_mode(fed_state, peer_key, false).await
+}
+
+pub async fn list_peer_read_only(
+    fed_state: &FedState,
+    peer_key: &str,
+) -> (Vec<FedListEntry>, NodeStatus) {
+    list_peer_mode(fed_state, peer_key, true).await
+}
+
+async fn list_peer_mode(
+    fed_state: &FedState,
+    peer_key: &str,
+    read_only: bool,
+) -> (Vec<FedListEntry>, NodeStatus) {
     let Some(peer) = fed_state.current_peers().get_peer_config(peer_key) else {
         return (
             Vec::new(),
@@ -6746,9 +6813,9 @@ pub async fn list_peer(fed_state: &FedState, peer_key: &str) -> (Vec<FedListEntr
     };
     let asked = async {
         if peer.leaf {
-            list_dial_out_client(fed_state, &peer.name).await
+            list_dial_out_client(fed_state, &peer.name, read_only).await
         } else {
-            list_direct_peer(fed_state, &peer).await
+            list_direct_peer_mode(fed_state, &peer, read_only).await
         }
     };
     let Ok(res) = tokio::time::timeout(LIST_TIMEOUT, asked).await else {
@@ -6786,8 +6853,9 @@ pub const WITHHOLDS_LIST: &str = "withholds list";
 async fn list_dial_out_client(
     fed_state: &FedState,
     peer_key: &str,
+    read_only: bool,
 ) -> Result<(FedListAnswer, String), AppError> {
-    let (query, rx) = fed_state.list_queries.ask(peer_key);
+    let (query, rx) = fed_state.list_queries.ask(peer_key, read_only);
     let _ = fed_state.notify_tx.send(peer_key.to_string());
     struct Forget<'a>(&'a ListQueries, String);
     impl Drop for Forget<'_> {
@@ -6803,6 +6871,22 @@ async fn list_dial_out_client(
 pub async fn list_direct_peer(
     fed_state: &FedState,
     peer: &PeerConfig,
+) -> Result<(FedListAnswer, String), AppError> {
+    list_direct_peer_mode(fed_state, peer, false).await
+}
+
+fn list_request_uri(read_only: bool) -> &'static str {
+    if read_only {
+        "/fed/v2/sessions?v=2&read_only=true"
+    } else {
+        "/fed/v2/sessions?v=2"
+    }
+}
+
+async fn list_direct_peer_mode(
+    fed_state: &FedState,
+    peer: &PeerConfig,
+    read_only: bool,
 ) -> Result<(FedListAnswer, String), AppError> {
     let peer_name = peer.name.as_str();
     let crate::discovery::dial::PreparedDirect {
@@ -6836,7 +6920,7 @@ pub async fn list_direct_peer(
 
     let req = hyper::Request::builder()
         .method("GET")
-        .uri("/fed/v2/sessions?v=2")
+        .uri(list_request_uri(read_only))
         .header("host", peer_name)
         .body(http_body_util::Empty::<bytes::Bytes>::new())
         .map_err(|e| AppError::Internal(e.to_string()))?;
@@ -6877,11 +6961,21 @@ pub async fn list_direct_peer(
 /// A dial-out client answers a `list` query from `peer_key`'s mailbox, applying its own
 /// entry for that node (A-1, AM-1): `denied` unless it allows `list`.
 pub async fn answer_list_query(fed_state: &FedState, peer_key: &str, query: &str, v2: bool) {
+    answer_list_query_mode(fed_state, peer_key, query, v2, false).await
+}
+
+pub(crate) async fn answer_list_query_mode(
+    fed_state: &FedState,
+    peer_key: &str,
+    query: &str,
+    v2: bool,
+    read_only: bool,
+) {
     let Some(peer) = fed_state.current_peers().get(peer_key).cloned() else {
         return;
     };
     let answer = if peer.allow.iter().any(|op| op == "list") {
-        match listing_for_peer(fed_state, &peer, v2).await {
+        match listing_for_peer(fed_state, &peer, v2, read_only).await {
             Ok(entries) => FedListAnswer::Ok { entries },
             Err(e) => {
                 tracing::warn!("list for '{peer_key}' failed: {e}");
@@ -8319,9 +8413,13 @@ pub(crate) fn spawn_control_answer(fs: &Arc<FedState>, peer: &str, item: FedInbo
                 answer_attachment_query(&fs, &peer, &query, &item_id, index, offset, length).await;
             });
         }
-        FedInboxItem::List { query, v } => {
+        FedInboxItem::List {
+            query,
+            v,
+            read_only,
+        } => {
             tokio::spawn(async move {
-                answer_list_query(&fs, &peer, &query, v.unwrap_or(1) >= 2).await;
+                answer_list_query_mode(&fs, &peer, &query, v.unwrap_or(1) >= 2, read_only).await;
             });
         }
         FedInboxItem::Observe { .. } | FedInboxItem::Message(_) => {}
@@ -8432,3 +8530,107 @@ mod attachment_query_tests {
 #[cfg(test)]
 #[path = "fed_observe_config_tests.rs"]
 mod observe_config_tests;
+
+#[cfg(test)]
+mod locator_readonly_tests {
+    use super::*;
+    fn fed(state: &crate::http::AppState) -> FedState {
+        FedState {
+            discovery: Arc::new(crate::discovery::state::State::default()),
+            node_name: state.node_name.clone(),
+            peers: Arc::new(PeersMap::empty()).into(),
+            cert_der: Vec::new(),
+            cert_chain_der: Vec::new(),
+            key_der: Vec::new(),
+            rate_limiter: Arc::new(RateLimiter::new(100, 100)),
+            db: state.db.clone(),
+            sessions_dirs: state.sessions_dirs.clone(),
+            agy_config: state.agy_config.clone(),
+            agy_store: state.agy_store.clone(),
+            pi_store: state.pi_store.clone(),
+            pi_notify_tx: state.pi_notify_tx.clone(),
+            svc_store: state.svc_store.clone(),
+            svc_notify_tx: state.svc_notify_tx.clone(),
+            notify_tx: state.notify_tx.clone(),
+            max_body: state.max_body,
+            max_attachment_bytes: state.max_attachment_bytes,
+            is_leaf: false,
+            leaf_principal: None,
+            outbound_replies_pushed: Arc::new(AtomicU64::new(0)),
+            dynamic_tls: Arc::new(std::sync::RwLock::new(None)),
+            reply_ttl: state.reply_ttl,
+            list_queries: ListQueries::default(),
+        }
+    }
+    #[tokio::test]
+    async fn read_only_federated_list_does_not_reconcile_or_purge() {
+        let (_dir, state) = crate::locator::tests::fixture();
+        let fs = fed(&state);
+        {
+            let db = fs.db.lock().unwrap();
+            db.execute(
+                "INSERT INTO instance_seen(id,harness,last_live) VALUES ('expired','pi',1)",
+                [],
+            )
+            .unwrap();
+            crate::locator::record(
+                &db,
+                "expired",
+                "pi",
+                "native",
+                Some(&crate::locator::Environment {
+                    kind: crate::locator::EnvironmentKind::Tmux,
+                    reference: Some("PRIVATE_PANE".into()),
+                }),
+                Some("/PRIVATE_CWD"),
+            )
+            .unwrap();
+        }
+        let before = fs.db.lock().unwrap().total_changes();
+        let entries = listing_for_peer(&fs, &PeerConfig::default(), true, true)
+            .await
+            .unwrap();
+        assert!(
+            entries.iter().any(|r| r.id == "expired"),
+            "read-only federation purged the registered history"
+        );
+        assert_eq!(
+            fs.db.lock().unwrap().total_changes(),
+            before,
+            "read-only federation mutated the database"
+        );
+        let json = serde_json::to_string(&entries).unwrap();
+        for secret in ["native_id", "env", "PRIVATE_PANE", "PRIVATE_CWD"] {
+            assert!(!json.contains(secret), "federated locator leaked {secret}");
+        }
+    }
+    #[test]
+    fn direct_and_mailbox_queries_carry_the_read_only_flag() {
+        assert_eq!(
+            list_request_uri(true),
+            "/fed/v2/sessions?v=2&read_only=true",
+            "direct locator lost read-only flag"
+        );
+        assert_eq!(list_request_uri(false), "/fed/v2/sessions?v=2");
+        let queries = ListQueries::default();
+        let (id, _rx) = queries.ask("peer", true);
+        let (query, read_only) = queries.next_for("peer").unwrap();
+        assert_eq!(query, id);
+        assert!(read_only, "mailbox locator lost read-only flag");
+        let wire = serde_json::to_value(FedInboxItem::List {
+            query,
+            v: Some(2),
+            read_only,
+        })
+        .unwrap();
+        assert_eq!(wire["read_only"], true);
+        let decoded: FedInboxItem = serde_json::from_value(wire).unwrap();
+        assert!(matches!(
+            decoded,
+            FedInboxItem::List {
+                read_only: true,
+                ..
+            }
+        ));
+    }
+}

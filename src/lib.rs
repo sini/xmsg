@@ -33,6 +33,8 @@ pub mod http;
 #[cfg(feature = "daemon")]
 pub mod inbox;
 #[cfg(feature = "daemon")]
+pub mod locator;
+#[cfg(feature = "daemon")]
 pub mod mcp;
 #[cfg(feature = "daemon")]
 pub mod mesh;
