@@ -63,6 +63,7 @@ jobs:
     if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
+    # Never cancel a Pages deploy in flight; serialize deploys on the github-pages environment.
     concurrency:
       group: docs-pages
       cancel-in-progress: false
