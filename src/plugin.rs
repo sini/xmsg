@@ -633,8 +633,7 @@ where
                             "session '{to}' is already registered on this connection"
                         )));
                     }
-                    crate::locator::record(&c, &s.session_id, harness, &to, None, None)
-                        .map_err(db_err)?;
+                    crate::locator::update_native(&c, &s.session_id, &to).map_err(db_err)?;
                     // A19: the address moves; `to` is now its label.
                     c.execute(
                         "UPDATE plugin_sessions SET session = ?1 WHERE address = ?2",
