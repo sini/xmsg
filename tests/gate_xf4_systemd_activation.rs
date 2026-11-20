@@ -646,11 +646,10 @@ async fn oracle_1_socket_activated_fed_exact_port_mtls_and_stopping() {
 // -----------------------------------------------------------------------------
 #[tokio::test]
 async fn oracle_2_pre_occupied_port_contention_control() {
-    // Part A (control): bind(0) -> drop -> contender steals the port -> rebind fails with EADDRINUSE.
-    let probe = StdTcpListener::bind("127.0.0.1:0").unwrap();
-    let target_addr = probe.local_addr().unwrap();
-    drop(probe);
-    let thief = StdTcpListener::bind(target_addr).unwrap();
+    // Part A (control): hold a bind(0) listener directly (never drop a probe and re-bind)
+    // and verify a second bind on that occupied port fails with EADDRINUSE.
+    let thief = StdTcpListener::bind("127.0.0.1:0").unwrap();
+    let target_addr = thief.local_addr().unwrap();
     let rebind_err = StdTcpListener::bind(target_addr).unwrap_err();
     assert_eq!(
         rebind_err.kind(),
