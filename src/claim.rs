@@ -442,7 +442,6 @@ pub fn sync_claims_entries(
                 "claude",
                 &entry.session_id,
                 entry.env.as_ref(),
-                Some(&entry.cwd),
             )
             .map_err(|e| AppError::Internal(e.to_string()))?;
         }

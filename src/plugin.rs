@@ -575,7 +575,7 @@ where
                         params![address, conn_id, harness, session, now, peer_pid],
                     )
                     .map_err(db_err)?;
-                    crate::locator::record(&c, &address, harness, &session, env.as_ref(), None)
+                    crate::locator::record(&c, &address, harness, &session, env.as_ref())
                         .map_err(db_err)?;
                     // HA9-A.oc §2.2, C6, C7: a register of P (fresh or reclaimed) clears the turn
                     // columns and unparks every subagent row under P in the same batch.

@@ -348,8 +348,7 @@ pub(crate) const SCHEMA_N: &str = r#"
             address TEXT PRIMARY KEY,
             harness TEXT NOT NULL,
             native_id TEXT NOT NULL,
-            env TEXT,
-            cwd TEXT
+            env TEXT
         );
 
         CREATE TABLE IF NOT EXISTS instance_seen (
@@ -3025,14 +3024,7 @@ fn record_codex_registration(
         |row| row.get(0),
     )?;
     if !unchanged {
-        crate::locator::record(
-            conn,
-            &snap.root_id,
-            "codex",
-            &snap.root_id,
-            None,
-            snap.cwd.as_deref(),
-        )?;
+        crate::locator::record(conn, &snap.root_id, "codex", &snap.root_id, None)?;
     }
     Ok(())
 }
@@ -3696,15 +3688,7 @@ mod queue_tests {
         upsert_codex_root(&c, &snap).unwrap();
         let env: crate::locator::Environment =
             serde_json::from_value(serde_json::json!({"kind":"tmux","ref":"%3"})).unwrap();
-        crate::locator::record(
-            &c,
-            &snap.root_id,
-            "codex",
-            &snap.root_id,
-            Some(&env),
-            snap.cwd.as_deref(),
-        )
-        .unwrap();
+        crate::locator::record(&c, &snap.root_id, "codex", &snap.root_id, Some(&env)).unwrap();
         upsert_codex_root(&c, &snap).unwrap();
         rebind_codex_root(&c, &snap).unwrap();
         let hint = || {
@@ -3722,8 +3706,7 @@ mod queue_tests {
             hint().is_none(),
             "new owner without an adapter hint is unknown"
         );
-        crate::locator::record(&c, &snap.root_id, "codex", &snap.root_id, Some(&env), None)
-            .unwrap();
+        crate::locator::record(&c, &snap.root_id, "codex", &snap.root_id, Some(&env)).unwrap();
         snap.generation += 1;
         rebind_codex_root(&c, &snap).unwrap();
         assert!(
@@ -3736,7 +3719,7 @@ mod queue_tests {
     fn locator_registration_retains_parked_metadata_until_release_or_purge() {
         let c = Connection::open_in_memory().unwrap();
         init_db(&c).unwrap();
-        crate::locator::record(&c, "address", "pi", "native-pi", None, Some("/work")).unwrap();
+        crate::locator::record(&c, "address", "pi", "native-pi", None).unwrap();
         mark_live(&c, "address", "pi", 10).unwrap();
         assert_eq!(
             c.query_row(
@@ -3754,7 +3737,7 @@ mod queue_tests {
                 .unwrap(),
             0
         );
-        crate::locator::record(&c, "address", "pi", "native-pi", None, None).unwrap();
+        crate::locator::record(&c, "address", "pi", "native-pi", None).unwrap();
         purge_instance_seen(&c, 100, 30).unwrap();
         assert_eq!(
             c.query_row("SELECT COUNT(*) FROM locator_metadata", [], |r| r

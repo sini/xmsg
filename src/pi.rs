@@ -280,15 +280,14 @@ pub async fn handle_pi_connection_peer<
         return Err(err.into());
     }
 
-    if let Some(native_id) = req.session_id.as_deref() {
+    {
         let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
         crate::locator::record(
             &conn,
             &session_id,
             "pi",
-            native_id,
+            req.session_id.as_deref().unwrap_or(""),
             req.env.as_ref(),
-            req.cwd.as_deref(),
         )?;
     }
 
