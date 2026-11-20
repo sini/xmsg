@@ -424,6 +424,22 @@ async fn test_oracle_1_order_and_persistence_across_restart() {
         "Later observed process P2 MUST receive ~2 despite earlier procStart"
     );
 
+    let native_id: String = server1
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT native_id FROM locator_metadata WHERE address = ?1",
+            [format!("{conv_id}~2")],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        native_id, conv_id,
+        "locator must retain the unsuffixed Claude native ID"
+    );
+
     // Stop Server 1 and restart as Server 2 against the same DB file
     server1.stop().await;
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1300,6 +1316,7 @@ async fn test_oracle_8_pi_server_minted_uuid_v4() {
     setup_mock_proc(&proc_root, 5555, "100");
 
     let req = xmsg::pi::PiRegisterRequest {
+        env: None,
         harness: None,
         session_id: Some("asserted-custom-pi-id-z".to_string()),
         session_name: Some("pi-worker".to_string()),
@@ -1350,6 +1367,17 @@ async fn test_oracle_8_pi_server_minted_uuid_v4() {
         "Minted session ID must be UUID-shaped: {minted_id}"
     );
 
+    let native_id: String = db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT native_id FROM locator_metadata WHERE address = ?1",
+            [minted_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(native_id, "asserted-custom-pi-id-z");
+
     // Must be UUID v4
     assert_eq!(minted_id.chars().nth(14).unwrap(), '4');
     let var = minted_id.chars().nth(19).unwrap();
@@ -1358,6 +1386,7 @@ async fn test_oracle_8_pi_server_minted_uuid_v4() {
     // Second registration on a new process must mint a DIFFERENT UUID
     setup_mock_proc(&proc_root, 6666, "200");
     let req2 = xmsg::pi::PiRegisterRequest {
+        env: None,
         harness: None,
         session_id: Some("asserted-custom-pi-id-z".to_string()),
         session_name: Some("pi-worker".to_string()),

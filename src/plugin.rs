@@ -76,6 +76,8 @@ pub struct PluginHello {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum Frame {
     Register {
+        #[serde(default)]
+        env: Option<crate::locator::Environment>,
         request_id: String,
         session: String,
         #[serde(default)]
@@ -533,6 +535,7 @@ where
         let address_of = |id: &str| format!("{id}@{node}");
         match frame {
             Frame::Register {
+                env,
                 request_id,
                 session,
                 reclaim,
@@ -572,6 +575,8 @@ where
                         params![address, conn_id, harness, session, now, peer_pid],
                     )
                     .map_err(db_err)?;
+                    crate::locator::record(&c, &address, harness, &session, env.as_ref(), None)
+                        .map_err(db_err)?;
                     // HA9-A.oc §2.2, C6, C7: a register of P (fresh or reclaimed) clears the turn
                     // columns and unparks every subagent row under P in the same batch.
                     storage::subagent_unpark_for_parent(&c, &address).map_err(db_err)?;
@@ -628,6 +633,8 @@ where
                             "session '{to}' is already registered on this connection"
                         )));
                     }
+                    crate::locator::record(&c, &s.session_id, harness, &to, None, None)
+                        .map_err(db_err)?;
                     // A19: the address moves; `to` is now its label.
                     c.execute(
                         "UPDATE plugin_sessions SET session = ?1 WHERE address = ?2",

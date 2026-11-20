@@ -134,6 +134,7 @@ const MESSAGE_STATE_TABLES: &[&str] = &[
     "handoff_owed",
     "codex_handoff",
     "codex_roots",
+    "locator_metadata",
 ];
 
 pub(crate) const SCHEMA_N: &str = r#"
@@ -341,6 +342,14 @@ pub(crate) const SCHEMA_N: &str = r#"
             id TEXT PRIMARY KEY,
             node TEXT NOT NULL,
             cached_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS locator_metadata (
+            address TEXT PRIMARY KEY,
+            harness TEXT NOT NULL,
+            native_id TEXT NOT NULL,
+            env TEXT,
+            cwd TEXT
         );
 
         CREATE TABLE IF NOT EXISTS instance_seen (
@@ -2209,6 +2218,7 @@ pub fn mint_reclaimable_instance(
 /// Permanently releases `id` (`Frame::Release`): clears `reclaim_hash` so the address
 /// cannot be reclaimed, answers `gone` on send, and lists as `closed` in inactive `list` (HA8).
 pub fn clear_reclaim_hash(conn: &Connection, id: &str, now: i64) -> Result<()> {
+    crate::locator::forget(conn, id)?;
     conn.execute(
         "UPDATE instance_seen SET reclaim_hash = NULL, last_live = MAX(last_live, ?2) WHERE id = ?1",
         params![id, now],
@@ -2398,6 +2408,11 @@ pub fn purge_instance_seen(conn: &Connection, now: i64, ttl_secs: i64) -> Result
         .query_map(params![now, ttl_secs], |r| r.get(0))?
         .collect::<Result<Vec<_>>>()?;
     for id in &purged_ids {
+        crate::locator::forget(conn, id)?;
+        conn.execute(
+            "DELETE FROM locator_metadata WHERE address LIKE ?1 || '~%'",
+            params![id],
+        )?;
         conn.execute("DELETE FROM instance_seen WHERE id = ?1", params![id])?;
         conn.execute(
             "DELETE FROM subagents WHERE parent = ?1 OR parent LIKE ?1 || '~%'",
@@ -3095,6 +3110,14 @@ fn rebind_codex_root_in(
             snap.rollout_ino as i64,
         ],
     )?;
+    crate::locator::record(
+        tx,
+        &snap.root_id,
+        "codex",
+        &snap.root_id,
+        None,
+        snap.cwd.as_deref(),
+    )?;
     mark_live(tx, &snap.root_id, "codex", now)?;
     rebind_pending_codex_handoffs(tx, snap, now)?;
     let child_ids: Vec<String> = {
@@ -3212,6 +3235,7 @@ fn park_codex_root_with_restart(conn: &Connection, root_id: &str, preserve: bool
 /// and delete its child bindings and child queue entries (§2.1, §2.3, §6.2.1).
 pub fn invalidate_codex_root(conn: &Connection, root_id: &str) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
+    crate::locator::forget(&tx, root_id)?;
     let now = now_epoch_secs();
     tx.execute(
         "INSERT INTO codex_roots (root_id, codex_home, owner_pid, owner_starttime, generation, label, cwd, registered_at, rollout_dev, rollout_ino, active, revoked) \
@@ -3636,6 +3660,38 @@ pub fn utc_rfc3339(secs: i64) -> String {
 #[cfg(test)]
 mod queue_tests {
     use super::*;
+
+    #[test]
+    fn locator_registration_retains_parked_metadata_until_release_or_purge() {
+        let c = Connection::open_in_memory().unwrap();
+        init_db(&c).unwrap();
+        crate::locator::record(&c, "address", "pi", "native-pi", None, Some("/work")).unwrap();
+        mark_live(&c, "address", "pi", 10).unwrap();
+        assert_eq!(
+            c.query_row(
+                "SELECT native_id FROM locator_metadata WHERE address='address'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "native-pi"
+        );
+        clear_reclaim_hash(&c, "address", 20).unwrap();
+        assert_eq!(
+            c.query_row("SELECT COUNT(*) FROM locator_metadata", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        crate::locator::record(&c, "address", "pi", "native-pi", None, None).unwrap();
+        purge_instance_seen(&c, 100, 30).unwrap();
+        assert_eq!(
+            c.query_row("SELECT COUNT(*) FROM locator_metadata", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
 
     fn msg(id: &str, session_id: &str, outcome: &str, harness: &str) -> MessageRecord {
         MessageRecord {

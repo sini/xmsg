@@ -1027,6 +1027,7 @@ pub async fn run_agent_server_with_listener(
                                 crate::agy::notify_agy_escrow();
                                 if let Ok(db) = state_clone.db.lock() {
                                     let now = crate::storage::now_epoch_secs();
+                                    let _ = crate::locator::record(&db, &session_key, "agy", &conv_id, None, None);
                                     let _ = crate::storage::mark_live(
                                         &db,
                                         &session_key,
@@ -2572,6 +2573,19 @@ pub async fn handle_codex_hook_frame(
                                     .map_err(|e| AppError::Internal(e.to_string()))?;
                                 crate::storage::rebind_codex_root(&db, &root_snap)
                                     .map_err(|e| AppError::Internal(e.to_string()))?;
+                                let env = raw_payload.get("xmsg_env").cloned().and_then(|value| {
+                                    serde_json::from_value::<crate::locator::Environment>(value)
+                                        .ok()
+                                });
+                                crate::locator::record(
+                                    &db,
+                                    session_id,
+                                    "codex",
+                                    session_id,
+                                    env.as_ref(),
+                                    root_snap.cwd.as_deref(),
+                                )
+                                .map_err(|e| AppError::Internal(e.to_string()))?;
                                 crate::storage::reserve_codex_hook_batch(
                                     &db,
                                     session_id,
@@ -2661,6 +2675,19 @@ pub async fn handle_codex_hook_frame(
                                     .map_err(|e| AppError::Internal(e.to_string()))?;
                                 crate::storage::rebind_codex_root(&db, &root_snap)
                                     .map_err(|e| AppError::Internal(e.to_string()))?;
+                                let env = raw_payload.get("xmsg_env").cloned().and_then(|value| {
+                                    serde_json::from_value::<crate::locator::Environment>(value)
+                                        .ok()
+                                });
+                                crate::locator::record(
+                                    &db,
+                                    session_id,
+                                    "codex",
+                                    session_id,
+                                    env.as_ref(),
+                                    root_snap.cwd.as_deref(),
+                                )
+                                .map_err(|e| AppError::Internal(e.to_string()))?;
                                 crate::storage::reserve_codex_hook_batch(
                                     &db,
                                     session_id,
@@ -3382,6 +3409,12 @@ pub fn run_codex_hook<W: std::io::Write>(
         "event": event,
         "payload": payload_val,
     });
+    if let Some(payload) = frame["payload"].as_object_mut() {
+        payload.insert(
+            "xmsg_env".to_string(),
+            serde_json::to_value(crate::locator::own_environment()).map_err(|e| e.to_string())?,
+        );
+    }
     if let Some(lbl) = label.filter(|s| !s.trim().is_empty()) {
         frame["label"] = serde_json::Value::String(lbl.to_string());
     }

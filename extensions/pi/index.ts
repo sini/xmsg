@@ -4,6 +4,22 @@ import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 import readline from "node:readline";
+
+function ownEnvironment(): { kind: string; ref?: string } {
+  for (const [name, kind] of [["ZELLIJ_SESSION_NAME", "zellij"], ["TMUX_PANE", "tmux"], ["HERDR_PANE_ID", "herdr"]]) {
+    const value = process.env[name];
+    if (value !== undefined) {
+      let reference = "";
+      for (const char of value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "")) {
+        if (Buffer.byteLength(reference + char, "utf8") > 64) break;
+        reference += char;
+      }
+      return { kind, ref: reference };
+    }
+  }
+  return { kind: "none" };
+}
+
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -276,6 +292,7 @@ export class XmsgPiBridge {
           const regPayload: Record<string, any> = {
             harness: "pi",
             sessionId: piKey,
+            env: ownEnvironment(),
             sessionName: this.currentSessionName,
             cwd: this.currentCwd,
             ...(saved ? { reclaim: { id: saved.id, secret: saved.reclaim } } : {}),
