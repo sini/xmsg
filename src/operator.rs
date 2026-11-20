@@ -292,6 +292,9 @@ pub fn locate(args: LocateArgs) -> Result<()> {
         return print_json(&serde_json::to_value(result)?, true);
     }
     let inert = xmsg::locator::inert;
+    if result.locators.is_empty() {
+        println!("No matching sessions in the nodes that answered.");
+    }
     for item in result.locators {
         let row = item.recipient;
         println!(

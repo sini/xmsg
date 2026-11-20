@@ -1,0 +1,239 @@
+[
+  {
+    "label": "locator-native-registration",
+    "target": "gate_xa1_instance_identity",
+    "test": "test_oracle_1_order_and_persistence_across_restart",
+    "test_file": "tests/gate_xa1_instance_identity.rs",
+    "expected_literal": "locator must retain the unsuffixed Claude native ID",
+    "edits": [
+      {
+        "file": "src/claim.rs",
+        "needle": "&entry.session_id,\n                entry.env.as_ref(),",
+        "replacement": "&address,\n                entry.env.as_ref(),"
+      }
+    ],
+    "binaries": [
+      "xmsg"
+    ]
+  },
+  {
+    "label": "locator-pi-native-registration",
+    "target": "gate_xa1_instance_identity",
+    "test": "test_oracle_8_pi_server_minted_uuid_v4",
+    "test_file": "tests/gate_xa1_instance_identity.rs",
+    "expected_literal": "Pi native ID was replaced by the bus address",
+    "edits": [
+      {
+        "file": "src/pi.rs",
+        "needle": "\"pi\",\n            native_id,",
+        "replacement": "\"pi\",\n            &session_id,"
+      }
+    ],
+    "binaries": [
+      "xmsg"
+    ]
+  },
+  {
+    "label": "locator-native-projection",
+    "target": "lib",
+    "test": "locator::tests::native_id_is_recorded_not_derived_from_suffixed_address",
+    "test_file": "src/locator.rs",
+    "expected_literal": "stored native ID changed to public address",
+    "edits": [
+      {
+        "file": "src/locator.rs",
+        "needle": "item.native_id = Some(id);",
+        "replacement": "item.native_id = Some(address.to_owned());"
+      }
+    ]
+  },
+  {
+    "label": "locator-unknown-harness",
+    "target": "lib",
+    "test": "locator::tests::unknown_harness_never_falls_back_to_claude",
+    "test_file": "src/locator.rs",
+    "expected_literal": "unknown harness gained a native mapping",
+    "edits": [
+      {
+        "file": "src/locator.rs",
+        "needle": "_ => false,",
+        "replacement": "_ => crate::claim::is_uuid_shaped(id),",
+        "start": "pub fn valid_native_id",
+        "end": "fn fail("
+      }
+    ]
+  },
+  {
+    "label": "locator-live-reason",
+    "target": "lib",
+    "test": "locator::tests::native_id_is_recorded_not_derived_from_suffixed_address",
+    "test_file": "src/locator.rs",
+    "expected_literal": "live locator lost location-only reason",
+    "edits": [
+      {
+        "file": "src/locator.rs",
+        "needle": "let reason = if matches!(",
+        "replacement": "let reason = if false && matches!("
+      }
+    ]
+  },
+  {
+    "label": "locator-unsafe-id",
+    "target": "lib",
+    "test": "locator::tests::native_ids_refuse_option_and_shell_shapes",
+    "test_file": "src/locator.rs",
+    "expected_literal": "claude accepted -x",
+    "edits": [
+      {
+        "file": "src/locator.rs",
+        "needle": "if id.is_empty() || id.len() > 256 || id.starts_with('-') {",
+        "replacement": "if id.starts_with('-') { return true; }\n    if id.is_empty() || id.len() > 256 || id.starts_with('-') {"
+      }
+    ]
+  },
+  {
+    "label": "locator-peer-extra",
+    "target": "lib",
+    "test": "locator::tests::peer_metadata_is_rejected_and_recipient_shape_is_unchanged",
+    "test_file": "src/locator.rs",
+    "expected_literal": "peer locator extras were accepted",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "#[serde(deny_unknown_fields)]\npub struct FedListEntry",
+        "replacement": "pub struct FedListEntry"
+      }
+    ]
+  },
+  {
+    "label": "locator-unknown-environment",
+    "target": "lib",
+    "test": "locator::tests::detail_and_environment_unknown_none_are_distinct",
+    "test_file": "src/locator.rs",
+    "expected_literal": "unknown environment became explicit none",
+    "edits": [
+      {
+        "file": "src/locator.rs",
+        "needle": ".map(|e| e.sanitized());",
+        "replacement": ".map(|e| e.sanitized()).or(Some(Environment {kind: EnvironmentKind::None, reference: None}));"
+      }
+    ]
+  },
+  {
+    "label": "locator-detail-request",
+    "target": "lib",
+    "test": "locator::tests::detail_and_environment_unknown_none_are_distinct",
+    "test_file": "src/locator.rs",
+    "expected_literal": "detail escaped request gate",
+    "edits": [
+      {
+        "file": "src/locator.rs",
+        "needle": "if query.detail {",
+        "replacement": "if true {"
+      }
+    ]
+  },
+  {
+    "label": "locator-detail-viewer-config",
+    "target": "operator_cli",
+    "test": "locate_requires_both_viewer_config_and_request_for_detail_and_escapes_display",
+    "test_file": "tests/operator_cli.rs",
+    "expected_literal": "viewer detail conjunction was bypassed",
+    "edits": [
+      {
+        "file": "src/operator.rs",
+        "needle": "let detail = args.detail && config.locate.detail;",
+        "replacement": "let detail = args.detail;"
+      }
+    ],
+    "binaries": [
+      "xmsg"
+    ]
+  },
+  {
+    "label": "locator-all-label-matches",
+    "target": "lib",
+    "test": "locator::tests::label_lookup_is_complete_beyond_list_and_snapshot_caps_and_read_only",
+    "test_file": "src/locator.rs",
+    "expected_literal": "locator discarded disambiguation matches",
+    "edits": [
+      {
+        "file": "src/locator.rs",
+        "needle": "recipients.sort_by(|a, b|",
+        "replacement": "recipients.truncate(50);\n    recipients.sort_by(|a, b|"
+      }
+    ]
+  },
+  {
+    "label": "locator-node-error",
+    "target": "lib",
+    "test": "locator::tests::label_lookup_is_complete_beyond_list_and_snapshot_caps_and_read_only",
+    "test_file": "src/locator.rs",
+    "expected_literal": "node failure became no-match",
+    "edits": [
+      {
+        "file": "src/locator.rs",
+        "needle": "\"unreachable\",\n            \"not a node in the local view\".into(),",
+        "replacement": "\"ok\",\n            \"not a node in the local view\".into(),"
+      }
+    ]
+  },
+  {
+    "label": "locator-display-escape",
+    "target": "lib",
+    "test": "locator::tests::display_escapes_terminal_controls_without_truncation",
+    "test_file": "src/locator.rs",
+    "expected_literal": "terminal controls were not escaped",
+    "edits": [
+      {
+        "file": "src/locator.rs",
+        "needle": "value.chars().flat_map(char::escape_default).collect()",
+        "replacement": "value.to_owned()"
+      }
+    ]
+  },
+  {
+    "label": "locator-readonly-federation",
+    "target": "lib",
+    "test": "fed::locator_readonly_tests::read_only_federated_list_does_not_reconcile_or_purge",
+    "test_file": "src/fed.rs",
+    "expected_literal": "read-only federation purged the registered history",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "let mut entries = if read_only {",
+        "replacement": "let mut entries = if false && read_only {"
+      }
+    ]
+  },
+  {
+    "label": "locator-direct-readonly-flag",
+    "target": "lib",
+    "test": "fed::locator_readonly_tests::direct_and_mailbox_queries_carry_the_read_only_flag",
+    "test_file": "src/fed.rs",
+    "expected_literal": "direct locator lost read-only flag",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if read_only {",
+        "replacement": "if false && read_only {",
+        "start": "fn list_request_uri(",
+        "end": "async fn list_direct_peer_mode("
+      }
+    ]
+  },
+  {
+    "label": "locator-mailbox-readonly-flag",
+    "target": "lib",
+    "test": "fed::locator_readonly_tests::direct_and_mailbox_queries_carry_the_read_only_flag",
+    "test_file": "src/fed.rs",
+    "expected_literal": "mailbox locator lost read-only flag",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": ".push((query.clone(), read_only));",
+        "replacement": ".push((query.clone(), false));"
+      }
+    ]
+  }
+]
