@@ -136,6 +136,8 @@ impl Fixture {
             },
             sources: vec![],
             web_tls: None,
+            retention_after_inactive_secs:
+                crate::observe_collector_net::DEFAULT_RETENTION_AFTER_INACTIVE_SECS,
         };
         let clock: crate::observe_collector_store::EpochClock = Arc::new(|| 1000);
         let store = Arc::new(

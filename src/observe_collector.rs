@@ -288,9 +288,13 @@ impl State {
                         if masked {
                             continue;
                         }
-                        let last_success = success.get(&view.node).map(|(mono, utc)| {
-                            (*utc, now_mono.saturating_duration_since(*mono).as_secs())
-                        });
+                        let last_success = if view.status == NodeStatus::RemovedRetained {
+                            view.last_activity
+                        } else {
+                            success.get(&view.node).map(|(mono, utc)| {
+                                (*utc, now_mono.saturating_duration_since(*mono).as_secs())
+                            })
+                        };
                         let mut entry = NodeFreshness {
                             stale_for_secs: None,
                             stale_since_start: false,
@@ -339,6 +343,7 @@ impl State {
                         .map(|t| now_mono.saturating_duration_since(t).as_secs()),
                     last_maintenance_failed: maint.last_failed,
                     store_slot_refusals: self.store_slot_refusals.load(Ordering::Relaxed),
+                    evicted_inactive: self.store.evicted_inactive(),
                     nodes: node_freshness,
                 };
                 response(
@@ -758,11 +763,13 @@ pub async fn run(args: Args) -> Result<(), Error> {
         })
         .collect();
     let directory = args.state_dir;
-    let store =
-        tokio::task::spawn_blocking(move || Store::open(Path::new(&directory), policies, clock))
-            .await
-            .map_err(|_| Error::Storage)?
-            .map_err(Error::from)?;
+    let retention_secs = config.retention_after_inactive_secs;
+    let store = tokio::task::spawn_blocking(move || {
+        Store::open_with_retention(Path::new(&directory), policies, clock, retention_secs)
+    })
+    .await
+    .map_err(|_| Error::Storage)?
+    .map_err(Error::from)?;
     let mut nodes = client
         .sources
         .iter()

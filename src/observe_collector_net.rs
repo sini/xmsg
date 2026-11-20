@@ -12,6 +12,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+pub const DEFAULT_RETENTION_AFTER_INACTIVE_SECS: u64 = 7 * 86_400;
+pub const MAX_RETENTION_AFTER_INACTIVE_SECS: u64 = 365 * 86_400;
+
+fn default_retention_after_inactive_secs() -> u64 {
+    DEFAULT_RETENTION_AFTER_INACTIVE_SECS
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -22,6 +29,8 @@ pub struct Config {
     pub sources: Vec<SourceConfig>,
     #[serde(default)]
     pub web_tls: Option<WebTls>,
+    #[serde(default = "default_retention_after_inactive_secs")]
+    pub retention_after_inactive_secs: u64,
 }
 
 #[derive(Deserialize)]
@@ -108,7 +117,9 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self, Error> {
         let bytes = read_file(path, 1024 * 1024)?;
         let mut config: Self = serde_json::from_slice(&bytes).map_err(|_| Error::Configuration)?;
-        if config.sources.len() > 64 {
+        if config.sources.len() > 64
+            || config.retention_after_inactive_secs > MAX_RETENTION_AFTER_INACTIVE_SECS
+        {
             return Err(Error::Configuration);
         }
         let base = path.parent().unwrap_or_else(|| Path::new("."));

@@ -58,6 +58,18 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		plannedSince: '2026-11-20',
 		note: 'Metadata-only collector; body detail and transcript views are not implemented.',
 	},
+	'fleet-observer.retention': {
+		id: 'fleet-observer.retention',
+		title: 'Configurable inactive-node retention window',
+		owner: 'sini',
+		evidence: [
+			{
+				path: 'src/observe_collector_net.rs',
+				anchor: 'pub retention_after_inactive_secs: u64',
+			},
+		],
+		note: 'Retains history for removed or unconfigured nodes for retention_after_inactive_secs (default 604800 = 7 days) after last accepted ingest.',
+	},
 };
 
 export const SIBLING_ALLOWLIST: SiblingAllowlistEntry[] = [];

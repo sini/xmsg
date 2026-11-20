@@ -3,6 +3,8 @@ title: Fleet Observer Operations
 description: Node observation grants, owner collector configuration, retention, and deployment prerequisites.
 ---
 
+import Status from '../../../components/Status.astro';
+
 The node export is available for explicitly authorized federation peers.
 **The collector command and view are planned, not yet released.** They use the
 node protocol below and the configuration described here. Actual ingress, owner
@@ -363,6 +365,10 @@ fallback. It does not make unpatched older binaries able to read newer events or
 stored rows. See the [wire contract](/reference/http-and-sockets/#planned-node-observation-export).
 
 ## Retention and bounds
+
+<Status id="fleet-observer.retention" />
+
+Set `retention_after_inactive_secs` in the collector configuration (default `604800`, 7 days; max `31536000`, 365 days; `0` purges immediately) to control how long a node removed from the configured set retains its stored history after its last accepted ingest (measured monotonically). Retained-but-removed nodes display as `not currently configured` with their last-success age in a separate `retained, not configured` coverage bucket without changing the configured-node denominator. Re-adding a node inside the window resumes it with its history intact and masked until revalidation; if the store fills, the oldest-inactive history is evicted first and reported in the collector line.
 
 Per node, the cache retains at most seven days, 10,000 events and 16 MiB of accounted
 metadata, including its latest snapshot. It does not accumulate snapshot archives.
