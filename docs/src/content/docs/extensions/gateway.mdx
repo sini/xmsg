@@ -3,6 +3,8 @@ title: Hosted models with xmsg-mcp-gateway
 description: Connect a hosted MCP client through OAuth, explicit grants, owner-set outbound policy and optional Events wake hints.
 ---
 
+import Status from '../../../components/Status.astro';
+
 [xmsg-mcp-gateway](https://github.com/sini/xmsg-mcp-gateway) is a separate Rust service. It
 connects hosted MCP clients to an xmsg node over the local
 [Rust service client](/reference/service-client/). The gateway handles the outside HTTPS and OAuth
@@ -57,7 +59,9 @@ client fall back to `initialize`.
 
 ## Authentication profiles and issuer cutover
 
-**Planned, not yet released.** The gateway can be configured with exact issuer, hosted-client and audience profiles for a common resource URL. Each keeps its own subject, scopes, provider restrictions and enabled grant. Profiles select authentication; they do not create separate bus addresses or mailboxes.
+<Status id="gateway.oauth-as" />
+
+The gateway can be configured with exact issuer, hosted-client and audience profiles for a common resource URL. Each keeps its own subject, scopes, provider restrictions and enabled grant. Profiles select authentication; they do not create separate bus addresses or mailboxes.
 
 For example, an owner can retain the Kanidm entry while adding a proxy issuer's entry. Readable token claims select one configured profile as a routing hint; that provider must validate the token and the gateway must match the complete binding. There is no trial of other providers after a refusal. At most one explicit opaque default can receive encrypted or opaque tokens. An unknown JWS issuer cannot fall back to it.
 
@@ -71,9 +75,11 @@ See the gateway's [profile reference and cutover example](https://github.com/sin
 
 ## Gateway authorization server
 
-**Planned, not yet released.** The gateway can act as the hosted client's OAuth [authorization server](/glossary/#authorization-server) while keeping owner login at Kanidm. Local access tokens and rotating [refresh families](/glossary/#refresh-family) let the hosted connection continue beyond Kanidm's browser session. This requires the feature's implementation and hosted acceptance; it is not a promise that a deployment is configured or production-ready.
+<Status id="gateway.oauth-as" />
 
-| Model | Legacy Kanidm profile | Gateway AS profile (planned) |
+The gateway can act as the hosted client's OAuth [authorization server](/glossary/#authorization-server) while keeping owner login at Kanidm. Local access tokens and rotating [refresh families](/glossary/#refresh-family) let the hosted connection continue beyond Kanidm's browser session. This requires the feature's implementation and hosted acceptance; it is not a promise that a deployment is configured or production-ready.
+
+| Model | Legacy Kanidm profile | Gateway AS profile |
 | --- | --- | --- |
 | Hosted access | Kanidm bearer, tied to its login session | 1-hour local access token |
 | Refresh lifetime | Kanidm's session policy | 30-day idle limit and 90-day absolute family limit by default |
@@ -100,7 +106,9 @@ See the [authorization-server reference](https://github.com/sini/xmsg-mcp-gatewa
 
 ## File exchange
 
-**Planned, not yet released.** `xmsg_send` and `xmsg_reply` accept inline files.
+<Status id="gateway.inline-attachments" />
+
+`xmsg_send` and `xmsg_reply` accept inline files.
 `xmsg_read_attachment` reads files on messages in the caller's own custody. These use the
 existing grant, scopes, outbound policy, owner and current revision. The caller supplies
 data; it cannot select a host filesystem path or fetch by a bare hash.
@@ -110,7 +118,7 @@ data; it cannot select a host filesystem path or fetch by a bare hash.
 ```
 
 Each of at most eight entries has `name`, optional `media_type`, and exactly one of `text`
-or `base64`. **Planned:** omitted `media_type` defaults to `text/plain; charset=utf-8` for
+or `base64`. Omitted `media_type` defaults to `text/plain; charset=utf-8` for
 `text` entries and `application/octet-stream` for `base64`, without filename or byte sniffing.
 An explicit type wins. Only the exact UTF-8 parameter shown here is accepted; other parameters
 remain invalid. Deploy the xmsg leaf with this canonical type validator **before** deploying the
@@ -150,7 +158,9 @@ is separate work. See [file attachments](/concepts/attachments/) and the gateway
 
 ## Events callback hosts
 
-**Planned, not yet released.** The gateway's optional `events.webhook_allowed_hosts`
+<Status id="gateway.webhook-egress" />
+
+The gateway's optional `events.webhook_allowed_hosts`
 limits subscribe/renew callbacks to exact DNS hostnames. For example, configure
 `"webhook_allowed_hosts": ["receiver.example.com"]` inside the complete Events
 configuration, replacing the example with the approved observed receiver host.
@@ -174,7 +184,9 @@ controls for an immediate stop. See the
 
 ## Renewal failures and credential recovery
 
-**Planned, not yet released.** Callback verification and the final credential/grant
+<Status id="gateway.webhook-egress" />
+
+Callback verification and the final credential/grant
 check complete before a single transaction replaces an Events subscription. A
 failed subscribe or renew leaves the old subscription, encrypted credentials,
 keys, expiry, generation and cursors unchanged; a failed first subscribe creates

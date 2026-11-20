@@ -3,7 +3,11 @@ title: Troubleshooting
 description: Check local node setup with read-only diagnostics and interpret the results.
 ---
 
-## Start with doctor (planned)
+import Status from '../../../components/Status.astro';
+
+## Start with doctor
+
+<Status id="xmsg.doctor" />
 
 Run these as the user who runs the daemon:
 
@@ -16,10 +20,10 @@ Doctor checks setup without changing it. Each result has a status and a fix hint
 `pass` applies only to the named check; it is not a guarantee that the whole node works.
 A `warn` needs interpretation, and a `fail` means a checked requirement failed. Only a
 failure makes the command exit `1`; warnings alone exit `0`. JSON includes the checks,
-summary counts, the CLI's `client_version`, its `client_build_revision` (planned) and a
+summary counts, the CLI's `client_version`, its `client_build_revision` and a
 `not_checked` list.
 
-The `collector.sqlite_engine` metadata line (planned) is always informational, including when the linked and required SQLite versions differ. It describes this CLI binary, performs no file or network I/O, and does not validate a collector configuration. `info` rows are excluded from summary counts and do not change the exit code. A collector startup error remains the authoritative engine refusal.
+The `collector.sqlite_engine` metadata line is always informational, including when the linked and required SQLite versions differ. It describes this CLI binary, performs no file or network I/O, and does not validate a collector configuration. `info` rows are excluded from summary counts and do not change the exit code. A collector startup error remains the authoritative engine refusal.
 
 For a custom installation, select the paths you want checked:
 
@@ -43,23 +47,23 @@ local defaults; it cannot prove that the running daemon uses the same configurat
 | --- | --- | --- |
 | Runtime directory or socket fails | A selected path is missing, has the wrong type, owner or permissions. | Check the daemon user, runtime directory and socket flags. Correct the installation deliberately; doctor does not create directories or change modes. |
 | Daemon health fails | The bounded request to `GET /healthz` did not give the expected health response. | Check that the daemon is running and that `--http-sock` selects its socket. Read the service logs. |
-| Daemon build revision warning (planned) | The daemon and client report different known revisions, or revision metadata is unavailable. | Check the intended source pin and the selected Unix socket. Nix builds embed the revision; plain Cargo builds may report `unknown`. The crate version alone is insufficient. A warning does not fail the health check or prove the daemon needs restarting. |
-| Registered process liveness warning (planned) | A registration has gone/stale process evidence, or bounded read-only diagnostics cannot establish liveness. | Inspect the named local process and registration deliberately. `live` is only process evidence; it does not prove the harness is addressable or a message can be delivered. Missing `/proc` or denied platform inspection may leave evidence unknown and produces one portability warning per run. |
-| Harness binary path drift (`harness.codex_exe`, `harness.agy_exe`) (planned) | `info`: a live Codex or Antigravity owner is running from a different canonical path than `--codex-exe` / `--agy-exe` (for example after a Nix store upgrade) and was admitted by canonical executable name. `warn`: `--codex-exe-strict` or `--agy-exe-strict` refused admission because the path differed. | On `info`, no action is needed unless you want the harness on the newer build. On `warn`, restart the harness (and any managed Codex app-server) on the configured binary, or omit `--*-exe-strict`. |
+| Daemon build revision warning | The daemon and client report different known revisions, or revision metadata is unavailable. | Check the intended source pin and the selected Unix socket. Nix builds embed the revision; plain Cargo builds may report `unknown`. The crate version alone is insufficient. A warning does not fail the health check or prove the daemon needs restarting. |
+| Registered process liveness warning | A registration has gone/stale process evidence, or bounded read-only diagnostics cannot establish liveness. | Inspect the named local process and registration deliberately. `live` is only process evidence; it does not prove the harness is addressable or a message can be delivered. Missing `/proc` or denied platform inspection may leave evidence unknown and produces one portability warning per run. |
+| Harness binary path drift (`harness.codex_exe`, `harness.agy_exe`) | `info`: a live Codex or Antigravity owner is running from a different canonical path than `--codex-exe` / `--agy-exe` (for example after a Nix store upgrade) and was admitted by canonical executable name. `warn`: `--codex-exe-strict` or `--agy-exe-strict` refused admission because the path differed. | On `info`, no action is needed unless you want the harness on the newer build. On `warn`, restart the harness (and any managed Codex app-server) on the configured binary, or omit `--*-exe-strict`. |
 | Sessions directory warning | Health reports that the sessions directory is missing. | Check the harness path if this node hosts sessions. A service-only node may not need one. |
-| Database schema or additive requirements (planned) | Newer schemas fail because startup refuses them; older schemas fail with a destructive schema-3 message-state rebuild warning. Missing same-version tables, indexes or additive columns warn by operation name. | Check the selected DB path, preserve a backup and follow the normal upgrade procedure. Version equality is not backfill or integrity certification; optional enrollment schema is conditional. |
-| Journal/WAL/SHM state (planned) | Doctor reports stat-only type and size. Live WAL/SHM can be expected; down or unknown daemon state with sidecars warns about an unclean or uncertain shutdown. | Keep the sidecars. The next normal SQLite start handles recovery; doctor does not open sidecars, recover or checkpoint. Presence/size does not prove journal hotness or corruption. |
+| Database schema or additive requirements | Newer schemas fail because startup refuses them; older schemas fail with a destructive schema-3 message-state rebuild warning. Missing same-version tables, indexes or additive columns warn by operation name. | Check the selected DB path, preserve a backup and follow the normal upgrade procedure. Version equality is not backfill or integrity certification; optional enrollment schema is conditional. |
+| Journal/WAL/SHM state | Doctor reports stat-only type and size. Live WAL/SHM can be expected; down or unknown daemon state with sidecars warns about an unclean or uncertain shutdown. | Keep the sidecars. The next normal SQLite start handles recovery; doctor does not open sidecars, recover or checkpoint. Presence/size does not prove journal hotness or corruption. |
 | Observation sidecar warning | The expected `<database>.observe.sqlite` file is absent or its metadata needs attention. | Check the observer setup and file ownership. Doctor does not open the journal writer or initialize a sidecar. |
 | Peer configuration fails | The selected configuration fails the existing `check-peers` parser or certificate consistency check. | Correct the named configuration issue, then run doctor again. Parsing does not prove peer reachability or the daemon's loaded configuration. |
 | Enrollment expiry fails | Saved metadata says the enrolled certificate has expired. | Follow the enrollment renewal procedure. Doctor does not renew it. |
 | Enrollment renewal warns | The certificate has reached two-thirds of its recorded lifetime. | Schedule renewal. For a 24-hour certificate this is 16 hours after issuance; a fixed seven-day threshold would be misleading. |
-| Loaded leaf certificate expired (planned) | The running daemon's actually loaded leaf certificate has expired. | Renew and reload that node's identity through the normal procedure. This is a failure; a certificate file selected by the CLI is not substituted for the loaded certificate. |
-| Loaded leaf expiry warning (planned) | The loaded certificate expires within the smaller of seven days or one-third of its lifetime. | Schedule renewal. This threshold also covers short-lived certificates: a 24-hour leaf warns within its final eight hours. |
-| Peer mTLS diagnostic warning (planned) | A bounded daemon-side probe could not establish reachability, or an ordinary peer was addressless or unattempted. Configured leaves with empty addresses or reserved `.invalid` hostnames report `INFO: outbound-only leaf, reached via its hub`; they are excluded from partial coverage and make no TLS, expiry or clock claim. Real-address leaves remain unknown and warn. | Inspect the peer's intended configuration and connectivity. Unknown is not evidence of a bad peer, and TLS success does not establish application permissions or delivery readiness. Peer results warn at most. |
-| Observed clock offset warning (planned) | The peer HTTP date differs from the local clock beyond the 120-second tolerance, accounting for uncertainty. | Compare both clocks with a trusted time source. The diagnostic cannot say which clock is wrong. Missing/bad dates, unexpected status or local clock jumps leave the offset unknown. |
+| Loaded leaf certificate expired | The running daemon's actually loaded leaf certificate has expired. | Renew and reload that node's identity through the normal procedure. This is a failure; a certificate file selected by the CLI is not substituted for the loaded certificate. |
+| Loaded leaf expiry warning | The loaded certificate expires within the smaller of seven days or one-third of its lifetime. | Schedule renewal. This threshold also covers short-lived certificates: a 24-hour leaf warns within its final eight hours. |
+| Peer mTLS diagnostic warning | A bounded daemon-side probe could not establish reachability, or an ordinary peer was addressless or unattempted. Configured leaves with empty addresses or reserved `.invalid` hostnames report `INFO: outbound-only leaf, reached via its hub`; they are excluded from partial coverage and make no TLS, expiry or clock claim. Real-address leaves remain unknown and warn. | Inspect the peer's intended configuration and connectivity. Unknown is not evidence of a bad peer, and TLS success does not establish application permissions or delivery readiness. Peer results warn at most. |
+| Observed clock offset warning | The peer HTTP date differs from the local clock beyond the 120-second tolerance, accounting for uncertainty. | Compare both clocks with a trusted time source. The diagnostic cannot say which clock is wrong. Missing/bad dates, unexpected status or local clock jumps leave the offset unknown. |
 | CA TLS warning | The optional CA TLS handshake did not succeed. | Check connectivity and configured trust. A successful handshake establishes TLS reachability, not enrollment application health or login readiness. |
 | MCP `reply` returns `gone:`, `not_found:`, `inbox_unavailable:`, `inbox_timeout:`, or `reply delivery failed: push_failed` | xmsg stored the reply, but pushing it to the other party's live inbox failed (`sender_gone` or `push_failed`). | For `gone:` / `not_found:`, the recipient exited or its socket is missing; check `xmsg list` and start a new exchange with `send` if needed. For `inbox_unavailable:` / `inbox_timeout:`, inspect the target harness and daemon logs before retrying. |
-| Raw socket `attach` with `path` fails with `Operation not permitted` or times out on macOS (planned) | Direct `agent.sock` or `register.sock` `path` staging opens the file inside `xmsg serve`; a background `launchd` daemon does not inherit terminal TCC access to `Documents`, `Desktop` or `Downloads`, and Nix store-path upgrades invalidate per-binary TCC grants. | Stage bytes from the caller with inline `data` or chunked `upload` frames, or send through `xmsg mcp`, which reads `path` entries in the client process. |
+| Raw socket `attach` with `path` fails with `Operation not permitted` or times out on macOS | Direct `agent.sock` or `register.sock` `path` staging opens the file inside `xmsg serve`; a background `launchd` daemon does not inherit terminal TCC access to `Documents`, `Desktop` or `Downloads`, and Nix store-path upgrades invalidate per-binary TCC grants. | Stage bytes from the caller with inline `data` or chunked `upload` frames, or send through `xmsg mcp`, which reads `path` entries in the client process. |
 
 Doctor uses only the explicit Unix read-only liveness snapshot to inspect registrations.
 It never falls back to ordinary recipient listing, which can synchronize claims and deliver
@@ -76,7 +80,9 @@ or admission caches during a handshake, but make no persistent or application-st
 writes. An older or unavailable daemon leaves the result unknown.
 The response deadline is bounded, but the system DNS resolver may finish an in-flight lookup after its request is cancelled.
 
-## CA application health (planned)
+## CA application health
+
+<Status id="xmsg.ca-health" />
 
 ```sh
 xmsg doctor --enroll-ca-dir /absolute/path/to/ca --json
@@ -98,7 +104,9 @@ or can issue certificates. It neither approves nor denies requests. Use normal C
 operations for any fix. The client enrollment TLS probe remains separate and does not
 establish application readiness. See [CA operations](/operations/enrollment-ca/).
 
-## Primary schema views (planned)
+## Primary schema views
+
+<Status id="xmsg.schema-status" />
 
 For a live daemon, an existing regular WAL and SHM permit an ordinary read-only metadata
 reader; SQLite's reader marks can update the existing SHM. A rollback-journal database also
@@ -122,7 +130,9 @@ enrollment disabled, are informational; missing tables with enabled/unknown enro
 still warn. This does not certify the rest of the loaded configuration. No migration,
 checkpoint, VACUUM or recovery is run by doctor.
 
-## Intermittent agy delivery timeouts on macOS (planned)
+## Intermittent agy delivery timeouts on macOS
+
+<Status id="agy.macos-locks" />
 
 On macOS, an Antigravity delivery could time out or leave its `agy` child running when another
 delivery or connection was being set up at the same moment: the child inherited descriptors it
@@ -130,7 +140,9 @@ should not have held. The fix marks those descriptors close-on-exec before `agy`
 the child when a delivery times out. Linux was not affected. Commands run by `xmsg service exec`
 get the same close-on-exec treatment.
 
-## agy and Codex lock state on macOS (planned)
+## agy and Codex lock state on macOS
+
+<Status id="agy.macos-locks" />
 
 macOS has no `/proc/locks`. xmsg reads a process's lock state from the `FWASLOCKED` flag that
 `proc_pidfdinfo` reports for each open file. The flag is sticky: `flock(2)` sets it, and it stays
@@ -170,10 +182,12 @@ leaf expiry and observed offset with uncertainty; it is not a complete peer-heal
 clock-correctness guarantee.
 Registered owner-process liveness does not prove a usable Codex writer lease, message
 delivery or task completion. Treat these as separate investigations, not implied successes. Doctor offers no automatic database recovery or
-integrity guarantee. See the [CLI reference](/reference/cli-and-mcp/#xmsg-doctor-planned)
+integrity guarantee. See the [CLI reference](/reference/cli-and-mcp/#xmsg-doctor)
 for its options and output contract.
 
-### Interpreting the process catalogue (planned)
+### Interpreting the process catalogue
+
+<Status id="xmsg.recipient-snapshot" />
 
 A large historical catalogue does not imply that hundreds of processes are unhealthy.
 For example, five live registrations plus 163 `seen` rows lacking a process identity appear
@@ -183,7 +197,9 @@ gone process still warns. Only gone rows get individual details, capped at 20; t
 keeps the full total. A truncated response still warns, while the catalogue-scope `partial`
 flag alone does not.
 
-## Collector relay failures (planned)
+## Collector relay failures
+
+<Status id="fleet-observer.reverse-relay" />
 
 The planned reverse collector reports fixed failure states: unsupported (501),
 unavailable (503 or a disconnected leaf), invalid response (400 or malformed
@@ -197,8 +213,10 @@ with their original ages. Restart, denied access and changed scope hide history
 until validation succeeds. Missing or inconsistent stored relay origin refuses
 the history rather than treating it as direct. Downgrading to an older collector
 destructively purges relay history; save any required operational evidence before
-choosing that downgrade. See [relay configuration](/operations/fleet-observer/#collector-relay-source-planned).
+choosing that downgrade. See [relay configuration](/operations/fleet-observer/#collector-relay-source).
 
-## Discovery source unavailable (planned)
+## Discovery source unavailable
+
+<Status id="xmsg.discovery" />
 
 A configured source that is not compiled into the build stays off and cannot permit a source-dependent missing address. Keep a static address or an existing supported hub route until the source integration is available. A failed static address never falls through to a discovered candidate. Unknown-node and ambiguity results describe routing knowledge, not a grant of trust from an announcement. The standalone collector does not use daemon discovery.

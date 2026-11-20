@@ -3,7 +3,11 @@ title: Peer discovery
 description: How untrusted addresses become verified federation endpoints.
 ---
 
-## Exact-identity discovery (planned)
+import Status from '../../../components/Status.astro';
+
+## Exact-identity discovery
+
+<Status id="xmsg.discovery" />
 
 A discovery candidate is an address, not a peer identity or permission. A local hint may order candidates, but cannot admit a peer. The planned mDNS
 producer ignores incoming root claims and advertises rotating opaque handles,
@@ -39,7 +43,9 @@ resolution budget. Existing shorter operation deadlines still apply, including
 `xmsg doctor`'s bounds. A coalescing change notification and a bounded periodic
 sweep refresh discovery independently of message delivery.
 
-## Source availability (planned)
+## Source availability
+
+<Status id="xmsg.discovery" />
 
 The discovery core defines the peers-file key and candidate interface. It does
 not include an mDNS socket backend. In a core-only build, configuring `mdns`

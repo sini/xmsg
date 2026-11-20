@@ -3,6 +3,8 @@ title: Antigravity
 description: Integrating Google Antigravity (agy) with xmsg — presence lock attestation, Linux proc watcher (Arm A), hooks (Arm B'), and subagents.
 ---
 
+import Status from '../../../components/Status.astro';
+
 An interactive Antigravity (`agy`) session runs an internal language server on a loopback port.
 An ephemeral CSRF token for each session protects it. Two variables hold these values:
 `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN`. Antigravity shows them only inside the
@@ -16,8 +18,8 @@ external hooks do not get them. Thus `xmsg` registers an Antigravity session in 
    looks for an ancestor with an open file descriptor to
    `~/.gemini/antigravity-cli/presence/<conversation_id>.lock`. The match uses the canonical
    `(dev, ino)`. On Linux, xmsg also checks for exclusive `FLOCK` ownership in `/proc/locks`.
-   On macOS (planned), it checks the same ownership through the lock flag on the open file and a
-   `kqueue` release watch; see [lock state on macOS](/operations/troubleshooting/#agy-and-codex-lock-state-on-macos-planned).
+   On macOS (<Status id="agy.macos-locks" />), it checks the same ownership through the lock flag on the open file and a
+   `kqueue` release watch; see [lock state on macOS](/operations/troubleshooting/#agy-and-codex-lock-state-on-macos).
    The session is then immediately addressable by its conversation UUID (`registered: false`).
    Messages to it wait in `agy_pending_messages` (`outcome: "queued"`).
 2. **Stage 2 — Credential capture & FIFO flush:**
@@ -37,7 +39,7 @@ external hooks do not get them. Thus `xmsg` registers an Antigravity session in 
   presence lock without registered push credentials. During that time, `xmsg serve` scans the
   attested `agy` process's descendant tree (`/proc/<pid>/task/<tid>/children`) every 100 ms. When
   a descendant tool command runs, `xmsg` checks its start time before and after it reads
-  `/proc/<pid>/environ`. On macOS (planned), the same watcher lists children with
+  `/proc/<pid>/environ`. On macOS (<Status id="agy.macos-locks" />), the same watcher lists children with
   `proc_listchildpids` and reads the environment from `KERN_PROCARGS2`, so a conversation is
   listed, and messages to it queue and are delivered, before its first hook turn. That relies on
   two agy behaviours measured on agy 1.5.3: its presence lock is close-on-exec, so its children

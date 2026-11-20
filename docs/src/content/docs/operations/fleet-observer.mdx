@@ -3,8 +3,10 @@ title: Fleet Observer Operations
 description: Node observation grants, owner collector configuration, retention, and deployment prerequisites.
 ---
 
+import Status from '../../../components/Status.astro';
+
 The node export is available for explicitly authorized federation peers.
-**The collector command and view are planned, not yet released.** They use the
+The collector command and view (<Status id="fleet-observer.collector" />) use the
 node protocol below and the configuration described here. Actual ingress, owner
 sign-in and deployment remain operator acceptance steps.
 
@@ -91,10 +93,12 @@ On timeout or unavailability, keep any historical data visibly stale rather than
 reporting a successful empty history. Reconnect after reload and begin a new
 backfill when the policy scope changes.
 
-## Reverse observation through a trusted hub (planned)
+## Reverse observation through a trusted hub
+
+<Status id="fleet-observer.reverse-relay" />
 
 This transport and collector reverse-source configuration, origin storage, and
-`via hub` view are **planned, not yet released**. Use only a hub administered by the same owner: the hub is trusted for
+`via hub` view require a hub administered by the same owner: the hub is trusted for
 confidentiality and collector-origin attestation and can fabricate observations.
 No independent leaf signature is provided.
 
@@ -337,7 +341,9 @@ retained data marked stale.
   `Collector: pollers alive P/S · last maintenance <N s ago | FAILED> · store-slot refusals R`.
   `GET /health` remains fixed `available` text.
 
-## Read newer event kinds (planned)
+## Read newer event kinds
+
+<Status id="fleet-observer.unknown-event-kind" />
 
 A collector with the planned [unknown event kind](/glossary/#unknown-event-kind)
 fallback can read a newer node's kind within the existing metadata envelope. For
@@ -400,7 +406,9 @@ message body, transcript, cwd, path, environment or credential field is stored o
 rendered. Authorized compromised exporters or collectors remain trusted-component
 compromises; metadata identifiers and opted-in labels are not a covert-data filter.
 
-## Collector relay source (planned)
+## Collector relay source
+
+<Status id="fleet-observer.reverse-relay" />
 
 After configuring the hub and leaf above, replace the direct source entry with:
 
