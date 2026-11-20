@@ -516,10 +516,11 @@ pub(crate) mod tests {
         let detail = one(&state, "a", true).await;
         assert_eq!(detail.env.unwrap().reference.as_deref(), Some("%3"));
         assert_eq!(detail.cwd.as_deref(), Some("/private/work"));
-        let db = state.db.lock().unwrap();
-        db.execute("UPDATE locator_metadata SET env=NULL WHERE address='a'", [])
-            .unwrap();
-        drop(db);
+        {
+            let db = state.db.lock().unwrap();
+            db.execute("UPDATE locator_metadata SET env=NULL WHERE address='a'", [])
+                .unwrap();
+        }
         assert_eq!(
             one(&state, "a", true).await.env,
             None,
