@@ -15,6 +15,7 @@ permissions:
   contents: read
   packages: write
 
+# Cancel superseded PR runs; non-PR runs use run_id so main pushes never cancel or queue.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
