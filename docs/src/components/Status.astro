@@ -1,0 +1,63 @@
+---
+import { Badge } from '@astrojs/starlight/components';
+import statusData from '../../.status.json';
+
+interface FeatureStatus {
+	id: string;
+	title: string;
+	owner: string;
+	note: string | null;
+	onMain: boolean | 'unknown';
+	inFleetPin: boolean | 'unknown';
+	released: boolean | 'unknown';
+}
+
+interface StatusPayload {
+	features: Record<string, FeatureStatus>;
+}
+
+interface Props {
+	id: string;
+	label?: string;
+}
+
+const { id, label } = Astro.props;
+
+const payload = statusData as StatusPayload;
+const status = payload.features[id];
+
+if (!status) {
+	throw new Error(`Status.astro: unknown feature id '${id}' in .status.json`);
+}
+
+const hasUnknown =
+	status.onMain === 'unknown' ||
+	status.inFleetPin === 'unknown' ||
+	status.released === 'unknown';
+
+const isPlannedOnly =
+	status.onMain === false && status.inFleetPin === false && status.released === false;
+---
+
+<span class="xmsg-status" data-feature-id={id} title={status.note ?? status.title}>
+	{label && <span class="xmsg-status-label">{label}</span>}
+	{status.onMain === true && <Badge text="on main" variant="tip" />}
+	{status.inFleetPin === true && <Badge text="in fleet pin" variant="success" />}
+	{status.released === true && <Badge text="released" variant="default" />}
+	{isPlannedOnly && <Badge text="planned" variant="note" />}
+	{hasUnknown && <Badge text="unknown" variant="caution" />}
+</span>
+
+<style>
+	.xmsg-status {
+		display: inline-flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.35rem;
+		vertical-align: middle;
+	}
+	.xmsg-status-label {
+		font-weight: 600;
+		font-size: 0.85em;
+	}
+</style>

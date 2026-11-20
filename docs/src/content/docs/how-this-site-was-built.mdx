@@ -119,3 +119,7 @@ permissions and its user's instructions. The infrastructure agent could change D
 own session had permission. A message did not give it that permission. Read the
 [trust model](/concepts/trust-model/).
 </Aside>
+
+## How feature status badges work
+
+Feature availability badges on converted pages (such as [Fleet Observer](/concepts/fleet-observer/)) are computed at prebuild time rather than maintained as hand-written prose. Each feature is registered in `docs/src/data/features.ts` with source `{ path, anchor }` evidence. Before Astro builds, `docs/scripts/status-check.mjs` runs `git` once to check each feature's evidence independently against `main`, the deployed fleet pin in `docs/fleet-pin.txt`, and the latest `v*` release tag, writing the results to `docs/.status.json`. `<Status id="..." />` renders Starlight badges directly from that generated JSON with zero runtime git calls.

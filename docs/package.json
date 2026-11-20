@@ -6,7 +6,12 @@
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
+    "status:check": "node --experimental-strip-types scripts/status-check.mjs",
+    "status:check:strict": "node --experimental-strip-types scripts/status-check.mjs --strict",
+    "status:test": "node --test scripts/status-check.test.mjs",
+    "precheck": "pnpm run status:check",
     "check": "astro check",
+    "prebuild": "pnpm run status:check",
     "build": "astro check && astro build",
     "preview": "astro preview",
     "astro": "astro"

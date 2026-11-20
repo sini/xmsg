@@ -29,6 +29,8 @@ This document records internal engineering invariants, security boundaries, and 
 
 - Run all Rust checks (`cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check`) and Nix checks (`nix develop ./ci --command ci`, `nix flake check ./ci`).
 
+- **Docs feature status manifest (`docs/src/data/features.ts`):** Every feature PR that documents user-visible behaviour on converted docs pages registers its `{ path, anchor }` evidence in `docs/src/data/features.ts` and uses `<Status id="..." />` instead of free-text `(planned)` or `Planned, not yet released` markers. Run `pnpm run status:test && pnpm run build` in `docs/`.
+
 - Never point Codex tests or probes at `~/.codex`; always use isolated temporary `CODEX_HOME` directories.
 
 ## XR8 admission amendment (owner steering 2026-11-07)

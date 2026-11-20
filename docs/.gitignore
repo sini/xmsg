@@ -2,6 +2,8 @@
 dist/
 # generated types
 .astro/
+# generated feature status
+.status.json
 
 # dependencies
 node_modules/

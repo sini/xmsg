@@ -3,8 +3,10 @@ title: Fleet Observer
 description: Passive fleet metadata, explicit observation grants, owner-only history, and its limits.
 ---
 
+import Status from '../../../components/Status.astro';
+
 Node export is available to explicitly authorized federation peers. The owner
-collector and browser view are **planned, not yet released**. They collect only
+collector and browser view (<Status id="fleet-observer.collector" />) collect only
 stored metadata into a separate bounded cache; a node can carry the export
 without running a collector.
 
@@ -23,7 +25,7 @@ flowchart LR
 ```
 
 Direct export uses the node's existing federation listener. **Reverse observation
-through an owner-administered hub is planned, not yet released.** An outbound-only
+through an owner-administered hub** (<Status id="fleet-observer.reverse-relay" />): an outbound-only
 leaf can answer metadata reads over its existing control-only polls, without an
 inbound listener, message custody, ACK, or agent wake. A planned collector source
 selects one explicit relay route and shows the configured leaf `via hub` in event,
@@ -83,13 +85,13 @@ partial, unavailable, stale, denied and reset states must remain visible rather
 than becoming an empty healthy node. Shapes distinguish cached nodes, sessions and services; those colors do not imply
 process health. Source time and collector receipt age stay separate.
 
-**Planned:** collector freshness outranks cached status. A node is only `healthy`
+Collector freshness (<Status id="fleet-observer.collector" />) outranks cached status. A node is only `healthy`
 when a validated ingest (including a healthy no-change empty page or unchanged
 snapshot) succeeded within the `15 s` monotonic freshness window; a TCP/TLS
 connection, `Pending`, or a busy store slot is not a success, and current
 authorization or scope masks always hide cached rows, gaps and last-success times.
 
-**Planned:** the collector view also summarizes fleet coverage at the top
+The collector view also summarizes fleet coverage at the top
 (`N/M configured nodes reporting · K unreachable · J endpoint not found/unsupported or misconfigured`,
 plus any non-zero `loading`, `denied`, `hidden`, `rate limited`, `malformed` or
 `storage full` buckets). Never-polled unmasked nodes show `loading: first observation pending`
@@ -111,11 +113,12 @@ The collector keeps bounded per-node metadata with visible retention and gap
 boundaries. Stored history is hidden after restart until its node validates the
 current scope; the view explicitly says “history hidden until this node answers”.
 Once validated in this process, retained metadata may remain visible as stale
-during a temporary outage. Denial and scope changes mask old history before purge. Body detail and transcript views remain planned and
-unimplemented. See [operations](/operations/fleet-observer/) and the
+during a temporary outage. Denial and scope changes mask old history before purge. Body detail and transcript views (<Status id="fleet-observer.body-transcript-views" />) remain unimplemented. See [operations](/operations/fleet-observer/) and the
 [wire reference](/reference/http-and-sockets/#planned-node-observation-export).
 
-## New event kinds (planned)
+## New event kinds
+
+<Status id="fleet-observer.unknown-event-kind" />
 
 The planned collector [unknown event kind](/glossary/#unknown-event-kind) fallback
 lets a collector read metadata from a newer node without losing known neighboring
