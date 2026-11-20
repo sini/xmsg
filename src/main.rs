@@ -1522,6 +1522,7 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
     let enrollment_hub_addr = fed_listener
         .as_ref()
         .map(|(_, address)| address.to_string());
+    let discovery_listen = fed_listener.as_ref().map(|(_, address)| *address);
     let fed_state = if let Some(peers_file) = args.peers_file {
         let peers = xmsg::fed::PeersMap::load_from_file_for(&peers_file, own.as_ref())
             .map_err(|e| format!("failed to load peers file: {e}"))?;
@@ -1886,6 +1887,7 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
             }
         });
 
+        xmsg::discovery::spawn(fed_state.clone(), discovery_listen);
         xmsg::systemd::notify_ready();
         run_shutdown_drain(sigterm, sigint, shutdown_tx, bg_tasks, vec![leaf_task], db).await?;
         return Ok(());
@@ -1939,6 +1941,7 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         }
     }));
 
+    xmsg::discovery::spawn(fed_state.clone(), discovery_listen);
     xmsg::systemd::notify_ready();
     run_shutdown_drain(sigterm, sigint, shutdown_tx, bg_tasks, server_tasks, db).await?;
     Ok(())
@@ -1974,6 +1977,7 @@ async fn run_shutdown_drain(
         }
     });
 
+    let _ = tokio::task::spawn_blocking(|| xmsg::discovery::stop(Duration::from_secs(1))).await;
     // 1. Notify axum servers to stop accepting connections and drain
     let _ = shutdown_tx.send(true);
 

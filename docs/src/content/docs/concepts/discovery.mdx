@@ -1,16 +1,15 @@
 ---
-title: Peer discovery
-description: How untrusted addresses become verified federation endpoints.
+title: Peer & LAN discovery
+description: How untrusted LAN mDNS addresses become verified federation endpoints, bounded rotating announcements, and Local Network detection.
 ---
 
 ## Exact-identity discovery (planned)
 
-A discovery candidate is an address, not a peer identity or permission. A local hint may order candidates, but cannot admit a peer. The planned mDNS
-producer ignores incoming root claims and advertises rotating opaque handles,
-without identity names or root hashes. A
-candidate becomes a verified presence only after mutual TLS proves the exact
-configured certificate identity under its configured CA roots. Presence is keyed
-by the certificate's URI, never by an announcement's name.
+A discovery candidate is an address, not a peer identity or permission. A local hint may order
+candidates, but cannot admit a peer. The mDNS source ignores incoming `root` TXT claims and
+advertises rotating opaque handles, without identity names or root hashes. A candidate becomes a
+verified presence only after mutual TLS proves the exact configured certificate identity under its
+configured CA roots. Presence is keyed by the certificate's URI, never by an announcement's name.
 
 Federation chooses an endpoint in this order:
 
@@ -20,39 +19,89 @@ Federation chooses an endpoint in this order:
 4. The existing hub route, where that operation supports forwarding.
 5. The existing unknown-node result when no route is available.
 
-A static address remains authoritative even if it fails: discovery cannot replace
-it. Existing applicable hub fallback is retained. A hub route remains a forwarding
-or mailbox operation; xmsg does not send an arbitrary target RPC to the hub while
-pretending the hub is the target.
+A static address remains authoritative even if it fails: discovery cannot replace it. Existing
+applicable hub fallback is retained. A hub route remains a forwarding or mailbox operation; xmsg
+does not send an arbitrary target RPC to the hub while pretending the hub is the target.
 
-Presence expires by the earliest of its source TTL, ten minutes, certificate
-expiry and a policy reload. An announcement refresh cannot extend a verified
-presence without another TLS proof. Failed addresses are remembered for that
-rule until their observed candidate expiry. Probe order retains an untried
-cursor across sends so a bad prefix cannot starve later candidates. Reloaded policy cannot reuse an old
-proof. Global deny and actual CA-leaf expiry apply before presence publication
-and continue through request sending, response frames and final answer publication.
-Explicit static pins retain their date-independent admission. Candidates are copied out of their table before any network wait.
+Presence expires by the earliest of its source TTL, ten minutes, certificate expiry and a policy
+reload. An announcement refresh cannot extend a verified presence without another TLS proof.
+Failed addresses are remembered for that rule until their observed candidate expiry. Probe order
+retains an untried cursor across sends so a bad prefix cannot starve later candidates. Reloaded
+policy cannot reuse an old proof. Global deny and actual CA-leaf expiry apply before presence
+publication and continue through request sending, response frames and final answer publication.
+Explicit static pins retain their date-independent admission. Candidates are copied out of their
+table before any network wait.
 
-Probes share four slots, have a two-second handshake limit and an eight-second
-resolution budget. Existing shorter operation deadlines still apply, including
-`xmsg doctor`'s bounds. A coalescing change notification and a bounded periodic
-sweep refresh discovery independently of message delivery.
+Bounds keep LAN floods and probing contained:
 
-## Source availability (planned)
+- **Candidates:** at most `64` mDNS candidates (`64` total across compiled sources), evicting the
+  oldest `seen_at` first.
+- **Lifetime:** each candidate lives at most `ttl_secs` (`600` seconds by default, `1` to `600`)
+  after the source last saw it, and is removed when no remaining instance announces that address.
+- **Probes and sweeps:** probes share `4` concurrent slots, have a `2`-second handshake limit and
+  an `8`-second resolution budget. Existing shorter operation deadlines still apply, including
+  `xmsg doctor`'s bounds. A coalescing change notification from the mDNS source and a bounded
+  `30`-second periodic sweep refresh discovery independently of message delivery.
+- **Address filter:** loopback, unspecified, multicast and link-local addresses (IPv4
+  `169.254.0.0/16` and IPv6 `fe80::/10`) are never kept. **IPv6 link-local addresses are not used
+  in v1:** dialling a link-local address needs an interface scope, and scoped candidate addresses
+  are not retained.
 
-The discovery core defines the peers-file key and candidate interface. It does
-not include an mDNS socket backend. In a core-only build, configuring `mdns`
-produces a not-compiled warning; the source stays off and cannot justify an
-address-less entry. Unsupported source keys are rejected. Enabling an actual
-source and verifying address-less onboarding belong to the source integration.
+## Browse-only at rest and rotating announcements (planned)
+
+By default (`discovery.announce = "timed"`), enabling `discovery.mdns` starts **browse-only at
+rest** (`announce_state: "at_rest"`). The daemon never announces itself at startup. Timed mode
+announces only during pairing, which arrives with the pairing release; **until the pairing
+workflow and local controls land, no production command opens a timed window, so default nodes
+remain browse-only at rest**. When a local activation opens a window, it runs for at most
+**`120` seconds** (`announce_state: {"window_open": <remaining_secs>}`), then withdraws its record
+and returns to `at_rest`.
+
+While announcing (`window_open` or `always`), the advertisement is `_xmsg._tcp.local.` on the
+`--fed-listen` port, carrying only dialable interface addresses:
+
+- a specific `--fed-listen` address announces just that address (when present on an active
+  non-loopback interface);
+- `0.0.0.0` announces the node's dialable IPv4 interface addresses;
+- `[::]` announces its dialable IPv4 and IPv6 interface addresses;
+- loopback and link-local addresses are never announced;
+- no CA peer entry is required, so pinned-only nodes can announce too.
+
+To reduce passive LAN linkability, announcements carry **no CA-root hash, node name, user name,
+OS hostname, email or stable device ID**. The TXT record holds only two keys:
+
+| Key | Value |
+| --- | --- |
+| `v` | Protocol version (`1`). Records with any other `v` value are ignored. |
+| `id` | A fresh `128`-bit (`32` lowercase hex characters) CSPRNG opaque handle. |
+
+The opaque `id`, the DNS-SD service instance (`<id>._xmsg._tcp.local.`), and the SRV target
+hostname (`<id>.local.`) rotate together:
+
+- **Interval:** every **`30` seconds** while an announcement is active;
+- **Triggers:** window activation, the `30`-second rotation timer, and any change in the host's
+  active network interface addresses;
+- **Cleanup:** every rotation, window expiry, interface loss, config disable and daemon shutdown
+  (bounded to `1` second) explicitly unregisters the previous service record. If OS randomness
+  (`getrandom`) fails at activation or rotation, any active record is withdrawn and the source
+  degrades to `at_rest` browse-only with a single warning. A transient registration error retries
+  with bounded exponential backoff (`2` to `30` seconds) and restores the prior state once
+  registration succeeds.
+
+## The `discovery` key and source availability (planned)
+
+Discovery is off unless the peers file asks for it. It is a top-level key in the wrapped peers
+file, beside `peers`:
 
 ```json
 {
-  "discovery": { "mdns": {}, "ttl_secs": 120 },
+  "discovery": {
+    "mdns": { "browse": true },
+    "announce": "timed",
+    "ttl_secs": 120
+  },
   "peers": {
     "alice.laptop": {
-      "address": "192.0.2.10:7788",
       "ca": "/absolute/path/to/root.pem",
       "identities": ["spiffe://example.test/host/laptop/user/alice"],
       "allow": ["send"]
@@ -61,11 +110,75 @@ source and verifying address-less onboarding belong to the source integration.
 }
 ```
 
-The TTL must be between 1 and 600 seconds. Address omission requires a CA entry with one exact URI identity
-and a source that is both configured and available in the build, except for the
-existing leaf and default-route cases. A pin alone cannot enable address-less
-discovery. Pattern probing is outside this exact-identity core.
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `mdns` | absent (off) | Turns the mDNS source on. `{}` enables browsing with bounded timed announce posture. |
+| `mdns.browse` | `true` | Collect candidates from other nodes' announcements. |
+| `mdns.announce` | `true` | Compatibility switch: `false` forces `browse_only` regardless of `discovery.announce`. |
+| `announce` | `"timed"` | `"timed"` (browse-only at rest; announces for `120` s during pairing, which arrives with the pairing release), `"browse_only"` (never announce), or `"always"` (continuous announcement; emits a standing `discovery.announce` warning in `xmsg doctor`). |
+| `ttl_secs` | `600` | How long a candidate lives without a fresh sighting, `1` to `600`. |
 
-The standalone fleet collector has a separate client and configuration; this
-resolver does not silently add discovery to it. See [federation](/concepts/federation/)
-and the [trust model](/concepts/trust-model/) for the existing admission boundary.
+Unknown fields are refused, so a typo fails loudly. `tailnet` is refused with `"not supported by
+this build"`. `xmsg check-peers` applies the same rules. Reloading the peers file applies changes
+on the next `30`-second reconcile tick without restarting the daemon.
+
+The `mdns` Cargo feature is enabled in the default build. In a build compiled without `mdns` (for
+example `--no-default-features --features daemon`), configuring `discovery.mdns` logs one warning,
+keeps the source off (`state: "off"`, detail `"not compiled into this build"`), and cannot justify
+an address-less peer entry.
+
+Address omission requires a CA entry with one exact URI identity and a source that is both
+configured and available in the build, except for the existing leaf and default-route cases. A pin
+alone or a wildcard identity pattern cannot enable address-less discovery. Pattern probing is
+outside this exact-identity core.
+
+The standalone fleet collector has a separate client and configuration; this resolver does not
+silently add discovery to it. See [federation](/concepts/federation/) and the
+[trust model](/concepts/trust-model/) for the existing admission boundary.
+
+## Local Network detection (planned)
+
+The mDNS responder runs on its own thread, started after the node's listeners are up. Serving
+never waits on it: federation, the agent socket and the hub work the same whether discovery is
+starting, unverified, blocked or failed. It binds UDP `5353` beside the system responder
+(`mDNSResponder` on macOS) via `SO_REUSEADDR`/`SO_REUSEPORT`.
+
+Detection uses two complementary arms that never disclose the OS hostname:
+
+- **Deny arm (always active, zero disclosure):** on startup, interface changes, and each
+  `30`-second tick, xmsg sends an IPv4 multicast DNS `A` query (`224.0.0.251:5353`,
+  `IP_MULTICAST_TTL=255`) for a fresh CSPRNG opaque label `xmsg-<32-hex>.local` (if OS randomness
+  is unavailable, the probe is skipped rather than sending a predictable label; unicast-to-self
+  and OS-hostname queries are never used). Measured on macOS `26.5.2` under `launchd` with System
+  Settings › Privacy & Security › Local Network toggled: when allowed, `sendto` succeeds with no
+  reply (`3/3` rounds); when explicitly denied, `sendto` fails immediately with `EHOSTUNREACH`
+  (`4/4` rounds), matching the hostname query's deny signal without disclosing a hostname. Because
+  the first multicast send after launch can fail once with `EHOSTUNREACH` even while allowed, send
+  failures retry every `2` seconds and require **`3` consecutive** errors before reporting
+  `permission_suspected`.
+- **Positive arm (only while announcing):** while an announce window (or `"always"`) is active,
+  seeing our own `_xmsg._tcp.local.` announcement resolve back on one of this host's own
+  non-loopback LAN addresses transitions `state` to `active` (adding no extra disclosure beyond
+  the active announcement). At rest with no active announcement, the state is `unverified`.
+- **IPv6 limits:** the deny probe uses IPv4 multicast (`224.0.0.251:5353`) only; IPv6-only
+  multicast gating is not measured and reports `unverified` when no IPv4 LAN interface is up.
+
+The local [health response](/reference/http-and-sockets/#lan-discovery-health-planned) reports
+`state` and `announce_state` separately:
+
+| `state` | Meaning |
+| --- | --- |
+| `off` | The key is absent, or the build lacks `mdns`. |
+| `starting` | The responder is starting (`xmsg doctor` warns if stuck past `15` seconds). |
+| `active` | While announcing, our own `_xmsg._tcp.local.` record resolved back on one of this host's own non-loopback LAN addresses. |
+| `unverified` | Normal at-rest state when no announce window is open (and outbound multicast `sendto` has not failed), or when no IPv4 LAN interface is up. Reported as `info` in `xmsg doctor` (never `pass` and never `warn`). |
+| `permission_suspected` | `3` consecutive outbound multicast send failures (such as `EHOSTUNREACH` under an explicit macOS Local Network denial, or a host firewall rule). Suspected, never proven; see [troubleshooting](/operations/troubleshooting/#lan-discovery-on-macos-local-network-permission-planned). |
+| `failed` | Responder, UDP `5353` bind, or transient registration failure; retries with bounded backoff (`2` to `30` s for registration, `30` s tick for responder start) and warns once per distinct cause. |
+
+| `announce_state` | Meaning |
+| --- | --- |
+| `"at_rest"` | Not announcing (idle `timed`, `browse_only`, `off`, or no dialable `--fed-listen`). |
+| `{"window_open": N}` | Bounded `120`-second pairing window open with `N` seconds remaining (no production entry point opens a window until the pairing release). |
+| `"always"` | Continuous announcement (`discovery.announce = "always"`). |
+
+LAN discovery reaches one network segment only: not a tailnet and not across k8s pods.
