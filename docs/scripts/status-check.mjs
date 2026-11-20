@@ -21,7 +21,6 @@ const docsDir = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(docsDir, '..');
 const docsContentDir = path.join(docsDir, 'src', 'content', 'docs');
 const statusOutPath = path.join(docsDir, '.status.json');
-const fleetPinFile = path.join(docsDir, 'fleet-pin.txt');
 
 function runGit(args) {
 	return execFileSync('git', args, {
@@ -68,22 +67,12 @@ async function resolveRefs() {
 		: (resolveCommit('origin/main') ?? resolveCommit('main'));
 
 	const envOverride = process.env.FLEET_PIN_REV?.trim() || '';
-	let fallbackRev = '';
-	if (fs.existsSync(fleetPinFile)) {
-		fallbackRev =
-			fs
-				.readFileSync(fleetPinFile, 'utf8')
-				.split('\n')
-				.map((l) => l.trim())
-				.find((l) => l && !l.startsWith('#')) || '';
-	}
 
 	const fetched = envOverride
 		? { fetchedRev: null, fetchError: null }
 		: await fetchFleetPinFromNixConfig();
 	const pinResolution = resolveFleetPinRev({
 		envOverride,
-		fallbackRev,
 		fetchedRev: fetched.fetchedRev,
 		fetchError: fetched.fetchError,
 	});

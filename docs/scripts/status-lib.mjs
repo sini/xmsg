@@ -47,7 +47,7 @@ export function extractXmsgRevFromFlakeLock(flakeLock) {
 	return locked.rev;
 }
 
-export function resolveFleetPinRev({ envOverride, fallbackRev, fetchedRev, fetchError }) {
+export function resolveFleetPinRev({ envOverride, fetchedRev, fetchError }) {
 	if (envOverride) {
 		return { rev: envOverride, source: 'env', error: null };
 	}
@@ -57,17 +57,7 @@ export function resolveFleetPinRev({ envOverride, fallbackRev, fetchedRev, fetch
 			source: 'fetch-failed',
 			error:
 				fetchError ||
-				'Failed to fetch xmsg locked.rev from nix-config flake.lock (fallback fleet-pin.txt not trusted as live pin)',
-			fallbackRev: fallbackRev || null,
-		};
-	}
-	if (fallbackRev && fallbackRev !== fetchedRev) {
-		return {
-			rev: null,
-			source: 'disagreement',
-			error: `docs/fleet-pin.txt (${fallbackRev}) disagrees with nix-config flake.lock (${fetchedRev})`,
-			fallbackRev,
-			fetchedRev,
+				'Failed to fetch xmsg locked.rev from nix-config flake.lock',
 		};
 	}
 	return { rev: fetchedRev, source: 'nix-config', error: null };

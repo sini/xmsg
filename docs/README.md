@@ -18,7 +18,7 @@ pnpm run build        # status prebuild, typecheck, static build into dist/, val
 
 Five checks run on every `pnpm run build`:
 
-- **Feature status manifest** — `scripts/status-check.mjs` resolves each entry in `src/data/features.ts` against `main`, the live `xmsg` pin in `github.com/sini/nix-config` `main`'s `flake.lock` (using `docs/fleet-pin.txt` only as an offline cross-check), and `v*` release tags once into `.status.json`, validates `<Status id="..." />` references, and rejects free-text status markers (`(planned)`, `planned, not yet released`, `<Aside title="...planned...">`) on converted pages.
+- **Feature status manifest** — `scripts/status-check.mjs` resolves each entry in `src/data/features.ts` against `main`, the live `xmsg` pin in `github.com/sini/nix-config` `main`'s `flake.lock`, and `v*` release tags once into `.status.json`, validates `<Status id="..." />` references, and rejects free-text status markers (`(planned)`, `planned, not yet released`, `<Aside title="...planned...">`) on converted pages.
 - **Broken internal links** — `starlight-links-validator` fails the build on any dead internal link.
 - **Type errors** — `astro check` runs before `astro build`.
 - **Code imports** — `remark-code-import` pulls source snippets directly from `<rootDir>/...` so stale file paths or line ranges fail the build.

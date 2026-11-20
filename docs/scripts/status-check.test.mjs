@@ -204,9 +204,9 @@ test('S10: <Status id> missing from manifest fails lint', () => {
 	assert.match(errors[0], /unknown feature id 'nonexistent\.feature'/);
 });
 
-test('S11: fleet pin derives from nix-config flake.lock; stale or failed fetch yields unknown', () => {
+test('S11: fleet pin derives from nix-config flake.lock; fetch failure yields unknown; no local file cross-check', () => {
 	const liveSha = '16f20a15bda3688d5364afb0a2eb558ae643cb9b';
-	const staleSha = 'fcd68211b2b6a1d74dd9a0310388e146851fa51f';
+	const otherSha = 'fcd68211b2b6a1d74dd9a0310388e146851fa51f';
 
 	const extracted = extractXmsgRevFromFlakeLock({
 		nodes: {
@@ -223,45 +223,35 @@ test('S11: fleet pin derives from nix-config flake.lock; stale or failed fetch y
 		}),
 	);
 
-	// Stale fleet-pin.txt disagrees with fetched nix-config rev -> rev is null -> unknown
-	const disagreed = resolveFleetPinRev({
+	// Fetch success is authoritative regardless of any local fallback file argument
+	const fetchedOk = resolveFleetPinRev({
 		envOverride: '',
-		fallbackRev: staleSha,
+		fallbackRev: otherSha,
 		fetchedRev: liveSha,
 		fetchError: null,
 	});
-	assert.equal(disagreed.rev, null);
-	assert.match(disagreed.error, /disagrees/);
+	assert.equal(fetchedOk.rev, liveSha);
+	assert.equal(fetchedOk.source, 'nix-config');
+	assert.equal(fetchedOk.error, null);
 
-	const statusDisagreed = computeFeatureStatus(
-		sampleFeature,
-		{
-			main: { ref: 'main-sha' },
-			fleetPin: { ref: disagreed.rev },
-			releaseTag: { ref: null, noReleaseTags: true },
-		},
-		makeReader({ 'main-sha': { 'src/demo.rs': 'pub fn demo() {}' } }),
-		{ strict: false },
-	);
-	assert.equal(statusDisagreed.status.inFleetPin, 'unknown');
-
-	// Fetch failed with fallback file present -> rev is null -> unknown (strict fails)
+	// Fetch failed -> rev is null -> unknown (strict fails)
 	const failedFetch = resolveFleetPinRev({
 		envOverride: '',
-		fallbackRev: staleSha,
 		fetchedRev: null,
 		fetchError: 'HTTP 503',
 	});
 	assert.equal(failedFetch.rev, null);
 	assert.match(failedFetch.error, /HTTP 503/);
 
-	// Matching fallback & fetched -> resolves liveSha
-	const matched = resolveFleetPinRev({
-		envOverride: '',
-		fallbackRev: liveSha,
-		fetchedRev: liveSha,
-		fetchError: null,
-	});
-	assert.equal(matched.rev, liveSha);
-	assert.equal(matched.error, null);
+	const statusFailed = computeFeatureStatus(
+		sampleFeature,
+		{
+			main: { ref: 'main-sha' },
+			fleetPin: { ref: failedFetch.rev },
+			releaseTag: { ref: null, noReleaseTags: true },
+		},
+		makeReader({ 'main-sha': { 'src/demo.rs': 'pub fn demo() {}' } }),
+		{ strict: false },
+	);
+	assert.equal(statusFailed.status.inFleetPin, 'unknown');
 });
