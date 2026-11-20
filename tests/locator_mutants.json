@@ -25,7 +25,7 @@
     "edits": [
       {
         "file": "src/pi.rs",
-        "needle": "\"pi\",\n            native_id,",
+        "needle": "\"pi\",\n            req.session_id.as_deref().unwrap_or(\"\"),",
         "replacement": "\"pi\",\n            &session_id,"
       }
     ],
@@ -128,8 +128,8 @@
     "edits": [
       {
         "file": "src/locator.rs",
-        "needle": "if query.detail {",
-        "replacement": "if true {"
+        "needle": "local_catalog(&state.local(), &user, query.detail)?",
+        "replacement": "local_catalog(&state.local(), &user, true)?"
       }
     ]
   },
@@ -280,6 +280,53 @@
         "replacement": "resume: Some(vec![\"claude\".into()]),",
         "start": "fn project(",
         "end": "pub async fn locate("
+      }
+    ]
+  },
+  {
+    "label": "locator-pi-omitted-reclaim",
+    "target": "gate_ha8_reclaim",
+    "binaries": [
+      "xmsg"
+    ],
+    "test": "locator_pi_legacy_reclaim_without_native_id_or_env_clears_prior_metadata",
+    "test_file": "tests/gate_ha8_reclaim.rs",
+    "expected_literal": "legacy Pi reclaim must replace the prior native ID and environment with unknown",
+    "edits": [
+      {
+        "file": "src/pi.rs",
+        "needle": "    {\n        let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;\n        crate::locator::record(\n            &conn,\n            &session_id,\n            \"pi\",\n            req.session_id.as_deref().unwrap_or(\"\"),\n            req.env.as_ref(),\n        )?;\n    }",
+        "replacement": "    if req.session_id.is_some() {\n        let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;\n        crate::locator::record(\n            &conn,\n            &session_id,\n            \"pi\",\n            req.session_id.as_deref().unwrap_or(\"\"),\n            req.env.as_ref(),\n        )?;\n    }"
+      }
+    ]
+  },
+  {
+    "label": "locator-env-ref-request",
+    "target": "lib",
+    "test": "locator::tests::detail_and_environment_unknown_none_are_distinct",
+    "test_file": "src/locator.rs",
+    "expected_literal": "detail escaped request gate",
+    "edits": [
+      {
+        "file": "src/locator.rs",
+        "needle": "if !query.detail {",
+        "replacement": "if false && !query.detail {"
+      }
+    ]
+  },
+  {
+    "label": "locator-current-cwd-source",
+    "target": "lib",
+    "test": "locator::tests::current_pi_cwd_updates_disappears_and_does_not_need_native_metadata",
+    "test_file": "src/locator.rs",
+    "expected_literal": "current Pi cwd source was discarded",
+    "edits": [
+      {
+        "file": "src/locator.rs",
+        "needle": "current_cwds,\n    })",
+        "replacement": "current_cwds: BTreeMap::new(),\n    })",
+        "start": "fn local_catalog(",
+        "end": "fn project("
       }
     ]
   }

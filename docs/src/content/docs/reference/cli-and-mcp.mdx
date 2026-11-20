@@ -599,7 +599,8 @@ preference, not a same-UID security boundary: a same-UID HTTP caller can make it
 own explicit detail request. The file and reach hints are never sent to peers.
 Reach hints appear in a separate display block and are never executed. Control
 characters are escaped for display; escaping does not turn data into safe shell
-commands.
+commands. Working directories come from the current existing registry, may be
+unknown after detach, and are not retained in locator metadata.
 
 Remote results contain only recipient metadata. The locator-only native ID, environment and working-directory fields remain
 local to their node. Existing recipient labels remain unchanged and can already
