@@ -1,0 +1,98 @@
+---
+title: Mission-Control Tools
+description: How xmsg compares to terminal session dashboards and orchestrators—RimZ, captain-miao, workmux, and Tower—and what patterns xmsg borrows.
+---
+
+import Status from '../../components/Status.astro';
+
+Terminal mission-control tools and `xmsg` solve adjacent problems. Tools like **RimZ**,
+**captain-miao**, **workmux**, and **Tower** manage interactive terminal sessions, PTYs, and
+worktrees for a human operator (locally or over SSH). `xmsg` is a federated, identity-addressed
+message bus with durable custody across hosts and pods.
+
+## The honest boundary
+
+All four tools below perform **remote terminal and session control over the user's own SSH
+connections or a local daemon**. None of them provides **identity-addressed cross-host
+agent-to-agent delivery with durable custody** across independent nodes or outbound-only container
+leaves—which is `xmsg`'s core responsibility.
+
+Conversely, `xmsg` is not a terminal multiplexer, PTY pool, or SSH session manager, and each of
+these tools is stronger than `xmsg` in its own domain.
+
+## Tool-by-tool comparison
+
+### RimZ
+
+[RimZ](https://github.com/rimio-ai/rimz) (`rimio-ai/rimz`) is a Rust CLI and terminal sidebar
+organized around one workspace/project room per multiplexer session (Zellij or tmux), with
+remote rooms attached over `ssh -t`.
+
+- **Shape:** One project, one room on a single host; rooms stay local to their host and do not
+  route agent messages across independent hosts.
+- **Strengths:** Attention triage, mid-flight steer/park/schedule loops (`rimz wait`, cron/interval
+  triggers), rate-limit auto-continue, local room blackboards, and browser terminal sharing
+  (`rimz web`).
+
+### captain-miao
+
+[captain-miao](https://github.com/hyperlogue/captain-miao) (`hyperlogue/captain-miao`) is a Rust
+`ratatui` TUI supervising local terminal agents and remote sessions across N hosts via SSH
+tunnels (`ssh -N -L` / `ControlMaster`) to a per-host `miao-server` daemon and `libshpool` PTY
+pool.
+
+- **Shape:** One operator TUI aggregating N hosts over SSH, with a per-host daemon and durable
+  PTYs.
+- **Strengths:** Polished session lifecycle UX, jump-to-session attach/reconnect, live host vitals,
+  and reverse clipboard/SSH port forwarding.
+
+### workmux
+
+[workmux](https://workmux.dev) is a Git worktree-per-task workflow tool built on tmux, with
+experimental remote workspace support over SSH.
+
+- **Shape:** Local Git authority and tmux pane/window orchestration per task/PR, plus
+  experimental remote attach.
+- **Strengths:** Tight worktree, branch, and PR lifecycle integration, detached send/wait/capture
+  for panes, and task-oriented dashboards.
+
+### Tower
+
+[Tower](https://github.com/hyperlogue/tower) (`hyperlogue/tower`, by `captain-miao`'s author) is
+a headless Rust session-management daemon (`tower`), a dedicated PTY multiplexer
+(`tower-terminal-pool`), and a CLI (`tower-cli`), with JSON-RPC/SSE APIs, `needs_attention`,
+audited message approvals, two-phase Git worktrees, and optional Allgather fleet sync.
+
+- **Shape:** A local daemon + PTY pool managing 9 harnesses via hooks (plus Codex app-server) or
+  forwarding raw stdio frames to external [Agent Client Protocol](https://agentclientprotocol.com)
+  adapters (`claude-agent-acp`, `codex-acp`).
+- **Strengths:** Headless session management, structured `needs_attention` state transitions,
+  per-rule approvals and rate limits for local agent-to-agent `message.send`, and two-phase
+  (`prepare` / `execute`) worktree safety.
+- **Source-verified corrections vs. README framing:**
+  - Tower's ACP layer is a **transparent stdio frame proxy** (`acp.send` / `acp.poll`) with a
+    passive status observer, rather than a structured verb-translating runtime; tool-call
+    permissions are left to the ACP client, while Tower's own `approval.*` / `rules.*` govern
+    `message.send` and `session.*` control.
+  - Tower's `pool.upgrade` ("hot upgrade") does **not** hand off live PTY file descriptors over
+    `SCM_RIGHTS`: upgrading the `tower` daemon leaves `tower-terminal-pool` running when the pool
+    protocol version matches, while upgrading `tower-terminal-pool` itself shuts down the old pool
+    and resumes sessions via native `--resume` flags.
+
+## What `xmsg` takes from them (design intent)
+
+For optional orchestration and environment integrations (<Status id="xmsg.teams-control" />, design
+intent—not yet shipped), `xmsg` adopts several patterns observed across these tools:
+
+- **Hook-derived attention parity:** Separating harness-reported attention (`working -> idle`,
+  `waiting_approval`, unexpected exit) from bus facts (custody backlog, unreachable node), without
+  inferring harness state from terminal scraping.
+- **Optional per-environment adapters:** Supporting `tmux`, `zellij`, `herdr`, or headless
+  runtimes as optional extensions behind a uniform control surface, rather than requiring a single
+  multiplexer or SSH topology.
+- **Typed-receipt lifecycle & generation fencing:** Distinguishing delivery/ack, authorization,
+  accepted execution, and observed effect—never silently retrying an uncertain submission.
+- **Two-phase worktrees:** Preparing and verifying repository identity (`prepare`) before
+  executing mutations (`execute`) with hooks disabled (`core.hooksPath=/dev/null`).
+- **Frozen-core version handshake + resume:** Keeping a minimal version-negotiation core across
+  upgrades and cleanly re-attaching or resuming sessions after a restart.

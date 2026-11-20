@@ -91,6 +91,7 @@ export default defineConfig({
 						{ label: 'How This Site Was Built', slug: 'how-this-site-was-built' },
 						{ label: 'Architecture', slug: 'architecture' },
 						{ label: 'Comparisons', slug: 'comparisons' },
+						{ label: 'Mission-Control Tools', slug: 'mission-control' },
 						{ label: 'Glossary', slug: 'glossary' },
 					],
 				},

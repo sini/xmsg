@@ -12,21 +12,25 @@ those alternatives are the better tool, and how they fit together.
 
 ## Why `xmsg` exists
 
-The dividing line between `xmsg` and remote-agent RPC protocols is **who owns the session
-lifecycle, and whether the session can be reached**:
+The dividing line between `xmsg` and remote-agent RPC protocols is **session reachability,
+delivery responsibility, and who owns the session lifecycle**—not cross-host networking by itself:
 
 - **Joining sessions the user already runs:** Interactive coding harnesses (`claude`, `codex`,
   `agy`, `opencode`, `pi`, `hermes`) run as ephemeral, subscription-backed processes on laptops and
   containers behind NAT. They do not expose an HTTPS endpoint, carry no per-agent OAuth credentials,
-  and park or restart independently of any caller. `xmsg` discovers and attests them locally
-  through OS UID (`SO_PEERCRED` / `getpeereid`), process ancestry, and per-harness locks or
-  hooks—without changing how the user launches or owns them. See
+  and park or restart independently of any caller. `xmsg` is designed to discover and attest them
+  locally through OS UID (`SO_PEERCRED` / `getpeereid`), process ancestry, and per-harness locks
+  or hooks—without changing how the user launches or owns them. See
   [Sessions, services & subagents](/concepts/sessions-services-subagents/) and
   [Trust model](/concepts/trust-model/).
-- **Store-and-forward custody:** Messages sent to a parked conversation, an active-turn subagent,
-  or an offline leaf wait in durable SQLite storage (`--reply-ttl`, 7 days by default), with
-  idempotency keys, symmetric `reply(message_id)` routing back to the origin, and cross-machine
-  queue handoff for synced conversations. See [Delivery, queueing & replies](/concepts/replies/).
+- **Distinct delivery stages and custody:** `xmsg` keeps delivery states distinct rather than
+  collapsing transport acceptance into task completion: **queued** for a parked session or
+  subagent, **accepted by the mailbox** (`peer_mailbox` on a hub for an offline leaf), **picked up
+  by the session** (acknowledged by the local recipient or daemon), and **task completed** (left to
+  the application or harness). Messages wait in durable SQLite storage (`--reply-ttl`, 7 days by
+  default), with idempotency keys, symmetric `reply(message_id)` routing back to the origin, and
+  cross-machine queue handoff for synced conversations. See
+  [Delivery, queueing & replies](/concepts/replies/).
 - **Identity-anchored federation and outbound-only leaves:** Nodes derive canonical names from
   pinned Ed25519 SPKI fingerprints or exact SPIFFE URI SANs, enforce per-peer `allow`, `from`,
   `principals`, `targets`, and `deny` policies, and support outbound-only `--leaf` sidecars backed
@@ -35,6 +39,9 @@ lifecycle, and whether the session can be reached**:
 - **Hosted-assistant gateway:** `xmsg-mcp-gateway` bridges external OAuth-authenticated MCP
   clients to the local mesh without exposing the mesh's internal listeners. See
   [Hosted MCP Gateway](/extensions/gateway/).
+
+These comparisons describe `xmsg`'s design intent and architectural boundaries; a comparative
+evaluation trial against an A2A relay setup is planned before making any empirical claims.
 
 ### Where other protocols are the better choice
 
@@ -64,16 +71,24 @@ independent, opaque agent services over JSON-RPC, gRPC, and `HTTP+JSON`.
   `SendStreamingMessage` (SSE), poll or subscribe to a `Task` (`SUBMITTED`, `WORKING`,
   `INPUT_REQUIRED`, `AUTH_REQUIRED`, `COMPLETED`, `FAILED`, `CANCELED`, `REJECTED`), and collect
   typed `Part`s and `Artifact`s. Async webhooks use `TaskPushNotificationConfig`.
-- **What `xmsg` does differently:** A2A assumes each agent (or multi-tenant endpoint) is a
-  dialable server carrying HTTP-layer identity; payloads carry no sender identity, and A2A has no
-  offline client inbox or local process-ancestry attestation. `xmsg` targets sessions that cannot be
-  dialled directly, attests local callers by OS UID and harness state, and holds messages in
-  durable custody across disconnects and machine handoffs. For dedicated, always-on services
-  exposed across organizations, A2A is the stronger fit and `xmsg`'s advantages are narrow.
-- **Interoperability:** An optional **A2A edge gateway** (<Status id="xmsg.a2a-edge" />, planned /
-  under evaluation) would sit at the mesh boundary—mirroring `xmsg-mcp-gateway`—to translate
-  between external A2A `SendMessage` / `GetTask` calls and `xmsg` messages while preserving
-  `xmsg`'s rule that an inbound message never carries implicit execution authority.
+- **What `xmsg` does differently:** A2A cards describe service endpoints: polling and streaming
+  observe *tasks at a server*, and push targets a registered webhook. None of those makes an
+  existing interactive session reachable when its host is disconnected, assigns durable custody of
+  an inbound message while it is offline, or makes a transport principal an attested local harness
+  session. An A2A relay can build queueing and target binding behind its endpoint, but those
+  internals sit outside what a generic A2A peer interoperates on. `xmsg` is designed to reach and
+  exchange durable messages with existing harness sessions, including through changing host
+  connectivity, keeping **queued**, **accepted by mailbox**, **picked up by session**, and **task
+  completed** distinct. For dedicated, always-on services exposed across organizations, A2A is the
+  stronger fit and `xmsg`'s advantages are narrow.
+- **Complementary roles & interoperability:** A2A defines how agent services advertise
+  capabilities, accept work, and report results; `xmsg` is designed for durable delivery to
+  existing harness sessions. An A2A service may use `xmsg` for delivery behind its endpoint.
+  `xmsg` is not an A2A implementation; compatibility is stated only for a tested adapter and
+  version. An optional **A2A edge gateway** (<Status id="xmsg.a2a-edge" />, planned / under
+  evaluation) would sit at the mesh boundary—mirroring `xmsg-mcp-gateway`—to translate between
+  external A2A `SendMessage` / `GetTask` calls and `xmsg` messages while preserving `xmsg`'s rule
+  that an inbound message never carries implicit execution authority.
 
 ### SLIM (Secure Low-Latency Interactive Messaging)
 
@@ -136,4 +151,5 @@ Tools such as [RimZ](https://github.com/rimio-ai/rimz),
 managing local or SSH-attached terminal sessions—providing PTY multiplexing, scrollback,
 focus/attach UX, and Git worktree workflows. `xmsg` does not multiplex PTYs or wrap SSH; it
 delivers identity-addressed messages with durable custody across hosts and pods regardless of which
-terminal, multiplexer, or headless runtime a session uses.
+terminal, multiplexer, or headless runtime a session uses. See
+[Mission-Control Tools](/mission-control/) for the detailed comparison.
