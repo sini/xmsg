@@ -6,7 +6,7 @@ use http_body_util::BodyExt;
 use rustls::pki_types::CertificateDer;
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use tokio::net::{TcpListener, TcpSocket};
+use tokio::net::TcpListener;
 use tokio::task::{JoinHandle, JoinSet};
 
 use super::*;
@@ -404,9 +404,21 @@ async fn static_connection_failure_does_not_fall_through_to_discovered_presence(
     let ca = Ca::new();
     let seed = Fixture::new(&ca, &[]);
     let discovered_server = Server::start(ca.issue(N), &seed.client_pin).await;
-    let reserved = TcpSocket::new_v4().unwrap();
-    reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let fixture = fixture_with_identity(&seed, &ca, N, reserved.local_addr().unwrap().to_string());
+    let static_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let static_address = static_listener.local_addr().unwrap();
+    let static_accepted = Arc::new(AtomicUsize::new(0));
+    let accepted = static_accepted.clone();
+    let static_server = Server {
+        address: static_address,
+        accepted: static_accepted,
+        requests: Arc::new(AtomicUsize::new(0)),
+        task: tokio::spawn(async move {
+            let (tcp, _) = static_listener.accept().await.unwrap();
+            accepted.fetch_add(1, Ordering::SeqCst);
+            drop(tcp);
+        }),
+    };
+    let fixture = fixture_with_identity(&seed, &ca, N, static_server.address.to_string());
     let candidate = fixture.inject(&discovered_server, &uri(N));
     let policy = fixture.fs.current_peers();
     drop(
@@ -423,6 +435,11 @@ async fn static_connection_failure_does_not_fall_through_to_discovered_presence(
     assert!(
         result.is_err(),
         "failed static endpoint silently fell through to discovery or its hub"
+    );
+    assert_eq!(
+        static_server.accepted.load(Ordering::SeqCst),
+        1,
+        "static failure fixture never accepted the configured connection"
     );
     assert_eq!(
         discovered_server.accepted.load(Ordering::SeqCst),
