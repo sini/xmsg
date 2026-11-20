@@ -150,8 +150,10 @@ impl State {
         let Some(certificate_remaining) = presence.not_after.checked_sub(wall_now) else {
             return false;
         };
-        let Some(certificate_expiry) =
-            now.checked_add(Duration::from_secs(certificate_remaining as u64))
+        let Ok(certificate_remaining) = u64::try_from(certificate_remaining) else {
+            return false;
+        };
+        let Some(certificate_expiry) = now.checked_add(Duration::from_secs(certificate_remaining))
         else {
             return false;
         };
@@ -366,6 +368,27 @@ mod tests {
                 .unwrap();
         }
         Arc::new(policy)
+    }
+
+    #[test]
+    fn expired_certificate_proof_cannot_publish_presence() {
+        let state = State::default();
+        let now = Instant::now();
+        let policy = Arc::new(PeersMap::empty());
+        let mut row = presence(candidate(&state, now, 60), &policy, now);
+        row.uri = "spiffe://test/host/device/user/owner".into();
+        let uri = row.uri.clone();
+        let rule = row.rule.clone();
+        assert!(state.record_verified(row.clone(), &policy, now, 100));
+        assert!(state.lookup(&uri, &rule, &policy, now, 100).is_some());
+        state.evict(&uri);
+
+        row.not_after = 99;
+        assert!(
+            !state.record_verified(row, &policy, now, 100),
+            "expired certificate proof published presence"
+        );
+        assert!(state.lookup(&uri, &rule, &policy, now, 100).is_none());
     }
 
     #[test]
