@@ -979,6 +979,24 @@ impl PeersMap {
             .unwrap_or_default()
     }
 
+    pub(crate) fn admitted_leaf_uris(&self) -> Vec<String> {
+        let clients = self
+            .admitted_clients
+            .read()
+            .map(|clients| clients.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        clients
+            .into_iter()
+            .filter(|client| {
+                client.not_after > crate::storage::now_epoch_secs()
+                    && self
+                        .current_dynamic_config(client)
+                        .is_some_and(|config| config.leaf)
+            })
+            .map(|client| client.uri)
+            .collect()
+    }
+
     pub fn get_peer_config(&self, name: &str) -> Option<PeerConfig> {
         if let Some(peer) = self.get(name) {
             return Some(peer.clone());
@@ -1533,7 +1551,10 @@ impl PeersMap {
                 && address.is_empty()
                 && !has_default_route
                 && !crate::discovery::permits_address_omission(
-                    has_ca,
+                    has_ca
+                        && identities
+                            .as_deref()
+                            .is_some_and(|ids| matches!(ids, [uri] if !uri.contains('*'))),
                     discovery.source_enabled(crate::discovery::Source::Mdns),
                 )
             {
@@ -5238,7 +5259,16 @@ pub fn make_tls_connector_for_peer(
     fed_state: &FedState,
     peer: &PeerConfig,
 ) -> Result<FederationConnector, AppError> {
-    let peers = fed_state.current_peers();
+    let (chain, key, peers) = fed_state.dial_credentials();
+    make_tls_connector_for_policy(chain, key, peer, peers)
+}
+
+pub(crate) fn make_tls_connector_for_policy(
+    chain: Vec<CertificateDer<'static>>,
+    key: Vec<u8>,
+    peer: &PeerConfig,
+    peers: Arc<PeersMap>,
+) -> Result<FederationConnector, AppError> {
     let selected = peers
         .get_peer_config(&peer.name)
         .ok_or_else(|| AppError::UnknownPeer(peer.name.clone()))?;
@@ -5252,12 +5282,7 @@ pub fn make_tls_connector_for_peer(
         AdmissionMode::Ca
     };
     Ok(FederationConnector {
-        connector: make_tls_connector_with_credentials(
-            fed_state.cert_chain(),
-            fed_state.key_der(),
-            &selected,
-            peers,
-        )?,
+        connector: make_tls_connector_with_credentials(chain, key, &selected, peers)?,
         mode,
     })
 }
@@ -5398,12 +5423,12 @@ pub async fn send_federated_message_with(
     let mut sender = None;
     for attempt in 0..2 {
         let connect_fut = async move {
-            let tls_stream = crate::discovery::dial::resolve_dial(fed_state, peer)
+            let crate::discovery::dial::PreparedDirect {
+                stream: tls_stream,
+                authority,
+            } = crate::discovery::dial::resolve_dial(fed_state, peer)
                 .await?
                 .into_direct()?;
-
-            let authority =
-                CurrentLeaf::outbound(fed_state, connector_clone.admission_mode(), &tls_stream)?;
             let io = hyper_util::rt::TokioIo::new(tls_stream);
             let (sender, conn) = hyper::client::conn::http1::handshake(io)
                 .await
@@ -5457,7 +5482,10 @@ pub(crate) async fn send_federated_message_prepared_with(
         .ok_or_else(|| AppError::UnknownPeer(peer_name.to_string()))?;
     let peer_name = peer.name.as_str();
     attachment_egress(fed_state, &envelope.id, &envelope.attachments, peer_name)?;
-    let tls = dial.into_direct()?;
+    let crate::discovery::dial::PreparedDirect {
+        stream: tls,
+        authority,
+    } = dial.into_direct()?;
     let (sender, connection) = tokio::time::timeout(
         FED_SEND_CONNECT_TIMEOUT,
         hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls)),
@@ -5475,7 +5503,7 @@ pub(crate) async fn send_federated_message_prepared_with(
         peer_name,
         envelope,
         live_only,
-        sender,
+        authority.sender(sender),
         Some(policy.clone()),
     )
     .await
@@ -5486,7 +5514,7 @@ async fn send_federated_message_request(
     peer_name: &str,
     envelope: &FedEnvelope,
     live_only: bool,
-    mut sender: hyper::client::conn::http1::SendRequest<http_body_util::Full<bytes::Bytes>>,
+    mut sender: CheckedSender<http_body_util::Full<bytes::Bytes>>,
     expected_policy: Option<Arc<PeersMap>>,
 ) -> Result<DeliveryResponse, AppError> {
     let req_fut = async move {
@@ -5590,11 +5618,12 @@ pub async fn send_federated_reply(
     attachment_egress(fed_state, &reply.id, &reply.attachments, peer_name)?;
 
     let reply_fut = async {
-        let tls_stream = crate::discovery::dial::resolve_dial(fed_state, peer)
+        let crate::discovery::dial::PreparedDirect {
+            stream: tls_stream,
+            authority,
+        } = crate::discovery::dial::resolve_dial(fed_state, peer)
             .await?
             .into_direct()?;
-
-        let authority = CurrentLeaf::outbound(fed_state, connector.admission_mode(), &tls_stream)?;
         let io = hyper_util::rt::TokioIo::new(tls_stream);
         let (sender, conn) = hyper::client::conn::http1::handshake(io)
             .await
@@ -5692,11 +5721,12 @@ pub async fn poll_federated_replies(
     let peer_name = peer.name.as_str();
 
     let poll_fut = async {
-        let tls_stream = crate::discovery::dial::resolve_dial(fed_state, peer)
+        let crate::discovery::dial::PreparedDirect {
+            stream: tls_stream,
+            authority,
+        } = crate::discovery::dial::resolve_dial(fed_state, peer)
             .await?
             .into_direct()?;
-
-        let authority = CurrentLeaf::outbound(fed_state, connector.admission_mode(), &tls_stream)?;
         let io = hyper_util::rt::TokioIo::new(tls_stream);
         let (sender, conn) = hyper::client::conn::http1::handshake(io)
             .await
@@ -5865,7 +5895,10 @@ pub(crate) async fn get_federated_inbox_witnessed(
     let peer_name = peer.name.as_str();
 
     let poll_fut = async {
-        let tls_stream = crate::discovery::dial::resolve_dial(fed_state, peer)
+        let crate::discovery::dial::PreparedDirect {
+            stream: tls_stream,
+            authority,
+        } = crate::discovery::dial::resolve_dial(fed_state, peer)
             .await?
             .into_direct()?;
         let remote_ip = tls_stream
@@ -5890,7 +5923,6 @@ pub(crate) async fn get_federated_inbox_witnessed(
         } else {
             None
         };
-        let authority = CurrentLeaf::outbound(fed_state, connector.admission_mode(), &tls_stream)?;
         let io = hyper_util::rt::TokioIo::new(tls_stream);
         let (sender, conn) = hyper::client::conn::http1::handshake(io)
             .await
@@ -6030,11 +6062,12 @@ pub async fn ack_federated_inbox(
     let peer_name = peer.name.as_str();
 
     let ack_fut = async {
-        let tls_stream = crate::discovery::dial::resolve_dial(fed_state, peer)
+        let crate::discovery::dial::PreparedDirect {
+            stream: tls_stream,
+            authority,
+        } = crate::discovery::dial::resolve_dial(fed_state, peer)
             .await?
             .into_direct()?;
-
-        let authority = CurrentLeaf::outbound(fed_state, connector.admission_mode(), &tls_stream)?;
         let io = hyper_util::rt::TokioIo::new(tls_stream);
         let (sender, conn) = hyper::client::conn::http1::handshake(io)
             .await
@@ -6772,7 +6805,10 @@ pub async fn list_direct_peer(
     peer: &PeerConfig,
 ) -> Result<(FedListAnswer, String), AppError> {
     let peer_name = peer.name.as_str();
-    let tls_stream = crate::discovery::dial::resolve_dial(fed_state, peer)
+    let crate::discovery::dial::PreparedDirect {
+        stream: tls_stream,
+        authority,
+    } = crate::discovery::dial::resolve_dial(fed_state, peer)
         .await?
         .into_direct()?;
     // The user the peer's certificate names (A16), read from the certificate it presented.
@@ -6783,8 +6819,6 @@ pub async fn list_direct_peer(
         .and_then(|c| c.first())
         .and_then(|leaf| crate::node::user_from_cert(leaf.as_ref()).ok())
         .unwrap_or_default();
-
-    let authority = CurrentLeaf::outbound(fed_state, connector.admission_mode(), &tls_stream)?;
     let io = hyper_util::rt::TokioIo::new(tls_stream);
     let (sender, conn) = hyper::client::conn::http1::handshake(io)
         .await
@@ -6858,10 +6892,13 @@ pub async fn answer_list_query(fed_state: &FedState, peer_key: &str, query: &str
         FedListAnswer::Denied
     };
     let posted = async {
-        let tls = crate::discovery::dial::resolve_dial(fed_state, &peer)
+        let crate::discovery::dial::PreparedDirect {
+            stream: tls,
+            authority,
+        } = crate::discovery::dial::resolve_dial(fed_state, &peer)
             .await?
             .into_direct()?;
-        let (mut sender, conn) =
+        let (sender, conn) =
             hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls))
                 .await
                 .map_err(|e| AppError::PeerUnreachable(e.to_string()))?;
@@ -7952,10 +7989,13 @@ async fn attachment_http(
     success_limit: usize,
 ) -> Result<Vec<u8>, AppError> {
     let request = async {
-        let tls = crate::discovery::dial::resolve_dial(fs, peer)
+        let crate::discovery::dial::PreparedDirect {
+            stream: tls,
+            authority,
+        } = crate::discovery::dial::resolve_dial(fs, peer)
             .await?
             .into_direct()?;
-        let (mut sender, conn) =
+        let (sender, conn) =
             hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls))
                 .await
                 .map_err(|e| AppError::PeerUnreachable(e.to_string()))?;

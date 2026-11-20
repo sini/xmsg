@@ -165,5 +165,99 @@
         "replacement": "        .is_some() && false\n        || (!candidates(fs, peer, &policy, Instant::now()).is_empty() && false)"
       }
     ]
+  },
+  {
+    "label": "discovery-full-uri-keys",
+    "target": "lib",
+    "test": "discovery::dial::identity_tests::full_identity_union_retains_old_collisions_beyond_presentation_limit",
+    "test_file": "src/discovery/dial.rs",
+    "expected_literal": "distinct verified presence identities collapsed to one name",
+    "edits": [
+      {
+        "file": "src/discovery/dial.rs",
+        "needle": ".collect::<std::collections::BTreeSet<_>>()",
+        "replacement": ".map(|uri| crate::node::node_name_from_uri(&uri).unwrap()).collect::<std::collections::BTreeSet<_>>()",
+        "start": "pub(crate) fn conflicting_identities",
+        "end": "pub(crate) fn identity_conflicts"
+      }
+    ]
+  },
+  {
+    "label": "discovery-admitted-union",
+    "target": "lib",
+    "test": "discovery::dial::identity_tests::full_identity_union_retains_old_collisions_beyond_presentation_limit",
+    "test_file": "src/discovery/dial.rs",
+    "expected_literal": "complete presence/admitted union lost an older collision",
+    "edits": [
+      {
+        "file": "src/discovery/dial.rs",
+        "needle": ".chain(admitted)",
+        "replacement": ".chain(admitted.into_iter().take(0))",
+        "start": "pub(crate) fn conflicting_identities",
+        "end": "pub(crate) fn identity_conflicts"
+      }
+    ]
+  },
+  {
+    "label": "discovery-complete-union",
+    "target": "lib",
+    "test": "discovery::dial::identity_tests::full_identity_union_retains_old_collisions_beyond_presentation_limit",
+    "test_file": "src/discovery/dial.rs",
+    "expected_literal": "complete presence/admitted union lost an older collision",
+    "edits": [
+      {
+        "file": "src/discovery/dial.rs",
+        "needle": ".chain(admitted)",
+        "replacement": ".chain(admitted.into_iter().take(500))",
+        "start": "pub(crate) fn conflicting_identities",
+        "end": "pub(crate) fn identity_conflicts"
+      }
+    ]
+  },
+  {
+    "label": "discovery-identity-dedup",
+    "target": "lib",
+    "test": "discovery::dial::identity_tests::full_identity_union_retains_old_collisions_beyond_presentation_limit",
+    "test_file": "src/discovery/dial.rs",
+    "expected_literal": "the same full identity counted twice",
+    "edits": [
+      {
+        "file": "src/discovery/dial.rs",
+        "needle": ".collect::<std::collections::BTreeSet<_>>()",
+        "replacement": ".collect::<Vec<_>>()",
+        "start": "pub(crate) fn conflicting_identities",
+        "end": "pub(crate) fn identity_conflicts"
+      }
+    ]
+  },
+  {
+    "label": "discovery-adapter-sni",
+    "target": "lib",
+    "test": "discovery::dial::tests::discovery_adapter_static_and_candidate_client_hello_omit_sni",
+    "test_file": "src/discovery/dial_tests.rs",
+    "expected_literal": "discovery adapter emitted SNI",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "client_config.enable_sni = false;",
+        "replacement": "client_config.enable_sni = true;",
+        "start": "pub fn make_tls_connector_with_credentials",
+        "end": "pub fn make_tls_acceptor"
+      }
+    ]
+  },
+  {
+    "label": "discovery-untried-continuation",
+    "target": "lib",
+    "test": "discovery::state::tests::cancelled_probe_retains_next_candidate_across_sends",
+    "test_file": "src/discovery/state.rs",
+    "expected_literal": "a cancelled send repeated the attempted prefix",
+    "edits": [
+      {
+        "file": "src/discovery/state.rs",
+        "needle": "candidates.rotate_left((index + 1) % len);",
+        "replacement": "let _ = (index, len);"
+      }
+    ]
   }
 ]
