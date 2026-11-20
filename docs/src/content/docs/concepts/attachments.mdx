@@ -4,6 +4,7 @@ description: File references, ranged reads and authenticated fetching between no
 ---
 
 import { Aside } from '@astrojs/starlight/components';
+import Status from '../../../components/Status.astro';
 
 <Aside type="note" title="On main, not yet in a release">
 Local attachments are on the main branch. Federated fetching is planned for the next release.
@@ -22,7 +23,7 @@ A message can carry up to eight content-addressed references:
 The bytes stay in SQLite, not in the message text. `--max-attachment-bytes`
 (`XMSG_MAX_ATTACHMENT_BYTES`, default 8 MiB) sets the maximum size of each file. xmsg sanitises
 names. The maximum name length is 128 bytes. Raw byte and path staging without a media type
-use `application/octet-stream`. **Planned:** inline text entries in MCP `send` and `reply` default
+use `application/octet-stream`. Inline text entries (<Status id="xmsg.attachments-inline-text" />) in MCP `send` and `reply` default
 to `text/plain; charset=utf-8`; an explicit `media_type` remains unchanged. xmsg accepts that
 exact UTF-8 parameter alongside bare types; other parameters such as `charset=latin1` remain
 invalid. Attachment rows have the same reply TTL as their message. Staged

@@ -3,6 +3,8 @@ title: Sessions, Services & Subagents
 description: How interactive instances, long-polling daemon services, and delegated child subagents work on xmsg.
 ---
 
+import Status from '../../../components/Status.astro';
+
 `xmsg` sends messages to three kinds of recipient:
 
 - **Instances** are interactive AI agent sessions. See [instance](/glossary/#instance).
@@ -104,7 +106,9 @@ subagent. `list` shows live bound subagents with `kind: "subagent"`.
 | [Hermes](/harnesses/hermes/) | Root `<P>@<node>` | `delegate_task` subagents act as their root conversation `P` and do not bind separate sub-addresses. |
 | [Pi](/harnesses/pi/) | None | Single-session process; no subagent sub-addresses. |
 
-## Watch recipients and exchanges (planned)
+## Watch recipients and exchanges
+
+<Status id="xmsg.watch" />
 
 Run `xmsg watch` from your local owner terminal to follow a read-only local registration
 snapshot. The partial roster reports `registered` and `seen` metadata; it does not attest
@@ -132,9 +136,11 @@ service, then `xmsg watch` to follow recorded registrations and newly observed e
 `--node` accepts only `local` or this daemon's canonical name. For a live remote listing use
 `xmsg list --node REMOTE`, which can reconcile and deliver queued work; use the
 [fleet observer](/concepts/fleet-observer/) for the planned remote view once deployed. See the
-[CLI reference](/reference/cli-and-mcp/#xmsg-watch-planned) for refresh, socket and limit details.
+[CLI reference](/reference/cli-and-mcp/#xmsg-watch) for refresh, socket and limit details.
 
-## Diagnose registered process liveness (planned)
+## Diagnose registered process liveness
+
+<Status id="xmsg.doctor" /> <Status id="xmsg.recipient-snapshot" />
 
 Use `xmsg doctor` when you need a bounded, read-only check of process evidence behind
 local registrations. It asks the Unix socket for the opt-in liveness snapshot and reports
@@ -149,5 +155,5 @@ an agent. Missing `/proc` or a denied native API remains a supported portable mo
 portability warning per run where evidence cannot be obtained. A partial or truncated roster
 cannot establish that an absent process is gone. Watch and default snapshots keep their
 metadata-only behavior. See [troubleshooting](/operations/troubleshooting/) for limits and
-[the HTTP reference](/reference/http-and-sockets/#registered-process-liveness-planned) for the
+[the HTTP reference](/reference/http-and-sockets/#registered-process-liveness) for the
 explicit opt-in request.

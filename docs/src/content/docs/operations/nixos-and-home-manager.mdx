@@ -3,6 +3,8 @@ title: NixOS & Home Manager
 description: Installing and configuring xmsg, agent harness switches, and mTLS federation with the flake's Home Manager and NixOS modules.
 ---
 
+import Status from '../../../components/Status.astro';
+
 The `github:sini/xmsg` flake provides two declarative modules:
 
 - **`homeManagerModules.xmsg`** (also `homeManagerModules.default`): Installs `xmsg`. Runs
@@ -36,9 +38,11 @@ To install the CLI and the harness integrations without a local `xmsg serve` dae
 | `programs.xmsg.server.svcExe` | `--svc-exe NAME=PATH` | `{ }` |
 | `programs.xmsg.server.sessionsDirs` | `XMSG_SESSIONS_DIR` (colon-joined) | `[ "${config.home.homeDirectory}/.claude/sessions" ]` |
 | `programs.xmsg.server.extraSessionsDirs` | appended to `sessionsDirs` | `[ ]` |
-| `programs.xmsg.server.stableExecutable` (planned) | — (macOS only) | `"${config.xdg.dataHome}/xmsg/serve/xmsg"` |
+| `programs.xmsg.server.stableExecutable` | — (macOS only) | `"${config.xdg.dataHome}/xmsg/serve/xmsg"` |
 
-## macOS: a stable daemon executable (planned)
+## macOS: a stable daemon executable
+
+<Status id="nixos.module-options" />
 
 macOS keys the Local Network permission to the executable's real path, so a daemon run straight
 from the Nix store would re-prompt after every upgrade (and its first launch waits on the

@@ -12,7 +12,7 @@ without running a collector.
 
 ## Passive metadata
 
-The export reads the node's [observation journal](/reference/http-and-sockets/#local-observation-journal-planned)
+The export reads the node's [observation journal](/reference/http-and-sockets/#local-observation-journal)
 and cached registration descriptors. It does not read message bodies, harness
 transcripts, paths, working directories, environment values or credentials.
 It does not discover harnesses, probe processes, list recipients through the bus,
@@ -44,7 +44,7 @@ policy and refuses an entire excluded response; it forwards accepted DTO bytes
 unchanged. Caller origin headers and browser bearer tokens are not forwarded.
 The hub is trusted to inspect, withhold, or fabricate its attested metadata;
 this is not an independently signed statement from the leaf. Cross-owner hubs
-are unsupported. See the [planned route example](/operations/fleet-observer/#reverse-observation-through-a-trusted-hub-planned).
+are unsupported. See the [planned route example](/operations/fleet-observer/#reverse-observation-through-a-trusted-hub).
 
 Source-IP restrictions use witnessed connections: the hub checks the collector's
 actual IP, and the leaf checks the hub's actual IP. A collector `from` condition

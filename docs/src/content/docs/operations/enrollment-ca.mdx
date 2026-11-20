@@ -4,8 +4,11 @@ description: Planned OIDC enrollment for xmsg host identities, with an in-proces
 ---
 
 import { Aside } from '@astrojs/starlight/components';
+import Status from '../../../components/Status.astro';
 
-<Aside type="note" title="Planned, not yet released">
+<Status id="xmsg.enroll-ca" />
+
+<Aside type="note" title="Enrollment CA">
 The enrollment CA runs inside `xmsg serve`; it does not require a separate CA
 service. Local fixture checks do not establish live Google or Kanidm compatibility.
 Real-provider acceptance and deployment remain operator-run work. V1 supports
@@ -601,4 +604,4 @@ It does not establish key validity, matching or issuance. The source is labeled
 `installed_not_loaded`; runtime enabled state, policy reload and pending counts stay
 unknown. The live view takes precedence over disk. No directory is guessed.
 `--enroll-state` still selects client enrollment state and is a different option.
-See [troubleshooting](/operations/troubleshooting/#ca-application-health-planned).
+See [troubleshooting](/operations/troubleshooting/#ca-application-health).
