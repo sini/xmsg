@@ -108,6 +108,7 @@ fn node(
     let (pi_notify_tx, _) = tokio::sync::broadcast::channel(32);
     let (svc_notify_tx, _) = tokio::sync::broadcast::channel(32);
     Arc::new(FedState {
+        discovery: Default::default(),
         node_name: name.into(),
         peers: peers.into(),
         cert_der: identity.0.to_vec(),
