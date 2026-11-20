@@ -348,6 +348,10 @@ pub fn sync_claims_entries(
             )
             .map_err(|e| AppError::Internal(e.to_string()))?;
             let claim_addr = claim.address();
+            if claim.suffix > 1 {
+                crate::locator::forget(conn, &claim_addr)
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+            }
             storage::subagent_park_for_parent(conn, &claim_addr, now)
                 .map_err(|e| AppError::Internal(e.to_string()))?;
             // Discovery is on demand, so the release is the latest moment X is known to

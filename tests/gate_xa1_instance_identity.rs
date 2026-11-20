@@ -539,6 +539,60 @@ async fn test_oracle_2_release_on_session_switch() {
 // Mutant M3a: promote ~2 when plain is free => RED
 // Mutant M3b: reuse the lowest free suffix => RED
 // =============================================================================
+#[test]
+fn locator_retains_plain_parked_registration_but_forgets_gone_fork() {
+    let tmp = tempdir().unwrap();
+    let proc_root = tmp.path().join("proc");
+    let sessions_dir = tmp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    let id = "0199cecf-0003-7000-8000-000000000001";
+    for (pid, start) in [(1001, "100"), (1002, "200")] {
+        setup_mock_proc(&proc_root, pid, start);
+        write_claude_session_file(
+            &sessions_dir,
+            pid,
+            id,
+            "worker",
+            start,
+            &tmp.path().join(format!("{pid}.sock")),
+        );
+    }
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    init_db(&conn).unwrap();
+    sync_claims_db(&conn, &proc_root, &sessions_dir, "node").unwrap();
+    conn.execute(
+        r#"UPDATE locator_metadata SET env = '{"kind":"tmux","ref":"%3"}'"#,
+        [],
+    )
+    .unwrap();
+    for pid in [1001, 1002] {
+        remove_mock_proc(&proc_root, pid);
+        remove_claude_session_file(&sessions_dir, pid, id);
+    }
+    let (active, _) = sync_claims_db(&conn, &proc_root, &sessions_dir, "node").unwrap();
+    assert!(active.is_empty());
+    assert_eq!(
+        conn.query_row(
+            "SELECT native_id FROM locator_metadata WHERE address=?1",
+            [id],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
+        id
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM locator_metadata WHERE address=?1",
+            [format!("{id}~2")],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0,
+        "gone forks must release their native ID, environment and cwd"
+    );
+    assert_eq!(get_all_claims_for_id(&conn, id).unwrap().len(), 2);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_oracle_3_no_promotion_while_live_no_reuse_of_suffixes() {
     let tmp = tempdir().unwrap();
