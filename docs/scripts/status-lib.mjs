@@ -29,6 +29,49 @@ export const UNCONVERTED_LEGACY_FILES = new Set([
 ]);
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const SHA40_RE = /^[0-9a-f]{40}$/i;
+
+export function extractXmsgRevFromFlakeLock(flakeLock) {
+	const locked = flakeLock?.nodes?.xmsg?.locked;
+	if (!locked || typeof locked !== 'object') {
+		throw new Error('nix-config flake.lock is missing nodes.xmsg.locked');
+	}
+	if (locked.owner !== 'sini' || locked.repo !== 'xmsg') {
+		throw new Error(
+			`nix-config flake.lock nodes.xmsg.locked has unexpected owner/repo: ${locked.owner}/${locked.repo}`,
+		);
+	}
+	if (typeof locked.rev !== 'string' || !SHA40_RE.test(locked.rev)) {
+		throw new Error(`nix-config flake.lock nodes.xmsg.locked.rev is invalid: ${locked.rev}`);
+	}
+	return locked.rev;
+}
+
+export function resolveFleetPinRev({ envOverride, fallbackRev, fetchedRev, fetchError }) {
+	if (envOverride) {
+		return { rev: envOverride, source: 'env', error: null };
+	}
+	if (fetchError || !fetchedRev) {
+		return {
+			rev: null,
+			source: 'fetch-failed',
+			error:
+				fetchError ||
+				'Failed to fetch xmsg locked.rev from nix-config flake.lock (fallback fleet-pin.txt not trusted as live pin)',
+			fallbackRev: fallbackRev || null,
+		};
+	}
+	if (fallbackRev && fallbackRev !== fetchedRev) {
+		return {
+			rev: null,
+			source: 'disagreement',
+			error: `docs/fleet-pin.txt (${fallbackRev}) disagrees with nix-config flake.lock (${fetchedRev})`,
+			fallbackRev,
+			fetchedRev,
+		};
+	}
+	return { rev: fetchedRev, source: 'nix-config', error: null };
+}
 
 export function todayIsoDate(now = new Date()) {
 	return now.toISOString().slice(0, 10);

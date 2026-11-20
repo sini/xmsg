@@ -6,10 +6,15 @@ import { FEATURES, SIBLING_ALLOWLIST } from '../src/data/features.ts';
 import {
 	collectLongPlannedWarnings,
 	computeFeatureStatus,
+	extractXmsgRevFromFlakeLock,
 	lintDocsTree,
+	resolveFleetPinRev,
 	todayIsoDate,
 	validateManifest,
 } from './status-lib.mjs';
+
+const DEFAULT_NIX_CONFIG_FLAKE_LOCK_URL =
+	'https://raw.githubusercontent.com/sini/nix-config/main/flake.lock';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const docsDir = path.resolve(__dirname, '..');
@@ -35,21 +40,54 @@ function resolveCommit(candidate) {
 	}
 }
 
-function resolveRefs() {
+async function fetchFleetPinFromNixConfig() {
+	const url =
+		process.env.NIX_CONFIG_FLAKE_LOCK_URL?.trim() || DEFAULT_NIX_CONFIG_FLAKE_LOCK_URL;
+	try {
+		const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+		if (!res.ok) {
+			return {
+				fetchedRev: null,
+				fetchError: `HTTP ${res.status} fetching ${url}`,
+			};
+		}
+		const json = await res.json();
+		return { fetchedRev: extractXmsgRevFromFlakeLock(json), fetchError: null };
+	} catch (err) {
+		return {
+			fetchedRev: null,
+			fetchError: `Failed to fetch ${url}: ${err instanceof Error ? err.message : String(err)}`,
+		};
+	}
+}
+
+async function resolveRefs() {
 	const mainCandidate = process.env.MAIN_REF?.trim();
 	const mainSha = mainCandidate
 		? resolveCommit(mainCandidate)
 		: (resolveCommit('origin/main') ?? resolveCommit('main'));
 
-	let fleetPinRaw = process.env.FLEET_PIN_REV?.trim();
-	if (!fleetPinRaw && fs.existsSync(fleetPinFile)) {
-		fleetPinRaw = fs
-			.readFileSync(fleetPinFile, 'utf8')
-			.split('\n')
-			.map((l) => l.trim())
-			.find((l) => l && !l.startsWith('#'));
+	const envOverride = process.env.FLEET_PIN_REV?.trim() || '';
+	let fallbackRev = '';
+	if (fs.existsSync(fleetPinFile)) {
+		fallbackRev =
+			fs
+				.readFileSync(fleetPinFile, 'utf8')
+				.split('\n')
+				.map((l) => l.trim())
+				.find((l) => l && !l.startsWith('#')) || '';
 	}
-	const fleetPinSha = resolveCommit(fleetPinRaw);
+
+	const fetched = envOverride
+		? { fetchedRev: null, fetchError: null }
+		: await fetchFleetPinFromNixConfig();
+	const pinResolution = resolveFleetPinRev({
+		envOverride,
+		fallbackRev,
+		fetchedRev: fetched.fetchedRev,
+		fetchError: fetched.fetchError,
+	});
+	const fleetPinSha = resolveCommit(pinResolution.rev);
 
 	let releaseTagSha = null;
 	let noReleaseTags = false;
@@ -68,9 +106,12 @@ function resolveRefs() {
 	}
 
 	return {
-		main: { ref: mainSha, label: mainCandidate || 'origin/main|main' },
-		fleetPin: { ref: fleetPinSha, label: fleetPinRaw || 'fleet-pin.txt' },
-		releaseTag: { ref: releaseTagSha, noReleaseTags, label: 'v*' },
+		refs: {
+			main: { ref: mainSha, label: mainCandidate || 'origin/main|main' },
+			fleetPin: { ref: fleetPinSha, label: pinResolution.source },
+			releaseTag: { ref: releaseTagSha, noReleaseTags, label: 'v*' },
+		},
+		pinError: pinResolution.error,
 	};
 }
 
@@ -90,7 +131,7 @@ function makeGitFileReader() {
 	};
 }
 
-function main() {
+async function main() {
 	const strict =
 		process.argv.includes('--strict') ||
 		process.env.DOCS_STATUS_STRICT === '1' ||
@@ -98,7 +139,14 @@ function main() {
 	const today = process.env.STATUS_TODAY?.trim() || todayIsoDate();
 
 	const errors = validateManifest(FEATURES, SIBLING_ALLOWLIST, today);
-	const refs = resolveRefs();
+	const { refs, pinError } = await resolveRefs();
+	if (pinError) {
+		if (strict) {
+			errors.push(pinError);
+		} else {
+			console.warn(`[status-check] WARN: ${pinError}`);
+		}
+	}
 	const readFileAtRef = makeGitFileReader();
 
 	const statuses = {};
