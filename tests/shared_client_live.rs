@@ -103,7 +103,7 @@ async fn bind_without_listen_race_control() {
     }
 }
 
-async fn exercise(binary: &Path, expects_effective_limits: bool) {
+async fn exercise(binary: &Path) {
     assert!(binary.is_file(), "required real-xmsg binary missing");
     let temp = tempfile::tempdir().unwrap();
     let run = temp.path().join("run");
@@ -154,43 +154,23 @@ async fn exercise(binary: &Path, expects_effective_limits: bool) {
     )
     .await;
     let mut client = RegisteredService::register(options.clone()).await.unwrap();
-    if expects_effective_limits {
-        assert_eq!(client.reply_ttl_secs(), Some(604_800));
-        assert_eq!(client.idempotency_ttl_secs(), Some(86_400));
-        assert_eq!(client.svc_queue_cap(), Some(100));
-        assert_eq!(client.max_body_bytes(), Some(65_536));
-        let reg = client.registration().unwrap();
-        assert_eq!(reg.reply_ttl_secs, Some(604_800));
-        assert_eq!(reg.idempotency_ttl_secs, Some(86_400));
-        assert_eq!(reg.svc_queue_cap, Some(100));
-        assert_eq!(reg.max_body_bytes, Some(65_536));
-    } else {
-        assert_eq!(client.reply_ttl_secs(), None);
-        assert_eq!(client.idempotency_ttl_secs(), None);
-        assert_eq!(client.svc_queue_cap(), None);
-        assert_eq!(client.max_body_bytes(), None);
-        let reg = client.registration().unwrap();
-        assert_eq!(reg.reply_ttl_secs, None);
-        assert_eq!(reg.idempotency_ttl_secs, None);
-        assert_eq!(reg.svc_queue_cap, None);
-        assert_eq!(reg.max_body_bytes, None);
-    }
+    assert_eq!(client.reply_ttl_secs(), Some(604_800));
+    assert_eq!(client.idempotency_ttl_secs(), Some(86_400));
+    assert_eq!(client.svc_queue_cap(), Some(100));
+    assert_eq!(client.max_body_bytes(), Some(65_536));
+    let reg = client.registration().unwrap();
+    assert_eq!(reg.reply_ttl_secs, Some(604_800));
+    assert_eq!(reg.idempotency_ttl_secs, Some(86_400));
+    assert_eq!(reg.svc_queue_cap, Some(100));
+    assert_eq!(reg.max_body_bytes, Some(65_536));
     let address = client.address().unwrap().to_owned();
-    let listed = client.list(ListQuery::default()).await;
-    if expects_effective_limits {
-        let listed = listed.unwrap();
-        assert!(listed
-            .recipients
-            .iter()
-            .any(|r| r.address == address && r.kind == "service"));
-        assert_eq!(listed.total, listed.recipients.len());
-        assert!(!listed.truncated);
-    } else {
-        assert!(
-            matches!(listed, Err(xmsg::client::ClientError::Protocol)),
-            "old baseline list must refuse missing bounded-list metadata"
-        );
-    }
+    let listed = client.list(ListQuery::default()).await.unwrap();
+    assert!(listed
+        .recipients
+        .iter()
+        .any(|r| r.address == address && r.kind == "service"));
+    assert_eq!(listed.total, listed.recipients.len());
+    assert!(!listed.truncated);
     let sent = client
         .send(&address, "bounded live body", Some("durable-key"))
         .await
@@ -289,9 +269,9 @@ async fn pinned_and_candidate_service_contract() {
         format!("xmsg 0.1.0+{revision}"),
         "baseline binary provenance mismatch"
     );
-    exercise(&baseline, false).await;
+    exercise(&baseline).await;
     let candidate = Path::new(env!("CARGO_BIN_EXE_xmsg"));
-    exercise(candidate, true).await;
+    exercise(candidate).await;
     exercise_candidate_service_name_validation(candidate).await;
     exercise_candidate_effective_limits(candidate).await;
     println!("shared-client: verified baseline and candidate service contract completed");

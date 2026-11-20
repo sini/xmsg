@@ -34,7 +34,7 @@ CASES = [
     ("forbidden-sender-field", "src/client/mod.rs", "as_agent: None,", 'as_agent: Some("injected".to_owned()),', "socket_specific_exact_frame_keys"),
     ("normal-edge-leak", "Cargo.toml", 'client = []', 'client = ["dep:rusqlite"]', "@graph"),
     ("self-dev-default-leak", "Cargo.toml", 'xmsg = { path = ".", default-features = false, features = ["test-hooks"] }', 'xmsg = { path = ".", features = ["test-hooks"] }', "@feature"),
-    ("live-wrong-revision", "ci/xmsg-pin.toml", "9b5bd5e241554d345bcb394cc5dfffcf4fa0ee9b", "9d1f5fa38356a8f9208594db951c8e6502fe8e5d", "@live"),
+    ("live-wrong-revision", "ci/xmsg-pin.toml", "16f20a15bda3688d5364afb0a2eb558ae643cb9b", "9d1f5fa38356a8f9208594db951c8e6502fe8e5d", "@live"),
     ("live-agent-version", "src/client/mod.rs", "pub const SCHEMA_VERSION: u32 = 2;", "pub const SCHEMA_VERSION: u32 = 3;", "@live"),
     ("live-register-version", "src/client/mod.rs", "serde_json::to_vec(request)", 'serde_json::to_vec(&{ let mut v = serde_json::to_value(request).unwrap(); v.as_object_mut().unwrap().insert("schema_version".into(), serde_json::json!(2)); v })', "@live"),
     ("live-register-skip-service-name-validation", "src/svc.rs", "if let Err(e) = crate::claim::validate_service_name(&name) {", "if let Err(e) = Ok::<(), AppError>(()) {", "@live"),
