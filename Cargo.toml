@@ -24,6 +24,7 @@ tokio = { version = "1.43", features = ["macros", "rt-multi-thread", "net", "io-
 axum = { optional = true, version = "0.8.1", features = ["tokio", "http1", "json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = { version = "0.8", optional = true }
 clap = { optional = true, version = "4.5", features = ["derive", "env"] }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { optional = true, version = "0.3", features = ["env-filter"] }
@@ -62,7 +63,7 @@ socket2 = { version = "=0.6.5", optional = true, features = ["all"] }
 [features]
 default = ["daemon", "mdns"]
 client = []
-daemon = ["client", "dep:openidconnect", "dep:time", "dep:chrono", "dep:axum", "dep:clap", "dep:tracing", "dep:tracing-subscriber", "dep:gethostname", "dep:unicode-general-category", "dep:regex", "dep:rusqlite", "dep:ulid", "dep:reqwest", "dep:rustls", "dep:tokio-rustls", "dep:rcgen", "dep:sha2", "dep:hex", "dep:base64", "dep:http-body-util", "dep:tower", "dep:hyper-util", "dep:x509-parser", "dep:bytes", "dep:hyper", "dep:webpki", "dep:getrandom", "dep:subtle", "dep:ring", "dep:data-encoding", "dep:ciborium", "dep:coset"]
+daemon = ["client", "dep:toml", "dep:openidconnect", "dep:time", "dep:chrono", "dep:axum", "dep:clap", "dep:tracing", "dep:tracing-subscriber", "dep:gethostname", "dep:unicode-general-category", "dep:regex", "dep:rusqlite", "dep:ulid", "dep:reqwest", "dep:rustls", "dep:tokio-rustls", "dep:rcgen", "dep:sha2", "dep:hex", "dep:base64", "dep:http-body-util", "dep:tower", "dep:hyper-util", "dep:x509-parser", "dep:bytes", "dep:hyper", "dep:webpki", "dep:getrandom", "dep:subtle", "dep:ring", "dep:data-encoding", "dep:ciborium", "dep:coset"]
 test-hooks = []
 mdns = ["daemon", "dep:mdns-sd", "dep:if-addrs", "dep:socket2"]
 

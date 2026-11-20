@@ -919,10 +919,20 @@ pub async fn run_leaf_inbox_task(
                     .await;
                 });
             }
-            Ok(Some(crate::fed::FedInboxItem::List { query, v })) => {
+            Ok(Some(crate::fed::FedInboxItem::List {
+                query,
+                v,
+                read_only,
+            })) => {
                 backoff_millis = 100;
-                crate::fed::answer_list_query(&fed_state, &peer_name, &query, v.unwrap_or(1) >= 2)
-                    .await;
+                crate::fed::answer_list_query_mode(
+                    &fed_state,
+                    &peer_name,
+                    &query,
+                    v.unwrap_or(1) >= 2,
+                    read_only,
+                )
+                .await;
             }
             Ok(Some(crate::fed::FedInboxItem::Message(msg))) => {
                 backoff_millis = 100;

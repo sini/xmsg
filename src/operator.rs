@@ -231,3 +231,112 @@ pub fn show(args: ShowArgs) -> Result<()> {
     )?;
     print_json(&value, args.options.json)
 }
+
+#[derive(Args, Debug)]
+#[command(group(clap::ArgGroup::new("target").required(true).args(["address", "label"])))]
+pub struct LocateArgs {
+    #[command(flatten)]
+    options: Options,
+    address: Option<String>,
+    #[arg(long)]
+    label: Option<String>,
+    #[arg(long)]
+    detail: bool,
+    /// Viewer-only TOML preferences and display-only reach hints
+    #[arg(long)]
+    locate_config: Option<PathBuf>,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocateFile {
+    #[serde(default)]
+    locate: LocatePreferences,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocatePreferences {
+    #[serde(default)]
+    detail: bool,
+    #[serde(default)]
+    reach: std::collections::BTreeMap<String, String>,
+}
+
+pub fn locate(args: LocateArgs) -> Result<()> {
+    let config: LocateFile = match &args.locate_config {
+        Some(file) => toml::from_str(&std::fs::read_to_string(file)?)?,
+        None => LocateFile::default(),
+    };
+    let detail = args.detail && config.locate.detail;
+    let mut url = endpoint(&["v1", "locate"]);
+    if let Some(address) = &args.address {
+        url.query_pairs_mut().append_pair("address", address);
+    }
+    if let Some(label) = &args.label {
+        url.query_pairs_mut().append_pair("label", label);
+    }
+    url.query_pairs_mut()
+        .append_pair("detail", if detail { "true" } else { "false" });
+    let raw = request(&args.options, "GET", url, None, Duration::from_secs(10))?;
+    let mut result: xmsg::locator::Located = serde_json::from_value(raw)?;
+    if !detail {
+        for item in &mut result.locators {
+            item.cwd = None;
+            if let Some(env) = &mut item.env {
+                env.reference = None;
+            }
+        }
+    }
+    if args.options.json {
+        return print_json(&serde_json::to_value(result)?, true);
+    }
+    let inert = xmsg::locator::inert;
+    for item in result.locators {
+        let row = item.recipient;
+        println!(
+            "{}  harness={}  status={}  label={}",
+            inert(&row.address),
+            inert(row.harness.as_deref().unwrap_or("unknown")),
+            inert(&row.status),
+            inert(row.label.as_deref().unwrap_or("-"))
+        );
+        println!(
+            "  native_id={}  resume=none ({})",
+            inert(item.native_id.as_deref().unwrap_or("unknown")),
+            inert(&item.reason)
+        );
+        if let Some(env) = item.env {
+            println!(
+                "  env={}{}",
+                serde_json::to_string(&env.kind)?,
+                env.reference
+                    .map(|s| format!(" ref={}", inert(&s)))
+                    .unwrap_or_default()
+            );
+        }
+        if let Some(cwd) = item.cwd {
+            println!("  cwd={}", inert(&cwd));
+        }
+        if item.native_id.is_none() {
+            println!(
+                "  For local detail, run xmsg locate on {}.",
+                inert(&row.node)
+            );
+        }
+    }
+    for node in result.nodes {
+        println!(
+            "node {}: {}{}",
+            inert(&node.node),
+            inert(&node.status),
+            node.detail
+                .map(|s| format!(" ({})", inert(&s)))
+                .unwrap_or_default()
+        );
+        if let Some(hint) = config.locate.reach.get(&node.node) {
+            println!("\nReach hint (display only):\n  {}\n", inert(hint));
+        }
+    }
+    Ok(())
+}
