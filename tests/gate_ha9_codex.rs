@@ -328,7 +328,7 @@ impl CodexTestEnv {
             request_counter: AtomicU64::new(0),
             notify_tx,
             agy_config,
-            agy_store: Arc::new(RwLock::new(HashMap::new())),
+            agy_store: xmsg::agy::new_agy_store(),
             pi_store: Arc::new(RwLock::new(HashMap::new())),
             pi_notify_tx,
             svc_store: Arc::new(RwLock::new(HashMap::new())),
@@ -5036,7 +5036,7 @@ async fn c19_3_post_admission_owner_release_without_unlink() {
                 agy_bin: "agy".to_string(),
                 ..Default::default()
             },
-            agy_store: Arc::new(RwLock::new(HashMap::new())),
+            agy_store: xmsg::agy::new_agy_store(),
             pi_store: Arc::new(RwLock::new(HashMap::new())),
             pi_notify_tx,
             svc_store: Arc::new(RwLock::new(HashMap::new())),

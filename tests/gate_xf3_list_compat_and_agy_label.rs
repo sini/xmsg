@@ -1731,7 +1731,7 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
                 agy_bin: "agy".to_string(),
                 ..Default::default()
             },
-            agy_store: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            agy_store: xmsg::agy::new_agy_store(),
             pi_store: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             pi_notify_tx: inproc_pi_notify,
             svc_store: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),

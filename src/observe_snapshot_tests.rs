@@ -208,7 +208,7 @@ async fn nonblocking_cache(cache: Cache) {
     let (release_tx, release_rx) = mpsc::channel();
     let holder = tokio::task::spawn_blocking(move || match cache {
         Cache::Svc => hold_writer(&state.svc_store, ready_tx, release_rx),
-        Cache::Agy => hold_writer(&state.agy_store, ready_tx, release_rx),
+        Cache::Agy => hold_writer(&state.agy_store.sessions, ready_tx, release_rx),
         Cache::Pi => hold_writer(&state.pi_store, ready_tx, release_rx),
     });
     tokio::time::timeout(Duration::from_secs(2), ready_rx)

@@ -93,10 +93,41 @@ impl From<AgyCredentials> for AgySessionInfo {
     }
 }
 
-pub type AgyStore = Arc<RwLock<HashMap<String, AgySessionInfo>>>;
+pub struct AgyStoreState {
+    pub(crate) sessions: RwLock<HashMap<String, AgySessionInfo>>,
+    evicted_parents: Mutex<Vec<String>>,
+}
+
+impl AgyStoreState {
+    pub fn read(
+        &self,
+    ) -> std::sync::LockResult<std::sync::RwLockReadGuard<'_, HashMap<String, AgySessionInfo>>>
+    {
+        self.sessions.read()
+    }
+
+    pub fn try_read(
+        &self,
+    ) -> std::sync::TryLockResult<std::sync::RwLockReadGuard<'_, HashMap<String, AgySessionInfo>>>
+    {
+        self.sessions.try_read()
+    }
+
+    pub fn write(
+        &self,
+    ) -> std::sync::LockResult<std::sync::RwLockWriteGuard<'_, HashMap<String, AgySessionInfo>>>
+    {
+        self.sessions.write()
+    }
+}
+
+pub type AgyStore = Arc<AgyStoreState>;
 
 pub fn new_agy_store() -> AgyStore {
-    Arc::new(RwLock::new(HashMap::new()))
+    Arc::new(AgyStoreState {
+        sessions: RwLock::new(HashMap::new()),
+        evicted_parents: Mutex::new(Vec::new()),
+    })
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1277,28 +1308,12 @@ pub fn attest_mcp_caller_peer(
     ))
 }
 
-type EvictedAgyQueue = HashMap<
-    usize,
-    (
-        std::sync::Weak<RwLock<HashMap<String, AgySessionInfo>>>,
-        Vec<String>,
-    ),
->;
-
-static EVICTED_AGY_PARENTS: std::sync::OnceLock<Mutex<EvictedAgyQueue>> =
-    std::sync::OnceLock::new();
-
 pub fn record_evicted_agy_parent(store: &AgyStore, parent_id: &str) {
     if parent_id.is_empty() {
         return;
     }
-    let key = Arc::as_ptr(store) as usize;
-    let weak = Arc::downgrade(store);
-    let queue = EVICTED_AGY_PARENTS.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(mut guard) = queue.lock() {
-        guard.retain(|_, (entry_weak, _)| entry_weak.strong_count() > 0);
-        let entry = guard.entry(key).or_insert_with(|| (weak, Vec::new()));
-        entry.1.push(parent_id.to_string());
+    if let Ok(mut guard) = store.evicted_parents.lock() {
+        guard.push(parent_id.to_string());
     }
 }
 
@@ -1334,18 +1349,8 @@ pub fn purge_evicted_agy_subagents(
             }
         }
     }
-    let key = Arc::as_ptr(store) as usize;
-    let drained: Vec<String> = match EVICTED_AGY_PARENTS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-    {
-        Ok(mut guard) => {
-            guard.retain(|_, (entry_weak, _)| entry_weak.strong_count() > 0);
-            guard
-                .remove(&key)
-                .map(|(_, parents)| parents)
-                .unwrap_or_default()
-        }
+    let drained: Vec<String> = match store.evicted_parents.lock() {
+        Ok(mut guard) => std::mem::take(&mut *guard),
         Err(_) => Vec::new(),
     };
     if drained.is_empty() {
