@@ -235,5 +235,36 @@
         "replacement": ".push((query.clone(), false));"
       }
     ]
+  },
+  {
+    "label": "locator-hermes-continuation",
+    "target": "gate_ha8_reclaim",
+    "binaries": [
+      "xmsg"
+    ],
+    "test": "locator_hermes_continues_preserves_registration_and_release_forgets",
+    "test_file": "tests/gate_ha8_reclaim.rs",
+    "expected_literal": "continuation must update the captured native ID",
+    "edits": [
+      {
+        "file": "src/plugin.rs",
+        "needle": "crate::locator::update_native(&c, &s.session_id, &to).map_err(db_err)?;",
+        "replacement": "let _ = &to;"
+      }
+    ]
+  },
+  {
+    "label": "locator-federation-env-private",
+    "target": "lib",
+    "test": "fed::locator_readonly_tests::read_only_federated_list_does_not_reconcile_or_purge",
+    "test_file": "src/fed.rs",
+    "expected_literal": "federated locator leaked PRIVATE_PANE",
+    "edits": [
+      {
+        "file": "src/locator.rs",
+        "needle": "SELECT id,'instance',harness,NULL,NULL,last_live,'seen' FROM instance_seen",
+        "replacement": "SELECT id,'instance',harness,(SELECT env FROM locator_metadata WHERE address=instance_seen.id),NULL,last_live,'seen' FROM instance_seen"
+      }
+    ]
   }
 ]

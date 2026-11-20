@@ -204,13 +204,9 @@ pub(crate) fn local_entries(local: &Local<'_>, user: &str) -> Result<Vec<Recipie
         registered_at: Some(time),
         last_seen: None,
     };
-    for info in local.agy_store.read().map_err(fail)?.values() {
+    for (key, info) in local.agy_store.read().map_err(fail)?.iter() {
         add(row(
-            if info.session_key.is_empty() {
-                info.conversation_id.clone()
-            } else {
-                info.session_key.clone()
-            },
+            key.clone(),
             "agy",
             "instance",
             info.label.clone(),
@@ -549,6 +545,26 @@ pub(crate) mod tests {
             one(&state, "a", true).await.env.unwrap().kind,
             EnvironmentKind::None
         );
+    }
+    #[tokio::test]
+    async fn agy_native_conversation_is_not_its_registered_address() {
+        let (_dir, state) = fixture();
+        state.agy_store.write().unwrap().insert(
+            "registered-alias".into(),
+            crate::agy::AgySessionInfo::new(UUID.into(), 0, "unknown".into(), None),
+        );
+        record(
+            &state.db.lock().unwrap(),
+            "registered-alias",
+            "agy",
+            UUID,
+            None,
+            None,
+        )
+        .unwrap();
+        let item = one(&state, "registered-alias", false).await;
+        assert_eq!(item.recipient.address, "registered-alias@local.example");
+        assert_eq!(item.native_id.as_deref(), Some(UUID));
     }
     #[tokio::test]
     async fn metadata_for_a_different_harness_is_not_reused() {
