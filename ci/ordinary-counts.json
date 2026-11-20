@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "Measured on 966d2ca5baee6c9e94259cc41c145e05cd7e7eeb, run 44616251796 job 135886687532; 1466 passed, 0 failed, 7 ignored, 115 summaries; all 112 integration targets executed",
-    "darwin": "Measured on 966d2ca5baee6c9e94259cc41c145e05cd7e7eeb, run 44616251766 job 135885613989; 1479 passed, 0 failed, 9 ignored, 115 summaries; all 112 integration targets executed"
+    "linux": "Measured on d8802cf4aacb2f5fedc06d0496b221b9eab9d051, run 44677066003 job 136096142305; 1501 passed, 0 failed, 7 ignored, 115 summaries; all 112 integration targets executed",
+    "darwin": "Measured on d8802cf4aacb2f5fedc06d0496b221b9eab9d051, run 44677065759 job 136091301073; 1514 passed, 0 failed, 9 ignored, 115 summaries; all 112 integration targets executed"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -119,13 +119,13 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1466,
+      "passed": 1501,
       "failed": 0,
       "ignored": 7,
       "summaries": 115
     },
     "darwin": {
-      "passed": 1479,
+      "passed": 1514,
       "failed": 0,
       "ignored": 9,
       "summaries": 115
