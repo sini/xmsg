@@ -8573,6 +8573,7 @@ mod locator_readonly_tests {
                 [],
             )
             .unwrap();
+            db.execute("INSERT INTO codex_roots(root_id,codex_home,owner_pid,owner_starttime,generation,label,cwd,registered_at,active) VALUES ('cwd-holder','/fixture',0,'unknown',1,'cwd-source','/PRIVATE_CWD',1,0)",[]).unwrap();
             crate::locator::record(
                 &db,
                 "expired",
@@ -8582,7 +8583,6 @@ mod locator_readonly_tests {
                     kind: crate::locator::EnvironmentKind::Tmux,
                     reference: Some("PRIVATE_PANE".into()),
                 }),
-                Some("/PRIVATE_CWD"),
             )
             .unwrap();
         }

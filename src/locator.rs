@@ -70,11 +70,10 @@ pub fn record(
     harness: &str,
     native_id: &str,
     env: Option<&Environment>,
-    cwd: Option<&str>,
 ) -> rusqlite::Result<()> {
     let env =
         env.map(|env| serde_json::to_string(&env.sanitized()).expect("environment serializes"));
-    conn.execute("INSERT INTO locator_metadata(address,harness,native_id,env,cwd) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(address) DO UPDATE SET harness=excluded.harness,native_id=excluded.native_id,env=excluded.env,cwd=excluded.cwd", params![address,harness,native_id,env,cwd])?;
+    conn.execute("INSERT INTO locator_metadata(address,harness,native_id,env) VALUES (?1,?2,?3,?4) ON CONFLICT(address) DO UPDATE SET harness=excluded.harness,native_id=excluded.native_id,env=excluded.env", params![address,harness,native_id,env])?;
     Ok(())
 }
 
@@ -153,13 +152,23 @@ fn fail(e: impl std::fmt::Display) -> AppError {
     AppError::Internal(e.to_string())
 }
 
+struct LocalCatalog {
+    recipients: Vec<Recipient>,
+    current_cwds: BTreeMap<(String, String), String>,
+}
+
 pub(crate) fn local_entries(local: &Local<'_>, user: &str) -> Result<Vec<Recipient>, AppError> {
+    Ok(local_catalog(local, user, false)?.recipients)
+}
+
+fn local_catalog(local: &Local<'_>, user: &str, detail: bool) -> Result<LocalCatalog, AppError> {
     if !crate::codex::runtime_initialized(local.db) {
         return Err(AppError::ServiceUnavailable(
             "locator runtime is not initialized".into(),
         ));
     }
     let mut rows: BTreeMap<(String, String), Recipient> = BTreeMap::new();
+    let mut current_cwds = BTreeMap::new();
     let mut add = |mut row: Recipient| {
         row.address = format!("{}@{}", row.address, local.node_name);
         row.node = local.node_name.into();
@@ -192,6 +201,18 @@ pub(crate) fn local_entries(local: &Local<'_>, user: &str) -> Result<Vec<Recipie
             }).map_err(fail)?;
             for row in results { add(row.map_err(fail)?); }
         }
+        if detail {
+            let mut stmt = db
+                .prepare("SELECT root_id,cwd FROM codex_roots WHERE cwd IS NOT NULL AND cwd<>''")
+                .map_err(fail)?;
+            let records = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(fail)?;
+            for record in records {
+                let (id, cwd) = record.map_err(fail)?;
+                current_cwds.insert((format!("{id}@{}", local.node_name), "codex".into()), cwd);
+            }
+        }
     }
     let row = |id: String, harness: &str, kind: &str, label: Option<String>, time: i64| Recipient {
         address: id,
@@ -213,9 +234,15 @@ pub(crate) fn local_entries(local: &Local<'_>, user: &str) -> Result<Vec<Recipie
             info.registered_at,
         ));
     }
-    for info in local.pi_store.read().map_err(fail)?.values() {
+    for (key, info) in local.pi_store.read().map_err(fail)?.iter() {
+        if detail && !info.cwd.is_empty() {
+            current_cwds.insert(
+                (format!("{key}@{}", local.node_name), "pi".into()),
+                info.cwd.clone(),
+            );
+        }
         add(row(
-            info.session_id.clone(),
+            key.clone(),
             "pi",
             "instance",
             info.name.clone(),
@@ -243,12 +270,21 @@ pub(crate) fn local_entries(local: &Local<'_>, user: &str) -> Result<Vec<Recipie
                     format!("{}@{}", claim.address(), local.node_name),
                     "instance".into(),
                 )) {
-                    row.label = entry.name.clone();
+                    if row.harness.as_deref() == Some("claude") {
+                        row.label = entry.name.clone();
+                        if detail && !entry.cwd.is_empty() {
+                            current_cwds
+                                .insert((row.address.clone(), "claude".into()), entry.cwd.clone());
+                        }
+                    }
                 }
             }
         }
     }
-    Ok(rows.into_values().collect())
+    Ok(LocalCatalog {
+        recipients: rows.into_values().collect(),
+        current_cwds,
+    })
 }
 
 fn project(recipient: Recipient) -> Locator {
@@ -288,12 +324,15 @@ pub async fn locate(state: &AppState, query: &Query) -> Result<Located, AppError
     };
     let mut recipients = Vec::new();
     let mut nodes = Vec::new();
+    let mut current_cwds = BTreeMap::new();
     if node.is_none_or(|n| n == state.node_name || n == "local") {
         let user = state
             .fed_state
             .as_ref()
             .map_or_else(|| crate::node::own_user(None), |f| crate::fed::own_user(f));
-        recipients.extend(local_entries(&state.local(), &user)?);
+        let catalog = local_catalog(&state.local(), &user, query.detail)?;
+        current_cwds = catalog.current_cwds;
+        recipients.extend(catalog.recipients);
         nodes.push(NodeStatus::ok(&state.node_name));
     }
     if let Some(fs) = &state.fed_state {
@@ -347,22 +386,28 @@ pub async fn locate(state: &AppState, query: &Query) -> Result<Located, AppError
     for recipient in recipients {
         let mut item = project(recipient);
         if item.recipient.node == state.node_name {
+            item.cwd = current_cwds
+                .get(&(
+                    item.recipient.address.clone(),
+                    item.recipient.harness.clone().unwrap_or_default(),
+                ))
+                .cloned();
             let address = item
                 .recipient
                 .address
                 .rsplit_once('@')
                 .map(|(id, _)| id)
                 .unwrap_or("");
-            let metadata: Option<(String, String, Option<String>, Option<String>)> = db
+            let metadata: Option<(String, String, Option<String>)> = db
                 .query_row(
-                    "SELECT harness,native_id,env,cwd FROM locator_metadata WHERE address=?1",
+                    "SELECT harness,native_id,env FROM locator_metadata WHERE address=?1",
                     [address],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()
                 .map_err(fail)?;
-            if let Some((harness, id, env, cwd)) = metadata
-                .filter(|(harness, _, _, _)| item.recipient.harness.as_deref() == Some(harness))
+            if let Some((harness, id, env)) = metadata
+                .filter(|(harness, _, _)| item.recipient.harness.as_deref() == Some(harness))
             {
                 if valid_native_id(&harness, &id) {
                     item.native_id = Some(id);
@@ -370,10 +415,10 @@ pub async fn locate(state: &AppState, query: &Query) -> Result<Located, AppError
                 item.env = env
                     .and_then(|raw| serde_json::from_str::<Environment>(&raw).ok())
                     .map(|e| e.sanitized());
-                if query.detail {
-                    item.cwd = cwd;
-                } else if let Some(env) = &mut item.env {
-                    env.reference = None;
+                if !query.detail {
+                    if let Some(env) = &mut item.env {
+                        env.reference = None;
+                    }
                 }
             }
         }
@@ -419,6 +464,19 @@ pub(crate) mod tests {
         (dir, state)
     }
     fn seed(state: &AppState, address: &str, harness: &str, native: &str, label: &str) {
+        if harness == "pi" {
+            state.pi_store.write().unwrap().insert(
+                address.into(),
+                crate::pi::PiSessionInfo {
+                    session_id: address.into(),
+                    name: Some(label.into()),
+                    pid: 0,
+                    starttime: "unknown".into(),
+                    cwd: "/private/work".into(),
+                    registered_at: 1,
+                },
+            );
+        }
         let db = state.db.lock().unwrap();
         db.execute(
             "INSERT INTO instance_seen(id,harness,last_live) VALUES (?1,?2,1)",
@@ -435,7 +493,6 @@ pub(crate) mod tests {
                 kind: EnvironmentKind::Tmux,
                 reference: Some("%3".into()),
             }),
-            Some("/private/work"),
         )
         .unwrap();
     }
@@ -537,7 +594,6 @@ pub(crate) mod tests {
                     kind: EnvironmentKind::None,
                     reference: None,
                 }),
-                None,
             )
             .unwrap();
         }
@@ -545,6 +601,96 @@ pub(crate) mod tests {
             one(&state, "a", true).await.env.unwrap().kind,
             EnvironmentKind::None
         );
+    }
+    #[tokio::test]
+    async fn current_pi_cwd_updates_disappears_and_does_not_need_native_metadata() {
+        let (_dir, state) = fixture();
+        seed(&state, "pi-address", "pi", "native-1", "pi");
+        assert_eq!(
+            one(&state, "pi-address", true).await.cwd.as_deref(),
+            Some("/private/work"),
+            "current Pi cwd source was discarded"
+        );
+        state
+            .pi_store
+            .write()
+            .unwrap()
+            .get_mut("pi-address")
+            .unwrap()
+            .cwd = "/current/pi".into();
+        forget(&state.db.lock().unwrap(), "pi-address").unwrap();
+        let item = one(&state, "pi-address", true).await;
+        assert_eq!(item.cwd.as_deref(), Some("/current/pi"));
+        assert_eq!(item.native_id, None);
+        assert_eq!(item.env, None);
+        state.pi_store.write().unwrap().remove("pi-address");
+        assert_eq!(
+            one(&state, "pi-address", true).await.cwd,
+            None,
+            "detached Pi cwd was retained"
+        );
+    }
+    #[tokio::test]
+    async fn current_codex_cwd_updates_and_disappears_without_locator_metadata() {
+        let (_dir, state) = fixture();
+        {
+            let db = state.db.lock().unwrap();
+            db.execute(
+                "INSERT INTO instance_seen(id,harness,last_live) VALUES (?1,'codex',1)",
+                [UUID],
+            )
+            .unwrap();
+            db.execute("INSERT INTO codex_roots(root_id,codex_home,owner_pid,owner_starttime,generation,label,cwd,registered_at,active) VALUES (?1,'/fixture',0,'unknown',1,'code','/codex/first',1,0)",[UUID]).unwrap();
+        }
+        assert_eq!(
+            one(&state, UUID, true).await.cwd.as_deref(),
+            Some("/codex/first")
+        );
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE codex_roots SET cwd='/codex/current' WHERE root_id=?1",
+                [UUID],
+            )
+            .unwrap();
+        assert_eq!(
+            one(&state, UUID, true).await.cwd.as_deref(),
+            Some("/codex/current")
+        );
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM codex_roots WHERE root_id=?1", [UUID])
+            .unwrap();
+        assert_eq!(one(&state, UUID, true).await.cwd, None);
+    }
+    #[tokio::test]
+    async fn current_claude_cwd_uses_matched_file_and_disappears_without_retention() {
+        let (dir, state) = fixture();
+        std::fs::create_dir(&state.sessions_dirs[0]).unwrap();
+        let socket = dir.path().join("inbox.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let file = state.sessions_dirs[0].join("fixture.json");
+        let write = |cwd: &str| {
+            std::fs::write(&file,serde_json::json!({"pid":1234,"sessionId":UUID,"name":"claude","cwd":cwd,"status":"idle","kind":"interactive","startedAt":1,"updatedAt":1,"procStart":"42","messagingSocketPath":socket}).to_string()).unwrap()
+        };
+        state.db.lock().unwrap().execute("INSERT INTO instance_claims(id,pid,proc_start,suffix,released,created_at) VALUES (?1,1234,'42',2,0,1)",[UUID]).unwrap();
+        let address = format!("{UUID}~2");
+        write("/claude/first");
+        assert_eq!(
+            one(&state, &address, true).await.cwd.as_deref(),
+            Some("/claude/first")
+        );
+        write("/claude/current");
+        assert_eq!(
+            one(&state, &address, true).await.cwd.as_deref(),
+            Some("/claude/current")
+        );
+        std::fs::remove_file(file).unwrap();
+        assert_eq!(one(&state, &address, true).await.cwd, None);
     }
     #[tokio::test]
     async fn agy_native_conversation_is_not_its_registered_address() {
@@ -558,7 +704,6 @@ pub(crate) mod tests {
             "registered-alias",
             "agy",
             UUID,
-            None,
             None,
         )
         .unwrap();
@@ -580,7 +725,12 @@ pub(crate) mod tests {
             )
             .unwrap();
         let item = one(&state, "a", true).await;
-        assert_eq!((item.native_id, item.env, item.cwd), (None, None, None));
+        assert_eq!((item.native_id, item.env), (None, None));
+        assert_eq!(
+            item.cwd.as_deref(),
+            Some("/private/work"),
+            "current registry cwd must not depend on stale native metadata"
+        );
     }
     #[tokio::test]
     async fn label_lookup_is_complete_beyond_list_and_snapshot_caps_and_read_only() {
