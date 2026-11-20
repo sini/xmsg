@@ -323,8 +323,8 @@
     "edits": [
       {
         "file": "src/locator.rs",
-        "needle": "current_cwds,\n    })",
-        "replacement": "current_cwds: BTreeMap::new(),\n    })",
+        "needle": "    Ok(LocalCatalog {",
+        "replacement": "    current_cwds.clear();\n    Ok(LocalCatalog {",
         "start": "fn local_catalog(",
         "end": "fn project("
       }
