@@ -451,3 +451,73 @@ fn locate_requires_both_viewer_config_and_request_for_detail_and_escapes_display
         }
     }
 }
+
+#[test]
+fn locate_text_displays_only_local_reach_as_inert_separate_hint() {
+    use std::os::unix::net::UnixListener;
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("http.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let marker = root.path().join("must-not-execute");
+    let hint = format!("ssh local;\u{1b}[4J; touch {}", marker.display());
+    let config = root.path().join("viewer.toml");
+    fs::write(
+        &config,
+        format!(
+            "[locate]\ndetail = true\n[locate.reach]\n'local.example' = {}\n",
+            serde_json::to_string(&hint).unwrap()
+        ),
+    )
+    .unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request = String::new();
+        reader.read_line(&mut request).unwrap();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let body=json!({"locators":[{"recipient":{"address":"id@local.example","kind":"instance","harness":"pi","label":"label\u{1b}[2J","status":"registered","node":"local.example","user":"owner"},"native_id":"native","resume":null,"reason":"live","env":{"kind":"tmux","ref":"%3\u{1b}[3J"},"cwd":"/work"}],"nodes":[{"node":"local.example","status":"ok"}]}).to_string();
+        write!(reader.get_mut(),"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+        request
+    });
+    let output = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+        .args(["locate", "id", "--detail", "--http-sock"])
+        .arg(&socket)
+        .arg("--locate-config")
+        .arg(&config)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !text.contains('\u{1b}'),
+        "raw terminal escape reached CLI output"
+    );
+    assert!(
+        text.contains("label\\u{1b}[2J"),
+        "label was not escaped: {text}"
+    );
+    assert!(
+        text.contains("ref=%3\\u{1b}[3J"),
+        "reference was not escaped: {text}"
+    );
+    assert!(
+        text.contains("\n\nReach hint (display only):\n  ssh local;\\u{1b}[4J; touch "),
+        "reach hint was not separate and inert: {text}"
+    );
+    assert!(!marker.exists(), "display-only reach hint was executed");
+    assert!(!server.join().unwrap().contains("ssh"));
+}

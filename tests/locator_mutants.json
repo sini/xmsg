@@ -266,5 +266,21 @@
         "replacement": "SELECT id,'instance',harness,(SELECT env FROM locator_metadata WHERE address=instance_seen.id),NULL,last_live,'seen' FROM instance_seen"
       }
     ]
+  },
+  {
+    "label": "locator-no-resume-fallback",
+    "target": "lib",
+    "test": "locator::tests::unknown_harness_never_falls_back_to_claude",
+    "test_file": "src/locator.rs",
+    "expected_literal": "left: Some([\"claude\"])",
+    "edits": [
+      {
+        "file": "src/locator.rs",
+        "needle": "resume: None,",
+        "replacement": "resume: Some(vec![\"claude\".into()]),",
+        "start": "fn project(",
+        "end": "pub async fn locate("
+      }
+    ]
   }
 ]
