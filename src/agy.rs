@@ -2356,19 +2356,25 @@ async fn register_from_subtree(
                         } else if let Some(existing) = store.read().unwrap().get(&reg.session_key) {
                             session_info.label = existing.label.clone();
                         }
-                        store
-                            .write()
-                            .unwrap()
-                            .insert(reg.session_key.clone(), session_info);
-                        if let Ok(conn) = db.lock() {
-                            let _ = crate::locator::record(
-                                &conn,
-                                &reg.session_key,
-                                "agy",
-                                conv_id,
-                                None,
-                                None,
-                            );
+                        let registration_changed = {
+                            let mut entries = store.write().unwrap();
+                            let changed = entries.get(&reg.session_key).is_none_or(|info| {
+                                info.pid != reg.pid || info.starttime != session_info.starttime
+                            });
+                            entries.insert(reg.session_key.clone(), session_info);
+                            changed
+                        };
+                        if registration_changed {
+                            if let Ok(conn) = db.lock() {
+                                let _ = crate::locator::record(
+                                    &conn,
+                                    &reg.session_key,
+                                    "agy",
+                                    conv_id,
+                                    None,
+                                    None,
+                                );
+                            }
                         }
                         notify_agy_escrow();
                         flush_agy_queue(config, store, db, &reg.session_key, conv_id, reply_ttl)
@@ -2800,15 +2806,25 @@ pub async fn run_register_server_with_listener(
                                 }
                                 match verify_registration_peer(&config_clone, my_uid, &peer, &req) {
                                     Ok(reg) => {
-                                        if let Ok(conn) = db_clone.lock() {
-                                            let _ = crate::locator::record(
-                                                &conn,
-                                                &reg.session_key,
-                                                "agy",
-                                                &req.conversation_id,
-                                                locator_env.as_ref(),
-                                                None,
-                                            );
+                                        let registration_changed = store_clone
+                                            .read()
+                                            .unwrap()
+                                            .get(&reg.session_key)
+                                            .is_none_or(|info| {
+                                                info.pid != reg.pid
+                                                    || info.starttime != reg.starttime
+                                            });
+                                        if registration_changed || locator_env.is_some() {
+                                            if let Ok(conn) = db_clone.lock() {
+                                                let _ = crate::locator::record(
+                                                    &conn,
+                                                    &reg.session_key,
+                                                    "agy",
+                                                    &req.conversation_id,
+                                                    locator_env.as_ref(),
+                                                    None,
+                                                );
+                                            }
                                         }
                                         let mut session_info = AgySessionInfo::new_with_credentials(
                                             req.conversation_id.clone(),

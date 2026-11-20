@@ -3015,9 +3015,32 @@ pub fn startup_invalidate_codex(
     Ok((max_gen.max(0) as u64, revoked, stale))
 }
 
+fn record_codex_registration(
+    conn: &Connection,
+    snap: &crate::codex::CodexRootSnapshot,
+) -> Result<()> {
+    let unchanged: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM codex_roots r JOIN locator_metadata l ON l.address=r.root_id WHERE r.root_id=?1 AND r.owner_pid=?2 AND r.owner_starttime=?3 AND r.generation=?4)",
+        params![snap.root_id, snap.owner_pid, snap.owner_starttime, snap.generation as i64],
+        |row| row.get(0),
+    )?;
+    if !unchanged {
+        crate::locator::record(
+            conn,
+            &snap.root_id,
+            "codex",
+            &snap.root_id,
+            None,
+            snap.cwd.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
 /// Persist an admitted Codex root generation in `codex_roots` and `instance_seen` (§2.1, §6.2.1).
 pub fn upsert_codex_root(conn: &Connection, snap: &crate::codex::CodexRootSnapshot) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
+    record_codex_registration(&tx, snap)?;
     let now = now_epoch_secs();
     tx.execute(
         "INSERT INTO codex_roots (root_id, codex_home, owner_pid, owner_starttime, generation, label, cwd, registered_at, rollout_dev, rollout_ino, active, revoked) \
@@ -3080,6 +3103,7 @@ fn rebind_codex_root_in(
     tx: &Transaction<'_>,
     snap: &crate::codex::CodexRootSnapshot,
 ) -> Result<()> {
+    record_codex_registration(tx, snap)?;
     let now = now_epoch_secs();
     tx.execute(
         "INSERT INTO codex_roots (root_id, codex_home, owner_pid, owner_starttime, generation, label, cwd, registered_at, rollout_dev, rollout_ino, active, revoked) \
@@ -3109,14 +3133,6 @@ fn rebind_codex_root_in(
             snap.rollout_dev as i64,
             snap.rollout_ino as i64,
         ],
-    )?;
-    crate::locator::record(
-        tx,
-        &snap.root_id,
-        "codex",
-        &snap.root_id,
-        None,
-        snap.cwd.as_deref(),
     )?;
     mark_live(tx, &snap.root_id, "codex", now)?;
     rebind_pending_codex_handoffs(tx, snap, now)?;
@@ -3660,6 +3676,61 @@ pub fn utc_rfc3339(secs: i64) -> String {
 #[cfg(test)]
 mod queue_tests {
     use super::*;
+
+    #[test]
+    fn locator_codex_same_owner_preserves_hint_and_new_registration_clears_it() {
+        let c = Connection::open_in_memory().unwrap();
+        init_db(&c).unwrap();
+        let mut snap = crate::codex::CodexRootSnapshot {
+            root_id: "0199cecf-0003-7000-8000-000000000001".into(),
+            codex_home: std::path::PathBuf::from("/codex"),
+            owner_pid: 10,
+            owner_starttime: "100".into(),
+            generation: 1,
+            label: "worker".into(),
+            cwd: Some("/work".into()),
+            registered_at: 1,
+            rollout_dev: 0,
+            rollout_ino: 0,
+        };
+        upsert_codex_root(&c, &snap).unwrap();
+        let env: crate::locator::Environment =
+            serde_json::from_value(serde_json::json!({"kind":"tmux","ref":"%3"})).unwrap();
+        crate::locator::record(
+            &c,
+            &snap.root_id,
+            "codex",
+            &snap.root_id,
+            Some(&env),
+            snap.cwd.as_deref(),
+        )
+        .unwrap();
+        upsert_codex_root(&c, &snap).unwrap();
+        rebind_codex_root(&c, &snap).unwrap();
+        let hint = || {
+            c.query_row(
+                "SELECT env FROM locator_metadata WHERE address=?1",
+                [&snap.root_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap()
+        };
+        assert!(hint().is_some(), "same registration keeps its adapter hint");
+        snap.owner_pid = 20;
+        upsert_codex_root(&c, &snap).unwrap();
+        assert!(
+            hint().is_none(),
+            "new owner without an adapter hint is unknown"
+        );
+        crate::locator::record(&c, &snap.root_id, "codex", &snap.root_id, Some(&env), None)
+            .unwrap();
+        snap.generation += 1;
+        rebind_codex_root(&c, &snap).unwrap();
+        assert!(
+            hint().is_none(),
+            "new generation without an adapter hint is unknown"
+        );
+    }
 
     #[test]
     fn locator_registration_retains_parked_metadata_until_release_or_purge() {

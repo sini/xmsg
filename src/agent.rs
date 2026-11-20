@@ -954,8 +954,10 @@ pub async fn run_agent_server_with_listener(
                                     .and_then(crate::inbox::clean_label);
                                 let session_key = conv_id.clone();
                                 let mut restored_creds = false;
+                                let registration_changed;
                                 {
                                     let mut store_lock = state_clone.agy_store.write().unwrap();
+                                    registration_changed = store_lock.get(&session_key).is_none_or(|info| info.pid != reg.pid || info.starttime != reg.starttime);
                                     store_lock
                                         .entry(session_key.clone())
                                         .and_modify(|current| {
@@ -1027,7 +1029,9 @@ pub async fn run_agent_server_with_listener(
                                 crate::agy::notify_agy_escrow();
                                 if let Ok(db) = state_clone.db.lock() {
                                     let now = crate::storage::now_epoch_secs();
-                                    let _ = crate::locator::record(&db, &session_key, "agy", &conv_id, None, None);
+                                    if registration_changed {
+                                        let _ = crate::locator::record(&db, &session_key, "agy", &conv_id, None, None);
+                                    }
                                     let _ = crate::storage::mark_live(
                                         &db,
                                         &session_key,
