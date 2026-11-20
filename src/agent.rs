@@ -1030,7 +1030,7 @@ pub async fn run_agent_server_with_listener(
                                 if let Ok(db) = state_clone.db.lock() {
                                     let now = crate::storage::now_epoch_secs();
                                     if registration_changed {
-                                        let _ = crate::locator::record(&db, &session_key, "agy", &conv_id, None, None);
+                                        let _ = crate::locator::record(&db, &session_key, "agy", &conv_id, None);
                                     }
                                     let _ = crate::storage::mark_live(
                                         &db,
@@ -2587,7 +2587,6 @@ pub async fn handle_codex_hook_frame(
                                     "codex",
                                     session_id,
                                     env.as_ref(),
-                                    root_snap.cwd.as_deref(),
                                 )
                                 .map_err(|e| AppError::Internal(e.to_string()))?;
                                 crate::storage::reserve_codex_hook_batch(
@@ -2689,7 +2688,6 @@ pub async fn handle_codex_hook_frame(
                                     "codex",
                                     session_id,
                                     env.as_ref(),
-                                    root_snap.cwd.as_deref(),
                                 )
                                 .map_err(|e| AppError::Internal(e.to_string()))?;
                                 crate::storage::reserve_codex_hook_batch(
