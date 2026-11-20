@@ -221,7 +221,9 @@ choosing that downgrade. See [relay configuration](/operations/fleet-observer/#c
 
 A configured source that is not compiled into the build stays off and cannot permit a source-dependent missing address. Keep a static address or an existing supported hub route until the source integration is available. A failed static address never falls through to a discovered candidate. Unknown-node and ambiguity results describe routing knowledge, not a grant of trust from an announcement. The standalone collector does not use daemon discovery.
 
-## LAN discovery on macOS: Local Network permission (planned)
+## LAN discovery on macOS: Local Network permission
+
+<Status id="xmsg.discovery" />
 
 With [LAN discovery](/concepts/discovery/) enabled, `xmsg doctor` reports a `discovery.mdns`
 check from the daemon's local health response (plus a standing `discovery.announce` warning
