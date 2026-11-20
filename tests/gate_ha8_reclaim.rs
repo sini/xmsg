@@ -621,6 +621,93 @@ async fn test_ha8_oracle_3_expired_window_refused() {
 // reclaim presents the secret for that address and reclaims it for `S2`.
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn locator_hermes_continues_preserves_registration_and_release_forgets() {
+    let node = Node::start(None);
+    let mut hermes = PluginConn::open(&node.register_sock, "hermes").await;
+    let old_native = "20261120_123456_aabbcc";
+    let new_native = "20261120_123457_ddeeff";
+    let hint = json!({"kind": "tmux", "ref": "%3"});
+    let registration = hermes
+        .call(json!({
+            "action": "register", "session": old_native, "env": hint,
+        }))
+        .await;
+    assert_eq!(registration["status"], "ok");
+    let address = registration["address"].as_str().unwrap().to_string();
+    let bare_address = address.split('@').next().unwrap();
+    let db = rusqlite::Connection::open(&node.db_path).unwrap();
+    let metadata = || {
+        db.query_row(
+            "SELECT native_id, env FROM locator_metadata WHERE address=?1",
+            [bare_address],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .unwrap()
+    };
+    let (native, env) = metadata();
+    assert_eq!(native, old_native);
+    assert_eq!(serde_json::from_str::<Value>(&env.unwrap()).unwrap(), hint);
+
+    let continuation = hermes
+        .call(json!({
+            "action": "continues", "from": old_native, "to": new_native,
+        }))
+        .await;
+    assert_eq!(continuation["status"], "ok");
+    assert_eq!(continuation["address"], address);
+    let (native, env) = metadata();
+    assert_eq!(
+        native, new_native,
+        "continuation must update the captured native ID"
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&env.unwrap()).unwrap(),
+        hint,
+        "continuation keeps the same registration environment"
+    );
+
+    let detached = hermes
+        .call(json!({"action": "detach", "session": new_native}))
+        .await;
+    assert_eq!(detached["status"], "ok");
+    assert_eq!(
+        metadata().0,
+        new_native,
+        "parked registration retains its native ID"
+    );
+    drop(hermes);
+    let mut resumed = PluginConn::open(&node.register_sock, "hermes").await;
+    let reclaimed = resumed
+        .call(json!({
+            "action": "register", "session": new_native,
+            "reclaim": {"id": bare_address, "secret": registration["reclaim"]},
+        }))
+        .await;
+    assert_eq!(reclaimed["status"], "ok");
+    assert_eq!(reclaimed["address"], address);
+    assert_eq!(
+        metadata(),
+        (new_native.to_string(), None),
+        "new registration without a hint must not inherit the previous environment"
+    );
+    let released = resumed
+        .call(json!({"action": "release", "session": new_native}))
+        .await;
+    assert_eq!(released["status"], "ok");
+    let remaining: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM locator_metadata WHERE address=?1",
+            [bare_address],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        remaining, 0,
+        "permanent release must forget locator metadata"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_ha8_oracle_7_continues_and_reclaim() {
     let node = Node::start(None);
     let mut hm1 = PluginConn::open(&node.register_sock, "hermes").await;
