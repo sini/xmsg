@@ -577,10 +577,13 @@ async fn post(
         AppError::PeerUnreachable(format!("{what} '{}': {e}", peer.name))
     };
     let fut = async {
-        let tls = crate::discovery::dial::resolve_dial(fs, &peer)
+        let crate::discovery::dial::PreparedDirect {
+            stream: tls,
+            authority,
+        } = crate::discovery::dial::resolve_dial(fs, &peer)
             .await?
             .into_direct()?;
-        let (mut sender, conn) =
+        let (sender, conn) =
             hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls))
                 .await
                 .map_err(|e| unreachable("HTTP with", &e))?;

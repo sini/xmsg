@@ -918,10 +918,21 @@ async fn x6_prepared_send_rejects_a_reloaded_policy_before_request() {
 #[tokio::test]
 async fn x6_admitted_addressless_nonleaf_is_not_prepared() {
     let ca = Ca::new();
-    let fixture = Fixture::new(&ca, &[]);
+    let mut fixture = Fixture::new(&ca, &[]);
+    let policy = PeersMap::load_from_json(
+        &json!({
+            "peers": {},
+            "hub": {"patterns": [{"pattern":"spiffe://discovery.test/host/*/user/*",
+                "ca": fixture._root.path().join("ca.pem")}],
+                "rules":[{"pattern":"spiffe://discovery.test/host/*/user/*","allow":["send"]}]}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    Arc::get_mut(&mut fixture.fs).unwrap().peers = Arc::new(policy).into();
     let policy = fixture.fs.current_peers();
     policy.admitted_clients.write().unwrap().insert(
-        N.into(),
+        uri(N),
         crate::fed::AdmittedClient {
             canonical_name: N.into(),
             uri: uri(N),
@@ -946,4 +957,61 @@ async fn x6_admitted_addressless_nonleaf_is_not_prepared() {
 #[tokio::test]
 async fn x6_request_error_does_not_retry_through_hub() {
     x6_surface_send(true, true).await;
+}
+
+#[tokio::test]
+async fn discovery_adapter_static_and_candidate_client_hello_omit_sni() {
+    for static_address in [true, false] {
+        let ca = Ca::new();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let fixture = Fixture::new(&ca, &[(N, static_address.then(|| addr.to_string()))]);
+        if !static_address {
+            let now = Instant::now();
+            fixture
+                .fs
+                .discovery
+                .candidates
+                .write()
+                .unwrap()
+                .inject_for_test(Candidate {
+                    addr,
+                    source: Source::Mdns,
+                    hint: None,
+                    root_fp: None,
+                    seen_at: now,
+                    expires_at: now + Duration::from_secs(60),
+                });
+        }
+        let fs = fixture.fs.clone();
+        let peer = fixture.peer(N);
+        let client = tokio::spawn(async move { resolve_dial(&fs, &peer).await });
+        let (tcp, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+            .await
+            .expect("adapter ClientHello accept deadline")
+            .unwrap();
+        let accepted = tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio_rustls::LazyConfigAcceptor::new(rustls::server::Acceptor::default(), tcp),
+        )
+        .await
+        .expect("adapter ClientHello capture deadline")
+        .unwrap();
+        let hello = accepted.client_hello();
+        assert!(
+            !hello.cipher_suites().is_empty(),
+            "adapter fixture did not parse a real ClientHello"
+        );
+        assert_eq!(hello.server_name(), None, "discovery adapter emitted SNI");
+        drop(accepted);
+        let result = tokio::time::timeout(Duration::from_secs(3), client)
+            .await
+            .expect("adapter client completion deadline")
+            .unwrap();
+        if static_address {
+            assert!(result.is_err(), "capture unexpectedly completed static TLS");
+        } else {
+            assert_eq!(result.unwrap().via_hub(), Some("hub"));
+        }
+    }
 }

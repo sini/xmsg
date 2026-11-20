@@ -29,6 +29,7 @@ struct Negative {
 struct Tables {
     presence: HashMap<String, Presence>,
     negative: HashMap<(SocketAddr, String), Negative>,
+    last_attempt: HashMap<String, SocketAddr>,
 }
 
 pub struct State {
@@ -50,6 +51,50 @@ impl Default for State {
 }
 
 impl State {
+    pub(crate) fn identity_uris(
+        &self,
+        policy: &Arc<PeersMap>,
+        now: Instant,
+        wall_now: i64,
+    ) -> Vec<String> {
+        let active = self.active_addresses(now);
+        let mut tables = self
+            .tables
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        prune(&mut tables, policy, &active, now, wall_now);
+        tables.presence.keys().cloned().collect()
+    }
+
+    pub(crate) fn order_untried(&self, rule: &str, candidates: &mut [Candidate]) {
+        let tables = self
+            .tables
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(last) = tables.last_attempt.get(rule) {
+            if let Some(index) = candidates
+                .iter()
+                .position(|candidate| &candidate.addr == last)
+            {
+                if !candidates.is_empty() {
+                    let len = candidates.len();
+                    candidates.rotate_left((index + 1) % len);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn attempted(&self, rule: &str, addr: SocketAddr) {
+        let mut tables = self
+            .tables
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if tables.last_attempt.len() >= MDNS_CAP && !tables.last_attempt.contains_key(rule) {
+            tables.last_attempt.clear();
+        }
+        tables.last_attempt.insert(rule.to_owned(), addr);
+    }
+
     fn active_addresses(&self, now: Instant) -> HashSet<SocketAddr> {
         self.candidates
             .read()
@@ -258,6 +303,25 @@ mod tests {
             expires_at: now + Duration::from_secs(3600),
             not_after: 10_000,
         }
+    }
+
+    #[test]
+    fn cancelled_probe_retains_next_candidate_across_sends() {
+        let state = State::default();
+        let now = Instant::now();
+        let first = candidate(&state, now, 60);
+        let mut second = first.clone();
+        second.addr = "192.0.2.2:7788".parse().unwrap();
+        let mut candidates = vec![first.clone(), second.clone()];
+        state.attempted("rule", first.addr);
+        state.order_untried("rule", &mut candidates);
+        assert_eq!(
+            candidates[0].addr, second.addr,
+            "a cancelled send repeated the attempted prefix"
+        );
+        state.attempted("rule", second.addr);
+        state.order_untried("rule", &mut candidates);
+        assert_eq!(candidates[0].addr, first.addr);
     }
 
     #[test]

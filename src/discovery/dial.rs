@@ -17,8 +17,20 @@ pub struct Dial {
 }
 
 enum Route {
-    Direct(Box<TlsStream<TcpStream>>),
+    Direct(Box<PreparedDirect>),
     ViaHub(String),
+}
+
+pub struct PreparedDirect {
+    pub(crate) stream: TlsStream<TcpStream>,
+    pub(crate) authority: crate::fed::CurrentLeaf,
+}
+
+impl std::ops::Deref for PreparedDirect {
+    type Target = TlsStream<TcpStream>;
+    fn deref(&self) -> &Self::Target {
+        &self.stream
+    }
 }
 
 impl Dial {
@@ -29,7 +41,7 @@ impl Dial {
         Ok(self.policy.clone())
     }
 
-    pub fn into_direct(self) -> Result<TlsStream<TcpStream>, AppError> {
+    pub fn into_direct(self) -> Result<PreparedDirect, AppError> {
         match self.inner {
             Route::Direct(stream) => Ok(*stream),
             Route::ViaHub(hub) => Err(AppError::PeerUnreachable(format!(
@@ -51,13 +63,12 @@ async fn connect(
     peer: &PeerConfig,
     policy: Arc<PeersMap>,
     address: &str,
-) -> Result<TlsStream<TcpStream>, AppError> {
+) -> Result<PreparedDirect, AppError> {
     let (chain, key, current) = fs.dial_credentials();
     if !Arc::ptr_eq(&current, &policy) {
         return Err(AppError::PeerRejected("discovery policy changed".into()));
     }
-    let connector =
-        crate::fed::make_tls_connector_with_credentials(chain, key, peer, policy.clone())?;
+    let connector = crate::fed::make_tls_connector_for_policy(chain, key, peer, policy.clone())?;
     let name =
         ServerName::try_from(peer.name.clone()).map_err(|e| AppError::Internal(e.to_string()))?;
     let tcp = TcpStream::connect(address)
@@ -67,10 +78,14 @@ async fn connect(
         .connect(name, tcp)
         .await
         .map_err(|e| crate::fed::map_tls_connect_error(&peer.name, e))?;
+    let authority = crate::fed::CurrentLeaf::outbound(fs, connector.admission_mode(), &tls)?;
     if !Arc::ptr_eq(&fs.current_peers(), &policy) {
         return Err(AppError::PeerRejected("discovery policy changed".into()));
     }
-    Ok(tls)
+    Ok(PreparedDirect {
+        stream: tls,
+        authority,
+    })
 }
 
 fn exact_uri(peer: &PeerConfig) -> Option<&str> {
@@ -127,7 +142,7 @@ async fn discovered(
     peer: &PeerConfig,
     policy: &Arc<PeersMap>,
     candidate: Candidate,
-) -> Result<TlsStream<TcpStream>, AppError> {
+) -> Result<PreparedDirect, AppError> {
     let _permit = fs
         .discovery
         .probes
@@ -152,6 +167,7 @@ async fn discovered(
         verified_at: now,
         not_after,
     };
+    tls.authority.check()?;
     let recorded = fs.with_discovery_policy(policy, || {
         fs.discovery
             .record_verified(row, policy, now, crate::storage::now_epoch_secs())
@@ -228,7 +244,9 @@ async fn resolve_with_policy(
                     }
                 }
             }
-            for candidate in candidates(fs, &peer, &policy, Instant::now()) {
+            let mut pending = candidates(fs, &peer, &policy, Instant::now());
+            fs.discovery.order_untried(&peer.name, &mut pending);
+            for candidate in pending {
                 let negative = fs.with_discovery_policy(&policy, || {
                     fs.discovery
                         .is_negative(candidate.addr, &peer.name, &policy, Instant::now())
@@ -238,6 +256,7 @@ async fn resolve_with_policy(
                     Some(true) => continue,
                     None => return None,
                 }
+                fs.discovery.attempted(&peer.name, candidate.addr);
                 match discovered(fs, &peer, &policy, candidate.clone()).await {
                     Ok(tls) => return Some(tls),
                     Err(_) => {
@@ -300,6 +319,34 @@ pub fn is_direct(fs: &FedState, peer: &PeerConfig) -> bool {
         )
         .is_some()
         || !candidates(fs, peer, &policy, Instant::now()).is_empty()
+}
+
+pub(crate) fn conflicting_identities(
+    name: &str,
+    presence: Vec<String>,
+    admitted: Vec<String>,
+) -> Vec<String> {
+    let identities = presence
+        .into_iter()
+        .chain(admitted)
+        .filter(|uri| crate::node::node_name_from_uri(uri).is_ok_and(|derived| derived == name))
+        .collect::<std::collections::BTreeSet<_>>();
+    if identities.len() > 1 {
+        identities.into_iter().collect()
+    } else {
+        Vec::new()
+    }
+}
+
+pub(crate) fn identity_conflicts(fs: &FedState, name: &str) -> Vec<String> {
+    let policy = fs.current_peers();
+    if policy.get(name).is_some() {
+        return Vec::new();
+    }
+    let presence =
+        fs.discovery
+            .identity_uris(&policy, Instant::now(), crate::storage::now_epoch_secs());
+    conflicting_identities(name, presence, policy.admitted_leaf_uris())
 }
 
 #[cfg(test)]
@@ -382,4 +429,32 @@ pub fn spawn_sweep(fs: &Arc<FedState>) -> tokio::task::JoinHandle<()> {
             let _ = tokio::time::timeout(Duration::from_secs(8), sweep).await;
         }
     })
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn full_identity_union_retains_old_collisions_beyond_presentation_limit() {
+        let first = "spiffe://first.test/host/n/user/owner".to_owned();
+        let second = "spiffe://second.test/host/n/user/owner".to_owned();
+        assert!(
+            !conflicting_identities("owner.n", vec![first.clone(), second.clone()], Vec::new())
+                .is_empty(),
+            "distinct verified presence identities collapsed to one name"
+        );
+        let mut admitted = (0..501)
+            .map(|index| format!("spiffe://test/host/h{index}/user/owner"))
+            .collect::<Vec<_>>();
+        admitted.push(second);
+        assert!(
+            !conflicting_identities("owner.n", vec![first.clone()], admitted).is_empty(),
+            "complete presence/admitted union lost an older collision"
+        );
+        assert!(
+            conflicting_identities("owner.n", vec![first.clone()], vec![first]).is_empty(),
+            "the same full identity counted twice"
+        );
+    }
 }

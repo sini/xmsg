@@ -5,8 +5,9 @@ description: How untrusted addresses become verified federation endpoints.
 
 ## Exact-identity discovery (planned)
 
-A discovery candidate is an address, not a peer identity or permission. A hint or
-announced root fingerprint can order candidates, but cannot admit a peer. A
+A discovery candidate is an address, not a peer identity or permission. A local hint may order candidates, but cannot admit a peer. The planned mDNS
+producer ignores incoming root claims and advertises rotating opaque handles,
+without identity names or root hashes. A
 candidate becomes a verified presence only after mutual TLS proves the exact
 configured certificate identity under its configured CA roots. Presence is keyed
 by the certificate's URI, never by an announcement's name.
@@ -27,8 +28,11 @@ pretending the hub is the target.
 Presence expires by the earliest of its source TTL, ten minutes, certificate
 expiry and a policy reload. An announcement refresh cannot extend a verified
 presence without another TLS proof. Failed addresses are remembered for that
-rule until their observed candidate expiry. Reloaded policy cannot reuse an old
-proof, and candidates are copied out of their table before any network wait.
+rule until their observed candidate expiry. Probe order retains an untried
+cursor across sends so a bad prefix cannot starve later candidates. Reloaded policy cannot reuse an old
+proof. Global deny and actual CA-leaf expiry apply before presence publication
+and continue through request sending, response frames and final answer publication.
+Explicit static pins retain their date-independent admission. Candidates are copied out of their table before any network wait.
 
 Probes share four slots, have a two-second handshake limit and an eight-second
 resolution budget. Existing shorter operation deadlines still apply, including
@@ -57,7 +61,7 @@ source and verifying address-less onboarding belong to the source integration.
 }
 ```
 
-The TTL must be between 1 and 600 seconds. Address omission requires a CA entry
+The TTL must be between 1 and 600 seconds. Address omission requires a CA entry with one exact URI identity
 and a source that is both configured and available in the build, except for the
 existing leaf and default-route cases. A pin alone cannot enable address-less
 discovery. Pattern probing is outside this exact-identity core.

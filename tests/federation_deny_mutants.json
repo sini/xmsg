@@ -269,8 +269,8 @@
     "edits": [
       {
         "file": "src/fed.rs",
-        "needle": "            &selected,\n            peers,",
-        "replacement": "            peer,\n            peers,",
+        "needle": "connector: make_tls_connector_with_credentials(chain, key, &selected, peers)?",
+        "replacement": "connector: make_tls_connector_with_credentials(chain, key, peer, peers)?",
         "start": "pub fn make_tls_connector_for_peer("
       }
     ],

@@ -163,7 +163,10 @@ async fn probe(fed: Arc<FedState>, peer: PeerConfig, progress: Arc<Mutex<Peer>>)
         return;
     }
     let work = async {
-        let tls = match crate::discovery::dial::resolve_dial(&fed, &peer)
+        let crate::discovery::dial::PreparedDirect {
+            stream: tls,
+            authority,
+        } = match crate::discovery::dial::resolve_dial(&fed, &peer)
             .await
             .and_then(|dial| dial.into_direct())
         {
@@ -205,14 +208,6 @@ async fn probe(fed: Arc<FedState>, peer: PeerConfig, progress: Arc<Mutex<Peer>>)
                 row.expiry = expiry;
             }
         }
-        let authority =
-            match crate::fed::CurrentLeaf::outbound(&fed, connector.admission_mode(), &tls) {
-                Ok(authority) => authority,
-                Err(_) => {
-                    progress.lock().unwrap().reason = "peer_denied";
-                    return;
-                }
-            };
         let io = hyper_util::rt::TokioIo::new(tls);
         let (mut sender, connection) = match hyper::client::conn::http1::Builder::new()
             .max_buf_size(16 * 1024)

@@ -1383,7 +1383,10 @@ async fn post_answer(
         Ok(body) => (body, "ok"),
         Err(e) => (Vec::new(), e.text()),
     };
-    let tls = crate::discovery::dial::resolve_dial(fs, peer)
+    let crate::discovery::dial::PreparedDirect {
+        stream: tls,
+        authority,
+    } = crate::discovery::dial::resolve_dial(fs, peer)
         .await
         .and_then(|dial| dial.into_direct())
         .map_err(|_| Failure::Unreachable)?;
@@ -1402,8 +1405,6 @@ async fn post_answer(
     if !certificate_matches(cert.as_ref(), &control.hub) {
         return Err(Failure::Denied);
     }
-    let authority = crate::fed::CurrentLeaf::outbound(fs, connector.admission_mode(), &tls)
-        .map_err(|_| Failure::Denied)?;
     let (sender, connection) =
         hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls))
             .await

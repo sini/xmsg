@@ -2580,14 +2580,17 @@ async fn deliver_send(
                     "node '{n}' has ambiguous identity patterns"
                 )));
             }
+            let conflicts = crate::discovery::dial::identity_conflicts(fs, n);
+            if !conflicts.is_empty() {
+                return Err(AppError::Ambiguous(format!(
+                    "node '{n}' has ambiguous identities: {}",
+                    conflicts.join(", ")
+                )));
+            }
             let is_direct = if let Some(peer) = peers.get(n) {
                 crate::discovery::dial::is_direct(fs, peer)
             } else {
-                peers
-                    .admitted_clients
-                    .read()
-                    .ok()
-                    .is_some_and(|adm| adm.contains_key(n))
+                peers.get_peer_config(n).is_some()
             };
 
             if is_direct {
