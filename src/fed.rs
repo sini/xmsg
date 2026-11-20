@@ -8633,4 +8633,107 @@ mod locator_readonly_tests {
             }
         ));
     }
+
+    async fn known_leaf_is_located_through_its_mailbox(peers: PeersMap, lookup: &str) {
+        let (_dir, mut state) = crate::locator::tests::fixture();
+        let expected_peer = peers
+            .get_peer_config(lookup)
+            .expect("fixture node is known")
+            .name;
+        let mut federation = fed(&state);
+        federation.peers = Arc::new(peers).into();
+        let federation = Arc::new(federation);
+        state.fed_state = Some(federation.clone());
+        let mut notified = federation.notify_tx.subscribe();
+        let query = crate::locator::Query {
+            address: Some(format!("remote-session@{lookup}")),
+            label: None,
+            detail: true,
+        };
+        let mut locating =
+            tokio::spawn(async move { crate::locator::locate(&state, &query).await.unwrap() });
+        tokio::select! {
+            note=notified.recv()=>assert_eq!(note.unwrap(),expected_peer),
+            completed=&mut locating=>panic!("known locator peer must dispatch its read-only list query: {:?}",completed),
+        }
+        let (query_id, read_only) = federation
+            .list_queries
+            .next_for(&expected_peer)
+            .expect("locator must ask the known leaf");
+        assert!(read_only, "known-node lookup must keep the read-only flag");
+        assert!(federation.list_queries.answer(
+            &query_id,
+            &expected_peer,
+            FedListAnswer::Ok {
+                entries: vec![FedListEntry {
+                    id: "remote-session".into(),
+                    kind: "instance".into(),
+                    harness: Some("codex".into()),
+                    label: Some("remote".into()),
+                    status: "live".into(),
+                    user: "person".into(),
+                    registered_at: Some(1),
+                    last_seen: None
+                }]
+            },
+            "person".into()
+        ));
+        let result = locating.await.unwrap();
+        assert_eq!(
+            result.locators.len(),
+            1,
+            "known locator peer answer was discarded"
+        );
+        assert!(result.nodes.iter().all(|n| n.status == "ok"));
+        let item = &result.locators[0];
+        assert_eq!(item.recipient.node, expected_peer);
+        assert_eq!(item.native_id, None);
+        assert_eq!(item.env, None);
+        assert_eq!(item.cwd, None);
+        assert_eq!(item.resume, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn locate_resolves_a_pinned_peers_canonical_name_to_its_configured_alias() {
+        let pin = "ab".repeat(32);
+        let canonical = crate::node::node_name_from_pin(&pin).unwrap();
+        let peers=PeersMap::load_from_json(&serde_json::json!({"peers":{"laptop":{"address":"127.0.0.1:1","pin":pin,"allow":["list"],"leaf":true}}}).to_string()).unwrap();
+        assert_eq!(peers.key_for(&canonical), Some("laptop"));
+        known_leaf_is_located_through_its_mailbox(peers, &canonical).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn locate_resolves_a_legitimately_admitted_dynamic_leaf() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_path = dir.path().join("ca.pem");
+        let mut ca = rcgen::CertificateParams::default();
+        ca.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::DigitalSignature,
+        ];
+        let key = rcgen::KeyPair::generate().unwrap();
+        std::fs::write(&ca_path, ca.self_signed(&key).unwrap().pem()).unwrap();
+        let uri = "spiffe://locator.invalid/host/desktop/user/person";
+        let mut leaf = rcgen::CertificateParams::default();
+        leaf.subject_alt_names = vec![rcgen::SanType::URI(uri.try_into().unwrap())];
+        leaf.extended_key_usages = vec![
+            rcgen::ExtendedKeyUsagePurpose::ClientAuth,
+            rcgen::ExtendedKeyUsagePurpose::ServerAuth,
+        ];
+        let leaf = leaf
+            .signed_by(
+                &rcgen::KeyPair::generate().unwrap(),
+                &rcgen::Issuer::from_params(&ca, &key),
+            )
+            .unwrap();
+        let pattern = "spiffe://locator.invalid/host/*/user/*";
+        let peers=PeersMap::load_from_json(&serde_json::json!({"peers":{},"hub":{"patterns":[{"pattern":pattern,"ca":ca_path}],"rules":[{"pattern":pattern,"allow":["list"],"leaf":true}]}}).to_string()).unwrap();
+        peers
+            .resolve_incoming_peer(leaf.der(), &[])
+            .expect("signed fixture leaf must be admitted through production resolver");
+        assert!(peers.contains_name("person.desktop"));
+        assert!(peers.keys().next().is_none());
+        known_leaf_is_located_through_its_mailbox(peers, "person.desktop").await;
+    }
 }
