@@ -142,6 +142,14 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		plannedSince: '2026-11-20',
 		note: 'Backlog: optional bridge node for interoperating with an external SLIM fabric.',
 	},
+	'xmsg.teams-control': {
+		id: 'xmsg.teams-control',
+		title: 'Optional teams & environment extensions',
+		owner: 'sini',
+		evidence: [],
+		plannedSince: '2026-11-20',
+		note: 'Design intent: optional per-environment terminal/runtime adapters, hook-derived attention, typed-receipt lifecycle, and two-phase worktrees.',
+	},
 	'xmsg.ca-health': {
 		id: 'xmsg.ca-health',
 		title: 'CA application health checks',
