@@ -1015,3 +1015,78 @@ async fn discovery_adapter_static_and_candidate_client_hello_omit_sni() {
         }
     }
 }
+
+#[test]
+fn stale_metadata_read_cannot_prune_new_generation_presence() {
+    let ca = Ca::new();
+    let fixture = Fixture::new(&ca, &[(N, None)]);
+    let old = fixture.fs.current_peers();
+    let current = Arc::new((*old).clone());
+    let acceptor = crate::fed::make_tls_acceptor(
+        &[CertificateDer::from(fixture.fs.cert_der.clone())],
+        &fixture.fs.key_der,
+        current.clone(),
+    )
+    .unwrap();
+    *fixture.fs.dynamic_tls.write().unwrap() = Some(crate::fed::DynamicTls {
+        cert_der: fixture.fs.cert_der.clone(),
+        cert_chain_der: Vec::new(),
+        key_der: fixture.fs.key_der.clone(),
+        ca_anchors: Default::default(),
+        acceptor,
+        peers: current.clone(),
+    });
+    let now = Instant::now();
+    let candidate = Candidate {
+        addr: "192.0.2.1:7788".parse().unwrap(),
+        source: Source::Mdns,
+        hint: None,
+        root_fp: None,
+        seen_at: now,
+        expires_at: now + Duration::from_secs(60),
+    };
+    assert!(fixture
+        .fs
+        .discovery
+        .candidates
+        .write()
+        .unwrap()
+        .upsert(candidate.clone(), now));
+    let wall = crate::storage::now_epoch_secs();
+    assert_eq!(
+        fixture.fs.with_discovery_policy(&current, || {
+            fixture.fs.discovery.record_verified(
+                Presence {
+                    uri: uri(N),
+                    rule: N.into(),
+                    policy: current.clone(),
+                    candidate,
+                    verified_at: now,
+                    expires_at: now + Duration::from_secs(60),
+                    not_after: wall + 3600,
+                },
+                &current,
+                now,
+                wall,
+            )
+        }),
+        Some(true)
+    );
+    let called = std::sync::atomic::AtomicBool::new(false);
+    let _ = fixture.fs.with_discovery_policy(&old, || {
+        called.store(true, Ordering::SeqCst);
+        fixture.fs.discovery.lookup(&uri(N), N, &old, now, wall)
+    });
+    assert!(
+        fixture
+            .fs
+            .discovery
+            .lookup(&uri(N), N, &current, now, wall)
+            .is_some(),
+        "stale metadata read pruned a new-generation presence"
+    );
+    assert!(
+        !called.load(Ordering::SeqCst),
+        "stale metadata read entered the effect"
+    );
+}

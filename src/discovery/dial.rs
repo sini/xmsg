@@ -245,7 +245,8 @@ async fn resolve_with_policy(
                 }
             }
             let mut pending = candidates(fs, &peer, &policy, Instant::now());
-            fs.discovery.order_untried(&peer.name, &mut pending);
+            fs.discovery
+                .order_untried(&policy, &peer.name, &mut pending);
             for candidate in pending {
                 let negative = fs.with_discovery_policy(&policy, || {
                     fs.discovery
@@ -256,7 +257,15 @@ async fn resolve_with_policy(
                     Some(true) => continue,
                     None => return None,
                 }
-                fs.discovery.attempted(&peer.name, candidate.addr);
+                if fs
+                    .with_discovery_policy(&policy, || {
+                        fs.discovery
+                            .attempted(&policy, &peer.name, candidate.addr, Instant::now())
+                    })
+                    .is_none()
+                {
+                    return None;
+                }
                 match discovered(fs, &peer, &policy, candidate.clone()).await {
                     Ok(tls) => return Some(tls),
                     Err(_) => {
@@ -309,16 +318,19 @@ pub fn is_direct(fs: &FedState, peer: &PeerConfig) -> bool {
         return false;
     };
     let policy = fs.current_peers();
-    fs.discovery
-        .lookup(
-            uri,
-            &peer.name,
-            &policy,
-            Instant::now(),
-            crate::storage::now_epoch_secs(),
-        )
-        .is_some()
-        || !candidates(fs, peer, &policy, Instant::now()).is_empty()
+    fs.with_discovery_policy(&policy, || {
+        fs.discovery
+            .lookup(
+                uri,
+                &peer.name,
+                &policy,
+                Instant::now(),
+                crate::storage::now_epoch_secs(),
+            )
+            .is_some()
+            || !candidates(fs, peer, &policy, Instant::now()).is_empty()
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn conflicting_identities(
@@ -343,10 +355,13 @@ pub(crate) fn identity_conflicts(fs: &FedState, name: &str) -> Vec<String> {
     if policy.get(name).is_some() {
         return Vec::new();
     }
-    let presence =
-        fs.discovery
-            .identity_uris(&policy, Instant::now(), crate::storage::now_epoch_secs());
-    conflicting_identities(name, presence, policy.admitted_leaf_uris())
+    fs.with_discovery_policy(&policy, || {
+        let presence =
+            fs.discovery
+                .identity_uris(&policy, Instant::now(), crate::storage::now_epoch_secs());
+        conflicting_identities(name, presence, policy.admitted_leaf_uris())
+    })
+    .unwrap_or_default()
 }
 
 #[cfg(test)]
