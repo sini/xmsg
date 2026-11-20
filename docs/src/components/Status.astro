@@ -2,6 +2,13 @@
 import { Badge } from '@astrojs/starlight/components';
 import statusData from '../../.status.json';
 
+interface SiblingAllowlistInfo {
+	repo: string;
+	owner: string;
+	expiry: string;
+	reason: string;
+}
+
 interface FeatureStatus {
 	id: string;
 	title: string;
@@ -10,6 +17,7 @@ interface FeatureStatus {
 	onMain: boolean | 'unknown';
 	inFleetPin: boolean | 'unknown';
 	released: boolean | 'unknown';
+	siblingAllowlist?: SiblingAllowlistInfo | null;
 }
 
 interface StatusPayload {
@@ -30,20 +38,27 @@ if (!status) {
 	throw new Error(`Status.astro: unknown feature id '${id}' in .status.json`);
 }
 
+const sibling = status.siblingAllowlist ?? null;
+
 const hasUnknown =
-	status.onMain === 'unknown' ||
-	status.inFleetPin === 'unknown' ||
-	status.released === 'unknown';
+	!sibling &&
+	(status.onMain === 'unknown' ||
+		status.inFleetPin === 'unknown' ||
+		status.released === 'unknown');
 
 const isPlannedOnly =
-	status.onMain === false && status.inFleetPin === false && status.released === false;
+	!sibling &&
+	status.onMain === false &&
+	status.inFleetPin === false &&
+	status.released === false;
 ---
 
-<span class="xmsg-status" data-feature-id={id} title={status.note ?? status.title}>
+<span class="xmsg-status" data-feature-id={id} title={sibling?.reason ?? status.note ?? status.title}>
 	{label && <span class="xmsg-status-label">{label}</span>}
-	{status.onMain === true && <Badge text="on main" variant="tip" />}
-	{status.inFleetPin === true && <Badge text="in fleet pin" variant="success" />}
-	{status.released === true && <Badge text="released" variant="default" />}
+	{sibling && <Badge text={`verified in ${sibling.repo}`} variant="tip" />}
+	{!sibling && status.onMain === true && <Badge text="on main" variant="tip" />}
+	{!sibling && status.inFleetPin === true && <Badge text="in fleet pin" variant="success" />}
+	{!sibling && status.released === true && <Badge text="released" variant="default" />}
 	{isPlannedOnly && <Badge text="planned" variant="note" />}
 	{hasUnknown && <Badge text="unknown" variant="caution" />}
 </span>
