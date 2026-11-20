@@ -255,3 +255,33 @@ test('S11: fleet pin derives from nix-config flake.lock; fetch failure yields un
 	);
 	assert.equal(statusFailed.status.inFleetPin, 'unknown');
 });
+
+test('S12: sibling allowlist entry renders verified-in-repo instead of planned', () => {
+	const allowlistEntry = {
+		id: 'gateway.oauth-as',
+		repo: 'sini/xmsg-mcp-gateway',
+		owner: 'sini',
+		expiry: '2026-12-20',
+		reason: 'Verified in sini/xmsg-mcp-gateway main (4804d250) at src/auth.rs:553',
+	};
+	const res = computeFeatureStatus(
+		{
+			id: 'gateway.oauth-as',
+			title: 'Gateway OAuth AS',
+			owner: 'sini',
+			evidence: [],
+		},
+		{
+			main: { ref: 'main-sha' },
+			fleetPin: { ref: 'pin-sha' },
+			releaseTag: { ref: null, noReleaseTags: true },
+		},
+		makeReader({}),
+		{ strict: true, allowlistById: new Map([[allowlistEntry.id, allowlistEntry]]) },
+	);
+	assert.equal(res.errors.length, 0);
+	assert.equal(res.status.siblingAllowlist?.repo, 'sini/xmsg-mcp-gateway');
+	assert.equal(res.status.onMain, false);
+	assert.equal(res.status.inFleetPin, false);
+	assert.equal(res.status.released, false);
+});

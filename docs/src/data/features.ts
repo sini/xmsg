@@ -142,29 +142,31 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		id: 'agy.macos-locks',
 		title: 'macOS Antigravity lock and process ancestry checks',
 		owner: 'sini',
-		evidence: [],
-		plannedSince: '2026-11-20',
+		evidence: [
+			{ path: 'src/agy.rs', anchor: 'darwin_holder' },
+			{ path: 'src/codex.rs', anchor: 'kqueue_vnode' },
+		],
 	},
 	'gateway.oauth-as': {
 		id: 'gateway.oauth-as',
 		title: 'Gateway OAuth authorization server profile',
 		owner: 'sini',
 		evidence: [],
-		plannedSince: '2026-11-20',
+		note: 'Verified in sibling repo sini/xmsg-mcp-gateway (4804d250).',
 	},
 	'gateway.inline-attachments': {
 		id: 'gateway.inline-attachments',
 		title: 'Gateway inline attachment transport',
 		owner: 'sini',
 		evidence: [],
-		plannedSince: '2026-11-20',
+		note: 'Verified in sibling repo sini/xmsg-mcp-gateway (4804d250).',
 	},
 	'gateway.webhook-egress': {
 		id: 'gateway.webhook-egress',
 		title: 'Gateway webhook egress allowlist and callback verification',
 		owner: 'sini',
 		evidence: [],
-		plannedSince: '2026-11-20',
+		note: 'Verified in sibling repo sini/xmsg-mcp-gateway (4804d250).',
 	},
 	'genie.token-pools': {
 		id: 'genie.token-pools',
@@ -172,6 +174,7 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		owner: 'sini',
 		evidence: [],
 		plannedSince: '2026-11-20',
+		note: 'Unimplemented in genie-agent 0117ea39 (src/dispatcher/index.ts:65 stub).',
 	},
 	'genie.reply-only-mcp': {
 		id: 'genie.reply-only-mcp',
@@ -179,14 +182,36 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		owner: 'sini',
 		evidence: [],
 		plannedSince: '2026-11-20',
+		note: 'Unimplemented in genie-agent 0117ea39 (nix/options.nix:639 registers plain xmsg mcp).',
 	},
 	'nixos.module-options': {
 		id: 'nixos.module-options',
 		title: 'NixOS and Home Manager module options',
 		owner: 'sini',
-		evidence: [],
-		plannedSince: '2026-11-20',
+		evidence: [{ path: 'nix/modules/home-manager.nix', anchor: 'stableExecutable = mkOption' }],
 	},
 };
 
-export const SIBLING_ALLOWLIST: SiblingAllowlistEntry[] = [];
+export const SIBLING_ALLOWLIST: SiblingAllowlistEntry[] = [
+	{
+		id: 'gateway.oauth-as',
+		repo: 'sini/xmsg-mcp-gateway',
+		owner: 'sini',
+		expiry: '2026-12-20',
+		reason: 'Verified in sini/xmsg-mcp-gateway main (4804d250) at src/auth.rs:553 and src/authorization_server/mod.rs:183',
+	},
+	{
+		id: 'gateway.inline-attachments',
+		repo: 'sini/xmsg-mcp-gateway',
+		owner: 'sini',
+		expiry: '2026-12-20',
+		reason: 'Verified in sini/xmsg-mcp-gateway main (4804d250) at src/attachments.rs:86 and src/attachments.rs:110',
+	},
+	{
+		id: 'gateway.webhook-egress',
+		repo: 'sini/xmsg-mcp-gateway',
+		owner: 'sini',
+		expiry: '2026-12-20',
+		reason: 'Verified in sini/xmsg-mcp-gateway main (4804d250) at src/events.rs:104 and src/serving.rs:90',
+	},
+];

@@ -130,10 +130,19 @@ export function checkEvidenceAtRef(evidence, ref, readFileAtRef) {
 	return true;
 }
 
-export function computeFeatureStatus(entry, refs, readFileAtRef, { strict = false } = {}) {
+export function computeFeatureStatus(
+	entry,
+	refs,
+	readFileAtRef,
+	{ strict = false, allowlistById = new Map() } = {},
+) {
 	const errors = [];
+	const allowlistEntry = allowlistById.get(entry.id) ?? null;
 
 	function evalFact(refState, label) {
+		if (allowlistEntry) {
+			return false;
+		}
 		if (refState.noReleaseTags) {
 			return false;
 		}
@@ -159,6 +168,14 @@ export function computeFeatureStatus(entry, refs, readFileAtRef, { strict = fals
 			onMain,
 			inFleetPin,
 			released,
+			siblingAllowlist: allowlistEntry
+				? {
+						repo: allowlistEntry.repo,
+						owner: allowlistEntry.owner,
+						expiry: allowlistEntry.expiry,
+						reason: allowlistEntry.reason,
+					}
+				: null,
 		},
 		errors,
 	};

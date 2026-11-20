@@ -138,9 +138,10 @@ async function main() {
 	}
 	const readFileAtRef = makeGitFileReader();
 
+	const allowlistById = new Map(SIBLING_ALLOWLIST.map((item) => [item.id, item]));
 	const statuses = {};
 	for (const entry of Object.values(FEATURES)) {
-		const res = computeFeatureStatus(entry, refs, readFileAtRef, { strict });
+		const res = computeFeatureStatus(entry, refs, readFileAtRef, { strict, allowlistById });
 		statuses[entry.id] = res.status;
 		errors.push(...res.errors);
 	}
