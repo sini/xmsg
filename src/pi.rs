@@ -17,6 +17,8 @@ use crate::storage::{self, now_epoch_secs};
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PiRegisterRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<crate::locator::Environment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
     #[serde(default, alias = "session_id")]
     pub session_id: Option<String>,
@@ -276,6 +278,18 @@ pub async fn handle_pi_connection_peer<
         let err_resp = err.frame();
         let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
         return Err(err.into());
+    }
+
+    if let Some(native_id) = req.session_id.as_deref() {
+        let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+        crate::locator::record(
+            &conn,
+            &session_id,
+            "pi",
+            native_id,
+            req.env.as_ref(),
+            req.cwd.as_deref(),
+        )?;
     }
 
     {

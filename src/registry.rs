@@ -128,6 +128,8 @@ pub fn resolve_sessions_dirs(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionFileEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<crate::locator::Environment>,
     pub pid: u32,
     pub session_id: String,
     #[serde(default)]

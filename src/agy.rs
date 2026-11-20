@@ -2360,6 +2360,16 @@ async fn register_from_subtree(
                             .write()
                             .unwrap()
                             .insert(reg.session_key.clone(), session_info);
+                        if let Ok(conn) = db.lock() {
+                            let _ = crate::locator::record(
+                                &conn,
+                                &reg.session_key,
+                                "agy",
+                                conv_id,
+                                None,
+                                None,
+                            );
+                        }
                         notify_agy_escrow();
                         flush_agy_queue(config, store, db, &reg.session_key, conv_id, reply_ttl)
                             .await;
@@ -2773,6 +2783,9 @@ pub async fn run_register_server_with_listener(
                     }
                     Ok(v) => {
                         let raw_label = v.get("label").and_then(|l| l.as_str()).map(str::to_string);
+                        let locator_env = v.get("env").cloned().and_then(|value| {
+                            serde_json::from_value::<crate::locator::Environment>(value).ok()
+                        });
                         match serde_json::from_value::<AgyRegisterRequest>(v) {
                             Ok(req) => {
                                 if !crate::claim::is_uuid_shaped(&req.conversation_id) {
@@ -2787,6 +2800,16 @@ pub async fn run_register_server_with_listener(
                                 }
                                 match verify_registration_peer(&config_clone, my_uid, &peer, &req) {
                                     Ok(reg) => {
+                                        if let Ok(conn) = db_clone.lock() {
+                                            let _ = crate::locator::record(
+                                                &conn,
+                                                &reg.session_key,
+                                                "agy",
+                                                &req.conversation_id,
+                                                locator_env.as_ref(),
+                                                None,
+                                            );
+                                        }
                                         let mut session_info = AgySessionInfo::new_with_credentials(
                                             req.conversation_id.clone(),
                                             reg.pid,
