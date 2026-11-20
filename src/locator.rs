@@ -179,16 +179,16 @@ pub(crate) fn local_entries(local: &Local<'_>, user: &str) -> Result<Vec<Recipie
     {
         let db = local.db.lock().map_err(fail)?;
         for sql in [
-            "SELECT id || CASE WHEN suffix>1 THEN '~'||suffix ELSE '' END,'instance','claude',NULL,CASE WHEN released=0 THEN created_at END,NULL FROM instance_claims ORDER BY created_at",
-            "SELECT id,'instance',harness,NULL,NULL,last_live FROM instance_seen ORDER BY id",
-            "SELECT root_id,'instance','codex',label,CASE WHEN active=1 AND revoked=0 THEN registered_at END,NULL FROM codex_roots ORDER BY root_id",
-            "SELECT address,'instance',harness,session,registered_at,NULL FROM plugin_sessions ORDER BY address",
-            "SELECT parent||'/'||COALESCE(name,agent_id),'subagent',COALESCE((SELECT harness FROM instance_seen WHERE id=parent),'unknown'),name,NULL,NULLIF(MAX(last_active,COALESCE(stopped_at,0)),0) FROM subagents ORDER BY parent,agent_id",
+            "SELECT id || CASE WHEN suffix>1 THEN '~'||suffix ELSE '' END,'instance','claude',NULL,CASE WHEN released=0 THEN created_at END,NULL,CASE WHEN released=0 THEN 'registered' WHEN suffix>1 THEN 'closed' ELSE 'seen' END FROM instance_claims ORDER BY created_at",
+            "SELECT id,'instance',harness,NULL,NULL,last_live,'seen' FROM instance_seen ORDER BY id",
+            "SELECT root_id,'instance','codex',label,CASE WHEN active=1 AND revoked=0 THEN registered_at END,NULL,CASE WHEN active=1 AND revoked=0 THEN 'registered' ELSE 'seen' END FROM codex_roots ORDER BY root_id",
+            "SELECT address,'instance',harness,session,registered_at,NULL,'registered' FROM plugin_sessions ORDER BY address",
+            "SELECT parent||'/'||COALESCE(name,agent_id),'subagent',COALESCE((SELECT harness FROM instance_seen WHERE id=parent),'unknown'),name,NULL,NULLIF(MAX(last_active,COALESCE(stopped_at,0)),0),'seen' FROM subagents ORDER BY parent,agent_id",
         ] {
             let mut stmt = db.prepare(sql).map_err(fail)?;
             let results = stmt.query_map([], |r| {
                 let registered_at: Option<i64> = r.get(4)?;
-                Ok(Recipient { address: r.get(0)?, kind: r.get(1)?, harness: Some(r.get(2)?), label: r.get(3)?, status: if registered_at.is_some() { "registered" } else { "seen" }.into(), node: String::new(), user: String::new(), registered_at, last_seen: r.get(5)? })
+                Ok(Recipient { address: r.get(0)?, kind: r.get(1)?, harness: Some(r.get(2)?), label: r.get(3)?, status: r.get(6)?, node: String::new(), user: String::new(), registered_at, last_seen: r.get(5)? })
             }).map_err(fail)?;
             for row in results { add(row.map_err(fail)?); }
         }
@@ -464,16 +464,26 @@ pub(crate) mod tests {
         let (_dir, state) = fixture();
         seed(&state, &format!("{UUID}~2"), "claude", UUID, "fork");
         let item = one(&state, &format!("{UUID}~2"), false).await;
-        assert_eq!(item.native_id.as_deref(), Some(UUID));
+        assert_eq!(
+            item.native_id.as_deref(),
+            Some(UUID),
+            "stored native ID changed to public address"
+        );
         assert_eq!(item.resume, None);
-        assert_eq!(item.reason, "live");
+        assert_eq!(
+            item.reason, "live",
+            "live locator lost location-only reason"
+        );
     }
     #[tokio::test]
     async fn unknown_harness_never_falls_back_to_claude() {
         let (_dir, state) = fixture();
         seed(&state, "opaque-address", "future", UUID, "unknown");
         let item = one(&state, "opaque-address", false).await;
-        assert_eq!(item.native_id, None);
+        assert_eq!(
+            item.native_id, None,
+            "unknown harness gained a native mapping"
+        );
         assert_eq!(item.resume, None);
         assert_eq!(item.recipient.harness.as_deref(), Some("future"));
         assert_eq!(
@@ -502,8 +512,12 @@ pub(crate) mod tests {
         seed(&state, "a", "pi", "session-1", "label");
         let plain = one(&state, "a", false).await;
         assert_eq!(plain.env.as_ref().unwrap().kind, EnvironmentKind::Tmux);
-        assert_eq!(plain.env.unwrap().reference, None);
-        assert_eq!(plain.cwd, None);
+        assert_eq!(
+            plain.env.unwrap().reference,
+            None,
+            "detail escaped request gate"
+        );
+        assert_eq!(plain.cwd, None, "detail escaped request gate");
         let detail = one(&state, "a", true).await;
         assert_eq!(detail.env.unwrap().reference.as_deref(), Some("%3"));
         assert_eq!(detail.cwd.as_deref(), Some("/private/work"));
@@ -511,7 +525,11 @@ pub(crate) mod tests {
         db.execute("UPDATE locator_metadata SET env=NULL WHERE address='a'", [])
             .unwrap();
         drop(db);
-        assert_eq!(one(&state, "a", true).await.env, None);
+        assert_eq!(
+            one(&state, "a", true).await.env,
+            None,
+            "unknown environment became explicit none"
+        );
         {
             let db = state.db.lock().unwrap();
             record(
@@ -571,7 +589,11 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(result.locators.len(), 1105);
+        assert_eq!(
+            result.locators.len(),
+            1105,
+            "locator discarded disambiguation matches"
+        );
         assert!(result.locators.iter().all(|item| item.resume.is_none()));
         assert_eq!(state.db.lock().unwrap().total_changes(), before);
         let missing = locate(
@@ -585,7 +607,10 @@ pub(crate) mod tests {
         .await
         .unwrap();
         assert!(missing.locators.is_empty());
-        assert_eq!(missing.nodes[0].status, "unreachable");
+        assert_eq!(
+            missing.nodes[0].status, "unreachable",
+            "node failure became no-match"
+        );
         let empty = locate(
             &state,
             &Query {
@@ -602,7 +627,10 @@ pub(crate) mod tests {
     #[test]
     fn peer_metadata_is_rejected_and_recipient_shape_is_unchanged() {
         let peer = serde_json::json!({"id":"x","kind":"instance","status":"live","user":"owner","resume":"bad","reach":"bad"});
-        assert!(serde_json::from_value::<crate::fed::FedListEntry>(peer).is_err());
+        assert!(
+            serde_json::from_value::<crate::fed::FedListEntry>(peer).is_err(),
+            "peer locator extras were accepted"
+        );
         let row = Recipient {
             address: "id@node".into(),
             kind: "instance".into(),
@@ -650,9 +678,44 @@ pub(crate) mod tests {
         assert!(!crate::codex::runtime_initialized(&cold.db));
         assert_eq!(cold.db.lock().unwrap().total_changes(), before);
     }
+    #[tokio::test]
+    async fn locate_route_is_absent_from_tcp_router() {
+        use tower::ServiceExt;
+        let (_dir, state) = fixture();
+        let response = crate::http::build_router(Arc::new(state))
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/locate?address=id")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+    #[test]
+    fn environment_reference_is_typed_sanitized_and_byte_bounded() {
+        let env = Environment {
+            kind: EnvironmentKind::Tmux,
+            reference: Some(format!("%3\u{1b}[2J{}", "界".repeat(40))),
+        }
+        .sanitized();
+        let reference = env.reference.unwrap();
+        assert!(!reference.contains('\u{1b}'));
+        assert!(reference.len() <= 64);
+        assert!(reference.starts_with("%3[2J"));
+        assert!(serde_json::from_value::<Environment>(
+            serde_json::json!({"kind":"shell","ref":"evil"})
+        )
+        .is_err());
+    }
     #[test]
     fn display_escapes_terminal_controls_without_truncation() {
-        assert_eq!(inert("a\u{1b}[2J\n"), "a\\u{1b}[2J\\n");
+        assert_eq!(
+            inert("a\u{1b}[2J\n"),
+            "a\\u{1b}[2J\\n",
+            "terminal controls were not escaped"
+        );
         assert_eq!(inert(&"x".repeat(200)), "x".repeat(200));
     }
 }

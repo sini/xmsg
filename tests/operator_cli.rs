@@ -196,6 +196,11 @@ fn operator_round_trip_over_unix_socket() {
         .all(|node| node["status"] == "ok"));
     let address = listed["recipients"][0]["address"].as_str().unwrap();
     let node = listed["recipients"][0]["node"].as_str().unwrap();
+    let located = fixture.json(&["locate", address, "--json"], None);
+    assert_eq!(located["locators"][0]["recipient"]["address"], address);
+    assert_eq!(located["locators"][0]["resume"], Value::Null);
+    assert_eq!(located["locators"][0]["reason"], "live");
+    assert_eq!(located["locators"][0]["native_id"], Value::Null);
     assert_eq!(
         fixture.json(
             &[

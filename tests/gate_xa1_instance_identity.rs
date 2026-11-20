@@ -1430,7 +1430,10 @@ async fn test_oracle_8_pi_server_minted_uuid_v4() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(native_id, "asserted-custom-pi-id-z");
+    assert_eq!(
+        native_id, "asserted-custom-pi-id-z",
+        "Pi native ID was replaced by the bus address"
+    );
 
     // Must be UUID v4
     assert_eq!(minted_id.chars().nth(14).unwrap(), '4');
