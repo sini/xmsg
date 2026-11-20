@@ -127,3 +127,16 @@ Give one hard problem to a dozen sessions and let them divide it. One session ma
 Other sessions take one module each. One session checks the rest. Do this responsibly, and only on
 a problem that you own. Each message carries its sender's address. Each agent still obeys its own
 user's permissions.
+
+## Find a conversation without starting a duplicate client
+
+```sh
+xmsg locate --label investigation
+xmsg locate 'SESSION@alice.laptop' --json
+```
+
+Choose among all matching addresses and check the node result before deciding
+that a conversation is absent. A live locator gives location only. Resume
+recipes remain unproven for every harness, so the command never launches or
+prints a suggested resume command. For a remote match, run the locator on its
+node when you need a native ID or local terminal detail.

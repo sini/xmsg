@@ -442,3 +442,19 @@ header can select or stamp an origin. See [collector relay setup](/operations/fl
 ## Exact-identity discovery (planned)
 
 The [discovery core](/concepts/discovery/) keeps configured addresses authoritative, then verifies candidate addresses against an exact configured CA identity. Announcements do not grant admission. Core-only builds keep the unimplemented source off; address-less onboarding requires the later source integration. Existing leaf mailboxes and applicable hub forwarding retain their semantics.
+
+## Remote session locators
+
+`xmsg locate ADDRESS@NODE` uses the existing federated list authorization and
+transport with a read-only query. New peers do not reconcile claims, prune history,
+or deliver queued messages for it. On a peer older than this release, a remote
+locate behaves like an ordinary list: the peer may reconcile its claims as it
+does for `xmsg list`. Deploy the peer update together. A node that cannot answer
+is reported as unreachable or refused, with its node error; the locator never
+retries a different, mutating query.
+
+Remote results contain only the existing recipient fields. Native harness IDs,
+terminal environment kinds and references, and working directories never leave
+the source node. Run `xmsg locate` on that node for local details. A reach hint
+can come only from the viewer's explicitly selected local configuration; peer
+recipes or hints are not accepted. Reach strings are displayed, never executed.

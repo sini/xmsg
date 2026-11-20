@@ -151,3 +151,26 @@ cannot establish that an absent process is gone. Watch and default snapshots kee
 metadata-only behavior. See [troubleshooting](/operations/troubleshooting/) for limits and
 [the HTTP reference](/reference/http-and-sockets/#registered-process-liveness-planned) for the
 explicit opt-in request.
+
+## Finding a session
+
+`xmsg locate ADDRESS` or `xmsg locate --label LABEL` returns display data without
+attaching a terminal or starting a client. Local lookup does not deliver queued
+messages; see [remote compatibility](/concepts/federation/#remote-session-locators)
+for older peers. Label
+lookup returns every match so you can choose the intended node and session.
+An unreachable node is reported separately from a node with no match.
+
+A bus address is not necessarily a harness resume ID: fork suffixes, agy
+session keys and Hermes conversation changes can make them different. The
+locator records the native ID at registration instead of deriving it from the
+address. Old registrations can have no native ID. No resume mapping is proven
+yet: `resume` is always `null`, with `reason: live` for live or stale-unknown
+sessions and `reason: unproven` otherwise.
+
+Environment hints come only from adapter registration. An absent hint means
+unknown; an explicit `none` means the adapter reported no supported terminal
+environment. xmsg never reads another process's environment or queries a
+multiplexer socket. Native IDs and environment hints stay on their node.
+See [the locator reference](/reference/cli-and-mcp/#locating-a-session) for
+local detail preferences and display-only reach hints.
