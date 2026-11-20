@@ -25,11 +25,16 @@ struct Negative {
     expires_at: Instant,
 }
 
+struct LastAttempt {
+    policy: Arc<PeersMap>,
+    addr: SocketAddr,
+}
+
 #[derive(Default)]
 struct Tables {
     presence: HashMap<String, Presence>,
     negative: HashMap<(SocketAddr, String), Negative>,
-    last_attempt: HashMap<String, SocketAddr>,
+    last_attempt: HashMap<String, LastAttempt>,
 }
 
 pub struct State {
@@ -66,15 +71,24 @@ impl State {
         tables.presence.keys().cloned().collect()
     }
 
-    pub(crate) fn order_untried(&self, rule: &str, candidates: &mut [Candidate]) {
+    pub(crate) fn order_untried(
+        &self,
+        policy: &Arc<PeersMap>,
+        rule: &str,
+        candidates: &mut [Candidate],
+    ) {
         let tables = self
             .tables
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(last) = tables.last_attempt.get(rule) {
+        if let Some(last) = tables
+            .last_attempt
+            .get(rule)
+            .filter(|last| Arc::ptr_eq(&last.policy, policy))
+        {
             if let Some(index) = candidates
                 .iter()
-                .position(|candidate| &candidate.addr == last)
+                .position(|candidate| candidate.addr == last.addr)
             {
                 if !candidates.is_empty() {
                     let len = candidates.len();
@@ -84,15 +98,28 @@ impl State {
         }
     }
 
-    pub(crate) fn attempted(&self, rule: &str, addr: SocketAddr) {
+    pub(crate) fn attempted(
+        &self,
+        policy: &Arc<PeersMap>,
+        rule: &str,
+        addr: SocketAddr,
+        now: Instant,
+    ) {
+        let active = self.active_addresses(now);
         let mut tables = self
             .tables
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if tables.last_attempt.len() >= MDNS_CAP && !tables.last_attempt.contains_key(rule) {
-            tables.last_attempt.clear();
+        prune_attempts(&mut tables, policy, &active);
+        if active.contains(&addr) && configured_exact_rule(policy, rule) {
+            tables.last_attempt.insert(
+                rule.to_owned(),
+                LastAttempt {
+                    policy: policy.clone(),
+                    addr,
+                },
+            );
         }
-        tables.last_attempt.insert(rule.to_owned(), addr);
     }
 
     fn active_addresses(&self, now: Instant) -> HashSet<SocketAddr> {
@@ -253,6 +280,26 @@ impl State {
     }
 }
 
+fn configured_exact_rule(policy: &PeersMap, rule: &str) -> bool {
+    policy.get(rule).is_some_and(|peer| {
+        peer.name == rule
+            && peer.pin.is_none()
+            && peer.ca.is_some()
+            && peer
+                .identities
+                .as_deref()
+                .is_some_and(|ids| matches!(ids, [uri] if !uri.contains('*')))
+    })
+}
+
+fn prune_attempts(tables: &mut Tables, policy: &Arc<PeersMap>, active: &HashSet<SocketAddr>) {
+    tables.last_attempt.retain(|rule, last| {
+        Arc::ptr_eq(&last.policy, policy)
+            && active.contains(&last.addr)
+            && configured_exact_rule(policy, rule)
+    });
+}
+
 fn prune(
     tables: &mut Tables,
     policy: &Arc<PeersMap>,
@@ -260,6 +307,7 @@ fn prune(
     now: Instant,
     wall_now: i64,
 ) {
+    prune_attempts(tables, policy, active);
     tables.presence.retain(|_, row| {
         row.expires_at > now
             && row.not_after > wall_now
@@ -305,23 +353,73 @@ mod tests {
         }
     }
 
+    fn rules(count: usize) -> Arc<PeersMap> {
+        let mut policy = PeersMap::empty();
+        for index in 0..count {
+            policy
+                .insert(crate::fed::PeerConfig {
+                    name: format!("rule{index}"),
+                    ca: Some("component.pem".into()),
+                    identities: Some(vec![format!("spiffe://test/host/h{index}/user/owner")]),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        Arc::new(policy)
+    }
+
     #[test]
     fn cancelled_probe_retains_next_candidate_across_sends() {
         let state = State::default();
         let now = Instant::now();
+        let policy = rules(65);
         let first = candidate(&state, now, 60);
         let mut second = first.clone();
         second.addr = "192.0.2.2:7788".parse().unwrap();
+        assert!(state
+            .candidates
+            .write()
+            .unwrap()
+            .upsert(second.clone(), now));
         let mut candidates = vec![first.clone(), second.clone()];
-        state.attempted("rule", first.addr);
-        state.order_untried("rule", &mut candidates);
+        state.attempted(&policy, "rule0", first.addr, now);
+        for index in 1..65 {
+            state.attempted(&policy, &format!("rule{index}"), first.addr, now);
+        }
+        state.order_untried(&policy, "rule0", &mut candidates);
         assert_eq!(
             candidates[0].addr, second.addr,
-            "a cancelled send repeated the attempted prefix"
+            "other configured rules erased cancelled-probe continuation"
         );
-        state.attempted("rule", second.addr);
-        state.order_untried("rule", &mut candidates);
+        assert_eq!(state.tables.lock().unwrap().last_attempt.len(), 65);
+        state.attempted(&policy, "rule0", second.addr, now);
+        state.order_untried(&policy, "rule0", &mut candidates);
         assert_eq!(candidates[0].addr, first.addr);
+        let current = rules(1);
+        candidates = vec![second.clone(), first.clone()];
+        state.order_untried(&current, "rule0", &mut candidates);
+        assert_eq!(
+            candidates[0].addr, second.addr,
+            "old generation reordered current candidates"
+        );
+        state.attempted(&current, "rule0", first.addr, now);
+        assert_eq!(state.tables.lock().unwrap().last_attempt.len(), 1);
+        state.attempted(&current, "unconfigured", first.addr, now);
+        assert_eq!(
+            state.tables.lock().unwrap().last_attempt.len(),
+            1,
+            "unconfigured rule grew cursor history"
+        );
+        state
+            .candidates
+            .write()
+            .unwrap()
+            .clear_source(super::super::Source::Mdns);
+        state.attempted(&current, "rule0", first.addr, now);
+        assert!(
+            state.tables.lock().unwrap().last_attempt.is_empty(),
+            "removed candidates retained cursors"
+        );
     }
 
     #[test]

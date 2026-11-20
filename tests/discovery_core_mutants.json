@@ -161,8 +161,8 @@
         "file": "src/discovery/dial.rs",
         "start": "pub fn is_direct",
         "end": "#[cfg(test)]",
-        "needle": "        .is_some()\n        || !candidates(fs, peer, &policy, Instant::now()).is_empty()",
-        "replacement": "        .is_some() && false\n        || (!candidates(fs, peer, &policy, Instant::now()).is_empty() && false)"
+        "needle": "            .is_some()\n            || !candidates(fs, peer, &policy, Instant::now()).is_empty()",
+        "replacement": "            .is_some() && false\n            || (!candidates(fs, peer, &policy, Instant::now()).is_empty() && false)"
       }
     ]
   },
@@ -251,12 +251,57 @@
     "target": "lib",
     "test": "discovery::state::tests::cancelled_probe_retains_next_candidate_across_sends",
     "test_file": "src/discovery/state.rs",
-    "expected_literal": "a cancelled send repeated the attempted prefix",
+    "expected_literal": "other configured rules erased cancelled-probe continuation",
     "edits": [
       {
         "file": "src/discovery/state.rs",
         "needle": "candidates.rotate_left((index + 1) % len);",
         "replacement": "let _ = (index, len);"
+      }
+    ]
+  },
+  {
+    "label": "discovery-many-rule-continuation",
+    "target": "lib",
+    "test": "discovery::state::tests::cancelled_probe_retains_next_candidate_across_sends",
+    "test_file": "src/discovery/state.rs",
+    "expected_literal": "other configured rules erased cancelled-probe continuation",
+    "edits": [
+      {
+        "file": "src/discovery/state.rs",
+        "needle": "if active.contains(&addr) && configured_exact_rule(policy, rule) {",
+        "replacement": "if active.contains(&addr) && configured_exact_rule(policy, rule) { if tables.last_attempt.len() >= MDNS_CAP && !tables.last_attempt.contains_key(rule) { tables.last_attempt.clear(); }"
+      }
+    ]
+  },
+  {
+    "label": "discovery-stale-read-preserves-new-proof",
+    "target": "lib",
+    "test": "discovery::dial::tests::stale_metadata_read_cannot_prune_new_generation_presence",
+    "test_file": "src/discovery/dial_tests.rs",
+    "expected_literal": "stale metadata read pruned a new-generation presence",
+    "edits": [
+      {
+        "file": "src/fed.rs",
+        "needle": "if !Arc::ptr_eq(&current, expected) {",
+        "replacement": "if false && !Arc::ptr_eq(&current, expected) {",
+        "start": "pub(crate) fn with_discovery_policy"
+      }
+    ]
+  },
+  {
+    "label": "discovery-cursor-current-generation",
+    "target": "lib",
+    "test": "discovery::state::tests::cancelled_probe_retains_next_candidate_across_sends",
+    "test_file": "src/discovery/state.rs",
+    "expected_literal": "old generation reordered current candidates",
+    "edits": [
+      {
+        "file": "src/discovery/state.rs",
+        "needle": ".filter(|last| Arc::ptr_eq(&last.policy, policy))",
+        "replacement": ".filter(|_| true)",
+        "start": "pub(crate) fn order_untried",
+        "end": "pub(crate) fn attempted"
       }
     ]
   }
