@@ -242,6 +242,66 @@ impl PluginConn {
 // rotation + /new fresh mint + permanent release for `pi`, `opencode`, `hermes`.
 // =============================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn locator_pi_legacy_reclaim_without_native_id_or_env_clears_prior_metadata() {
+    let node = Node::start(None);
+    let (first, registration) = PiConn::open(
+        &node.register_sock,
+        json!({
+            "harness": "pi", "sessionId": "native-pi-before-reclaim", "sessionName": "worker",
+            "env": {"kind": "tmux", "ref": "%3"},
+        }),
+    )
+    .await;
+    let id = registration["sessionId"].as_str().unwrap();
+    let route = format!("/v1/locate?address={id}");
+    let (status, located) = node.http("GET", &route, None).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        located["locators"][0]["native_id"],
+        "native-pi-before-reclaim"
+    );
+    assert_eq!(located["locators"][0]["env"]["kind"], "tmux");
+    drop(first);
+    for _ in 0..100 {
+        if node.list("").await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let (_legacy, reclaimed) = PiConn::open(
+        &node.register_sock,
+        json!({
+            "harness": "pi", "reclaim": {"id": id, "secret": registration["reclaim"]},
+        }),
+    )
+    .await;
+    assert_eq!(reclaimed["address"], registration["address"]);
+    let db = rusqlite::Connection::open(&node.db_path).unwrap();
+    let metadata: (String, Option<String>) = db
+        .query_row(
+            "SELECT native_id, env FROM locator_metadata WHERE address=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        metadata,
+        (String::new(), None),
+        "legacy Pi reclaim must replace the prior native ID and environment with unknown"
+    );
+    let (status, located) = node.http("GET", &route, None).await;
+    assert_eq!(status, 200);
+    assert!(
+        located["locators"][0]["native_id"].is_null(),
+        "legacy Pi native ID must project as unknown"
+    );
+    assert!(
+        located["locators"][0]["env"].is_null(),
+        "legacy Pi environment must project as unknown"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_ha8_oracle_1_4_5_reclaim_queued_delivery_and_rotation() {
     let node = Node::start(None);
     let n = node_name();

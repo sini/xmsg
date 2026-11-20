@@ -2372,7 +2372,6 @@ async fn register_from_subtree(
                                     "agy",
                                     conv_id,
                                     None,
-                                    None,
                                 );
                             }
                         }
@@ -2822,7 +2821,6 @@ pub async fn run_register_server_with_listener(
                                                     "agy",
                                                     &req.conversation_id,
                                                     locator_env.as_ref(),
-                                                    None,
                                                 );
                                             }
                                         }
