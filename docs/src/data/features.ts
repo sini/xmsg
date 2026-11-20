@@ -134,6 +134,22 @@ export const FEATURES: Record<string, FeatureEntry> = {
 			{ path: 'src/enroll_client.rs', anchor: 'pub struct SavedState' },
 		],
 	},
+	'xmsg.a2a-edge': {
+		id: 'xmsg.a2a-edge',
+		title: 'Optional A2A edge gateway',
+		owner: 'sini',
+		evidence: [],
+		plannedSince: '2026-11-20',
+		note: 'Planned / under evaluation: optional gateway node translating external A2A tasks to and from xmsg.',
+	},
+	'xmsg.slim-bridge': {
+		id: 'xmsg.slim-bridge',
+		title: 'Optional SLIM bridge',
+		owner: 'sini',
+		evidence: [],
+		plannedSince: '2026-11-20',
+		note: 'Backlog: optional bridge node for interoperating with an external SLIM fabric.',
+	},
 	'xmsg.ca-health': {
 		id: 'xmsg.ca-health',
 		title: 'CA application health checks',

@@ -1,0 +1,139 @@
+---
+title: Comparisons
+description: Why xmsg exists, how it compares to A2A, SLIM, the Agent Client Protocol, MCP, and terminal mission-control tools, and where each is the better choice.
+---
+
+import Status from '../../components/Status.astro';
+
+`xmsg` is a local and federated message bus for agent sessions and services. Several active
+protocols and tools sit nearby—**A2A**, **SLIM**, the **Agent Client Protocol**, **MCP**, and
+terminal session multiplexers. This page explains where `xmsg` occupies distinct ground, where
+those alternatives are the better tool, and how they fit together.
+
+## Why `xmsg` exists
+
+The dividing line between `xmsg` and remote-agent RPC protocols is **who owns the session
+lifecycle, and whether the session can be reached**:
+
+- **Joining sessions the user already runs:** Interactive coding harnesses (`claude`, `codex`,
+  `agy`, `opencode`, `pi`, `hermes`) run as ephemeral, subscription-backed processes on laptops and
+  containers behind NAT. They do not expose an HTTPS endpoint, carry no per-agent OAuth credentials,
+  and park or restart independently of any caller. `xmsg` discovers and attests them locally
+  through OS UID (`SO_PEERCRED` / `getpeereid`), process ancestry, and per-harness locks or
+  hooks—without changing how the user launches or owns them. See
+  [Sessions, services & subagents](/concepts/sessions-services-subagents/) and
+  [Trust model](/concepts/trust-model/).
+- **Store-and-forward custody:** Messages sent to a parked conversation, an active-turn subagent,
+  or an offline leaf wait in durable SQLite storage (`--reply-ttl`, 7 days by default), with
+  idempotency keys, symmetric `reply(message_id)` routing back to the origin, and cross-machine
+  queue handoff for synced conversations. See [Delivery, queueing & replies](/concepts/replies/).
+- **Identity-anchored federation and outbound-only leaves:** Nodes derive canonical names from
+  pinned Ed25519 SPKI fingerprints or exact SPIFFE URI SANs, enforce per-peer `allow`, `from`,
+  `principals`, `targets`, and `deny` policies, and support outbound-only `--leaf` sidecars backed
+  by a hub `peer_mailbox` with service-ACK-before-hub-ACK ordering. See
+  [Federation](/concepts/federation/) and [Hubs, leaves & gateways](/concepts/hubs-and-leaves/).
+- **Hosted-assistant gateway:** `xmsg-mcp-gateway` bridges external OAuth-authenticated MCP
+  clients to the local mesh without exposing the mesh's internal listeners. See
+  [Hosted MCP Gateway](/extensions/gateway/).
+
+### Where other protocols are the better choice
+
+`xmsg` is **not** a universal replacement for every layer in an agent stack:
+
+| Need | Better choice | Why |
+|---|---|---|
+| Dialable, long-running agent services & cross-org delegation | **A2A** | Standardized `AgentCard` discovery, OAuth2/OIDC auth, and structured `Task` / `Artifact` lifecycle. |
+| Low-latency routed messaging with E2E MLS when receivers are online | **SLIM** | End-to-end RFC 9420 MLS encryption across intermediate relays, multi-hop routing, and `SlimRPC`. |
+| Driving a local coding harness turn-by-turn | **Agent Client Protocol** | Standard stdio JSON-RPC for prompts, turn cancellation, session loading, and tool-call permissions. |
+| Exposing tools, resources, and prompts to a model | **MCP** | Purpose-built tool/resource contract; `xmsg` itself exposes its messaging surface as MCP tools. |
+| Interactive SSH/PTY panes, scrollback, and human attach | **Mission-control tools** | Dedicated terminal multiplexing and UI workflows over SSH or local PTYs. |
+
+---
+
+## Protocol comparisons
+
+### A2A (Agent2Agent)
+
+[A2A](https://github.com/a2aproject/A2A) (`lf.a2a.v1`, under the Linux Foundation / Agentic AI
+Foundation; see [a2a-protocol.org](https://a2a-protocol.org)) standardizes communication between
+independent, opaque agent services over JSON-RPC, gRPC, and `HTTP+JSON`.
+
+- **Shape:** HTTP/gRPC server-shaped. An agent publishes an `AgentCard` (commonly at
+  `/.well-known/agent-card.json`) declaring `AgentInterface` URLs, skills, and OpenAPI-style
+  `SecurityScheme`s (OAuth2, OIDC, API keys, mTLS). Clients submit work via `SendMessage` or
+  `SendStreamingMessage` (SSE), poll or subscribe to a `Task` (`SUBMITTED`, `WORKING`,
+  `INPUT_REQUIRED`, `AUTH_REQUIRED`, `COMPLETED`, `FAILED`, `CANCELED`, `REJECTED`), and collect
+  typed `Part`s and `Artifact`s. Async webhooks use `TaskPushNotificationConfig`.
+- **What `xmsg` does differently:** A2A assumes each agent (or multi-tenant endpoint) is a
+  dialable server carrying HTTP-layer identity; payloads carry no sender identity, and A2A has no
+  offline client inbox or local process-ancestry attestation. `xmsg` targets sessions that cannot be
+  dialled directly, attests local callers by OS UID and harness state, and holds messages in
+  durable custody across disconnects and machine handoffs. For dedicated, always-on services
+  exposed across organizations, A2A is the stronger fit and `xmsg`'s advantages are narrow.
+- **Interoperability:** An optional **A2A edge gateway** (<Status id="xmsg.a2a-edge" />, planned /
+  under evaluation) would sit at the mesh boundary—mirroring `xmsg-mcp-gateway`—to translate
+  between external A2A `SendMessage` / `GetTask` calls and `xmsg` messages while preserving
+  `xmsg`'s rule that an inbound message never carries implicit execution authority.
+
+### SLIM (Secure Low-Latency Interactive Messaging)
+
+[SLIM](https://github.com/agntcy/slim) (AGNTCY / Linux Foundation; see
+[docs.agntcy.org/slim](https://docs.agntcy.org/slim/overview/)) is a routed gRPC and WebSocket
+transport overlay for online agents, carrying `SlimRPC` (including A2A and MCP over SLIM) and
+multi-language bindings.
+
+- **Shape:** Data-plane forwarders route by four-component hierarchical names
+  (`org/namespace/service/<id>`) with an optional control plane and channel manager. Applications
+  dial outbound (`ConnType::Edge`) and use RFC 9420 MLS for end-to-end encryption (1:1 and group
+  channels), SPIFFE/DID/JWT identity, and Rego/CEL claim policies.
+- **What `xmsg` does differently:** **SLIM has no store-and-forward for a disconnected receiver.**
+  Its persistence layer stores endpoint-local MLS and session state for crash recovery, not a
+  broker mailbox; when an endpoint disconnects, its data-plane subscriptions are removed, and
+  offline group members are excluded from acknowledgements and MLS key rotations. SLIM's peer
+  discovery targets cluster replicas (static or Kubernetes), whereas `xmsg` adds LAN mDNS
+  exact-identity discovery (<Status id="xmsg.discovery" />) and serverless device pairing, plus
+  durable `peer_mailbox` custody and cross-machine queue handoff.
+- **Honest strengths:** SLIM is stronger when receivers are online and traffic crosses untrusted
+  intermediate relays (where MLS keeps payloads opaque to routing nodes), or when polyglot
+  in-process bindings and multicast `SlimRPC` are required.
+- **Interoperability:** An optional **SLIM bridge** (<Status id="xmsg.slim-bridge" />, backlog)
+  could connect an `xmsg` node to a SLIM fabric as a boundary adapter without replacing `/fed/v2`.
+
+### Agent Client Protocol (and IBM's archived ACP)
+
+Two distinct protocols share the "ACP" initials:
+
+- **IBM's Agent Communication Protocol** ([i-am-bee/acp](https://github.com/i-am-bee/acp)) was
+  archived on 2025-08-25 and merged into **A2A** under the Linux Foundation
+  ([announcement](https://github.com/orgs/i-am-bee/discussions/5)).
+- **The Agent Client Protocol**
+  ([agentclientprotocol/agent-client-protocol](https://github.com/agentclientprotocol/agent-client-protocol);
+  [agentclientprotocol.com](https://agentclientprotocol.com)) is active and separate. It
+  standardizes JSON-RPC over stdio between a client/editor and a local coding harness (`session/new`,
+  `session/load`, `session/prompt`, `session/cancel`, `session/request_permission`, and
+  `session/update` tool streaming), used by adapters such as `claude-agent-acp`, `codex-acp`,
+  `agy acp`, and `opencode acp`.
+
+`xmsg` and the Agent Client Protocol operate at different layers: the Agent Client Protocol drives
+a single harness's turns and tool-permission prompts, while `xmsg` is the message bus connecting
+independent sessions, services, and hosts.
+
+### MCP (Model Context Protocol)
+
+[MCP](https://modelcontextprotocol.io) standardizes how a model or agent client calls tools, reads
+resources, and consumes prompts. `xmsg` uses MCP as an interface rather than competing with it:
+locally, `xmsg mcp` exposes `list`, `send`, `reply`, `replies`, `inbox`, and `read_attachment` to
+connected harnesses; remotely, [xmsg-mcp-gateway](/extensions/gateway/) exposes authenticated
+Streamable HTTP and Events to hosted assistants.
+
+---
+
+## Mission-control and terminal tools
+
+Tools such as [RimZ](https://github.com/rimio-ai/rimz),
+[captain-miao](https://github.com/hyperlogue/captain-miao),
+[workmux](https://workmux.dev), and [Tower](https://github.com/hyperlogue/tower) focus on
+managing local or SSH-attached terminal sessions—providing PTY multiplexing, scrollback,
+focus/attach UX, and Git worktree workflows. `xmsg` does not multiplex PTYs or wrap SSH; it
+delivers identity-addressed messages with durable custody across hosts and pods regardless of which
+terminal, multiplexer, or headless runtime a session uses.
