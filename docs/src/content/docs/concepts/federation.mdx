@@ -463,8 +463,8 @@ does for `xmsg list`. Deploy the peer update together. A node that cannot answer
 is reported as unreachable or refused, with its node error; the locator never
 retries a different, mutating query.
 
-Remote results contain only the existing recipient fields. Native harness IDs,
-terminal environment kinds and references, and working directories never leave
-the source node. Run `xmsg locate` on that node for local details. A reach hint
+Remote results contain only the existing recipient fields. The locator-only `native_id`, terminal environment and working-directory
+fields never leave the source node. Existing recipient labels remain unchanged
+and can already contain harness session names. Run `xmsg locate` on that node for local details. A reach hint
 can come only from the viewer's explicitly selected local configuration; peer
 recipes or hints are not accepted. Reach strings are displayed, never executed.

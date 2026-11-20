@@ -606,8 +606,9 @@ Reach hints appear in a separate display block and are never executed. Control
 characters are escaped for display; escaping does not turn data into safe shell
 commands.
 
-Remote results contain only recipient metadata. Native IDs, environment kinds,
-terminal references and working directories remain local to their node. Remote
+Remote results contain only recipient metadata. The locator-only native ID, environment and working-directory fields remain
+local to their node. Existing recipient labels remain unchanged and can already
+contain harness session names. Remote
 lookup uses the existing federation list grant with a read-only request. On a peer older than this release, a remote locate behaves like an ordinary
 list (the peer may reconcile its claims as it does for `xmsg list`). Deploy peers
 together. New peers honor the read-only flag. Node errors are retained, with no

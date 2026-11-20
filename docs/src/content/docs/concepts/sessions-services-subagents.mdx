@@ -177,6 +177,8 @@ sessions and `reason: unproven` otherwise.
 Environment hints come only from adapter registration. An absent hint means
 unknown; an explicit `none` means the adapter reported no supported terminal
 environment. xmsg never reads another process's environment or queries a
-multiplexer socket. Native IDs and environment hints stay on their node.
+multiplexer socket. The locator-only native ID and environment fields stay on their node.
+Existing recipient labels remain unchanged and can already contain harness
+session names.
 See [the locator reference](/reference/cli-and-mcp/#locating-a-session) for
 local detail preferences and display-only reach hints.
