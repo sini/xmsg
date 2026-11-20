@@ -106,9 +106,12 @@ bindings) and multi-language bindings.
   focuses on live routed sessions and optional end-to-end payload encryption, whereas `xmsg` focuses
   on durable mailboxes and verified delivery to existing harness sessions, including disconnected
   leaves. **SLIM has no store-and-forward for a disconnected receiver**, and its retries and
-  session restoration are not a documented offline mailbox guarantee: its persistence layer stores
-  endpoint-local MLS and session state for crash recovery, data-plane subscriptions are removed on
-  disconnect, and offline group members are excluded from acknowledgements and MLS key rotations.
+  session restoration are not a documented offline mailbox guarantee: in `agntcy/slim` (`84b47797`,
+  `v3.5.0`), the persistence layer stores endpoint-local MLS and session state for crash recovery,
+  a local no-match can still forward via a configured default gateway, and at the terminal no-match
+  the publish is a routing error, not durable acceptance (while data-plane subscriptions are
+  removed on disconnect and offline group members are excluded from acknowledgements and MLS key
+  rotations).
   SLIM's peer discovery targets cluster replicas (static or Kubernetes), whereas `xmsg` adds LAN
   mDNS exact-identity discovery (<Status id="xmsg.discovery" />) and serverless device pairing, plus
   cross-machine queue handoff.
