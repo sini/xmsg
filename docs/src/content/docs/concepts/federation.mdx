@@ -3,6 +3,8 @@ title: Federation
 description: Cross-host mTLS federation over /fed/v2, self-authenticating node names, pinned and CA-signed trust models, and peer policy configuration.
 ---
 
+import Status from '../../../components/Status.astro';
+
 [Federation](/glossary/#federation) connects xmsg nodes on different hosts, virtual machines
 and Kubernetes pods. The nodes use mutual TLS ([mTLS](/glossary/#mtls)) on the `/fed/v2` wire
 protocol. Each node lists the nodes it trusts, its [peers](/glossary/#peer), in a
@@ -203,7 +205,9 @@ HTTPS client are separate. See the [offboarding runbook](/operations/enrollment-
 
 ### Mailbox retention
 
-**Planned, not yet released.** A stored message or reply stays in the `peer_mailbox` until its
+<Status id="xmsg.peer-mailbox" />
+
+A stored message or reply stays in the `peer_mailbox` until its
 leaf acknowledges it or it passes the reply TTL. `--reply-ttl` (`XMSG_REPLY_TTL`) defaults to
 604800 seconds (7 days). Expiry cleanup also runs while the hub is idle: every 10 minutes by
 default, or once per reply-TTL period when that is shorter, with a minimum interval of 1 second.
@@ -241,7 +245,7 @@ is logged by error code, and the rejected item is still ACKed so it cannot block
 ### Hub admission (`hub`)
 
 A hub can admit clients that have no entry of their own. The `hub` block matches the client's
-certificate identity against patterns. **Planned:** each pattern binds its own CA bundle,
+certificate identity against patterns. Each pattern (<Status id="xmsg.enroll-ca" />) binds its own CA bundle,
 and a rule may grant a durable leaf mailbox:
 
 ```json
@@ -348,7 +352,9 @@ recipient does not enforce the forwarded target limit. This is a known limitatio
 The empty-list rules are in
 [`PeerConfig` parsing and inbound checks](https://github.com/sini/xmsg/blob/76f8f1e8249777cfb63c4d0287431cbbf6b2ce76/src/fed.rs).
 
-## Diagnose peer connectivity (planned)
+## Diagnose peer connectivity
+
+<Status id="xmsg.doctor-peers" />
 
 Run `xmsg doctor --json` on the node to inspect bounded federation diagnostics. Doctor
 asks the daemon through its Unix socket; it does not load private keys or dial peers.
@@ -370,7 +376,7 @@ does not prove application permissions or delivery readiness. Normal connection 
 or admission caches may update during the handshake, but this diagnostic makes no
 persistent or application-state writes, listing requests or reconciliation calls. See
 [troubleshooting](/operations/troubleshooting/) and the
-[Unix endpoint reference](/reference/http-and-sockets/#invocation-only-federation-diagnostics-planned).
+[Unix endpoint reference](/reference/http-and-sockets/#invocation-only-federation-diagnostics).
 
 ## Identity during credential renewal
 
@@ -407,12 +413,14 @@ both grant and request opt-in. Reconnect after peer-policy reload.
 
 See [fleet observer concepts](/concepts/fleet-observer/) and the
 [grant and request example](/operations/fleet-observer/). The collector, owner
-authentication and web view remain planned, not yet released.
+authentication and web view (<Status id="fleet-observer.collector" />) are tracked in the feature manifest.
 
 
-## Reverse observation controls (planned)
+## Reverse observation controls
 
-Reverse metadata export is **planned, not yet released**. It reuses the leaf's
+<Status id="fleet-observer.reverse-relay" />
+
+Reverse metadata export reuses the leaf's
 outbound control-only HTTP polls. A capable leaf advertises `observe_relay=1`
 on each poll; the hub can send an Observe control only to that currently waiting
 poll. A concurrent legacy poll can receive only its existing List/Attachment
@@ -431,14 +439,16 @@ The hub attests the actual authenticated collector, and the leaf checks that
 assertion against its enabled exact route and its own current collector policy.
 The hub is an owner-administered trusted origin attestor, not independent leaf
 proof. See [the trust and IP limits](/concepts/fleet-observer/) and
-[the hub/leaf configuration example](/operations/fleet-observer/#reverse-observation-through-a-trusted-hub-planned).
+[the hub/leaf configuration example](/operations/fleet-observer/#reverse-observation-through-a-trusted-hub).
 
 The planned collector selects direct or relay transport per source, using full
 hub/leaf identities and a separate trust binding for each configured hub. Relay
 history displays the configured leaf via its trusted hub. Changing routes takes
 effect on collector restart and purges the previous route's cache; no browser
-header can select or stamp an origin. See [collector relay setup](/operations/fleet-observer/#collector-relay-source-planned).
+header can select or stamp an origin. See [collector relay setup](/operations/fleet-observer/#collector-relay-source).
 
-## Exact-identity discovery (planned)
+## Exact-identity discovery
+
+<Status id="xmsg.discovery" />
 
 The [discovery core](/concepts/discovery/) keeps configured addresses authoritative, then verifies candidate addresses against an exact configured CA identity. Announcements do not grant admission. Core-only builds keep the unimplemented source off; address-less onboarding requires the later source integration. Existing leaf mailboxes and applicable hub forwarding retain their semantics.

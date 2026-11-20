@@ -3,30 +3,7 @@ import path from 'node:path';
 
 export const LONG_PLANNED_DAYS = 60;
 
-export const UNCONVERTED_LEGACY_FILES = new Set([
-	'case-studies/team-hub.mdx',
-	'concepts/addressing.mdx',
-	'concepts/attachments.mdx',
-	'concepts/discovery.mdx',
-	'concepts/federation.mdx',
-	'concepts/hubs-and-leaves.mdx',
-	'concepts/replies.mdx',
-	'concepts/sessions-services-subagents.mdx',
-	'concepts/trust-model.mdx',
-	'extensions/gateway.mdx',
-	'genie/overview.mdx',
-	'genie/tiers-and-experts.mdx',
-	'glossary.mdx',
-	'harnesses/antigravity.mdx',
-	'harnesses/codex.mdx',
-	'operations/enrollment-ca.mdx',
-	'operations/fleet-observer.mdx',
-	'operations/nixos-and-home-manager.mdx',
-	'operations/troubleshooting.mdx',
-	'reference/cli-and-mcp.mdx',
-	'reference/http-and-sockets.mdx',
-	'reference/service-client.mdx',
-]);
+export const UNCONVERTED_LEGACY_FILES = new Set([]);
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const SHA40_RE = /^[0-9a-f]{40}$/i;

@@ -3,7 +3,11 @@ title: Peer & LAN discovery
 description: How untrusted LAN mDNS addresses become verified federation endpoints, bounded rotating announcements, and Local Network detection.
 ---
 
-## Exact-identity discovery (planned)
+import Status from '../../../components/Status.astro';
+
+## Exact-identity discovery
+
+<Status id="xmsg.discovery" />
 
 A discovery candidate is an address, not a peer identity or permission. A local hint may order
 candidates, but cannot admit a peer. The mDNS source ignores incoming `root` TXT claims and
@@ -47,7 +51,9 @@ Bounds keep LAN floods and probing contained:
   in v1:** dialling a link-local address needs an interface scope, and scoped candidate addresses
   are not retained.
 
-## Browse-only at rest and rotating announcements (planned)
+## Browse-only at rest and rotating announcements
+
+<Status id="xmsg.discovery" />
 
 By default (`discovery.announce = "timed"`), enabling `discovery.mdns` starts **browse-only at
 rest** (`announce_state: "at_rest"`). The daemon never announces itself at startup. Timed mode
@@ -88,7 +94,9 @@ hostname (`<id>.local.`) rotate together:
   with bounded exponential backoff (`2` to `30` seconds) and restores the prior state once
   registration succeeds.
 
-## The `discovery` key and source availability (planned)
+## The `discovery` key and source availability
+
+<Status id="xmsg.discovery" />
 
 Discovery is off unless the peers file asks for it. It is a top-level key in the wrapped peers
 file, beside `peers`:
@@ -136,7 +144,9 @@ The standalone fleet collector has a separate client and configuration; this res
 silently add discovery to it. See [federation](/concepts/federation/) and the
 [trust model](/concepts/trust-model/) for the existing admission boundary.
 
-## Local Network detection (planned)
+## Local Network detection
+
+<Status id="xmsg.discovery" />
 
 The mDNS responder runs on its own thread, started after the node's listeners are up. Serving
 never waits on it: federation, the agent socket and the hub work the same whether discovery is

@@ -3,6 +3,8 @@ title: Daemon Protocol & Rust Client
 description: Registering headless services over register.sock and using the xmsg::client Rust library.
 ---
 
+import Status from '../../../components/Status.astro';
+
 Headless daemons and service bridges, such as `matrix-xmsg`, `genie-guard` and
 `xmsg-mcp-gateway`, connect to `xmsg` as attested [services](/glossary/#service)
 (`<name>@<node>`). They use `register.sock` and `agent.sock`.
@@ -109,7 +111,9 @@ holds a short descriptor-lifetime mutex:
   a mutation after it connects again must use its stored `idempotency_key` again.
 
 
-## Attachment reads (planned)
+## Attachment reads
+
+<Status id="xmsg.attachments-inline-text" />
 
 `AgentClient::read_attachment(message_id, index, offset, length)` returns
 `Result<AttachmentRead, ClientError>`. The result is `AttachmentRead::Ready(range)` for a
@@ -128,7 +132,9 @@ Choose an operation timeout above the daemon's ten-second pending wait, such as 
 seconds, to leave room for response delivery. This timeout remains bounded by the calling
 application. See [file attachments](/concepts/attachments/) for range and file-size bounds.
 
-## Bounded list results (planned)
+## Bounded list results
+
+<Status id="xmsg.recipient-snapshot" />
 
 `ListQuery.limit` accepts `Some(1..=500)`; `None` uses the daemon default of 50.
 `ListResult.total` counts matching recipients before the global cap, and

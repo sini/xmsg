@@ -3,6 +3,8 @@ title: Codex
 description: Integrating OpenAI Codex CLI on Linux and macOS with xmsg — writer-lock lease attestation, runtime _meta attribution, live push relay, and subagents.
 ---
 
+import Status from '../../../components/Status.astro';
+
 On Linux and macOS, `xmsg` connects to the OpenAI Codex CLI (`codex`) with four mechanisms:
 
 - writer-lock lease attestation, which proves which session is calling;
@@ -71,7 +73,9 @@ xmsg serve \
 
 ## After a daemon restart
 
-**Planned:** xmsg can wake a known Codex root after its own daemon restarts, without waiting for
+<Status id="xmsg.codex-restart-custody" />
+
+xmsg can wake a known Codex root after its own daemon restarts, without waiting for
 that root to make an MCP call. This applies only to roots loaded as recovery candidates at
 startup, with queued messages and no operator revocation. Ordinary `SessionEnd` or unsubscribe
 parking stays parked.

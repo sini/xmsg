@@ -3,6 +3,8 @@ title: HTTP API & Unix Sockets
 description: Wire reference for http.sock, agent.sock, register.sock, /fed/v2 routes, and the unified error vocabulary.
 ---
 
+import Status from '../../../components/Status.astro';
+
 `xmsg serve` has three local Unix domain sockets in `$XDG_RUNTIME_DIR/xmsg/`. On macOS, with `XDG_RUNTIME_DIR` unset, the directory is `xmsg/` under the
 Darwin user temp directory (`getconf DARWIN_USER_TEMP_DIR`). Each socket has
 mode `0600`, in a `0700` directory. With federation, it also has an mTLS listener for
@@ -36,15 +38,17 @@ curl -s --unix-socket "$sock" "http://localhost/v1/messages/<message_id>/replies
 
 | Method & Route | Description |
 |---|---|
-| `GET /healthz` | Server health check (`200 OK`); the Unix socket also reports daemon build metadata (planned). |
+| `GET /healthz` | Server health check (`200 OK`); the Unix socket also reports daemon build metadata. |
 | `GET /v1/recipients?name=&node=&kind=&status=&within=` | Lists recipients across this node and reachable peers (`{"recipients": [...], "nodes": [...]}`). Reconciles claims and registrations and can deliver queued work or fork notices. |
-| `GET /v1/recipients?read_only=true` (planned) | Returns an explicitly partial, read-only local registration snapshot; no reconciliation, pruning, delivery or federation requests. |
+| `GET /v1/recipients?read_only=true` | Returns an explicitly partial, read-only local registration snapshot; no reconciliation, pruning, delivery or federation requests. |
 | `POST /v1/messages` | Sends `{ "to", "text", "from"?, "idempotency_key"? }`. Returns `202 Accepted` with `{ "message_id", "address", "outcome" }`. |
 | `POST /v1/messages/{id}/replies` | Replies to `{id}` with `{ "text", "idempotency_key"? }`. Requires traced session/service caller (or leaf principal). Returns `200 OK` with `{ "seq", "messageId", "createdAt", "replierSessionId", "text", "pushOutcome", "pushedMessageId" }`. |
 | `GET /v1/messages/{id}/replies?after={seq}&wait={seconds}` | Reads stored replies to `{id}`, waiting up to `wait` seconds (max `60`, max `128` concurrent waiters). |
 | `GET /v1/messages/{id}` | Returns the stored message record and its replies. |
 
-### Local daemon build metadata (planned)
+### Local daemon build metadata
+
+<Status id="xmsg.doctor" />
 
 On `http.sock`, `GET /healthz` includes `version` (the crate version) and
 `build_revision` (the compiled source revision), alongside the existing health fields:
@@ -58,10 +62,12 @@ a dirty tree. A plain Cargo build without that compile-time value reports `unkno
 the crate version alone does not identify a source revision. Build metadata is read-only.
 The optional local TCP health response does not expose the build revision, and the
 federation listener does not serve `/healthz`. Use
-[`xmsg doctor`](/reference/cli-and-mcp/#xmsg-doctor-planned) on the node to compare the
+[`xmsg doctor`](/reference/cli-and-mcp/#xmsg-doctor) on the node to compare the
 running daemon with the client.
 
-### LAN discovery health (planned)
+### LAN discovery health
+
+<Status id="xmsg.discovery" />
 
 On `http.sock`, `GET /healthz` also includes the detector state and announce posture of
 [LAN discovery](/concepts/discovery/):
@@ -84,7 +90,9 @@ On `http.sock`, `GET /healthz` also includes the detector state and announce pos
 
 Like `build_revision`, `discovery` is omitted from the optional TCP health response.
 
-### Read-only local recipient snapshot (planned)
+### Read-only local recipient snapshot
+
+<Status id="xmsg.recipient-snapshot" />
 
 Use this mode when observing a node must not reconcile its claims or drive queued delivery:
 
@@ -111,10 +119,12 @@ for MCP and federation listing.
 
 An older daemon rejects the unknown `read_only` query field with `400 bad_request`. A client
 requiring a read-only snapshot must report that failure rather than retry the ordinary list.
-The planned [`xmsg watch`](/reference/cli-and-mcp/#xmsg-watch-planned) uses this mode exclusively
+The planned [`xmsg watch`](/reference/cli-and-mcp/#xmsg-watch) uses this mode exclusively
 for its roster. The local observation journal supplies its separate exchange timeline.
 
-### Registered process liveness (planned)
+### Registered process liveness
+
+<Status id="xmsg.recipient-snapshot" />
 
 The Unix socket accepts an explicit diagnostic variant of the read-only snapshot:
 
@@ -137,7 +147,9 @@ returns `503` instead of initializing it. Missing rows or a truncated response d
 establish that a process is gone. A client whose daemon rejects this opt-in must report
 unknown rather than fall back to the ordinary listing.
 
-### Invocation-only federation diagnostics (planned)
+### Invocation-only federation diagnostics
+
+<Status id="xmsg.doctor-peers" />
 
 `GET /v1/diagnostics/federation` is available only over `http.sock`, not the optional
 local TCP or federation listener. For example:
@@ -166,9 +178,11 @@ These probes run only when invoked. They add no federation route, protocol or pe
 and do not list recipients, read observation data or reconcile registrations. Normal
 connection counters or admission caches may update during a handshake, but diagnostics
 make no persistent or application-state writes. See
-[`xmsg doctor`](/reference/cli-and-mcp/#xmsg-doctor-planned) for warning and expiry results.
+[`xmsg doctor`](/reference/cli-and-mcp/#xmsg-doctor) for warning and expiry results.
 
-### Local observation journal (planned)
+### Local observation journal
+
+<Status id="fleet-observer.collector" />
 
 `GET /v1/observe/events` reads bounded message metadata over `http.sock` from the
 same UID. It is absent from the shared TCP router, including a leaf's TCP listener.
@@ -238,7 +252,7 @@ service client's `AgentClient` use it:
 
 | Request Frame | Response Frame |
 |---|---|
-| `{"action":"list","name"?,"node"?,"kind"?,"status"?,"within"?,"limit"?}` | `{"status":"ok","recipients":[…],"nodes":[…],"total":N,"truncated":B}` (planned) |
+| `{"action":"list","name"?,"node"?,"kind"?,"status"?,"within"?,"limit"?}` | `{"status":"ok","recipients":[…],"nodes":[…],"total":N,"truncated":B}` |
 | `{"action":"send","to","text","idempotency_key"?,"as_agent"?}` | `{"status":"ok","message_id","address","outcome"}` |
 | `{"action":"reply","message_id","text","idempotency_key"?,"as_agent"?}` | `{"status":"ok","reply":{…}}` |
 | `{"action":"replies","message_id","wait"?,"after"?}` | `{"status":"ok","replies":[…]}` |
@@ -317,7 +331,9 @@ branch and is not yet in a release.
 
 ### Planned node observation export
 
-**Planned, not yet released.** These read-only routes require the literal
+<Status id="fleet-observer.collector" />
+
+These read-only routes require the literal
 `observe` peer right over the mTLS federation listener. They are absent from
 normal HTTP, leaf TCP and MCP. They do not call discovery, inbox, reply polling,
 ACK or body/transcript readers. Outbound-only leaves are unsupported. See
@@ -375,7 +391,7 @@ Stored newer rows use the same fallback after fresh scope validation, without a
 database migration. This compatibility change is planned and requires an updated
 collector. An unpatched older binary may reject newer pages or stored rows; a
 downgrade to one does not gain the fallback. See the
-[mixed-kind example](/operations/fleet-observer/#read-newer-event-kinds-planned).
+[mixed-kind example](/operations/fleet-observer/#read-newer-event-kinds).
 
 `GET /fed/v2/observe/snapshot?v=1&labels=false` accepts only `v` and `labels`.
 Its object has `v`, `node`, `scope`, `observed_at`, `endpoints`, `truncated` and
@@ -444,8 +460,9 @@ message-body limit and the separate `attach:<peer>` rate bucket. See
 
 ## Planned collector HTTP view
 
-The separate `observe-collector` listener is planned, not yet released. It never
-exposes the exporter routes on ordinary bus HTTP or initializes bus state.
+<Status id="fleet-observer.collector" />
+
+The separate `observe-collector` listener never exposes the exporter routes on ordinary bus HTTP or initializes bus state.
 
 | Method and path | Boundary and result |
 | --- | --- |
@@ -470,7 +487,9 @@ HTML/SVG have no browser bearer store or action routes. A non-loopback listener
 requires configured server TLS. See [collector operations](/operations/fleet-observer/)
 for configuration, cache retention and restart revalidation states.
 
-## Bounded recipient listings (planned)
+## Bounded recipient listings
+
+<Status id="xmsg.recipient-snapshot" />
 
 Ordinary `GET /v1/recipients` and agent/plugin `list` accept `limit` (integer,
 1–500, default 50). They return `total` and `truncated` alongside `recipients`

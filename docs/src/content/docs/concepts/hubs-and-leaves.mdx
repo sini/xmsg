@@ -4,6 +4,7 @@ description: Container leaf nodes, NAT-friendly outbound links, single-hop hub f
 ---
 
 import { Aside } from '@astrojs/starlight/components';
+import Status from '../../../components/Status.astro';
 
 Some nodes cannot accept inbound TCP connections or share a host PID namespace. For them,
 `xmsg` has three topologies that you can combine with direct mTLS peerings:
@@ -252,7 +253,9 @@ OAuth caller itself.
 
 ## Mailbox controls while a service works
 
-**Planned, not yet released.** Updated leaves and outbound links keep a separate, bounded
+<Status id="xmsg.peer-mailbox" />
+
+Updated leaves and outbound links keep a separate, bounded
 control long-poll alongside message delivery. A slow service ACK therefore does not spend
 ordinary inbox tokens just to answer list or file queries. The hub still retains its durable
 message until the service ACK arrives; control traffic never acknowledges or consumes it.

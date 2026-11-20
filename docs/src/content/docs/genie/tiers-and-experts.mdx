@@ -4,6 +4,7 @@ description: How tier 1 answers, when it escalates, how the expert dispatcher ru
 ---
 
 import { Aside } from '@astrojs/starlight/components';
+import Status from '../../../components/Status.astro';
 
 Genie answers in two stages. **Tier 1** is a local model that fields every question. The
 **expert tier** is a frontier model that tier 1 escalates to when it is unsure, or when the asker
@@ -161,15 +162,18 @@ context, an argv or a shared environment is on
 When a tier's token runs out of quota, that tier answers "expert unavailable". Nothing falls back
 to another token or tier.
 
-<Aside type="note" title="Planned: token pools">
+<Status id="genie.token-pools" />
+
+<Aside type="note" title="Token pools">
 The design gives each tier a pool of tokens: contributors' tokens for `@public`, and the owner's
 token under a daily cap on public escalations. Each thread would stay pinned to the token it
-started on. The dispatcher today takes one token per tier; the pool is **planned**.
+started on. The dispatcher today takes one token per tier.
 </Aside>
 
-<Aside type="note" title="Planned: reply-only MCP in expert sessions">
+<Status id="genie.reply-only-mcp" />
+
+<Aside type="note" title="Reply-only MCP in expert sessions">
 xmsg has a reply-only MCP mode (`xmsg mcp --reply-only`, see
 [CLI & MCP](/reference/cli-and-mcp/#xmsg-mcp)), which offers only `reply` and `replies`, with no `list` and no `send`. The design runs every
-expert session in that mode. The NixOS module currently starts the plain `xmsg mcp`; the switch
-is **planned**.
+expert session in that mode. The NixOS module currently starts the plain `xmsg mcp`.
 </Aside>

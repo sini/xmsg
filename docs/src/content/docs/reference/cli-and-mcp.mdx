@@ -3,10 +3,12 @@ title: CLI & MCP Server
 description: Operator commands, optional command-backed services, daemon and harness commands, and MCP tool schemas.
 ---
 
+import Status from '../../../components/Status.astro';
+
 ## Command-line interface (`src/main.rs`)
 
 The `xmsg` binary exposes `list`, `watch`, `doctor`, `send`, `replies`, `show`, `service`, `serve`, `mcp`,
-`register`, `unregister`, `check-peers`, `enroll` (planned), `enroll-ca`, and `observe-collector` (planned).
+`register`, `unregister`, `check-peers`, `enroll` (<Status id="xmsg.enroll-ca" />), `enroll-ca`, and `observe-collector` (<Status id="fleet-observer.collector" />).
 
 ```rust file=<rootDir>/src/main.rs#L21-L79
 ```
@@ -48,7 +50,9 @@ There is no operator CLI command to reply from an anonymous shell. Agents and re
 use their own reply interfaces.
 
 
-### `xmsg watch` (planned)
+### `xmsg watch`
+
+<Status id="xmsg.watch" />
 
 A read-only local registration snapshot and metadata exchange timeline:
 
@@ -62,7 +66,7 @@ xmsg watch --once --plain --http-sock /absolute/path/to/http.sock
 interval is two seconds; `--interval` accepts 1–60 seconds. Ctrl-C exits. `--once` prints one
 snapshot; `--plain` disables terminal redraw styling. Non-terminal output is plain.
 
-The roster polls health and the [read-only local snapshot](/reference/http-and-sockets/#read-only-local-recipient-snapshot-planned).
+The roster polls health and the [read-only local snapshot](/reference/http-and-sockets/#read-only-local-recipient-snapshot).
 It shows already-observed registrations and last-seen metadata, marked partial. `registered`
 and `seen` are recorded states, not an attestation that a session is currently alive or
 reachable. Filesystem-only sessions and newly presented sessions may be absent until normal
@@ -83,7 +87,7 @@ retries with the ordinary, mutating listing. It retains at most 1,000 rows and r
 bodies over 4 MiB. Server-supplied names, labels and other fields have terminal controls escaped
 before display.
 
-The timeline reads the local [observation journal](/reference/http-and-sockets/#local-observation-journal-planned)
+The timeline reads the local [observation journal](/reference/http-and-sockets/#local-observation-journal)
 through `GET /v1/observe/events`. It shows source/destination references, message and reply
 correlation, times, event kinds and stored outcomes. The planned `arrival` kind means the
 daemon committed a queued item's delivery mark for an inbox result. It is not proof of client
@@ -100,7 +104,9 @@ agent-read or task-complete. Watch reads no bodies or transcripts and does not s
 acknowledge or consume messages or open a listener. Use `xmsg show MESSAGE_ID` for deliberate
 known-ID inspection. Existing caller-attribution rules still apply.
 
-### `xmsg doctor` (planned)
+### `xmsg doctor`
+
+<Status id="xmsg.doctor" />
 
 Checks local setup once and prints `info`, `pass`, `warn` or `fail` lines with fix hints, plus informational metadata:
 
@@ -113,11 +119,11 @@ xmsg doctor --http-sock /absolute/path/to/http.sock --db-path /absolute/path/to/
 The command exits `1` if any check fails. Warnings alone exit `0`. Informational rows
 do not add to the passed, warning or failed totals. `--json` reports
 `checks` (each with `id`, `status`, `message` and `hint`), `passed`, `warnings`, `failed`,
-`client_version`, `client_build_revision` (planned) and `not_checked`.
+`client_version`, `client_build_revision` and `not_checked`.
 
-The always-on `collector.sqlite_engine` line (planned) reports `linked SQLite <found>; the fleet collector requires <required>` for this CLI binary. Its status is `info`, even when the versions differ; it does not affect summary counts or the exit code. It performs no file or network I/O and does not validate a collector configuration or a running collector. The collector enforces its engine requirement at startup.
+The always-on `collector.sqlite_engine` line reports `linked SQLite <found>; the fleet collector requires <required>` for this CLI binary. Its status is `info`, even when the versions differ; it does not affect summary counts or the exit code. It performs no file or network I/O and does not validate a collector configuration or a running collector. The collector enforces its engine requirement at startup.
 
-Doctor displays the client and daemon crate versions and build revisions (planned).
+Doctor displays the client and daemon crate versions and build revisions.
 The daemon metadata comes from the bounded Unix-socket health response, not a process
 or image-name guess. Nix builds embed the source revision; a plain Cargo build without
 `XMSG_BUILD_REVISION` reports `unknown`. Missing metadata from an older daemon or an
@@ -126,7 +132,7 @@ warn, rather than fail: check the intended deployment pin before deciding whethe
 restart or upgrade. Matching crate versions such as `0.1.0` do not prove matching builds.
 
 Optional path overrides are `--http-sock`, `--agent-sock`, `--register-sock`, `--db-path`,
-`--peers-file`, `--fed-cert`, `--enroll-state` and `--enroll-ca-dir` (planned). Doctor checks the selected paths; it
+`--peers-file`, `--fed-cert`, `--enroll-state` and `--enroll-ca-dir` (<Status id="xmsg.ca-health" />). Doctor checks the selected paths; it
 cannot establish that a running daemon loaded those same paths or configuration.
 `--fed-cert` requires `--peers-file`; `--enroll-state` names a directory containing
 the existing private `enroll.json`.
@@ -150,7 +156,7 @@ issues a test certificate. The CLI's local request has a five-second budget.
 
 Doctor reads local filesystem metadata, probes the database read-only and makes a bounded
 `GET /healthz` request on the HTTP Unix socket. It also requests the explicit local
-read-only process-liveness snapshot (planned):
+read-only process-liveness snapshot (<Status id="xmsg.recipient-snapshot" />):
 `GET /v1/recipients?read_only=true&liveness=true`. Optional peer configuration uses the same
 parser as `check-peers`. Optional saved enrollment metadata supplies expiry and renewal
 checks; its CA probe makes a TLS handshake only. Doctor does not repair files, initialize
@@ -189,7 +195,7 @@ loaded configuration, without another network probe or full URI witnesses in the
 
 The invocation probes at most 32 configured peers in sorted order, with at most four
 concurrent attempts, two seconds per peer and an eight-second total deadline. Doctor's
-IPC deadline is nine seconds. **Planned:** a configured `leaf` with an empty address
+IPC deadline is nine seconds. A configured `leaf` (<Status id="xmsg.doctor-peers" />) with an empty address
 or a reserved `.invalid` hostname (for example, `pod.invalid:443`) is reported as
 `INFO` with `outbound-only leaf, reached via its hub`. This does not add a pass or
 warning, and does not make coverage partial; its TLS, certificate expiry and clock
@@ -394,14 +400,14 @@ Lists recipients the caller may see on this node and every reachable peer:
   - `"live"` is the default. Each entry has `registered_at`, in epoch seconds.
   - `"inactive"` shows the `parked` and `closed` instances that xmsg saw within `within` seconds.
     The default is `86400` (24 hours). The maximum is the reply TTL. Each entry has `last_seen`.
-    **Planned:** startup Codex roots with queued recovery work appear here as
+    (<Status id="xmsg.codex-restart-custody" />) Startup Codex roots with queued recovery work appear here as
     `awaiting_reattestation` until verified delivery can resume. They are excluded from the default
     live list; deliberate parking and revoked or closed roots keep their existing states.
 - **`kind`:** Filter by `"service"`, `"instance"`, or `"subagent"`.
 - **`name`:** Filter by service name or instance label.
 - **`node`:** An exact canonical name or local nickname queries one node. A bare-host selector queries all matching nodes in the current view; see [node selectors](/concepts/addressing/#node-selectors).
-- **`limit` (planned):** Default `50`, maximum `500`; must be at least `1`. Applies once across all nodes after filters. Live entries sort by newest `registered_at`, inactive entries by newest `last_seen`; equal timestamps sort by address.
-- **Returns (planned):** `{ recipients: [{ address, kind, harness?, label?, status, node, user, registered_at | last_seen }], nodes: [{ node, status, detail? }], total, truncated }`. `total` counts matching recipients before the cap. When `truncated` is true, narrow with `name`, `node` or `kind`, or raise `limit`.
+- **`limit` (<Status id="xmsg.recipient-snapshot" />):** Default `50`, maximum `500`; must be at least `1`. Applies once across all nodes after filters. Live entries sort by newest `registered_at`, inactive entries by newest `last_seen`; equal timestamps sort by address.
+- **Returns (<Status id="xmsg.recipient-snapshot" />):** `{ recipients: [{ address, kind, harness?, label?, status, node, user, registered_at | last_seen }], nodes: [{ node, status, detail? }], total, truncated }`. `total` counts matching recipients before the cap. When `truncated` is true, narrow with `name`, `node` or `kind`, or raise `limit`.
 
 Planned CLI example: `xmsg list --node alice.laptop --limit 100 --json`. CLI and MCP default to 50. This response change requires updating daemon and clients together.
 
@@ -420,7 +426,7 @@ Sends a message to `<id or name>[@<node>]` (at most one `@`):
 - **`as_agent`:** When a subagent calls the tool, the harness `PreToolUse` hook sets it
   automatically.
 - **Returns:** `{ message_id, address, outcome }` where `outcome` is `"delivered"`, `"queued"`, or `"pending"`.
-  Use the returned `address` for follow-ups. **Planned:** a failed immediate Codex push
+  Use the returned `address` for follow-ups. (<Status id="xmsg.codex-restart-custody" />) A failed immediate Codex push
   returns `queued` when xmsg proves custody for the live root's current generation,
   including an idle subagent's parent fallback.
 
@@ -445,7 +451,7 @@ sender. If you sent it, the reply is a follow-up to the recipient in the same ex
     the recipient's harness health or daemon logs before retrying.
   - `internal: …` or `reply delivery failed: push_failed`: an internal daemon error occurred while
     formatting or queueing the push (or an older daemon omitted detail). Inspect daemon logs.
-- **Planned:** a Codex reply held for a live root's current generation reports `pushed`
+- (<Status id="xmsg.codex-restart-custody" />) A Codex reply held for a live root's current generation reports `pushed`
   even if its immediate push fails before handoff. Parked or revoked roots keep
   `sender_gone`; unknown or in-flight handoffs do not imply successful custody.
 
@@ -553,6 +559,8 @@ identities; a URI hub requires its CA. Configuration applies on restart. The pri
 `GET /health` is a fixed metadata-free availability response. There is no MCP
 observation tool, browser token store, body route or action control.
 
-### Discovery and explicit-node routing (planned)
+### Discovery and explicit-node routing
+
+<Status id="xmsg.discovery" />
 
 The shared federation dial resolver preserves static-address priority and existing operation-specific hub fallback. `check-peers` rejects source-dependent address omission when no source is available; malformed address values are rejected. Doctor uses the same authenticated direct-dial path under its existing shorter budget and never reports a hub certificate as the target leaf. See [peer discovery](/concepts/discovery/) for core-only build limits.

@@ -3,6 +3,8 @@ title: Addressing & Resolution
 description: Recipient addresses, sender labels, local target resolution order, and federated view resolution.
 ---
 
+import Status from '../../../components/Status.astro';
+
 Each recipient on `xmsg` has an [address](/glossary/#address). Its form is
 `<id or name>[@<node>]`, with at most one `@`. The part after `@` names the
 [node](/glossary/#node).
@@ -134,7 +136,9 @@ time, with a 5-second list timeout:
   session is now parked (`not_live`), or delivery fails, xmsg removes the cache entry. Then the
   send resolves again over the full view.
 
-## Finding recipients (planned)
+## Finding recipients
+
+<Status id="xmsg.recipient-snapshot" />
 
 `xmsg list` and the MCP `list` tool return the newest 50 matching recipients across
 all reachable nodes by default. Filters run before this global limit. Check `total`
