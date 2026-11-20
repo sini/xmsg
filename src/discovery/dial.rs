@@ -257,15 +257,10 @@ async fn resolve_with_policy(
                     Some(true) => continue,
                     None => return None,
                 }
-                if fs
-                    .with_discovery_policy(&policy, || {
-                        fs.discovery
-                            .attempted(&policy, &peer.name, candidate.addr, Instant::now())
-                    })
-                    .is_none()
-                {
-                    return None;
-                }
+                fs.with_discovery_policy(&policy, || {
+                    fs.discovery
+                        .attempted(&policy, &peer.name, candidate.addr, Instant::now())
+                })?;
                 match discovered(fs, &peer, &policy, candidate.clone()).await {
                     Ok(tls) => return Some(tls),
                     Err(_) => {
