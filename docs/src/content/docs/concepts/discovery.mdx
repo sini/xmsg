@@ -173,7 +173,7 @@ Detection uses two complementary arms that never disclose the OS hostname:
 - **IPv6 limits:** the deny probe uses IPv4 multicast (`224.0.0.251:5353`) only; IPv6-only
   multicast gating is not measured and reports `unverified` when no IPv4 LAN interface is up.
 
-The local [health response](/reference/http-and-sockets/#lan-discovery-health-planned) reports
+The local [health response](/reference/http-and-sockets/#lan-discovery-health) reports
 `state` and `announce_state` separately:
 
 | `state` | Meaning |
@@ -182,7 +182,7 @@ The local [health response](/reference/http-and-sockets/#lan-discovery-health-pl
 | `starting` | The responder is starting (`xmsg doctor` warns if stuck past `15` seconds). |
 | `active` | While announcing, our own `_xmsg._tcp.local.` record resolved back on one of this host's own non-loopback LAN addresses. |
 | `unverified` | Normal at-rest state when no announce window is open (and outbound multicast `sendto` has not failed), or when no IPv4 LAN interface is up. Reported as `info` in `xmsg doctor` (never `pass` and never `warn`). |
-| `permission_suspected` | `3` consecutive outbound multicast send failures (such as `EHOSTUNREACH` under an explicit macOS Local Network denial, or a host firewall rule). Suspected, never proven; see [troubleshooting](/operations/troubleshooting/#lan-discovery-on-macos-local-network-permission-planned). |
+| `permission_suspected` | `3` consecutive outbound multicast send failures (such as `EHOSTUNREACH` under an explicit macOS Local Network denial, or a host firewall rule). Suspected, never proven; see [troubleshooting](/operations/troubleshooting/#lan-discovery-on-macos-local-network-permission). |
 | `failed` | Responder, UDP `5353` bind, or transient registration failure; retries with bounded backoff (`2` to `30` s for registration, `30` s tick for responder start) and warns once per distinct cause. |
 
 | `announce_state` | Meaning |
