@@ -101,6 +101,7 @@ fn status(node: &NodeView) -> &'static str {
         NodeStatus::Unsupported if node.origin_hub.is_none() => "unsupported: outbound-only source",
         NodeStatus::Unsupported => "unsupported: observation transport",
         NodeStatus::StorageFull => "storage full",
+        NodeStatus::RemovedRetained => "not currently configured",
     }
 }
 fn provenance(origin: Option<&str>) -> String {
@@ -151,6 +152,7 @@ pub struct CollectorHealth {
     pub last_maintenance_ok_secs: Option<u64>,
     pub last_maintenance_failed: bool,
     pub store_slot_refusals: u64,
+    pub evicted_inactive: u64,
     pub nodes: BTreeMap<String, NodeFreshness>,
 }
 
@@ -200,7 +202,7 @@ fn gap_and_loss_lines(node: &NodeView) -> String {
 }
 
 fn coverage_banner(summaries: &[NodeView]) -> String {
-    let total = summaries.len();
+    let mut total = 0usize;
     let mut reporting = 0usize;
     let mut unreachable = 0usize;
     let mut endpoint_not_found = 0usize;
@@ -210,8 +212,14 @@ fn coverage_banner(summaries: &[NodeView]) -> String {
     let mut rate_limited = 0usize;
     let mut malformed = 0usize;
     let mut storage_full = 0usize;
+    let mut retained_not_configured = 0usize;
 
     for node in summaries {
+        if node.status == NodeStatus::RemovedRetained {
+            retained_not_configured += 1;
+            continue;
+        }
+        total += 1;
         if node.status == NodeStatus::Denied {
             denied += 1;
         } else if node.status == NodeStatus::Unsupported
@@ -247,6 +255,7 @@ fn coverage_banner(summaries: &[NodeView]) -> String {
         (rate_limited, "rate limited"),
         (malformed, "malformed"),
         (storage_full, "storage full"),
+        (retained_not_configured, "retained, not configured"),
     ] {
         if count > 0 {
             let _ = write!(banner, " · {count} {label}");
@@ -265,9 +274,14 @@ fn collector_line(health: &CollectorHealth) -> String {
         (false, Some(secs)) => format!("{secs} s ago"),
         (false, None) => "never".into(),
     };
+    let evicted = if health.evicted_inactive > 0 {
+        format!(" · evicted inactive {}", health.evicted_inactive)
+    } else {
+        String::new()
+    };
     format!(
-        "<p class=\"muted\">Collector: pollers alive {}/{} · last maintenance {} · store-slot refusals {}</p>",
-        health.pollers_alive, health.supported_sources, maint, health.store_slot_refusals
+        "<p class=\"muted\">Collector: pollers alive {}/{} · last maintenance {} · store-slot refusals {}{}</p>",
+        health.pollers_alive, health.supported_sources, maint, health.store_slot_refusals, evicted
     )
 }
 

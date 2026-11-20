@@ -222,6 +222,19 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		owner: 'sini',
 		evidence: [{ path: 'nix/modules/home-manager.nix', anchor: 'stableExecutable = mkOption' }],
 	},
+||||||| parent of a7018e7 (observe_collector: retain removed nodes for configurable inactive window)
+	'fleet-observer.retention': {
+		id: 'fleet-observer.retention',
+		title: 'Configurable inactive-node retention window',
+		owner: 'sini',
+		evidence: [
+			{
+				path: 'src/observe_collector_net.rs',
+				anchor: 'pub retention_after_inactive_secs: u64',
+			},
+		],
+		note: 'Retains history for removed or unconfigured nodes for retention_after_inactive_secs (default 604800 = 7 days) after last accepted ingest.',
+	},
 };
 
 export const SIBLING_ALLOWLIST: SiblingAllowlistEntry[] = [

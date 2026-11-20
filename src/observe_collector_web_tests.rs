@@ -25,6 +25,7 @@ fn view() -> NodeView {
         ],
         truncated: true,
         backfill: true,
+        last_activity: None,
     }
 }
 fn hostile_view() -> NodeView {
@@ -590,4 +591,48 @@ fn r5_relayed_node_retains_escaped_provenance() {
             "unescaped origin_hub in detail:\n{detail_html}"
         );
     }
+}
+
+#[test]
+fn lpjc_coverage_banner_and_removed_retained_rendering() {
+    let mut configured = view();
+    configured.status = NodeStatus::Healthy;
+    let mut removed = view();
+    removed.node = "retired.node".into();
+    removed.status = NodeStatus::RemovedRetained;
+    removed.last_activity = Some((1_700_000_000, 120));
+
+    let mut health = CollectorHealth {
+        evicted_inactive: 2,
+        ..Default::default()
+    };
+    health.nodes.insert(
+        "retired.node".into(),
+        NodeFreshness {
+            last_success: Some((1_700_000_000, 120)),
+            ..Default::default()
+        },
+    );
+
+    let html = render_with_health(&[configured, removed], None, Filter::default(), &health);
+    assert!(
+        html.contains("1/1 configured nodes reporting"),
+        "configured denominator must exclude removed-retained node:\n{html}"
+    );
+    assert!(
+        html.contains("1 retained, not configured"),
+        "missing retained, not configured bucket:\n{html}"
+    );
+    assert!(
+        html.contains("not currently configured"),
+        "missing not currently configured status:\n{html}"
+    );
+    assert!(
+        html.contains("120 s ago"),
+        "missing last-success age on removed-retained node:\n{html}"
+    );
+    assert!(
+        html.contains("evicted inactive 2"),
+        "missing evicted inactive count:\n{html}"
+    );
 }

@@ -370,6 +370,10 @@ stored rows. See the [wire contract](/reference/http-and-sockets/#planned-node-o
 
 ## Retention and bounds
 
+<Status id="fleet-observer.retention" />
+
+Set `retention_after_inactive_secs` in the collector configuration (default `604800`, 7 days; max `31536000`, 365 days; `0` purges immediately) to control how long a node removed from the configured set retains its stored history after its last accepted ingest (measured monotonically). Retained-but-removed nodes display as `not currently configured` with their last-success age in a separate `retained, not configured` coverage bucket without changing the configured-node denominator. Re-adding a node inside the window resumes it with its history intact and masked until revalidation; if the store fills, the oldest-inactive history is evicted first and reported in the collector line.
+
 Per node, the cache retains at most seven days, 10,000 events and 16 MiB of accounted
 metadata, including its latest snapshot. It does not accumulate snapshot archives.
 Page records and their cursor commit together. Replays do not duplicate retained

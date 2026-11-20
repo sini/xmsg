@@ -9,7 +9,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub type EpochClock = Arc<dyn Fn() -> i64 + Send + Sync>;
+pub type MonoClock = Arc<dyn Fn() -> u64 + Send + Sync>;
 const TTL: i64 = 7 * 86400;
+const MAX_RETENTION_SECS: u64 = 365 * 86_400;
 const MAX_TIME: i64 = 253_402_300_799;
 const ROWS: usize = 10_000;
 const BYTES: usize = 16 * 1024 * 1024;
@@ -58,6 +60,7 @@ pub enum NodeStatus {
     Denied,
     Unsupported,
     StorageFull,
+    RemovedRetained,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnavailableKind {
@@ -100,6 +103,7 @@ pub struct NodeView {
     pub gaps: Vec<ExportGap>,
     pub truncated: bool,
     pub backfill: bool,
+    pub last_activity: Option<(i64, u64)>,
 }
 #[derive(Clone, Debug)]
 pub struct CommitOutcome {
@@ -154,13 +158,22 @@ struct NodeState {
     status: NodeStatus,
     failure: Option<UnavailableKind>,
 }
+struct RemovedNodeState {
+    storage_key: String,
+    origin_hub: Option<String>,
+    last_activity_utc: i64,
+    last_activity_mono: u64,
+}
 struct Inner {
     connection: Option<Connection>,
     nodes: BTreeMap<String, NodeState>,
+    removed: BTreeMap<String, RemovedNodeState>,
+    evicted_inactive: u64,
 }
 pub struct Store {
     inner: Mutex<Inner>,
     clock: EpochClock,
+    mono_clock: MonoClock,
     limits: Limits,
 }
 #[derive(Clone, Copy)]
@@ -168,6 +181,17 @@ struct Limits {
     rows: usize,
     bytes: usize,
     pages: i64,
+    retention_after_inactive_secs: u64,
+}
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            rows: ROWS,
+            bytes: BYTES,
+            pages: 128,
+            retention_after_inactive_secs: TTL as u64,
+        }
+    }
 }
 fn valid_time(value: i64) -> bool {
     (0..=MAX_TIME).contains(&value)
@@ -371,26 +395,65 @@ impl Store {
         nodes: Vec<NodePolicy>,
         clock: EpochClock,
     ) -> Result<Self, StoreError> {
+        Self::open_with_retention(state_dir, nodes, clock, TTL as u64)
+    }
+    pub fn open_with_retention(
+        state_dir: &Path,
+        nodes: Vec<NodePolicy>,
+        clock: EpochClock,
+        retention_after_inactive_secs: u64,
+    ) -> Result<Self, StoreError> {
+        let start = std::time::Instant::now();
+        let mono_clock: MonoClock = Arc::new(move || start.elapsed().as_secs());
+        Self::open_with_retention_and_mono(
+            state_dir,
+            nodes,
+            clock,
+            mono_clock,
+            retention_after_inactive_secs,
+        )
+    }
+    pub fn open_with_retention_and_mono(
+        state_dir: &Path,
+        nodes: Vec<NodePolicy>,
+        clock: EpochClock,
+        mono_clock: MonoClock,
+        retention_after_inactive_secs: u64,
+    ) -> Result<Self, StoreError> {
         let pages = (nodes.len() as u64)
             .checked_mul(32 * 1024 * 1024)
             .and_then(|v| v.checked_add(64 * 1024 * 1024))
             .ok_or(StoreError::Invalid)?
             / 4096;
-        Self::open_limits(
+        Self::open_limits_with_mono(
             state_dir,
             nodes,
             clock,
+            mono_clock,
             Limits {
                 rows: ROWS,
                 bytes: BYTES,
                 pages: i64::try_from(pages).map_err(|_| StoreError::Invalid)?,
+                retention_after_inactive_secs,
             },
         )
     }
+    #[cfg(test)]
     fn open_limits(
         state_dir: &Path,
         nodes: Vec<NodePolicy>,
         clock: EpochClock,
+        limits: Limits,
+    ) -> Result<Self, StoreError> {
+        let start = std::time::Instant::now();
+        let mono_clock: MonoClock = Arc::new(move || start.elapsed().as_secs());
+        Self::open_limits_with_mono(state_dir, nodes, clock, mono_clock, limits)
+    }
+    fn open_limits_with_mono(
+        state_dir: &Path,
+        nodes: Vec<NodePolicy>,
+        clock: EpochClock,
+        mono_clock: MonoClock,
         limits: Limits,
     ) -> Result<Self, StoreError> {
         if nodes.is_empty()
@@ -398,6 +461,7 @@ impl Store {
             || limits.rows > ROWS
             || limits.bytes > BYTES
             || limits.pages < 8
+            || limits.retention_after_inactive_secs > MAX_RETENTION_SECS
         {
             return Err(StoreError::Invalid);
         }
@@ -490,13 +554,18 @@ impl Store {
         c.execute_batch("CREATE TABLE IF NOT EXISTS nodes(node TEXT PRIMARY KEY,epoch TEXT,scope TEXT,next INTEGER NOT NULL DEFAULT 0,snapshot BLOB,snapshot_receipt INTEGER,snapshot_base INTEGER,snapshot_fingerprint BLOB,gaps TEXT NOT NULL DEFAULT '[]',truncated INTEGER NOT NULL DEFAULT 0,backfill INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS events(node TEXT NOT NULL,epoch TEXT NOT NULL,sequence INTEGER NOT NULL,json BLOB NOT NULL,receipt INTEGER NOT NULL,base INTEGER NOT NULL,bytes INTEGER NOT NULL,PRIMARY KEY(node,epoch,sequence)); CREATE INDEX IF NOT EXISTS retention ON events(node,base,receipt,epoch,sequence);")?;
         c.execute_batch("BEGIN IMMEDIATE")?;
         let migration = (|| -> Result<(), StoreError> {
-            for (table, column) in [("events", "origin_hub"), ("nodes", "snapshot_origin_hub")] {
+            for (table, column, ty) in [
+                ("events", "origin_hub", "TEXT"),
+                ("nodes", "snapshot_origin_hub", "TEXT"),
+                ("nodes", "display_name", "TEXT"),
+                ("nodes", "last_activity", "INTEGER"),
+            ] {
                 let columns = c
                     .prepare(&format!("PRAGMA table_info({table})"))?
                     .query_map([], |r| r.get::<_, String>(1))?
                     .collect::<Result<Vec<_>, _>>()?;
                 if !columns.iter().any(|name| name == column) {
-                    c.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT"))?;
+                    c.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {ty}"))?;
                 }
             }
             c.execute_batch("COMMIT")?;
@@ -506,42 +575,114 @@ impl Store {
             let _ = c.execute_batch("ROLLBACK");
         }
         migration?;
-        c.prepare("SELECT snapshot_fingerprint FROM nodes LIMIT 0")?;
+        c.prepare("SELECT snapshot_fingerprint,display_name,last_activity FROM nodes LIMIT 0")?;
         let persisted = c
-            .prepare("SELECT node FROM nodes ORDER BY node LIMIT 65")?
-            .query_map([], |r| r.get::<_, String>(0))?
+            .prepare("SELECT node,display_name,last_activity,snapshot_origin_hub FROM nodes ORDER BY node LIMIT 65")?
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
-        // a valid previous inventory has at most 64 rows, including removed nodes.
+        // a valid previous inventory has at most 64 rows, including retained removed nodes.
         if persisted.len() > 64 {
             return Err(StoreError::Storage);
         }
         let mut inner = Inner {
             connection: Some(c),
             nodes: inventory,
+            removed: BTreeMap::new(),
+            evicted_inactive: 0,
         };
-        let configured: BTreeSet<String> = inner
+        let configured: BTreeMap<String, String> = inner
             .nodes
             .values()
-            .map(|s| s.policy.storage_key())
+            .map(|s| (s.policy.storage_key(), s.policy.node.clone()))
             .collect();
-        for node in persisted {
-            if !configured.contains(&node) {
-                transaction(&mut inner, |c| {
-                    c.execute("DELETE FROM events WHERE node=?1", [&node])?;
-                    c.execute("DELETE FROM nodes WHERE node=?1", [&node])?;
-                    Ok(())
-                })?;
+        let configured_names: BTreeSet<String> = configured.values().cloned().collect();
+        let now_utc = (clock)();
+        if !valid_time(now_utc) {
+            return Err(StoreError::Invalid);
+        }
+        let mono_now = (mono_clock)();
+        for (node, display_name, last_activity, origin_hub) in persisted {
+            if !configured.contains_key(&node) {
+                let name = display_name.unwrap_or_else(|| node.clone());
+                let has_history: bool = inner
+                    .connection
+                    .as_ref()
+                    .ok_or(StoreError::Storage)?
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM events WHERE node=?1) OR EXISTS(SELECT 1 FROM nodes WHERE node=?1 AND snapshot IS NOT NULL)",
+                        [&node],
+                        |r| r.get(0),
+                    )?;
+                let keep = !configured_names.contains(&name)
+                    && limits.retention_after_inactive_secs > 0
+                    && has_history
+                    && last_activity.is_some_and(|utc| {
+                        now_utc.saturating_sub(utc).max(0) as u64
+                            <= limits.retention_after_inactive_secs
+                    });
+                if keep {
+                    let utc = last_activity.unwrap_or(now_utc);
+                    let initial_age = now_utc.saturating_sub(utc).max(0) as u64;
+                    inner.removed.insert(
+                        name,
+                        RemovedNodeState {
+                            storage_key: node,
+                            origin_hub,
+                            last_activity_utc: utc,
+                            last_activity_mono: mono_now.saturating_sub(initial_age),
+                        },
+                    );
+                } else {
+                    transaction(&mut inner, |c| {
+                        c.execute("DELETE FROM events WHERE node=?1", [&node])?;
+                        c.execute("DELETE FROM nodes WHERE node=?1", [&node])?;
+                        Ok(())
+                    })?;
+                }
             }
         }
-        for node in configured {
+        while inner.removed.len() + configured.len() > 64 {
+            let Some(oldest_name) = inner
+                .removed
+                .iter()
+                .min_by_key(|(name, s)| (s.last_activity_mono, (*name).clone()))
+                .map(|(name, _)| name.clone())
+            else {
+                break;
+            };
+            if let Some(removed) = inner.removed.remove(&oldest_name) {
+                transaction(&mut inner, |c| {
+                    c.execute("DELETE FROM events WHERE node=?1", [&removed.storage_key])?;
+                    c.execute("DELETE FROM nodes WHERE node=?1", [&removed.storage_key])?;
+                    Ok(())
+                })?;
+                inner.evicted_inactive += 1;
+            }
+        }
+        for (key, name) in configured {
             transaction(&mut inner, |c| {
-                c.execute("INSERT OR IGNORE INTO nodes(node) VALUES(?1)", [node])?;
+                c.execute(
+                    "INSERT OR IGNORE INTO nodes(node,display_name) VALUES(?1,?2)",
+                    params![&key, &name],
+                )?;
+                c.execute(
+                    "UPDATE nodes SET display_name=?2 WHERE node=?1",
+                    params![&key, &name],
+                )?;
                 Ok(())
             })?;
         }
         let store = Self {
             inner: Mutex::new(inner),
             clock,
+            mono_clock,
             limits,
         };
         store.maintain()?;
@@ -662,14 +803,15 @@ impl Store {
                 }
             }
             c.execute(
-                "UPDATE nodes SET epoch=?2,scope=?3,next=?4,gaps=?5,backfill=?6 WHERE node=?1",
+                "UPDATE nodes SET epoch=?2,scope=?3,next=?4,gaps=?5,backfill=?6,last_activity=?7 WHERE node=?1",
                 params![
                     node,
                     page.epoch,
                     page.scope,
                     page.next,
                     encoded(&gaps, 4096)?,
-                    page.has_more
+                    page.has_more,
+                    now
                 ],
             )?;
             self.retain(c, node, now)?;
@@ -684,8 +826,59 @@ impl Store {
                 epoch_changed,
             })
         });
+        let result = match result {
+            Err(StoreError::Full) if self.evict_oldest_inactive(&mut inner)? => {
+                // Retry once after evicting oldest-inactive history
+                transaction(&mut inner, |c| {
+                    let node = key.as_str();
+                    for (event, original) in page.events.iter().zip(&decoded.events) {
+                        let json = &original.canonical;
+                        c.execute("INSERT OR IGNORE INTO events(node,epoch,sequence,json,receipt,base,bytes,origin_hub) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![node,page.epoch,event.sequence,json,now,event.observed_at.min(now),(json.len()+page.epoch.len()+node.len()+128+origin.map_or(0,str::len)) as i64,origin])?;
+                    }
+                    c.execute(
+                        "UPDATE nodes SET epoch=?2,scope=?3,next=?4,backfill=?5,last_activity=?6 WHERE node=?1",
+                        params![node, page.epoch, page.scope, page.next, page.has_more, now],
+                    )?;
+                    self.retain(c, node, now)?;
+                    Ok(CommitOutcome {
+                        cursor: Cursor {
+                            epoch: Some(page.epoch.clone()),
+                            scope: Some(page.scope.clone()),
+                            next: page.next,
+                        },
+                        inserted: page.events.len(),
+                        scope_changed,
+                        epoch_changed,
+                    })
+                })
+            }
+            other => other,
+        };
         self.finish(&mut inner, node, &result);
         result
+    }
+    pub fn evicted_inactive(&self) -> u64 {
+        self.inner.lock().map(|g| g.evicted_inactive).unwrap_or(0)
+    }
+    fn evict_oldest_inactive(&self, inner: &mut Inner) -> Result<bool, StoreError> {
+        let Some(oldest_name) = inner
+            .removed
+            .iter()
+            .min_by_key(|(name, s)| (s.last_activity_mono, (*name).clone()))
+            .map(|(name, _)| name.clone())
+        else {
+            return Ok(false);
+        };
+        if let Some(removed) = inner.removed.remove(&oldest_name) {
+            transaction(inner, |c| {
+                c.execute("DELETE FROM events WHERE node=?1", [&removed.storage_key])?;
+                c.execute("DELETE FROM nodes WHERE node=?1", [&removed.storage_key])?;
+                Ok(())
+            })?;
+            inner.evicted_inactive += 1;
+            return Ok(true);
+        }
+        Ok(false)
     }
     fn finish<T>(&self, inner: &mut Inner, node: &str, result: &Result<T, StoreError>) {
         if let Some(state) = inner.nodes.get_mut(node) {
@@ -738,7 +931,7 @@ impl Store {
             } else {
                 (now, snapshot.observed_at.min(now))
             };
-            c.execute("UPDATE nodes SET scope=?2,snapshot=?3,snapshot_receipt=?4,snapshot_base=?5,snapshot_fingerprint=?6,snapshot_origin_hub=?7 WHERE node=?1",params![node,snapshot.scope,bytes,receipt,base,fingerprint,origin])?;
+            c.execute("UPDATE nodes SET scope=?2,snapshot=?3,snapshot_receipt=?4,snapshot_base=?5,snapshot_fingerprint=?6,snapshot_origin_hub=?7,last_activity=?8 WHERE node=?1",params![node,snapshot.scope,bytes,receipt,base,fingerprint,origin,now])?;
             self.retain(c, node, now)?;
             Ok(CommitOutcome {
                 cursor: read_cursor(c, node)?,
@@ -747,6 +940,22 @@ impl Store {
                 epoch_changed: false,
             })
         });
+        let result = match result {
+            Err(StoreError::Full) if self.evict_oldest_inactive(&mut inner)? => {
+                transaction(&mut inner, |c| {
+                    let node = key.as_str();
+                    c.execute("UPDATE nodes SET scope=?2,snapshot=?3,snapshot_receipt=?4,snapshot_base=?5,snapshot_fingerprint=?6,snapshot_origin_hub=?7,last_activity=?8 WHERE node=?1",params![node,snapshot.scope,bytes,now,snapshot.observed_at.min(now),fingerprint,origin,now])?;
+                    self.retain(c, node, now)?;
+                    Ok(CommitOutcome {
+                        cursor: read_cursor(c, node)?,
+                        inserted: 0,
+                        scope_changed,
+                        epoch_changed: false,
+                    })
+                })
+            }
+            other => other,
+        };
         self.finish(&mut inner, node, &result);
         result
     }
@@ -819,7 +1028,27 @@ impl Store {
     }
     pub fn maintain(&self) -> Result<(), StoreError> {
         let now = self.now()?;
+        let mono_now = (self.mono_clock)();
         let mut inner = self.lock()?;
+        let expired: Vec<String> = inner
+            .removed
+            .iter()
+            .filter(|(_, s)| {
+                self.limits.retention_after_inactive_secs == 0
+                    || mono_now.saturating_sub(s.last_activity_mono)
+                        > self.limits.retention_after_inactive_secs
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in expired {
+            if let Some(removed) = inner.removed.remove(&name) {
+                transaction(&mut inner, |c| {
+                    c.execute("DELETE FROM events WHERE node=?1", [&removed.storage_key])?;
+                    c.execute("DELETE FROM nodes WHERE node=?1", [&removed.storage_key])?;
+                    Ok(())
+                })?;
+            }
+        }
         let nodes: Vec<String> = inner
             .nodes
             .values()
@@ -864,6 +1093,7 @@ impl Store {
                 gaps: Vec::new(),
                 truncated: false,
                 backfill: false,
+                last_activity: None,
             };
             if state.validated {
                 let name = key.as_str();
@@ -909,6 +1139,94 @@ impl Store {
                         received_at,
                     });
                 }
+            }
+            views.push(v);
+        }
+        let mono_now = (self.mono_clock)();
+        for (name, removed) in &inner.removed {
+            if node.is_some_and(|n| n != name) {
+                continue;
+            }
+            let key = removed.storage_key.as_str();
+            let has_stored_history: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM events WHERE node=?1) OR EXISTS(SELECT 1 FROM nodes WHERE node=?1 AND snapshot IS NOT NULL)",
+                params![key],
+                |r| r.get(0),
+            )?;
+            let age_secs = mono_now.saturating_sub(removed.last_activity_mono);
+            let mut v = NodeView {
+                failure: None,
+                origin_hub: removed.origin_hub.clone(),
+                history_hidden: false,
+                has_stored_history,
+                node: name.clone(),
+                status: NodeStatus::RemovedRetained,
+                events: Vec::new(),
+                latest_snapshot: None,
+                cursor: Some(read_cursor(c, key)?),
+                gaps: Vec::new(),
+                truncated: false,
+                backfill: false,
+                last_activity: Some((removed.last_activity_utc, age_secs)),
+            };
+            let (snapshot, receipt, gaps, truncated, backfill, snapshot_origin) = c.query_row(
+                "SELECT CASE WHEN snapshot_base>=?2 THEN snapshot END,CASE WHEN snapshot_base>=?2 THEN snapshot_receipt END,CAST(gaps AS BLOB),truncated,backfill,snapshot_origin_hub FROM nodes WHERE node=?1",
+                params![key, cutoff],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<Vec<u8>>>(0)?,
+                        r.get::<_, Option<i64>>(1)?,
+                        r.get::<_, Vec<u8>>(2)?,
+                        r.get::<_, bool>(3)?,
+                        r.get::<_, bool>(4)?,
+                        r.get::<_, Option<String>>(5)?,
+                    ))
+                },
+            )?;
+            v.gaps = serde_json::from_slice(&gaps).map_err(|_| StoreError::Storage)?;
+            v.truncated = truncated;
+            v.truncated |= c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM events WHERE node=?1 AND base<?3) OR (SELECT count(*) FROM events WHERE node=?1 AND base>=?3)>?2 OR EXISTS(SELECT 1 FROM nodes WHERE node=?1 AND snapshot_base<?3)",
+                params![key, limit.min(ROWS) as i64, cutoff],
+                |r| r.get::<_, bool>(0),
+            )?;
+            v.backfill = backfill;
+            if let (Some(bytes), Some(received_at)) = (snapshot, receipt) {
+                let snapshot: ExportSnapshot =
+                    serde_json::from_slice(&bytes).map_err(|_| StoreError::Storage)?;
+                v.latest_snapshot = Some(CachedSnapshot {
+                    origin_hub: snapshot_origin,
+                    source_age_seconds: now.saturating_sub(snapshot.observed_at).max(0),
+                    receipt_age_seconds: now.saturating_sub(received_at).max(0),
+                    snapshot,
+                    received_at,
+                });
+            }
+            let mut statement = c.prepare(
+                "SELECT epoch,json,receipt,origin_hub FROM events WHERE node=?1 AND base>=?3 ORDER BY receipt DESC,epoch DESC,sequence DESC LIMIT ?2",
+            )?;
+            let events =
+                statement.query_map(params![key, limit.min(ROWS) as i64, cutoff], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Vec<u8>>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                })?;
+            for e in events {
+                let (epoch, json, received_at, event_origin) = e?;
+                let event = crate::observe_collector_decode::decode_event(&json)
+                    .map_err(|_| StoreError::Storage)?
+                    .event;
+                v.events.push(CachedEvent {
+                    origin_hub: event_origin,
+                    epoch,
+                    source_age_seconds: now.saturating_sub(event.observed_at).max(0),
+                    receipt_age_seconds: now.saturating_sub(received_at).max(0),
+                    event,
+                    received_at,
+                });
             }
             views.push(v);
         }

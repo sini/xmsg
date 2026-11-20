@@ -387,6 +387,7 @@ fn independent_row_and_byte_limits_include_snapshot() {
                 rows,
                 bytes,
                 pages: 128,
+                ..Limits::default()
             },
         )
         .unwrap();
@@ -423,6 +424,7 @@ fn private_paths_and_preexisting_physical_limits() {
                 rows: ROWS,
                 bytes: BYTES,
                 pages: 128,
+                ..Limits::default()
             },
         )
     }
@@ -500,6 +502,7 @@ fn engine_settings_journal_peak_full_abort_and_compaction() {
             rows: ROWS,
             bytes: BYTES,
             pages: 128,
+            ..Limits::default()
         },
     )
     .unwrap();
@@ -934,6 +937,7 @@ fn snapshot_budget_and_replay_receipt_are_independent() {
             rows: ROWS,
             bytes: 1000,
             pages: 128,
+            ..Limits::default()
         },
     )
     .unwrap();
@@ -1185,6 +1189,7 @@ fn snapshot_control_counts_toward_bytes_and_survives_blob_byte_eviction() {
                 rows: ROWS,
                 bytes: cap,
                 pages: 128,
+                ..Limits::default()
             },
         )
         .unwrap();
@@ -1338,6 +1343,7 @@ fn journal_store(dir: &Path) -> Store {
             rows: ROWS,
             bytes: BYTES,
             pages: 128,
+            ..Limits::default()
         },
     )
     .unwrap()
@@ -2227,5 +2233,315 @@ fn relay_future_kind_canonical_bytes_and_replay_identity_are_preserved() {
         store.cursor(&policy.node).unwrap(),
         before,
         "conflicting relay future-kind replay advanced committed cursor"
+    );
+}
+
+#[test]
+fn lpjc_retains_removed_node_until_window_expires_then_purges() {
+    let dir = private_temp();
+    let p_a = NodePolicy {
+        relay: None,
+        node: "node".into(),
+        labels: false,
+        supported: true,
+    };
+    let p_b = NodePolicy {
+        relay: None,
+        node: "other".into(),
+        labels: false,
+        supported: true,
+    };
+    let utc = Arc::new(AtomicI64::new(NOW));
+    let mono = Arc::new(std::sync::atomic::AtomicU64::new(100));
+    let store = Store::open_with_retention_and_mono(
+        dir.path(),
+        vec![p_a.clone(), p_b.clone()],
+        Arc::new({
+            let utc = utc.clone();
+            move || utc.load(Ordering::SeqCst)
+        }),
+        Arc::new({
+            let mono = mono.clone();
+            move || mono.load(Ordering::SeqCst)
+        }),
+        600,
+    )
+    .unwrap();
+    store
+        .ingest_page("node", &Cursor::default(), page(1))
+        .unwrap();
+    drop(store);
+
+    // Reopen without node-a, still inside the 600s window
+    utc.store(NOW + 100, Ordering::SeqCst);
+    mono.store(200, Ordering::SeqCst);
+    let store = Store::open_with_retention_and_mono(
+        dir.path(),
+        vec![p_b.clone()],
+        Arc::new({
+            let utc = utc.clone();
+            move || utc.load(Ordering::SeqCst)
+        }),
+        Arc::new({
+            let mono = mono.clone();
+            move || mono.load(Ordering::SeqCst)
+        }),
+        600,
+    )
+    .unwrap();
+    store.maintain().unwrap();
+    let views = store.view(None, 100).unwrap();
+    let retained = views.iter().find(|v| v.node == "node").unwrap();
+    assert_eq!(retained.status, NodeStatus::RemovedRetained);
+    assert_eq!(retained.events.len(), 1);
+    assert_eq!(retained.last_activity, Some((NOW, 100)));
+
+    // Advance monotonic clock past 600s -> maintain() purges node-a
+    utc.store(NOW + 700, Ordering::SeqCst);
+    mono.store(701, Ordering::SeqCst);
+    store.maintain().unwrap();
+    let views = store.view(None, 100).unwrap();
+    assert!(views.iter().all(|v| v.node != "node"));
+}
+
+#[test]
+fn lpjc_retention_zero_purges_immediately() {
+    let dir = private_temp();
+    let p_a = NodePolicy {
+        relay: None,
+        node: "node".into(),
+        labels: false,
+        supported: true,
+    };
+    let p_b = NodePolicy {
+        relay: None,
+        node: "other".into(),
+        labels: false,
+        supported: true,
+    };
+    let store = Store::open_with_retention(dir.path(), vec![p_a, p_b.clone()], Arc::new(|| NOW), 0)
+        .unwrap();
+    store
+        .ingest_page("node", &Cursor::default(), page(1))
+        .unwrap();
+    drop(store);
+
+    let store = Store::open_with_retention(dir.path(), vec![p_b], Arc::new(|| NOW + 1), 0).unwrap();
+    let views = store.view(None, 100).unwrap();
+    assert!(views.iter().all(|v| v.node != "node"));
+}
+
+#[test]
+fn lpjc_last_activity_uses_monotonic_clock_not_wall_clock() {
+    let dir = private_temp();
+    let p_a = NodePolicy {
+        relay: None,
+        node: "node".into(),
+        labels: false,
+        supported: true,
+    };
+    let p_b = NodePolicy {
+        relay: None,
+        node: "other".into(),
+        labels: false,
+        supported: true,
+    };
+    let utc = Arc::new(AtomicI64::new(NOW));
+    let mono = Arc::new(std::sync::atomic::AtomicU64::new(100));
+    let store = Store::open_with_retention_and_mono(
+        dir.path(),
+        vec![p_a, p_b.clone()],
+        Arc::new({
+            let utc = utc.clone();
+            move || utc.load(Ordering::SeqCst)
+        }),
+        Arc::new({
+            let mono = mono.clone();
+            move || mono.load(Ordering::SeqCst)
+        }),
+        600,
+    )
+    .unwrap();
+    store
+        .ingest_page("node", &Cursor::default(), page(1))
+        .unwrap();
+    drop(store);
+
+    // Reopen immediately without node-a
+    let store = Store::open_with_retention_and_mono(
+        dir.path(),
+        vec![p_b],
+        Arc::new({
+            let utc = utc.clone();
+            move || utc.load(Ordering::SeqCst)
+        }),
+        Arc::new({
+            let mono = mono.clone();
+            move || mono.load(Ordering::SeqCst)
+        }),
+        600,
+    )
+    .unwrap();
+
+    // Jump wall clock forward 30 days while monotonic clock only advances 10 seconds
+    utc.store(NOW + 30 * 86_400, Ordering::SeqCst);
+    mono.store(110, Ordering::SeqCst);
+    store.maintain().unwrap();
+    let views = store.view(None, 100).unwrap();
+    assert!(
+        views
+            .iter()
+            .any(|v| v.node == "node" && v.status == NodeStatus::RemovedRetained),
+        "wall clock jump prematurely purged retained node"
+    );
+
+    // Now advance monotonic clock past retention
+    mono.store(750, Ordering::SeqCst);
+    store.maintain().unwrap();
+    let views = store.view(None, 100).unwrap();
+    assert!(views.iter().all(|v| v.node != "node"));
+}
+
+#[test]
+fn lpjc_readd_inside_window_resumes_masked_until_revalidation() {
+    let dir = private_temp();
+    let p_a = NodePolicy {
+        relay: None,
+        node: "node".into(),
+        labels: false,
+        supported: true,
+    };
+    let p_b = NodePolicy {
+        relay: None,
+        node: "other".into(),
+        labels: false,
+        supported: true,
+    };
+    let store = Store::open_with_retention(
+        dir.path(),
+        vec![p_a.clone(), p_b.clone()],
+        Arc::new(|| NOW),
+        600,
+    )
+    .unwrap();
+    store
+        .ingest_page("node", &Cursor::default(), page(1))
+        .unwrap();
+    drop(store);
+
+    // Remove node-a, then re-add within window
+    let store =
+        Store::open_with_retention(dir.path(), vec![p_b.clone()], Arc::new(|| NOW + 10), 600)
+            .unwrap();
+    assert!(store
+        .view(Some("node"), 100)
+        .unwrap()
+        .first()
+        .is_some_and(|v| v.status == NodeStatus::RemovedRetained));
+    drop(store);
+
+    let store =
+        Store::open_with_retention(dir.path(), vec![p_a, p_b], Arc::new(|| NOW + 20), 600).unwrap();
+    let v = store.view(Some("node"), 100).unwrap().remove(0);
+    assert_eq!(v.status, NodeStatus::HiddenPendingRevalidation);
+    assert!(v.history_hidden);
+    assert!(v.has_stored_history);
+    assert!(v.events.is_empty());
+
+    // Revalidation reveals the intact history
+    let cur = store.cursor("node").unwrap();
+    assert_eq!(cur.next, 1);
+    store.ingest_snapshot("node", snapshot()).unwrap();
+    let v = store.view(Some("node"), 100).unwrap().remove(0);
+    assert_eq!(v.status, NodeStatus::Healthy);
+    assert!(!v.history_hidden);
+    assert_eq!(v.events.len(), 1);
+}
+
+#[test]
+fn lpjc_capacity_full_evicts_oldest_inactive_first() {
+    let dir = private_temp();
+    let p_old = NodePolicy {
+        relay: None,
+        node: "node0".into(),
+        labels: false,
+        supported: true,
+    };
+    let p_new = NodePolicy {
+        relay: None,
+        node: "node1".into(),
+        labels: false,
+        supported: true,
+    };
+    let p_live = NodePolicy {
+        relay: None,
+        node: "node2".into(),
+        labels: false,
+        supported: true,
+    };
+    let utc = Arc::new(AtomicI64::new(NOW));
+    let store = Store::open_limits(
+        dir.path(),
+        vec![p_old.clone(), p_new.clone(), p_live.clone()],
+        Arc::new({
+            let utc = utc.clone();
+            move || utc.load(Ordering::SeqCst)
+        }),
+        Limits {
+            rows: ROWS,
+            bytes: BYTES,
+            pages: 16,
+            retention_after_inactive_secs: 600,
+        },
+    )
+    .unwrap();
+    let mut p0 = page(1);
+    p0.node = "node0".into();
+    store.ingest_page("node0", &Cursor::default(), p0).unwrap();
+    utc.store(NOW + 100, Ordering::SeqCst);
+    let mut p1 = page(1);
+    p1.node = "node1".into();
+    store.ingest_page("node1", &Cursor::default(), p1).unwrap();
+    drop(store);
+
+    // Reopen with only node-live and tiny page cap, then fill until DiskFull triggers eviction
+    let store = Store::open_limits(
+        dir.path(),
+        vec![p_live],
+        Arc::new({
+            let utc = utc.clone();
+            move || utc.load(Ordering::SeqCst)
+        }),
+        Limits {
+            rows: ROWS,
+            bytes: BYTES,
+            pages: 12,
+            retention_after_inactive_secs: 600,
+        },
+    )
+    .unwrap();
+    let mut seq = 1i64;
+    let mut cur = Cursor::default();
+    while store.evicted_inactive() == 0 && seq < 500 {
+        let mut p = page(seq);
+        p.node = "node2".into();
+        let res = store.ingest_page("node2", &cur, p);
+        match res {
+            Ok(outcome) => {
+                cur = outcome.cursor;
+                seq += 1;
+            }
+            Err(StoreError::Full) => break,
+            Err(e) => panic!("unexpected error: {e:?}"),
+        }
+    }
+    assert!(
+        store.evicted_inactive() >= 1,
+        "expected oldest-inactive eviction on StoreError::Full"
+    );
+    let views = store.view(None, 100).unwrap();
+    assert!(
+        views.iter().all(|v| v.node != "node0"),
+        "oldest-inactive node0 should be evicted first"
     );
 }
