@@ -423,6 +423,24 @@ pub fn sync_claims_entries(
                 params![id, entry.pid, entry.proc_start, suffix, now],
             )
             .map_err(|e| AppError::Internal(e.to_string()))?;
+            let address = InstanceClaim {
+                id: id.clone(),
+                pid: entry.pid,
+                proc_start: entry.proc_start.clone(),
+                suffix,
+                released: false,
+                created_at: now,
+            }
+            .address();
+            crate::locator::record(
+                conn,
+                &address,
+                "claude",
+                &entry.session_id,
+                entry.env.as_ref(),
+                Some(&entry.cwd),
+            )
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         }
     }
 

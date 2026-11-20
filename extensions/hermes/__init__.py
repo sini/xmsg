@@ -35,6 +35,14 @@ import time
 logger = logging.getLogger(__name__)
 
 
+def _own_environment():
+    for name, kind in (("ZELLIJ_SESSION_NAME", "zellij"), ("TMUX_PANE", "tmux"), ("HERDR_PANE_ID", "herdr")):
+        if name in os.environ:
+            ref = "".join(c for c in os.environ[name] if not (ord(c) < 32 or 127 <= ord(c) <= 159))
+            return {"kind": kind, "ref": ref.encode("utf-8")[:64].decode("utf-8", errors="ignore")}
+    return {"kind": "none"}
+
+
 def _register_sock():
     """register.sock, resolved as the xmsg binary does: $XDG_RUNTIME_DIR, else on macOS the
     Darwin user temp dir."""
@@ -160,7 +168,7 @@ class Connection:
             return
         store = _load_reclaim_store(self.store_path)
         saved = store.get(session)
-        frame = {"action": "register", "session": session}
+        frame = {"action": "register", "session": session, "env": _own_environment()}
         if isinstance(saved, dict) and saved.get("id") and saved.get("reclaim"):
             frame["reclaim"] = {"id": saved["id"], "secret": saved["reclaim"]}
         a = self.call(frame)
@@ -169,7 +177,7 @@ class Connection:
             latest = _load_reclaim_store(self.store_path)
             latest.pop(session, None)
             _save_reclaim_store(self.store_path, latest)
-            a = self.call({"action": "register", "session": session})
+            a = self.call({"action": "register", "session": session, "env": _own_environment()})
         if a.get("status") == "ok":
             # Persist the new/rotated secret atomically BEFORE acting on the registration.
             addr = a.get("address", "")

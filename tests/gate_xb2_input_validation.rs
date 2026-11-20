@@ -289,6 +289,7 @@ async fn f3_session_file_entry_requires_uuid_and_safe_socket_path() {
     let valid_sock = tmp.path().join("claude-valid.sock");
 
     let valid_entry = SessionFileEntry {
+        env: None,
         pid: std::process::id(),
         session_id: VALID_UUID_1.to_string(),
         name: Some("valid".to_string()),

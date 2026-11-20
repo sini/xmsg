@@ -21,6 +21,22 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 
+function ownEnvironment(): { kind: string; ref?: string } {
+  for (const [name, kind] of [["ZELLIJ_SESSION_NAME", "zellij"], ["TMUX_PANE", "tmux"], ["HERDR_PANE_ID", "herdr"]]) {
+    const value = process.env[name];
+    if (value !== undefined) {
+      let reference = "";
+      for (const char of value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "")) {
+        if (Buffer.byteLength(reference + char, "utf8") > 64) break;
+        reference += char;
+      }
+      return { kind, ref: reference };
+    }
+  }
+  return { kind: "none" };
+}
+
+
 // The runtime dir holding xmsg/, resolved as the xmsg binary does: $XDG_RUNTIME_DIR, else
 // on macOS the Darwin user temp dir.
 function registerSockPath(): string | undefined {
@@ -155,6 +171,7 @@ class Connection {
     let a = await this.call({
       action: "register",
       session: root,
+      env: ownEnvironment(),
       ...(saved ? { reclaim: { id: saved.id, secret: saved.reclaim } } : {}),
     });
     if (saved && a.status === "error" && a.error === "denied") {
@@ -162,7 +179,7 @@ class Connection {
       const latest = loadReclaimStore(this.storePath);
       delete latest[root];
       saveReclaimStore(this.storePath, latest);
-      a = await this.call({ action: "register", session: root });
+      a = await this.call({ action: "register", session: root, env: ownEnvironment() });
     }
     if (a.status === "ok" && a.address && a.reclaim) {
       // Persist the new/rotated secret atomically BEFORE acting on the registration.
