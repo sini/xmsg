@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "Measured on d8802cf4aacb2f5fedc06d0496b221b9eab9d051, run 44677066003 job 136096142305; 1501 passed (+1 expiry test from 2e4e8d05, +1 from #194: train expects 1503), 0 failed, 7 ignored, 115 summaries; all 112 integration targets executed",
-    "darwin": "Measured on d8802cf4aacb2f5fedc06d0496b221b9eab9d051, run 44677065759 job 136091301073; 1514 passed (+1 expiry test from 2e4e8d05, +1 from #194: train expects 1516), 0 failed, 9 ignored, 115 summaries; all 112 integration targets executed"
+    "linux": "Measured on 4cce2691115cb17a637de383166c08e4b91fd8eb baseline + tests/discovery_mdns.rs (+29 tests on Linux, 0 net lib change): 1532 passed, 0 failed, 7 ignored, 116 summaries; all 113 integration targets executed",
+    "darwin": "Measured natively on macOS against 4cce2691115cb17a637de383166c08e4b91fd8eb + tests/discovery_mdns.rs (+31 tests on Darwin, 0 net lib change): 1547 passed, 0 failed, 9 ignored, 116 summaries; all 113 integration targets executed"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -10,6 +10,7 @@
     "tests/agy_spawn_fds.rs",
     "tests/ancestor_walk.rs",
     "tests/claude_lstart_macos.rs",
+    "tests/discovery_mdns.rs",
     "tests/doctor.rs",
     "tests/doctor_liveness.rs",
     "tests/doctor_peers.rs",
@@ -119,16 +120,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1503,
+      "passed": 1532,
       "failed": 0,
       "ignored": 7,
-      "summaries": 115
+      "summaries": 116
     },
     "darwin": {
-      "passed": 1516,
+      "passed": 1547,
       "failed": 0,
       "ignored": 9,
-      "summaries": 115
+      "summaries": 116
     }
   }
 }

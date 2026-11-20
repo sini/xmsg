@@ -202,3 +202,44 @@ choosing that downgrade. See [relay configuration](/operations/fleet-observer/#c
 ## Discovery source unavailable (planned)
 
 A configured source that is not compiled into the build stays off and cannot permit a source-dependent missing address. Keep a static address or an existing supported hub route until the source integration is available. A failed static address never falls through to a discovered candidate. Unknown-node and ambiguity results describe routing knowledge, not a grant of trust from an announcement. The standalone collector does not use daemon discovery.
+
+## LAN discovery on macOS: Local Network permission (planned)
+
+With [LAN discovery](/concepts/discovery/) enabled, `xmsg doctor` reports a `discovery.mdns`
+check from the daemon's local health response (plus a standing `discovery.announce` warning
+whenever `discovery.announce` is loosened to `"always"`):
+
+- `active` and `off` pass, as does `starting` within its first `15` seconds (past `15`
+  seconds, a stuck `starting` responder warns).
+- `unverified` is the normal at-rest state when no announcement window is open (outbound
+  random-label IPv4 multicast `sendto` succeeded without error, and positive LAN echo is
+  checked only while announcing). Because an allowed browse-only Mac at rest is not a
+  fault, `xmsg doctor` reports `unverified` as `info` (excluded from pass and warning totals).
+- `permission_suspected` warns after `3` consecutive debounced outbound multicast send
+  failures (measured on macOS `26.5.2` under `launchd`: toggling Local Network off makes
+  random-label multicast `sendto` return `EHOSTUNREACH` on every round, `4/4`, while
+  allowed runs succeed with no reply, `3/3`, after at most one initial post-launch
+  `EHOSTUNREACH`; a host firewall rule can also block `sendto`). Because network errors
+  cannot prove TCC state by themselves, xmsg labels the condition *permission suspected*,
+  never proven.
+- `failed` warns and names the responder, UDP `5353` bind, or registration error (which
+  retries automatically with bounded backoff).
+
+Serving continues in every state; federation, `agent.sock` and `http.sock` never block on
+LAN discovery.
+
+On macOS, open **System Settings › Privacy & Security › Local Network** and enable the entry
+for xmsg. When a LaunchAgent-run binary first sends multicast, macOS may prompt for Local
+Network access; until you allow it, outbound LAN multicast can be dropped silently. The
+detector re-probes on every `30`-second tick and on interface changes, so changing the
+setting updates the reported state without restarting the daemon.
+
+After an upgrade macOS may ask again for Local Network access; until you allow it, LAN
+discovery is silently off or `permission_suspected`. macOS keys the grant to the binary's
+resolved real path rather than a symlink, so retargeting a symlink into a package store
+looks like a new binary (and overwriting a running binary in place has been observed to
+stall launchd runs for ~`60` seconds). Run xmsg from a stable real path installed cleanly on
+upgrade rather than through a store symlink.
+
+On Linux, `permission_suspected` or `failed` usually indicates a host firewall or routing
+rule blocking mDNS: allow UDP port `5353` (`224.0.0.251:5353`).

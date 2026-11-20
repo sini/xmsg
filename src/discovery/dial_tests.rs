@@ -456,23 +456,63 @@ fn unavailable_discovery_cannot_permit_addressless_entries_or_malformed_addresse
     let ca_file = root.path().join("ca.pem");
     std::fs::write(&ca_file, ca.pem).unwrap();
     let ca_entry = json!({"ca":ca_file,"identities":[uri(N)],"allow":["send"]});
-    let config = |entry: Value| {
+    let config = |entry: Value, discovery: Value| {
         let peers = serde_json::Map::from_iter([(N.to_string(), entry)]);
-        json!({"peers":peers,"discovery":{"mdns":{}}}).to_string()
+        json!({"peers":peers,"discovery":discovery}).to_string()
     };
-    let error = PeersMap::load_from_json(&config(ca_entry.clone())).unwrap_err();
-    assert!(
-        error.contains("missing required field 'address'"),
-        "{error}"
-    );
+
+    // Unconfigured discovery (absent or disabled) always refuses address-less CA entries.
+    for off in [
+        json!(null),
+        json!({"mdns":{"browse":false,"announce":false}}),
+    ] {
+        let error = PeersMap::load_from_json(&config(ca_entry.clone(), off)).unwrap_err();
+        assert!(
+            error.contains("missing required field 'address'"),
+            "{error}"
+        );
+    }
+
+    // With `mdns` compiled in, `discovery.mdns` enables address omission for exact-URI CA entries;
+    // without `mdns` compiled in, it stays refused.
+    let mdns_on = json!({"mdns":{}});
+    let res = PeersMap::load_from_json(&config(ca_entry.clone(), mdns_on.clone()));
+    if cfg!(feature = "mdns") {
+        assert!(
+            res.is_ok(),
+            "enabled mDNS source should allow address-less exact-URI CA entry: {res:?}"
+        );
+    } else {
+        let error = res.unwrap_err();
+        assert!(
+            error.contains("missing required field 'address'"),
+            "{error}"
+        );
+    }
+
+    // Malformed address, pin-only omission, and wildcard CA omission are refused even with mDNS on.
     let mut malformed = ca_entry;
     malformed["address"] = json!(42);
-    let error = PeersMap::load_from_json(&config(malformed)).unwrap_err();
+    let error = PeersMap::load_from_json(&config(malformed, mdns_on.clone())).unwrap_err();
     assert!(error.contains("'address' must be a string"), "{error}");
+
+    let wildcard =
+        json!({"ca":ca_file,"identities":["spiffe://example.test/host/*"],"allow":["send"]});
+    let error = PeersMap::load_from_json(&config(wildcard, mdns_on.clone())).unwrap_err();
+    assert!(error.contains("names no single node"), "{error}");
+
+    let multi = json!({
+        "ca": ca_file,
+        "identities": [uri(N), "spiffe://example.test/host/other/user/owner"],
+        "allow": ["send"]
+    });
+    let error = PeersMap::load_from_json(&config(multi, mdns_on.clone())).unwrap_err();
+    assert!(error.contains("holds exactly one identity"), "{error}");
+
     let (_, _, pin) = crate::fed::generate_self_signed_ed25519("pinned").unwrap();
     let pinned = json!({"pin":pin,"allow":["send"]});
     let error = PeersMap::load_from_json(
-        &json!({"peers":{"pinned":pinned},"discovery":{"mdns":{}}}).to_string(),
+        &json!({"peers":{"pinned":pinned},"discovery":mdns_on}).to_string(),
     )
     .unwrap_err();
     assert!(

@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Notify, Semaphore};
 
-use super::{Candidate, CandidateTable, SharedCandidates, MAX_TTL_SECS, MDNS_CAP};
+use super::{Candidate, CandidateTable, SharedCandidates, SharedStatus, MAX_TTL_SECS, MDNS_CAP};
 use crate::fed::PeersMap;
 
 #[derive(Clone, Debug)]
@@ -41,6 +42,8 @@ pub struct State {
     pub candidates: SharedCandidates,
     pub changed: Arc<Notify>,
     pub probes: Arc<Semaphore>,
+    pub mdns_status: SharedStatus,
+    pub mdns_trigger: Arc<AtomicBool>,
     tables: Mutex<Tables>,
 }
 
@@ -50,6 +53,8 @@ impl Default for State {
             candidates: Arc::new(std::sync::RwLock::new(CandidateTable::new())),
             changed: Arc::new(Notify::new()),
             probes: Arc::new(Semaphore::new(4)),
+            mdns_status: SharedStatus::default(),
+            mdns_trigger: Arc::new(AtomicBool::new(false)),
             tables: Mutex::new(Tables::default()),
         }
     }
