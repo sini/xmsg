@@ -1775,3 +1775,96 @@ async fn g8_child_registration_refused_and_agy_store_keeps_only_parent() {
         "expected {expected_from_p:?} and {expected_ref_p:?} in {raw_p:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn g6_eviction_queue_isolated_across_concurrent_harnesses_sharing_parent_id() {
+    let h1 = AgyTestHarness::start().await;
+    let h2 = AgyTestHarness::start().await;
+    let pid1 = 9101;
+    let pid2 = 9102;
+    h1.setup_agy_lock(P_UUID, pid1, "1001");
+    h1.set_caller_parent(pid1);
+    h2.setup_agy_lock(P_UUID, pid2, "1002");
+    h2.set_caller_parent(pid2);
+
+    write_descriptor(
+        &h1.brain_dir,
+        P_UUID,
+        X_UUID,
+        X_UUID,
+        Some("kid"),
+        Some("self"),
+        4,
+        false,
+    );
+    write_descriptor(
+        &h2.brain_dir,
+        P_UUID,
+        X_UUID,
+        X_UUID,
+        Some("kid"),
+        Some("self"),
+        4,
+        false,
+    );
+
+    assert_eq!(
+        h1.agent_frame(json!({ "action": "mcp_start" })).await["status"],
+        "ok"
+    );
+    assert_eq!(
+        h1.agent_frame(json!({ "action": "subagent", "event": "start", "agent_id": X_UUID }))
+            .await["status"],
+        "ok"
+    );
+    assert_eq!(
+        h2.agent_frame(json!({ "action": "mcp_start" })).await["status"],
+        "ok"
+    );
+    assert_eq!(
+        h2.agent_frame(json!({ "action": "subagent", "event": "start", "agent_id": X_UUID }))
+            .await["status"],
+        "ok"
+    );
+
+    // Kill h1's parent process and evict it from h1's AgyStore without purging h1's DB yet.
+    remove_mock_process(&h1.proc_root, pid1);
+    let _ = fs::remove_file(h1.presence_dir.join(format!("{P_UUID}.lock")));
+    fs::write(&h1.proc_locks, "").unwrap();
+    let live1 = xmsg::agy::list_agy_sessions(
+        &h1.state.agy_config,
+        &h1.state.agy_store,
+        &Default::default(),
+    );
+    assert!(
+        !live1.iter().any(|s| s.session_id == P_UUID),
+        "dead P_UUID must be evicted from h1's store"
+    );
+
+    // Forced interleave: h2 drains its eviction queue while h1 has not yet purged its DB.
+    {
+        let db2 = h2.state.db.lock().unwrap();
+        xmsg::agy::purge_evicted_agy_subagents(&db2, &h2.proc_root, &h2.state.agy_store);
+    }
+
+    // Now h1 runs its own eviction purge; h2 must not have stolen h1's eviction entry.
+    {
+        let db1 = h1.state.db.lock().unwrap();
+        xmsg::agy::purge_evicted_agy_subagents(&db1, &h1.proc_root, &h1.state.agy_store);
+        let subs1 = storage::list_subagents_for_parent(&db1, P_UUID).unwrap();
+        assert!(
+            subs1.is_empty(),
+            "h1 subagents rows must be purged despite h2 forced drain interleave: {subs1:?}"
+        );
+    }
+    // h2's live parent and subagent must remain intact.
+    {
+        let db2 = h2.state.db.lock().unwrap();
+        let subs2 = storage::list_subagents_for_parent(&db2, P_UUID).unwrap();
+        assert_eq!(
+            subs2.len(),
+            1,
+            "h2 live subagent row must remain intact: {subs2:?}"
+        );
+    }
+}

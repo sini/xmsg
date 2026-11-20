@@ -821,14 +821,14 @@ pub fn list_agy_sessions(
         let mut store_lock = store.write().unwrap();
         for d in dead {
             if let Some(removed) = store_lock.remove(&d) {
-                record_evicted_agy_parent(&removed.session_key);
+                record_evicted_agy_parent(store, &removed.session_key);
                 if !removed.conversation_id.is_empty()
                     && removed.conversation_id != removed.session_key
                 {
-                    record_evicted_agy_parent(&removed.conversation_id);
+                    record_evicted_agy_parent(store, &removed.conversation_id);
                 }
             } else {
-                record_evicted_agy_parent(&d);
+                record_evicted_agy_parent(store, &d);
             }
         }
     }
@@ -1277,15 +1277,28 @@ pub fn attest_mcp_caller_peer(
     ))
 }
 
-static EVICTED_AGY_PARENTS: std::sync::OnceLock<Mutex<Vec<String>>> = std::sync::OnceLock::new();
+type EvictedAgyQueue = HashMap<
+    usize,
+    (
+        std::sync::Weak<RwLock<HashMap<String, AgySessionInfo>>>,
+        Vec<String>,
+    ),
+>;
 
-pub fn record_evicted_agy_parent(parent_id: &str) {
+static EVICTED_AGY_PARENTS: std::sync::OnceLock<Mutex<EvictedAgyQueue>> =
+    std::sync::OnceLock::new();
+
+pub fn record_evicted_agy_parent(store: &AgyStore, parent_id: &str) {
     if parent_id.is_empty() {
         return;
     }
-    let list = EVICTED_AGY_PARENTS.get_or_init(|| Mutex::new(Vec::new()));
-    if let Ok(mut guard) = list.lock() {
-        guard.push(parent_id.to_string());
+    let key = Arc::as_ptr(store) as usize;
+    let weak = Arc::downgrade(store);
+    let queue = EVICTED_AGY_PARENTS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut guard) = queue.lock() {
+        guard.retain(|_, (entry_weak, _)| entry_weak.strong_count() > 0);
+        let entry = guard.entry(key).or_insert_with(|| (weak, Vec::new()));
+        entry.1.push(parent_id.to_string());
     }
 }
 
@@ -1310,22 +1323,29 @@ pub fn purge_evicted_agy_subagents(
         let mut store_lock = store.write().unwrap();
         for d in newly_dead {
             if let Some(removed) = store_lock.remove(&d) {
-                record_evicted_agy_parent(&removed.session_key);
+                record_evicted_agy_parent(store, &removed.session_key);
                 if !removed.conversation_id.is_empty()
                     && removed.conversation_id != removed.session_key
                 {
-                    record_evicted_agy_parent(&removed.conversation_id);
+                    record_evicted_agy_parent(store, &removed.conversation_id);
                 }
             } else {
-                record_evicted_agy_parent(&d);
+                record_evicted_agy_parent(store, &d);
             }
         }
     }
+    let key = Arc::as_ptr(store) as usize;
     let drained: Vec<String> = match EVICTED_AGY_PARENTS
-        .get_or_init(|| Mutex::new(Vec::new()))
+        .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
     {
-        Ok(mut guard) => std::mem::take(&mut *guard),
+        Ok(mut guard) => {
+            guard.retain(|_, (entry_weak, _)| entry_weak.strong_count() > 0);
+            guard
+                .remove(&key)
+                .map(|(_, parents)| parents)
+                .unwrap_or_default()
+        }
         Err(_) => Vec::new(),
     };
     if drained.is_empty() {
@@ -1834,7 +1854,7 @@ pub async fn deliver_agy_envelope(
             store_lock
                 .retain(|k, v| k != &session.session_id && v.conversation_id != session.session_id);
         }
-        record_evicted_agy_parent(&session.session_id);
+        record_evicted_agy_parent(store, &session.session_id);
         return Err(AppError::Gone {
             session_id: session.session_id.clone(),
             pid: session.pid,
