@@ -23,6 +23,14 @@ export interface SiblingAllowlistEntry {
 }
 
 export const FEATURES: Record<string, FeatureEntry> = {
+	'session-locator.cli': {
+		id: 'session-locator.cli',
+		title: 'Read-only session locator CLI and Unix HTTP endpoint',
+		owner: 'sini',
+		evidence: [{ path: 'src/locator.rs', anchor: 'pub struct Locator' }],
+		plannedSince: '2026-11-20',
+		note: 'Registration-native identifiers and local display hints; resume recipes remain unproven.',
+	},
 	'fleet-observer.collector': {
 		id: 'fleet-observer.collector',
 		title: 'Fleet observer collector and browser view',

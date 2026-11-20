@@ -502,3 +502,32 @@ Deploy the daemon and CLI/MCP/SDK clients together: strict older clients and ser
 are not compatible with this response/query change. The schema version remains 2.
 Federation `/fed/v2/sessions` and dial-out list answers retain their existing unbounded
 vector wire format. Read-only snapshots, watch and doctor retain their separate behavior.
+
+## Session locator
+
+<Status id="session-locator.cli" />
+
+`GET /v1/locate?address=ADDRESS` or `GET /v1/locate?label=LABEL` is served
+only on the local Unix socket, with the same-UID check. Choose exactly one
+selector; `detail=true` explicitly requests local working-directory and terminal
+reference fields. This endpoint is absent from the TCP and federation listeners.
+
+The strict response has `locators` and `nodes`. Each locator contains its
+unchanged `recipient` row, `native_id`, `resume`, `reason`, `env` and `cwd`.
+`resume` is always `null`. `reason` is `live` for live or stale-unknown
+registrations, otherwise `unproven`. Missing native IDs or environment hints
+are `null`; a reported environment is `{kind, ref?}`, with kind `zellij`,
+`tmux`, `herdr` or `none`. `none` is distinct from an unknown environment.
+
+Local lookup gathers all matches without the ordinary list display cap,
+reconciliation, purge or queued delivery. Remote results expose only recipient
+metadata; native IDs, environments and working directories are `null`. Node
+errors distinguish an unreachable node from an empty matching set. Remote
+lookup uses the existing federation list grant with `read_only=true`, not a
+new remote locator route. Old peers may ignore the flag and reconcile exactly
+as an ordinary list; new peers honor it. There is no retry through a different
+query. The peer update should be deployed together.
+
+The CLI's detail configuration is a viewer preference. A same-UID HTTP caller
+can request detail independently. Reach hints belong only to the viewer's
+explicitly selected CLI configuration and never appear in this API.

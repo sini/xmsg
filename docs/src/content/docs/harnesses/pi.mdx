@@ -36,3 +36,11 @@ In Home Manager, set `programs.xmsg.harnesses.pi.enable = true`. This installs
 `~/.pi/agent/extensions/xmsg-pi.ts` and `~/.pi/agent/skills/xmsg/SKILL.md`. Pi automatically
 loads all extensions under `~/.pi/agent/extensions/`. See
 [NixOS & Home Manager](/operations/nixos-and-home-manager/#per-harness-switches).
+
+## Session locator
+
+The [session locator](/reference/cli-and-mcp/#locating-a-session) captures the
+harness-native ID at registration. Resume remains **unproven**: no resume
+command is offered. An adapter may report a typed terminal hint from its own
+environment; an omitted hint means unknown. Terminal references require local
+detail opt-in and are never published to peers.
