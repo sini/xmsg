@@ -117,7 +117,7 @@ pub struct Candidate {
     pub source: Source,
     /// Opaque announcer id (TXT `id`). Never names or keys a presence.
     pub hint: Option<String>,
-    /// sha256 of the announced trust root (TXT `root`), or None = eligible for every rule.
+    /// Optional untrusted root-selection hint; mDNS supplies None.
     pub root_fp: Option<[u8; 32]>,
     pub seen_at: Instant,
     pub expires_at: Instant,
