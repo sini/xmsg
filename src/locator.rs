@@ -231,7 +231,6 @@ pub(crate) fn local_entries(local: &Local<'_>, user: &str) -> Result<Vec<Recipie
             info.registered_at,
         ));
     }
-    drop(add);
     let entries = crate::registry::read_session_entries(local.sessions_dirs);
     let db = local.db.lock().map_err(fail)?;
     for entry in entries {
