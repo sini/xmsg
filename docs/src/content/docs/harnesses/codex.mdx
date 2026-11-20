@@ -147,3 +147,11 @@ This behavior was measured with Codex 0.167.0 and matches its
 
 ```nix file=<rootDir>/nix/modules/home-manager.nix#L41-L120
 ```
+
+## Session locator
+
+The [session locator](/reference/cli-and-mcp/#locating-a-session) captures the
+harness-native ID at registration. Resume remains **unproven**: no resume
+command is offered. An adapter may report a typed terminal hint from its own
+environment; an omitted hint means unknown. Terminal references require local
+detail opt-in and are never published to peers.

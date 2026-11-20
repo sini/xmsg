@@ -3,6 +3,8 @@ title: CLI & MCP Server
 description: Operator commands, optional command-backed services, daemon and harness commands, and MCP tool schemas.
 ---
 
+import Status from '../../../components/Status.astro';
+
 ## Command-line interface (`src/main.rs`)
 
 The `xmsg` binary exposes `list`, `watch`, `doctor`, `send`, `replies`, `show`, `service`, `serve`, `mcp`,
@@ -556,3 +558,51 @@ observation tool, browser token store, body route or action control.
 ### Discovery and explicit-node routing (planned)
 
 The shared federation dial resolver preserves static-address priority and existing operation-specific hub fallback. `check-peers` rejects source-dependent address omission when no source is available; malformed address values are rejected. Doctor uses the same authenticated direct-dial path under its existing shorter budget and never reports a hub certificate as the target leaf. See [peer discovery](/concepts/discovery/) for core-only build limits.
+
+## Locating a session
+
+<Status id="session-locator.cli" />
+
+```sh
+xmsg locate 'SESSION@NODE' [--detail] [--locate-config FILE] [--json]
+xmsg locate --label LABEL [--detail] [--locate-config FILE] [--json]
+```
+
+The local locator reads registrations without delivering messages or
+reconciling claims. It returns every matching label, including matches beyond the normal
+`list` display limit, and reports unreachable nodes separately from no match.
+Only the CLI and local Unix HTTP API expose this feature; there is no locator
+MCP tool or collector action.
+
+`resume` is always `null`: every harness mapping is still unproven. A live or
+stale-unknown registration has `reason: live` and gives location only; other
+registrations have `reason: unproven`. A native ID is captured at registration,
+never reconstructed from a bus address. Older registrations may have no native
+ID. Invalid IDs are withheld; no unknown harness falls back to Claude.
+
+An explicitly selected viewer configuration can enable local detail and add
+display-only reach hints:
+
+```toml
+[locate]
+detail = true
+
+[locate.reach]
+"alice.laptop" = "ssh alice.laptop"
+```
+
+No configuration is selected by default. Both `detail = true` and `--detail`
+are required for this CLI to request and display a working directory or terminal
+reference. Without both, these fields are redacted. This file is a client
+preference, not a same-UID security boundary: a same-UID HTTP caller can make its
+own explicit detail request. The file and reach hints are never sent to peers.
+Reach hints appear in a separate display block and are never executed. Control
+characters are escaped for display; escaping does not turn data into safe shell
+commands.
+
+Remote results contain only recipient metadata. Native IDs, environment kinds,
+terminal references and working directories remain local to their node. Remote
+lookup uses the existing federation list grant with a read-only request. On a peer older than this release, a remote locate behaves like an ordinary
+list (the peer may reconcile its claims as it does for `xmsg list`). Deploy peers
+together. New peers honor the read-only flag. Node errors are retained, with no
+client-side retry or fallback to a different query.
