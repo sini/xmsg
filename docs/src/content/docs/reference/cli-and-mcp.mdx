@@ -582,9 +582,10 @@ MCP tool or collector action.
 
 `resume` is always `null`: every harness mapping is still unproven. A live or
 stale-unknown registration has `reason: live` and gives location only; other
-registrations have `reason: unproven`. A native ID is captured at registration,
-never reconstructed from a bus address. Older registrations may have no native
-ID. Invalid IDs are withheld; no unknown harness falls back to Claude.
+registrations have `reason: unproven`. Instance native IDs are captured at
+registration, never reconstructed from a bus address. Older registrations,
+services and child bindings without a separately captured native ID return
+`native_id: null`; a child never inherits a guessed ID from its root. Invalid IDs are withheld; no unknown harness falls back to Claude.
 
 An explicitly selected viewer configuration can enable local detail and add
 display-only reach hints:
