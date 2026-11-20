@@ -336,12 +336,14 @@ pub async fn locate(state: &AppState, query: &Query) -> Result<Located, AppError
         nodes.push(NodeStatus::ok(&state.node_name));
     }
     if let Some(fs) = &state.fed_state {
-        let peers: Vec<_> = fs
-            .current_peers()
-            .keys()
-            .filter(|key| node.is_none_or(|n| n == key.as_str()))
-            .cloned()
-            .collect();
+        let current_peers = fs.current_peers();
+        let peers: Vec<String> = match node {
+            Some(name) if current_peers.contains_name(name) => {
+                vec![current_peers.key_for(name).unwrap_or(name).to_owned()]
+            }
+            None => current_peers.keys().cloned().collect(),
+            _ => Vec::new(),
+        };
         let mut requests = tokio::task::JoinSet::new();
         for key in peers {
             let fs = fs.clone();
