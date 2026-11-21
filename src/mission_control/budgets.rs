@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use super::admission::Refusal;
 use super::authority::{Grants, Record};
+use super::limits::ReadLimits;
 
 #[derive(Default)]
 pub(super) struct Budgets(Mutex<Counts>);
@@ -37,7 +38,12 @@ pub(super) enum Mode {
 const WINDOW: Duration = Duration::from_secs(60);
 
 impl Budgets {
-    pub(super) fn take(self: &Arc<Self>, record: &Record, mode: Mode) -> Result<Slot, Refusal> {
+    pub(super) fn take(
+        self: &Arc<Self>,
+        record: &Record,
+        mode: Mode,
+        limits: &ReadLimits,
+    ) -> Result<Slot, Refusal> {
         let mut counts = self.0.lock().map_err(|_| Refusal::UNAVAILABLE)?;
         let now = Instant::now();
         let relevant = |bucket: &mut Bucket| {
@@ -52,7 +58,7 @@ impl Budgets {
         };
         counts.principals.retain(|_, value| relevant(value));
         counts.records.retain(|_, value| relevant(value));
-        if matches!(mode, Mode::Upgrade) && counts.connections >= 64 {
+        if matches!(mode, Mode::Upgrade) && counts.connections >= limits.connections_global {
             return Err(Refusal::RATE_LIMIT);
         }
         let key = if matches!(mode, Mode::Upgrade) {
@@ -66,11 +72,19 @@ impl Budgets {
             counts.records.entry(key.clone()).or_default()
         };
         match mode {
-            Mode::Upgrade if bucket.live >= 8 || bucket.attempts.len() >= 30 => {
+            Mode::Upgrade
+                if bucket.live >= limits.connections_per_principal
+                    || bucket.attempts.len() >= limits.upgrades_per_principal_per_min =>
+            {
                 return Err(Refusal::RATE_LIMIT)
             }
-            Mode::Stream if bucket.live >= 2 => return Err(Refusal::RATE_LIMIT),
-            Mode::Snapshot | Mode::Stream if bucket.attempts.len() >= http_rate(record) => {
+            Mode::Stream if bucket.live >= limits.streams_per_token => {
+                return Err(Refusal::RATE_LIMIT)
+            }
+            Mode::Snapshot | Mode::Stream
+                if bucket.attempts.len()
+                    >= http_rate(record, limits.http_requests_per_token_per_min) =>
+            {
                 return Err(Refusal::RATE_LIMIT);
             }
             _ => {}
@@ -90,10 +104,10 @@ impl Budgets {
     }
 }
 
-fn http_rate(record: &Record) -> usize {
+fn http_rate(record: &Record, maximum: usize) -> usize {
     match &record.grants {
-        Grants::Machine { rate, .. } => (*rate as usize).min(60),
-        _ => 60,
+        Grants::Machine { rate, .. } => (*rate as usize).min(maximum),
+        _ => maximum,
     }
 }
 

@@ -184,13 +184,18 @@ impl Fixture {
             store.ingest_snapshot("fixture.node", snapshot).unwrap();
             initial_success.insert("fixture.node".into(), (tokio::time::Instant::now(), utc));
         }
-        let read_hub = issuer.as_ref().map(|_| {
-            let hub = crate::mission_control::upstream::ReadHub::new().unwrap();
+        let read_hub = issuer.as_ref().map(|issuer| {
+            let hub =
+                crate::mission_control::upstream::ReadHub::new(&issuer.config().session_limits)
+                    .unwrap();
             for view in store.view(None, 200).unwrap() {
                 hub.accept_poll(view, Some(store.epoch_now()), false, store.epoch_now())
                     .unwrap();
             }
             Arc::new(hub)
+        });
+        let requests = issuer.as_ref().map_or_else(request_slots, |issuer| {
+            Arc::new(Semaphore::new(issuer.config().pending_handshakes_global))
         });
         let state = Arc::new(State {
             verifier: Some(Verifier::new(config.auth.clone().unwrap(), clock).unwrap()),
@@ -199,7 +204,7 @@ impl Fixture {
             wire_probe,
             store,
             store_slots: Arc::new(Semaphore::new(1)),
-            requests: request_slots(),
+            requests,
             nodes: vec!["fixture.node".into()],
             denied: Mutex::new(BTreeSet::new()),
             failures: Mutex::new(BTreeMap::new()),
@@ -2567,6 +2572,27 @@ async fn mission_control_upgrade_validates_carriers_and_version() {
     assert!(over_budget
         .headers()
         .contains_key(hyper::header::RETRY_AFTER));
+    let mut held = Vec::new();
+    for _ in 0..64 {
+        let mut tcp = tokio::net::TcpStream::connect(address).await.unwrap();
+        tcp.write_all(b"GET /health HTTP/1.1\r\nHost: fixture\r\n")
+            .await
+            .unwrap();
+        held.push(tcp);
+    }
+    eventually(|| f.state.requests.available_permits() == 0).await;
+    let exceeded = client
+        .get(&snapshot)
+        .bearer_auth(&machine.handle)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(exceeded.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        exceeded.json::<serde_json::Value>().await.unwrap()["code"],
+        "unavailable"
+    );
+    drop(held);
 }
 
 struct VectorSocket {

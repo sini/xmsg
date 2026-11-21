@@ -19,7 +19,7 @@ use super::budgets::{Mode, Slot};
 use super::cursor::Partition;
 use super::hub::Reset;
 use super::protocol::Projection;
-use super::transport::{encode_snapshot, error, grants, parse_scope, partition, MAX_SNAPSHOT};
+use super::transport::{encode_snapshot, error, grants, parse_scope, partition};
 use super::upstream::ReadHub;
 use super::writer::SessionWriter;
 use super::Issuer;
@@ -33,6 +33,7 @@ pub(crate) struct Fence {
     live: Mutex<Option<Arc<Live>>>,
     headers_written: tokio::sync::Notify,
     terminal: Mutex<Option<Terminal>>,
+    track_headers: bool,
     #[cfg(test)]
     pub(crate) probe: Option<Arc<WireProbe>>,
 }
@@ -46,6 +47,11 @@ impl Fence {
     #[cfg(test)]
     pub(crate) fn with_probe(mut self, probe: Option<Arc<WireProbe>>) -> Self {
         self.probe = probe;
+        self
+    }
+
+    pub(crate) fn track_headers(mut self, enabled: bool) -> Self {
+        self.track_headers = enabled;
         self
     }
 
@@ -155,7 +161,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Fenced<S> {
         if matches!(checked, Poll::Ready(Ok(count)) if count != 0) {
             self.quiet = false;
         }
-        if guard.is_some() && !self.notified {
+        if owner.track_headers && !self.notified {
             if let Poll::Ready(Ok(count)) = checked {
                 for &byte in &bytes[..count] {
                     const END: &[u8] = b"\r\n\r\n";
@@ -282,12 +288,14 @@ async fn open(
         .snapshot(&projection)
         .map_err(|_| Refusal::UNAVAILABLE)?
         .ok_or(Refusal::NOT_FOUND)?;
-    let slot = hub.budgets.take(&record, Mode::Stream)?;
+    let slot = hub
+        .budgets
+        .take(&record, Mode::Stream, &issuer.config.session_limits)?;
     let writer = SessionWriter::register(
         issuer,
         &record,
         abort.ok_or(Refusal::UNAVAILABLE)?,
-        Duration::from_secs(900),
+        Duration::from_secs(issuer.config.session_limits.lease_max_secs),
     )?;
     let partition = partition(&scope, &record)?;
     let resume = supplied
@@ -317,7 +325,8 @@ async fn open(
         ended: false,
         changes: hub.watch(),
         fence,
-        next_tick: tokio::time::Instant::now() + Duration::from_secs(15),
+        next_tick: tokio::time::Instant::now()
+            + Duration::from_millis(issuer.config.session_limits.tick_interval_ms),
     };
     let frames = futures_util::stream::unfold(reader, |mut reader| async move {
         let frame = reader.next().await?;
@@ -380,7 +389,8 @@ struct Reader {
 impl Reader {
     async fn next(&mut self) -> Option<Bytes> {
         let frame = self.next_frame().await?;
-        self.next_tick = tokio::time::Instant::now() + Duration::from_secs(15);
+        self.next_tick = tokio::time::Instant::now()
+            + Duration::from_millis(self.issuer.config.session_limits.tick_interval_ms);
         Some(frame)
     }
 
@@ -432,7 +442,13 @@ impl Reader {
             if self.needs_snapshot {
                 let (snapshot, epoch) = self.hub.subscribed_snapshot(&projection).ok()?;
                 let cursor = self.hub.cursor(snapshot.watermark, &self.partition).ok()?;
-                let body = encode_snapshot(&snapshot, &epoch, &cursor, MAX_SNAPSHOT).ok()?;
+                let body = encode_snapshot(
+                    &snapshot,
+                    &epoch,
+                    &cursor,
+                    self.issuer.config.session_limits.snapshot_max_bytes,
+                )
+                .ok()?;
                 let nodes = snapshot
                     .nodes
                     .iter()

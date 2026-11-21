@@ -12,7 +12,6 @@ use super::upstream::ReadHub;
 use super::{response, Issuer, WebResponse};
 
 const SNAPSHOT_PREFIX: &str = "/v1/mission-control/snapshot/";
-pub(super) const MAX_SNAPSHOT: usize = 4 * 1024 * 1024;
 
 #[derive(Serialize)]
 pub(super) struct SnapshotMessage<'a> {
@@ -86,7 +85,11 @@ async fn snapshot_response(
         .ok_or(Refusal::INVALID)?;
     let scope = parse_scope(path)?;
     let record = admission::authenticate(issuer, Route::Snapshot, request.headers()).await?;
-    let _slot = hub.budgets.take(&record, super::budgets::Mode::Snapshot)?;
+    let _slot = hub.budgets.take(
+        &record,
+        super::budgets::Mode::Snapshot,
+        &issuer.config.session_limits,
+    )?;
     let grants = grants(&record);
     if grants.is_empty() {
         return Err(Refusal::FORBIDDEN);
@@ -116,7 +119,12 @@ async fn snapshot_response(
     let mut result = if unchanged {
         response(StatusCode::NOT_MODIFIED, "application/json", "")
     } else {
-        let body = encode_snapshot(&snapshot, &epoch, &cursor, MAX_SNAPSHOT)?;
+        let body = encode_snapshot(
+            &snapshot,
+            &epoch,
+            &cursor,
+            issuer.config.session_limits.snapshot_max_bytes,
+        )?;
         response(StatusCode::OK, "application/json", body)
     };
     result.headers_mut().insert(
@@ -244,4 +252,8 @@ pub(super) fn error(refusal: Refusal) -> WebResponse {
             .insert(header::RETRY_AFTER, header::HeaderValue::from_static("60"));
     }
     response
+}
+
+pub(crate) fn busy() -> WebResponse {
+    error(Refusal::UNAVAILABLE)
 }
