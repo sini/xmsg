@@ -791,4 +791,179 @@ mod tests {
             Err(FailureReason::Protocol)
         ));
     }
+    #[test]
+    fn attribution_wrong_marker_closes_received_original() {
+        use std::io::Read;
+        let (client, server) = UnixStream::pair().unwrap();
+        let (original, mut peer) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let body = frame(0x11, &query()).unwrap();
+        send(
+            &client,
+            &body,
+            Some(original.as_fd()),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        drop(original);
+        assert!(
+            receive_query(&server, Instant::now() + Duration::from_secs(2)).is_err(),
+            "wrong query marker accepted"
+        );
+        assert_eq!(
+            peer.read(&mut [0]).unwrap(),
+            0,
+            "malformed query leaked received descriptor"
+        );
+    }
+    #[test]
+    fn attribution_oversized_header_is_rejected_before_body() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (original, _peer) = UnixStream::pair().unwrap();
+        let mut body = vec![QUERY_MARKER];
+        body.extend_from_slice(&((MAX_BODY + 1) as u32).to_be_bytes());
+        send(
+            &client,
+            &body,
+            Some(original.as_fd()),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                receive_query(&server, Instant::now() + Duration::from_secs(2)),
+                Err(FailureReason::Limit)
+            ),
+            "oversized attribution body header accepted"
+        );
+    }
+    fn extra_fd_frame(client: &UnixStream, descriptors: &[RawFd], bytes: &[u8]) {
+        let mut control = [0usize; 16];
+        let mut vector = libc::iovec {
+            iov_base: bytes.as_ptr().cast_mut().cast(),
+            iov_len: bytes.len(),
+        };
+        let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+        message.msg_iov = &mut vector;
+        message.msg_iovlen = 1;
+        message.msg_control = control.as_mut_ptr().cast();
+        message.msg_controllen =
+            unsafe { libc::CMSG_SPACE(std::mem::size_of_val(descriptors) as _) } as _;
+        unsafe {
+            let header = libc::CMSG_FIRSTHDR(&message);
+            (*header).cmsg_level = libc::SOL_SOCKET;
+            (*header).cmsg_type = libc::SCM_RIGHTS;
+            (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of_val(descriptors) as _) as _;
+            std::ptr::copy_nonoverlapping(
+                descriptors.as_ptr(),
+                libc::CMSG_DATA(header).cast::<RawFd>(),
+                descriptors.len(),
+            );
+            assert_eq!(
+                libc::sendmsg(client.as_raw_fd(), &message, 0),
+                bytes.len() as libc::ssize_t
+            );
+        }
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+    }
+    #[test]
+    fn attribution_extra_descriptors_are_rejected_and_all_closed() {
+        use std::io::Read;
+        let (client, server) = UnixStream::pair().unwrap();
+        let (first, mut first_peer) = UnixStream::pair().unwrap();
+        let (second, mut second_peer) = UnixStream::pair().unwrap();
+        for peer in [&first_peer, &second_peer] {
+            peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        }
+        extra_fd_frame(
+            &client,
+            &[first.as_raw_fd(), second.as_raw_fd()],
+            &frame(QUERY_MARKER, &query()).unwrap(),
+        );
+        drop(first);
+        drop(second);
+        assert!(
+            matches!(
+                receive_query(&server, Instant::now() + Duration::from_secs(2)),
+                Err(FailureReason::Ancillary)
+            ),
+            "multiple original descriptors accepted"
+        );
+        assert_eq!(
+            first_peer.read(&mut [0]).unwrap(),
+            0,
+            "first excess descriptor leaked"
+        );
+        assert_eq!(
+            second_peer.read(&mut [0]).unwrap(),
+            0,
+            "second excess descriptor leaked"
+        );
+    }
+    #[test]
+    fn attribution_truncated_ancillary_closes_visible_and_hidden_rights() {
+        use std::io::Read;
+        let (client, server) = UnixStream::pair().unwrap();
+        let (a, mut ap) = UnixStream::pair().unwrap();
+        let (b, mut bp) = UnixStream::pair().unwrap();
+        let (c, mut cp) = UnixStream::pair().unwrap();
+        for peer in [&ap, &bp, &cp] {
+            peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        }
+        extra_fd_frame(
+            &client,
+            &[a.as_raw_fd(), b.as_raw_fd(), c.as_raw_fd()],
+            &frame(QUERY_MARKER, &query()).unwrap(),
+        );
+        drop(a);
+        drop(b);
+        drop(c);
+        assert!(
+            matches!(
+                receive_query(&server, Instant::now() + Duration::from_secs(2)),
+                Err(FailureReason::Ancillary)
+            ),
+            "truncated rights accepted"
+        );
+        for peer in [&mut ap, &mut bp, &mut cp] {
+            assert_eq!(
+                peer.read(&mut [0]).unwrap(),
+                0,
+                "truncated rights leaked descriptor"
+            );
+        }
+    }
+    #[test]
+    fn attribution_reply_without_eof_cannot_be_decoded() {
+        use std::io::Write;
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let reply = Reply::Ok {
+            v: VERSION,
+            runtime_epoch: "a".repeat(32),
+            call_nonce: 1,
+            input_digest: "b".repeat(64),
+            context_digest: "c".repeat(64),
+            peer_uid: super::super::current_uid(),
+            peer_pid: std::process::id(),
+            principal: "caller@node".into(),
+            authority_stamp: Box::new(AuthorityStamp {
+                source: "test".into(),
+                matched_pid: std::process::id(),
+                matched_start: "test".into(),
+                registration_digest: "d".repeat(64),
+                root_generation: None,
+                child_generation: None,
+            }),
+        };
+        server
+            .write_all(&frame(REPLY_MARKER, &reply).unwrap())
+            .unwrap();
+        assert!(
+            matches!(
+                receive_reply(&client, Instant::now() + Duration::from_millis(100)),
+                Err(FailureReason::Deadline)
+            ),
+            "response principal boundary ignored missing EOF"
+        );
+    }
 }

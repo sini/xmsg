@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 
 
-HELPER_ENTRYPOINTS = {"supervisor::tests::fixture_process_entrypoint"}
+HELPER_ENTRYPOINTS = {"supervisor::tests::fixture_process_entrypoint", "control::tests::bridge_live_peer_fixture"}
 
 def census(inventory, listing, results, platform):
     listed = sorted(re.findall(r"^([A-Za-z_][A-Za-z0-9_:]*): test$", listing, re.M))
