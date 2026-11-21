@@ -197,7 +197,7 @@ fn local_catalog(local: &Local<'_>, user: &str, detail: bool) -> Result<LocalCat
             let mut stmt = db.prepare(sql).map_err(fail)?;
             let results = stmt.query_map([], |r| {
                 let registered_at: Option<i64> = r.get(4)?;
-                Ok(Recipient { address: r.get(0)?, kind: r.get(1)?, harness: Some(r.get(2)?), label: r.get(3)?, status: r.get(6)?, node: String::new(), user: String::new(), registered_at, last_seen: r.get(5)? })
+                Ok(Recipient { address: r.get(0)?, kind: r.get(1)?, harness: Some(r.get(2)?), label: r.get(3)?, status: r.get(6)?, node: String::new(), user: String::new(), registered_at, last_seen: r.get(5)?, context: None })
             }).map_err(fail)?;
             for row in results { add(row.map_err(fail)?); }
         }
@@ -224,6 +224,7 @@ fn local_catalog(local: &Local<'_>, user: &str, detail: bool) -> Result<LocalCat
         user: String::new(),
         registered_at: Some(time),
         last_seen: None,
+        context: None,
     };
     for (key, info) in local.agy_store.read().map_err(fail)?.iter() {
         add(row(
@@ -364,6 +365,7 @@ pub async fn locate(state: &AppState, query: &Query) -> Result<Located, AppError
                 user: e.user,
                 registered_at: e.registered_at,
                 last_seen: e.last_seen,
+                context: e.context,
             }));
             nodes.push(status);
         }
@@ -400,6 +402,14 @@ pub async fn locate(state: &AppState, query: &Query) -> Result<Located, AppError
                 .rsplit_once('@')
                 .map(|(id, _)| id)
                 .unwrap_or("");
+            if item.recipient.status == "registered" && item.recipient.kind != "service" {
+                item.recipient.context = crate::session_context::project(
+                    &db,
+                    address,
+                    item.recipient.harness.as_deref().unwrap_or_default(),
+                    crate::session_context::Surface::Local,
+                );
+            }
             let metadata: Option<(String, String, Option<String>)> = db
                 .query_row(
                     "SELECT harness,native_id,env FROM locator_metadata WHERE address=?1",
@@ -423,6 +433,12 @@ pub async fn locate(state: &AppState, query: &Query) -> Result<Located, AppError
                     }
                 }
             }
+        } else {
+            item.recipient.context = crate::session_context::mask_remote(
+                &db,
+                item.recipient.context.take(),
+                crate::session_context::Surface::Local,
+            );
         }
         locators.push(item);
     }
@@ -809,6 +825,7 @@ pub(crate) mod tests {
             user: "u".into(),
             registered_at: None,
             last_seen: None,
+            context: None,
         };
         assert_eq!(
             serde_json::to_value(&row).unwrap(),

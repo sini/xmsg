@@ -182,3 +182,21 @@ Existing recipient labels remain unchanged and can already contain harness
 session names.
 See [the locator reference](/reference/cli-and-mcp/#locating-a-session) for
 local detail preferences and display-only reach hints.
+
+## Session context tags
+
+<Status id="session-context.tags" />
+
+Use session context to find the session working on a particular branch,
+worktree, task, or pull request. A reporting session supplies the tags itself.
+The daemon adds them to authorized recipient listings and locator results
+according to the node's publication policy.
+
+For example, look for a `task` of `issue-418` in `xmsg list --json` to find the
+session address, then use that address with `xmsg locate --json`. Treat tags as
+display metadata that the session can change. Use the xmsg address for routing.
+See [fields and publication controls](/reference/cli-and-mcp/#session-context-tags).
+
+Codex roots sharing one app-server daemon can overwrite each other's tags
+because the daemon is the attested owner for those roots. Tags are self-reports.
+Use session identities and grants for authorization.

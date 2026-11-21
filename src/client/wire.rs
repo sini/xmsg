@@ -71,6 +71,31 @@ pub enum SvcFrame {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentFrame {
+    UpdateContext {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema_version: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_session: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_thread: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_turn: Option<String>,
+        context: crate::session_context::ContextFields,
+    },
+    ClearContext {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema_version: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_session: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_thread: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_turn: Option<String>,
+    },
     Attach {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema_version: Option<u32>,
@@ -348,6 +373,8 @@ pub struct Recipient {
     pub registered_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::session_context::SessionContext>,
 }
 
 /// What `list` returns: the recipients, and how each node asked answered (A-12).

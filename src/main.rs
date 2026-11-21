@@ -237,6 +237,22 @@ pub struct RegisterAgyArgs {
 
 #[derive(Parser, Debug)]
 pub struct ServeArgs {
+    /// Read session context tags and masking policy from a TOML file.
+    #[arg(long, env = "XMSG_CONTEXT_TAGS_CONFIG")]
+    pub context_tags_config: Option<PathBuf>,
+
+    /// Disable collection and publication of session context tags.
+    #[arg(long, env = "XMSG_NO_CONTEXT_TAGS")]
+    pub no_context_tags: bool,
+
+    /// Omit a context field (or * for all fields) on local, federation, or observe output.
+    #[arg(
+        long = "context-mask",
+        env = "XMSG_CONTEXT_MASK",
+        value_delimiter = ','
+    )]
+    pub context_mask: Vec<String>,
+
     /// Optional TCP listen address (IP:PORT), for environments like Kubernetes pods where loopback is a private netns. With no flag, no TCP socket is bound.
     #[arg(long, env = "XMSG_LISTEN")]
     pub listen: Option<String>,
@@ -1326,6 +1342,23 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         let _ = std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o600));
     }
     storage::init_db(&conn)?;
+    let context_config = args.context_tags_config.clone();
+    let no_context_tags = args.no_context_tags;
+    let context_mask = args.context_mask.clone();
+    let apply_context_policy =
+        move |db: &rusqlite::Connection| -> Result<(), Box<dyn std::error::Error>> {
+            let policy = context_config
+                .as_ref()
+                .map(std::fs::read_to_string)
+                .transpose()?
+                .map(|content| toml::from_str::<xmsg::session_context::Config>(&content))
+                .transpose()?
+                .unwrap_or_default();
+            policy.apply(db, no_context_tags, &context_mask)?;
+            Ok(())
+        };
+    apply_context_policy(&conn)?;
+    xmsg::session_context::reset(&conn)?;
 
     let db = Arc::new(Mutex::new(conn));
     let (notify_tx, _) = broadcast::channel(1024);
@@ -1685,6 +1718,9 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
             let Ok(db) = mailbox_db.lock() else {
                 break;
             };
+            if xmsg::session_context::prune(&db, storage::now_epoch_secs()).is_err() {
+                tracing::warn!("session context TTL purge failed");
+            }
             if storage::purge_peer_mailbox(&db, mailbox_ttl).is_err() {
                 tracing::warn!("peer mailbox TTL purge failed");
             }
@@ -1702,9 +1738,17 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
 
     {
         let reloader_sighup = reloader_for_sighup.clone();
+        let context_db = db.clone();
         bg_tasks.push(tokio::spawn(async move {
             while sighup.recv().await.is_some() {
                 info!("SIGHUP received, reloading configuration");
+                let context_reload = context_db
+                    .lock()
+                    .ok()
+                    .is_some_and(|db| apply_context_policy(&db).is_ok());
+                if !context_reload {
+                    tracing::error!("SIGHUP session context config reload failed");
+                }
                 if let Some(ref reloader) = reloader_sighup {
                     if let Err(e) = reloader.force_reload() {
                         tracing::error!("SIGHUP credential reload failed: {e}");

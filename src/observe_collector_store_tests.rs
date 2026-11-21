@@ -208,6 +208,7 @@ fn snapshot() -> ExportSnapshot {
             state: RegistrationState::Unknown,
             source_at: None,
             label: None,
+            context: None,
         }],
         truncated: false,
         available: SnapshotAvailability::Partial,

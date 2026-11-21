@@ -32,6 +32,10 @@ struct PostAuthFixture {
 
 impl PostAuthFixture {
     fn new() -> Self {
+        Self::with_connection(rusqlite::Connection::open_in_memory().unwrap())
+    }
+
+    fn with_connection(connection: rusqlite::Connection) -> Self {
         let pin = format!("sha256:{}", "a".repeat(64));
         let peers = Arc::new(
             PeersMap::load_from_json(
@@ -42,7 +46,6 @@ impl PostAuthFixture {
             )
             .unwrap(),
         );
-        let connection = rusqlite::Connection::open_in_memory().unwrap();
         crate::storage::init_db(&connection).unwrap();
         let state = Arc::new(FedState {
             discovery: Default::default(),
@@ -270,4 +273,61 @@ async fn agy_cache_read_is_nonblocking() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pi_cache_read_is_nonblocking() {
     nonblocking_cache(Cache::Pi).await;
+}
+
+#[tokio::test]
+async fn observe_snapshot_publishes_and_masks_live_session_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = PostAuthFixture::with_connection(
+        rusqlite::Connection::open(temp.path().join("observe.sqlite")).unwrap(),
+    );
+    let id = "00000000-bbbb-4111-8111-111111111111";
+    fixture.populate(Cache::Pi);
+    {
+        let db = fixture.state.db.lock().unwrap();
+        crate::storage::mark_live(&db, id, "pi", crate::storage::now_epoch_secs()).unwrap();
+        db.execute(
+            "INSERT INTO session_context VALUES (?1,'pi',?1,?2,?3,1)",
+            rusqlite::params![
+                id,
+                crate::storage::now_epoch_secs(),
+                json!({"task": "example", "branch": "public-feature"}).to_string()
+            ],
+        )
+        .unwrap();
+    }
+    let endpoint = |page: Value| {
+        page["endpoints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|endpoint| endpoint["id"] == format!("{id}@post-auth.node"))
+            .unwrap()
+            .clone()
+    };
+    let (status, page) = fixture.snapshot("?v=1").await;
+    assert_eq!(status, 200);
+    assert_eq!(endpoint(page)["context"]["task"], "example");
+    {
+        let db = fixture.state.db.lock().unwrap();
+        db.execute(
+            "INSERT INTO session_context_mask VALUES ('observe','task')",
+            [],
+        )
+        .unwrap();
+    }
+    let (_, page) = fixture.snapshot("?v=1").await;
+    let masked = endpoint(page);
+    assert!(masked["context"].get("task").is_none());
+    assert_eq!(masked["context"]["branch"], "public-feature");
+    {
+        let db = fixture.state.db.lock().unwrap();
+        db.execute(
+            "INSERT INTO session_context_mask VALUES ('observe','*')",
+            [],
+        )
+        .unwrap();
+    }
+    let (_, page) = fixture.snapshot("?v=1").await;
+    assert!(endpoint(page).get("context").is_none());
 }

@@ -213,3 +213,13 @@ tool call does not replace the stored credential. See the
 The gateway owns external authentication and grant policy. The bus's
 [UID/network trust model](/concepts/trust-model/) still applies behind it, and a hosted model's
 message remains peer data.
+
+## Session context tags
+
+<Status id="session-context.tags" />
+
+The xmsg daemon can attach masked, self-reported context to its authorized
+recipient data. See [source-node publication controls](/reference/cli-and-mcp/#session-context-tags).
+Update the xmsg daemon and clients together before re-pinning the gateway.
+Hosted gateway publication and gateway-specific masking require a separate
+gateway update.

@@ -1179,6 +1179,43 @@ pub async fn handle_agent_frame(
     .await;
     let caller_trace = trace_caller_or_codex_owner(state, peer);
     match frame {
+        AgentFrame::UpdateContext {
+            session_id,
+            codex_session,
+            codex_thread,
+            codex_turn,
+            context,
+            ..
+        } => {
+            let session = context_owner(
+                state,
+                caller_trace,
+                session_id.as_deref(),
+                codex_session.as_deref(),
+                codex_thread.as_deref(),
+                codex_turn.as_deref(),
+            )?;
+            crate::session_context::update(&state.db, &session, context)?;
+            Ok(serde_json::json!({ "status": "ok" }))
+        }
+        AgentFrame::ClearContext {
+            session_id,
+            codex_session,
+            codex_thread,
+            codex_turn,
+            ..
+        } => {
+            let session = context_owner(
+                state,
+                caller_trace,
+                session_id.as_deref(),
+                codex_session.as_deref(),
+                codex_thread.as_deref(),
+                codex_turn.as_deref(),
+            )?;
+            crate::session_context::clear(&state.db, &session)?;
+            Ok(serde_json::json!({ "status": "ok" }))
+        }
         AgentFrame::McpStart { .. } | AgentFrame::CodexHook { .. } => Err(AppError::BadRequest(
             "mcp_start and codex_hook are handled at stream level".to_string(),
         )),
@@ -1566,6 +1603,42 @@ pub async fn handle_agent_frame(
             ..
         } => apply_codex_revoke(state, &session_id, revoked),
     }
+}
+
+fn context_owner(
+    state: &AppState,
+    caller_trace: Result<CallerTrace, AppError>,
+    session_id: Option<&str>,
+    codex_session: Option<&str>,
+    codex_thread: Option<&str>,
+    codex_turn: Option<&str>,
+) -> Result<Session, AppError> {
+    let denied = || AppError::Denied("context requires the attested session owner".to_string());
+    let caller = match caller_trace {
+        Ok(CallerTrace::Session(session))
+            if codex_session.is_none() && codex_thread.is_none() && codex_turn.is_none() =>
+        {
+            session
+        }
+        Ok(CallerTrace::CodexOwner {
+            owner_pid,
+            owner_starttime,
+        }) => resolve_codex_mcp_caller(
+            state,
+            owner_pid,
+            &owner_starttime,
+            codex_session,
+            codex_thread,
+            codex_turn,
+            false,
+        )
+        .map_err(|_| denied())?,
+        _ => return Err(denied()),
+    };
+    if caller.harness == "svc" || session_id.is_some_and(|id| id != caller.session_id) {
+        return Err(denied());
+    }
+    Ok(caller)
 }
 
 /// Persist operator `revoke` / `unrevoke` to SQLite first, updating in-memory `CodexStore`

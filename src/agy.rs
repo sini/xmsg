@@ -1363,6 +1363,7 @@ pub fn purge_evicted_agy_subagents(
                 && is_agy_session_alive(proc_root, info)
         });
         if !still_live {
+            let _ = crate::session_context::end(conn, &parent_id, "agy");
             let _ = crate::storage::subagent_delete_rows_only_for_parent(conn, &parent_id);
         }
     }

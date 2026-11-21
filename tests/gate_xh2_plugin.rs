@@ -219,6 +219,36 @@ fn id_of(address: &str) -> &str {
     address.split_once('@').map_or(address, |(id, _)| id)
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn context_is_bound_to_the_plugin_connection() {
+    let node = Node::start();
+    let mut owner = node.plugin().await;
+    let mut other = node.plugin().await;
+    let address = owner.register("working").await;
+    let update = json!({
+        "action": "update_context",
+        "session": "working",
+        "context": {"task": "report"}
+    });
+    let accepted = owner.call(update.clone()).await;
+    assert_eq!(accepted["status"], "ok", "{accepted}");
+    let refused = other.call(update).await;
+    assert_eq!(refused["error"], "denied", "{refused}");
+
+    let clear = json!({"action": "clear_context", "session": "working"});
+    let refused = other.call(clear.clone()).await;
+    assert_eq!(refused["error"], "denied", "{refused}");
+    let listed = node.list().await;
+    let own = listed.iter().find(|row| row["address"] == address).unwrap();
+    assert_eq!(own["context"]["task"], "report");
+
+    let accepted = owner.call(clear).await;
+    assert_eq!(accepted["status"], "ok", "{accepted}");
+    let listed = node.list().await;
+    let own = listed.iter().find(|row| row["address"] == address).unwrap();
+    assert!(own.get("context").is_none(), "{own}");
+}
+
 // -----------------------------------------------------------------------------
 // 1. Two sessions on one connection (C1's FAIL-IF)
 // -----------------------------------------------------------------------------

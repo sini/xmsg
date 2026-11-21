@@ -137,3 +137,15 @@ the compatibility change; an unpatched older binary can still reject new data.
 Relay history retains its configured hub origin in the bounded seven-day cache.
 Downgrading to a collector without relay support destructively purges relay
 history; it never reclassifies that history as direct observations.
+
+## Session context tags
+
+<Status id="session-context.tags" />
+
+A session's self-reported tags can appear in the node's authorized observation
+export. To keep task values out of the export while still showing them in local
+listings, configure the source node with `--context-mask observe:task`. To
+withhold every tag from the export, use `--context-mask 'observe:*'`.
+
+The source node applies the mask before export. The observation grant still
+controls who can read the export. See [session context and node policy](/reference/cli-and-mcp/#session-context-tags).

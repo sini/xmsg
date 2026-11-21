@@ -81,6 +81,8 @@ mod recipient_snapshot;
 pub mod registry;
 #[cfg(feature = "daemon")]
 pub mod schema_status;
+#[cfg(feature = "client")]
+pub mod session_context;
 #[cfg(feature = "daemon")]
 pub mod spawn;
 #[cfg(feature = "daemon")]

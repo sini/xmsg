@@ -159,3 +159,15 @@ harness-native ID at registration. Resume remains **unproven**: no resume
 command is offered. An adapter may report a typed terminal hint from its own
 environment; an omitted hint means unknown. Terminal references require local
 detail opt-in and are never published to peers.
+
+## Session context tags
+
+<Status id="session-context.tags" />
+
+A context reporter using the session's existing runtime attribution can supply optional tags such as a
+branch, worktree handle, or task ID. The node publishes submitted tags by default
+to authorized readers, subject to its [context controls](/reference/cli-and-mcp/#session-context-tags).
+
+Codex roots sharing one app-server daemon can overwrite each other's tags
+because the daemon is the attested owner for those roots. Tags are self-reports.
+Use session identities and grants for authorization.

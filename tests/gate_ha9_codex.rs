@@ -1575,6 +1575,25 @@ async fn c4_one_owner_many_roots_and_nested_owner() {
         "claiming another owner's root must fail closed"
     );
 
+    let context_update = || AgentFrame::UpdateContext {
+        schema_version: None,
+        session_id: None,
+        codex_session: Some(root_other.to_string()),
+        codex_thread: Some(root_other.to_string()),
+        codex_turn: None,
+        context: xmsg::session_context::ContextFields {
+            task: Some("report".into()),
+            ..Default::default()
+        },
+    };
+    let refused = handle_agent_frame(&env.state, &peer_o1, context_update())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code().1, "denied");
+    handle_agent_frame(&env.state, &peer_o2, context_update())
+        .await
+        .unwrap();
+
     // Nested approved `--codex-exe` process (`nested_codex_pid`) without its own lock must NOT walk past itself
     // to inherit `owner_pid`'s `root_1`!
     let nested_attempt = handle_agent_frame(

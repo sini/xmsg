@@ -47,6 +47,7 @@ fn hostile_view() -> NodeView {
                 state: RegistrationState::Unknown,
                 source_at: None,
                 label: Some(hostile.into()),
+                context: None,
             }],
             truncated: true,
             available: SnapshotAvailability::Partial,

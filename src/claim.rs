@@ -348,6 +348,8 @@ pub fn sync_claims_entries(
             )
             .map_err(|e| AppError::Internal(e.to_string()))?;
             let claim_addr = claim.address();
+            crate::session_context::end(conn, &claim_addr, "claude")
+                .map_err(|e| AppError::Internal(e.to_string()))?;
             if claim.suffix > 1 {
                 crate::locator::forget(conn, &claim_addr)
                     .map_err(|e| AppError::Internal(e.to_string()))?;

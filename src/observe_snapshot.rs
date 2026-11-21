@@ -1,5 +1,6 @@
 use crate::fed::FedState;
 use crate::observe_export::{EndpointKind, Harness, RegistrationState, SnapshotRecord};
+use crate::session_context::{project, Surface};
 
 const SOURCE_ROWS: usize = 201;
 
@@ -40,7 +41,7 @@ pub(crate) fn collect(state: &std::sync::Arc<FedState>) -> (Vec<SnapshotRecord>,
             .ok()?;
         Some(connection)
     });
-    if let Some(connection) = connection {
+    if let Some(connection) = connection.as_ref() {
         for (sql, kind, registration) in [
             (
                 "SELECT substr(id,1,513),substr(harness,1,33),last_live,NULL FROM instance_seen ORDER BY id LIMIT 201",
@@ -57,13 +58,17 @@ pub(crate) fn collect(state: &std::sync::Arc<FedState>) -> (Vec<SnapshotRecord>,
                 let mut statement = connection.prepare(sql)?;
                 let mut rows = statement.query([])?;
                 while let Some(row) = rows.next()? {
+                    let id: String = row.get(0)?;
+                    let source: String = row.get(1)?;
+                    let context = project(connection, &id, &source, Surface::Observe);
                     records.push(SnapshotRecord {
-                        id: row.get(0)?,
+                        id,
                         kind,
-                        harness: harness(&row.get::<_, String>(1)?),
+                        harness: harness(&source),
                         state: registration,
                         source_at: row.get(2)?,
                         label: row.get(3)?,
+                        context,
                     });
                 }
                 Ok(())
@@ -80,6 +85,7 @@ pub(crate) fn collect(state: &std::sync::Arc<FedState>) -> (Vec<SnapshotRecord>,
                 state: RegistrationState::Registered,
                 source_at: Some(value.registered_at),
                 label: Some(label(&value.name)),
+                context: None,
             });
         }
     }
@@ -92,6 +98,9 @@ pub(crate) fn collect(state: &std::sync::Arc<FedState>) -> (Vec<SnapshotRecord>,
                 state: RegistrationState::Registered,
                 source_at: Some(value.registered_at),
                 label: value.label.as_deref().map(label),
+                context: connection
+                    .as_ref()
+                    .and_then(|db| project(db, &value.conversation_id, "agy", Surface::Observe)),
             });
         }
     }
@@ -104,6 +113,9 @@ pub(crate) fn collect(state: &std::sync::Arc<FedState>) -> (Vec<SnapshotRecord>,
                 state: RegistrationState::Registered,
                 source_at: Some(value.registered_at),
                 label: value.name.as_deref().map(label),
+                context: connection
+                    .as_ref()
+                    .and_then(|db| project(db, &value.session_id, "pi", Surface::Observe)),
             });
         }
     }

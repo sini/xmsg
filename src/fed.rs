@@ -2946,6 +2946,8 @@ pub struct FedListEntry {
     pub registered_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::session_context::SessionContext>,
 }
 
 /// A dial-out client's answer to a mailbox `list` query: its entries, or `denied` when its
@@ -4688,6 +4690,7 @@ async fn listing_for_peer(
                 user: r.user,
                 registered_at: r.registered_at,
                 last_seen: r.last_seen,
+                context: None,
             })
             .collect()
     } else {
@@ -4700,6 +4703,20 @@ async fn listing_for_peer(
     };
     if let Some(ref allowed_targets) = peer_cfg.targets {
         entries.retain(|e| allowed_targets.contains(&e.id));
+    }
+    let db = fed_state
+        .db
+        .lock()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    for entry in &mut entries {
+        if matches!(entry.status.as_str(), "live" | "registered") && entry.kind != "service" {
+            entry.context = crate::session_context::project(
+                &db,
+                &entry.id,
+                entry.harness.as_deref().unwrap_or_default(),
+                crate::session_context::Surface::Federation,
+            );
+        }
     }
     if !v2 {
         for e in &mut entries {
@@ -4717,6 +4734,16 @@ pub(crate) fn admit_entries(entries: Vec<FedListEntry>, cert_user: &str) -> Vec<
     entries
         .into_iter()
         .filter(|e| e.user == cert_user)
+        .map(|mut entry| {
+            if entry
+                .context
+                .as_ref()
+                .is_some_and(|context| !context.is_valid())
+            {
+                entry.context = None;
+            }
+            entry
+        })
         .collect()
 }
 
@@ -8574,6 +8601,22 @@ mod locator_readonly_tests {
             )
             .unwrap();
             db.execute("INSERT INTO codex_roots(root_id,codex_home,owner_pid,owner_starttime,generation,label,cwd,registered_at,active) VALUES ('cwd-holder','/fixture',0,'unknown',1,'cwd-source','/PRIVATE_CWD',1,0)",[]).unwrap();
+            let now = crate::storage::now_epoch_secs();
+            db.execute(
+                "INSERT INTO plugin_sessions VALUES ('active-plugin','conn','hermes','plugin',?1,1)",
+                [now],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO session_context VALUES ('active-plugin','hermes','active-plugin',?1,?2,1)",
+                rusqlite::params![now, r#"{"branch":"shared-branch","task":"private-task"}"#],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO session_context_mask VALUES ('federation','task')",
+                [],
+            )
+            .unwrap();
             crate::locator::record(
                 &db,
                 "expired",
@@ -8599,8 +8642,23 @@ mod locator_readonly_tests {
             before,
             "read-only federation mutated the database"
         );
+        let context = entries
+            .iter()
+            .find(|entry| entry.id == "active-plugin")
+            .unwrap()
+            .context
+            .as_ref()
+            .unwrap();
+        assert_eq!(context.fields.branch.as_deref(), Some("shared-branch"));
+        assert!(context.fields.task.is_none());
         let json = serde_json::to_string(&entries).unwrap();
-        for secret in ["native_id", "env", "PRIVATE_PANE", "PRIVATE_CWD"] {
+        for secret in [
+            "native_id",
+            "env",
+            "PRIVATE_PANE",
+            "PRIVATE_CWD",
+            "private-task",
+        ] {
             assert!(!json.contains(secret), "federated locator leaked {secret}");
         }
     }
@@ -8673,7 +8731,8 @@ mod locator_readonly_tests {
                     status: "live".into(),
                     user: "person".into(),
                     registered_at: Some(1),
-                    last_seen: None
+                    last_seen: None,
+                    context: None,
                 }]
             },
             "person".into()

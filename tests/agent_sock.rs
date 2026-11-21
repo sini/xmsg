@@ -385,6 +385,102 @@ fn get_self_proc_start() -> String {
 }
 
 #[tokio::test]
+async fn context_updates_require_the_attested_session() {
+    let live_proc = std::path::PathBuf::from(xmsg::process::LIVE_PROC_ROOT);
+    let uid = current_uid();
+    let pid = std::process::id();
+    let id = "0199cecf-0123-7000-8000-000000000124";
+    let start = xmsg::storage::now_epoch_secs();
+    let pi_store = new_pi_store();
+    pi_store.write().unwrap().insert(
+        id.into(),
+        xmsg::pi::PiSessionInfo {
+            session_id: id.into(),
+            name: None,
+            pid,
+            starttime: get_self_proc_start(),
+            cwd: "/private/workspace".into(),
+            registered_at: start,
+        },
+    );
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    xmsg::storage::init_db(&conn).unwrap();
+    let state = Arc::new(AppState {
+        max_attachment_bytes: 8 * 1024 * 1024,
+        sessions_dirs: Vec::new(),
+        agy_config: AgyConfig {
+            proc_root: live_proc,
+            ..Default::default()
+        },
+        agy_store: new_agy_store(),
+        pi_store,
+        pi_notify_tx: tokio::sync::broadcast::channel(16).0,
+        svc_store: xmsg::svc::new_svc_store(),
+        svc_notify_tx: tokio::sync::broadcast::channel(16).0,
+        node_name: "test-host".into(),
+        max_body: 65536,
+        request_counter: AtomicU64::new(1),
+        db: Arc::new(Mutex::new(conn)),
+        notify_tx: tokio::sync::broadcast::channel(16).0,
+        reply_ttl: Duration::from_secs(3600),
+        idempotency_ttl: Duration::from_secs(86400),
+        long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
+        fed_state: None,
+    });
+    let peer = xmsg::process::PeerCred::unpinned(uid, pid);
+    let request = |value: serde_json::Value| {
+        xmsg::agent::handle_agent_frame(
+            &state,
+            &peer,
+            xmsg::agent::parse_agent_frame(&value.to_string()).unwrap(),
+        )
+    };
+
+    request(serde_json::json!({
+        "action": "update_context", "context": {"task": "build"}
+    }))
+    .await
+    .unwrap();
+    let denied = request(serde_json::json!({
+        "action": "update_context", "session_id": "0199cecf-0123-7000-8000-000000000125",
+        "context": {"task": "other"}
+    }))
+    .await
+    .unwrap_err();
+    assert_eq!(denied.code().1, "denied");
+    let denied = request(serde_json::json!({
+        "action": "clear_context", "session_id": "0199cecf-0123-7000-8000-000000000125"
+    }))
+    .await
+    .unwrap_err();
+    assert_eq!(denied.code().1, "denied");
+    let listed = request(serde_json::json!({"action": "list"}))
+        .await
+        .unwrap();
+    let recipients = listed["recipients"].as_array().unwrap();
+    let recipient = recipients
+        .iter()
+        .find(|row| row["address"] == format!("{id}@test-host"))
+        .unwrap();
+    assert_eq!(recipient["context"]["task"], "build");
+    assert!((start..=xmsg::storage::now_epoch_secs())
+        .contains(&recipient["context"]["updated_at"].as_i64().unwrap()));
+
+    request(serde_json::json!({"action": "clear_context"}))
+        .await
+        .unwrap();
+    let listed = request(serde_json::json!({"action": "list"}))
+        .await
+        .unwrap();
+    let recipients = listed["recipients"].as_array().unwrap();
+    let recipient = recipients
+        .iter()
+        .find(|row| row["address"] == format!("{id}@test-host"))
+        .unwrap();
+    assert!(recipient.get("context").is_none(), "{recipient}");
+}
+
+#[tokio::test]
 async fn test_agent_sock_reply_and_send_flow() {
     let tmp = tempdir().unwrap();
     fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();

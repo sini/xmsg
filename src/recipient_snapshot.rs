@@ -176,6 +176,7 @@ fn row(
         user: String::new(),
         registered_at,
         last_seen,
+        context: None,
     }
 }
 
@@ -183,6 +184,7 @@ pub(crate) fn collect(
     state: &AppState,
     query: &ListQuery,
     liveness: bool,
+    include_context: bool,
 ) -> Result<Snapshot, AppError> {
     if query.host.is_some()
         || query
@@ -352,6 +354,25 @@ pub(crate) fn collect(
                     canonical_path: rec.canonical_path.to_string_lossy().into_owned(),
                     observed_at: rec.observed_at,
                 });
+            }
+        }
+    }
+    if include_context {
+        use crate::session_context::{project, Surface};
+        let db = state
+            .db
+            .lock()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        for candidate in catalog.rows.values_mut() {
+            let row = &mut candidate.recipient;
+            if row.status == "registered" && row.kind != "service" {
+                let id = row.address.rsplit_once('@').map_or("", |(id, _)| id);
+                row.context = project(
+                    &db,
+                    id,
+                    row.harness.as_deref().unwrap_or_default(),
+                    Surface::Local,
+                );
             }
         }
     }

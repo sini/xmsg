@@ -23,6 +23,14 @@ export interface SiblingAllowlistEntry {
 }
 
 export const FEATURES: Record<string, FeatureEntry> = {
+	'session-context.tags': {
+		id: 'session-context.tags',
+		title: 'Self-reported session context tags',
+		owner: 'sini',
+		evidence: [{ path: 'src/session_context.rs', anchor: 'pub struct SessionContext' }],
+		plannedSince: '2026-11-20',
+		note: 'Optional session metadata with publication masks on the source node.',
+	},
 	'session-locator.cli': {
 		id: 'session-locator.cli',
 		title: 'Read-only session locator CLI and Unix HTTP endpoint',
