@@ -1,5 +1,6 @@
 //! Bounded, same-process service transport shared by xmsg consumers.
 
+pub mod caller_attribution;
 mod health;
 mod origin;
 pub(crate) mod wire;
