@@ -805,7 +805,7 @@ fn accept_fixture(listener: &UnixListener, phase: &str) -> std::io::Result<UnixS
     let expires = std::time::Instant::now() + Duration::from_secs(3);
     loop {
         match listener.accept() {
-            Ok((stream, _)) => return Ok(stream),
+            Ok((stream, _)) => return blocking_fixture_stream(stream),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => return Err(e),
         }
@@ -827,6 +827,97 @@ fn accept_fixture(listener: &UnixListener, phase: &str) -> std::io::Result<UnixS
             return Err(std::io::Error::last_os_error());
         }
     }
+}
+fn blocking_fixture_stream(stream: UnixStream) -> std::io::Result<UnixStream> {
+    stream.set_nonblocking(false)?;
+    Ok(stream)
+}
+
+#[test]
+fn fixture_accepted_stream_normalizes_forced_nonblocking_mode() {
+    let (stream, _peer) = UnixStream::pair().unwrap();
+    stream.set_nonblocking(true).unwrap();
+    let stream = blocking_fixture_stream(stream).unwrap();
+    let flags = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) };
+    assert!(flags >= 0);
+    assert_eq!(
+        flags & libc::O_NONBLOCK,
+        0,
+        "fixture accepted stream retained nonblocking mode"
+    );
+}
+
+#[test]
+fn production_handler_normalizes_nonblocking_before_fragmented_request() {
+    let f = fixture();
+    let service = ControlService::open(
+        &f.dir.path().join("journal.db"),
+        xmsg::client::current_uid(),
+        f.config.clone(),
+        ProvisionedCredentials::from_bytes(OWNER, HUMAN).unwrap(),
+    )
+    .unwrap();
+    let (mut client, server) = UnixStream::pair().unwrap();
+    server.set_nonblocking(true).unwrap();
+    let observer = server.try_clone().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut request = serde_json::to_vec(&ControlRequest::dispatch(
+        "fragmented".into(),
+        "ordinary request".into(),
+    ))
+    .unwrap();
+    request.push(b'\n');
+    let split = request.len() / 2;
+    client.write_all(&request[..split]).unwrap();
+    std::thread::scope(|scope| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let service_ref = &service;
+        let worker = scope.spawn(move || {
+            tx.send(service_ref.handle_lifecycle_connection(server))
+                .unwrap();
+        });
+        let expires = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            assert!(
+                matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+                "nonblocking handler returned before fragmented request completed"
+            );
+            let flags = unsafe { libc::fcntl(observer.as_raw_fd(), libc::F_GETFL) };
+            assert!(flags >= 0);
+            if flags & libc::O_NONBLOCK == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < expires,
+                "production handler never normalized accepted descriptor"
+            );
+            std::thread::yield_now();
+        }
+        drop(observer);
+        client.write_all(&request[split..]).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&response).unwrap(),
+            serde_json::json!({"status":"error","code":"attestation_unavailable"})
+        );
+        assert!(rx.recv_timeout(Duration::from_secs(2)).unwrap().is_ok());
+        worker.join().unwrap();
+    });
+    let count: i64 = service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*) FROM admissions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "fragmented request bypassed unavailable attestation"
+    );
 }
 
 impl Drop for FixtureDaemon {
