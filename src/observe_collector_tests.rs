@@ -124,7 +124,7 @@ impl Fixture {
         let config = Config {
             client_cert: files.path().join("cert.pem"),
             client_key: files.path().join("key.pem"),
-            auth: AuthConfig {
+            auth: Some(AuthConfig {
                 issuer: "https://owner.invalid".into(),
                 introspection_url: format!("https://localhost:{}/introspect", address.port()),
                 subjects: vec!["owner".into()],
@@ -133,7 +133,8 @@ impl Fixture {
                 lookup_client: None,
                 lookup_secret_file: None,
                 provider_ca: Some(files.path().join("cert.pem")),
-            },
+            }),
+            mission_control: None,
             sources: vec![],
             web_tls: None,
             retention_after_inactive_secs:
@@ -176,7 +177,8 @@ impl Fixture {
             initial_success.insert("fixture.node".into(), (tokio::time::Instant::now(), utc));
         }
         let state = Arc::new(State {
-            verifier: Verifier::new(config.auth.clone(), clock).unwrap(),
+            verifier: Some(Verifier::new(config.auth.clone().unwrap(), clock).unwrap()),
+            issuer: None,
             store,
             store_slots: Arc::new(Semaphore::new(1)),
             requests: request_slots(),
@@ -654,7 +656,7 @@ async fn duplex_request(
     };
     let state = fixture.state.clone();
     let task = tokio::spawn(async move {
-        serve_stream(io, state).await;
+        serve_stream(io, state, None).await;
     });
     client.write_all(b"GET /?node=0 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer synthetic-owner-fixture\r\n\r\n").await.unwrap();
     (client, task, blocked)
@@ -701,11 +703,16 @@ async fn admitted_read_deadline_includes_preparation() {
     let slots = requests.clone();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
-    let mut task = tokio::spawn(serve_http(server, requests, move |_| async move {
-        entered_tx.send(()).unwrap();
-        let _ = release_rx.await;
-        response(StatusCode::OK, "prepared", false)
-    }));
+    let mut task = tokio::spawn(serve_http(
+        server,
+        requests,
+        WEB_BUDGET,
+        move |_| async move {
+            entered_tx.send(()).unwrap();
+            let _ = release_rx.await;
+            response(StatusCode::OK, "prepared", false)
+        },
+    ));
     client
         .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .await
@@ -735,7 +742,10 @@ async fn admitted_read_deadline_includes_preparation() {
 
 fn scheduler_state(fixture: &Fixture, node: &str, store: Arc<Store>) -> Arc<State> {
     Arc::new(State {
-        verifier: Verifier::new(fixture.config.auth.clone(), Arc::new(|| 1000)).unwrap(),
+        verifier: Some(
+            Verifier::new(fixture.config.auth.clone().unwrap(), Arc::new(|| 1000)).unwrap(),
+        ),
+        issuer: None,
         store,
         store_slots: Arc::new(Semaphore::new(1)),
         requests: request_slots(),
@@ -1446,7 +1456,8 @@ async fn a2_healthy_no_change_advances_last_success() {
     );
     let fixture = Fixture::new().await;
     let state = Arc::new(State {
-        verifier: Verifier::new(fixture.config.auth.clone(), clock).unwrap(),
+        verifier: Some(Verifier::new(fixture.config.auth.clone().unwrap(), clock).unwrap()),
+        issuer: None,
         store: store.clone(),
         store_slots: Arc::new(Semaphore::new(1)),
         requests: request_slots(),
@@ -1649,7 +1660,8 @@ async fn a5_restart_with_history_shows_hidden_and_none_since_start() {
     let fixture = Fixture::new().await;
     let initial_succ = initial_success(&reopened);
     let state = Arc::new(State {
-        verifier: Verifier::new(fixture.config.auth.clone(), clock).unwrap(),
+        verifier: Some(Verifier::new(fixture.config.auth.clone().unwrap(), clock).unwrap()),
+        issuer: None,
         store: reopened,
         store_slots: Arc::new(Semaphore::new(1)),
         requests: request_slots(),
@@ -1711,7 +1723,8 @@ async fn a6_monotonic_health_ignores_epoch_clock_shifts() {
     );
     let fixture = Fixture::new().await;
     let state = Arc::new(State {
-        verifier: Verifier::new(fixture.config.auth.clone(), clock).unwrap(),
+        verifier: Some(Verifier::new(fixture.config.auth.clone().unwrap(), clock).unwrap()),
+        issuer: None,
         store: store.clone(),
         store_slots: Arc::new(Semaphore::new(1)),
         requests: request_slots(),

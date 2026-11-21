@@ -573,8 +573,7 @@ required; `--listen` defaults to `127.0.0.1:9428`. A non-loopback listener requi
 `web_tls.cert` and `web_tls.key` in configuration. It dispatches independently of
 `serve` and does not initialize the bus, enrollment or harness stores.
 
-The JSON configuration supplies client mTLS files, one fixed owner introspection
-provider and a static inventory of at most 64 canonical nodes. `sources[].labels`
+The JSON configuration supplies client mTLS files, owner authentication and a static inventory of at most 64 canonical nodes. `sources[].labels`
 and `sources[].outbound_only` default false. Outbound-only sources are visibly
 unsupported unless an explicit `sources[].relay` selects reverse transport. The
 closed relay object supplies `hub`, `leaf`, `address`, and optional `ca`; it
@@ -583,8 +582,55 @@ identities; a URI hub requires its CA. Configuration applies on restart. The pri
 [collector setup](/operations/fleet-observer/#configure-the-collector).
 
 `GET /` is the authenticated view, with numeric `node` and `page` filters;
-`GET /health` is a fixed metadata-free availability response. There is no MCP
-observation tool, browser token store, body route or action control.
+`GET /health` is a fixed metadata-free availability response. The optional
+Mission Control issuer adds its own login and device routes.
+
+### Mission Control owner CLI
+
+<Status id="mission-control.session" />
+
+Run `xmsg observe-collector admin` as the collector's OS user with the same
+`--state-dir`. Use the owner principal shown by `list` for `--owner`.
+
+```sh
+xmsg observe-collector admin --state-dir ./observer-state list
+xmsg observe-collector admin --state-dir ./observer-state revoke RECORD_ID
+xmsg observe-collector admin --state-dir ./observer-state audit
+```
+
+<Status id="mission-control.machine-tokens" />
+
+Specify a name, at least one JSON scope, and the rate for a machine token.
+Repeat `--scope` for additional scopes. Available scope objects are
+`{"kind":"fleet"}`, `{"kind":"attention"}`, `{"kind":"node","node":"node"}`,
+and `{"kind":"session","node":"node","endpoint":"service@node"}`.
+`--expires-at` takes a Unix timestamp in seconds and defaults to 90 days
+after issue.
+
+```sh
+xmsg observe-collector admin --state-dir ./observer-state \
+  mint machine --owner OWNER_PRINCIPAL --name attention-poller \
+  --scope '{"kind":"attention"}' --rate 12
+```
+
+<Status id="mission-control.delegated-grants" />
+
+For a delegated credential, use `mint delegated --owner OWNER_PRINCIPAL
+--grant-file ./grant.json`. The JSON object supplies `holder`, `verbs`,
+`targets` as explicit `{node, endpoint}` pairs, `expires_at` in Unix
+seconds, and `rate`. `read_scope` is optional. Either mint writes the handle
+once to stdout. Save it to an owner-only credential file.
+
+`list` reports record IDs, class, principal, minting owner, creation and last
+use. Revoke using the record ID. To change an owner's issuer and subject, use
+`rebind --owner OWNER_PRINCIPAL --issuer ISSUER --subject SUBJECT`.
+Rebinding revokes the old subject's credentials and the grants it minted.
+
+When the collector is serving, the CLI uses its owner-only `admin.sock` and
+waits for the authority writer to update the live table. For an offline action,
+also pass `--config collector.json` after `admin`. The CLI takes the exclusive
+authority lock and reports that changes apply at the next start. A held lock
+with the socket unavailable makes the command fail without changing the store.
 
 ### Discovery and explicit-node routing
 

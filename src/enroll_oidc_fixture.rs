@@ -86,6 +86,7 @@ struct Shared {
     access: String,
     refresh: String,
     codes: HashMap<String, Mode>,
+    refresh_replies: std::collections::VecDeque<(u16, Value)>,
     device_reply: Value,
     device_errors: std::collections::VecDeque<(u16, Value)>,
     device_no_token: bool,
@@ -141,6 +142,7 @@ impl Fixture {
             access: format!("fixture-access-{}", ulid::Ulid::new()),
             refresh: format!("fixture-refresh-{}", ulid::Ulid::new()),
             codes: HashMap::new(),
+            refresh_replies: Default::default(),
             device_reply: json!({"expires_in":300,"interval":5}),
             device_errors: Default::default(),
             device_no_token: false,
@@ -260,6 +262,33 @@ impl Fixture {
         mode.bad_signature = bad_signature;
         mode.hmac_modulus = hmac_modulus;
     }
+    pub(crate) fn set_discovery_claim(&self, claim: &str, value: Value) {
+        self.shared
+            .lock()
+            .unwrap()
+            .discovery_overrides
+            .insert(claim.into(), value);
+    }
+    pub(crate) fn queue_refresh_reply(&self, status: u16, body: Value) {
+        self.shared
+            .lock()
+            .unwrap()
+            .refresh_replies
+            .push_back((status, body));
+    }
+    pub(crate) fn refresh_requests(&self) -> usize {
+        self.shared
+            .lock()
+            .unwrap()
+            .forms
+            .iter()
+            .filter(|fields| {
+                fields
+                    .get("grant_type")
+                    .is_some_and(|grant| grant == "refresh_token")
+            })
+            .count()
+    }
     pub(crate) fn request_paths(&self) -> Vec<String> {
         self.shared.lock().unwrap().requests.clone()
     }
@@ -274,7 +303,13 @@ impl Fixture {
         values.extend(shared.codes.keys().cloned());
         values.extend(shared.device_user_codes.keys().cloned());
         for form in &shared.forms {
-            for key in ["code_verifier", "device_code", "code", "client_secret"] {
+            for key in [
+                "code_verifier",
+                "device_code",
+                "code",
+                "client_secret",
+                "refresh_token",
+            ] {
                 if let Some(value) = form.get(key) {
                     values.push(value.clone());
                 }
@@ -466,6 +501,31 @@ fn reply(shared: &Mutex<Shared>, path: &str, header: &str, body: &[u8]) -> Value
             let Some(client) = fixture_client_auth(&fields, header, &shared.secret) else {
                 return json!({"error":"invalid_client", "__status":400});
             };
+            if fields
+                .get("grant_type")
+                .is_some_and(|value| value == "refresh_token")
+            {
+                let valid = fields.get("refresh_token") == Some(&shared.refresh);
+                shared.forms.push(fields);
+                if !valid {
+                    return json!({"error":"invalid_grant", "__status":400});
+                }
+                let Some((status, mut response)) = shared.refresh_replies.pop_front() else {
+                    return json!({"access_token":shared.access,"token_type":"Bearer"});
+                };
+                for field in ["access_token", "id_token", "refresh_token"] {
+                    if let Some(value) = response[field].as_str() {
+                        shared.values.push(value.into());
+                    }
+                }
+                if status == 200 {
+                    if let Some(value) = response["refresh_token"].as_str() {
+                        shared.refresh = value.into();
+                    }
+                }
+                response["__status"] = json!(status);
+                return response;
+            }
             let device = fields
                 .get("grant_type")
                 .is_some_and(|value| value == "urn:ietf:params:oauth:grant-type:device_code");

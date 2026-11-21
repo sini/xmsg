@@ -24,7 +24,8 @@ fn default_retention_after_inactive_secs() -> u64 {
 pub struct Config {
     pub client_cert: PathBuf,
     pub client_key: PathBuf,
-    pub auth: AuthConfig,
+    pub auth: Option<AuthConfig>,
+    pub mission_control: Option<crate::mission_control::Config>,
     #[serde(default)]
     pub sources: Vec<SourceConfig>,
     #[serde(default)]
@@ -117,7 +118,8 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self, Error> {
         let bytes = read_file(path, 1024 * 1024)?;
         let mut config: Self = serde_json::from_slice(&bytes).map_err(|_| Error::Configuration)?;
-        if config.sources.len() > 64
+        if (config.auth.is_none() && config.mission_control.is_none())
+            || config.sources.len() > 64
             || config.retention_after_inactive_secs > MAX_RETENTION_AFTER_INACTIVE_SECS
         {
             return Err(Error::Configuration);
@@ -125,14 +127,16 @@ impl Config {
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         relative(base, &mut config.client_cert);
         relative(base, &mut config.client_key);
-        for file in [
-            &mut config.auth.lookup_secret_file,
-            &mut config.auth.provider_ca,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            relative(base, file);
+        if let Some(auth) = &mut config.auth {
+            for file in [&mut auth.lookup_secret_file, &mut auth.provider_ca]
+                .into_iter()
+                .flatten()
+            {
+                relative(base, file);
+            }
+        }
+        if let Some(issuer) = &mut config.mission_control {
+            issuer.resolve_files(base);
         }
         if let Some(tls) = &mut config.web_tls {
             relative(base, &mut tls.cert);
