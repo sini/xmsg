@@ -222,7 +222,6 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		owner: 'sini',
 		evidence: [{ path: 'nix/modules/home-manager.nix', anchor: 'stableExecutable = mkOption' }],
 	},
-||||||| parent of a7018e7 (observe_collector: retain removed nodes for configurable inactive window)
 	'fleet-observer.retention': {
 		id: 'fleet-observer.retention',
 		title: 'Configurable inactive-node retention window',
