@@ -73,15 +73,29 @@ fn peer() -> PeerWitness {
     }
 }
 
-struct FixedBridgeClock(i64);
-impl WallClock for FixedBridgeClock {
+struct EchoPeer(std::process::Child);
+impl Drop for EchoPeer {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+struct AtomicBridgeClock(std::sync::Arc<std::sync::atomic::AtomicI64>);
+impl WallClock for AtomicBridgeClock {
     fn now(&self) -> i64 {
-        self.0
+        self.0.load(Ordering::SeqCst)
     }
 }
 
 fn run_scripted_bridge(
     mutate: impl FnOnce(&mut xmsg::client::caller_attribution::Reply) + Send,
+) -> (serde_json::Value, i64) {
+    run_scripted_bridge_clock(mutate, None, false)
+}
+fn run_scripted_bridge_clock(
+    mutate: impl FnOnce(&mut xmsg::client::caller_attribution::Reply) + Send,
+    clock: Option<std::sync::Arc<std::sync::atomic::AtomicI64>>,
+    post_query_wait: bool,
 ) -> (serde_json::Value, i64) {
     use std::{
         io::{Read, Write},
@@ -109,7 +123,20 @@ fn run_scripted_bridge(
         lifecycle_socket: life_path.clone(),
         expected_uid: uid(),
     });
-    f.service.clock = Box::new(FixedBridgeClock(100));
+    let clock =
+        clock.unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicI64::new(100)));
+    f.service.clock = Box::new(AtomicBridgeClock(clock.clone()));
+    let (at_tx, at_rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    if post_query_wait {
+        *f.service.after_attestation.lock().unwrap() = Some(Box::new(move || {
+            at_tx.send(()).unwrap();
+            resume_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+        }));
+    }
+    let held_journal = post_query_wait.then(|| f.service.journal.lock().unwrap());
     let response = std::thread::scope(|scope| {
         let script = scope.spawn(move || {
             let (stream, _) = query.accept().unwrap();
@@ -148,6 +175,14 @@ fn run_scripted_bridge(
         client.write_all(&body).unwrap();
         client.write_all(b"\n").unwrap();
         client.shutdown(std::net::Shutdown::Write).unwrap();
+        if post_query_wait {
+            at_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            clock.store(201, Ordering::SeqCst);
+            drop(held_journal);
+            resume_tx.send(()).unwrap();
+        }
         client
             .set_read_timeout(Some(std::time::Duration::from_secs(3)))
             .unwrap();
@@ -178,6 +213,99 @@ fn bridge_wrong_epoch_has_no_admission_even_with_valid_grant() {
         }
     });
     assert_eq!(rows, 0, "wrong epoch reached durable admission");
+    assert_eq!(reply["code"], "attestation_binding");
+}
+#[test]
+fn bridge_wrong_nonce_has_no_admission_even_with_valid_grant() {
+    let (reply, rows) = run_scripted_bridge(|reply| {
+        if let xmsg::client::caller_attribution::Reply::Ok { call_nonce, .. } = reply {
+            *call_nonce += 1;
+        }
+    });
+    assert_eq!(rows, 0, "wrong nonce reached durable admission");
+    assert_eq!(reply["code"], "attestation_binding");
+}
+#[test]
+fn bridge_wrong_request_digest_has_no_admission_even_with_valid_grant() {
+    let (reply, rows) = run_scripted_bridge(|reply| {
+        if let xmsg::client::caller_attribution::Reply::Ok { input_digest, .. } = reply {
+            *input_digest = "e".repeat(64);
+        }
+    });
+    assert_eq!(rows, 0, "wrong request digest reached durable admission");
+    assert_eq!(reply["code"], "attestation_binding");
+}
+#[test]
+fn bridge_wrong_context_digest_has_no_admission_even_with_valid_grant() {
+    let (reply, rows) = run_scripted_bridge(|reply| {
+        if let xmsg::client::caller_attribution::Reply::Ok { context_digest, .. } = reply {
+            *context_digest = "e".repeat(64);
+        }
+    });
+    assert_eq!(rows, 0, "wrong context digest reached durable admission");
+    assert_eq!(reply["code"], "attestation_binding");
+}
+#[test]
+fn bridge_expiry_during_scripted_reply_has_no_admission() {
+    let clock = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(100));
+    let script_clock = clock.clone();
+    let (reply, rows) = run_scripted_bridge_clock(
+        move |_| {
+            script_clock.store(201, Ordering::SeqCst);
+        },
+        Some(clock),
+        false,
+    );
+    assert_eq!(rows, 0, "expired during query reached durable admission");
+    assert_eq!(
+        reply["result"]["receipt"]["authorization"]["code"],
+        "deadline_expired"
+    );
+}
+#[test]
+fn bridge_expiry_after_query_before_admission_lock_has_no_admission() {
+    let (reply, rows) = run_scripted_bridge_clock(|_| {}, None, true);
+    assert_eq!(
+        rows, 0,
+        "expiry after query lock wait reached durable admission"
+    );
+    assert_eq!(
+        reply["result"]["receipt"]["authorization"]["code"],
+        "deadline_expired"
+    );
+}
+#[test]
+#[ignore = "test-only captured/reaped live alternate peer for attribution echo controls"]
+fn bridge_live_peer_fixture() {
+    use std::io::Read;
+    let mut byte = [0];
+    let _ = std::io::stdin().read(&mut byte);
+}
+#[test]
+fn bridge_wrong_live_peer_has_no_admission_even_with_valid_grant() {
+    use std::process::{Command, Stdio};
+    let mut peer = EchoPeer(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "control::tests::bridge_live_peer_fixture",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let pid = peer.0.id();
+    let (reply, rows) = run_scripted_bridge(|reply| {
+        if let xmsg::client::caller_attribution::Reply::Ok { peer_pid, .. } = reply {
+            *peer_pid = pid;
+        }
+    });
+    drop(peer.0.stdin.take());
+    let _ = peer.0.wait();
+    assert_eq!(rows, 0, "wrong live peer reached durable admission");
     assert_eq!(reply["code"], "attestation_binding");
 }
 fn send(id: &str) -> ControlRequest {

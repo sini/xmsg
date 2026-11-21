@@ -164,6 +164,8 @@ pub struct ControlService {
     bridge: Option<DaemonAttributionConfig>,
     runtime_epoch: String,
     clock: Box<dyn WallClock>,
+    #[cfg(test)]
+    after_attestation: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 pub use crate::auth::daemon::DaemonAttributionConfig;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -217,6 +219,8 @@ impl ControlService {
             bridge: None,
             runtime_epoch: hex::encode(epoch),
             clock: Box::new(SystemClock),
+            #[cfg(test)]
+            after_attestation: Mutex::new(None),
         })
     }
     pub fn open_with_daemon_attribution(
@@ -280,6 +284,15 @@ impl ControlService {
             deadline,
         )?;
         let principal = auth::principal(&attestor, &binding, self.uid)?;
+        #[cfg(test)]
+        if let Some(barrier) = self
+            .after_attestation
+            .lock()
+            .map_err(|_| ErrorCode::Storage)?
+            .take()
+        {
+            barrier();
+        }
         let mut journal = loop {
             match self.journal.try_lock() {
                 Ok(guard) => break guard,

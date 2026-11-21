@@ -1,5 +1,9 @@
 //! Opt-in local metadata query. Production qualification is unavailable by default.
 
+#[cfg(test)]
+mod lineage_tests;
+#[cfg(test)]
+mod noninterference_tests;
 pub(crate) mod resolve;
 #[cfg(test)]
 mod tests;
@@ -58,16 +62,23 @@ trait QualificationProvider: Send + Sync {
 struct FixtureFacts {
     expires: Instant,
     revision: std::sync::atomic::AtomicU64,
+    drift: bool,
+    reaper_complete: bool,
+    match_complete: bool,
 }
 #[cfg(test)]
 impl QualificationProvider for FixtureFacts {
     fn current(&self, key: &RuntimeKey) -> Option<EligibilityFacts> {
         Some(EligibilityFacts {
             key: key.clone(),
-            assumptions_revision: self.revision.load(Ordering::Acquire),
+            assumptions_revision: if self.drift {
+                self.revision.fetch_add(1, Ordering::AcqRel)
+            } else {
+                self.revision.load(Ordering::Acquire)
+            },
             expires: self.expires,
-            full_reaper_domain_excluded: true,
-            full_matched_identity_domain: true,
+            full_reaper_domain_excluded: self.reaper_complete,
+            full_matched_identity_domain: self.match_complete,
             allowed_branches: vec![
                 crate::process::StrictPeerBranch::LinuxPinned,
                 crate::process::StrictPeerBranch::LinuxUnsupportedFallback,
