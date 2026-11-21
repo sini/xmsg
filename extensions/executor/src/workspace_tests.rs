@@ -314,9 +314,9 @@ fn workspace_dirty_cleanup_preserves_work() {
     let destination = prepared.path().to_owned();
     fs::write(destination.join("file.txt"), b"user-work\n").unwrap();
     let result = prepared.cleanup();
-    assert_eq!(
-        fs::read(destination.join("file.txt")).unwrap(),
-        b"user-work\n",
+    let preserved = fs::read(destination.join("file.txt"));
+    assert!(
+        matches!(preserved.as_deref(), Ok(bytes) if bytes == b"user-work\n"),
         "dirty cleanup discarded user work"
     );
     assert!(matches!(result, Err(WorkspaceError::Dirty)));
