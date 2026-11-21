@@ -3181,3 +3181,107 @@ async fn mission_control_snapshot_fence_keeps_live_source_gap_after_final() {
     assert_eq!(event["delta"]["kind"], "source_gap");
     assert_eq!(event["delta"]["gap"]["unknown_loss"], true);
 }
+
+#[tokio::test]
+async fn mission_control_sse_buffered_mask_resets_without_leaking_or_closing() {
+    async fn next_frame(stream: &mut reqwest::Response, buffered: &mut Vec<u8>) -> Vec<u8> {
+        loop {
+            if let Some(end) = buffered.windows(2).position(|bytes| bytes == b"\n\n") {
+                return buffered.drain(..end + 2).collect();
+            }
+            let chunk = stream
+                .chunk()
+                .await
+                .expect("SP6 masking interrupted the established SSE stream")
+                .expect("SP6 masking closed the established SSE stream");
+            buffered.extend_from_slice(&chunk);
+        }
+    }
+
+    fn payload(frame: &[u8]) -> serde_json::Value {
+        let data = frame
+            .split(|byte| *byte == b'\n')
+            .find_map(|line| line.strip_prefix(b"data: "))
+            .expect("SSE data field");
+        serde_json::from_slice(data).unwrap()
+    }
+
+    let provider =
+        crate::enroll_oidc::signed_fixture::Fixture::new_at(crate::storage::now_epoch_secs()).await;
+    let directory = tempfile::tempdir().unwrap();
+    let (issuer, issued) =
+        crate::mission_control::tests::transport_fixture(&provider, &directory).await;
+    let gate = crate::mission_control::tests::arm_projection(&issuer, false);
+    let fixture = Fixture::with_issuer(false, true, Some(issuer.clone()), None).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(25))
+        .build()
+        .unwrap();
+    let mut stream = client
+        .get(format!("{}/v1/mission-control/stream/fleet", fixture.url))
+        .header(hyper::header::ACCEPT, "text/event-stream")
+        .bearer_auth(&issued.handle)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let mut buffered = Vec::new();
+    assert!(next_frame(&mut stream, &mut buffered)
+        .await
+        .starts_with(b": lease_expires_at="));
+    let initial = payload(&next_frame(&mut stream, &mut buffered).await);
+    assert_eq!(initial["type"], "snapshot");
+    assert_eq!(initial["nodes"][0]["node"], "fixture.node");
+    assert_eq!(initial["nodes"][0]["history_hidden"], false);
+
+    let hub = fixture.state.read_hub.as_ref().unwrap();
+    hub.queue_mask_canaries("fixture.node");
+    tokio::time::timeout(Duration::from_secs(3), gate.ready.notified())
+        .await
+        .expect("SSE writer did not pause after projecting a canary event");
+    issuer.set_node_masked("fixture.node", true);
+    hub.mask_poll("fixture.node", true, crate::storage::now_epoch_secs())
+        .unwrap();
+    gate.release.notify_one();
+
+    let reset = tokio::time::timeout(
+        Duration::from_secs(3),
+        next_frame(&mut stream, &mut buffered),
+    )
+    .await
+    .expect("SP6 masking did not produce an SSE scope reset");
+    let assert_no_canary = |frame: &[u8]| {
+        assert!(
+            !frame
+                .windows(b"planted-counterpart".len())
+                .any(|bytes| bytes == b"planted-counterpart"),
+            "SP6 queued node history escaped onto the SSE stream"
+        );
+    };
+    let assert_reset = |frame: &[u8]| {
+        assert_no_canary(frame);
+        let reset = payload(frame);
+        assert_eq!(reset["type"], "gap");
+        assert_eq!(reset["reason"], "scope_changed");
+        assert_eq!(reset["reset"], true);
+    };
+    assert_reset(&reset);
+    let frame = next_frame(&mut stream, &mut buffered).await;
+    assert_no_canary(&frame);
+    let snapshot = payload(&frame);
+    assert_eq!(
+        snapshot["type"], "snapshot",
+        "SP9: the next message after the SSE reset must be a snapshot"
+    );
+    let masked = &snapshot["nodes"][0];
+    assert_eq!(masked["node"], "fixture.node");
+    assert_eq!(masked["history_hidden"], true);
+    for field in ["endpoints", "exchanges", "source_gaps"] {
+        assert!(masked[field].as_array().unwrap().is_empty());
+    }
+    let tick = next_frame(&mut stream, &mut buffered).await;
+    assert_no_canary(&tick);
+    assert_no_canary(&buffered);
+    assert_eq!(payload(&tick)["type"], "tick");
+}
