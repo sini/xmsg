@@ -1,0 +1,13 @@
+[package]
+name = "xmsg-executor"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+description = "Internal contracts and deterministic ACP fixtures for an optional xmsg executor"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+xmsg = { path = "../..", default-features = false, features = ["client"] }
