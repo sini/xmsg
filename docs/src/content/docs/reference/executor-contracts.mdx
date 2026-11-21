@@ -8,8 +8,10 @@ import Status from '../../../components/Status.astro';
 <Status id="teams.executor-contracts" />
 
 The standalone `xmsg-executor` library lives in `extensions/executor/`. This
-increment contains data contracts, bounded ACP framing and test-only fake
-fixtures. It has no executable, listener, launcher, control-service endpoint or
+foundation contains data contracts, bounded ACP framing and test-only fake
+fixtures. The next library boundary adds a private Unix control handler and
+separate journal, but **real lifecycle calls fail closed** until the independent
+host-attestation bridge exists. There is no executable, runtime launcher or
 real harness integration. The [teams runtime](/concepts/teams/) remains planned.
 The default xmsg installation does not acquire an executor dependency.
 
@@ -75,3 +77,51 @@ No agent may select/edit that profile in the future control service.
 requests remain distinct from failed tool status and content. All child-supplied
 text and metadata remain data. Harness-owned child observations do not become
 managed dispatches or additional prompts.
+
+## Fail-closed control journal
+
+<Status id="teams.control-journal" />
+
+`control::ControlService` is a library boundary, not an installed daemon or a
+new core xmsg endpoint. The embedding application owns each private Unix
+connection. `unix::bind_private_socket` requires a private directory and creates
+a private socket. The lifecycle, owner and human connection handlers are
+separate; each consumes one call. There is no `xmsg-executor serve` command.
+
+The lifecycle path checks the kernel peer UID and requests an attested
+principal for that specific call. The production attestor is deliberately
+unavailable, so a valid same-UID lifecycle request returns
+`attestation_unavailable`; a caller of the wrong UID is rejected. Grant-success
+paths use a sealed, test-only attestor in unit tests. No request field, parent
+relationship, copied bus origin, ambient MCP process or owner/human credential
+substitutes for lifecycle attribution. A production bridge is separate work.
+
+Owner-configured grants name a principal, verb and target. The journal keeps
+authorization, durable admission and observed effect distinct. The same
+principal/request ID and canonical resolved input replays a **historical**
+receipt, not fresh authority or a second admission. Different input reusing the
+ID conflicts. Generation/turn, current policy/profile and deadline fences apply
+before a new admission. A denied request does not become accepted simply
+because policy changes later.
+
+The executor database is separate from the bus database, in a private directory.
+It records requests, sessions, admissions, policy/profile revisions and audit
+metadata. Fake pending requests test human-decision fencing and single use;
+they are not a real ACP approval relay or a claim that native human-only
+provenance is preserved. No code launches a process, turns a message into
+control, or invokes a real harness.
+
+### Privileged connection contracts
+
+`ControlService::handle_lifecycle_connection` accepts one strict JSON line.
+`handle_owner_connection` and `handle_human_connection` first accept a bounded
+newline-terminated proof, then a strict JSON line. Their separately provisioned
+proofs are distinct, 32–128 bytes without CR/LF; proofs never belong in prompts,
+bus messages, command arguments or logs. This library does not mint or install
+credentials. Same UID alone is not owner or human authority.
+
+Owner policy replacement/profile revocation requires the owner channel, with
+revision checks and atomic configuration validation. Human decisions require
+the human channel and exact still-pending request binding. Their credentials
+do not bypass lifecycle attribution or grant checks. These controls do not
+claim isolation from arbitrary same-UID code.
