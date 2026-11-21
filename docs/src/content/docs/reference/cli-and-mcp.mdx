@@ -74,7 +74,7 @@ activity reconciles them. Watch does not assign claims, prune registrations or d
 
 `--node` may select `local` or this daemon's canonical node name. A remote selection fails;
 use `xmsg list --node REMOTE` for a live remote listing, with its reconciliation and delivery
-side effects. The [fleet observer](/concepts/fleet-observer/) is the planned remote view once
+side effects. The [fleet observer](/concepts/fleet-observer/) provides the remote view once
 its collector is deployed. Watch does not contact federation peers.
 
 The roster shows `scope: local node only`, truncation, and the age of its last successful snapshot.
@@ -89,7 +89,7 @@ before display.
 
 The timeline reads the local [observation journal](/reference/http-and-sockets/#local-observation-journal)
 through `GET /v1/observe/events`. It shows source/destination references, message and reply
-correlation, times, event kinds and stored outcomes. The planned `arrival` kind means the
+correlation, times, event kinds and stored outcomes. The `arrival` kind means the
 daemon committed a queued item's delivery mark for an inbox result. It is not proof of client
 receipt, agent-read or task-complete. Each refresh fetches at most two bounded
 pages and keeps at most 1,000 timeline rows. It displays gaps, dropped counters
@@ -560,13 +560,15 @@ and `--fed-listen`. `--enroll-state` conflicts with explicit `--fed-cert` and
 `--fed-key`; it still needs the peers file and federation listener. See the
 [setup and renewal example](/operations/enrollment-ca/#enroll-the-machine).
 
-## Planned: observation collector
+## Observation collector
+
+<Status id="fleet-observer.collector" />
 
 ```sh
 xmsg observe-collector --config collector.json --state-dir ./observer-state --listen 127.0.0.1:9428
 ```
 
-The collector is planned and not yet released. `--config` and `--state-dir` are
+`--config` and `--state-dir` are
 required; `--listen` defaults to `127.0.0.1:9428`. A non-loopback listener requires
 `web_tls.cert` and `web_tls.key` in configuration. It dispatches independently of
 `serve` and does not initialize the bus, enrollment or harness stores.

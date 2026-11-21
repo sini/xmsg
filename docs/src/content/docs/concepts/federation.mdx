@@ -400,7 +400,7 @@ patterns of multiple bundles is refused. See
 [enrolled hub mailboxes](/concepts/hubs-and-leaves/#planned-enrolled-nodes-and-bounded-hub-mailboxes)
 for the rule's `leaf` field and a configuration example.
 
-## Planned observation grants
+## Observation grants
 
 The literal `observe` capability permits bounded stored metadata reads on the
 federation listener. It is never implied by other rights, `"*"`, `leaf: true` or
@@ -441,7 +441,7 @@ The hub is an owner-administered trusted origin attestor, not independent leaf
 proof. See [the trust and IP limits](/concepts/fleet-observer/) and
 [the hub/leaf configuration example](/operations/fleet-observer/#reverse-observation-through-a-trusted-hub).
 
-The planned collector selects direct or relay transport per source, using full
+The collector selects direct or relay transport per source, using full
 hub/leaf identities and a separate trust binding for each configured hub. Relay
 history displays the configured leaf via its trusted hub. Changing routes takes
 effect on collector restart and purges the previous route's cache; no browser
