@@ -70,16 +70,6 @@
     "test_file": "extensions/executor/src/supervisor_tests.rs"
   },
   {
-    "id": "pr3-owned-group",
-    "file": "extensions/executor/src/supervisor.rs",
-    "needle": "if unsafe { libc::kill(-own, libc::SIGTERM) } != 0 {",
-    "replacement": "if 0 != 0 {",
-    "test": "owned_group_stop_closes_a_real_grandchild_probe",
-    "assertion": "owned process group left a child alive",
-    "test_module": "supervisor::tests",
-    "test_file": "extensions/executor/src/supervisor_tests.rs"
-  },
-  {
     "id": "pr3-monotonic-cursor",
     "file": "extensions/executor/src/execution.rs",
     "needle": "AND state IN('spawn_intent','running','unknown') AND cursor<=?2",
@@ -188,5 +178,66 @@
     "assertion": "diagnostic PID was used as kill authority",
     "test_module": "supervisor::tests",
     "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-ack-before-failed-commit",
+    "file": "extensions/executor/src/membership.rs",
+    "needle": "    let stored = store.commit(binding, &content)?;\n    connection\n        .ack_content(&content.message_id)\n        .await\n        .map_err(|source| MembershipError::Acknowledgement { stored, source })?;",
+    "replacement": "    connection.ack_content(&content.message_id).await.map_err(MembershipError::Transport)?;\n    let stored = store.commit(binding, &content)?;",
+    "test": "failed_content_commit_sends_no_ack",
+    "assertion": "failed content storage was acknowledged",
+    "test_module": "membership::tests",
+    "test_file": "extensions/executor/src/membership_tests.rs"
+  },
+  {
+    "id": "pr3-unknown-stop-slot",
+    "file": "extensions/executor/src/supervisor.rs",
+    "needle": "journal.mark_execution(&identity, false)?;",
+    "replacement": "journal.mark_execution(&identity, true)?;",
+    "test": "resistant_descendant_stop_is_unknown_and_retains_slot_and_workspace",
+    "assertion": "uncertain group stop released resource slot",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-startup-deadline",
+    "file": "extensions/executor/src/supervisor.rs",
+    "needle": "DeadlineIo::new(&mut output, expires)?",
+    "replacement": "DeadlineIo::new(&mut output, std::time::Instant::now()+Duration::from_secs(60))?",
+    "test": "broker_death_during_initialize_cannot_bypass_supervisor_wall_budget",
+    "assertion": "startup handshake escaped supervisor wall budget",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-client-deadline",
+    "file": "extensions/executor/src/supervisor.rs",
+    "needle": "read_frame_until(&stream, request_deadline)",
+    "replacement": "read_frame_until(&stream, std::time::Instant::now()+Duration::from_secs(3))",
+    "test": "stalled_accepted_client_cannot_postpone_execution_wall_budget",
+    "assertion": "accepted client extended supervisor wall budget",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-observe-backend-exit",
+    "file": "extensions/executor/src/supervisor.rs",
+    "needle": "fn backend_live(backend: &mut Child, output_fd: RawFd) -> Result<bool, SupervisorError> {",
+    "replacement": "fn backend_live(backend: &mut Child, output_fd: RawFd) -> Result<bool, SupervisorError> { if true{return Ok(true)}",
+    "test": "held_backend_exit_is_observed_before_attach_can_publish_running",
+    "assertion": "dead backend published running state",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-launch-lock-concurrency",
+    "file": "extensions/executor/src/supervisor.rs",
+    "needle": "if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {",
+    "replacement": "if 0 != 0 {",
+    "test": "concurrent_brokers_consume_one_launch_and_one_process",
+    "assertion": "concurrent brokers created multiple OS supervisors",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs",
+    "expected_outcome": "equivalent"
   }
 ]

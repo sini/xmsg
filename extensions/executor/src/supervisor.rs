@@ -82,6 +82,8 @@ impl OwnerRuntimeConfig {
                 ],
                 backend: p.backend.clone(),
                 python: p.python.clone(),
+                #[cfg(test)]
+                accept_probe: p.accept_probe.clone(),
             });
         }
         Err(SupervisorError::BackendUnavailable)
@@ -93,6 +95,7 @@ pub(crate) struct FixtureProgram {
     pub(crate) executable: PathBuf,
     pub(crate) backend: PathBuf,
     pub(crate) python: PathBuf,
+    pub(crate) accept_probe: Option<PathBuf>,
 }
 #[cfg(test)]
 #[derive(Clone)]
@@ -105,6 +108,8 @@ struct TrustedProgram {
     args: Vec<String>,
     backend: PathBuf,
     python: PathBuf,
+    #[cfg(test)]
+    accept_probe: Option<PathBuf>,
 }
 fn private_directory(path: &Path) -> Result<(), SupervisorError> {
     let m = fs::symlink_metadata(path)?;
@@ -155,6 +160,7 @@ pub(crate) struct SupervisorHello {
     pub(crate) event_cursor: u64,
     pub(crate) diagnostic_pid: u32,
     pub(crate) stopped: bool,
+    pub(crate) running: bool,
     pub(crate) events: Vec<SupervisorEvent>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,24 +191,133 @@ struct ChildManifest {
     socket: PathBuf,
     lock_fd: RawFd,
     startup_fd: RawFd,
+    #[cfg(test)]
+    accept_probe: Option<PathBuf>,
     max_wall_ms: u64,
     max_content_bytes: u32,
     workspace: PathBuf,
     backend: PathBuf,
     python: PathBuf,
 }
-fn frame<T: Serialize>(stream: &mut UnixStream, value: &T) -> Result<(), SupervisorError> {
+struct DeadlineIo<'a, T: AsRawFd> {
+    inner: &'a mut T,
+    expires: std::time::Instant,
+    original_flags: i32,
+}
+impl<'a, T: AsRawFd> DeadlineIo<'a, T> {
+    fn new(inner: &'a mut T, expires: std::time::Instant) -> std::io::Result<Self> {
+        let fd = inner.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self {
+            inner,
+            expires,
+            original_flags: flags,
+        })
+    }
+    fn ready(&self, event: i16) -> std::io::Result<()> {
+        loop {
+            let left = self
+                .expires
+                .saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "execution deadline",
+                ));
+            }
+            let wait = i32::try_from(left.as_millis().saturating_add(1).min(i32::MAX as u128))
+                .unwrap_or(i32::MAX);
+            let mut p = libc::pollfd {
+                fd: self.inner.as_raw_fd(),
+                events: event,
+                revents: 0,
+            };
+            let n = unsafe { libc::poll(&mut p, 1, wait) };
+            if n > 0 {
+                return Ok(());
+            }
+            if n < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
+}
+impl<T: AsRawFd> Drop for DeadlineIo<'_, T> {
+    fn drop(&mut self) {
+        unsafe {
+            libc::fcntl(self.inner.as_raw_fd(), libc::F_SETFL, self.original_flags);
+        }
+    }
+}
+impl<T: Read + AsRawFd> Read for DeadlineIo<'_, T> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            self.ready(libc::POLLIN)?;
+            match self.inner.read(bytes) {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue
+                }
+                other => return other,
+            }
+        }
+    }
+}
+impl<T: Write + AsRawFd> Write for DeadlineIo<'_, T> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        loop {
+            self.ready(libc::POLLOUT)?;
+            match self.inner.write(bytes) {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue
+                }
+                other => return other,
+            }
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+fn frame_until<T: Serialize>(
+    stream: &mut UnixStream,
+    value: &T,
+    expires: std::time::Instant,
+) -> Result<(), SupervisorError> {
     let mut data = serde_json::to_vec(value).map_err(|_| SupervisorError::Protocol)?;
     if data.len() + 1 > MAX_CONTROL {
         return Err(SupervisorError::Protocol);
     }
     data.push(b'\n');
-    stream.write_all(&data)?;
+    DeadlineIo::new(stream, expires)?.write_all(&data)?;
     Ok(())
 }
-fn read_frame<T: serde::de::DeserializeOwned>(stream: &UnixStream) -> Result<T, SupervisorError> {
+fn frame<T: Serialize>(stream: &mut UnixStream, value: &T) -> Result<(), SupervisorError> {
+    frame_until(
+        stream,
+        value,
+        std::time::Instant::now() + Duration::from_secs(3),
+    )
+}
+fn read_frame_until<T: serde::de::DeserializeOwned>(
+    stream: &UnixStream,
+    expires: std::time::Instant,
+) -> Result<T, SupervisorError> {
+    let mut copy = stream.try_clone()?;
     let mut data = Vec::new();
-    BufReader::new(stream.try_clone()?)
+    BufReader::new(DeadlineIo::new(&mut copy, expires)?)
         .take((MAX_CONTROL + 1) as u64)
         .read_until(b'\n', &mut data)?;
     if data.len() > MAX_CONTROL || data.last() != Some(&b'\n') {
@@ -210,6 +325,10 @@ fn read_frame<T: serde::de::DeserializeOwned>(stream: &UnixStream) -> Result<T, 
     }
     serde_json::from_slice(&data).map_err(|_| SupervisorError::Protocol)
 }
+fn read_frame<T: serde::de::DeserializeOwned>(stream: &UnixStream) -> Result<T, SupervisorError> {
+    read_frame_until(stream, std::time::Instant::now() + Duration::from_secs(3))
+}
+
 fn call(
     socket: &Path,
     expected: &ExecutionIdentity,
@@ -267,6 +386,8 @@ impl OwnedProcessGroup {
             socket,
             lock_fd: lock.file.as_raw_fd(),
             startup_fd: child_startup.as_raw_fd(),
+            #[cfg(test)]
+            accept_probe: program.accept_probe,
             max_wall_ms: budget.max_wall_ms,
             max_content_bytes: budget.max_content_bytes,
             workspace: workspace.into(),
@@ -379,7 +500,9 @@ impl SupervisorController {
         drop(journal);
         let hello: SupervisorHello = match read_frame::<SupervisorHello>(&group.startup) {
             Ok(hello)
-                if hello.identity == lease.identity && hello.diagnostic_pid == group.child.id() =>
+                if hello.identity == lease.identity
+                    && hello.diagnostic_pid == group.child.id()
+                    && hello.running =>
             {
                 hello
             }
@@ -507,35 +630,30 @@ impl SupervisorController {
             .map_err(|_| ErrorCode::Storage)?
             .administrative_stop_needed(&old.identity)?;
         if administrative_stop {
-            return match call(&socket, &old.identity, true) {
-                Ok(hello) if hello.stopped => {
-                    service
-                        .journal
-                        .lock()
-                        .map_err(|_| ErrorCode::Storage)?
-                        .mark_stopped(&old.identity, hello.event_cursor)?;
-                    Ok(ExecutionObservation {
-                        identity: old.identity,
-                        state: ExecutionState::Stopped,
-                        cursor: hello.event_cursor,
-                        diagnostic_pid: Some(hello.diagnostic_pid),
-                    })
-                }
-                _ => {
+            let _ = call(&socket, &old.identity, true);
+            service
+                .journal
+                .lock()
+                .map_err(|_| ErrorCode::Storage)?
+                .mark_execution(&old.identity, false)?;
+            return Ok(ExecutionObservation {
+                state: ExecutionState::Unknown,
+                ..old
+            });
+        }
+        match call(&socket, &old.identity, false) {
+            Ok(hello) => {
+                if !hello.running {
                     service
                         .journal
                         .lock()
                         .map_err(|_| ErrorCode::Storage)?
                         .mark_execution(&old.identity, false)?;
-                    Ok(ExecutionObservation {
+                    return Ok(ExecutionObservation {
                         state: ExecutionState::Unknown,
                         ..old
-                    })
+                    });
                 }
-            };
-        }
-        match call(&socket, &old.identity, false) {
-            Ok(hello) => {
                 service
                     .journal
                     .lock()
@@ -578,20 +696,18 @@ impl SupervisorController {
             .join(component(&identity.session_id, identity.generation))
             .join("supervisor.sock");
         match call(&socket, &identity, true) {
-            Ok(hello) if hello.stopped => {
-                service
-                    .journal
-                    .lock()
-                    .map_err(|_| ErrorCode::Storage)?
-                    .mark_stopped(&identity, hello.event_cursor)?;
+            Ok(hello) => {
+                let mut journal = service.journal.lock().map_err(|_| ErrorCode::Storage)?;
+                journal.mark_execution(&identity, false)?;
+                journal.db.execute("UPDATE executions SET cursor=MAX(cursor,?1) WHERE session_id=?2 AND generation=?3 AND identity=?4",rusqlite::params![i64::try_from(hello.event_cursor).map_err(|_|ErrorCode::InvalidConfiguration)?,identity.session_id,i64::try_from(identity.generation).map_err(|_|ErrorCode::InvalidConfiguration)?,serde_json::to_string(&identity).map_err(|_|SupervisorError::Protocol)?]).map_err(|_|ErrorCode::Storage)?;
                 Ok(ExecutionObservation {
                     identity,
-                    state: ExecutionState::Stopped,
+                    state: ExecutionState::Unknown,
                     cursor: hello.event_cursor,
                     diagnostic_pid: Some(hello.diagnostic_pid),
                 })
             }
-            _ => {
+            Err(_) => {
                 service
                     .journal
                     .lock()
@@ -680,7 +796,36 @@ fn terminate_owned_backend_group(backend: &mut Child) -> Result<(), SupervisorEr
     Ok(())
 }
 
+fn backend_live(backend: &mut Child, output_fd: RawFd) -> Result<bool, SupervisorError> {
+    if backend.try_wait()?.is_some() {
+        return Ok(false);
+    }
+    let mut pipe = libc::pollfd {
+        fd: output_fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    if unsafe { libc::poll(&mut pipe, 1, 0) } < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(pipe.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) == 0)
+}
 fn run_supervisor_process(manifest: ChildManifest) -> Result<(), SupervisorError> {
+    let expires = std::time::Instant::now()
+        .checked_add(Duration::from_millis(manifest.max_wall_ms))
+        .ok_or(SupervisorError::Protocol)?;
+    let result = run_supervisor_until(manifest, expires);
+    if unsafe { libc::getpgrp() } == i32::try_from(std::process::id()).unwrap_or(-1) {
+        unsafe {
+            libc::kill(-libc::getpgrp(), libc::SIGKILL);
+        }
+    }
+    result
+}
+fn run_supervisor_until(
+    manifest: ChildManifest,
+    expires: std::time::Instant,
+) -> Result<(), SupervisorError> {
     use std::os::fd::FromRawFd;
     let _lock = unsafe { File::from_raw_fd(manifest.lock_fd) };
     let mut startup = unsafe { UnixStream::from_raw_fd(manifest.startup_fd) };
@@ -697,8 +842,10 @@ fn run_supervisor_process(manifest: ChildManifest) -> Result<(), SupervisorError
         .stderr(Stdio::null())
         .spawn()?;
     let mut input = backend.stdin.take().ok_or(SupervisorError::Protocol)?;
-    let output = backend.stdout.take().ok_or(SupervisorError::Protocol)?;
-    let mut reader = crate::framing::FrameReader::new(BufReader::new(output));
+    let mut output = backend.stdout.take().ok_or(SupervisorError::Protocol)?;
+    let output_fd = output.as_raw_fd();
+    let mut reader =
+        crate::framing::FrameReader::new(BufReader::new(DeadlineIo::new(&mut output, expires)?));
     let mut events = Vec::<SupervisorEvent>::new();
     let mut event_bytes = 0usize;
     let mut log = OpenOptions::new()
@@ -731,7 +878,8 @@ fn run_supervisor_process(manifest: ChildManifest) -> Result<(), SupervisorError
             method: method.into(),
             params: Some(params),
         });
-        crate::framing::write_frame(&mut input, &request).map_err(|_| SupervisorError::Protocol)?;
+        crate::framing::write_frame(&mut DeadlineIo::new(&mut input, expires)?, &request)
+            .map_err(|_| SupervisorError::Protocol)?;
         match reader.next_frame().map_err(|_| SupervisorError::Protocol)? {
             Some(crate::framing::Frame::Success(response))
                 if response.id == crate::framing::RequestId::Number(id) =>
@@ -764,14 +912,12 @@ fn run_supervisor_process(manifest: ChildManifest) -> Result<(), SupervisorError
         event_cursor: 2,
         diagnostic_pid: std::process::id(),
         stopped: false,
+        running: backend_live(&mut backend, output_fd)?,
         events: Vec::new(),
     };
-    let _ = frame(&mut startup, &hello);
+    let _ = frame_until(&mut startup, &hello, expires);
     drop(startup);
     listener.set_nonblocking(true)?;
-    let expires = std::time::Instant::now()
-        .checked_add(Duration::from_millis(manifest.max_wall_ms))
-        .ok_or(SupervisorError::Protocol)?;
     loop {
         let remaining = expires.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
@@ -804,10 +950,17 @@ fn run_supervisor_process(manifest: ChildManifest) -> Result<(), SupervisorError
         if crate::unix::peer(&stream)?.uid != xmsg::client::current_uid() {
             continue;
         }
-        let request: SupervisorRequest = match read_frame(&stream) {
+        #[cfg(test)]
+        if let Some(probe) = &manifest.accept_probe {
+            let mut signal = UnixStream::connect(probe)?;
+            frame_until(&mut signal, &"accepted", expires)?;
+        }
+        let request_deadline = expires.min(std::time::Instant::now() + Duration::from_secs(3));
+        let request: SupervisorRequest = match read_frame_until(&stream, request_deadline) {
             Ok(r) => r,
             Err(_) => continue,
         };
+        hello.running = backend_live(&mut backend, output_fd)?;
         let expected = match &request {
             SupervisorRequest::Attach { identity }
             | SupervisorRequest::Stop { identity }
@@ -827,7 +980,7 @@ fn run_supervisor_process(manifest: ChildManifest) -> Result<(), SupervisorError
                 .take(usize::from(max))
                 .cloned()
                 .collect();
-            frame(&mut stream, &response)?;
+            frame_until(&mut stream, &response, request_deadline)?;
             continue;
         }
         if matches!(request, SupervisorRequest::Stop { .. }) {
@@ -835,7 +988,7 @@ fn run_supervisor_process(manifest: ChildManifest) -> Result<(), SupervisorError
             hello.event_cursor += 1;
             let event = SupervisorEvent {
                 cursor: hello.event_cursor,
-                frame: serde_json::json!({"kind":"owned_backend_stopped"}),
+                frame: serde_json::json!({"kind":"owned_backend_stop_attempt"}),
             };
             let raw = serde_json::to_vec(&event).map_err(|_| SupervisorError::Protocol)?;
             if event_bytes
@@ -847,10 +1000,11 @@ fn run_supervisor_process(manifest: ChildManifest) -> Result<(), SupervisorError
             log.write_all(&raw)?;
             log.write_all(b"\n")?;
             log.sync_data()?;
-            hello.stopped = true;
-            frame(&mut stream, &hello)?;
+            hello.running = false;
+            hello.stopped = false;
+            frame_until(&mut stream, &hello, request_deadline)?;
             return Ok(());
         }
-        frame(&mut stream, &hello)?;
+        frame_until(&mut stream, &hello, request_deadline)?;
     }
 }

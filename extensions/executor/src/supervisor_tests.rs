@@ -200,6 +200,7 @@ fn fake_runtime(f: &Fixture) -> OwnerRuntimeConfig {
         executable: std::env::current_exe().unwrap(),
         backend: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_acp_process.py"),
         python,
+        accept_probe: None,
     });
     runtime
 }
@@ -230,11 +231,12 @@ struct BrokerFixture {
     base: String,
     runtime: PathBuf,
     python: PathBuf,
+    backend: PathBuf,
     config: OwnerConfig,
     point: String,
     fd: RawFd,
 }
-fn broker_at_barrier(f: &Fixture, point: &str) -> (Child, UnixStream, serde_json::Value) {
+fn spawn_broker(f: &Fixture, point: &str, backend: Option<PathBuf>) -> (Child, UnixStream) {
     let (parent, child) = UnixStream::pair().unwrap();
     parent
         .set_read_timeout(Some(Duration::from_secs(30)))
@@ -251,6 +253,9 @@ fn broker_at_barrier(f: &Fixture, point: &str) -> (Child, UnixStream, serde_json
             .clone(),
         runtime: f.runtime.root.clone(),
         python,
+        backend: backend.unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_acp_process.py")
+        }),
         config: f.config.clone(),
         point: point.into(),
         fd: child.as_raw_fd(),
@@ -287,8 +292,12 @@ fn broker_at_barrier(f: &Fixture, point: &str) -> (Child, UnixStream, serde_json
             Ok(())
         });
     }
-    let mut broker = command.spawn().unwrap();
+    let broker = command.spawn().unwrap();
     drop(child);
+    (broker, parent)
+}
+fn broker_at_barrier(f: &Fixture, point: &str) -> (Child, UnixStream, serde_json::Value) {
+    let (mut broker, parent) = spawn_broker(f, point, None);
     let event = match read_frame(&parent) {
         Ok(event) => event,
         Err(error) => {
@@ -308,6 +317,20 @@ fn fixture_process_entrypoint() {
         let manifest: ChildManifest =
             serde_json::from_str(&std::env::var("XMSG_EXECUTOR_FIXTURE_MANIFEST").unwrap())
                 .unwrap();
+        let marker = manifest
+            .socket
+            .parent()
+            .unwrap()
+            .join("supervisor-starts.log");
+        let mut starts = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(marker)
+            .unwrap();
+        writeln!(starts, "{}", std::process::id()).unwrap();
+        starts.sync_all().unwrap();
         run_supervisor_process(manifest).unwrap();
     } else if role == "broker" {
         let data: BrokerFixture =
@@ -330,9 +353,9 @@ fn fixture_process_entrypoint() {
         let mut runtime = OwnerRuntimeConfig::new(data.runtime, Arc::new(binding)).unwrap();
         runtime.fixture = Some(FixtureProgram {
             executable: std::env::current_exe().unwrap(),
-            backend: Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/support/fake_acp_process.py"),
+            backend: data.backend,
             python: data.python,
+            accept_probe: None,
         });
         runtime.barrier = Some(FixtureBarrier {
             point: data.point,
@@ -408,10 +431,14 @@ fn genuine_admission_starts_one_real_fake_supervisor_and_stops_owned_backend() {
     let duplicate = controller.start_admitted(&f.service, 1, 100);
     assert!(matches!(duplicate, Err(SupervisorError::Busy)));
     let stopped = stop(&f, &controller);
-    assert_eq!(stopped.state, ExecutionState::Stopped);
-    controller
-        .cleanup_stopped(&f.service, "session-1", 1)
-        .unwrap();
+    assert_eq!(stopped.state, ExecutionState::Unknown);
+    assert!(
+        matches!(
+            controller.cleanup_stopped(&f.service, "session-1", 1),
+            Err(SupervisorError::Unknown)
+        ),
+        "unproven group cleanup discarded workspace"
+    );
 }
 #[test]
 fn forged_receipt_without_dispatch_row_cannot_create_workspace_or_child() {
@@ -452,7 +479,7 @@ fn broker_crash_before_spawn_recovers_reserved_lease_without_double_creation() {
         executions, 1,
         "reserved recovery created duplicate execution"
     );
-    assert_eq!(stop(&f, &controller).state, ExecutionState::Stopped);
+    assert_eq!(stop(&f, &controller).state, ExecutionState::Unknown);
 }
 #[test]
 fn broker_crash_after_spawn_reconciles_live_supervisor_without_relaunch() {
@@ -489,7 +516,7 @@ fn broker_crash_after_spawn_reconciles_live_supervisor_without_relaunch() {
         SupervisorController::new(fake_runtime(&f)).start_admitted(&f.service, 1, 101),
         Err(SupervisorError::Busy)
     ));
-    assert_eq!(stop(&f, &controller).state, ExecutionState::Stopped);
+    assert_eq!(stop(&f, &controller).state, ExecutionState::Unknown);
 }
 #[test]
 fn owner_profile_revocation_stops_authenticated_owned_runtime() {
@@ -512,7 +539,7 @@ fn owner_profile_revocation_stops_authenticated_owned_runtime() {
     let observed = controller
         .reconcile(&f.service, "session-1", 1, 101)
         .unwrap();
-    assert_eq!(observed.state, ExecutionState::Stopped);
+    assert_eq!(observed.state, ExecutionState::Unknown);
     let session: String = f
         .service
         .journal
@@ -523,7 +550,7 @@ fn owner_profile_revocation_stops_authenticated_owned_runtime() {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(session, "ended");
+    assert_eq!(session, "unknown");
 }
 
 #[derive(Serialize, Deserialize)]
@@ -755,7 +782,7 @@ async fn real_bus_sender_commits_control_looking_content_without_authority() {
         .unwrap();
     assert_eq!(origin, "ordinary_sender");
     drop(journal);
-    assert_eq!(stop(&f, &controller).state, ExecutionState::Stopped);
+    assert_eq!(stop(&f, &controller).state, ExecutionState::Unknown);
 }
 
 impl Drop for Fixture {
@@ -862,7 +889,7 @@ fn wrong_supervisor_nonce_cannot_stop_an_owned_backend() {
     let after = after.unwrap();
     assert!(!after.stopped, "wrong nonce stopped the owned backend");
     assert_eq!(after.diagnostic_pid, running.diagnostic_pid.unwrap());
-    assert_eq!(stop(&f, &controller).state, ExecutionState::Stopped);
+    assert_eq!(stop(&f, &controller).state, ExecutionState::Unknown);
 }
 #[test]
 fn missing_supervisor_stays_unknown_consumes_slot_and_never_kills_diagnostic_pid() {
@@ -968,7 +995,7 @@ fn owned_group_stop_closes_a_real_grandchild_probe() {
         matches!(observed, Ok(0)),
         "owned process group left a child alive: {observed:?}"
     );
-    assert_eq!(stopped.state, ExecutionState::Stopped);
+    assert_eq!(stopped.state, ExecutionState::Unknown);
 }
 
 #[test]
@@ -986,14 +1013,13 @@ fn concurrent_brokers_consume_one_launch_and_one_process() {
     });
     let first = SupervisorController::new(config);
     let second = SupervisorController::new(fake_runtime(&f));
-    std::thread::scope(|scope| {
+    let (first_result, second_result) = std::thread::scope(|scope| {
         let a = scope.spawn(|| first.start_admitted(&f.service, 1, 100));
         let event: serde_json::Value = read_frame(&parent).unwrap();
         assert_eq!(event["point"], "before_spawn");
         let b = scope.spawn(|| second.start_admitted(&f.service, 1, 100));
         parent.write_all(b"1").unwrap();
-        assert_eq!(a.join().unwrap().unwrap().state, ExecutionState::Running);
-        assert!(matches!(b.join().unwrap(), Err(SupervisorError::Busy)));
+        (a.join().unwrap(), b.join().unwrap())
     });
     let count: i64 = f
         .service
@@ -1004,7 +1030,23 @@ fn concurrent_brokers_consume_one_launch_and_one_process() {
         .query_row("SELECT COUNT(*) FROM executions", [], |r| r.get(0))
         .unwrap();
     assert_eq!(count, 1, "concurrent claims created duplicate execution");
-    assert_eq!(stop(&f, &second).state, ExecutionState::Stopped);
+    let marker = f
+        .runtime
+        .root
+        .join(component("session-1", 1))
+        .join("supervisor-starts.log");
+    let starts = fs::read_to_string(marker).unwrap();
+    assert_eq!(
+        starts.lines().count(),
+        1,
+        "concurrent brokers created multiple OS supervisors"
+    );
+    assert_eq!(first_result.unwrap().state, ExecutionState::Running);
+    assert!(
+        second_result.is_err(),
+        "second concurrent broker unexpectedly admitted"
+    );
+    assert_eq!(stop(&f, &second).state, ExecutionState::Unknown);
 }
 #[test]
 fn authenticated_event_cursor_reconnect_is_bounded_and_monotonic() {
@@ -1050,14 +1092,14 @@ fn authenticated_event_cursor_reconnect_is_bounded_and_monotonic() {
         .unwrap();
     assert_eq!(stored.cursor, 2, "reconnect rolled event cursor backward");
     assert!(lower.is_err());
-    assert_eq!(stop(&f, &controller).state, ExecutionState::Stopped);
+    assert_eq!(stop(&f, &controller).state, ExecutionState::Unknown);
     let final_state = controller
         .reconcile(&f.service, "session-1", 1, 102)
         .unwrap();
     assert_eq!(
         final_state.state,
-        ExecutionState::Stopped,
-        "observed stop reverted to unknown"
+        ExecutionState::Unknown,
+        "unproven group absence released execution"
     );
     assert_eq!(final_state.cursor, 3);
 }
@@ -1155,6 +1197,7 @@ fn mismatched_live_hello_cannot_publish_running_state() {
                         event_cursor: 2,
                         diagnostic_pid: std::process::id(),
                         stopped: false,
+                        running: true,
                         events: Vec::new(),
                     },
                 )
@@ -1249,7 +1292,7 @@ fn live_supervisor_holds_execution_lock_after_broker_death() {
             .state,
         ExecutionState::Running
     );
-    assert_eq!(stop(&f, &controller).state, ExecutionState::Stopped);
+    assert_eq!(stop(&f, &controller).state, ExecutionState::Unknown);
 }
 #[test]
 fn content_store_deduplicates_before_ack_and_enforces_cumulative_execution_budget() {
@@ -1322,7 +1365,7 @@ fn content_store_deduplicates_before_ack_and_enforces_cumulative_execution_budge
         .unwrap();
     assert_eq!(count, 1, "execution cumulative content budget was exceeded");
     assert!(matches!(result, Err(MembershipError::ContentLimit)));
-    assert_eq!(stop(&f, &controller).state, ExecutionState::Stopped);
+    assert_eq!(stop(&f, &controller).state, ExecutionState::Unknown);
 }
 
 #[test]
@@ -1378,5 +1421,188 @@ fn current_generation_content_binding_is_checked_before_durable_row() {
         .db
         .execute("UPDATE sessions SET generation=1", [])
         .unwrap();
-    assert_eq!(stop(&f, &controller).state, ExecutionState::Stopped);
+    assert_eq!(stop(&f, &controller).state, ExecutionState::Unknown);
+}
+
+fn set_wall_budget(f: &Fixture, millis: u64) {
+    let mut cfg = f.config.clone();
+    cfg.revision = 2;
+    cfg.defaults[0].resolved.budget.max_wall_ms = millis;
+    f.service
+        .admin(
+            peer(),
+            OWNER,
+            crate::control::AdminCommand::ReplacePolicy {
+                request_id: "test-wall-budget".into(),
+                expected_revision: 1,
+                configuration: cfg,
+            },
+            99,
+        )
+        .unwrap();
+}
+fn budget_probe_backend(f: &Fixture, probe: &Path, stall_startup: bool) -> PathBuf {
+    let original = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_acp_process.py");
+    let script = f.dir.path().join(if stall_startup {
+        "stall_startup.py"
+    } else {
+        "budget_backend.py"
+    });
+    let code=format!("import socket,signal,os,runpy\nsignal.signal(signal.SIGALRM,lambda *args:os.killpg(os.getpgrp(),signal.SIGKILL));signal.alarm(10)\ns=socket.socket(socket.AF_UNIX);s.connect({});s.sendall(b'R')\n{}\n",serde_json::to_string(&probe.to_string_lossy()).unwrap(),if stall_startup{"s.recv(1)".into()}else{format!("runpy.run_path({},run_name='__main__')",serde_json::to_string(&original.to_string_lossy()).unwrap())});
+    fs::write(&script, code).unwrap();
+    script
+}
+#[test]
+fn resistant_descendant_stop_is_unknown_and_retains_slot_and_workspace() {
+    let f = fixture();
+    admit(&f);
+    let probe = f.dir.path().join("resistant.sock");
+    let listener = UnixListener::bind(&probe).unwrap();
+    let wrapper = f.dir.path().join("resistant_backend.py");
+    let original = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_acp_process.py");
+    let child="import os,signal,sys;fd=int(sys.argv[1]);signal.signal(signal.SIGTERM,signal.SIG_IGN);signal.alarm(10);os.write(fd,b'R');signal.pause()";
+    let code=format!("import socket,subprocess,sys,runpy\ns=socket.socket(socket.AF_UNIX);s.connect({})\np=subprocess.Popen([sys.executable,'-c',{},str(s.fileno())],pass_fds=(s.fileno(),))\nrunpy.run_path({},run_name='__main__')",serde_json::to_string(&probe.to_string_lossy()).unwrap(),serde_json::to_string(child).unwrap(),serde_json::to_string(&original.to_string_lossy()).unwrap());
+    fs::write(&wrapper, code).unwrap();
+    let mut cfg = fake_runtime(&f);
+    cfg.fixture.as_mut().unwrap().backend = wrapper;
+    let controller = SupervisorController::new(cfg);
+    controller.start_admitted(&f.service, 1, 100).unwrap();
+    let (mut stream, _) = listener.accept().unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut byte = [0];
+    stream.read_exact(&mut byte).unwrap();
+    assert_eq!(byte[0], b'R');
+    let result = stop(&f, &controller);
+    let slots: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE state!='ended'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(slots, 1, "uncertain group stop released resource slot");
+    assert_eq!(result.state, ExecutionState::Unknown);
+    assert!(
+        matches!(
+            controller.cleanup_stopped(&f.service, "session-1", 1),
+            Err(SupervisorError::Unknown)
+        ),
+        "uncertain group stop allowed workspace cleanup"
+    );
+    let destination = f
+        .dir
+        .path()
+        .join("worktrees")
+        .join(component("session-1", 1));
+    assert!(
+        destination.exists(),
+        "uncertain group stop discarded workspace"
+    );
+}
+#[test]
+fn broker_death_during_initialize_cannot_bypass_supervisor_wall_budget() {
+    let f = fixture();
+    set_wall_budget(&f, 500);
+    admit(&f);
+    let probe = f.dir.path().join("startup-budget.sock");
+    let listener = UnixListener::bind(&probe).unwrap();
+    let backend = budget_probe_backend(&f, &probe, true);
+    let (mut broker, _barrier) = spawn_broker(&f, "after_spawn", Some(backend));
+    let (mut stream, _) = listener.accept().unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut byte = [0];
+    stream.read_exact(&mut byte).unwrap();
+    assert_eq!(byte[0], b'R');
+    broker.kill().unwrap();
+    broker.wait().unwrap();
+    let ended = stream.read(&mut byte);
+    assert!(
+        matches!(ended, Ok(0)),
+        "startup handshake escaped supervisor wall budget: {ended:?}"
+    );
+    let observed = SupervisorController::new(f.runtime.clone())
+        .reconcile(&f.service, "session-1", 1, 101)
+        .unwrap();
+    assert_eq!(observed.state, ExecutionState::Unknown);
+}
+#[test]
+fn stalled_accepted_client_cannot_postpone_execution_wall_budget() {
+    let f = fixture();
+    set_wall_budget(&f, 500);
+    admit(&f);
+    let backend_probe = f.dir.path().join("client-budget-backend.sock");
+    let backend_listener = UnixListener::bind(&backend_probe).unwrap();
+    let accepted = f.dir.path().join("accepted.sock");
+    let accepted_listener = UnixListener::bind(&accepted).unwrap();
+    let mut cfg = fake_runtime(&f);
+    cfg.fixture.as_mut().unwrap().backend = budget_probe_backend(&f, &backend_probe, false);
+    cfg.fixture.as_mut().unwrap().accept_probe = Some(accepted);
+    let controller = SupervisorController::new(cfg);
+    let running = controller.start_admitted(&f.service, 1, 100).unwrap();
+    let (mut backend, _) = backend_listener.accept().unwrap();
+    backend
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut byte = [0];
+    backend.read_exact(&mut byte).unwrap();
+    let socket = f
+        .runtime
+        .root
+        .join(component("session-1", 1))
+        .join("supervisor.sock");
+    let mut client = UnixStream::connect(socket).unwrap();
+    client.write_all(b"{").unwrap();
+    let (accepted_signal, _) = accepted_listener.accept().unwrap();
+    let accepted_text: String = read_frame(&accepted_signal).unwrap();
+    assert_eq!(accepted_text, "accepted");
+    let ended = backend.read(&mut byte);
+    assert!(
+        matches!(ended, Ok(0)),
+        "accepted client extended supervisor wall budget: {ended:?}"
+    );
+    assert_eq!(running.state, ExecutionState::Running);
+}
+#[test]
+fn held_backend_exit_is_observed_before_attach_can_publish_running() {
+    let f = fixture();
+    admit(&f);
+    let probe = f.dir.path().join("backend-exit.sock");
+    let listener = UnixListener::bind(&probe).unwrap();
+    let script = f.dir.path().join("exit_backend.py");
+    let code=format!("import socket,sys,json,os\ns=socket.socket(socket.AF_UNIX);s.connect({})\nfor i in range(2):\n q=json.loads(sys.stdin.readline());print(json.dumps({{'jsonrpc':'2.0','id':q['id'],'result':{{'protocolVersion':1}}}}),flush=True)\ns.sendall(b'R');s.recv(1);os._exit(0)\n",serde_json::to_string(&probe.to_string_lossy()).unwrap());
+    fs::write(&script, code).unwrap();
+    let mut cfg = fake_runtime(&f);
+    cfg.fixture.as_mut().unwrap().backend = script;
+    let controller = SupervisorController::new(cfg);
+    controller.start_admitted(&f.service, 1, 100).unwrap();
+    let (mut stream, _) = listener.accept().unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut byte = [0];
+    stream.read_exact(&mut byte).unwrap();
+    stream.write_all(b"X").unwrap();
+    assert_eq!(stream.read(&mut byte).unwrap(), 0);
+    let result = controller
+        .reconcile(&f.service, "session-1", 1, 101)
+        .unwrap();
+    let state: String = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT state FROM executions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(state, "unknown", "dead backend published running state");
+    assert_eq!(result.state, ExecutionState::Unknown);
 }
