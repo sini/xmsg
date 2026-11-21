@@ -583,6 +583,23 @@ Observe export `v=2` is a breaking cut with no dual serving (`v=1` and omitted
 together. Reference Home Manager packaging (`programs.xmsg.activity.enable`) is
 one way to configure it, not a requirement.
 
+### Upgrading from export v1
+
+- **Coordinated cut:** Node daemons, relay hubs, and collectors must cut over
+  together; there is no mixed-version compatibility window.
+- **v1 HTTP 400 refusal:** Upgraded node exporters and relay hubs refuse `v=1`
+  or omitted `v` queries with HTTP 400 (`invalid`), so an un-upgraded v1
+  collector reports `invalid` until it is upgraded too.
+- **Deploy order:** Upgrade node daemons (`xmsg serve`) and relay hubs first,
+  then upgrade and restart `xmsg observe-collector` so every upstream endpoint
+  already serves `v=2` when the collector resumes polling.
+- **Rollback (sidecar retained):** Stop the affected services, roll back node
+  daemons, relay hubs, and the collector together to the previous v1 binary, and
+  remove any `xmsg activity hook` entries (delivery hooks remain untouched). The
+  `<configured-db-path>.observe.sqlite` observation sidecar can remain in place
+  on disk while running v1 (note that downgrading the collector permanently
+  deletes relay history in `collector.sqlite`, as noted above).
+
 ### Plain-daemon install and rollback
 
 1. **Enable:** Start each node daemon with `xmsg serve --activity` (optional
