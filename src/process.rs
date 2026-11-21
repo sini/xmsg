@@ -2456,6 +2456,13 @@ pub fn strict_open_file_vnodes(
         let text = std::str::from_utf8(&bytes).map_err(|_| FailureReason::AuthorityUnavailable)?;
         let mut holders = std::collections::HashSet::new();
         for line in text.lines().filter_map(|l| l.strip_prefix("lock:")) {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() < 4 {
+                return Err(FailureReason::AuthorityUnavailable);
+            }
+            if fields[1] != "FLOCK" || fields[3] != "WRITE" {
+                continue;
+            }
             let Some((holder, major, minor, inode)) = crate::agy::parse_locks_line(line) else {
                 return Err(FailureReason::AuthorityUnavailable);
             };
@@ -2489,4 +2496,56 @@ pub fn strict_open_file_vnodes(
         return Err(FailureReason::Deadline);
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod strict_vnode_tests {
+    #[test]
+    fn non_flock_metadata_is_not_a_failed_writer_lease_parse() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let pid = 100;
+        std::fs::create_dir_all(root.path().join("100/fd")).unwrap();
+        std::fs::create_dir_all(root.path().join("100/fdinfo")).unwrap();
+        let mut fields = vec!["0"; 20];
+        fields[0] = "S";
+        fields[19] = "42";
+        std::fs::write(
+            root.path().join("100/stat"),
+            format!("{pid} (fixture) {}\n", fields.join(" ")),
+        )
+        .unwrap();
+        let target = root.path().join("regular");
+        std::fs::write(&target, b"fixture").unwrap();
+        symlink(&target, root.path().join("100/fd/4")).unwrap();
+        std::fs::write(
+            root.path().join("100/fdinfo/4"),
+            "lock: 1: POSIX ADVISORY WRITE 100 00:00:1 0 EOF\n",
+        )
+        .unwrap();
+        let rows = super::strict_open_file_vnodes(
+            root.path(),
+            pid,
+            "42",
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].has_flock);
+        std::fs::write(
+            root.path().join("100/fdinfo/4"),
+            "lock: 1: FLOCK ADVISORY WRITE invalid\n",
+        )
+        .unwrap();
+        assert_eq!(
+            super::strict_open_file_vnodes(
+                root.path(),
+                pid,
+                "42",
+                std::time::Instant::now() + std::time::Duration::from_secs(1)
+            )
+            .err(),
+            Some(crate::client::caller_attribution::FailureReason::AuthorityUnavailable)
+        );
+    }
 }
