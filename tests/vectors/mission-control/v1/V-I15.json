@@ -1,0 +1,5 @@
+{
+  "transport": "websocket",
+  "input_bytes": 16385,
+  "expect_close": 1009
+}

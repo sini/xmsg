@@ -1,0 +1,5 @@
+{
+  "method": "GET",
+  "path": "/v1/mission-control/session?access_token=fixture",
+  "status": 400
+}

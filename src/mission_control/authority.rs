@@ -338,6 +338,10 @@ struct State {
     generation: i64,
     records: HashMap<String, Stored>,
     by_digest: HashMap<[u8; 32], String>,
+    #[cfg(test)]
+    suppress_push: bool,
+    #[cfg(test)]
+    last_revoke: Option<(i64, Instant)>,
     masked_nodes: HashSet<String>,
     live: HashMap<u64, Registration>,
     #[allow(dead_code, reason = "Mission Control transport registry")]
@@ -530,6 +534,10 @@ impl Authority {
                 generation,
                 records,
                 by_digest,
+                #[cfg(test)]
+                suppress_push: false,
+                #[cfg(test)]
+                last_revoke: None,
                 masked_nodes: HashSet::new(),
                 live: HashMap::new(),
                 next_live_id: 0,
@@ -929,6 +937,10 @@ impl Authority {
         audit(&tx, now(), "revoke", Some(owner_for(&record)), Some(id))?;
         tx.commit()?;
         let change = Instant::now();
+        #[cfg(test)]
+        {
+            state.last_revoke = Some((state.conn.last_insert_rowid(), change));
+        }
         state
             .records
             .get_mut(id)
@@ -940,6 +952,16 @@ impl Authority {
             self.cutoff(),
         );
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn suppress_push_for_test(&self) {
+        self.locked().unwrap().suppress_push = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_revoke_for_test(&self) -> (i64, Instant) {
+        self.locked().unwrap().last_revoke.unwrap()
     }
 
     pub(crate) fn rebind(&self, owner: &str, issuer: &str, subject: &str) -> Result<()> {
@@ -1119,21 +1141,37 @@ pub(crate) struct Live {
 }
 
 impl Registration {
-    fn invalidate(&mut self, reason: InvalidationReason, changed_at: Instant, slo: Duration) {
+    fn invalidate(
+        &mut self,
+        reason: InvalidationReason,
+        changed_at: Instant,
+        slo: Duration,
+        push: bool,
+    ) {
         if self.invalidation.is_some() {
             return;
         }
-        let cutoff = changed_at + slo;
-        let invalidation = Invalidation {
+        self.invalidation = Some(Invalidation {
             reason,
             changed_at,
-            cutoff,
+            cutoff: changed_at + slo,
+        });
+        if push {
+            self.dispatch();
+        }
+    }
+
+    fn dispatch(&mut self) {
+        let Some(change) = self.invalidation else {
+            return;
         };
-        self.invalidation = Some(invalidation);
-        self.sender.send_replace(Some(invalidation));
+        if self.sender.borrow().is_some() {
+            return;
+        }
+        self.sender.send_replace(Some(change));
         let socket = Arc::clone(&self.abort);
-        // Reserve time for timer granularity and socket wake-up before the cutoff.
-        let abort_at = cutoff - (slo / 10).min(Duration::from_millis(25));
+        let slo = change.cutoff - change.changed_at;
+        let abort_at = change.cutoff - (slo / 10).min(Duration::from_millis(25));
         self.runtime.spawn(async move {
             tokio::time::sleep_until(abort_at.into()).await;
             let _ = socket.shutdown(Shutdown::Both);
@@ -1148,9 +1186,13 @@ impl State {
         changed_at: Instant,
         slo: Duration,
     ) {
+        #[cfg(test)]
+        let push = !self.suppress_push;
+        #[cfg(not(test))]
+        let push = true;
         for registration in self.live.values_mut() {
             if let Some(reason) = reason(registration) {
-                registration.invalidate(reason, changed_at, slo);
+                registration.invalidate(reason, changed_at, slo, push);
             }
         }
     }
@@ -1256,9 +1298,7 @@ impl Authority {
             let now = Instant::now();
             for registration in state.live.values_mut() {
                 if let Some(change) = registration.invalidation {
-                    if registration.sender.borrow().is_none() {
-                        registration.sender.send_replace(Some(change));
-                    }
+                    registration.dispatch();
                     if now >= change.cutoff {
                         let _ = registration.abort.shutdown(Shutdown::Both);
                     }
@@ -1267,6 +1307,7 @@ impl Authority {
                         InvalidationReason::LeaseExpired,
                         registration.lease,
                         authority.cutoff(),
+                        true,
                     );
                 }
             }

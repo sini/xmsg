@@ -196,3 +196,15 @@ the last applied observation are shown separately from connection state.
 
 See [issuer setup](/operations/fleet-observer/#mission-control-issuer) and
 the [wire reference](/reference/http-and-sockets/#mission-control-issuer-routes).
+
+### Attention and delivery
+
+The initial read-only session uses the collector's polled upstream.
+Each node reports Delayed, with the latest real source observation
+timestamp. A heartbeat can refresh the connection without refreshing
+a node. Watch for the difference when deciding whether a block is current.
+
+Attention combines current input and permission blocks, node failures,
+and coverage gaps. A masked or stale endpoint contributes no actionable
+block. An unreachable node has one attention item even when its view is
+also stale. Items keep their IDs while the underlying condition persists.

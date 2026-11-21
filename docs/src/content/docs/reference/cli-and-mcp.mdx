@@ -753,3 +753,13 @@ See the [socket contract](/reference/http-and-sockets/#session-context-tags) for
 - `xmsg activity hook <harness> [--correlated] [--sock <path>]`: Isolated,
   fail-open hook helper (1 MiB bounded stdin, depth-32 JSON parse, 100 ms
   application deadline, allowlisted 1 KiB frame, always exits `0`).
+
+## Planned Mission Control terminal view
+
+<Status id="mission-control.http" />
+
+`xmsg mission-control --origin <collector-origin> --client-id <native-id>`
+starts the collector's device grant and then presents a read-only fleet
+view. Use the `native_client_id` from collector config. The session
+handle remains in memory. Use Ctrl+C to exit. The owner CLI above
+continues to mint, list, revoke, and re-bind credentials.
