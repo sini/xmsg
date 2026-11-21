@@ -1,0 +1,341 @@
+{
+  "version": 1,
+  "pins": [
+    {
+      "pin": {
+        "id": "claude-acp-v1",
+        "harness": "claude",
+        "adapter": "claude-agent-acp",
+        "adapter_version": "0.108.0",
+        "runtime_version": "2.1.327",
+        "protocol_version": 1,
+        "source_revision": "a6ba98ff3cf065d681abfe21042a8ce7ee292a09"
+      },
+      "capabilities": [
+        {
+          "capability": "strict_steer",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "confirmed_interrupt",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "reconnect",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "stored_resume",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "pending_approval",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "human_mandatory_provenance",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "native_children",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "per_call_control_binding",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "reviewer_isolation",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        }
+      ],
+      "profiles": [
+        {
+          "mode": "safe",
+          "owner_selection_required": false,
+          "protections": {
+            "hard_denials": {
+              "state": "unknown",
+              "reason": "No runtime protection conformance has been executed for this tuple."
+            },
+            "human_checkpoints": {
+              "state": "unknown",
+              "reason": "No runtime protection conformance has been executed for this tuple."
+            }
+          }
+        },
+        {
+          "mode": "unsafe",
+          "owner_selection_required": true,
+          "protections": {
+            "hard_denials": {
+              "state": "unknown",
+              "reason": "No runtime protection conformance has been executed for this tuple."
+            },
+            "human_checkpoints": {
+              "state": "unknown",
+              "reason": "No runtime protection conformance has been executed for this tuple."
+            }
+          }
+        }
+      ],
+      "qualification_backlog": [
+        "per-call parent principal binding without ambient authority",
+        "native ask/manual mode verified before prompt and after resume",
+        "effective reviewer tools/hooks/customizations absent after new and load",
+        "real steer/interrupt/resume effects on the exact pin and model"
+      ]
+    },
+    {
+      "pin": {
+        "id": "codex-acp-v1",
+        "harness": "codex",
+        "adapter": "codex-acp",
+        "adapter_version": "2.7.0",
+        "runtime_version": "0.169.1",
+        "protocol_version": 1,
+        "source_revision": "7c98a1608022cbb2b7e425ae7a1df5fde86c6ff2"
+      },
+      "capabilities": [
+        {
+          "capability": "strict_steer",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "confirmed_interrupt",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "reconnect",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "stored_resume",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "pending_approval",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "human_mandatory_provenance",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "native_children",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "per_call_control_binding",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "reviewer_isolation",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        }
+      ],
+      "profiles": [
+        {
+          "mode": "safe",
+          "owner_selection_required": false,
+          "protections": {
+            "hard_denials": {
+              "state": "unknown",
+              "reason": "No runtime protection conformance has been executed for this tuple."
+            },
+            "human_checkpoints": {
+              "state": "unknown",
+              "reason": "No runtime protection conformance has been executed for this tuple."
+            }
+          }
+        },
+        {
+          "mode": "unsafe",
+          "owner_selection_required": true,
+          "protections": {
+            "hard_denials": {
+              "state": "unknown",
+              "reason": "No runtime protection conformance has been executed for this tuple."
+            },
+            "human_checkpoints": {
+              "state": "unknown",
+              "reason": "No runtime protection conformance has been executed for this tuple."
+            }
+          }
+        }
+      ],
+      "qualification_backlog": [
+        "per-call parent principal binding without ambient authority",
+        "native ask/manual mode verified before prompt and after resume",
+        "effective reviewer tools/hooks/customizations absent after new and load",
+        "real steer/interrupt/resume effects on the exact pin and model"
+      ]
+    },
+    {
+      "pin": {
+        "id": "agy-acp-v1",
+        "harness": "agy",
+        "adapter": "agy acp",
+        "adapter_version": "1.5.10",
+        "runtime_version": "1.5.10",
+        "protocol_version": 1,
+        "source_revision": null
+      },
+      "capabilities": [
+        {
+          "capability": "strict_steer",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "confirmed_interrupt",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "reconnect",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "stored_resume",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "pending_approval",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "human_mandatory_provenance",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "native_children",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "per_call_control_binding",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        },
+        {
+          "capability": "reviewer_isolation",
+          "state": {
+            "state": "unproven",
+            "reason": "Source/package presence is not runtime conformance."
+          }
+        }
+      ],
+      "profiles": [
+        {
+          "mode": "safe",
+          "owner_selection_required": false,
+          "protections": {
+            "hard_denials": {
+              "state": "unknown",
+              "reason": "No runtime protection conformance has been executed for this tuple."
+            },
+            "human_checkpoints": {
+              "state": "unknown",
+              "reason": "No runtime protection conformance has been executed for this tuple."
+            }
+          }
+        },
+        {
+          "mode": "unsafe",
+          "owner_selection_required": true,
+          "protections": {
+            "hard_denials": {
+              "state": "unknown",
+              "reason": "No runtime protection conformance has been executed for this tuple."
+            },
+            "human_checkpoints": {
+              "state": "unknown",
+              "reason": "No runtime protection conformance has been executed for this tuple."
+            }
+          }
+        }
+      ],
+      "qualification_backlog": [
+        "per-call parent principal binding without ambient authority",
+        "native ask/manual mode verified before prompt and after resume",
+        "effective reviewer tools/hooks/customizations absent after new and load",
+        "real steer/interrupt/resume effects on the exact pin and model"
+      ]
+    }
+  ]
+}
