@@ -264,7 +264,7 @@ impl RelayFixture {
         request_to(self.address, &self.hub, caller, method, uri, body, headers).await
     }
     fn uri(&self, kind: &str) -> String {
-        format!("/fed/v2/observe/relay/{}/{kind}", self.leaf.node)
+        format!("/fed/v2/observe/relay/{}/{kind}?v=2", self.leaf.node)
     }
 }
 async fn request_to(
@@ -1387,7 +1387,7 @@ async fn slow_busy_answer_does_not_block_list_or_attachment_controls() {
                     &server,
                     &caller,
                     "GET",
-                    "/fed/v2/observe/snapshot",
+                    "/fed/v2/observe/snapshot?v=2",
                     vec![],
                     &[],
                 )
@@ -2181,7 +2181,7 @@ async fn relay_reads_fill_the_same_leaf_budget_seen_by_direct_export() {
             &f.leaf,
             &f.collector,
             "GET",
-            "/fed/v2/observe/snapshot",
+            "/fed/v2/observe/snapshot?v=2",
             vec![],
             &[],
         )
