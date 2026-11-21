@@ -79,6 +79,8 @@ impl Node {
         let codex = directory.path().join("codex");
         let mut child = Command::new(env!("CARGO_BIN_EXE_xmsg"))
             .scrub_agy_env()
+            .env("HOME", directory.path())
+            .env("XDG_RUNTIME_DIR", directory.path().join("run"))
             .env("CODEX_HOME", &codex)
             .env_remove("XMSG_CODEX_HOME")
             .env_remove("XMSG_CODEX_EXE")

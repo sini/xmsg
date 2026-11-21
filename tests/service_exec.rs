@@ -46,6 +46,7 @@ fn isolated(cmd: &mut Command, dir: &Path) {
 impl Node {
     fn start() -> Self {
         let dir = tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
         for name in ["run", "sessions", "codex"] {
             let p = dir.path().join(name);
             fs::create_dir(&p).unwrap();
