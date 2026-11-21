@@ -386,6 +386,7 @@ fn get_self_proc_start() -> String {
 
 #[tokio::test]
 async fn context_updates_require_the_attested_session() {
+    let tmp = tempdir().unwrap();
     let live_proc = std::path::PathBuf::from(xmsg::process::LIVE_PROC_ROOT);
     let uid = current_uid();
     let pid = std::process::id();
@@ -410,6 +411,8 @@ async fn context_updates_require_the_attested_session() {
         sessions_dirs: Vec::new(),
         agy_config: AgyConfig {
             proc_root: live_proc,
+            presence_dir: tmp.path().join("presence"),
+            brain_dir: tmp.path().join("brain"),
             ..Default::default()
         },
         agy_store: new_agy_store(),
