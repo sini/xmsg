@@ -312,7 +312,7 @@ fn capture_step(
                     turn_id.as_deref(),
                     deadline,
                 )?;
-                let row:Option<(u32,String,i64,bool,bool,String,i64,i64)>=connection.query_row("SELECT owner_pid,owner_starttime,generation,active,revoked,codex_home,rollout_dev,rollout_ino FROM codex_roots WHERE root_id=?1",[session_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?))).optional().map_err(|_|FailureReason::AuthorityUnavailable)?;
+                let row:Option<CodexSqlRoot>=connection.query_row("SELECT owner_pid,owner_starttime,generation,active,revoked,codex_home,rollout_dev,rollout_ino FROM codex_roots WHERE root_id=?1",[session_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?))).optional().map_err(|_|FailureReason::AuthorityUnavailable)?;
                 let row = row.ok_or(FailureReason::Context)?;
                 if row.0 != step.pid
                     || row.1 != step.start
@@ -458,3 +458,7 @@ pub fn resolve(
     }
     Err(FailureReason::Limit)
 }
+
+#[cfg(test)]
+#[path = "resolve_tests.rs"]
+mod tests;
