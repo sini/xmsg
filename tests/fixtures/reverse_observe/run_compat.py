@@ -60,7 +60,25 @@ def controls(binary, library, target):
     raise AssertionError("cached-library refusal control failed")
 
 
-def build(source, output, variant, seed, candidate):
+def configure_vendor_cargo_home(output, variant, vendor_dir):
+    cargo_home = output / f"{variant}-cargo-home"
+    cargo_home.mkdir(mode=0o700)
+    vendor_config = vendor_dir / "config.toml"
+    if vendor_config.is_file():
+        config_text = vendor_config.read_text()
+    else:
+        escaped = json.dumps(str(vendor_dir))
+        config_text = (
+            '[source.crates-io]\n'
+            'replace-with = "vendored-sources"\n'
+            '[source.vendored-sources]\n'
+            f'directory = {escaped}\n'
+        )
+    (cargo_home / "config.toml").write_text(config_text)
+    return cargo_home
+
+
+def build(source, output, variant, seed, candidate, vendor_dir=None):
     tree, target = output / variant, output / f"{variant}-target"
     tree.mkdir()
     for name in ("Cargo.toml","Cargo.lock"):
@@ -84,6 +102,9 @@ def build(source, output, variant, seed, candidate):
         assert "release" not in seed.parts, "release seed refused"
         shutil.copytree(seed,target,symlinks=True)
     env = os.environ.copy()
+    if vendor_dir is not None:
+        env["CARGO_HOME"] = str(configure_vendor_cargo_home(output, variant, vendor_dir))
+        env["CARGO_NET_OFFLINE"] = "true"
     env["CARGO_TARGET_DIR"] = str(target)
     nonce = secrets.token_hex(16)
     env["REVERSE_BUILD_NONCE"] = nonce
@@ -109,6 +130,8 @@ def build(source, output, variant, seed, candidate):
     source_hashes = {str(f.relative_to(tree)):digest(f) for f in (tree/"src").rglob("*") if f.is_file()}
     receipt = {"variant":variant,"production_src_sha256":source_hashes,"helper_sha256":digest(helper),
                "manifest_sha256":digest(manifest),"lock_sha256":digest(tree/"Cargo.lock"),
+               "vendor_dir":str(vendor_dir) if vendor_dir is not None else None,
+               "seeded":seed is not None,
                "binary_sha256":digest(binary),"library_sha256":{str(Path(f).name):digest(Path(f)) for f in library["filenames"]},
                "binary":str(binary),"nonce":nonce,"library_fresh":False,"helper_fresh":False,
                "actual_cached_build_refused":True,
@@ -153,6 +176,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source",type=Path,required=True)
     parser.add_argument("--old-source",type=Path,required=True)
+    parser.add_argument("--old-vendor",type=Path)
     parser.add_argument("--output",type=Path,required=True)
     parser.add_argument("--artifact-seed",type=Path)
     parser.add_argument("--old-build-only",action="store_true")
@@ -161,10 +185,13 @@ def main():
     assert source != old and not source.is_relative_to(output) and not old.is_relative_to(output)
     seed = args.artifact_seed.resolve(strict=True) if args.artifact_seed else None
     assert seed is None or not output.is_relative_to(seed), "output must be outside artifact seed"
+    old_vendor = args.old_vendor.resolve(strict=True) if args.old_vendor else None
+    assert old_vendor is None or not output.is_relative_to(old_vendor), "output must be outside old vendor dir"
     pin = verify_old(old)
+    old_seed = seed if (seed is not None and digest(old / "Cargo.lock") == digest(source / "Cargo.lock")) else None
     output.mkdir(parents=True,exist_ok=False,mode=0o700)
     isolation_controls(output)
-    older = build(old,output,"old",seed,False)
+    older = build(old,output,"old",old_seed,False,vendor_dir=old_vendor)
     if args.old_build_only:
         print("old-only construction check; candidate/downgrade NOT executed")
         return
