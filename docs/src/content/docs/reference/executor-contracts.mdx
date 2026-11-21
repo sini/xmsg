@@ -9,10 +9,10 @@ import Status from '../../../components/Status.astro';
 
 The standalone `xmsg-executor` library lives in `extensions/executor/`. This
 foundation contains data contracts, bounded ACP framing and test-only fake
-fixtures. The next library boundary adds a private Unix control handler and
-separate journal, but **real lifecycle calls fail closed** until the independent
-host-attestation bridge exists. There is no executable, runtime launcher or
-real harness integration. The [teams runtime](/concepts/teams/) remains planned.
+fixtures, a private Unix control handler and a separate journal.
+**Real lifecycle calls fail closed** until the independent
+host-attestation bridge exists. There is no installed executable or real harness integration.
+Supervisor subprocess fixtures use a fake ACP backend only. The [teams runtime](/concepts/teams/) remains planned.
 The default xmsg installation does not acquire an executor dependency.
 
 ## Developer checks
@@ -108,8 +108,8 @@ The executor database is separate from the bus database, in a private directory.
 It records requests, sessions, admissions, policy/profile revisions and audit
 metadata. Fake pending requests test human-decision fencing and single use;
 they are not a real ACP approval relay or a claim that native human-only
-provenance is preserved. No code launches a process, turns a message into
-control, or invokes a real harness.
+provenance is preserved. The supervisor fixtures launch only owned fake subprocesses. No bus message
+becomes control, and no real harness is invoked.
 
 ### Privileged connection contracts
 
@@ -125,3 +125,50 @@ revision checks and atomic configuration validation. Human decisions require
 the human channel and exact still-pending request binding. Their credentials
 do not bypass lifecycle attribution or grant checks. These controls do not
 claim isolation from arbitrary same-UID code.
+
+
+## Supervisor and workspace boundary
+
+<Status id="teams.supervisor" />
+
+The crate-private supervisor foundation consumes journal-derived launch authority, not
+serialized receipts supplied by a caller. Immediately before launch it rechecks
+the current grant, profile, generation and resource budget. A durable launch
+intent and exclusive execution lock prevent concurrent claims or reconnects
+from starting a second execution. Reconnect reconciles identity and progress;
+it does not replay a prompt or silently start a replacement.
+
+An ambiguous or lost owner is `unknown`, with its resource slot still consumed.
+A saved PID alone is neither ownership nor proof of death. Stop applies only
+to an owned process group; it is not an interrupt fallback. In this stage, a
+stop attempt remains `unknown` and retains the slot and workspace: reaping the
+direct backend does not prove that every descendant has stopped. The supervisor
+bounds startup and connection I/O within the execution wall-time budget and
+checks its held backend before reporting it running.
+
+Workspace preparation uses an owner-bound repository, an immutable base and an
+approved destination root. It revalidates repository identity, HEAD and worktree
+inventory before the owned effect. It does not copy a dirty checkout or harness
+authentication files. Cleanup preserves modified work rather than silently
+discarding it.
+
+### Ordinary bus service proxies
+
+Each proxy is an ordinary service recipient registered through the existing
+client SDK, with a compact stable service name. It introduces no recipient kind
+or core role. Incoming message IDs and bounded content are committed before the
+message is acknowledged, so reconnect can recognize a duplicate delivery.
+
+Text, JSON-looking control requests and approval-looking replies remain
+content. Neither their origin nor their wording grants lifecycle, owner or human
+authority. Real-bus fixtures exercise this distinction with a sender and an
+isolated daemon; they do not use the fleet service.
+
+### Recovery example
+
+If a broker disconnects after a fake child starts but before acknowledgement,
+the next connection reconciles the existing execution. If ownership cannot be
+established, the result stays `unknown` and reserves the slot; it does not spawn
+another child to recover availability. Dirty workspace contents remain available
+for inspection. These are fake-backend library checks, not instructions for
+starting a production team.
