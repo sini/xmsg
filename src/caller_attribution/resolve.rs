@@ -420,6 +420,10 @@ pub fn resolve(
             return Err(FailureReason::Ambiguous);
         }
         if let Some(candidate) = candidates.into_iter().next() {
+            #[cfg(test)]
+            if let Some(barrier) = REVALIDATION_BARRIER.with(|cell| cell.borrow_mut().take()) {
+                barrier();
+            }
             for prior in &previous_steps {
                 if strict_process_link(&state.agy_config.proc_root, prior.pid)? != *prior {
                     return Err(FailureReason::Changed);
@@ -461,3 +465,8 @@ pub fn resolve(
 #[cfg(test)]
 #[path = "resolve_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+thread_local! {
+    static REVALIDATION_BARRIER:std::cell::RefCell<Option<Box<dyn FnOnce()>>>=const{std::cell::RefCell::new(None)};
+}
