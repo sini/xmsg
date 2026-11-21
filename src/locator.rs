@@ -148,6 +148,19 @@ pub fn valid_native_id(harness: &str, id: &str) -> bool {
     }
 }
 
+pub fn valid_native_id_with_registry(
+    harnesses: &crate::harnesses::HarnessRegistry,
+    harness: &str,
+    id: &str,
+) -> bool {
+    if valid_native_id(harness, id) {
+        return true;
+    }
+    harnesses
+        .get(harness)
+        .is_some_and(|desc| desc.validate_id(id))
+}
+
 fn fail(e: impl std::fmt::Display) -> AppError {
     AppError::Internal(e.to_string())
 }
@@ -385,6 +398,7 @@ pub async fn locate(state: &AppState, query: &Query) -> Result<Located, AppError
                 .is_none_or(|l| r.label.as_deref() == Some(l))
     });
     recipients.sort_by(|a, b| a.address.cmp(&b.address).then_with(|| a.kind.cmp(&b.kind)));
+    let harnesses = crate::harnesses::for_state(state);
     let db = state.db.lock().map_err(fail)?;
     let mut locators = Vec::new();
     for recipient in recipients {
@@ -421,7 +435,10 @@ pub async fn locate(state: &AppState, query: &Query) -> Result<Located, AppError
             if let Some((harness, id, env)) = metadata
                 .filter(|(harness, _, _)| item.recipient.harness.as_deref() == Some(harness))
             {
-                if valid_native_id(&harness, &id) {
+                if valid_native_id_with_registry(&harnesses, &harness, &id) {
+                    if let Some(desc) = harnesses.get(&harness) {
+                        item.resume = desc.render_resume(&id);
+                    }
                     item.native_id = Some(id);
                 }
                 item.env = env

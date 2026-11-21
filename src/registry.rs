@@ -160,14 +160,14 @@ pub struct Session {
     pub version: Option<String>,
     pub started_at: u64,
     pub updated_at: u64,
-    #[serde(default = "default_claude_harness")]
+    #[serde(default = "default_unknown_harness")]
     pub harness: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registered: Option<bool>,
 }
 
-fn default_claude_harness() -> String {
-    "claude".to_string()
+fn default_unknown_harness() -> String {
+    "unknown".to_string()
 }
 
 impl From<SessionFileEntry> for Session {

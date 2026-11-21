@@ -2730,35 +2730,6 @@ pub async fn run_register_server_with_listener(
                             }
                         }
                     }
-                    Ok(ref v)
-                        if v.get("harness")
-                            .and_then(|h| h.as_str())
-                            .and_then(crate::plugin::harness)
-                            .is_some() =>
-                    {
-                        match serde_json::from_value::<crate::plugin::PluginHello>(v.clone()) {
-                            Ok(hello) => {
-                                let harness = crate::plugin::harness(&hello.harness)
-                                    .expect("matched a plugin harness");
-                                if let Err(e) = crate::plugin::handle_plugin_connection_peer(
-                                    buf_reader,
-                                    writer,
-                                    state_clone,
-                                    harness,
-                                    my_uid,
-                                    peer,
-                                )
-                                .await
-                                {
-                                    tracing::warn!("plugin connection ended with error: {e}");
-                                }
-                            }
-                            Err(e) => {
-                                let err = crate::error::AppError::BadRequest(e.to_string()).frame();
-                                let _ = writer.write_all(format!("{err}\n").as_bytes()).await;
-                            }
-                        }
-                    }
                     Ok(ref v) if v.get("harness").and_then(|h| h.as_str()) == Some("svc") => {
                         match serde_json::from_value::<crate::svc::SvcRegisterRequest>(v.clone()) {
                             Ok(req) => {
@@ -2784,6 +2755,54 @@ pub async fn run_register_server_with_listener(
                                     "detail": format!("invalid svc request: {e}")
                                 });
                                 let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+                            }
+                        }
+                    }
+                    Ok(ref v) if v.get("harness").and_then(|h| h.as_str()).is_some() => {
+                        match serde_json::from_value::<crate::plugin::PluginHello>(v.clone()) {
+                            Ok(hello) => {
+                                let reg = crate::harnesses::for_state(&state_clone);
+                                match reg.connect_decision(&hello.harness) {
+                                    crate::harnesses::ConnectDecision::Accepted(pinned) => {
+                                        if let Err(e) =
+                                            crate::plugin::handle_plugin_connection_pinned(
+                                                buf_reader,
+                                                writer,
+                                                state_clone,
+                                                pinned,
+                                                my_uid,
+                                                peer,
+                                            )
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                "plugin connection ended with error: {e}"
+                                            );
+                                        }
+                                    }
+                                    crate::harnesses::ConnectDecision::Revoked => {
+                                        let err = crate::error::AppError::Denied(format!(
+                                            "harness '{}' is security-revoked",
+                                            hello.harness
+                                        ))
+                                        .frame();
+                                        let _ =
+                                            writer.write_all(format!("{err}\n").as_bytes()).await;
+                                    }
+                                    crate::harnesses::ConnectDecision::Undeclared => {
+                                        let err = crate::error::AppError::BadRequest(format!(
+                                            "unknown or undeclared harness '{}'",
+                                            hello.harness
+                                        ))
+                                        .frame();
+                                        let _ =
+                                            writer.write_all(format!("{err}\n").as_bytes()).await;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let err = crate::error::AppError::BadRequest(e.to_string()).frame();
+                                let _ = writer.write_all(format!("{err}\n").as_bytes()).await;
                             }
                         }
                     }

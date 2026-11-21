@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "Measured on 4cce2691115cb17a637de383166c08e4b91fd8eb baseline + tests/discovery_mdns.rs (+29 tests on Linux, 0 net lib change): 1532 passed, 0 failed, 7 ignored, 116 summaries; all 113 integration targets executed",
-    "darwin": "Measured natively on macOS against 4cce2691115cb17a637de383166c08e4b91fd8eb + tests/discovery_mdns.rs (+31 tests on Darwin, 0 net lib change): 1547 passed, 0 failed, 9 ignored, 116 summaries; all 113 integration targets executed"
+    "linux": "Baseline 634c11f88d9e79e59770bd064c5f2550485e9ecc + src/harnesses.rs (+3 lib tests) + tests/harness_descriptors.rs (+6 integration tests): 1567 passed, 0 failed, 7 ignored, 117 summaries; all 114 integration targets executed",
+    "darwin": "Measured natively on macOS against 634c11f88d9e79e59770bd064c5f2550485e9ecc + src/harnesses.rs (+3 lib tests) + tests/harness_descriptors.rs (+6 integration tests): 1582 passed, 0 failed, 9 ignored, 117 summaries; all 114 integration targets executed"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -102,6 +102,7 @@
     "tests/gate_xu1_api_ergonomics.rs",
     "tests/grt4_concrete_ca_leaf.rs",
     "tests/grt4_standalone_enrollment.rs",
+    "tests/harness_descriptors.rs",
     "tests/mcp_client_attach.rs",
     "tests/observe_arrival.rs",
     "tests/observe_http.rs",
@@ -120,16 +121,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1573,
+      "passed": 1582,
       "failed": 0,
       "ignored": 7,
-      "summaries": 116
+      "summaries": 117
     },
     "darwin": {
-      "passed": 1588,
+      "passed": 1597,
       "failed": 0,
       "ignored": 9,
-      "summaries": 116
+      "summaries": 117
     }
   }
 }

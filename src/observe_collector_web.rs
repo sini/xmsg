@@ -404,7 +404,7 @@ fn render_with_health_and_cap(
                         }
                         EndpointKind::Unknown => "<text x=\"10\" y=\"27\">?</text>",
                     };
-                    out.push(&format!("<svg class=\"endpoint\" role=\"img\" aria-label=\"reported endpoint\" viewBox=\"0 0 1000 62\">{shape}<text x=\"40\" y=\"22\">{}</text><text x=\"40\" y=\"46\">{}</text></svg><p class=\"endpoint-label\">{} <small>kind: {}; harness: {}; state: {}</small></p>", svg_text(&endpoint.id),svg_text(endpoint.label.as_deref().unwrap_or("label not reported")),html_text(endpoint.label.as_deref().unwrap_or("label not reported")),name(endpoint.kind),name(endpoint.harness),name(endpoint.state)));
+                    out.push(&format!("<svg class=\"endpoint\" role=\"img\" aria-label=\"reported endpoint\" viewBox=\"0 0 1000 62\">{shape}<text x=\"40\" y=\"22\">{}</text><text x=\"40\" y=\"46\">{}</text></svg><p class=\"endpoint-label\">{} <small>kind: {}; harness: {}; state: {}</small></p>", svg_text(&endpoint.id),svg_text(endpoint.label.as_deref().unwrap_or("label not reported")),html_text(endpoint.label.as_deref().unwrap_or("label not reported")),name(endpoint.kind),name(&endpoint.harness),name(endpoint.state)));
                 }
             } else {
                 out.push("<p>Source inventory unknown: no retained snapshot.</p>");

@@ -161,11 +161,77 @@ pub fn build_unix_router_with_enrollment(
                     post(enrollment_approve_handler),
                 )
                 .route("/v1/enrollment/{id}/deny", post(enrollment_deny_handler))
+                .route("/v1/harnesses/reload", post(harnesses_reload_handler))
+                .route(
+                    "/v1/harnesses/{name}/revoke",
+                    post(harnesses_revoke_handler),
+                )
                 .layer(DefaultBodyLimit::max(4096))
                 .with_state(state),
         )
         .layer(Extension(LocalHealth))
         .layer(Extension(config))
+}
+
+fn require_local_non_plugin_owner(
+    state: &AppState,
+    peer: &PeerInfo,
+    action: &str,
+) -> Result<(), AppError> {
+    let Some(cred) = peer.as_ref().and_then(|p| p.0 .0.peer.as_ref()) else {
+        return Err(AppError::Denied(format!(
+            "{action} requires a local same-UID Unix connection"
+        )));
+    };
+    if cred.uid != crate::agent::current_uid() {
+        return Err(AppError::Denied(format!(
+            "{action} requires a local same-UID Unix connection"
+        )));
+    }
+    if let Some(pid) = cred.pid {
+        if let Ok(starttime) = crate::process::starttime(&state.agy_config.proc_root, pid) {
+            let is_plugin = state
+                .db
+                .lock()
+                .ok()
+                .and_then(|conn| crate::plugin::is_plugin_process(&conn, pid, &starttime).ok())
+                .unwrap_or(false);
+            if is_plugin {
+                return Err(AppError::Denied(format!(
+                    "plugin processes cannot invoke {action}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn harnesses_reload_handler(
+    State(state): State<Arc<AppState>>,
+    peer: PeerInfo,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_local_non_plugin_owner(&state, &peer, "harness reload")?;
+    let reg = crate::harnesses::for_state(&state);
+    if !reg.is_configured() {
+        return Err(AppError::BadRequest(
+            "no --harnesses-file is configured on this daemon".into(),
+        ));
+    }
+    reg.reload().map_err(AppError::BadRequest)?;
+    Ok(Json(json!({ "status": "ok", "reloaded": true })))
+}
+
+async fn harnesses_revoke_handler(
+    State(state): State<Arc<AppState>>,
+    peer: PeerInfo,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_local_non_plugin_owner(&state, &peer, "harness security revocation")?;
+    let reg = crate::harnesses::for_state(&state);
+    reg.security_revoke(&name).map_err(AppError::BadRequest)?;
+    Ok(Json(
+        json!({ "status": "ok", "harness": name, "revoked": true }),
+    ))
 }
 
 async fn locate_handler(
@@ -379,7 +445,7 @@ impl ResolvedTarget {
         }
     }
 
-    pub(crate) fn recipient_harness(&self) -> &'static str {
+    pub(crate) fn recipient_harness(&self) -> &str {
         match self {
             ResolvedTarget::Claude(_, _) | ResolvedTarget::Parked { .. } => "claude",
             ResolvedTarget::SubagentInTurn { session: s, .. } => match s.harness.as_str() {
@@ -392,7 +458,13 @@ impl ResolvedTarget {
             ResolvedTarget::SubagentFallback { parent, .. } => parent.recipient_harness(),
             ResolvedTarget::Agy(_) => "agy",
             ResolvedTarget::Codex(_, _) | ResolvedTarget::ParkedCodex { .. } => "codex",
-            ResolvedTarget::Pi(s) => crate::plugin::harness(&s.harness).unwrap_or("pi"),
+            ResolvedTarget::Pi(s) => {
+                if s.harness.is_empty() {
+                    "unknown"
+                } else {
+                    s.harness.as_str()
+                }
+            }
             ResolvedTarget::Svc(_) => "svc",
         }
     }
@@ -662,9 +734,15 @@ pub(crate) async fn resolve_target(
             }
             // An agy conversation between turns queues where its credentials would.
             "agy" => Ok(ResolvedTarget::Agy(parked_session("agy"))),
-            _ => Ok(ResolvedTarget::Parked {
+            "claude" => Ok(ResolvedTarget::Parked {
                 session: parked_session("claude"),
                 expires_at: now + ttl.as_secs() as i64,
+            }),
+            // Declared v1 poll-only harnesses (no reclaim) and unknown harnesses never fall
+            // back to Claude's parked queue.
+            _ => Err(AppError::Gone {
+                session_id: ref_str.to_string(),
+                pid: 0,
             }),
         };
     }

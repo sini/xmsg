@@ -3,6 +3,8 @@ title: Runtime, Reloading & Systemd
 description: Dynamic TLS and peer reloading, systemd socket activation and sd_notify readiness, SQLite schema v3 persistence, and verification commands.
 ---
 
+import Status from '../../../components/Status.astro';
+
 ## Dynamic credential, CA bundle & peers reloading
 
 With federation (`--peers-file`, `--fed-cert`, `--fed-key`), `xmsg serve` loads new
@@ -53,6 +55,32 @@ CA policy reload uses its content hash. A bad replacement keeps the previous
 policy, emits `invalid_enrollment_policy` and reports degraded reload status.
 Issuance continues under the last valid policy; startup without one is refused.
 Enrollment is not a systemd socket-activation slot: `--enroll-listen` is separate.
+
+## Declared plugin harness descriptors
+
+<Status id="xmsg.harness-descriptors" />
+
+Pass `--harnesses-file <PATH>` (`XMSG_HARNESSES_FILE`) to `xmsg serve` to declare external v1
+poll-only plugin harnesses in a strict JSON file. Pure-bus deployments omit this flag.
+
+- **File ownership & permissions:** The descriptor file must be a regular file (at most 1 MiB)
+  owned by the daemon's UID or `root` (`uid == 0`), and must not be group- or world-writable
+  (`mode & 0o022 == 0`). This accepts immutable Nix store paths (`root`, mode `0444`) as well as
+  owner-managed files (`0600`/`0400`).
+- **Atomic reload & drain window:** Send `SIGHUP` to `xmsg serve` or run `xmsg harness reload`
+  (`POST /v1/harnesses/reload` on local `http.sock`). Validation is fail-closed: invalid JSON,
+  unknown fields, built-in shadowing, or unsafe `resume_argv` templates keep the previous table
+  unchanged. When a declared harness is removed from the file, new registrations are refused
+  immediately while existing live connections drain for `drain_window_secs` (default `600`
+  seconds) before closing.
+- **Immediate security revocation:** Mark a harness `"revoked": true` (or list it in top-level
+  `"revoked_harnesses"`) and reload, or run `xmsg harness revoke <NAME>`
+  (`POST /v1/harnesses/{name}/revoke` on local `http.sock`). Revocation closes active connections
+  for that harness immediately without waiting for the drain window and rejects new connections
+  with `denied`.
+- **Coordinated upgrade:** Extending `observe_export::Harness` to accept validated declared harness
+  names is a breaking observation-snapshot wire change. Upgrade the daemon, CLI/MCP clients, and
+  `observe-collector` together before deploying declared harnesses.
 
 ## Systemd socket activation & `sd_notify`
 

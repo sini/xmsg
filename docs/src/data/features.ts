@@ -194,6 +194,14 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		owner: 'sini',
 		evidence: [{ path: 'src/schema_status.rs', anchor: 'pub fn inspect' }],
 	},
+	'xmsg.harness-descriptors': {
+		id: 'xmsg.harness-descriptors',
+		title: 'Declared plugin harness descriptors (--harnesses-file)',
+		owner: 'sini',
+		evidence: [{ path: 'src/harnesses.rs', anchor: 'pub struct HarnessRegistry' }],
+		plannedSince: '2026-11-20',
+		note: 'Optional JSON descriptor registry for poll-only plugin harnesses, atomic reload/drain, immediate security revocation, and typed inert locator resume_argv.',
+	},
 	'agy.macos-locks': {
 		id: 'agy.macos-locks',
 		title: 'macOS Antigravity lock and process ancestry checks',

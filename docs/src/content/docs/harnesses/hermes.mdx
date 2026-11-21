@@ -75,3 +75,14 @@ to authorized readers, subject to its [context controls](/reference/cli-and-mcp/
 
 A reporter uses its registered plugin connection and selects a session key held by that connection.
 See the [socket frames](/reference/http-and-sockets/#session-context-tags).
+
+
+## Built-in vs. declared plugin harnesses
+
+<Status id="xmsg.harness-descriptors" />
+
+`hermes` is a compiled-in plugin harness with push delivery and compression-chain `continues`
+support. It cannot be shadowed by a descriptor in `--harnesses-file`. To add an external poll-only
+plugin harness without changing `xmsg`, declare it via
+[`--harnesses-file`](/concepts/sessions-services-subagents/#declared-plugin-harnesses).
+

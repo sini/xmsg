@@ -8,9 +8,9 @@ import Status from '../../../components/Status.astro';
 ## Command-line interface (`src/main.rs`)
 
 The `xmsg` binary exposes `list`, `locate`, `watch`, `doctor`, `send`, `replies`, `show`, `service`, `serve`, `mcp`,
-`register`, `unregister`, `check-peers`, `enroll` (<Status id="xmsg.enroll-ca" />), `enroll-ca`, and `observe-collector` (<Status id="fleet-observer.collector" />).
+`register`, `unregister`, `check-peers`, `enroll` (<Status id="xmsg.enroll-ca" />), `enroll-ca`, `harness` (<Status id="xmsg.harness-descriptors" />), and `observe-collector` (<Status id="fleet-observer.collector" />).
 
-```rust file=<rootDir>/src/main.rs#L21-L79
+```rust file=<rootDir>/src/main.rs#L21-L85
 ```
 
 ### Operator commands
@@ -299,7 +299,7 @@ enablement for each user are deployment configuration.
 
 Starts the local IPC and optional mTLS federation daemon:
 
-```rust file=<rootDir>/src/main.rs#L235-L376
+```rust file=<rootDir>/src/main.rs#L241-L386
 ```
 
 Planned: `--codex-exe` and `--agy-exe` compare canonical executable `file_name`s by default
@@ -320,11 +320,36 @@ and `XMSG_PEER_MAILBOX_MAX_BYTES`. A full mailbox refuses a new row with
 `peer_mailbox_full`/HTTP 429. See [mailbox retention](/concepts/federation/#mailbox-retention)
 for accounting, duplicates and cleanup cadence.
 
+<Status id="xmsg.harness-descriptors" /> `--harnesses-file <PATH>` (`XMSG_HARNESSES_FILE`)
+optionally loads declared v1 poll-only plugin harness descriptors at startup and on `SIGHUP` or
+`xmsg harness reload`. Omit it for pure-bus or built-in-only deployments. See
+[declared plugin harnesses](/operations/runtime-and-systemd/#declared-plugin-harness-descriptors).
+
+### `xmsg harness`
+
+<Status id="xmsg.harness-descriptors" />
+
+Administers declared plugin harness descriptors on the local daemon over `http.sock`:
+
+```bash
+xmsg harness reload [--http-sock PATH] [--json]
+xmsg harness revoke <NAME> [--http-sock PATH] [--json]
+```
+
+- `reload` atomically reloads `--harnesses-file` with fail-closed validation. Removed harnesses
+  stop accepting new registrations and drain live connections for `drain_window_secs` (default
+  `600` seconds).
+- `revoke <NAME>` immediately revokes a declared harness, closes its live plugin connections
+  without waiting for the drain window, and refuses new registrations until re-enabled.
+
+Both subcommands require the local same-UID `http.sock` from a non-plugin owner process; they are
+denied to plugin connections and absent from TCP and `/fed`.
+
 ### `xmsg mcp`
 
 Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
 
-```rust file=<rootDir>/src/main.rs#L378-L403
+```rust file=<rootDir>/src/main.rs#L388-L413
 ```
 
 ### `xmsg register`
@@ -332,7 +357,7 @@ Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
 Registers credentials or handles lifecycle hooks for [Antigravity](/harnesses/antigravity/),
 [Claude Code](/harnesses/claude-code/), and [Codex](/harnesses/codex/):
 
-```rust file=<rootDir>/src/main.rs#L142-L230
+```rust file=<rootDir>/src/main.rs#L151-L239
 ```
 
 ### `xmsg check-peers`
@@ -580,12 +605,16 @@ reconciling claims. It returns every matching label, including matches beyond th
 Only the CLI and local Unix HTTP API expose this feature; there is no locator
 MCP tool or collector action.
 
-`resume` is always `null`: every harness mapping is still unproven. A live or
-stale-unknown registration has `reason: live` and gives location only; other
-registrations have `reason: unproven`. Instance native IDs are captured at
-registration, never reconstructed from a bus address. Older registrations,
-services and child bindings without a separately captured native ID return
-`native_id: null`; a child never inherits a guessed ID from its root. Invalid IDs are withheld; no unknown harness falls back to Claude.
+Built-in harness resume mappings remain `null` (`reason: live` for live or
+stale-unknown registrations, `reason: unproven` otherwise). A declared plugin
+harness (<Status id="xmsg.harness-descriptors" />) with a typed `resume_argv`
+descriptor renders inert display-only argv tokens when the registration is not
+live and carries a validated non-leading-dash native ID; `xmsg` never executes
+the rendered command. Instance native IDs are captured at registration, never
+reconstructed from a bus address. Older registrations, services and child
+bindings without a separately captured native ID return `native_id: null`; a
+child never inherits a guessed ID from its root. Invalid IDs are withheld; no
+unknown or undeclared harness falls back to Claude or Pi.
 
 An explicitly selected viewer configuration can enable local detail and add
 display-only reach hints:

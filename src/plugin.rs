@@ -446,8 +446,8 @@ where
 
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_plugin_connection_peer<R, W>(
-    mut reader: R,
-    mut writer: W,
+    reader: R,
+    writer: W,
     state: Arc<AppState>,
     harness: &'static str,
     my_uid: u32,
@@ -457,6 +457,33 @@ where
     R: tokio::io::AsyncBufRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    handle_plugin_connection_pinned(
+        reader,
+        writer,
+        state,
+        crate::harnesses::PinnedHarness::Builtin(harness),
+        my_uid,
+        peer,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_plugin_connection_pinned<R, W>(
+    mut reader: R,
+    mut writer: W,
+    state: Arc<AppState>,
+    pinned: crate::harnesses::PinnedHarness,
+    my_uid: u32,
+    peer: crate::process::PeerCred,
+) -> Result<(), AppError>
+where
+    R: tokio::io::AsyncBufRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let harness = pinned.name().to_string();
+    let harnesses_reg = crate::harnesses::for_state(&state);
+    let mut reg_rx = harnesses_reg.subscribe();
     let peer_pid = peer.pid.unwrap_or(0);
     let starttime =
         match crate::pi::verify_pi_process_peer(&state.agy_config.proc_root, my_uid, &peer) {
@@ -500,14 +527,51 @@ where
     let max_frame = state.max_body * 6 + 4096;
     loop {
         while tasks.try_join_next().is_some() {}
+        let drain_sleep = match harnesses_reg.connection_state(&pinned, std::time::Instant::now()) {
+            crate::harnesses::ConnectionState::Revoked
+            | crate::harnesses::ConnectionState::DrainExpired => break,
+            crate::harnesses::ConnectionState::Draining(deadline) => Some(
+                tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)),
+            ),
+            crate::harnesses::ConnectionState::Active => None,
+        };
         buf.clear();
-        let n = match (&mut reader)
-            .take((max_frame + 1) as u64)
-            .read_until(b'\n', &mut buf)
-            .await
-        {
-            Ok(n) => n,
-            Err(_) => break,
+        let n = if pinned.is_builtin() {
+            match (&mut reader)
+                .take((max_frame + 1) as u64)
+                .read_until(b'\n', &mut buf)
+                .await
+            {
+                Ok(n) => n,
+                Err(_) => break,
+            }
+        } else {
+            let mut limited = (&mut reader).take((max_frame + 1) as u64);
+            tokio::select! {
+                biased;
+                _ = reg_rx.changed() => {
+                    match harnesses_reg.connection_state(&pinned, std::time::Instant::now()) {
+                        crate::harnesses::ConnectionState::Revoked
+                        | crate::harnesses::ConnectionState::DrainExpired => break,
+                        _ => continue,
+                    }
+                }
+                _ = async {
+                    if let Some(sleep) = drain_sleep {
+                        sleep.await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    break;
+                }
+                read_res = limited.read_until(b'\n', &mut buf) => {
+                    match read_res {
+                        Ok(n) => n,
+                        Err(_) => break,
+                    }
+                }
+            }
         };
         if n == 0 || !buf.ends_with(b"\n") {
             if buf.len() > max_frame {
@@ -525,15 +589,30 @@ where
         if line.is_empty() {
             continue;
         }
+        let raw_rid = serde_json::from_str::<Value>(line).ok().and_then(|v| {
+            v.get("request_id")
+                .and_then(|r| r.as_str())
+                .map(str::to_string)
+        });
+        match harnesses_reg.connection_state(&pinned, std::time::Instant::now()) {
+            crate::harnesses::ConnectionState::Revoked => {
+                let err =
+                    AppError::Denied(format!("harness '{harness}' has been security-revoked"));
+                let _ = tx.send(with_id(err.frame(), raw_rid.as_deref()));
+                break;
+            }
+            crate::harnesses::ConnectionState::DrainExpired => {
+                let err =
+                    AppError::GoneDetail(format!("harness '{harness}' drain window has expired"));
+                let _ = tx.send(with_id(err.frame(), raw_rid.as_deref()));
+                break;
+            }
+            _ => {}
+        }
         let frame: Frame = match surface::parse_frame(line) {
             Ok(f) => f,
             Err(e) => {
-                let rid = serde_json::from_str::<Value>(line).ok().and_then(|v| {
-                    v.get("request_id")
-                        .and_then(|r| r.as_str())
-                        .map(str::to_string)
-                });
-                let _ = tx.send(with_id(e.frame(), rid.as_deref()));
+                let _ = tx.send(with_id(e.frame(), raw_rid.as_deref()));
                 continue;
             }
         };
@@ -554,6 +633,16 @@ where
                     if session.trim().is_empty() {
                         return Err(AppError::BadRequest("'session' must not be empty".into()));
                     }
+                    if !pinned.is_builtin() && reclaim.is_some() {
+                        return Err(AppError::BadRequest(
+                            "reclaim is not supported for v1 declared poll-only harnesses".into(),
+                        ));
+                    }
+                    let env = env.filter(|e| {
+                        pinned
+                            .descriptor()
+                            .is_none_or(|desc| desc.allows_env(&e.kind))
+                    });
                     let c = db.lock().map_err(db_err)?;
                     if held(&c, &conn_id, &session).map_err(db_err)?.is_some() {
                         return Err(AppError::Conflict(format!(
@@ -561,42 +650,50 @@ where
                         )));
                     }
                     let now = now_epoch_secs();
-                    let (address, secret) = if let Some(r) = reclaim {
-                        storage::reclaim_instance(
+                    let (address, secret) = if !pinned.is_builtin() {
+                        let id = crate::claim::mint_uuid_v4();
+                        storage::mark_live(&c, &id, &harness, now).map_err(db_err)?;
+                        (id, None)
+                    } else if let Some(r) = reclaim {
+                        let (id, sec) = storage::reclaim_instance(
                             &c,
                             &r.id,
                             node,
-                            harness,
+                            &harness,
                             &r.secret,
                             now,
                             state.reply_ttl.as_secs() as i64,
                             |conn, id| {
                                 Ok(crate::plugin::session(conn, id).map_err(db_err)?.is_some())
                             },
-                        )?
+                        )?;
+                        (id, Some(sec))
                     } else {
                         let id = crate::claim::mint_uuid_v4();
-                        let sec = storage::mint_reclaimable_instance(&c, &id, harness, now)
+                        let sec = storage::mint_reclaimable_instance(&c, &id, &harness, now)
                             .map_err(db_err)?;
-                        (id, sec)
+                        (id, Some(sec))
                     };
                     c.execute(
                         "INSERT INTO plugin_sessions (address, conn, harness, session, registered_at, pid) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        params![address, conn_id, harness, session, now, peer_pid],
+                        params![address, conn_id, &harness, session, now, peer_pid],
                     )
                     .map_err(db_err)?;
-                    crate::locator::record(&c, &address, harness, &session, env.as_ref())
+                    crate::locator::record(&c, &address, &harness, &session, env.as_ref())
                         .map_err(db_err)?;
                     // HA9-A.oc §2.2, C6, C7: a register of P (fresh or reclaimed) clears the turn
                     // columns and unparks every subagent row under P in the same batch.
                     storage::subagent_unpark_for_parent(&c, &address).map_err(db_err)?;
                     let _ = crate::claim::take_queued_for(&c, &state.agy_config.proc_root, &[]);
                     let _ = state.pi_notify_tx.send(address.clone());
-                    Ok(json!({
+                    let mut out = json!({
                         "status": "ok",
                         "address": address_of(&address),
-                        "reclaim": secret,
-                    }))
+                    });
+                    if let Some(secret) = secret {
+                        out["reclaim"] = json!(secret);
+                    }
+                    Ok(out)
                 })();
                 let _ = tx.send(answer(res, &request_id));
             }
@@ -609,7 +706,7 @@ where
                     let s = held(&c, &conn_id, &session)
                         .map_err(db_err)?
                         .ok_or_else(|| not_held(&session))?;
-                    detach(&c, &s.session_id, harness).map_err(db_err)?;
+                    detach(&c, &s.session_id, &harness).map_err(db_err)?;
                     Ok(json!({ "status": "ok" }))
                 })();
                 let _ = tx.send(answer(res, &request_id));
@@ -623,7 +720,7 @@ where
                     let s = held(&c, &conn_id, &session)
                         .map_err(db_err)?
                         .ok_or_else(|| not_held(&session))?;
-                    release(&c, &s.session_id, harness).map_err(db_err)?;
+                    release(&c, &s.session_id, &harness).map_err(db_err)?;
                     Ok(json!({ "status": "ok" }))
                 })();
                 let _ = tx.send(answer(res, &request_id));
@@ -669,6 +766,11 @@ where
                 to,
             } => {
                 let res = (|| {
+                    if !pinned.is_builtin() {
+                        return Err(AppError::BadRequest(
+                            "continues is not supported for v1 declared poll-only harnesses".into(),
+                        ));
+                    }
                     let c = db.lock().map_err(db_err)?;
                     let s = held(&c, &conn_id, &from)
                         .map_err(db_err)?
@@ -779,6 +881,13 @@ where
                 offset,
                 sha256,
             } => {
+                if !pinned.attachments_allowed() {
+                    let err = AppError::Denied(format!(
+                        "harness '{harness}' does not have the 'attachments' capability"
+                    ));
+                    let _ = tx.send(answer(Err(err), &request_id));
+                    continue;
+                }
                 let caller =
                     held(&*db.lock().map_err(db_err)?, &conn_id, &session).map_err(db_err)?;
                 let Some(caller) = caller else {
@@ -826,6 +935,13 @@ where
                 offset,
                 length,
             } => {
+                if !pinned.attachments_allowed() {
+                    let err = AppError::Denied(format!(
+                        "harness '{harness}' does not have the 'attachments' capability"
+                    ));
+                    let _ = tx.send(answer(Err(err), &request_id));
+                    continue;
+                }
                 let caller =
                     held(&*db.lock().map_err(db_err)?, &conn_id, &session).map_err(db_err)?;
                 let Some(caller) = caller else {
@@ -867,6 +983,13 @@ where
                 attachments,
                 idempotency_key,
             } => {
+                if !attachments.is_empty() && !pinned.attachments_allowed() {
+                    let err = AppError::Denied(format!(
+                        "harness '{harness}' does not have the 'attachments' capability"
+                    ));
+                    let _ = tx.send(answer(Err(err), &request_id));
+                    continue;
+                }
                 let caller =
                     held(&*db.lock().map_err(db_err)?, &conn_id, &session).map_err(db_err)?;
                 let Some(caller) = caller else {
@@ -917,6 +1040,13 @@ where
                 attachments,
                 idempotency_key,
             } => {
+                if !attachments.is_empty() && !pinned.attachments_allowed() {
+                    let err = AppError::Denied(format!(
+                        "harness '{harness}' does not have the 'attachments' capability"
+                    ));
+                    let _ = tx.send(answer(Err(err), &request_id));
+                    continue;
+                }
                 let caller =
                     held(&*db.lock().map_err(db_err)?, &conn_id, &session).map_err(db_err)?;
                 let Some(caller) = caller else {
