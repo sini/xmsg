@@ -881,21 +881,118 @@ fn ao2_ao4_ao5_ao7_bounded_hook_allowlist_scope_and_v2() {
     assert_eq!(code_missing, 0);
     assert_eq!(out_missing, "{}");
 
-    // AO4: Canary in prompt/command/cwd/task/last_assistant_message/tool_input never leaves hook.
+    // AO4: Every supported hook event discards content outside the frame allowlist.
     let canary = "SECRET_CANARY_999";
-    let raw = format!(
-        r#"{{"hook_event_name":"PermissionRequest","session_id":"s1","tool_name":"Bash","tool_use_id":"toolu_99","prompt":"{canary}","command":"{canary}","cwd":"/tmp/{canary}","last_assistant_message":"{canary}","tool_input":{{"cmd":"{canary}"}}}}"#
-    );
-    let frame = normalize_hook_payload(
-        ActivityHarness::Claude,
-        raw.as_bytes(),
-        true,
-        Some(owner1()),
-    )
-    .unwrap();
-    let serialized = serde_json::to_string(&frame).unwrap();
-    assert!(!serialized.contains(canary), "canary leaked into frame");
-    assert_eq!(frame.correlation.as_deref(), Some("toolu_99"));
+    for (harness, events) in [
+        (
+            ActivityHarness::Claude,
+            &[
+                "UserPromptSubmit",
+                "Stop",
+                "StopFailure",
+                "SessionStart",
+                "SessionEnd",
+                "PermissionRequest",
+                "PostToolUse",
+                "Notification",
+            ][..],
+        ),
+        (
+            ActivityHarness::Codex,
+            &[
+                "UserPromptSubmit",
+                "PreModelRequest",
+                "Stop",
+                "PermissionRequest",
+                "Interrupt",
+                "SessionStart",
+            ][..],
+        ),
+        (
+            ActivityHarness::Agy,
+            &[
+                "PreInvocation",
+                "PostInvocation",
+                "PreToolUse",
+                "PostToolUse",
+                "Stop",
+            ][..],
+        ),
+    ] {
+        for event in events {
+            let raw = json!({
+                "hook_event_name": event,
+                "session_id": "s1",
+                "trajectory_id": "s1",
+                "notification_type": "agent_needs_input",
+                "tool_name": "Bash",
+                "tool_use_id": "toolu_99",
+                "prompt": canary,
+                "command": canary,
+                "cwd": format!("/tmp/{canary}"),
+                "task_id": canary,
+                "task_description": canary,
+                "last_assistant_message": canary,
+                "tool_input": {"cmd": canary},
+                "tool_output": {"stdout": canary},
+                "tool_response": {"stdout": canary},
+                "background_tasks": [{"id": canary, "description": canary, "status": "running"}],
+                "unknown_extra": {"nested": [canary]},
+            });
+            let frame = normalize_hook_payload(
+                harness,
+                &serde_json::to_vec(&raw).unwrap(),
+                true,
+                Some(owner1()),
+            )
+            .unwrap_or_else(|| panic!("{harness:?} {event} must normalize"));
+            let serialized = serde_json::to_string(&frame).unwrap();
+            assert!(
+                !serialized.contains(canary),
+                "{harness:?} {event}: canary leaked into frame"
+            );
+            if harness == ActivityHarness::Claude
+                && matches!(*event, "PermissionRequest" | "PostToolUse")
+            {
+                assert_eq!(frame.correlation.as_deref(), Some("toolu_99"));
+            }
+        }
+    }
+
+    let graphic_limit = "!".repeat(128);
+    for key in ["event_id", "uuid", "tool_use_id"] {
+        for (name, value, accepted) in [
+            ("oversized", "x".repeat(129), false),
+            ("space", "id with space".into(), false),
+            ("non-ASCII", "id-é".into(), false),
+            ("control", "id\u{0001}value".into(), false),
+            ("128 graphic bytes", graphic_limit.clone(), true),
+        ] {
+            let mut raw = json!({
+                "hook_event_name": "PermissionRequest",
+                "session_id": "s1",
+                "tool_name": "Bash",
+            });
+            raw[key] = json!(value);
+            let frame = normalize_hook_payload(
+                ActivityHarness::Claude,
+                &serde_json::to_vec(&raw).unwrap(),
+                true,
+                Some(owner1()),
+            )
+            .unwrap();
+            let observed = if key == "tool_use_id" {
+                frame.correlation.as_deref()
+            } else {
+                frame.event_id.as_deref()
+            };
+            assert_eq!(
+                observed,
+                accepted.then_some(value.as_str()),
+                "{key}: {name}"
+            );
+        }
+    }
 
     // AO5: Single-endpoint scope rule on node egress (`project_page`) with restricted AND unrestricted targets.
     let ep_a = "11111111-1111-4111-8111-111111111111@node-a";
