@@ -195,7 +195,7 @@
     "id": "grant-session-turn-session",
     "file": "extensions/executor/src/auth.rs",
     "needle": "            (\n                Self::Session {\n                    session_id: a,\n                    generation: ga,\n                },\n                Target::Turn {\n                    session_id: b,\n                    generation: gb,\n                    ..\n                },\n            ) => a == b && ga == gb,",
-    "replacement": "            (\n                Self::Session {\n                    session_id: a,\n                    generation: ga,\n                },\n                Target::Turn {\n                    session_id: b,\n                    generation: gb,\n                    ..\n                },\n            ) => { let _ = (a, b); true } && ga == gb,",
+    "replacement": "            (\n                Self::Session {\n                    session_id: a,\n                    generation: ga,\n                },\n                Target::Turn {\n                    session_id: b,\n                    generation: gb,\n                    ..\n                },\n            ) => ({ let _ = (a, b); true }) && ga == gb,",
     "test": "session_grant_turn_other_session_has_no_admission_effect",
     "assertion": "grant target mismatch reached admission"
   },
@@ -211,7 +211,7 @@
     "id": "grant-session-execution-session",
     "file": "extensions/executor/src/auth.rs",
     "needle": "            (\n                Self::Session {\n                    session_id: a,\n                    generation: ga,\n                },\n                Target::Execution {\n                    session_id: b,\n                    generation: gb,\n                },\n            ) => a == b && ga == gb,",
-    "replacement": "            (\n                Self::Session {\n                    session_id: a,\n                    generation: ga,\n                },\n                Target::Execution {\n                    session_id: b,\n                    generation: gb,\n                },\n            ) => { let _ = (a, b); true } && ga == gb,",
+    "replacement": "            (\n                Self::Session {\n                    session_id: a,\n                    generation: ga,\n                },\n                Target::Execution {\n                    session_id: b,\n                    generation: gb,\n                },\n            ) => ({ let _ = (a, b); true }) && ga == gb,",
     "test": "session_grant_execution_other_session_has_no_admission_effect",
     "assertion": "grant target mismatch reached admission"
   },
@@ -219,7 +219,7 @@
     "id": "grant-turn-turn-session",
     "file": "extensions/executor/src/auth.rs",
     "needle": "            (\n                Self::Turn {\n                    session_id: a,\n                    generation: ga,\n                    turn_id: ta,\n                },\n                Target::Turn {\n                    session_id: b,\n                    generation: gb,\n                    turn_id: tb,\n                },\n            ) => a == b && ga == gb && ta == tb,",
-    "replacement": "            (\n                Self::Turn {\n                    session_id: a,\n                    generation: ga,\n                    turn_id: ta,\n                },\n                Target::Turn {\n                    session_id: b,\n                    generation: gb,\n                    turn_id: tb,\n                },\n            ) => { let _ = (a, b); true } && ga == gb && ta == tb,",
+    "replacement": "            (\n                Self::Turn {\n                    session_id: a,\n                    generation: ga,\n                    turn_id: ta,\n                },\n                Target::Turn {\n                    session_id: b,\n                    generation: gb,\n                    turn_id: tb,\n                },\n            ) => ({ let _ = (a, b); true }) && ga == gb && ta == tb,",
     "test": "turn_grant_turn_other_session_has_no_admission_effect",
     "assertion": "grant target mismatch reached admission"
   },
