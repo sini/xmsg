@@ -211,6 +211,34 @@ impl ReadHub {
         self.changed.send_replace(state.hub.watermark());
     }
 
+    #[cfg(test)]
+    pub(crate) fn witness_activity_for_test(
+        &self,
+        node: &str,
+    ) -> crate::observe_export::ExportEvent {
+        let vector: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../tests/vectors/mission-control/v1/V-E2.json"
+        ))
+        .unwrap();
+        let mut event: crate::observe_export::ExportEvent =
+            serde_json::from_value(vector["delta"]["event"].clone()).unwrap();
+        event.from = Some(format!("agent@{node}"));
+        let mut state = self.state.lock().unwrap();
+        state
+            .hub
+            .append(
+                Delta::ActivityChanged {
+                    node: node.to_owned(),
+                    event: event.clone(),
+                },
+                1000,
+                Instant::now(),
+            )
+            .unwrap();
+        self.changed.send_replace(state.hub.watermark());
+        event
+    }
+
     pub(super) fn watch(&self) -> tokio::sync::watch::Receiver<u64> {
         self.changed.subscribe()
     }

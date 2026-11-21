@@ -32,8 +32,14 @@ pub(crate) type Body = UnsyncBoxBody<Bytes, Infallible>;
 pub(crate) struct Fence {
     live: Mutex<Option<Arc<Live>>>,
     headers_written: tokio::sync::Notify,
+    terminal: Mutex<Option<Terminal>>,
     #[cfg(test)]
     pub(crate) probe: Option<Arc<WireProbe>>,
+}
+
+struct Terminal {
+    wire: Vec<u8>,
+    sent: usize,
 }
 
 impl Fence {
@@ -47,12 +53,23 @@ impl Fence {
         self.headers_written.notified().await;
     }
 
+    fn permit_terminal(&self, frame: &Bytes) {
+        // Hyper writes each SSE data frame as one HTTP/1.1 chunk.
+        let mut wire = format!("{:X}\r\n", frame.len()).into_bytes();
+        wire.extend_from_slice(frame);
+        wire.extend_from_slice(b"\r\n0\r\n\r\n");
+        if let Ok(mut terminal) = self.terminal.lock() {
+            *terminal = Some(Terminal { wire, sent: 0 });
+        }
+    }
+
     pub(crate) fn wrap<S>(self: &Arc<Self>, stream: S) -> Fenced<S> {
         Fenced {
             stream,
             fence: self.clone(),
             header_suffix: 0,
             notified: false,
+            quiet: false,
         }
     }
 }
@@ -86,6 +103,7 @@ pub(crate) struct Fenced<S> {
     fence: Arc<Fence>,
     header_suffix: usize,
     notified: bool,
+    quiet: bool,
 }
 
 impl<S: AsyncRead + Unpin> AsyncRead for Fenced<S> {
@@ -110,15 +128,33 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Fenced<S> {
             .lock()
             .map_err(|_| io::Error::other("stream fence unavailable"))?;
         let checked = if let Some(live) = guard.as_ref() {
-            live.authorize_payload(
+            match live.authorize_payload(
                 std::iter::empty(),
                 || true,
                 || Pin::new(&mut self.stream).poll_write(cx, bytes),
-            )
-            .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "stream write fenced"))?
+            ) {
+                Ok(result) => result,
+                Err(_) => {
+                    let mut terminal = owner.terminal.lock().map_err(|_| fenced())?;
+                    let terminal = terminal.as_mut().ok_or_else(fenced)?;
+                    if (!self.quiet && terminal.sent == 0)
+                        || !terminal.wire[terminal.sent..].starts_with(bytes)
+                    {
+                        return Poll::Ready(Err(fenced()));
+                    }
+                    let result = Pin::new(&mut self.stream).poll_write(cx, bytes);
+                    if let Poll::Ready(Ok(count)) = result {
+                        terminal.sent += count;
+                    }
+                    result
+                }
+            }
         } else {
             Pin::new(&mut self.stream).poll_write(cx, bytes)
         };
+        if matches!(checked, Poll::Ready(Ok(count)) if count != 0) {
+            self.quiet = false;
+        }
         if guard.is_some() && !self.notified {
             if let Poll::Ready(Ok(count)) = checked {
                 for &byte in &bytes[..count] {
@@ -155,21 +191,40 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Fenced<S> {
             .live
             .lock()
             .map_err(|_| io::Error::other("stream fence unavailable"))?;
-        if let Some(live) = guard.as_ref() {
-            live.authorize_payload(
+        let result = if let Some(live) = guard.as_ref() {
+            match live.authorize_payload(
                 std::iter::empty(),
                 || true,
                 || Pin::new(&mut self.stream).poll_flush(cx),
-            )
-            .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "stream flush fenced"))?
+            ) {
+                Ok(result) => result,
+                Err(_) => {
+                    let terminal = owner.terminal.lock().map_err(|_| fenced())?;
+                    if terminal.as_ref().is_some_and(|terminal| terminal.sent != 0) {
+                        Pin::new(&mut self.stream).poll_flush(cx)
+                    } else if self.quiet {
+                        Poll::Ready(Ok(()))
+                    } else {
+                        Poll::Ready(Err(fenced()))
+                    }
+                }
+            }
         } else {
             Pin::new(&mut self.stream).poll_flush(cx)
+        };
+        if matches!(result, Poll::Ready(Ok(()))) {
+            self.quiet = true;
         }
+        result
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.stream).poll_shutdown(cx)
     }
+}
+
+fn fenced() -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, "stream write fenced")
 }
 
 pub(crate) fn is_stream(path: &str) -> bool {
@@ -261,6 +316,8 @@ async fn open(
         pending: None,
         ended: false,
         changes: hub.watch(),
+        fence,
+        next_tick: tokio::time::Instant::now() + Duration::from_secs(15),
     };
     let frames = futures_util::stream::unfold(reader, |mut reader| async move {
         let frame = reader.next().await?;
@@ -316,10 +373,18 @@ struct Reader {
     pending: Option<super::hub::Sequenced>,
     ended: bool,
     changes: tokio::sync::watch::Receiver<u64>,
+    fence: Arc<Fence>,
+    next_tick: tokio::time::Instant,
 }
 
 impl Reader {
     async fn next(&mut self) -> Option<Bytes> {
+        let frame = self.next_frame().await?;
+        self.next_tick = tokio::time::Instant::now() + Duration::from_secs(15);
+        Some(frame)
+    }
+
+    async fn next_frame(&mut self) -> Option<Bytes> {
         if self.ended {
             return None;
         }
@@ -444,10 +509,12 @@ impl Reader {
                         InvalidationReason::Revoked => "revoked",
                         InvalidationReason::PolicyChanged => "policy_changed",
                     };
-                    return Some(frame("error",None,&json!({"v":1,"type":"error","code":code,"fatal":true}).to_string()));
+                    let terminal = frame("error",None,&json!({"v":1,"type":"error","code":code,"fatal":true}).to_string());
+                    self.fence.permit_terminal(&terminal);
+                    return Some(terminal);
                 }
                 result = self.changes.changed() => { result.ok()?; }
-                _ = tokio::time::sleep(Duration::from_secs(15)) => {
+                _ = tokio::time::sleep_until(self.next_tick) => {
                     let tick = json!({"v":1,"type":"tick","server_at":crate::storage::now_epoch_secs().saturating_mul(1000)});
                     return self.writer.handoff([],None,|| frame("tick",None,&tick.to_string())).ok();
                 }
