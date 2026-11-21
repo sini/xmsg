@@ -397,15 +397,25 @@ pub(crate) const SCHEMA_N: &str = r#"
         CREATE INDEX IF NOT EXISTS idx_codex_handoff_root ON codex_handoff(root_id, root_generation, state);
         "#;
 
-/// Opens a database at schema N. A database already at N keeps its rows, and gains any
-/// table schema N has since been extended with in place (plan §6 D12); one below N (the
-/// deployed `ee1b6ca` schema, or none at all) has its message state dropped and is created
-/// at N in one transaction; one above N is refused.
+/// Opens a database at schema N without dropping existing data.
+///
+/// - Version N keeps its rows and applies any additive schema-N extensions in place.
+/// - Version 0 with no message-state tables is treated as a fresh database and initialized at N.
+/// - Version 0 containing any message-state table, any intermediate `0 < v < N` without a tested
+///   migration, or any `v > N` is refused before any write occurs.
 pub fn init_db(conn: &Connection) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    // Plugin registrations end with this connection, so their tables are not schema N's.
-    conn.execute_batch(crate::plugin::SCHEMA)?;
+    if version > SCHEMA_VERSION {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISMATCH),
+            Some(format!(
+                "database schema version {version} is newer than this xmsg (schema {SCHEMA_VERSION})"
+            )),
+        ));
+    }
     if version == SCHEMA_VERSION {
+        // Plugin registrations end with this connection, so their tables are not schema N's.
+        conn.execute_batch(crate::plugin::SCHEMA)?;
         conn.execute_batch(SCHEMA_N)?;
         conn.execute_batch(crate::session_context::SCHEMA)?;
         let has_admitted: bool = conn.query_row(
@@ -504,18 +514,38 @@ pub fn init_db(conn: &Connection) -> Result<()> {
         }
         return Ok(());
     }
-    if version > SCHEMA_VERSION {
+    if version > 0 {
         return Err(rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISMATCH),
             Some(format!(
-                "database schema version {version} is newer than this xmsg (schema {SCHEMA_VERSION})"
+                "refusing to open unsupported older database schema version {version} (expected {SCHEMA_VERSION}): no tested migration exists; existing data preserved"
+            )),
+        ));
+    }
+    // Version 0: refuse before any write if any message-state table already exists.
+    let mut existing_state_tables = Vec::new();
+    {
+        let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table'")?;
+        let names = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for name in names {
+            let name = name?;
+            if MESSAGE_STATE_TABLES.contains(&name.as_str()) {
+                existing_state_tables.push(name);
+            }
+        }
+    }
+    if !existing_state_tables.is_empty() {
+        existing_state_tables.sort();
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISMATCH),
+            Some(format!(
+                "refusing to open unversioned (user_version=0) database containing existing message-state tables ({}): export or migrate before upgrading; existing data preserved",
+                existing_state_tables.join(", ")
             )),
         ));
     }
     let tx = conn.unchecked_transaction()?;
-    for table in MESSAGE_STATE_TABLES {
-        tx.execute_batch(&format!("DROP TABLE IF EXISTS {table};"))?;
-    }
+    tx.execute_batch(crate::plugin::SCHEMA)?;
     tx.execute_batch(SCHEMA_N)?;
     tx.execute_batch(crate::session_context::SCHEMA)?;
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;

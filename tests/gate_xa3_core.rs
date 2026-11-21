@@ -620,10 +620,10 @@ async fn test_oracle_8_fork_sends_as_its_address() {
 }
 
 // =============================================================================
-// Oracle 9 (schema N, plan gate v0 C5). A database created by the deployed ee1b6ca
-// binary, with a row in every message table, starts at schema N with those tables
-// empty and `user_version` N; a `forwarded_messages` table (199cecf's) is dropped too.
-// Mutant: skip the drop => RED.
+// Oracle 9 (schema preservation fence, S5 / N8). A populated database created by
+// the deployed ee1b6ca binary (user_version 0) is refused before any write so
+// existing bytes and seeded rows remain untouched.
+// Mutant (M-S5): bypass lower-schema refusal => RED.
 // =============================================================================
 const EE1B6CA_DB: &str = include_str!("fixtures/ee1b6ca-db.sql");
 
@@ -649,9 +649,15 @@ fn user_version(conn: &rusqlite::Connection) -> i64 {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_oracle_9_migration_from_ee1b6ca_drops_message_state() {
+async fn test_oracle_9_populated_v0_ee1b6ca_refused_without_writes() {
     for with_forwarded in [false, true] {
         let tmp = tempdir().unwrap();
+        let run = tmp.path().join("run");
+        let sessions = tmp.path().join("sessions");
+        for d in [&run, &sessions] {
+            fs::create_dir_all(d).unwrap();
+            fs::set_permissions(d, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let db = tmp.path().join("xmsg.db");
         {
             let conn = rusqlite::Connection::open(&db).unwrap();
@@ -668,25 +674,51 @@ async fn test_oracle_9_migration_from_ee1b6ca_drops_message_state() {
                 assert_eq!(count(&conn, table), 1, "fixture row in {table}");
             }
         }
+        let bytes_before = fs::read(&db).unwrap();
 
-        let mut node = Node::start(tmp.path(), &[]);
-        node.stop();
-
-        let conn = rusqlite::Connection::open(&db).unwrap();
-        assert_eq!(
-            user_version(&conn),
-            xmsg::storage::SCHEMA_VERSION,
-            "the database is at schema N"
+        let output = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+            .scrub_agy_env()
+            .env("XDG_RUNTIME_DIR", &run)
+            .env("HOME", tmp.path())
+            .args([
+                "serve",
+                "--db-path",
+                db.to_str().unwrap(),
+                "--sessions-dir",
+                sessions.to_str().unwrap(),
+                "--http-sock",
+                run.join("http.sock").to_str().unwrap(),
+                "--agent-sock",
+                run.join("agent.sock").to_str().unwrap(),
+                "--register-sock",
+                run.join("register.sock").to_str().unwrap(),
+            ])
+            .output()
+            .expect("run xmsg serve on populated v0 db");
+        assert!(
+            !output.status.success(),
+            "serve must refuse populated v0 ee1b6ca database; stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("user_version=0") || stderr.contains("schema"),
+            "expected schema refusal in stderr, got: {stderr}"
+        );
+
+        let bytes_after = fs::read(&db).unwrap();
+        assert_eq!(
+            bytes_before, bytes_after,
+            "refused populated v0 database bytes must remain untouched"
+        );
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        assert_eq!(user_version(&conn), 0, "user_version must remain 0");
         for table in EE1B6CA_MESSAGE_TABLES {
-            assert_eq!(
-                count(&conn, table),
-                0,
-                "{table} is emptied by the migration"
-            );
+            assert_eq!(count(&conn, table), 1, "seeded row in {table} preserved");
         }
         if with_forwarded {
-            assert_eq!(count(&conn, "forwarded_messages"), 0);
+            assert_eq!(count(&conn, "forwarded_messages"), 1);
         }
     }
 }
