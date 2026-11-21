@@ -2263,6 +2263,8 @@ async fn mission_control_upgrade_validates_carriers_and_version() {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Error as WsError, Message};
 
+    let (trace, _guard) = crate::mission_control::tests::capture_transport_trace();
+    let mut frame_bytes = Vec::new();
     let oidc =
         crate::enroll_oidc::signed_fixture::Fixture::new_at(crate::storage::now_epoch_secs()).await;
     let directory = tempfile::tempdir().unwrap();
@@ -2376,6 +2378,7 @@ async fn mission_control_upgrade_validates_carriers_and_version() {
         ),
     ];
     for (protocol, target, bearer, browser_cookie, origin, expected) in cases {
+        let reads = crate::mission_control::tests::admission_reads(&issuer);
         let mut req = request(protocol, target);
         if let Some(origin) = origin {
             with_origin(req.headers_mut(), origin);
@@ -2401,6 +2404,12 @@ async fn mission_control_upgrade_validates_carriers_and_version() {
             matches!(result, Err(WsError::Http(response)) if response.status().as_u16() == expected),
             "unexpected refusal status {expected}"
         );
+        if expected == 403 {
+            assert_eq!(
+                crate::mission_control::tests::admission_reads(&issuer),
+                reads
+            );
+        }
     }
 
     crate::mission_control::tests::synthetic_transport_record(&issuer, &delegated.handle);
@@ -2443,6 +2452,7 @@ async fn mission_control_upgrade_validates_carriers_and_version() {
             .unwrap()
             .unwrap()
             .unwrap();
+        frame_bytes.push(msg.to_text().unwrap().as_bytes().to_vec());
         let json: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
         assert_eq!(json["type"], "hello");
         assert_eq!(json["actor"]["class"], class);
@@ -2593,6 +2603,92 @@ async fn mission_control_upgrade_validates_carriers_and_version() {
         "unavailable"
     );
     drop(held);
+    eventually(|| f.state.requests.available_permits() == 64).await;
+
+    let empty =
+        crate::mission_control::tests::scoped_transport_machine(&issuer, &browser.record.principal);
+    crate::mission_control::tests::clear_machine_scope(&issuer, &empty.record);
+    let response = client
+        .get(&snapshot)
+        .bearer_auth(&empty.handle)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "empty scope must never expand to fleet"
+    );
+    for absolute in [false, true] {
+        let expired = crate::mission_control::tests::scoped_transport_machine(
+            &issuer,
+            &browser.record.principal,
+        );
+        crate::mission_control::tests::set_expired(&issuer, &expired.record, absolute);
+        let response = client
+            .get(&snapshot)
+            .bearer_auth(expired.handle)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let upstream = crate::mission_control::tests::upstream_fixture_tokens(&issuer, &oidc).await;
+    for token in upstream {
+        if token.is_ascii() && !token.chars().any(char::is_whitespace) {
+            let response = client
+                .get(&snapshot)
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+    crate::mission_control::tests::set_entitlement(&issuer, false);
+    let removed = client
+        .get(&snapshot)
+        .header(hyper::header::COOKIE, cookie(&browser.handle))
+        .header("sec-fetch-site", "same-origin")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), StatusCode::FORBIDDEN);
+    crate::mission_control::tests::set_entitlement(&issuer, true);
+    let known = [
+        &browser.handle,
+        &native.handle,
+        &machine.handle,
+        &delegated.handle,
+    ];
+    let positive_headers = known
+        .iter()
+        .map(|value| format!("Authorization: Bearer {value}"))
+        .collect::<Vec<_>>();
+    let mut output = crate::mission_control::tests::transport_files(&directory);
+    output.extend(frame_bytes);
+    output.push(trace());
+    for (handle, header) in known.into_iter().zip(positive_headers) {
+        assert!(header.contains(handle));
+        assert!(
+            !output.iter().any(|bytes| bytes
+                .windows(handle.len())
+                .any(|window| window == handle.as_bytes())),
+            "Mission Control credential escaped transport output or authority storage"
+        );
+    }
+    crate::mission_control::tests::fail_store(&issuer);
+    let unavailable = client
+        .get(&snapshot)
+        .bearer_auth(machine.handle)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        unavailable.json::<serde_json::Value>().await.unwrap()["code"],
+        "unavailable"
+    );
 }
 
 struct VectorSocket {
@@ -2807,6 +2903,38 @@ async fn mission_control_independent_wire_client_exercises_read_vectors() {
     assert_eq!(replayed["delta"], observed["delta"]);
     assert_eq!(replayed["cursor"], observed["cursor"]);
     drop(sse);
+    let node: serde_json::Value = client
+        .get(format!(
+            "{}/v1/mission-control/snapshot/node/fixture.node",
+            f.url
+        ))
+        .bearer_auth(&issued.handle)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut stream = client
+        .get(format!("{}/v1/mission-control/stream/fleet", f.url))
+        .header("last-event-id", node["cursor"].as_str().unwrap())
+        .bearer_auth(&issued.handle)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let mut wire = String::new();
+    while !wire.contains("event: snapshot") {
+        let fragment = stream.chunk().await.unwrap().unwrap();
+        wire.push_str(std::str::from_utf8(&fragment).unwrap());
+    }
+    assert!(wire.contains("event: gap"));
+    assert!(wire.contains(r#""reason":"cursor_invalid""#));
+    assert!(wire.find("event: gap").unwrap() < wire.find("event: snapshot").unwrap());
+    drop(stream);
 
     socket
         .send(
@@ -2819,6 +2947,23 @@ async fn mission_control_independent_wire_client_exercises_read_vectors() {
     let replay = json!({"v":1,"type":"subscribe","id":10,"sub":"fleet","scope":{"kind":"fleet"},"cursor":cursor});
     socket.send(1, replay.to_string().as_bytes(), true).await;
     assert_eq!(socket.json().await["mode"], "resume");
+    // The activity delta staged above follows the resumed reply.
+    assert_eq!(socket.json().await["replayed"], true);
+    socket
+        .send(
+            1,
+            br#"{"v":1,"type":"unsubscribe","id":11,"sub":"fleet"}"#,
+            true,
+        )
+        .await;
+    assert_eq!(socket.json().await["type"], "unsubscribed");
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let mut tampered = URL_SAFE_NO_PAD.decode(&cursor).unwrap();
+    *tampered.last_mut().unwrap() ^= 1;
+    let request = json!({"v":1,"type":"subscribe","id":12,"sub":"fleet","scope":{"kind":"fleet"},"cursor":URL_SAFE_NO_PAD.encode(tampered)});
+    socket.send(1, request.to_string().as_bytes(), true).await;
+    assert_eq!(socket.json().await["mode"], "snapshot");
+    assert_eq!(socket.json().await["reason"], "cursor_invalid");
 
     for (opcode, length, masked, code) in [
         (2, 1, true, 1003),
@@ -2830,4 +2975,190 @@ async fn mission_control_independent_wire_client_exercises_read_vectors() {
         socket.send(opcode, &vec![b'x'; length], masked).await;
         assert_eq!(socket.close_code().await, code);
     }
+}
+
+#[tokio::test]
+async fn mission_control_buffered_mask_resets_without_leaking_or_closing() {
+    let oidc =
+        crate::enroll_oidc::signed_fixture::Fixture::new_at(crate::storage::now_epoch_secs()).await;
+    let directory = tempfile::tempdir().unwrap();
+    let (issuer, machine) =
+        crate::mission_control::tests::transport_fixture(&oidc, &directory).await;
+    let gate = crate::mission_control::tests::arm_projection(&issuer, false);
+    let f = Fixture::with_issuer(false, true, Some(issuer.clone()), None).await;
+    let mut socket = VectorSocket::open(&f, &machine.handle).await;
+    socket.hello().await;
+    socket
+        .send(
+            1,
+            include_bytes!("../tests/vectors/mission-control/v1/V-S1.json"),
+            true,
+        )
+        .await;
+    assert_eq!(socket.json().await["type"], "subscribed");
+    let cursor = loop {
+        let snapshot = socket.json().await;
+        assert_eq!(snapshot["type"], "snapshot");
+        if snapshot["final"] == true {
+            break snapshot["cursor"].as_str().unwrap().to_owned();
+        }
+    };
+    let hub = f.state.read_hub.as_ref().unwrap();
+    hub.queue_mask_canaries("fixture.node");
+    tokio::time::timeout(Duration::from_secs(3), gate.ready.notified())
+        .await
+        .unwrap();
+    issuer.set_node_masked("fixture.node", true);
+    hub.mask_poll("fixture.node", true, crate::storage::now_epoch_secs())
+        .unwrap();
+    gate.release.notify_one();
+    let gap = socket.json().await;
+    assert_eq!(gap["type"], "gap");
+    assert_eq!(gap["reason"], "scope_changed");
+    assert_eq!(gap["reset"], true);
+    loop {
+        let snapshot = socket.json().await;
+        assert_eq!(snapshot["type"], "snapshot");
+        assert!(!snapshot.to_string().contains("planted-counterpart"));
+        if snapshot["final"] == true {
+            break;
+        }
+        assert_eq!(snapshot["nodes"][0]["history_hidden"], true);
+    }
+    socket
+        .send(
+            1,
+            br#"{"v":1,"type":"unsubscribe","id":10,"sub":"fleet"}"#,
+            true,
+        )
+        .await;
+    assert_eq!(socket.json().await["type"], "unsubscribed");
+    let resume = json!({"v":1,"type":"subscribe","id":11,"sub":"fleet","scope":{"kind":"fleet"},"cursor":cursor});
+    socket.send(1, resume.to_string().as_bytes(), true).await;
+    assert_eq!(socket.json().await["mode"], "resume");
+    let after = socket.json().await;
+    assert_eq!(after["delta"]["history_hidden"], true);
+    assert!(!after.to_string().contains("planted-counterpart"));
+}
+
+#[tokio::test]
+async fn mission_control_lease_ends_silent_websocket_and_idle_stream() {
+    let oidc =
+        crate::enroll_oidc::signed_fixture::Fixture::new_at(crate::storage::now_epoch_secs()).await;
+    let directory = tempfile::tempdir().unwrap();
+    let (issuer, machine) =
+        crate::mission_control::tests::transport_with_lease(&oidc, &directory, 2).await;
+    let watchdog = crate::mission_control::tests::start_watchdog(&issuer);
+    let f = Fixture::with_issuer(false, true, Some(issuer), None).await;
+    let started = tokio::time::Instant::now();
+    let mut socket = VectorSocket::open(&f, &machine.handle).await;
+    socket.hello().await;
+    socket
+        .send(
+            1,
+            include_bytes!("../tests/vectors/mission-control/v1/V-S1.json"),
+            true,
+        )
+        .await;
+    assert_eq!(socket.json().await["type"], "subscribed");
+    loop {
+        let snapshot = socket.json().await;
+        assert_eq!(snapshot["type"], "snapshot");
+        if snapshot["final"] == true {
+            break;
+        }
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let mut stream = client
+        .get(format!("{}/v1/mission-control/stream/fleet", f.url))
+        .bearer_auth(machine.handle)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let websocket = async {
+        let code = tokio::time::timeout_at(started + Duration::from_secs(3), socket.close_code())
+            .await
+            .expect("silent WebSocket did not observe lease expiry");
+        assert_eq!(code, 4401);
+    };
+    let sse = async {
+        let mut wire = Vec::new();
+        while let Some(chunk) = stream.chunk().await.unwrap() {
+            wire.extend_from_slice(&chunk);
+        }
+        let messages = std::str::from_utf8(&wire).unwrap();
+        assert!(messages.contains("event: error"));
+        assert!(messages.contains("lease_expired"));
+    };
+    tokio::join!(websocket, sse);
+    watchdog.abort();
+}
+
+#[tokio::test]
+async fn mission_control_snapshot_fence_keeps_live_source_gap_after_final() {
+    let oidc =
+        crate::enroll_oidc::signed_fixture::Fixture::new_at(crate::storage::now_epoch_secs()).await;
+    let directory = tempfile::tempdir().unwrap();
+    let (issuer, issued) =
+        crate::mission_control::tests::transport_fixture(&oidc, &directory).await;
+    let gate = crate::mission_control::tests::arm_projection(&issuer, true);
+    let f = Fixture::with_issuer(false, true, Some(issuer), None).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let initial: serde_json::Value = client
+        .get(format!("{}/v1/mission-control/snapshot/fleet", f.url))
+        .bearer_auth(&issued.handle)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut socket = VectorSocket::open(&f, &issued.handle).await;
+    socket.hello().await;
+    socket
+        .send(
+            1,
+            include_bytes!("../tests/vectors/mission-control/v1/V-S1.json"),
+            true,
+        )
+        .await;
+    assert_eq!(socket.json().await["type"], "subscribed");
+    tokio::time::timeout(Duration::from_secs(3), gate.ready.notified())
+        .await
+        .unwrap();
+    f.state
+        .read_hub
+        .as_ref()
+        .unwrap()
+        .inject_source_gap_for_test("fixture.node");
+    gate.release.notify_one();
+    loop {
+        let snapshot = socket.json().await;
+        assert_eq!(
+            snapshot["type"], "snapshot",
+            "live event preceded the final snapshot part"
+        );
+        if snapshot["final"] == true {
+            assert_eq!(
+                snapshot["cursor"], initial["cursor"],
+                "snapshot cursor moved after the frozen read"
+            );
+            break;
+        }
+    }
+    let event = socket.json().await;
+    assert_eq!(event["type"], "event");
+    assert!(event.get("replayed").is_none());
+    assert_eq!(event["delta"]["kind"], "source_gap");
+    assert_eq!(event["delta"]["gap"]["unknown_loss"], true);
 }

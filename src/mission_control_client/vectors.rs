@@ -102,4 +102,12 @@ fn server_vectors_round_trip_in_native_codec_on_listed_bindings() {
     for name in ["V-I13", "V-I14", "V-I24"] {
         assert!(codec::decode(&vector(name), 262_144).is_err(), "{name}");
     }
+    let invalid: Value = serde_json::from_slice(&vector("V-I24")).unwrap();
+    let descriptor = invalid["nodes"][0]["endpoints"][0]["descriptor"].clone();
+    let export = serde_json::json!({
+        "v":2,"node":"laptop","scope":"a".repeat(64),"observed_at":1795000000,
+        "endpoints":[descriptor],"truncated":false,"available":"available",
+        "activity":{"status":"disabled","complete":true}
+    });
+    assert!(serde_json::from_value::<crate::observe_export::ExportSnapshot>(export).is_err());
 }
