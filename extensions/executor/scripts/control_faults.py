@@ -63,6 +63,14 @@ def main():
     files += [p for p in crate.rglob('*') if p.is_file() and not excluded.intersection(p.relative_to(crate).parts)]
     originals = {str(file.relative_to(root)): file.read_bytes() for file in sorted(files)}
     ledger = {'status': 'running', 'protected_hashes': {name: digest(data) for name, data in originals.items()}, 'controls': {}, 'arms': []}
+    fixture_inputs = {}
+    for variable in ['XMSG_EXECUTOR_FIXTURE_DAEMON', 'XMSG_EXECUTOR_FIXTURE_PYTHON']:
+        value = os.environ.get(variable)
+        if value:
+            file = Path(value).resolve(strict=True)
+            fixture_inputs[variable] = {'file': str(file), 'sha256': digest(file.read_bytes())}
+    ledger['fixture_binary_inputs'] = fixture_inputs
+
 
     def persist():
         temporary = evidence / 'results.json.new'
@@ -81,6 +89,9 @@ def main():
 
     def arm(case, phase):
         verify(root, originals)
+        for item in fixture_inputs.values():
+            if digest(Path(item['file']).read_bytes()) != item['sha256']:
+                raise RuntimeError('fixture executable input changed')
         nonce = str(uuid.uuid4())
         stem = case['id'] + '-' + phase
         variant = evidence / 'variants' / stem
@@ -95,7 +106,9 @@ def main():
             expected[name] = originals[name].replace(needle, case['replacement'].encode(), 1)
             if expected[name] == originals[name]:
                 raise RuntimeError('no-op mutation')
-        test_file = 'extensions/executor/src/control_tests.rs'
+        test_file = case.get('test_file', 'extensions/executor/src/control_tests.rs')
+        if test_file not in originals:
+            raise ValueError('test fixture is outside protected inputs')
         function = ('fn ' + case['test'] + '() {').encode()
         if expected[test_file].count(function) != 1:
             raise RuntimeError('exact killing-function anchor is not unique')
@@ -152,7 +165,10 @@ def main():
             else:
                 raise RuntimeError('fresh-cache control was not refused')
             persist()
-        test = 'control::tests::' + case['test']
+        module = case.get('test_module', 'control::tests')
+        if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_:]*', module):
+            raise ValueError('unsafe test module')
+        test = module + '::' + case['test']
         if 'wrong_nonce_refused' not in ledger['controls']:
             if digest(binary.read_bytes()) != record['artifact_sha256']:
                 raise RuntimeError('artifact changed before nonce control execution')
@@ -169,6 +185,9 @@ def main():
         (evidence / (stem + '.log')).write_bytes(output)
         verify(source, expected)
         verify(root, originals)
+        for item in fixture_inputs.values():
+            if digest(Path(item['file']).read_bytes()) != item['sha256']:
+                raise RuntimeError('fixture executable input changed after execution')
         if digest(binary.read_bytes()) != record['artifact_sha256']:
             raise RuntimeError('executed artifact changed')
         marker = ('control-proof-nonce:' + nonce).encode()

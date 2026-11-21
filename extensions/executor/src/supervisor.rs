@@ -490,6 +490,12 @@ impl SupervisorController {
             .map_err(|_| ErrorCode::Storage)?
             .execution(session, generation)?
             .ok_or(ErrorCode::UnknownTarget)?;
+        if matches!(
+            old.state,
+            ExecutionState::Stopped | ExecutionState::Reserved
+        ) {
+            return Ok(old);
+        }
         let socket = self
             .config
             .root
@@ -507,7 +513,7 @@ impl SupervisorController {
                         .journal
                         .lock()
                         .map_err(|_| ErrorCode::Storage)?
-                        .mark_execution(&old.identity, true)?;
+                        .mark_stopped(&old.identity, hello.event_cursor)?;
                     Ok(ExecutionObservation {
                         identity: old.identity,
                         state: ExecutionState::Stopped,
@@ -577,7 +583,7 @@ impl SupervisorController {
                     .journal
                     .lock()
                     .map_err(|_| ErrorCode::Storage)?
-                    .mark_execution(&identity, true)?;
+                    .mark_stopped(&identity, hello.event_cursor)?;
                 Ok(ExecutionObservation {
                     identity,
                     state: ExecutionState::Stopped,
@@ -655,6 +661,24 @@ impl SupervisorController {
 #[cfg(test)]
 #[path = "supervisor_tests.rs"]
 mod tests;
+
+fn terminate_owned_backend_group(backend: &mut Child) -> Result<(), SupervisorError> {
+    let own = i32::try_from(std::process::id()).map_err(|_| SupervisorError::Unknown)?;
+    if unsafe { libc::getpgrp() } != own {
+        return Err(SupervisorError::Unknown);
+    }
+    if unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN) } == libc::SIG_ERR {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if unsafe { libc::kill(-own, libc::SIGTERM) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if backend.try_wait()?.is_none() {
+        backend.kill()?;
+    }
+    backend.wait()?;
+    Ok(())
+}
 
 fn run_supervisor_process(manifest: ChildManifest) -> Result<(), SupervisorError> {
     use std::os::fd::FromRawFd;
@@ -751,10 +775,7 @@ fn run_supervisor_process(manifest: ChildManifest) -> Result<(), SupervisorError
     loop {
         let remaining = expires.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            if backend.try_wait()?.is_none() {
-                backend.kill()?;
-            }
-            backend.wait()?;
+            terminate_owned_backend_group(&mut backend)?;
             return Ok(());
         }
         let mut poll = libc::pollfd {
@@ -810,12 +831,22 @@ fn run_supervisor_process(manifest: ChildManifest) -> Result<(), SupervisorError
             continue;
         }
         if matches!(request, SupervisorRequest::Stop { .. }) {
-            // Only the held child is signalled; stored diagnostic PIDs are never ownership.
-            if backend.try_wait()?.is_none() {
-                backend.kill()?;
-            }
-            backend.wait()?;
+            terminate_owned_backend_group(&mut backend)?;
             hello.event_cursor += 1;
+            let event = SupervisorEvent {
+                cursor: hello.event_cursor,
+                frame: serde_json::json!({"kind":"owned_backend_stopped"}),
+            };
+            let raw = serde_json::to_vec(&event).map_err(|_| SupervisorError::Protocol)?;
+            if event_bytes
+                .checked_add(raw.len() + 1)
+                .is_none_or(|n| n > manifest.max_content_bytes as usize)
+            {
+                return Err(SupervisorError::Protocol);
+            }
+            log.write_all(&raw)?;
+            log.write_all(b"\n")?;
+            log.sync_data()?;
             hello.stopped = true;
             frame(&mut stream, &hello)?;
             return Ok(());
