@@ -21,7 +21,15 @@ fn token_key() -> LessSafeKey {
 }
 
 async fn issuer(oidc: &Fixture, directory: &TempDir, refresh: bool) -> Arc<Issuer> {
-    let config = config(&oidc.issuer());
+    issuer_with_config(oidc, directory, refresh, config(&oidc.issuer())).await
+}
+
+async fn issuer_with_config(
+    oidc: &Fixture,
+    directory: &TempDir,
+    refresh: bool,
+    config: Config,
+) -> Arc<Issuer> {
     let provider = Provider::discover_with_client(
         config.oidc(),
         &config.public_origin,
@@ -51,7 +59,17 @@ pub(crate) async fn transport_fixture(
     oidc: &Fixture,
     directory: &TempDir,
 ) -> (Arc<Issuer>, authority::Issued) {
-    let issuer = issuer(oidc, directory, false).await;
+    transport_with_lease(oidc, directory, 900).await
+}
+
+pub(crate) async fn transport_with_lease(
+    oidc: &Fixture,
+    directory: &TempDir,
+    lease_secs: u64,
+) -> (Arc<Issuer>, authority::Issued) {
+    let mut settings = config(&oidc.issuer());
+    settings.session_limits.lease_max_secs = lease_secs;
+    let issuer = issuer_with_config(oidc, directory, false, settings).await;
     let browser = issuer
         .authority
         .login("alice@example.org", &oidc.issuer(), "transport-owner", None)
@@ -150,6 +168,63 @@ pub(crate) async fn suppress_and_revoke(
         watchdog.abort();
     });
     at
+}
+
+pub(crate) fn admission_reads(issuer: &Issuer) -> u64 {
+    issuer.authority.admission_reads()
+}
+
+pub(crate) fn set_expired(issuer: &Issuer, record: &authority::Record, absolute: bool) {
+    issuer
+        .authority
+        .edit_fixture_record(&record.record_id, |stored| {
+            if absolute {
+                stored.absolute_expires_at = 0;
+            } else {
+                stored.idle_expires_at = 0;
+            }
+        });
+}
+
+pub(crate) fn clear_machine_scope(issuer: &Issuer, record: &authority::Record) {
+    issuer
+        .authority
+        .edit_fixture_record(&record.record_id, |stored| {
+            if let authority::Grants::Machine { scope, .. } = &mut stored.grants {
+                scope.clear();
+            } else {
+                panic!("fixture requires a machine record");
+            }
+        });
+}
+
+pub(crate) fn set_entitlement(issuer: &Issuer, value: bool) {
+    issuer.authority.fixture_entitlement(value);
+}
+
+pub(crate) fn fail_store(issuer: &Issuer) {
+    issuer.authority.fail_fixture_store();
+}
+
+pub(crate) async fn upstream_fixture_tokens(issuer: &Issuer, provider: &Fixture) -> Vec<String> {
+    let _ = login(issuer, provider).await;
+    let tokens = provider.secret_values();
+    assert!(!tokens.is_empty());
+    tokens
+}
+
+pub(crate) fn start_watchdog(issuer: &Issuer) -> tokio::task::JoinHandle<()> {
+    let authority = issuer.authority.clone();
+    tokio::spawn(async move {
+        authority.watchdog().await.unwrap();
+    })
+}
+
+pub(crate) fn arm_projection(
+    issuer: &Issuer,
+    snapshot: bool,
+) -> Arc<super::writer::ProjectionGate> {
+    issuer.authority.arm_projection_gate(snapshot)
 }
 
 pub(crate) fn last_handoff(issuer: &Issuer) -> Option<std::time::Instant> {
@@ -494,6 +569,25 @@ impl std::io::Write for Capture {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+pub(crate) fn capture_transport_trace(
+) -> (impl FnOnce() -> Vec<u8>, tracing::subscriber::DefaultGuard) {
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer({
+            let capture = capture.clone();
+            move || capture.clone()
+        })
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    (move || capture.0.lock().unwrap().clone(), guard)
+}
+
+pub(crate) fn transport_files(directory: &TempDir) -> Vec<Vec<u8>> {
+    state_files(directory)
 }
 
 #[tokio::test]

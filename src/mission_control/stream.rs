@@ -501,13 +501,23 @@ impl Reader {
                         if self.replay_through.is_some_and(|max| event.seq <= max) {
                             body["replayed"] = json!(true);
                         }
+                        #[cfg(test)]
+                        self.writer
+                            .queued_projection_gate(event.delta.contains_history(), false)
+                            .await;
                         let nodes = event.delta.contains_history().then(|| event.delta.node());
-                        return self
-                            .writer
-                            .handoff(nodes, Some((&self.hub, event)), || {
-                                frame("event", Some(&cursor), &body.to_string())
-                            })
-                            .ok();
+                        match self.writer.handoff(nodes, Some((&self.hub, event)), || {
+                            frame("event", Some(&cursor), &body.to_string())
+                        }) {
+                            Ok(frame) => return Some(frame),
+                            Err(_) if self.writer.still_live() => {
+                                self.reset = Some(Reset::ScopeChanged);
+                                self.needs_snapshot = true;
+                                self.replay_through = None;
+                                continue;
+                            }
+                            Err(_) => return None,
+                        }
                     }
                 }
                 Err(reset) => {
