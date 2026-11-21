@@ -86,6 +86,9 @@ struct State {
     verifier: Option<Verifier>,
     issuer: Option<Arc<crate::mission_control::Issuer>>,
     read_hub: Option<Arc<crate::mission_control::upstream::ReadHub>>,
+    #[cfg(test)]
+    wire_probe: Option<Arc<crate::mission_control::stream::WireProbe>>,
+
     store: Arc<Store>,
     store_slots: Arc<Semaphore>,
     requests: Arc<Semaphore>,
@@ -433,6 +436,10 @@ async fn serve_with_admission(
                 let tls = tls.clone();
                 tasks.spawn(async move {
                     let _lease = lease;
+                    #[cfg(test)]
+                    if state.wire_probe.is_some() {
+                        socket2::SockRef::from(&tcp).set_send_buffer_size(4096).unwrap();
+                    }
                     let (tcp, abort) = if state.read_hub.is_some() {
                         let Ok(socket) = tcp.into_std() else { return };
                         let Ok(abort) = socket.try_clone() else { return };
@@ -476,7 +483,10 @@ async fn serve_stream_with_socket<I>(
     let budget = state.issuer.as_ref().map_or(WEB_BUDGET, |issuer| {
         Duration::from_millis(issuer.config().handshake_timeout_ms)
     });
-    let fence = Arc::new(crate::mission_control::stream::Fence::default());
+    let fence = crate::mission_control::stream::Fence::default();
+    #[cfg(test)]
+    let fence = fence.with_probe(state.wire_probe.clone());
+    let fence = Arc::new(fence);
     let connection_fence = fence.clone();
     serve_http_inner(
         connection_fence.wrap(stream),
@@ -1076,6 +1086,8 @@ pub async fn run(args: Args) -> Result<(), Error> {
         verifier,
         issuer,
         read_hub,
+        #[cfg(test)]
+        wire_probe: None,
         store: Arc::new(store),
         store_slots: Arc::new(Semaphore::new(1)),
         requests,

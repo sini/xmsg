@@ -32,7 +32,11 @@ async fn issuer(oidc: &Fixture, directory: &TempDir, refresh: bool) -> Arc<Issue
     .unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let authority = Authority::open(directory.path(), config.authority_config(vec![])).unwrap();
+    let authority = Authority::open(
+        directory.path(),
+        config.authority_config(vec!["fixture.node".to_owned()]),
+    )
+    .unwrap();
     Issuer::start(
         Prepared {
             config,
@@ -65,6 +69,44 @@ pub(crate) async fn transport_fixture(
     (issuer, machine)
 }
 
+pub(crate) fn transport_owner_records(
+    issuer: &Issuer,
+    upstream: &str,
+) -> (authority::Issued, authority::Issued, authority::Issued) {
+    let browser = issuer
+        .authority
+        .login("alice@example.org", upstream, "transport-owner", None)
+        .unwrap();
+    let native = issuer
+        .authority
+        .issue_native(&browser.record.record_id)
+        .unwrap();
+    let delegated = issuer
+        .authority
+        .mint_delegated(
+            &browser.record.principal,
+            authority::DelegatedGrant {
+                holder: "synthetic-transport-holder".into(),
+                verbs: vec!["send".into()],
+                targets: vec![authority::Target {
+                    node: "fixture.node".into(),
+                    endpoint: "worker@fixture.node".into(),
+                }],
+                presenter: None,
+                expires_at: now_epoch_secs() + 60,
+                rate: 1,
+                read_scope: Some(vec![authority::Scope::Attention]),
+                confirm_verbs: Vec::new(),
+            },
+        )
+        .unwrap();
+    (browser, native, delegated)
+}
+
+pub(crate) fn synthetic_transport_record(issuer: &Issuer, handle: &str) {
+    issuer.authority.allow_synthetic_for_test(handle);
+}
+
 pub(crate) async fn suppress_and_revoke(
     issuer: &Arc<Issuer>,
     directory: &TempDir,
@@ -72,8 +114,12 @@ pub(crate) async fn suppress_and_revoke(
 ) -> std::time::Instant {
     let listener = admin::bind(directory.path(), &issuer.authority).unwrap();
     let admin = tokio::spawn(admin::serve(listener, issuer.authority.clone()));
+    let tick = issuer.authority.watchdog_tick_for_test();
     let watchdog = tokio::spawn(issuer.authority.clone().watchdog());
     issuer.authority.suppress_push_for_test();
+    tokio::time::timeout(Duration::from_secs(1), tick.notified())
+        .await
+        .unwrap();
     admin::revoke_fixture(directory.path(), record_id).await;
     let (audit_row, at) = issuer.authority.last_revoke_for_test();
     assert!(audit_row > 0);
@@ -89,6 +135,10 @@ pub(crate) async fn suppress_and_revoke(
         watchdog.abort();
     });
     at
+}
+
+pub(crate) fn last_handoff(issuer: &Issuer) -> Option<std::time::Instant> {
+    issuer.authority.last_handoff_for_test()
 }
 
 fn set_cookie_header(response: &WebResponse, name: &str) -> String {
