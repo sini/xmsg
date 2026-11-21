@@ -143,19 +143,21 @@ fn capture_step(
 ) -> Result<Vec<Candidate>, FailureReason> {
     let entries = crate::registry::read_session_entries_checked(&state.sessions_dirs, deadline)?;
     let runtime = crate::codex::readonly_runtime_for_db(&state.db, deadline)?;
-    macro_rules! guard {
-        ($value:expr) => {
-            match $value {
-                Ok(guard) => guard,
-                Err(TryLockError::WouldBlock) => {
-                    std::thread::yield_now();
-                    continue 'retry;
-                }
-                Err(TryLockError::Poisoned(_)) => return Err(FailureReason::AuthorityUnavailable),
-            }
-        };
-    }
     'retry: loop {
+        macro_rules! guard {
+            ($value:expr) => {
+                match $value {
+                    Ok(guard) => guard,
+                    Err(TryLockError::WouldBlock) => {
+                        std::thread::yield_now();
+                        continue 'retry;
+                    }
+                    Err(TryLockError::Poisoned(_)) => {
+                        return Err(FailureReason::AuthorityUnavailable)
+                    }
+                }
+            };
+        }
         deadline_check(deadline)?;
         let connection = guard!(state.db.try_lock());
         let agy = guard!(state.agy_store.try_read());
