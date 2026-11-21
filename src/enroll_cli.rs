@@ -269,9 +269,20 @@ pub async fn run(args: Args) -> Result<()> {
 
 pub(crate) async fn run_with_browser(args: Args, browser: &dyn Browser) -> Result<()> {
     let is_device = matches!(args.flow, Flow::Device);
-    let directory = args
-        .state_dir
-        .unwrap_or_else(client::default_state_directory);
+    let lookup = crate::install_paths::SystemHomeLookup;
+    let env = crate::install_paths::ResolveEnv::from_process(&lookup);
+    let directory = match args.state_dir {
+        Some(dir) => crate::install_paths::expand_explicit_path(&dir, &env)?,
+        None => {
+            let req = crate::install_paths::ResolveRequest {
+                writable: true,
+                enforce_legacy_guard: true,
+                ..Default::default()
+            };
+            let resolved = crate::install_paths::resolve_install(&req, &env)?;
+            resolved.enroll_state_dir
+        }
+    };
     if args.renew {
         renew_once(&directory, None).await?;
         println!("enrollment certificate renewed");

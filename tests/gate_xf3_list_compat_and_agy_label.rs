@@ -404,6 +404,7 @@ async fn start_node_with_bin(
         .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
+        .env("XMSG_AGY_PRESENCE_DIR", &presence_dir)
         .env("PATH", &path_env)
         .env("RUST_LOG", "info")
         .args(&args)

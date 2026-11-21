@@ -464,27 +464,17 @@ pub struct McpArgs {
 }
 
 fn resolve_db_path(path: Option<PathBuf>) -> PathBuf {
+    resolve_db_path_checked(path).unwrap_or_else(|_| PathBuf::new())
+}
+
+fn resolve_db_path_checked(
+    path: Option<PathBuf>,
+) -> Result<PathBuf, xmsg::install_paths::InstallError> {
+    let lookup = xmsg::install_paths::SystemHomeLookup;
+    let env = xmsg::install_paths::ResolveEnv::from_process(&lookup);
     match path {
-        Some(p) => {
-            if let Ok(stripped) = p.strip_prefix("~/") {
-                if let Ok(home) = std::env::var("HOME") {
-                    return PathBuf::from(home).join(stripped);
-                }
-            }
-            p
-        }
-        None => {
-            if let Ok(state_home) = std::env::var("XDG_STATE_HOME") {
-                PathBuf::from(state_home).join("xmsg").join("xmsg.db")
-            } else {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                PathBuf::from(home)
-                    .join(".local")
-                    .join("state")
-                    .join("xmsg")
-                    .join("xmsg.db")
-            }
-        }
+        Some(p) => xmsg::install_paths::expand_explicit_path(&p, &env),
+        None => Ok(xmsg::install_paths::default_state_root(&env)?.join("xmsg.db")),
     }
 }
 
@@ -538,6 +528,8 @@ async fn enrollment_operator(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Restrict newly created state, config, log, and socket files to owner-only before any write.
+    xmsg::install_paths::apply_process_umask();
     let cli = Cli::parse();
 
     match cli.command {
@@ -639,10 +631,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if !directory.join("root.key").exists() {
                     return Err("run enroll-ca init first".into());
                 }
-                let db_file = resolve_db_path(args.db_path);
-                if let Some(parent) = db_file.parent() {
-                    std::fs::create_dir_all(parent)?;
+                let lookup = xmsg::install_paths::SystemHomeLookup;
+                let resolve_env = xmsg::install_paths::ResolveEnv::from_process(&lookup);
+                let my_uid = xmsg::agent::current_uid();
+                let resolved = xmsg::install_paths::resolve_install(
+                    &xmsg::install_paths::ResolveRequest {
+                        db_path: args.db_path,
+                        writable: true,
+                        enforce_legacy_guard: true,
+                        ..Default::default()
+                    },
+                    &resolve_env,
+                )?;
+                if resolved.state_root_explicit {
+                    xmsg::install_paths::ensure_explicit_private_dir(&resolved.state_root, my_uid)?;
+                } else {
+                    xmsg::install_paths::ensure_default_private_dir(&resolved.state_root, my_uid)?;
                 }
+                let db_file = resolved.db_path;
                 let connection = rusqlite::Connection::open(&db_file)?;
                 storage::init_db(&connection)?;
                 let ca = xmsg::enroll_ca::EnrollCa::open(
@@ -1311,6 +1317,9 @@ fn run_hook_agy(args: RegisterAgyArgs) -> Result<(), Box<dyn std::error::Error>>
 }
 
 async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // Sample actual effective kernel umask before spawning concurrent work (A3 / M-S9d).
+    let effective_umask = xmsg::install_paths::sample_effective_umask();
+
     if let Some(directory) = &args.enroll_state {
         if args.fed_cert.is_some() || args.fed_key.is_some() {
             return Err("--enroll-state conflicts with explicit --fed-cert/--fed-key".into());
@@ -1379,23 +1388,177 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
                 .into(),
         );
     }
+    let my_uid = xmsg::agent::current_uid();
     let sessions_dirs = resolve_sessions_dirs(args.sessions_dirs);
-    let db_path = resolve_db_path(args.db_path);
+    let lookup = xmsg::install_paths::SystemHomeLookup;
+    let resolve_env = xmsg::install_paths::ResolveEnv::from_process(&lookup);
+    let resolved = xmsg::install_paths::resolve_install(
+        &xmsg::install_paths::ResolveRequest {
+            leaf: args.leaf,
+            db_path: args.db_path.clone(),
+            enroll_state: args.enroll_state.clone(),
+            peers_file: args.peers_file.clone(),
+            http_sock: args.http_sock.clone(),
+            agent_sock: args.agent_sock.clone(),
+            register_sock: args.register_sock.clone(),
+            leaf_register_sock: args.leaf_register_sock.clone(),
+            writable: true,
+            enforce_legacy_guard: true,
+        },
+        &resolve_env,
+    )?;
 
-    if let Some(parent) = db_path.parent() {
-        let _ = xmsg::agent::create_private_dir(parent);
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+    let canon_state_root = if resolved.state_root_explicit {
+        xmsg::install_paths::ensure_explicit_private_dir(&resolved.state_root, my_uid)?
+    } else {
+        xmsg::install_paths::ensure_default_private_dir(&resolved.state_root, my_uid)?
+    };
+    let db_path = canon_state_root.join(
+        resolved
+            .db_path
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("xmsg.db")),
+    );
+
+    // Acquire exclusive per-state lock BEFORE opening the database or touching sockets.
+    let state_lock = Arc::new(xmsg::runtime_lock::StateLock::try_acquire(&canon_state_root)?);
+    let manager_hint = detect_process_manager_hint();
+    let mut owner_record = xmsg::runtime_lock::OwnerRecord::load(&canon_state_root)?
+        .unwrap_or_else(|| xmsg::runtime_lock::OwnerRecord::new(my_uid, manager_hint.clone()));
+    owner_record.pid = std::process::id();
+    owner_record.uid = my_uid;
+    owner_record.started_at_unix = storage::now_epoch_secs();
+    owner_record.manager_hint = manager_hint;
+
+    if let (Some(ns_dir), Some(ns_id)) = (&resolved.runtime_namespace, &resolved.namespace_identity)
+    {
+        xmsg::runtime_lock::ensure_managed_runtime_dir(
+            &state_lock,
+            &canon_state_root,
+            ns_dir,
+            ns_id,
+            &mut owner_record,
+            my_uid,
+        )?;
+    } else {
+        owner_record.runtime_dir = None;
+        owner_record.save(&canon_state_root)?;
     }
 
-    let http_sock_path = match args.http_sock {
-        Some(p) => p,
-        None => xmsg::http::default_http_sock_path()
-            .map_err(|e| format!("cannot determine http socket path: {e}"))?,
+    // Validate or exclusively create missing final parents for every manual endpoint (H1/H2/K1).
+    for ep in resolved.enabled_endpoints() {
+        if ep.kind == xmsg::install_paths::BindingKind::Manual {
+            if let Some(parent) = ep.path.parent() {
+                xmsg::install_paths::ensure_explicit_private_dir(parent, my_uid)?;
+            }
+        }
+    }
+
+    let http_sock_path = resolved
+        .http_sock
+        .as_ref()
+        .map(|e| e.path.clone())
+        .unwrap_or_default();
+    let agent_sock_path = resolved
+        .agent_sock
+        .as_ref()
+        .expect("agent endpoint enabled in all modes")
+        .path
+        .clone();
+    let register_sock_path = resolved
+        .register_sock
+        .as_ref()
+        .map(|e| e.path.clone())
+        .unwrap_or_default();
+    let leaf_reg_sock_path = resolved.leaf_register_sock.as_ref().map(|e| e.path.clone());
+
+    let fed_listen_addr: Option<std::net::SocketAddr> = match &args.fed_listen {
+        Some(s) => Some(
+            s.parse()
+                .map_err(|e| format!("invalid --fed-listen address '{s}': {e}"))?,
+        ),
+        None => None,
     };
+
+    let mut activated = xmsg::systemd::take_activated_sockets(&xmsg::systemd::ActivatedConfig {
+        fed_listen: fed_listen_addr,
+        listen: args.listen.as_deref(),
+        agent_sock: Some(agent_sock_path.as_path()),
+        register_sock: if args.leaf {
+            leaf_reg_sock_path.as_deref().unwrap_or(&register_sock_path)
+        } else {
+            register_sock_path.as_path()
+        },
+        http_sock: if args.leaf {
+            None
+        } else {
+            Some(http_sock_path.as_path())
+        },
+    })?;
+
+    // Systemd activation requires explicit endpoint paths; collect adopted Unix paths to lock
+    // and exclude from legacy probe, bind, publication, and cleanup (G3 / M-S1g).
+    let mut adopted_unix_paths: Vec<PathBuf> = Vec::new();
+    if activated.http.is_some() {
+        let ep = resolved
+            .http_sock
+            .as_ref()
+            .ok_or("systemd http listener adopted in leaf mode")?;
+        if !ep.explicit {
+            return Err("systemd activation for http requires an explicit --http-sock pin".into());
+        }
+        adopted_unix_paths.push(ep.path.clone());
+    }
+    if activated.agent.is_some() {
+        let ep = resolved
+            .agent_sock
+            .as_ref()
+            .ok_or("systemd agent listener missing endpoint")?;
+        if !ep.explicit {
+            return Err("systemd activation for agent requires an explicit --agent-sock pin".into());
+        }
+        adopted_unix_paths.push(ep.path.clone());
+    }
+    if activated.register.is_some() {
+        let ep = if args.leaf {
+            resolved.leaf_register_sock.as_ref()
+        } else {
+            resolved.register_sock.as_ref()
+        }
+        .ok_or("systemd register listener missing endpoint")?;
+        if !ep.explicit {
+            return Err(
+                "systemd activation for register requires an explicit --register-sock / --leaf-register-sock pin"
+                    .into(),
+            );
+        }
+        adopted_unix_paths.push(ep.path.clone());
+    }
+
+    // Acquire sorted per-endpoint locks for all manual bindings and adopted systemd listeners
+    // before probing legacy listeners or opening the database.
+    let mut endpoint_lock_targets: Vec<PathBuf> = resolved
+        .enabled_endpoints()
+        .into_iter()
+        .filter(|ep| ep.kind == xmsg::install_paths::BindingKind::Manual)
+        .map(|ep| ep.path.clone())
+        .collect();
+    endpoint_lock_targets.extend(adopted_unix_paths.iter().cloned());
+    let endpoint_locks =
+        xmsg::runtime_lock::acquire_endpoint_locks_sorted(&endpoint_lock_targets, my_uid)?;
+    let endpoint_lock_by_path: std::collections::HashMap<PathBuf, usize> = endpoint_locks
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (l.path.clone(), i))
+        .collect();
+
+    // Probe legacy default/known endpoints read-only, excluding validated adopted listeners.
+    xmsg::install_paths::probe_legacy_listeners(&resolved, &resolve_env, &adopted_unix_paths, &[])?;
 
     info!(
         http_sock = %http_sock_path.display(),
+        agent_sock = %agent_sock_path.display(),
+        effective_umask = format!("{effective_umask:03o}"),
         sessions_dirs = ?sessions_dirs,
         db_path = %db_path.display(),
         max_body = args.max_body,
@@ -1455,32 +1618,6 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         }
     }
 
-    let my_uid = xmsg::agent::current_uid();
-    let register_sock_path = match &args.register_sock {
-        Some(p) => p.clone(),
-        None => xmsg::agent::default_register_sock_path()
-            .map_err(|e| format!("cannot determine register socket path: {e}"))?,
-    };
-    let leaf_reg_sock_path = if args.leaf {
-        Some(
-            args.leaf_register_sock
-                .clone()
-                .or_else(|| args.register_sock.clone())
-                .unwrap_or_else(|| register_sock_path.clone()),
-        )
-    } else {
-        None
-    };
-    let agent_sock_path = match args.agent_sock {
-        Some(p) => p,
-        None => leaf_reg_sock_path
-            .as_ref()
-            .and_then(|p| p.parent().map(|d| d.join("agent.sock")))
-            .map(Ok)
-            .unwrap_or_else(xmsg::agent::default_agent_sock_path)
-            .map_err(|e| format!("cannot determine agent socket path: {e}"))?,
-    };
-
     let reply_ttl = Duration::from_secs(args.reply_ttl);
     let idempotency_ttl = Duration::from_secs(args.idempotency_ttl);
     storage::set_svc_queue_cap(&db, args.svc_queue_cap);
@@ -1519,30 +1656,6 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
     if args.fed_listen.is_some() && args.peers_file.is_none() {
         return Err("--fed-listen requires --peers-file".to_string().into());
     }
-
-    let fed_listen_addr: Option<std::net::SocketAddr> = match &args.fed_listen {
-        Some(s) => Some(
-            s.parse()
-                .map_err(|e| format!("invalid --fed-listen address '{s}': {e}"))?,
-        ),
-        None => None,
-    };
-
-    let mut activated = xmsg::systemd::take_activated_sockets(&xmsg::systemd::ActivatedConfig {
-        fed_listen: fed_listen_addr,
-        listen: args.listen.as_deref(),
-        agent_sock: Some(agent_sock_path.as_path()),
-        register_sock: if args.leaf {
-            leaf_reg_sock_path.as_deref().unwrap_or(&register_sock_path)
-        } else {
-            register_sock_path.as_path()
-        },
-        http_sock: if args.leaf {
-            None
-        } else {
-            Some(http_sock_path.as_path())
-        },
-    })?;
 
     let fed_listener = if let Some(addr) = fed_listen_addr {
         let listener = match activated.fed.take() {
@@ -1929,6 +2042,8 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
 
     let mailbox_db = db.clone();
     let mailbox_peers = fed_state.clone();
+    let maintenance_state_lock = state_lock.clone();
+    let maintenance_runtime_dir = owner_record.runtime_dir.clone();
     bg_tasks.push(tokio::spawn(async move {
         let cadence = Duration::from_secs(mailbox_ttl.clamp(1, 600));
         let mut timer = tokio::time::interval(cadence);
@@ -1936,6 +2051,20 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         timer.tick().await;
         loop {
             timer.tick().await;
+            if let Some(ref rt_rec) = maintenance_runtime_dir {
+                match xmsg::runtime_lock::verify_and_restamp_runtime_marker(
+                    &maintenance_state_lock,
+                    rt_rec,
+                    my_uid,
+                ) {
+                    Ok(true) => info!(
+                        runtime_dir = %rt_rec.path.display(),
+                        "re-stamped missing runtime identity.json marker under state lock"
+                    ),
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!("runtime marker verification failed: {e}"),
+                }
+            }
             let Ok(db) = mailbox_db.lock() else {
                 break;
             };
@@ -2027,29 +2156,26 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         let codex_homes = if args.codex_homes.is_empty() {
             if let Ok(env_home) = std::env::var("CODEX_HOME") {
                 if !env_home.trim().is_empty() {
-                    vec![PathBuf::from(env_home)]
-                } else if let Ok(home) = std::env::var("HOME") {
-                    vec![PathBuf::from(home).join(".codex")]
+                    vec![xmsg::install_paths::expand_explicit_path(
+                        std::path::Path::new(env_home.trim()),
+                        &resolve_env,
+                    )?]
                 } else {
-                    Vec::new()
+                    xmsg::install_paths::resolve_optional_home(&resolve_env)
+                        .map(|h| vec![h.join(".codex")])
+                        .unwrap_or_default()
                 }
-            } else if let Ok(home) = std::env::var("HOME") {
-                vec![PathBuf::from(home).join(".codex")]
             } else {
-                Vec::new()
+                xmsg::install_paths::resolve_optional_home(&resolve_env)
+                    .map(|h| vec![h.join(".codex")])
+                    .unwrap_or_default()
             }
         } else {
-            args.codex_homes
-                .into_iter()
-                .map(|p| {
-                    if let Ok(stripped) = p.strip_prefix("~/") {
-                        if let Ok(home) = std::env::var("HOME") {
-                            return PathBuf::from(home).join(stripped);
-                        }
-                    }
-                    p
-                })
-                .collect()
+            let mut expanded = Vec::with_capacity(args.codex_homes.len());
+            for p in args.codex_homes {
+                expanded.push(xmsg::install_paths::expand_explicit_path(&p, &resolve_env)?);
+            }
+            expanded
         };
         let codex_config = xmsg::codex::CodexConfig {
             trusted_codex_exes: args.codex_exes,
@@ -2067,39 +2193,17 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         }
     }
 
-    let agent_listener = match activated.agent.take() {
-        Some(listener) => listener,
-        None => xmsg::agent::bind_agent_listener(&agent_sock_path, my_uid).await?,
+    let find_endpoint_lock = |ep_path: &std::path::Path| -> Option<&xmsg::runtime_lock::EndpointLock> {
+        let lp = xmsg::runtime_lock::EndpointLock::lock_path_for(ep_path).ok()?;
+        let canon_lp = xmsg::install_paths::canonicalize_best_effort(&lp).unwrap_or(lp);
+        endpoint_lock_by_path
+            .get(&canon_lp)
+            .map(|&idx| &endpoint_locks[idx])
     };
-    let agent_state = state.clone();
-    bg_tasks.push(tokio::spawn(async move {
-        if let Err(e) =
-            xmsg::agent::run_agent_server_with_listener(agent_listener, agent_state, my_uid).await
-        {
-            tracing::error!("agent server error: {e}");
-        }
-    }));
 
+    // Initialize handoff observer channel before starting listeners/claim watchers so early
+    // session observations are never dropped during synchronous socket publication.
     if !args.leaf {
-        let reg_listener = match activated.register.take() {
-            Some(listener) => listener,
-            None => xmsg::agy::bind_register_listener(&register_sock_path, my_uid).await?,
-        };
-        let reg_state = state.clone();
-        let reg_trusted_svc_exes = trusted_svc_exes.clone();
-        bg_tasks.push(tokio::spawn(async move {
-            if let Err(e) = xmsg::agy::run_register_server_with_listener(
-                reg_listener,
-                reg_state,
-                my_uid,
-                reg_trusted_svc_exes,
-            )
-            .await
-            {
-                tracing::error!("register server error: {e}");
-            }
-        }));
-
         if let Some(ref fs) = fed_state {
             bg_tasks.push(xmsg::handoff::spawn(state.clone()));
             for (peer_name, peer_cfg) in fs.current_peers().iter() {
@@ -2116,13 +2220,88 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         }
     }
 
+    let agent_ep = resolved.agent_sock.as_ref().expect("agent endpoint");
+    let agent_listener = match activated.agent.take() {
+        Some(listener) => listener,
+        None => {
+            let (listener, _) = xmsg::runtime_lock::bind_and_publish_socket(
+                &state_lock,
+                find_endpoint_lock(&agent_ep.path),
+                &canon_state_root,
+                agent_ep.name,
+                &agent_ep.path,
+                agent_ep.kind,
+                &mut owner_record,
+                my_uid,
+            )?;
+            listener
+        }
+    };
+    let agent_state = state.clone();
+    bg_tasks.push(tokio::spawn(async move {
+        if let Err(e) =
+            xmsg::agent::run_agent_server_with_listener(agent_listener, agent_state, my_uid).await
+        {
+            tracing::error!("agent server error: {e}");
+        }
+    }));
+
+    if !args.leaf {
+        let reg_ep = resolved.register_sock.as_ref().expect("register endpoint");
+        let reg_listener = match activated.register.take() {
+            Some(listener) => listener,
+            None => {
+                let (listener, _) = xmsg::runtime_lock::bind_and_publish_socket(
+                    &state_lock,
+                    find_endpoint_lock(&reg_ep.path),
+                    &canon_state_root,
+                    reg_ep.name,
+                    &reg_ep.path,
+                    reg_ep.kind,
+                    &mut owner_record,
+                    my_uid,
+                )?;
+                listener
+            }
+        };
+        let reg_state = state.clone();
+        let reg_trusted_svc_exes = trusted_svc_exes.clone();
+        bg_tasks.push(tokio::spawn(async move {
+            if let Err(e) = xmsg::agy::run_register_server_with_listener(
+                reg_listener,
+                reg_state,
+                my_uid,
+                reg_trusted_svc_exes,
+            )
+            .await
+            {
+                tracing::error!("register server error: {e}");
+            }
+        }));
+    }
+
     let app = build_router(state.clone());
 
     if args.leaf {
-        let leaf_reg_sock = leaf_reg_sock_path.expect("leaf_reg_sock_path");
+        let leaf_ep = resolved
+            .leaf_register_sock
+            .as_ref()
+            .expect("leaf_register endpoint");
         let leaf_reg_listener = match activated.register.take() {
             Some(listener) => listener,
-            None => xmsg::svc::bind_leaf_register_listener(&leaf_reg_sock, my_uid)?,
+            None => {
+                let (listener, _) = xmsg::runtime_lock::bind_and_publish_socket(
+                    &state_lock,
+                    find_endpoint_lock(&leaf_ep.path),
+                    &canon_state_root,
+                    leaf_ep.name,
+                    &leaf_ep.path,
+                    leaf_ep.kind,
+                    &mut owner_record,
+                    my_uid,
+                )?;
+                listener
+            }
         };
         let leaf_p = args.leaf_principal.clone().unwrap();
         let leaf_state = state.clone();
@@ -2181,6 +2360,8 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         xmsg::discovery::spawn(fed_state.clone(), discovery_listen);
         xmsg::systemd::notify_ready();
         run_shutdown_drain(sigterm, sigint, shutdown_tx, bg_tasks, vec![leaf_task], db).await?;
+        drop(endpoint_locks);
+        drop(state_lock);
         return Ok(());
     }
 
@@ -2206,9 +2387,22 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         }));
     }
 
+    let http_ep = resolved.http_sock.as_ref().expect("http endpoint");
     let ucred_listener = match activated.http.take() {
         Some(listener) => xmsg::http::adopt_ucred_unix_listener(listener, my_uid, None),
-        None => xmsg::http::bind_ucred_unix_listener(&http_sock_path, my_uid, None)?,
+        None => {
+            let (listener, _) = xmsg::runtime_lock::bind_and_publish_socket(
+                &state_lock,
+                find_endpoint_lock(&http_ep.path),
+                &canon_state_root,
+                http_ep.name,
+                &http_ep.path,
+                http_ep.kind,
+                &mut owner_record,
+                my_uid,
+            )?;
+            xmsg::http::adopt_ucred_unix_listener(listener, my_uid, None)
+        }
     };
     let unix_app = build_unix_router_with_enrollment(
         state.clone(),
@@ -2235,7 +2429,21 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
     xmsg::discovery::spawn(fed_state.clone(), discovery_listen);
     xmsg::systemd::notify_ready();
     run_shutdown_drain(sigterm, sigint, shutdown_tx, bg_tasks, server_tasks, db).await?;
+    drop(endpoint_locks);
+    drop(state_lock);
     Ok(())
+}
+
+fn detect_process_manager_hint() -> Option<String> {
+    if std::env::var_os("INVOCATION_ID").is_some() {
+        return Some("systemd_user".to_string());
+    }
+    if let Ok(xpc) = std::env::var("XPC_SERVICE_NAME") {
+        if xpc.contains("homebrew.mxcl.xmsg") {
+            return Some("homebrew_launchagent".to_string());
+        }
+    }
+    Some("foreground".to_string())
 }
 
 async fn run_shutdown_drain(
