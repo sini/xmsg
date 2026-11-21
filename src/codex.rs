@@ -3066,14 +3066,14 @@ impl CodexStore {
     pub fn readonly_attribution_binding(
         &self,
         config: &CodexConfig,
-        owner_pid: u32,
-        owner_start: &str,
+        owner: (u32, &str),
         root_id: &str,
         thread_id: &str,
         turn_id: Option<&str>,
         deadline: std::time::Instant,
     ) -> Result<ReadonlyCodexBinding, crate::client::caller_attribution::FailureReason> {
         use crate::client::caller_attribution::FailureReason;
+        let (owner_pid, owner_start) = owner;
         if std::time::Instant::now() >= deadline {
             return Err(FailureReason::Deadline);
         }
@@ -3525,11 +3525,11 @@ mod readonly_attribution_tests {
         );
         let first = f
             .store
-            .readonly_attribution_binding(&f.config, 100, "42", A, A, None, deadline())
+            .readonly_attribution_binding(&f.config, (100, "42"), A, A, None, deadline())
             .unwrap();
         let second = f
             .store
-            .readonly_attribution_binding(&f.config, 100, "42", B, B, None, deadline())
+            .readonly_attribution_binding(&f.config, (100, "42"), B, B, None, deadline())
             .unwrap();
         assert_eq!(first.principal_id, A);
         assert_eq!(second.principal_id, B);
@@ -3585,8 +3585,7 @@ mod readonly_attribution_tests {
             .store
             .readonly_attribution_binding(
                 &f.config,
-                100,
-                "42",
+                (100, "42"),
                 A,
                 CHILD,
                 Some("turn-a"),
