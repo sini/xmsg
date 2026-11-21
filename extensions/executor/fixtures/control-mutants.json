@@ -158,5 +158,13 @@
     "replacement": "serde_json::to_string(&crate::protocol::Decision::Deny).map_err(storage)?",
     "test": "exact_human_decisions_survive_reopen_without_credentials",
     "assertion": "exact human meaning was lost"
+  },
+  {
+    "id": "pending-expiry",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": " || args.expires_at <= now",
+    "replacement": "",
+    "test": "human_pending_expiry_is_checked_at_consumption",
+    "assertion": "expired pending action was consumed"
   }
 ]
