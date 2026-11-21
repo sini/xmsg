@@ -42,6 +42,28 @@ async fn issuer(oidc: &Fixture, directory: &TempDir, refresh: bool) -> Arc<Issue
     )
 }
 
+pub(crate) async fn transport_fixture(
+    oidc: &Fixture,
+    directory: &TempDir,
+) -> (Arc<Issuer>, authority::Issued) {
+    let issuer = issuer(oidc, directory, false).await;
+    let browser = issuer
+        .authority
+        .login("alice@example.org", &oidc.issuer(), "transport-owner", None)
+        .unwrap();
+    let machine = issuer
+        .authority
+        .mint_machine(
+            &browser.record.principal,
+            "transport-reader",
+            vec![authority::Scope::Fleet],
+            None,
+            60,
+        )
+        .unwrap();
+    (issuer, machine)
+}
+
 fn set_cookie_header(response: &WebResponse, name: &str) -> String {
     response
         .headers()

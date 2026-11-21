@@ -65,6 +65,13 @@ impl Fixture {
         Self::with_validation(relay, true).await
     }
     async fn with_validation(relay: bool, validated: bool) -> Self {
+        Self::with_issuer(relay, validated, None).await
+    }
+    async fn with_issuer(
+        relay: bool,
+        validated: bool,
+        issuer: Option<Arc<crate::mission_control::Issuer>>,
+    ) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let files = tempfile::tempdir().unwrap();
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
@@ -176,10 +183,18 @@ impl Fixture {
             store.ingest_snapshot("fixture.node", snapshot).unwrap();
             initial_success.insert("fixture.node".into(), (tokio::time::Instant::now(), utc));
         }
+        let read_hub = issuer.as_ref().map(|_| {
+            let hub = crate::mission_control::upstream::ReadHub::new().unwrap();
+            for view in store.view(None, 200).unwrap() {
+                hub.accept_poll(view, Some(store.epoch_now()), false, store.epoch_now())
+                    .unwrap();
+            }
+            Arc::new(hub)
+        });
         let state = Arc::new(State {
             verifier: Some(Verifier::new(config.auth.clone().unwrap(), clock).unwrap()),
-            issuer: None,
-            read_hub: None,
+            issuer,
+            read_hub,
             store,
             store_slots: Arc::new(Semaphore::new(1)),
             requests: request_slots(),
@@ -1921,4 +1936,105 @@ async fn r2a_direct_404_recovers_on_valid_response_and_403_stays_denied() {
         html_denied.contains("1 denied") && !html_denied.contains("Latest source inventory"),
         "denied mask lost after 404:\n{html_denied}"
     );
+}
+
+#[tokio::test]
+async fn mission_control_three_transports_share_the_snapshot_and_cursor() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+
+    let oidc =
+        crate::enroll_oidc::signed_fixture::Fixture::new_at(crate::storage::now_epoch_secs()).await;
+    let directory = tempfile::tempdir().unwrap();
+    let (issuer, issued) =
+        crate::mission_control::tests::transport_fixture(&oidc, &directory).await;
+    let f = Fixture::with_issuer(false, true, Some(issuer)).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let http: serde_json::Value = client
+        .get(format!("{}/v1/mission-control/snapshot/fleet", f.url))
+        .bearer_auth(&issued.handle)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut req = format!(
+        "{}/v1/mission-control/session",
+        f.url.replacen("http://", "ws://", 1)
+    )
+    .into_client_request()
+    .unwrap();
+    req.headers_mut().insert(
+        hyper::header::SEC_WEBSOCKET_PROTOCOL,
+        "xmsg.mission-control.v1".parse().unwrap(),
+    );
+    req.headers_mut().insert(
+        hyper::header::AUTHORIZATION,
+        format!("Bearer {}", issued.handle).parse().unwrap(),
+    );
+    let host = req.uri().authority().unwrap().as_str().to_owned();
+    let tcp = tokio::net::TcpStream::connect(host).await.unwrap();
+    let (mut socket, response) = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::client_async(req, tcp),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+    socket
+        .send(Message::Text(
+            r#"{"v":1,"type":"hello","id":1,"protocol":1,"capabilities":["observe","activity"]}"#
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let receive = async |socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>| {
+        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        serde_json::from_str::<serde_json::Value>(frame.to_text().unwrap()).unwrap()
+    };
+    assert_eq!(receive(&mut socket).await["type"], "hello");
+    socket
+        .send(Message::Text(
+            r#"{"v":1,"type":"subscribe","id":2,"sub":"fleet","scope":{"kind":"fleet"}}"#.into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(receive(&mut socket).await["type"], "subscribed");
+    let ws = receive(&mut socket).await;
+    assert_eq!(ws["type"], "snapshot");
+    assert_eq!(ws["cursor"], http["cursor"]);
+    assert_eq!(ws["nodes"], http["nodes"]);
+
+    let mut sse = client
+        .get(format!("{}/v1/mission-control/stream/fleet", f.url))
+        .bearer_auth(issued.handle)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let mut bytes = Vec::new();
+    let value = loop {
+        bytes.extend(sse.chunk().await.unwrap().unwrap());
+        let text = std::str::from_utf8(&bytes).unwrap();
+        if let Some((_, tail)) = text.split_once("data: ") {
+            if let Some((data, _)) = tail.split_once("\n\n") {
+                break serde_json::from_str::<serde_json::Value>(data).unwrap();
+            }
+        }
+    };
+    assert_eq!(value["type"], "snapshot");
+    assert_eq!(value["cursor"], http["cursor"]);
+    assert_eq!(value["nodes"], http["nodes"]);
 }

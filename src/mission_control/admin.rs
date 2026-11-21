@@ -514,6 +514,7 @@ mod tests {
         let email = "owner@example.test";
         let config = AuthorityConfig {
             allowlist: vec![email.to_owned()],
+            nodes: vec!["laptop".into()],
             ..AuthorityConfig::default()
         };
         let authority = Authority::open(directory.path(), config.clone()).unwrap();
@@ -557,6 +558,42 @@ mod tests {
         )
         .unwrap();
         assert!(output == format!("{handle}\n").as_bytes());
+
+        let grant = directory.path().join("grant.json");
+        fs::write(
+            &grant,
+            json!({
+                "holder": "fixture-agent",
+                "verbs": ["send"],
+                "targets": [{"node": "laptop", "endpoint": "worker@laptop"}],
+                "expires_at": crate::storage::now_epoch_secs() + 60,
+                "rate": 1,
+                "read_scope": [{"kind": "node", "node": "laptop"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let operation = Operation::try_from(Action::Mint {
+            class: Mint::Delegated {
+                owner: owner.clone(),
+                grant_file: grant,
+            },
+        })
+        .unwrap();
+        let (reply, offline) = execute(directory.path(), operation, || unreachable!())
+            .await
+            .unwrap();
+        assert!(!offline);
+        let Reply::Issued { handle: delegated } = reply else {
+            panic!("expected a staged delegated record");
+        };
+        assert!(
+            matches!(
+                authority.admit(&delegated, Carrier::Bearer),
+                Err(AuthorityError::Denied)
+            ),
+            "production admits a delegated record before the management panel"
+        );
 
         let record = authority.admit(&handle, Carrier::Bearer).unwrap();
         let (reply, offline) = execute(directory.path(), Operation::List {}, || unreachable!())

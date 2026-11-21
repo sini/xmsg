@@ -208,7 +208,7 @@ fn allows_endpoint(scope: &Scope, node: &str, id: &str) -> bool {
 pub(super) struct Projection<'a> {
     pub scope: &'a Scope,
     pub grants: &'a [Scope],
-    pub masked: &'a dyn Fn(&str) -> bool,
+    pub masked: &'a (dyn Fn(&str) -> bool + Sync),
     pub activity: bool,
 }
 

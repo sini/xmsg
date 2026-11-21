@@ -218,7 +218,7 @@ impl Verifier {
     }
 }
 
-fn bearer(headers: &HeaderMap) -> Result<&str, AuthError> {
+pub(crate) fn bearer(headers: &HeaderMap) -> Result<&str, AuthError> {
     let size = headers.iter().fold(2usize, |total, (name, value)| {
         total
             .saturating_add(name.as_str().len())
