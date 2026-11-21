@@ -437,13 +437,11 @@ async fn production_leaf_exports_events_and_snapshot_without_listener_or_custody
     };
     assert!(f._observer.flush_for_test(Duration::from_secs(3)));
     let (tx, _rx) = tokio::sync::mpsc::channel(1);
-    xmsg::activity::register_runtime(
-        &f.leaf_state.db,
-        xmsg::activity::ActivityRuntime {
-            engine: Arc::new(Mutex::new(engine)),
-            tx,
-        },
-    );
+    let runtime = xmsg::activity::ActivityRuntime {
+        engine: Arc::new(Mutex::new(engine)),
+        tx,
+    };
+    xmsg::activity::register_runtime(&f.leaf_state.db, runtime.clone());
     let primary_before = [
         f.state.db.lock().unwrap().total_changes(),
         f.leaf_state.db.lock().unwrap().total_changes(),
@@ -580,6 +578,31 @@ async fn production_leaf_exports_events_and_snapshot_without_listener_or_custody
         retained.descriptor.state,
         xmsg::activity::ActivityState::Working
     );
+
+    xmsg::activity::unregister_runtime(&f.leaf_state.db);
+    let (status, body) = f
+        .request(
+            &f.collector,
+            "GET",
+            &format!("{}?v=2", f.uri("snapshot")),
+            vec![],
+            &[],
+        )
+        .await;
+    assert_eq!(status, 200);
+    let disabled: xmsg::observe_export::ExportSnapshot = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        disabled.activity.status,
+        xmsg::activity::ActivityStatus::Disabled
+    );
+    assert!(!disabled.endpoints.is_empty());
+    assert!(disabled
+        .endpoints
+        .iter()
+        .all(|entry| entry.activity.is_none()));
+    reconciler.apply_snapshot(&disabled, now);
+    assert!(reconciler.nodes[&f.leaf.node].endpoints.is_empty());
+    xmsg::activity::register_runtime(&f.leaf_state.db, runtime);
 
     drop(_worker);
     reload(&f.leaf_state, |c| {

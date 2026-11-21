@@ -20,9 +20,9 @@ use xmsg::activity::reconcile::CollectorActivityReconciler;
 use xmsg::activity::reducer::{ActivityEngine, BindingOutcome, OwnerResolver, ProofFlags};
 use xmsg::observe::{Config as ObserveConfig, Event, LossCounters, Observation, Observer, Page};
 use xmsg::observe_export::{
-    project_page, valid_activity_endpoint, EndpointDescriptor, EndpointKind, EventKind,
-    ExportEvent, ExportQuery, ExportSnapshot, Harness, RegistrationState, Scope,
-    SnapshotAvailability, SnapshotQuery,
+    project_page, project_snapshot_with_activity, valid_activity_endpoint, EndpointDescriptor,
+    EndpointKind, EventKind, ExportEvent, ExportQuery, ExportSnapshot, Harness, RegistrationState,
+    Scope, SnapshotAvailability, SnapshotQuery, SnapshotRecord,
 };
 
 struct StubResolver {
@@ -1211,6 +1211,100 @@ fn ao1_ao8_ao9_ao10_opt_in_snapshot_authority_and_crash_recovery() {
     assert!(eng_off
         .descriptor_for("11111111-1111-4111-8111-111111111111")
         .is_none());
+
+    // AO8: Status and descriptor validity independently gate the wire projection.
+    let valid = ActivityDescriptor {
+        state: ActivityState::Working,
+        block: None,
+        reason: None,
+        state_epoch: "a".repeat(32),
+        incarnation: 1,
+        revision: 1,
+        changed_at: 100,
+        fresh_at: 100,
+    };
+    let candidate = |n: u64, activity: ActivityDescriptor| SnapshotRecord {
+        id: format!("11111111-1111-4111-8111-{n:012}"),
+        kind: EndpointKind::Instance,
+        harness: Harness::Claude,
+        state: RegistrationState::Registered,
+        source_at: None,
+        label: None,
+        context: None,
+        activity: Some(activity),
+    };
+    let scope = Scope::new("node-a", "collector", None, false).unwrap();
+    let project = |records, status| {
+        project_snapshot_with_activity(
+            &scope,
+            records,
+            100,
+            false,
+            SnapshotActivity {
+                status,
+                complete: true,
+            },
+        )
+        .unwrap()
+    };
+    let disabled = project(vec![candidate(0, valid.clone())], ActivityStatus::Disabled);
+    assert_eq!(disabled.endpoints.len(), 1);
+    assert!(
+        disabled
+            .endpoints
+            .iter()
+            .all(|entry| entry.activity.is_none()),
+        "disabled snapshot disclosed endpoint activity"
+    );
+    let invalid = [
+        (
+            "state epoch",
+            ActivityDescriptor {
+                state_epoch: "A".repeat(32),
+                ..valid.clone()
+            },
+        ),
+        (
+            "missing block",
+            ActivityDescriptor {
+                state: ActivityState::Blocked,
+                ..valid.clone()
+            },
+        ),
+        (
+            "unexpected block",
+            ActivityDescriptor {
+                block: Some(BlockKind::Permission),
+                ..valid.clone()
+            },
+        ),
+        (
+            "negative changed_at",
+            ActivityDescriptor {
+                changed_at: -1,
+                ..valid.clone()
+            },
+        ),
+        (
+            "negative fresh_at",
+            ActivityDescriptor {
+                fresh_at: -1,
+                ..valid.clone()
+            },
+        ),
+    ];
+    for (label, descriptor) in invalid {
+        let enabled = project(
+            vec![candidate(0, valid.clone()), candidate(1, descriptor)],
+            ActivityStatus::Enabled,
+        );
+        assert_eq!(enabled.endpoints.len(), 2);
+        assert_eq!(enabled.endpoints[0].activity, Some(valid.clone()));
+        assert!(
+            enabled.endpoints[1].activity.is_none(),
+            "enabled snapshot disclosed invalid activity: {label}"
+        );
+    }
 
     // AO8: Incomplete/truncated snapshot keeps missing endpoints stale (never clears to idle);
     // first snapshot or gap recovery showing idle yields NO Done.
