@@ -11,10 +11,12 @@ Teams is a planned optional executor extension. A Claude parent will be able to
 work with independent Codex and Antigravity teammates on one host. Ordinary xmsg
 recipients will continue to work without an executor or a prescribed workflow.
 
-The first increment supplies [internal contracts and a fake ACP test
-harness](/reference/executor-contracts/). It provides no runtime launcher,
-control endpoint, team CLI or team MCP tool. No real harness capability is
-qualified by the fake tests. Installing xmsg does not start an executor.
+The foundation supplies [internal contracts, a fake ACP test harness and a
+fail-closed control journal](/reference/executor-contracts/). There is no runtime
+launcher, team CLI or team MCP tool. The library control boundary denies real
+lifecycle calls as `attestation_unavailable` until the separately commissioned
+attribution bridge exists. No real harness capability is qualified by fake
+tests. Installing xmsg does not start an executor.
 
 ## Messages and control
 
