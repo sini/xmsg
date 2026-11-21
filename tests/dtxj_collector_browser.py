@@ -56,7 +56,7 @@ def main():
     try:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(
-                executable_path=args.chromium, args=["--no-sandbox", "--disable-dev-shm-usage"]
+                executable_path=args.chromium, args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
             )
             try:
                 total_requests = 0
