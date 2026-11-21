@@ -1118,6 +1118,7 @@ async fn test_ha9_o6_restart_persistence() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         fs::set_permissions(&run_dir, fs::Permissions::from_mode(0o700)).unwrap();
     }
     let db_path = tmp.path().join("xmsg.db");

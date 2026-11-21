@@ -2138,6 +2138,10 @@ fn grt4_warning_is_once_per_published_alias_class() {
 fn grt4_check_peers_reports_ambiguity_without_invalidating_config() {
     let (_, _, _, pem) = generate_ca("grt4 offline check CA");
     let (temp, config) = grt4_mixed_config(&pem);
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let file = temp.path().join("peers.json");
     fs::write(&file, config).unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_xmsg"))
@@ -2187,6 +2191,10 @@ fn grt4_serve_startup_reports_its_ambiguity_class_once() {
     use std::io::{Read, Write};
     let (params, ca_key, _, pem) = generate_ca("grt4 startup CA");
     let (temp, config) = grt4_mixed_config(&pem);
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let file = temp.path().join("peers.json");
     fs::write(&file, config).unwrap();
     for name in ["run", "sessions", "codex"] {
