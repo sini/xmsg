@@ -166,5 +166,21 @@
     "replacement": "",
     "test": "human_pending_expiry_is_checked_at_consumption",
     "assertion": "expired pending action was consumed"
+  },
+  {
+    "id": "principal-scope",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": "g.principal == principal && ",
+    "replacement": "",
+    "test": "grant_for_other_principal_has_no_admission_effect",
+    "assertion": "unauthorized admission effect reached journal"
+  },
+  {
+    "id": "effective-caller-budget",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": "            resolved.budget = budget.clone();",
+    "replacement": "",
+    "test": "tighter_caller_budget_survives_reopen_and_limits_admission",
+    "assertion": "caller budget widened in durable admission"
   }
 ]
