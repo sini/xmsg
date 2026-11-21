@@ -395,6 +395,30 @@ pub(crate) const SCHEMA_N: &str = r#"
             updated_at INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_codex_handoff_root ON codex_handoff(root_id, root_generation, state);
+
+        CREATE TABLE IF NOT EXISTS session_activity_meta (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            state_epoch TEXT NOT NULL,
+            revision INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS session_activity (
+            address TEXT PRIMARY KEY,
+            harness TEXT NOT NULL,
+            incarnation INTEGER NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 0,
+            owner_pid INTEGER,
+            owner_started_at INTEGER,
+            state TEXT NOT NULL,
+            block TEXT,
+            reason TEXT,
+            open_correlations TEXT NOT NULL,
+            last_native_seq INTEGER,
+            last_event_id TEXT,
+            last_payload_digest TEXT,
+            changed_at INTEGER NOT NULL,
+            fresh_at INTEGER NOT NULL,
+            ended_at INTEGER
+        );
         "#;
 
 /// Opens a database at schema N. A database already at N keeps its rows, and gains any
