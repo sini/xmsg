@@ -325,6 +325,36 @@ pub mod test_hooks {
     }
 
     #[derive(Default)]
+    pub struct Signal {
+        count: std::sync::atomic::AtomicUsize,
+        changed: Notify,
+    }
+
+    impl Signal {
+        pub(crate) fn record(&self) {
+            self.count
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+            self.changed.notify_waiters();
+        }
+
+        pub async fn wait_for(&self, count: usize) {
+            loop {
+                let changed = self.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if self.count.load(std::sync::atomic::Ordering::Acquire) >= count {
+                    return;
+                }
+                changed.await;
+            }
+        }
+
+        pub fn count(&self) -> usize {
+            self.count.load(std::sync::atomic::Ordering::Acquire)
+        }
+    }
+
+    #[derive(Default)]
     pub struct Controls {
         pub snapshot_candidates: std::sync::atomic::AtomicUsize,
         pub read_admissions: std::sync::atomic::AtomicUsize,
@@ -334,6 +364,9 @@ pub mod test_hooks {
         pub before_read: Gate,
         pub before_io: Gate,
         pub before_emit: Gate,
+        pub listener_ready: Signal,
+        pub tls_handshake_done: Signal,
+        pub tls_handshake_refusals: Signal,
     }
     impl Controls {
         pub(crate) fn read_decision(&self, admitted: bool) {

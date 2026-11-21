@@ -7169,9 +7169,14 @@ pub async fn run_fed_listener_with_acceptor(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let router = build_fed_router(fed_state.clone());
     #[cfg(any(test, feature = "test-hooks"))]
-    crate::observe_relay::test_hooks::controls(&fed_state)
-        .listeners
-        .fetch_add(1, Ordering::Relaxed);
+    {
+        crate::observe_relay::test_hooks::controls(&fed_state)
+            .listeners
+            .fetch_add(1, Ordering::Relaxed);
+        crate::observe_fed::test_hooks::controls(&fed_state)
+            .listener_ready
+            .record();
+    }
     let conn_semaphore = Arc::new(tokio::sync::Semaphore::new(128));
     let unauth_ip_counts: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
     let peer_conn_counts: Arc<Mutex<HashMap<String, usize>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -7234,10 +7239,20 @@ pub async fn run_fed_listener_with_acceptor(
                 Ok(Ok(s)) => s,
                 Ok(Err(e)) => {
                     debug!("TLS handshake failed from {remote_addr}: {e}");
+                    #[cfg(any(test, feature = "test-hooks"))]
+                    {
+                        let controls = crate::observe_fed::test_hooks::controls(&fed_state);
+                        controls.tls_handshake_refusals.record();
+                        controls.tls_handshake_done.record();
+                    }
                     return;
                 }
                 Err(_) => {
                     debug!("TLS handshake timed out from {remote_addr}");
+                    #[cfg(any(test, feature = "test-hooks"))]
+                    crate::observe_fed::test_hooks::controls(&fed_state)
+                        .tls_handshake_done
+                        .record();
                     return;
                 }
             };
@@ -7263,6 +7278,12 @@ pub async fn run_fed_listener_with_acceptor(
                     Ok(p) => p,
                     Err(e) => {
                         debug!("Failed to resolve peer from TLS certificate: {e}");
+                        #[cfg(any(test, feature = "test-hooks"))]
+                        {
+                            let controls = crate::observe_fed::test_hooks::controls(&fed_state);
+                            controls.tls_handshake_refusals.record();
+                            controls.tls_handshake_done.record();
+                        }
                         return;
                     }
                 };

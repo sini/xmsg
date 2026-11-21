@@ -216,6 +216,57 @@ async fn sender(hub: &Arc<FedState>, directory: &Path, tasks: &mut Tasks) -> Reg
     .expect("grt4 concrete cycle hub sender registration failed")
 }
 
+async fn probe_hostile_inbox(
+    fed_state: &FedState,
+    peer_name: &str,
+) -> Result<hyper::StatusCode, xmsg::error::AppError> {
+    let peers = fed_state.current_peers();
+    let peer = peers
+        .get(peer_name)
+        .ok_or_else(|| xmsg::error::AppError::UnknownPeer(peer_name.to_string()))?;
+    let chain = fed_state
+        .cert_chain_der
+        .iter()
+        .cloned()
+        .map(CertificateDer::from)
+        .collect();
+    let connector = xmsg::fed::make_tls_connector_with_credentials(
+        chain,
+        fed_state.key_der.clone(),
+        peer,
+        peers.clone(),
+    )?;
+    let name = rustls::pki_types::ServerName::try_from(peer.name.clone())
+        .map_err(|e| xmsg::error::AppError::Internal(e.to_string()))?;
+    let tcp = tokio::net::TcpStream::connect(&peer.address)
+        .await
+        .map_err(|e| xmsg::error::AppError::PeerUnreachable(format!("connecting: {e}")))?;
+    let tls = connector.connect(name, tcp).await.map_err(|e| {
+        xmsg::error::AppError::PeerUnreachable(format!("TLS handshake failed: {e}"))
+    })?;
+    let io = hyper_util::rt::TokioIo::new(tls);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+        .await
+        .map_err(|e| {
+            xmsg::error::AppError::PeerUnreachable(format!("HTTP handshake failed: {e}"))
+        })?;
+    let conn_task = tokio::spawn(conn);
+    let req = hyper::Request::builder()
+        .method("GET")
+        .uri("/fed/v2/inbox?wait=0")
+        .header("host", peer.name.as_str())
+        .body(http_body_util::Empty::<bytes::Bytes>::new())
+        .map_err(|e| xmsg::error::AppError::Internal(e.to_string()))?;
+    let result = sender
+        .send_request(req)
+        .await
+        .map(|resp| resp.status())
+        .map_err(|e| xmsg::error::AppError::PeerUnreachable(format!("Request failed: {e}")));
+    conn_task.abort();
+    let _ = conn_task.await;
+    result
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concrete_addressless_ca_leaf_survives_mixed_patterns_and_hub_restart() {
     let directory = tempfile::tempdir().unwrap();
@@ -241,10 +292,12 @@ async fn concrete_addressless_ca_leaf_survives_mixed_patterns_and_hub_restart() 
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let hub_controls = xmsg::observe_fed::test_hooks::controls(&hub);
         let state = hub.clone();
         let mut tasks = Tasks(vec![tokio::spawn(async move {
             xmsg::fed::run_fed_listener(listener, state).await.unwrap();
         })]);
+        hub_controls.listener_ready.wait_for(1).await;
         let leaf = node(
             LEAF,
             ca.leaf_peers(address),
@@ -261,19 +314,24 @@ async fn concrete_addressless_ca_leaf_survives_mixed_patterns_and_hub_restart() 
             runtime.path(),
             true,
         );
-        let started = std::time::Instant::now();
-        match xmsg::fed::get_federated_inbox(&hostile, HUB, 10).await {
-            Err(xmsg::error::AppError::PeerUnreachable(_)) => {}
+        match probe_hostile_inbox(&hostile, HUB).await {
+            Err(xmsg::error::AppError::PeerUnreachable(_))
+            | Err(xmsg::error::AppError::PeerRejected(_)) => {}
             Err(err) => {
                 panic!("grt4 concrete cycle hostile host failed with unexpected error: {err:?}")
             }
-            Ok(_) if started.elapsed() >= Duration::from_secs(14) => {
-                panic!("grt4 concrete cycle hostile host check timed out before hub refusal")
-            }
-            Ok(item) => {
-                panic!("grt4 concrete cycle hostile host was admitted (captured the pod alias): {item:?}")
+            Ok(status) => {
+                panic!(
+                    "grt4 concrete cycle hostile host was admitted (captured the pod alias): HTTP {status}"
+                )
             }
         }
+        hub_controls.tls_handshake_done.wait_for(1).await;
+        assert_eq!(
+            hub_controls.tls_handshake_refusals.count(),
+            1,
+            "grt4 concrete cycle hub did not record TLS refusal for hostile host"
+        );
         assert!(xmsg::fed::get_federated_inbox(&leaf, HUB, 0)
             .await
             .expect("grt4 concrete CA leaf failed to authenticate and poll")
