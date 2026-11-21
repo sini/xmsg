@@ -39,6 +39,24 @@ not authorize send, reply or recipient discovery. Omit `targets` only when
 node-wide export is intended; an empty array permits no event or descriptor data.
 To permit labels, set `observe_labels: true` and request `labels=true`.
 
+In Home Manager (`programs.xmsg.server.federation.peers`), declare the same grant with
+`"observe"` in `allow` and `observeLabels = true` (which emits `observe_labels = true` only
+when set):
+
+```nix
+programs.xmsg.server.federation.peers."owner.collector" = {
+  address = "collector.example.org:7788";
+  ca = /etc/xmsg/collector-ca.pem;
+  identities = [ "spiffe://xmsg/host/collector/user/owner" ];
+  allow = [ "observe" ];
+  targets = [
+    "11111111-1111-4111-8111-111111111111@owner.node"
+    "guard@owner.node"
+  ];
+  observeLabels = true;
+};
+```
+
 A hub can instead use a literal rule under its existing bundle-bound admission
 patterns:
 
@@ -279,6 +297,20 @@ The default listen address is `127.0.0.1:9428`. Non-loopback listeners require
 `web_tls: { "cert": "server.pem", "key": "server.key" }`; loopback may use it too.
 The state directory must be owned by the running UID and mode 0700, with a regular
 mode-0600 database. Unsafe existing paths are refused rather than repaired.
+
+With Home Manager, `programs.xmsg.observeCollector` runs `xmsg observe-collector` as a user
+service (systemd on Linux, launchd on macOS), rendering `config` to JSON (`--config`) and
+passing `stateDir` (`--state-dir`, defaulting to `${config.xdg.stateHome}/xmsg/observe-collector`):
+
+```nix
+programs.xmsg.observeCollector = {
+  enable = true;
+  stateDir = "/var/lib/xmsg/observe-collector";
+  config = {
+    # Same JSON schema as collector.json above
+  };
+};
+```
 
 ## Admit the owner
 

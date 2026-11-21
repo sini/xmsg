@@ -21,6 +21,7 @@ let
   cfg = config.programs.xmsg;
   srv = cfg.server;
   fed = srv.federation;
+  oc = cfg.observeCollector;
   exe = lib.getExe cfg.package;
   skill = ./skills/xmsg;
 
@@ -403,10 +404,16 @@ let
             "forward"
             "relayed"
             "relay"
+            "observe"
           ]
         );
         default = [ ];
-        description = "Operations the peer may perform here, as the loader reads them (src/fed.rs): on a hub, `forward` relays the peer's sends; on a recipient, `relayed` (or `relay`) accepts what the peer relays (README 7.7).";
+        description = "Operations the peer may perform here, as the loader reads them (src/fed.rs): on a hub, `forward` relays the peer's sends; on a recipient, `relayed` (or `relay`) accepts what the peer relays (README 7.7); `observe` allows fleet observation reads.";
+      };
+      observeLabels = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Include observed session labels in `observe` responses; requires `\"observe\"` in `allow` (src/fed.rs).";
       };
       from = mkOption {
         type = types.nullOr (types.listOf types.str);
@@ -453,6 +460,7 @@ let
       ca = if p.ca == null then null else "${p.ca}";
     }
     // lib.optionalAttrs p.leaf { leaf = true; }
+    // lib.optionalAttrs p.observeLabels { observe_labels = true; }
     // lib.optionalAttrs (p.principals != [ ]) { inherit (p) principals; };
 
   peersJson = builtins.toJSON (lib.mapAttrs renderPeer fed.peers);
@@ -484,6 +492,14 @@ let
           )}
           cp peers.json $out
         '';
+
+  collectorConfigFile = pkgs.writeText "xmsg-observe-collector.json" (builtins.toJSON oc.config);
+  collectorArgs = [
+    "--config"
+    "${collectorConfigFile}"
+    "--state-dir"
+    oc.stateDir
+  ];
 
   serveArgs =
     lib.optionals (srv.httpSocket != null) [
@@ -678,6 +694,21 @@ in
       };
     };
 
+    observeCollector = {
+      enable = mkEnableOption "the `xmsg observe-collector` user service (systemd on Linux, launchd on darwin)";
+      config = mkOption {
+        type = types.attrs;
+        default = { };
+        description = "Collector JSON configuration (`--config`), rendered to a JSON file in the Nix store.";
+      };
+      stateDir = mkOption {
+        type = types.str;
+        default = "${config.xdg.stateHome}/xmsg/observe-collector";
+        defaultText = lib.literalExpression ''"''${config.xdg.stateHome}/xmsg/observe-collector"'';
+        description = "`--state-dir`: directory holding the collector SQLite store (`collector.sqlite`).";
+      };
+    };
+
     harnesses = {
       claude = {
         enable = mkEnableOption "the xmsg MCP server, skill and tool permissions in Claude Code (`programs.claude-code`)";
@@ -734,7 +765,10 @@ in
 
       warnings =
         lib.optional (srv.enable && pkgs.stdenv.hostPlatform.isLinux && !config.systemd.user.startServices)
-          "programs.xmsg.server.enable: systemd.user.startServices is not \"sd-switch\", so a home-manager switch will not restart xmsg.service.";
+          "programs.xmsg.server.enable: systemd.user.startServices is not \"sd-switch\", so a home-manager switch will not restart xmsg.service."
+        ++
+          lib.optional (oc.enable && pkgs.stdenv.hostPlatform.isLinux && !config.systemd.user.startServices)
+            "programs.xmsg.observeCollector.enable: systemd.user.startServices is not \"sd-switch\", so a home-manager switch will not restart xmsg-observe-collector.service.";
 
       assertions =
         lib.optionals (srv.stableExecutable != null) [
@@ -791,6 +825,9 @@ in
                 p.identities == null || lib.length p.identities == 1
               ) "identities holds exactly one identity.")
               (peer (p.from != [ ]) "from must hold at least one CIDR, or be null.")
+              (peer (
+                !p.observeLabels || lib.elem "observe" p.allow
+              ) "observeLabels requires \"observe\" in allow.")
             ]
           ) fed.peers
         )
@@ -848,6 +885,65 @@ in
       };
     })
 
+    (mkIf (oc.enable && pkgs.stdenv.hostPlatform.isLinux) {
+      systemd.user.services.xmsg-observe-collector = {
+        Unit = {
+          Description = "xmsg: fleet observation collector";
+          X-Restart-Triggers = [
+            "${cfg.package}"
+            "${collectorConfigFile}"
+          ];
+        };
+        Service = {
+          ExecStart = "${exe} observe-collector ${lib.escapeShellArgs collectorArgs}";
+          Restart = "on-failure";
+          # Safe hardening subset for systemd --user (no CLONE_NEWUSER / CLONE_NEWNS):
+          NoNewPrivileges = true;
+          LockPersonality = true;
+          RestrictRealtime = true;
+          RestrictSUIDSGID = true;
+          SystemCallArchitectures = "native";
+          RestrictAddressFamilies = [
+            "AF_UNIX"
+            "AF_INET"
+            "AF_INET6"
+            "AF_NETLINK"
+          ];
+          UMask = "0077";
+        };
+        Install.WantedBy = [ "default.target" ];
+      };
+    })
+
+    (mkIf ((srv.enable || oc.enable) && pkgs.stdenv.hostPlatform.isDarwin) {
+      home.activation.xmsgLogDir =
+        lib.hm.dag.entryBetween
+          [ "setupLaunchAgents" ]
+          [
+            "writeBoundary"
+          ]
+          "run mkdir -p -m 0700 ${lib.escapeShellArg logDir}";
+    })
+
+    (mkIf (oc.enable && pkgs.stdenv.hostPlatform.isDarwin) {
+      launchd.agents.xmsg-observe-collector = {
+        enable = true;
+        config = {
+          ProgramArguments = [
+            exe
+            "observe-collector"
+          ]
+          ++ collectorArgs;
+          KeepAlive.SuccessfulExit = false;
+          RunAtLoad = true;
+          StandardOutPath = "${logDir}/observe-collector-stdout.log";
+          StandardErrorPath = "${logDir}/observe-collector-stderr.log";
+          # 0077, the Linux unit's UMask.
+          Umask = 63;
+        };
+      };
+    })
+
     (mkIf (srv.enable && pkgs.stdenv.hostPlatform.isDarwin) {
       launchd.agents.xmsg = {
         enable = true;
@@ -868,13 +964,6 @@ in
           EnvironmentVariables.XMSG_SESSIONS_DIR = sessionsDirsEnv;
         };
       };
-      home.activation.xmsgLogDir =
-        lib.hm.dag.entryBetween
-          [ "setupLaunchAgents" ]
-          [
-            "writeBoundary"
-          ]
-          "run mkdir -p -m 0700 ${lib.escapeShellArg logDir}";
     })
 
     (mkIf (srv.enable && pkgs.stdenv.hostPlatform.isDarwin && srv.stableExecutable != null) {

@@ -116,13 +116,22 @@ programs.xmsg.server.federation = {
       identities = [ "spiffe://example.org/host/workstation/user/alice" ];
       allow = [ "send" "reply" "list" ];
     };
+    # Fleet observation collector grant (`observeLabels` requires `"observe"` in `allow`)
+    "owner.collector" = {
+      address = "collector.example.org:7788";
+      ca = ./collector-ca.pem;
+      identities = [ "spiffe://xmsg/host/collector/user/owner" ];
+      allow = [ "observe" ];
+      observeLabels = true;
+    };
   };
 };
 ```
 
 Each `peers` entry takes the same field names as an entry in the
 [peers file](/concepts/federation/#entry-fields). `pinFromCert` is extra: it computes `pin` at
-build time. These limits apply:
+build time, and `observeLabels` (boolean, default `false`) emits `observe_labels = true` only
+when enabled and requires `"observe"` in `allow`. These limits apply:
 
 - **`address` has no default.** On a `leaf = true` entry the hub never dials the peer, so set
   `address = "";`.
@@ -137,6 +146,33 @@ On NixOS, open the federation port in the firewall with `nixosModules.xmsg`:
 
 ```nix file=<rootDir>/nix/modules/nixos.nix#L1-L20
 ```
+
+## Fleet observation collector
+
+To run `xmsg observe-collector` as a managed user service (`xmsg-observe-collector.service` on
+systemd, `xmsg-observe-collector` launchd agent on macOS), enable `programs.xmsg.observeCollector`:
+
+```nix
+programs.xmsg.observeCollector = {
+  enable = true;
+  stateDir = "/var/lib/xmsg/observe-collector";
+  config = {
+    nodes = [
+      {
+        node = "workstation.example.org";
+        address = "workstation.example.org:7788";
+        ca = "/etc/xmsg/node-ca.pem";
+        identity = "spiffe://xmsg/host/workstation/user/alice";
+      }
+    ];
+  };
+};
+```
+
+`config` is rendered to JSON in the Nix store and passed via `--config`; `stateDir` defaults to
+`${config.xdg.stateHome}/xmsg/observe-collector` and is passed via `--state-dir`. Keep private
+keys and OIDC client secrets as runtime file paths rather than embedding them in Nix-store JSON.
+See [Fleet Observer Operations](/operations/fleet-observer/) for the full collector schema.
 
 
 ## Planned enrollment with a managed installation

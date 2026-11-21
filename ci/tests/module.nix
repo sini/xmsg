@@ -1036,6 +1036,157 @@ in
       };
       expected = badMsg "from must hold at least one CIDR, or be null.";
     };
+    test-peer-observe-labels-needs-observe = {
+      expr = badPeer {
+        address = "bad.example.org:7790";
+        pin = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        allow = [ "list" ];
+        observeLabels = true;
+      };
+      expected = badMsg "observeLabels requires \"observe\" in allow.";
+    };
+    test-peer-observe-labels =
+      let
+        c = hmEval "x86_64-linux" {
+          programs.xmsg.server.federation.peers = {
+            collector = {
+              address = "collector.example.org:7788";
+              pin = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+              allow = [ "observe" ];
+              observeLabels = true;
+            };
+            quiet = {
+              address = "quiet.example.org:7788";
+              pin = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+              allow = [ "observe" ];
+            };
+          };
+        };
+        expectedPeers = nixpkgs.legacyPackages.x86_64-linux.writeText "xmsg-peers.json" (
+          builtins.toJSON {
+            collector = {
+              address = "collector.example.org:7788";
+              allow = [ "observe" ];
+              observe_labels = true;
+              pin = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+            };
+            cortex = {
+              address = "cortex.example.org:7790";
+              allow = [ "send" ];
+              pin = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+            };
+            quiet = {
+              address = "quiet.example.org:7788";
+              allow = [ "observe" ];
+              pin = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+            };
+          }
+        );
+      in
+      {
+        expr = {
+          failed = failedAssertions c;
+          hasPeersFile = lib.hasInfix "--peers-file ${builtins.unsafeDiscardStringContext expectedPeers}" (
+            builtins.unsafeDiscardStringContext (lib.head c.systemd.user.services.xmsg.Service.ExecStart)
+          );
+        };
+        expected = {
+          failed = [ ];
+          hasPeersFile = true;
+        };
+      };
+    test-observe-collector =
+      let
+        ocCfg = {
+          nodes = {
+            cortex = {
+              address = "cortex.example.org:7788";
+            };
+          };
+        };
+        linuxOc = hmEval "x86_64-linux" {
+          programs.xmsg.observeCollector = {
+            enable = true;
+            config = ocCfg;
+            stateDir = "/var/lib/xmsg/collector";
+          };
+        };
+        linuxConfigFile = nixpkgs.legacyPackages.x86_64-linux.writeText "xmsg-observe-collector.json" (
+          builtins.toJSON ocCfg
+        );
+        darwinOc = hmEval "aarch64-darwin" {
+          programs.xmsg.observeCollector = {
+            enable = true;
+            config = ocCfg;
+          };
+        };
+        darwinExe = lib.getExe xmsg.packages.aarch64-darwin.default;
+        darwinConfigFile = nixpkgs.legacyPackages.aarch64-darwin.writeText "xmsg-observe-collector.json" (
+          builtins.toJSON ocCfg
+        );
+      in
+      {
+        expr = {
+          defaultOff = {
+            linux = linux.systemd.user.services ? xmsg-observe-collector;
+            darwin = (hmEval "aarch64-darwin" { }).launchd.agents ? xmsg-observe-collector;
+          };
+          linux = {
+            exec = linuxOc.systemd.user.services.xmsg-observe-collector.Service.ExecStart;
+            triggers = linuxOc.systemd.user.services.xmsg-observe-collector.Unit.X-Restart-Triggers;
+            restart = linuxOc.systemd.user.services.xmsg-observe-collector.Service.Restart;
+            umask = linuxOc.systemd.user.services.xmsg-observe-collector.Service.UMask;
+            wantedBy = linuxOc.systemd.user.services.xmsg-observe-collector.Install.WantedBy;
+            launchd = linuxOc.launchd.agents ? xmsg-observe-collector;
+            failed = failedAssertions linuxOc;
+          };
+          darwin = {
+            enable = darwinOc.launchd.agents.xmsg-observe-collector.enable;
+            args = darwinOc.launchd.agents.xmsg-observe-collector.config.ProgramArguments;
+            stdout = darwinOc.launchd.agents.xmsg-observe-collector.config.StandardOutPath;
+            stderr = darwinOc.launchd.agents.xmsg-observe-collector.config.StandardErrorPath;
+            umask = darwinOc.launchd.agents.xmsg-observe-collector.config.Umask;
+            systemd = darwinOc.systemd.user.services ? xmsg-observe-collector;
+            failed = failedAssertions darwinOc;
+          };
+        };
+        expected = {
+          defaultOff = {
+            linux = false;
+            darwin = false;
+          };
+          linux = {
+            exec = [
+              "${exe} observe-collector --config ${linuxConfigFile} --state-dir /var/lib/xmsg/collector"
+            ];
+            triggers = [
+              "${xmsg.packages.x86_64-linux.default}"
+              "${linuxConfigFile}"
+            ];
+            restart = "on-failure";
+            umask = "0077";
+            wantedBy = [ "default.target" ];
+            launchd = false;
+            failed = [ ];
+          };
+          darwin = {
+            enable = true;
+            args = [
+              darwinExe
+              "observe-collector"
+              "--config"
+              "${darwinConfigFile}"
+              "--state-dir"
+              "/Users/alice/.local/state/xmsg/observe-collector"
+            ];
+            stdout = "/Users/alice/Library/Logs/xmsg/observe-collector-stdout.log";
+            stderr = "/Users/alice/Library/Logs/xmsg/observe-collector-stderr.log";
+            umask = 63;
+            systemd = false;
+            failed = [ ];
+          };
+        };
+      };
 
     # D19 (and XH3 oracle 7): a switch whose harness module is off is refused, naming the option.
     test-switch-needs-harness = {
