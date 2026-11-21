@@ -59,6 +59,7 @@ impl Journal {
             ],
         )
         .map_err(storage)?;
+        crate::execution::initialize(&db)?;
         Ok(Self { db })
     }
     pub(crate) fn admit(
@@ -355,7 +356,7 @@ impl Journal {
         Ok(reply)
     }
 }
-fn config(tx: &Transaction<'_>) -> Result<OwnerConfig, ErrorCode> {
+pub(crate) fn config(tx: &Transaction<'_>) -> Result<OwnerConfig, ErrorCode> {
     let body: String = tx
         .query_row(
             "SELECT body FROM configuration WHERE singleton=1",
@@ -424,7 +425,7 @@ fn session(tx: &Transaction<'_>, id: &str) -> Result<(u64, Option<String>, Strin
     .map_err(storage)?
     .ok_or(ErrorCode::UnknownTarget)
 }
-fn profile<'a>(
+pub(crate) fn profile<'a>(
     config: &'a OwnerConfig,
     id: &str,
 ) -> Result<&'a crate::control::OwnerProfile, ErrorCode> {

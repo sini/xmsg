@@ -5,32 +5,42 @@ from pathlib import Path
 import re
 
 
+HELPER_ENTRYPOINTS = {"supervisor::tests::fixture_process_entrypoint"}
+
 def census(inventory, listing, results, platform):
     listed = sorted(re.findall(r"^([A-Za-z_][A-Za-z0-9_:]*): test$", listing, re.M))
     executed = sorted(re.findall(r"^test ([A-Za-z_][A-Za-z0-9_:]*) \.\.\. ok$", results, re.M))
-    if not inventory or len(inventory) != len(set(inventory)) or sorted(inventory) != listed or listed != executed:
+    ignored_helpers = sorted(re.findall(r"^test ([A-Za-z_][A-Za-z0-9_:]*) \.\.\. ignored(?:,.*)?$", results, re.M))
+    expected_helpers = sorted(set(listed) & HELPER_ENTRYPOINTS)
+    functional = sorted(set(listed) - HELPER_ENTRYPOINTS)
+    if not inventory or len(inventory) != len(set(inventory)) or sorted(inventory) != listed or functional != executed or ignored_helpers != expected_helpers:
         raise ValueError("executor inventory mismatch")
     rows = re.findall(r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;", results, re.M)
     if not rows:
         raise ValueError("executor result summaries missing")
     passed, failed, ignored = [sum(int(row[i]) for row in rows) for i in range(3)]
-    if failed or ignored or passed != len(inventory):
+    if failed or ignored != len(expected_helpers) or passed + ignored != len(inventory):
         raise ValueError("executor result totals mismatch")
     return {"platform": platform, "passed": passed, "failed": failed, "ignored": ignored,
-            "summaries": len(rows), "tests": executed, "evidence_class": "fake_only"}
+            "summaries": len(rows), "tests": executed, "ignored_helper_entrypoints": expected_helpers, "evidence_class": "fake_only"}
 
 
 def controls():
     listing = "planted: test\n"
     result = "test planted ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n"
     assert census(["planted"], listing, result, "control")["passed"] == 1
-    for bad in ["", result.replace("1 passed", "2 passed"), result.replace("planted ... ok", "other ... ok")]:
+    helper = next(iter(HELPER_ENTRYPOINTS))
+    helper_listing = listing + helper + ": test\n"
+    helper_result = result.replace("0 ignored", "1 ignored") + "test " + helper + " ... ignored, test-only subprocess fixture entrypoint\n"
+    measured = census(["planted", helper], helper_listing, helper_result, "control")
+    assert measured["passed"] == 1 and measured["ignored_helper_entrypoints"] == [helper]
+    for bad in ["", result.replace("1 passed", "2 passed"), result.replace("planted ... ok", "other ... ok"), result.replace("planted ... ok", "planted ... ignored")]:
         try:
             census(["planted"], listing, bad, "control")
         except ValueError:
             continue
         raise AssertionError("census negative control survived")
-    print("executor census controls: positive and 3 negatives passed")
+    print("executor census controls: 2 positives and 4 negatives passed")
 
 
 def main():

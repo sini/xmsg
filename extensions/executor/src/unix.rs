@@ -62,7 +62,7 @@ pub fn bind_private_socket(socket_path: &Path) -> Result<UnixListener, ErrorCode
         .map_err(|_| ErrorCode::InvalidConfiguration)?;
     Ok(listener)
 }
-fn peer(stream: &UnixStream) -> Result<PeerWitness, ErrorCode> {
+pub(crate) fn peer(stream: &UnixStream) -> Result<PeerWitness, ErrorCode> {
     #[cfg(target_os = "linux")]
     {
         let mut cred: libc::ucred = unsafe { std::mem::zeroed() };

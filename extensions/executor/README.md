@@ -2,7 +2,7 @@
 
 This standalone Rust library contains internal contracts, a fail-closed control journal and deterministic ACP fixtures for a future local executor. It has its own Cargo manifest and lockfile; it does not convert the root project into a workspace or add an executable. The bus default package, recipient shapes and six existing MCP tools are unchanged.
 
-There is no production launcher, listening service, host-attestation bridge, supervisor, native approval relay, approval reviewer, process/model/provider invocation, service installation or credential provisioning here. Later runtime stages must supply those implementations and their qualification evidence.
+There is no public launch producer, installed executable, host-attestation bridge, real harness/backend, native approval relay, reviewer, model/provider invocation, service installation or credential provisioning here. A crate-private supervisor foundation owns real OS child/process-group handles and locks; only test helpers select a fake ACP process. Later runtime stages must supply those implementations and their qualification evidence.
 
 ## Contracts
 
@@ -30,14 +30,22 @@ The test-only fake peer stays in `tests/support/`; it is an in-memory determinis
 
 Per-call parent attribution, native ask-mode verification and effective reviewer isolation are explicitly first in the qualification backlog. A source version or a passing fake test is not runtime qualification.
 
+## Staged supervisor, workspaces and content membership
+
+Launch authority is a private journal-derived lease, never a serialized receipt. Current original-principal grants, profile/policy, generation and resource caps are checked again before launch. A durable spawn intent precedes the OS effect; uncertain ownership stays unknown and consumes its slot. Reconnect authenticates the existing supervisor rather than spawning or replaying prompts. Diagnostic PIDs are not kill authority.
+
+Owner workspace bindings fix the repository, approved root and immutable base. Preparation is revalidated before execution, ignores ambient Git hooks/configuration and refuses unsafe filters/includes/fetches. Ownership markers distinguish worktree incarnations; dirty or unowned work is preserved on cleanup. Context/patch references are bounded, owner-bound and SHA-pinned; no auth files or dirty checkout are copied.
+
+Ordinary SDK service proxies use stable 31-byte names. They retain their registration handle and commit generation-bound message deduplication/content before acknowledgement. Text, JSON, envelopes and origin are content/provenance, never lifecycle or approval authority. The real-bus fixture uses its own scratch daemon and sender, never a live fleet socket.
+
 ## Check this package only
 
 From the repository root:
 
 ```sh
-cargo test --manifest-path extensions/executor/Cargo.toml --locked
-cargo clippy --manifest-path extensions/executor/Cargo.toml --all-targets --locked -- -D warnings
-cargo fmt --manifest-path extensions/executor/Cargo.toml -- --check
+extensions/executor/scripts/check.sh
 ```
+
+The check script builds the candidate scratch daemon outside cargo-test and records its binary hash/version, then supplies it explicitly to the required real-bus fixture. It does not install a service or launch a real harness. One ignored libtest helper is a subprocess entrypoint, not a qualification case: parent tests actually execute and reap it. The census distinguishes that exact helper from functional tests and rejects other ignored tests.
 
 Pinned ACP schema basis: [RequestId and v1 schema](https://github.com/agentclientprotocol/agent-client-protocol/blob/fa50fde1ac75ccd22fafff69c3e0ec3562a4f30f/schema/v1/schema.json), [stdio transport](https://agentclientprotocol.com/protocol/v1/transports). This package makes no v2 or real-runtime support claim.
