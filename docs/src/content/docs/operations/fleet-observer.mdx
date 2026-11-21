@@ -471,7 +471,9 @@ ceiling error (`collector.sqlite is X bytes, which exceeds the Y-byte ceiling fo
 N configured nodes`) rather than silently dropping retained data. Either restore
 the node list (or raise capacity) until retention ages out the removed nodes'
 rows, or stop the collector and move the store aside to start fresh, which keeps
-the old file.
+the old file. Because retention and incremental vacuum do not shrink the files
+immediately, check the actual DB and journal sizes against the lower ceiling
+before retrying with a smaller node list.
 
 If startup reports `UnsupportedEngine` (for example, `required 3.53.2, found 3.54.0`; the found version may differ), rebuild with bundled SQLite without `LIBSQLITE3_SYS_USE_PKG_CONFIG` overriding it; do not remove the engine pin.
 
