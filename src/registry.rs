@@ -445,3 +445,103 @@ pub fn find_ancestor_session(
         std::process::id(),
     )
 }
+pub fn read_session_entries_checked(
+    sessions_dirs: &(impl SessionDirs + ?Sized),
+    deadline: std::time::Instant,
+) -> Result<Vec<SessionFileEntry>, crate::client::caller_attribution::FailureReason> {
+    use crate::client::caller_attribution::FailureReason;
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    const MAX_FILES: usize = 4096;
+    const MAX_BYTES: u64 = 65536;
+    let dirs = sessions_dirs.to_dirs();
+    if dirs.len() > 32 {
+        return Err(FailureReason::Limit);
+    }
+    let mut entries = Vec::new();
+    let mut seen = 0usize;
+    let mut keys = std::collections::HashSet::new();
+    for dir in dirs {
+        if std::time::Instant::now() >= deadline {
+            return Err(FailureReason::Deadline);
+        }
+        let meta =
+            std::fs::symlink_metadata(&dir).map_err(|_| FailureReason::AuthorityUnavailable)?;
+        if !meta.is_dir()
+            || meta.file_type().is_symlink()
+            || meta.uid() != unsafe { libc::geteuid() }
+        {
+            return Err(FailureReason::AuthorityUnavailable);
+        }
+        let listing = std::fs::read_dir(&dir).map_err(|_| FailureReason::AuthorityUnavailable)?;
+        for item in listing {
+            if std::time::Instant::now() >= deadline {
+                return Err(FailureReason::Deadline);
+            }
+            seen += 1;
+            if seen > 8192 {
+                return Err(FailureReason::Limit);
+            }
+            let item = item.map_err(|_| FailureReason::AuthorityUnavailable)?;
+            let file_path = item.path();
+            if file_path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            if entries.len() >= MAX_FILES {
+                return Err(FailureReason::Limit);
+            }
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+                .open(&file_path)
+                .map_err(|_| FailureReason::AuthorityUnavailable)?;
+            let meta = file
+                .metadata()
+                .map_err(|_| FailureReason::AuthorityUnavailable)?;
+            if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.len() > MAX_BYTES
+            {
+                return Err(FailureReason::AuthorityUnavailable);
+            }
+            let mut bytes = Vec::new();
+            file.take(MAX_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| FailureReason::AuthorityUnavailable)?;
+            if bytes.len() as u64 > MAX_BYTES {
+                return Err(FailureReason::Limit);
+            }
+            let entry: SessionFileEntry =
+                serde_json::from_slice(&bytes).map_err(|_| FailureReason::AuthorityUnavailable)?;
+            let socket = std::path::Path::new(&entry.messaging_socket_path);
+            if entry.pid == 0
+                || entry.proc_start.is_empty()
+                || !crate::claim::is_uuid_shaped(&entry.session_id)
+                || !socket.is_absolute()
+                || socket
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                || socket.parent() == Some(std::path::Path::new("/"))
+                || matches!(
+                    socket.file_name().and_then(|s| s.to_str()),
+                    Some("agent.sock" | "register.sock" | "http.sock" | "leaf-register.sock")
+                )
+            {
+                return Err(FailureReason::AuthorityUnavailable);
+            }
+            if !keys.insert((
+                entry.session_id.clone(),
+                entry.pid,
+                entry.proc_start.clone(),
+            )) {
+                return Err(FailureReason::Ambiguous);
+            }
+            entries.push(entry);
+        }
+    }
+    if std::time::Instant::now() >= deadline {
+        return Err(FailureReason::Deadline);
+    }
+    entries.sort_by(|a, b| {
+        (&a.session_id, a.pid, &a.proc_start).cmp(&(&b.session_id, b.pid, &b.proc_start))
+    });
+    Ok(entries)
+}

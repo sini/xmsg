@@ -1704,3 +1704,789 @@ mod service_start_tests {
         assert!(classify_starttime_error(io::Error::from_raw_os_error(libc::EIO)).is_err());
     }
 }
+pub use strict_peer::{
+    strict_peer_cred_from_fd, strict_process_link, strict_revalidate, StrictPeer, StrictPeerBranch,
+    StrictPeerError, StrictProcessLink,
+};
+
+mod strict_peer {
+    use super::{PeerCred, PeerPin};
+    use crate::client::caller_attribution::FailureReason;
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, BorrowedFd};
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::path::Path;
+
+    pub type StrictPeerError = FailureReason;
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum StrictPeerBranch {
+        LinuxPinned,
+        LinuxUnsupportedFallback,
+        MacWeaker,
+    }
+    #[derive(Debug, Clone)]
+    pub struct StrictPeer {
+        pub peer: PeerCred,
+        pub branch: StrictPeerBranch,
+        pub captured_start: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct StrictProcessLink {
+        pub pid: u32,
+        pub parent_pid: u32,
+        pub start: String,
+        pub order: u64,
+    }
+
+    fn option_i32(fd: BorrowedFd<'_>, level: i32, option: i32) -> Result<i32, FailureReason> {
+        let mut value: libc::c_int = 0;
+        let mut len = std::mem::size_of_val(&value) as libc::socklen_t;
+        if unsafe {
+            libc::getsockopt(
+                fd.as_raw_fd(),
+                level,
+                option,
+                (&mut value as *mut libc::c_int).cast(),
+                &mut len,
+            )
+        } != 0
+            || len as usize != std::mem::size_of_val(&value)
+        {
+            return Err(FailureReason::Endpoint);
+        }
+        Ok(value)
+    }
+    fn socket_metadata(fd: BorrowedFd<'_>) -> Result<(), FailureReason> {
+        if option_i32(fd, libc::SOL_SOCKET, libc::SO_TYPE)? != libc::SOCK_STREAM
+            || option_i32(fd, libc::SOL_SOCKET, libc::SO_ACCEPTCONN)? != 0
+        {
+            return Err(FailureReason::Endpoint);
+        }
+        let mut address: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of_val(&address) as libc::socklen_t;
+        if unsafe {
+            libc::getpeername(
+                fd.as_raw_fd(),
+                (&mut address as *mut libc::sockaddr_storage).cast(),
+                &mut len,
+            )
+        } != 0
+            || address.ss_family as libc::c_int != libc::AF_UNIX
+        {
+            return Err(FailureReason::Endpoint);
+        }
+        let mut poll = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: 0,
+            revents: 0,
+        };
+        if unsafe { libc::poll(&mut poll, 1, 0) } < 0 {
+            return Err(FailureReason::AuthorityUnavailable);
+        }
+        #[cfg(test)]
+        if let Some(revents) =
+            TEST_READINGS.with(|r| r.borrow().as_ref().and_then(|x| x.socket_revents))
+        {
+            poll.revents = revents;
+        }
+        if poll.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            return Err(FailureReason::DeadPeer);
+        }
+        Ok(())
+    }
+    fn credentials(fd: BorrowedFd<'_>) -> Result<(u32, u32), FailureReason> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut value: libc::ucred = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of_val(&value) as libc::socklen_t;
+            if unsafe {
+                libc::getsockopt(
+                    fd.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_PEERCRED,
+                    (&mut value as *mut libc::ucred).cast(),
+                    &mut len,
+                )
+            } != 0
+                || len as usize != std::mem::size_of_val(&value)
+            {
+                return Err(FailureReason::AuthorityUnavailable);
+            }
+            #[cfg(test)]
+            TEST_READINGS.with(|r| {
+                if let Some(raw) = r.borrow().as_ref().and_then(|x| x.credential_pid) {
+                    value.pid = raw;
+                }
+            });
+            let pid = u32::try_from(value.pid)
+                .ok()
+                .filter(|p| *p > 0)
+                .ok_or(FailureReason::MissingPid)?;
+            Ok((value.uid, pid))
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut uid = 0;
+            let mut gid = 0;
+            if unsafe { libc::getpeereid(fd.as_raw_fd(), &mut uid, &mut gid) } != 0 {
+                return Err(FailureReason::AuthorityUnavailable);
+            }
+            let pid = option_i32(fd, 0, libc::LOCAL_PEERPID)?;
+            let pid = u32::try_from(pid)
+                .ok()
+                .filter(|p| *p > 0)
+                .ok_or(FailureReason::MissingPid)?;
+            Ok((uid, pid))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = fd;
+            Err(FailureReason::Unsupported)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn native_peer_pin(fd: BorrowedFd<'_>) -> std::io::Result<std::os::fd::OwnedFd> {
+        use std::os::fd::FromRawFd;
+        #[cfg(test)]
+        if let Some(errno) = TEST_READINGS.with(|r| r.borrow().as_ref().and_then(|x| x.pidfd_errno))
+        {
+            return Err(std::io::Error::from_raw_os_error(errno));
+        }
+        let mut raw = -1;
+        let mut len = std::mem::size_of_val(&raw) as libc::socklen_t;
+        if unsafe {
+            libc::getsockopt(
+                fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERPIDFD,
+                (&mut raw as *mut libc::c_int).cast(),
+                &mut len,
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        if raw < 0 {
+            return Err(std::io::Error::other("negative SO_PEERPIDFD"));
+        }
+        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+        if len as usize != std::mem::size_of_val(&raw) {
+            return Err(std::io::Error::other("short SO_PEERPIDFD"));
+        }
+        Ok(owned)
+    }
+    #[cfg(target_os = "linux")]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum PinReading {
+        Visible(u32),
+        Dead,
+        Unmapped,
+        Unreadable,
+    }
+    #[cfg(target_os = "linux")]
+    fn pin_reading(pin: &std::os::fd::OwnedFd) -> PinReading {
+        #[cfg(test)]
+        if let Some(value) = TEST_READINGS.with(|r| r.borrow().as_ref().and_then(|x| x.pin)) {
+            return value;
+        }
+        let mut poll = libc::pollfd {
+            fd: pin.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        if unsafe { libc::poll(&mut poll, 1, 0) } < 0 {
+            return PinReading::Unreadable;
+        }
+        if poll.revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+            return PinReading::Dead;
+        }
+        if poll.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+            return PinReading::Unreadable;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(format!("/proc/self/fdinfo/{}", pin.as_raw_fd()));
+        let Ok(file) = file else {
+            return PinReading::Unreadable;
+        };
+        let mut bytes = Vec::new();
+        if file.take(8193).read_to_end(&mut bytes).is_err() || bytes.len() > 8192 {
+            return PinReading::Unreadable;
+        }
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            return PinReading::Unreadable;
+        };
+        let mut values = text.lines().filter_map(|l| l.strip_prefix("Pid:"));
+        let Some(value) = values.next() else {
+            return PinReading::Unreadable;
+        };
+        if values.next().is_some() {
+            return PinReading::Unreadable;
+        }
+        match value.trim().parse::<i64>() {
+            Ok(-1) => PinReading::Dead,
+            Ok(0) => PinReading::Unmapped,
+            Ok(p) if p > 0 => u32::try_from(p)
+                .map(PinReading::Visible)
+                .unwrap_or(PinReading::Unreadable),
+            _ => PinReading::Unreadable,
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn pin_matches(pin: &std::os::fd::OwnedFd, pid: u32) -> Result<(), FailureReason> {
+        match pin_reading(pin) {
+            PinReading::Visible(observed) if observed == pid => Ok(()),
+            PinReading::Visible(_) => Err(FailureReason::ContradictoryPeer),
+            PinReading::Dead => Err(FailureReason::DeadPeer),
+            PinReading::Unmapped => Err(FailureReason::UnmappedPeer),
+            PinReading::Unreadable => Err(FailureReason::FdinfoUnavailable),
+        }
+    }
+
+    pub fn strict_process_link(
+        proc_root: &Path,
+        pid: u32,
+    ) -> Result<StrictProcessLink, FailureReason> {
+        if pid == 0 {
+            return Err(FailureReason::MissingPid);
+        }
+        #[cfg(target_os = "macos")]
+        if super::is_live(proc_root) {
+            let before =
+                super::macos::bsdinfo(pid).map_err(|_| FailureReason::AuthorityUnavailable)?;
+            if before.pbi_status == libc::SZOMB {
+                return Err(FailureReason::DeadPeer);
+            }
+            let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
+            if unsafe {
+                libc::proc_pid_rusage(
+                    pid as libc::c_int,
+                    libc::RUSAGE_INFO_V2,
+                    info.as_mut_ptr().cast(),
+                )
+            } != 0
+            {
+                return Err(FailureReason::AuthorityUnavailable);
+            }
+            let info = unsafe { info.assume_init() };
+            let start = super::macos::starttime_token(&before);
+            let after =
+                super::macos::bsdinfo(pid).map_err(|_| FailureReason::AuthorityUnavailable)?;
+            if super::macos::starttime_token(&after) != start {
+                return Err(FailureReason::Changed);
+            }
+            return Ok(StrictProcessLink {
+                pid,
+                parent_pid: before.pbi_ppid,
+                start,
+                order: info.ri_proc_start_abstime,
+            });
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(proc_root.join(pid.to_string()).join("stat"))
+            .map_err(|_| FailureReason::AuthorityUnavailable)?;
+        if !file
+            .metadata()
+            .map_err(|_| FailureReason::AuthorityUnavailable)?
+            .is_file()
+        {
+            return Err(FailureReason::AuthorityUnavailable);
+        }
+        let mut bytes = Vec::new();
+        file.take(65537)
+            .read_to_end(&mut bytes)
+            .map_err(|_| FailureReason::AuthorityUnavailable)?;
+        if bytes.len() > 65536 {
+            return Err(FailureReason::Limit);
+        }
+        let text = std::str::from_utf8(&bytes).map_err(|_| FailureReason::AuthorityUnavailable)?;
+        let close = text.rfind(')').ok_or(FailureReason::AuthorityUnavailable)?;
+        let fields: Vec<_> = text[close + 1..].split_whitespace().collect();
+        if matches!(fields.first(), Some(&"Z" | &"X" | &"x")) {
+            return Err(FailureReason::DeadPeer);
+        }
+        let parent_pid = fields
+            .get(1)
+            .and_then(|s| s.parse::<u32>().ok())
+            .ok_or(FailureReason::AuthorityUnavailable)?;
+        let start = fields
+            .get(19)
+            .ok_or(FailureReason::AuthorityUnavailable)?
+            .to_string();
+        let order = start
+            .parse()
+            .map_err(|_| FailureReason::AuthorityUnavailable)?;
+        Ok(StrictProcessLink {
+            pid,
+            parent_pid,
+            start,
+            order,
+        })
+    }
+
+    pub fn strict_peer_cred_from_fd(
+        fd: BorrowedFd<'_>,
+        proc_root: &Path,
+    ) -> Result<StrictPeer, StrictPeerError> {
+        socket_metadata(fd)?;
+        let (uid, pid) = credentials(fd)?;
+        #[cfg(target_os = "linux")]
+        let (pin, branch) = match native_peer_pin(fd) {
+            Ok(pin) => {
+                pin_matches(&pin, pid)?;
+                (
+                    PeerPin::Visible(std::sync::Arc::new(pin)),
+                    StrictPeerBranch::LinuxPinned,
+                )
+            }
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::ENOPROTOOPT | libc::ENOSYS | libc::EOPNOTSUPP)
+                ) =>
+            {
+                (
+                    PeerPin::Unpinned,
+                    StrictPeerBranch::LinuxUnsupportedFallback,
+                )
+            }
+            Err(_) => return Err(FailureReason::AuthorityUnavailable),
+        };
+        #[cfg(target_os = "macos")]
+        let (pin, branch) = (PeerPin::Unpinned, StrictPeerBranch::MacWeaker);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let (pin, branch) = {
+            return Err(FailureReason::Unsupported);
+        };
+        let captured_start = strict_process_link(proc_root, pid)?.start;
+        let peer = StrictPeer {
+            peer: PeerCred {
+                uid,
+                pid: Some(pid),
+                pin,
+            },
+            branch,
+            captured_start,
+        };
+        strict_revalidate(&peer, fd, proc_root)?;
+        Ok(peer)
+    }
+    pub fn strict_revalidate(
+        peer: &StrictPeer,
+        fd: BorrowedFd<'_>,
+        proc_root: &Path,
+    ) -> Result<(), StrictPeerError> {
+        socket_metadata(fd)?;
+        let (uid, pid) = credentials(fd)?;
+        if peer.peer.uid != uid || peer.peer.pid != Some(pid) {
+            return Err(FailureReason::ContradictoryPeer);
+        }
+        #[cfg(target_os = "linux")]
+        match &peer.peer.pin {
+            PeerPin::Visible(pin) => pin_matches(pin, pid)?,
+            PeerPin::Unpinned if peer.branch == StrictPeerBranch::LinuxUnsupportedFallback => {}
+            _ => return Err(FailureReason::DeadPeer),
+        }
+        if strict_process_link(proc_root, pid)?.start != peer.captured_start {
+            return Err(FailureReason::Changed);
+        }
+        #[cfg(target_os = "linux")]
+        if let PeerPin::Visible(pin) = &peer.peer.pin {
+            pin_matches(pin, pid)?;
+        }
+        socket_metadata(fd)?;
+        if credentials(fd)? != (uid, pid) {
+            return Err(FailureReason::ContradictoryPeer);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    #[derive(Debug, Clone, Default)]
+    pub(crate) struct TestReadings {
+        pub credential_pid: Option<i32>,
+        pub pidfd_errno: Option<i32>,
+        #[cfg(target_os = "linux")]
+        pub pin: Option<PinReading>,
+        pub socket_revents: Option<i16>,
+    }
+    #[cfg(test)]
+    thread_local! {pub(crate) static TEST_READINGS:std::cell::RefCell<Option<TestReadings>>=const{std::cell::RefCell::new(None)};}
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::io::{Read, Write};
+        use std::os::fd::{AsFd, OwnedFd};
+        fn reset() {
+            TEST_READINGS.with(|r| *r.borrow_mut() = None);
+        }
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                reset();
+            }
+        }
+        #[test]
+        fn strict_peer_metadata_preserves_bytes_and_flags() {
+            let (mut sender, mut original) = std::os::unix::net::UnixStream::pair().unwrap();
+            sender.write_all(b"untouched-lifecycle").unwrap();
+            let flags = unsafe { libc::fcntl(original.as_raw_fd(), libc::F_GETFL) };
+            let read_timeout = original.read_timeout().unwrap();
+            let write_timeout = original.write_timeout().unwrap();
+            let peer =
+                strict_peer_cred_from_fd(original.as_fd(), Path::new(super::super::LIVE_PROC_ROOT))
+                    .unwrap();
+            strict_revalidate(
+                &peer,
+                original.as_fd(),
+                Path::new(super::super::LIVE_PROC_ROOT),
+            )
+            .unwrap();
+            assert_eq!(
+                unsafe { libc::fcntl(original.as_raw_fd(), libc::F_GETFL) },
+                flags
+            );
+            assert_eq!(original.read_timeout().unwrap(), read_timeout);
+            assert_eq!(original.write_timeout().unwrap(), write_timeout);
+            let mut bytes = [0; 19];
+            original.read_exact(&mut bytes).unwrap();
+            assert_eq!(&bytes, b"untouched-lifecycle");
+        }
+        #[test]
+        fn strict_peer_write_half_close_is_not_full_hup() {
+            let (sender, original) = std::os::unix::net::UnixStream::pair().unwrap();
+            sender.shutdown(std::net::Shutdown::Write).unwrap();
+            assert!(
+                strict_peer_cred_from_fd(original.as_fd(), Path::new(super::super::LIVE_PROC_ROOT))
+                    .is_ok(),
+                "valid write-half-close refused"
+            );
+            sender.shutdown(std::net::Shutdown::Both).unwrap();
+            assert_eq!(
+                strict_peer_cred_from_fd(original.as_fd(), Path::new(super::super::LIVE_PROC_ROOT))
+                    .err(),
+                Some(FailureReason::DeadPeer)
+            );
+        }
+        #[test]
+        fn strict_peer_regular_file_and_datagram_are_not_stream_peers() {
+            let file = std::fs::File::open("/dev/null").unwrap();
+            assert_eq!(
+                strict_peer_cred_from_fd(file.as_fd(), Path::new(super::super::LIVE_PROC_ROOT))
+                    .err(),
+                Some(FailureReason::Endpoint)
+            );
+            let (datagram, _) = std::os::unix::net::UnixDatagram::pair().unwrap();
+            assert_eq!(
+                strict_peer_cred_from_fd(datagram.as_fd(), Path::new(super::super::LIVE_PROC_ROOT))
+                    .err(),
+                Some(FailureReason::Endpoint)
+            );
+        }
+        #[test]
+        fn strict_process_link_keeps_pid_one_visible() {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir(root.path().join("1")).unwrap();
+            let mut fields = vec!["0"; 20];
+            fields[0] = "S";
+            fields[19] = "1";
+            std::fs::write(
+                root.path().join("1/stat"),
+                format!("1 (fixture) {}\n", fields.join(" ")),
+            )
+            .unwrap();
+            let link = strict_process_link(root.path(), 1).unwrap();
+            assert_eq!(link.pid, 1);
+            assert_eq!(link.parent_pid, 0);
+            assert_eq!(link.start, "1");
+        }
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn strict_peer_only_three_unsupported_errnos_are_weaker() {
+            let _reset = Reset;
+            let (_sender, original) = std::os::unix::net::UnixStream::pair().unwrap();
+            for errno in [libc::ENOPROTOOPT, libc::ENOSYS, libc::EOPNOTSUPP] {
+                TEST_READINGS.with(|r| {
+                    *r.borrow_mut() = Some(TestReadings {
+                        pidfd_errno: Some(errno),
+                        ..Default::default()
+                    })
+                });
+                let result = strict_peer_cred_from_fd(
+                    original.as_fd(),
+                    Path::new(super::super::LIVE_PROC_ROOT),
+                );
+                assert_eq!(
+                    result.unwrap().branch,
+                    StrictPeerBranch::LinuxUnsupportedFallback
+                );
+            }
+            for errno in [libc::EINVAL, libc::EIO, libc::EBADF, libc::EPERM] {
+                TEST_READINGS.with(|r| {
+                    *r.borrow_mut() = Some(TestReadings {
+                        pidfd_errno: Some(errno),
+                        ..Default::default()
+                    })
+                });
+                assert_eq!(
+                    strict_peer_cred_from_fd(
+                        original.as_fd(),
+                        Path::new(super::super::LIVE_PROC_ROOT)
+                    )
+                    .err(),
+                    Some(FailureReason::AuthorityUnavailable),
+                    "unexpected pidfd error became fallback"
+                );
+            }
+        }
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn strict_peer_missing_pid_never_becomes_uid_only() {
+            let _reset = Reset;
+            let (_sender, original) = std::os::unix::net::UnixStream::pair().unwrap();
+            TEST_READINGS.with(|r| {
+                *r.borrow_mut() = Some(TestReadings {
+                    credential_pid: Some(0),
+                    ..Default::default()
+                })
+            });
+            assert_eq!(
+                strict_peer_cred_from_fd(original.as_fd(), Path::new(super::super::LIVE_PROC_ROOT))
+                    .err(),
+                Some(FailureReason::MissingPid),
+                "missing PID constructed a strict peer"
+            );
+        }
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn strict_peer_pin_contradiction_dead_unmapped_and_unreadable_refuse() {
+            let _reset = Reset;
+            let pin: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+            let pid = std::process::id();
+            for (reading, expected) in [
+                (
+                    PinReading::Visible(pid + 1),
+                    FailureReason::ContradictoryPeer,
+                ),
+                (PinReading::Dead, FailureReason::DeadPeer),
+                (PinReading::Unmapped, FailureReason::UnmappedPeer),
+                (PinReading::Unreadable, FailureReason::FdinfoUnavailable),
+            ] {
+                TEST_READINGS.with(|r| {
+                    *r.borrow_mut() = Some(TestReadings {
+                        pin: Some(reading),
+                        ..Default::default()
+                    })
+                });
+                assert_eq!(
+                    pin_matches(&pin, pid).err(),
+                    Some(expected),
+                    "invalid pin reading constructed authority"
+                );
+            }
+        }
+        #[test]
+        fn strict_peer_changed_start_token_refuses() {
+            let root = tempfile::tempdir().unwrap();
+            let pid = std::process::id();
+            std::fs::create_dir(root.path().join(pid.to_string())).unwrap();
+            let mut fields = vec!["0"; 20];
+            fields[0] = "S";
+            fields[19] = "42";
+            let stat = root.path().join(pid.to_string()).join("stat");
+            std::fs::write(&stat, format!("{pid} (fixture) {}\n", fields.join(" "))).unwrap();
+            let (_sender, original) = std::os::unix::net::UnixStream::pair().unwrap();
+            let peer = strict_peer_cred_from_fd(original.as_fd(), root.path()).unwrap();
+            fields[19] = "43";
+            std::fs::write(stat, format!("{pid} (fixture) {}\n", fields.join(" "))).unwrap();
+            assert_eq!(
+                strict_revalidate(&peer, original.as_fd(), root.path()).err(),
+                Some(FailureReason::Changed),
+                "changed process token survived revalidation"
+            );
+        }
+    }
+}
+pub fn strict_open_file_vnodes(
+    proc_root: &Path,
+    pid: u32,
+    expected_start: &str,
+    deadline: std::time::Instant,
+) -> Result<Vec<OpenVnode>, crate::client::caller_attribution::FailureReason> {
+    use crate::client::caller_attribution::FailureReason;
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    if std::time::Instant::now() >= deadline {
+        return Err(FailureReason::Deadline);
+    }
+    if strict_process_link(proc_root, pid)?.start != expected_start {
+        return Err(FailureReason::Changed);
+    }
+    #[cfg(target_os = "macos")]
+    if is_live(proc_root) {
+        use std::os::unix::ffi::OsStrExt;
+        let entry_size = std::mem::size_of::<libc::proc_fdinfo>();
+        let bytes = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDLISTFDS,
+                0,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if bytes <= 0 {
+            return Err(FailureReason::AuthorityUnavailable);
+        }
+        let count = (bytes as usize)
+            .checked_mul(2)
+            .ok_or(FailureReason::Limit)?
+            / entry_size;
+        if count > 4096 {
+            return Err(FailureReason::Limit);
+        }
+        let mut entries: Vec<libc::proc_fdinfo> = Vec::with_capacity(count);
+        let size = count * entry_size;
+        let filled = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDLISTFDS,
+                0,
+                entries.as_mut_ptr().cast(),
+                size as libc::c_int,
+            )
+        };
+        if filled <= 0 || filled as usize >= size || filled as usize % entry_size != 0 {
+            return Err(FailureReason::AuthorityUnavailable);
+        }
+        unsafe {
+            entries.set_len(filled as usize / entry_size);
+        }
+        let mut result = Vec::new();
+        for entry in entries {
+            if std::time::Instant::now() >= deadline {
+                return Err(FailureReason::Deadline);
+            }
+            if entry.proc_fdtype as libc::c_int != libc::PROX_FDTYPE_VNODE {
+                continue;
+            }
+            let mut info = std::mem::MaybeUninit::<macos::vnode_fdinfowithpath>::zeroed();
+            let size = std::mem::size_of_val(&info) as libc::c_int;
+            if unsafe {
+                libc::proc_pidfdinfo(
+                    pid as libc::c_int,
+                    entry.proc_fd,
+                    macos::PROC_PIDFDVNODEPATHINFO,
+                    info.as_mut_ptr().cast(),
+                    size,
+                )
+            } != size
+            {
+                return Err(FailureReason::AuthorityUnavailable);
+            }
+            let info = unsafe { info.assume_init() };
+            let raw = info.pvip.vip_path.as_slice();
+            let end = raw
+                .iter()
+                .position(|b| *b == 0)
+                .ok_or(FailureReason::AuthorityUnavailable)?;
+            let bytes: Vec<u8> = raw[..end].iter().map(|b| *b as u8).collect();
+            let stat = info.pvip.vip_vi.vi_stat;
+            result.push(OpenVnode {
+                dev: stat.vst_dev as u64,
+                ino: stat.vst_ino,
+                path: std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&bytes)),
+                mode: stat.vst_mode as libc::mode_t,
+                uid: stat.vst_uid,
+                nlink: u64::from(stat.vst_nlink),
+                has_flock: info.pfi.fi_openflags & 0x4002 == 0x4002,
+            });
+        }
+        if strict_process_link(proc_root, pid)?.start != expected_start {
+            return Err(FailureReason::Changed);
+        }
+        return Ok(result);
+    }
+    use std::os::unix::fs::MetadataExt;
+    let directory = proc_root.join(pid.to_string());
+    let listing =
+        std::fs::read_dir(directory.join("fd")).map_err(|_| FailureReason::AuthorityUnavailable)?;
+    let mut result = Vec::new();
+    let mut seen = 0;
+    for entry in listing {
+        if std::time::Instant::now() >= deadline {
+            return Err(FailureReason::Deadline);
+        }
+        seen += 1;
+        if seen > 4096 {
+            return Err(FailureReason::Limit);
+        }
+        let entry = entry.map_err(|_| FailureReason::AuthorityUnavailable)?;
+        if entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+            .is_none()
+        {
+            return Err(FailureReason::AuthorityUnavailable);
+        }
+        let target =
+            std::fs::read_link(entry.path()).map_err(|_| FailureReason::AuthorityUnavailable)?;
+        let meta =
+            std::fs::metadata(entry.path()).map_err(|_| FailureReason::AuthorityUnavailable)?;
+        if !meta.is_file() {
+            continue;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(directory.join("fdinfo").join(entry.file_name()))
+            .map_err(|_| FailureReason::AuthorityUnavailable)?;
+        let mut bytes = Vec::new();
+        std::io::Read::take(file, 65537)
+            .read_to_end(&mut bytes)
+            .map_err(|_| FailureReason::AuthorityUnavailable)?;
+        if bytes.len() > 65536 {
+            return Err(FailureReason::Limit);
+        }
+        let text = std::str::from_utf8(&bytes).map_err(|_| FailureReason::AuthorityUnavailable)?;
+        let mut holders = std::collections::HashSet::new();
+        for line in text.lines().filter_map(|l| l.strip_prefix("lock:")) {
+            let Some((holder, major, minor, inode)) = crate::agy::parse_locks_line(line) else {
+                return Err(FailureReason::AuthorityUnavailable);
+            };
+            if (major, minor, inode)
+                == (
+                    crate::agy::dev_major(meta.dev()),
+                    crate::agy::dev_minor(meta.dev()),
+                    meta.ino(),
+                )
+            {
+                holders.insert(holder);
+            }
+        }
+        if holders.len() > 1 {
+            return Err(FailureReason::Ambiguous);
+        }
+        result.push(OpenVnode {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            path: target,
+            mode: meta.mode() as libc::mode_t,
+            uid: meta.uid(),
+            nlink: meta.nlink(),
+            has_flock: holders.contains(&pid),
+        });
+    }
+    if strict_process_link(proc_root, pid)?.start != expected_start {
+        return Err(FailureReason::Changed);
+    }
+    if std::time::Instant::now() >= deadline {
+        return Err(FailureReason::Deadline);
+    }
+    Ok(result)
+}
