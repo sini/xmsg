@@ -577,3 +577,13 @@ In the first slice, events are fetched at least two seconds apart and
 snapshots are refreshed at the collector's 30-second cadence outside
 backfill. Allow for poll and network delay when using the HTTP read
 surfaces from a script.
+
+### Tune the read-only session limits
+
+Set optional `mission_control.session_limits` fields to tune read-only
+message, snapshot, replay and connection limits. For example,
+`{"tick_interval_ms":10000,"lease_max_secs":600}` sets a ten-second
+heartbeat and a ten-minute lease cap. Choose a heartbeat shorter than
+the proxy's documented idle bound. The issuer still applies the earlier
+of the record's idle and absolute expiration. The authority watchdog and
+revocation SLO remain peer fields under `mission_control`.

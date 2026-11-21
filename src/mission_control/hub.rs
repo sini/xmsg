@@ -12,6 +12,8 @@ pub(super) struct ReplayLimits {
     pub events: usize,
     pub bytes: usize,
     pub window: Duration,
+    pub queue_bytes: usize,
+    pub queue_messages: usize,
 }
 
 pub(super) struct Snapshot {
@@ -53,9 +55,6 @@ pub(super) struct Batch {
     pub through: u64,
     pub coalesced: bool,
 }
-
-const QUEUE_BYTES: usize = 1024 * 1024;
-const QUEUE_MESSAGES: usize = 1024;
 
 pub(super) struct Hub {
     key: CursorKey,
@@ -382,7 +381,10 @@ impl Hub {
             history.push(entry);
         }
         let original = history.len();
-        if !replaying && (bytes > QUEUE_BYTES / 2 || history.len() > QUEUE_MESSAGES / 2) {
+        if !replaying
+            && (bytes > self.limits.queue_bytes / 2
+                || history.len() > self.limits.queue_messages / 2)
+        {
             let mut keys = std::collections::HashSet::new();
             history.reverse();
             history.retain(|&entry| {
@@ -398,7 +400,9 @@ impl Hub {
             });
             history.reverse();
         }
-        if !replaying && (bytes > QUEUE_BYTES || history.len() > QUEUE_MESSAGES) {
+        if !replaying
+            && (bytes > self.limits.queue_bytes || history.len() > self.limits.queue_messages)
+        {
             return Err(Reset::SlowConsumer);
         }
         let retained = history.len();
@@ -407,7 +411,8 @@ impl Hub {
         let mut queued_bytes = 0usize;
         for entry in history {
             if events.len() == cap
-                || (!events.is_empty() && queued_bytes.saturating_add(entry.bytes) > QUEUE_BYTES)
+                || (!events.is_empty()
+                    && queued_bytes.saturating_add(entry.bytes) > self.limits.queue_bytes)
             {
                 break;
             }
@@ -476,6 +481,8 @@ mod tests {
             events: 2,
             bytes: 1024,
             window: Duration::from_secs(2),
+            queue_bytes: 1024 * 1024,
+            queue_messages: 1024,
         })
         .unwrap();
         let partition = Partition::new(b"fleet", b"local-record", 1);
@@ -515,6 +522,8 @@ mod tests {
             events: 4096,
             bytes: 8 * 1024 * 1024,
             window: Duration::from_secs(120),
+            queue_bytes: 1024 * 1024,
+            queue_messages: 1024,
         })
         .unwrap();
         let now = Instant::now();

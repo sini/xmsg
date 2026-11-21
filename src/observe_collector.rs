@@ -417,7 +417,19 @@ async fn serve(
     state: Arc<State>,
     tls: Option<tokio_rustls::TlsAcceptor>,
 ) -> Result<(), Error> {
-    serve_with_admission(listener, state, tls, connection_slots()).await
+    let slots = state
+        .issuer
+        .as_ref()
+        .map_or_else(connection_slots, |issuer| {
+            let limits = issuer.config();
+            let count = limits
+                .pending_handshakes_global
+                .saturating_mul(2)
+                .saturating_add(limits.session_limits.connections_global)
+                .min(Semaphore::MAX_PERMITS);
+            Arc::new(Semaphore::new(count))
+        });
+    serve_with_admission(listener, state, tls, slots).await
 }
 
 async fn serve_with_admission(
@@ -432,6 +444,10 @@ async fn serve_with_admission(
             accepted = listener.accept() => {
                 let (tcp, peer) = accepted.map_err(|_| Error::Listener)?;
                 let Ok(lease) = connections.clone().try_acquire_owned() else { drop(tcp); continue };
+                let pending = state.issuer.as_ref().map(|issuer| PendingAccept {
+                    deadline: tokio::time::Instant::now() + Duration::from_millis(issuer.config().handshake_timeout_ms),
+                    permit: state.requests.clone().try_acquire_owned().ok(),
+                });
                 let state = state.clone();
                 let tls = tls.clone();
                 tasks.spawn(async move {
@@ -449,11 +465,13 @@ async fn serve_with_admission(
                         (tcp, None)
                     };
                     if let Some(tls) = tls {
-                        if let Ok(Ok(stream)) = tokio::time::timeout(Duration::from_secs(5), tls.accept(tcp)).await {
-                            serve_stream_with_socket(stream, state, Some(peer), abort).await;
+                        let deadline = pending.as_ref().map_or_else(
+                            || tokio::time::Instant::now() + WEB_BUDGET, |pending| pending.deadline);
+                        if let Ok(Ok(stream)) = tokio::time::timeout_at(deadline, tls.accept(tcp)).await {
+                            serve_stream_with_socket(stream, state, Some(peer), abort, pending).await;
                         }
                     } else {
-                        serve_stream_with_socket(tcp, state, Some(peer), abort).await;
+                        serve_stream_with_socket(tcp, state, Some(peer), abort, pending).await;
                     }
                 });
             }
@@ -464,12 +482,17 @@ async fn serve_with_admission(
 
 const WEB_BUDGET: Duration = Duration::from_secs(5);
 
+struct PendingAccept {
+    deadline: tokio::time::Instant,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
 #[cfg(test)]
 async fn serve_stream<I>(stream: I, state: Arc<State>, peer: Option<SocketAddr>)
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    serve_stream_with_socket(stream, state, peer, None).await;
+    serve_stream_with_socket(stream, state, peer, None, None).await;
 }
 
 async fn serve_stream_with_socket<I>(
@@ -477,13 +500,15 @@ async fn serve_stream_with_socket<I>(
     state: Arc<State>,
     peer: Option<SocketAddr>,
     abort: Option<std::net::TcpStream>,
+    pending: Option<PendingAccept>,
 ) where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let budget = state.issuer.as_ref().map_or(WEB_BUDGET, |issuer| {
         Duration::from_millis(issuer.config().handshake_timeout_ms)
     });
-    let fence = crate::mission_control::stream::Fence::default();
+    let fence =
+        crate::mission_control::stream::Fence::default().track_headers(state.issuer.is_some());
     #[cfg(test)]
     let fence = fence.with_probe(state.wire_probe.clone());
     let fence = Arc::new(fence);
@@ -493,6 +518,7 @@ async fn serve_stream_with_socket<I>(
         state.requests.clone(),
         budget,
         Some(connection_fence),
+        pending,
         move |mut request| async move {
             if let Some(issuer) = &state.issuer {
                 if request.method() != hyper::Method::GET
@@ -564,9 +590,14 @@ where
     F: FnOnce(Request<Incoming>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Response<Full<Bytes>>> + Send + 'static,
 {
-    serve_http_inner(stream, requests, budget, None, move |request| async move {
-        prepare(request).await.map(BodyExt::boxed_unsync)
-    })
+    serve_http_inner(
+        stream,
+        requests,
+        budget,
+        None,
+        None,
+        move |request| async move { prepare(request).await.map(BodyExt::boxed_unsync) },
+    )
     .await;
 }
 
@@ -575,6 +606,7 @@ async fn serve_http_inner<I, F, Fut>(
     requests: Arc<Semaphore>,
     budget: Duration,
     fence: Option<Arc<crate::mission_control::stream::Fence>>,
+    pending: Option<PendingAccept>,
     prepare: F,
 ) where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -584,7 +616,7 @@ async fn serve_http_inner<I, F, Fut>(
         + 'static,
 {
     let (admission_tx, admission_rx) = tokio::sync::oneshot::channel();
-    let preparation = Mutex::new(Some((admission_tx, prepare)));
+    let preparation = Mutex::new(Some((admission_tx, prepare, pending)));
     let service = hyper::service::service_fn(move |request| {
         let operation = preparation
             .lock()
@@ -592,10 +624,7 @@ async fn serve_http_inner<I, F, Fut>(
             .and_then(|mut operation| operation.take());
         let requests = requests.clone();
         async move {
-            let lease = requests.try_acquire_owned().ok();
-            let admitted = lease.is_some();
-            let deadline = tokio::time::Instant::now() + budget;
-            let Some((admission, prepare)) = operation else {
+            let Some((admission, prepare, pending)) = operation else {
                 return Ok::<_, Infallible>(
                     response(
                         StatusCode::SERVICE_UNAVAILABLE,
@@ -605,6 +634,14 @@ async fn serve_http_inner<I, F, Fut>(
                     .map(BodyExt::boxed_unsync),
                 );
             };
+            let PendingAccept {
+                deadline,
+                permit: lease,
+            } = pending.unwrap_or_else(|| PendingAccept {
+                deadline: tokio::time::Instant::now() + budget,
+                permit: requests.try_acquire_owned().ok(),
+            });
+            let admitted = lease.is_some();
             if admission.send((deadline, lease)).is_err() {
                 return Ok::<_, Infallible>(
                     response(
@@ -617,6 +654,10 @@ async fn serve_http_inner<I, F, Fut>(
             }
             let mut response = if admitted {
                 prepare(request).await
+            } else if crate::mission_control::transport::is_snapshot(request.uri().path())
+                || crate::mission_control::stream::is_stream(request.uri().path())
+            {
+                crate::mission_control::transport::busy().map(BodyExt::boxed_unsync)
             } else {
                 response(StatusCode::SERVICE_UNAVAILABLE, "collector busy\n", false)
                     .map(BodyExt::boxed_unsync)
@@ -1072,8 +1113,9 @@ pub async fn run(args: Args) -> Result<(), Error> {
     let requests = issuer.as_ref().map_or_else(request_slots, |issuer| {
         Arc::new(Semaphore::new(issuer.config().pending_handshakes_global))
     });
-    let read_hub = if issuer.is_some() {
-        let hub = crate::mission_control::upstream::ReadHub::new().map_err(|_| Error::Storage)?;
+    let read_hub = if let Some(issuer) = &issuer {
+        let hub = crate::mission_control::upstream::ReadHub::new(&issuer.config().session_limits)
+            .map_err(|_| Error::Storage)?;
         for view in store.view(None, 200)? {
             hub.accept_poll(view, None, true, store.epoch_now())
                 .map_err(|_| Error::Storage)?;

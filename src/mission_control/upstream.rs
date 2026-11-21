@@ -24,15 +24,19 @@ struct ReadState {
 }
 
 impl ReadHub {
-    pub(crate) fn new() -> Result<Self, ring::error::Unspecified> {
+    pub(crate) fn new(
+        limits: &super::limits::ReadLimits,
+    ) -> Result<Self, ring::error::Unspecified> {
         Ok(Self {
             changed: tokio::sync::watch::channel(0).0,
             budgets: std::sync::Arc::default(),
             state: Mutex::new(ReadState {
                 hub: Hub::new(ReplayLimits {
-                    events: 4096,
-                    bytes: 8 * 1024 * 1024,
-                    window: Duration::from_secs(120),
+                    events: limits.replay_events,
+                    bytes: limits.replay_bytes,
+                    window: Duration::from_secs(limits.replay_window_secs),
+                    queue_bytes: limits.queue_max_bytes,
+                    queue_messages: limits.queue_max_messages,
                 })?,
                 poll: BTreeMap::new(),
             }),
@@ -438,4 +442,67 @@ impl PollSource {
 
 fn milliseconds(seconds: i64) -> i64 {
     seconds.saturating_mul(1000)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mission_control::authority::Scope;
+
+    #[test]
+    fn live_and_delayed_sources_produce_the_same_view_shape() {
+        let limits = super::super::limits::ReadLimits::default();
+        let mut hub = Hub::new(ReplayLimits {
+            events: limits.replay_events,
+            bytes: limits.replay_bytes,
+            window: Duration::from_secs(limits.replay_window_secs),
+            queue_bytes: limits.queue_max_bytes,
+            queue_messages: limits.queue_max_messages,
+        })
+        .unwrap();
+        let mut poll_source = PollSource::default();
+        let delayed = poll_source.update(
+            NodeView {
+                failure: None,
+                origin_hub: None,
+                history_hidden: false,
+                has_stored_history: false,
+                node: "laptop".to_owned(),
+                status: NodeStatus::Healthy,
+                events: Vec::new(),
+                latest_snapshot: None,
+                cursor: None,
+                gaps: Vec::new(),
+                truncated: false,
+                backfill: false,
+                last_activity: None,
+            },
+            Some(1),
+            false,
+        );
+        let live = Update {
+            node: Node {
+                delivery: Delivery::Live,
+                ..delayed.node.clone()
+            },
+            unreachable: false,
+            events: Vec::new(),
+        };
+        let projection = Projection {
+            scope: &Scope::Fleet,
+            grants: &[Scope::Fleet],
+            masked: &|_| false,
+            activity: true,
+        };
+        delayed.apply(&mut hub, 1000, Instant::now()).unwrap();
+        let mut delayed = serde_json::to_value(&hub.snapshot(&projection).nodes[0]).unwrap();
+        assert_eq!(delayed["delivery"], "delayed");
+        live.apply(&mut hub, 1000, Instant::now()).unwrap();
+        let mut live = serde_json::to_value(&hub.snapshot(&projection).nodes[0]).unwrap();
+        assert_eq!(live["delivery"], "live");
+        for item in [&mut delayed, &mut live] {
+            item.as_object_mut().unwrap().remove("delivery");
+        }
+        assert_eq!(delayed, live);
+    }
 }
