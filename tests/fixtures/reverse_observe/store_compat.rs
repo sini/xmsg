@@ -26,7 +26,11 @@ fn policy(node: &str, relay: bool, supported: bool) -> NodePolicy {
     }
 }
 fn page(node: &str, write: bool) -> ExportPage {
-    serde_json::from_value(json!({"v":1,"node":node,"epoch":"downgrade-fixture",
+    #[cfg(candidate)]
+    let v = 2;
+    #[cfg(not(candidate))]
+    let v = 1;
+    serde_json::from_value(json!({"v":v,"node":node,"epoch":"downgrade-fixture",
         "scope":"a".repeat(64),"events":if write {vec![json!({"sequence":1,
         "observed_at":1000,"persisted_at":1000,"kind":"message_recorded",
         "available":"not_recorded"})]} else {vec![]},"next":1,"has_more":false,
@@ -34,6 +38,12 @@ fn page(node: &str, write: bool) -> ExportPage {
     .unwrap()
 }
 fn snapshot(node: &str) -> ExportSnapshot {
+    #[cfg(candidate)]
+    return serde_json::from_value(json!({"v":2,"node":node,"scope":"a".repeat(64),
+        "observed_at":1000,"endpoints":[],"truncated":false,"available":"partial",
+        "activity":{"status":"disabled","complete":true}}))
+    .unwrap();
+    #[cfg(not(candidate))]
     serde_json::from_value(json!({"v":1,"node":node,"scope":"a".repeat(64),
         "observed_at":1000,"endpoints":[],"truncated":false,"available":"partial"}))
     .unwrap()
