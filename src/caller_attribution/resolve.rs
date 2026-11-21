@@ -305,8 +305,7 @@ fn capture_step(
                 };
                 let selected = codex.store.readonly_attribution_binding(
                     &config,
-                    step.pid,
-                    &step.start,
+                    (step.pid, &step.start),
                     session_id,
                     thread_id,
                     turn_id.as_deref(),
