@@ -23,6 +23,14 @@ export interface SiblingAllowlistEntry {
 }
 
 export const FEATURES: Record<string, FeatureEntry> = {
+	'teams.attribution-bridge': {
+		id: 'teams.attribution-bridge',
+		title: 'Default-unqualified local executor caller attribution',
+		owner: 'sini',
+		evidence: [{ path: 'src/caller_attribution.rs', anchor: 'pub fn bind_unqualified' }],
+		plannedSince: '2026-11-21',
+		note: 'Mechanism only; no production OS/runtime tuple is enabled.',
+	},
 	'teams.supervisor': {
 		id: 'teams.supervisor',
 		title: 'Fake-backend executor supervisor and workspace library',
