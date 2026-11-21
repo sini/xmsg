@@ -1,0 +1,405 @@
+use std::collections::HashSet;
+use std::convert::Infallible;
+use std::io;
+use std::net::TcpStream;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+use http_body_util::{combinators::UnsyncBoxBody, BodyExt, StreamBody};
+use hyper::body::{Bytes, Frame, Incoming};
+use hyper::{header, Method, Request, Response, StatusCode};
+use serde_json::json;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+use super::admission::{self, Refusal, Route};
+use super::authority::{InvalidationReason, Live, Record, Scope};
+use super::budgets::{Mode, Slot};
+use super::cursor::Partition;
+use super::hub::Reset;
+use super::protocol::Projection;
+use super::transport::{encode_snapshot, error, grants, parse_scope, partition, MAX_SNAPSHOT};
+use super::upstream::ReadHub;
+use super::writer::SessionWriter;
+use super::Issuer;
+
+const STREAM_PREFIX: &str = "/v1/mission-control/stream/";
+
+pub(crate) type Body = UnsyncBoxBody<Bytes, Infallible>;
+
+#[derive(Default)]
+pub(crate) struct Fence {
+    live: Mutex<Option<Arc<Live>>>,
+    headers_written: tokio::sync::Notify,
+}
+
+impl Fence {
+    pub(crate) async fn started(&self) {
+        self.headers_written.notified().await;
+    }
+
+    pub(crate) fn wrap<S>(self: &Arc<Self>, stream: S) -> Fenced<S> {
+        Fenced {
+            stream,
+            fence: self.clone(),
+            header_suffix: 0,
+            notified: false,
+        }
+    }
+}
+
+pub(crate) struct Fenced<S> {
+    stream: S,
+    fence: Arc<Fence>,
+    header_suffix: usize,
+    notified: bool,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Fenced<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        output: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(cx, output)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Fenced<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let owner = self.fence.clone();
+        let guard = owner
+            .live
+            .lock()
+            .map_err(|_| io::Error::other("stream fence unavailable"))?;
+        let checked = if let Some(live) = guard.as_ref() {
+            live.authorize_payload(
+                std::iter::empty(),
+                || true,
+                || Pin::new(&mut self.stream).poll_write(cx, bytes),
+            )
+            .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "stream write fenced"))?
+        } else {
+            Pin::new(&mut self.stream).poll_write(cx, bytes)
+        };
+        if guard.is_some() && !self.notified {
+            if let Poll::Ready(Ok(count)) = checked {
+                for &byte in &bytes[..count] {
+                    const END: &[u8] = b"\r\n\r\n";
+                    if byte == END[self.header_suffix] {
+                        self.header_suffix += 1;
+                    } else {
+                        self.header_suffix = usize::from(byte == END[0]);
+                    }
+                    if self.header_suffix == END.len() {
+                        self.notified = true;
+                        owner.headers_written.notify_one();
+                        break;
+                    }
+                }
+            }
+        }
+        checked
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let owner = self.fence.clone();
+        let guard = owner
+            .live
+            .lock()
+            .map_err(|_| io::Error::other("stream fence unavailable"))?;
+        if let Some(live) = guard.as_ref() {
+            live.authorize_payload(
+                std::iter::empty(),
+                || true,
+                || Pin::new(&mut self.stream).poll_flush(cx),
+            )
+            .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "stream flush fenced"))?
+        } else {
+            Pin::new(&mut self.stream).poll_flush(cx)
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+
+pub(crate) fn is_stream(path: &str) -> bool {
+    path.starts_with(STREAM_PREFIX)
+}
+
+pub(crate) async fn response(
+    issuer: &Arc<Issuer>,
+    hub: Arc<ReadHub>,
+    req: Request<Incoming>,
+    abort: Option<TcpStream>,
+    fence: Arc<Fence>,
+) -> Response<Body> {
+    match open(issuer, hub, req, abort, fence).await {
+        Ok(body) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .header(header::CACHE_CONTROL, "no-store")
+            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+            .body(body)
+            .expect("fixed SSE headers"),
+        Err(refusal) => error(refusal).map(BodyExt::boxed_unsync),
+    }
+}
+
+async fn open(
+    issuer: &Arc<Issuer>,
+    hub: Arc<ReadHub>,
+    req: Request<Incoming>,
+    abort: Option<TcpStream>,
+    fence: Arc<Fence>,
+) -> Result<Body, Refusal> {
+    if req.method() != Method::GET {
+        return Err(Refusal::INVALID);
+    }
+    let scope = parse_scope(
+        req.uri()
+            .path()
+            .strip_prefix(STREAM_PREFIX)
+            .ok_or(Refusal::INVALID)?,
+    )?;
+    let supplied = cursor(&req)?;
+    let record = admission::authenticate(issuer, Route::Stream, req.headers()).await?;
+    if grants(&record).is_empty() {
+        return Err(Refusal::FORBIDDEN);
+    }
+    let mask = issuer.authority.masked_nodes()?;
+    let projection = Projection {
+        scope: &scope,
+        grants: grants(&record),
+        activity: true,
+        masked: &|node| mask.contains(node),
+    };
+    let (snapshot, _) = hub
+        .snapshot(&projection)
+        .map_err(|_| Refusal::UNAVAILABLE)?
+        .ok_or(Refusal::NOT_FOUND)?;
+    let slot = hub.budgets.take(&record, Mode::Stream)?;
+    let writer = SessionWriter::register(
+        issuer,
+        &record,
+        abort.ok_or(Refusal::UNAVAILABLE)?,
+        Duration::from_secs(900),
+    )?;
+    let partition = partition(&scope, &record)?;
+    let resume = supplied
+        .as_deref()
+        .map(|supplied| hub.resume(supplied, &partition));
+    let (after, replay_through, reset, needs_snapshot) = match resume {
+        Some(Ok(seq)) => (seq, Some(snapshot.watermark), None, false),
+        Some(Err(reset)) => (snapshot.watermark, None, Some(reset), true),
+        None => (snapshot.watermark, None, None, true),
+    };
+    *fence.live.lock().map_err(|_| Refusal::UNAVAILABLE)? = Some(writer.live.clone());
+    let reader = Reader {
+        issuer: issuer.clone(),
+        hub: hub.clone(),
+        record,
+        writer,
+        _slot: slot,
+        scope,
+        partition,
+        seq: after,
+        replay_through,
+        masked: mask,
+        reset,
+        needs_snapshot,
+        opening: true,
+        ended: false,
+        changes: hub.watch(),
+    };
+    let frames = futures_util::stream::unfold(reader, |mut reader| async move {
+        let frame = reader.next().await?;
+        Some((Ok::<_, Infallible>(Frame::data(frame)), reader))
+    });
+    Ok(StreamBody::new(frames).boxed_unsync())
+}
+
+fn cursor(req: &Request<Incoming>) -> Result<Option<String>, Refusal> {
+    let mut headers = req.headers().get_all("last-event-id").iter();
+    let found = headers
+        .next()
+        .map(|value| value.to_str().map_err(|_| Refusal::INVALID))
+        .transpose()?;
+    if headers.next().is_some() {
+        return Err(Refusal::INVALID);
+    }
+    let query = req
+        .uri()
+        .query()
+        .map(|query| query.strip_prefix("cursor=").ok_or(Refusal::INVALID))
+        .transpose()?;
+    if found.is_some() && query.is_some() {
+        return Err(Refusal::INVALID);
+    }
+    let cursor = found.or(query);
+    if cursor.is_some_and(|value| {
+        value.is_empty()
+            || value.len() > 512
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    }) {
+        return Err(Refusal::INVALID);
+    }
+    Ok(cursor.map(str::to_owned))
+}
+
+struct Reader {
+    issuer: Arc<Issuer>,
+    hub: Arc<ReadHub>,
+    record: Record,
+    writer: SessionWriter,
+    _slot: Slot,
+    scope: Scope,
+    partition: Partition,
+    seq: u64,
+    replay_through: Option<u64>,
+    masked: HashSet<String>,
+    reset: Option<Reset>,
+    needs_snapshot: bool,
+    opening: bool,
+    ended: bool,
+    changes: tokio::sync::watch::Receiver<u64>,
+}
+
+impl Reader {
+    async fn next(&mut self) -> Option<Bytes> {
+        if self.ended {
+            return None;
+        }
+        if std::mem::take(&mut self.opening) {
+            return Some(Bytes::from(format!(
+                ": lease_expires_at={}\n\n",
+                self.writer.lease_at
+            )));
+        }
+        loop {
+            if let Some(reset) = self.reset.take() {
+                let reason = match reset {
+                    Reset::CursorInvalid => "cursor_invalid",
+                    Reset::CursorExpired => "cursor_expired",
+                    Reset::EpochChanged => "epoch_changed",
+                    Reset::ScopeChanged => "scope_changed",
+                };
+                let gap =
+                    json!({"v":1,"type":"gap","reason":reason,"unknown_loss":true,"reset":true});
+                return self
+                    .writer
+                    .handoff([], None, || frame("gap", None, &gap.to_string()))
+                    .ok();
+            }
+            let masked = self.issuer.authority.masked_nodes().ok()?;
+            let projection = Projection {
+                scope: &self.scope,
+                grants: grants(&self.record),
+                activity: true,
+                masked: &|node| masked.contains(node),
+            };
+            let changed = self
+                .masked
+                .symmetric_difference(&masked)
+                .any(|node| projection.node_allowed(node));
+            self.masked.clone_from(&masked);
+            if changed {
+                self.reset = Some(Reset::ScopeChanged);
+                self.needs_snapshot = true;
+                self.replay_through = None;
+                continue;
+            }
+            if self.needs_snapshot {
+                let (snapshot, epoch) = self.hub.subscribed_snapshot(&projection).ok()?;
+                let cursor = self.hub.cursor(snapshot.watermark, &self.partition).ok()?;
+                let body = encode_snapshot(&snapshot, &epoch, &cursor, MAX_SNAPSHOT).ok()?;
+                let nodes = snapshot
+                    .nodes
+                    .iter()
+                    .filter(|node| !node.history_hidden)
+                    .map(|node| node.node.as_str());
+                let attention = snapshot
+                    .attention
+                    .iter()
+                    .flatten()
+                    .filter(|item| item.endpoint.is_some())
+                    .map(|item| item.node.as_str());
+                let body = std::str::from_utf8(&body).ok()?;
+                let result = self
+                    .writer
+                    .handoff(nodes.chain(attention), None, || {
+                        frame("snapshot", Some(&cursor), body)
+                    })
+                    .ok()?;
+                self.seq = snapshot.watermark;
+                self.needs_snapshot = false;
+                return Some(result);
+            }
+            match self.hub.after(self.seq, &projection, 1) {
+                Ok((events, through)) => {
+                    self.seq = through;
+                    if let Some(event) = events.first() {
+                        let cursor = self.hub.cursor(event.seq, &self.partition).ok()?;
+                        let mut body = json!({"v":1,"type":"event","seq":event.seq,"cursor":cursor,"at":event.at,"delta":event.delta});
+                        if self.replay_through.is_some_and(|max| event.seq <= max) {
+                            body["replayed"] = json!(true);
+                        }
+                        let nodes = event.delta.contains_history().then(|| event.delta.node());
+                        return self
+                            .writer
+                            .handoff(nodes, Some((&self.hub, event)), || {
+                                frame("event", Some(&cursor), &body.to_string())
+                            })
+                            .ok();
+                    }
+                }
+                Err(reset) => {
+                    self.reset = Some(reset);
+                    self.needs_snapshot = true;
+                    self.replay_through = None;
+                    continue;
+                }
+            }
+            tokio::select! {
+                change = self.writer.live.change() => {
+                    self.ended = true;
+                    let code = match change?.reason {
+                        InvalidationReason::LeaseExpired => "lease_expired",
+                        InvalidationReason::Revoked => "revoked",
+                        InvalidationReason::PolicyChanged => "policy_changed",
+                    };
+                    return Some(frame("error",None,&json!({"v":1,"type":"error","code":code,"fatal":true}).to_string()));
+                }
+                result = self.changes.changed() => { result.ok()?; }
+                _ = tokio::time::sleep(Duration::from_secs(15)) => {
+                    let tick = json!({"v":1,"type":"tick","server_at":crate::storage::now_epoch_secs().saturating_mul(1000)});
+                    return self.writer.handoff([],None,|| frame("tick",None,&tick.to_string())).ok();
+                }
+            }
+        }
+    }
+}
+
+fn frame(kind: &str, cursor: Option<&str>, json: &str) -> Bytes {
+    let mut output = String::new();
+    if let Some(cursor) = cursor {
+        output.push_str("id: ");
+        output.push_str(cursor);
+        output.push('\n');
+    }
+    output.push_str("event: ");
+    output.push_str(kind);
+    output.push_str("\ndata: ");
+    output.push_str(json);
+    output.push_str("\n\n");
+    Bytes::from(output)
+}

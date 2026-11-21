@@ -2,7 +2,7 @@ use crate::observe_collector_auth::Verifier;
 use crate::observe_collector_net::{self as net, Client, Config};
 use crate::observe_collector_store::{NodePolicy, NodeStatus, Store, StoreError, UnavailableKind};
 use crate::observe_collector_web::{self as web, CollectorHealth, Filter, NodeFreshness};
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::{Request, Response, StatusCode};
 use std::collections::{BTreeMap, BTreeSet};
@@ -88,7 +88,7 @@ impl Drop for PollerGuard {
 struct State {
     verifier: Option<Verifier>,
     issuer: Option<Arc<crate::mission_control::Issuer>>,
-    read_hub: Option<crate::mission_control::upstream::ReadHub>,
+    read_hub: Option<Arc<crate::mission_control::upstream::ReadHub>>,
     store: Arc<Store>,
     store_slots: Arc<Semaphore>,
     requests: Arc<Semaphore>,
@@ -436,11 +436,21 @@ async fn serve_with_admission(
                 let tls = tls.clone();
                 tasks.spawn(async move {
                     let _lease = lease;
+                    let (tcp, abort) = if state.read_hub.is_some() {
+                        let Ok(socket) = tcp.into_std() else { return };
+                        let Ok(abort) = socket.try_clone() else { return };
+                        let Ok(tcp) = tokio::net::TcpStream::from_std(socket) else { return };
+                        (tcp, Some(abort))
+                    } else {
+                        (tcp, None)
+                    };
                     if let Some(tls) = tls {
                         if let Ok(Ok(stream)) = tokio::time::timeout(Duration::from_secs(5), tls.accept(tcp)).await {
-                            serve_stream(stream, state, Some(peer)).await;
+                            serve_stream_with_socket(stream, state, Some(peer), abort).await;
                         }
-                    } else { serve_stream(tcp, state, Some(peer)).await; }
+                    } else {
+                        serve_stream_with_socket(tcp, state, Some(peer), abort).await;
+                    }
                 });
             }
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
@@ -450,17 +460,32 @@ async fn serve_with_admission(
 
 const WEB_BUDGET: Duration = Duration::from_secs(5);
 
+#[cfg(test)]
 async fn serve_stream<I>(stream: I, state: Arc<State>, peer: Option<SocketAddr>)
 where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    serve_stream_with_socket(stream, state, peer, None).await;
+}
+
+async fn serve_stream_with_socket<I>(
+    stream: I,
+    state: Arc<State>,
+    peer: Option<SocketAddr>,
+    abort: Option<std::net::TcpStream>,
+) where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let budget = state.issuer.as_ref().map_or(WEB_BUDGET, |issuer| {
         Duration::from_millis(issuer.config().handshake_timeout_ms)
     });
-    serve_http(
-        stream,
+    let fence = Arc::new(crate::mission_control::stream::Fence::default());
+    let connection_fence = fence.clone();
+    serve_http_inner(
+        connection_fence.wrap(stream),
         state.requests.clone(),
         budget,
+        Some(connection_fence),
         move |mut request| async move {
             if let Some(issuer) = &state.issuer {
                 if request.method() != hyper::Method::GET
@@ -484,22 +509,72 @@ where
                             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
                             "request headers too large\n",
                             false,
-                        );
+                        )
+                        .map(BodyExt::boxed_unsync);
                     }
-                    return issuer.handle(request).await;
+                    if let Some(hub) = &state.read_hub {
+                        if crate::mission_control::stream::is_stream(request.uri().path()) {
+                            return crate::mission_control::stream::response(
+                                issuer,
+                                hub.clone(),
+                                request,
+                                abort,
+                                fence,
+                            )
+                            .await;
+                        }
+                        if crate::mission_control::websocket::is_session(request.uri().path()) {
+                            return crate::mission_control::websocket::upgrade(
+                                issuer,
+                                hub.clone(),
+                                request,
+                                abort,
+                            )
+                            .await
+                            .map(BodyExt::boxed_unsync);
+                        }
+                        if crate::mission_control::transport::is_snapshot(request.uri().path()) {
+                            return crate::mission_control::transport::snapshot(
+                                issuer, hub, request,
+                            )
+                            .await
+                            .map(BodyExt::boxed_unsync);
+                        }
+                    }
+                    return issuer.handle(request).await.map(BodyExt::boxed_unsync);
                 }
             }
-            state.prepare(request).await
+            state.prepare(request).await.map(BodyExt::boxed_unsync)
         },
     )
     .await;
 }
 
+#[cfg(test)]
 async fn serve_http<I, F, Fut>(stream: I, requests: Arc<Semaphore>, budget: Duration, prepare: F)
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     F: FnOnce(Request<Incoming>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Response<Full<Bytes>>> + Send + 'static,
+{
+    serve_http_inner(stream, requests, budget, None, move |request| async move {
+        prepare(request).await.map(BodyExt::boxed_unsync)
+    })
+    .await;
+}
+
+async fn serve_http_inner<I, F, Fut>(
+    stream: I,
+    requests: Arc<Semaphore>,
+    budget: Duration,
+    fence: Option<Arc<crate::mission_control::stream::Fence>>,
+    prepare: F,
+) where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    F: FnOnce(Request<Incoming>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Response<crate::mission_control::stream::Body>>
+        + Send
+        + 'static,
 {
     let (admission_tx, admission_rx) = tokio::sync::oneshot::channel();
     let preparation = Mutex::new(Some((admission_tx, prepare)));
@@ -514,43 +589,68 @@ where
             let admitted = lease.is_some();
             let deadline = tokio::time::Instant::now() + budget;
             let Some((admission, prepare)) = operation else {
-                return Ok::<_, Infallible>(response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "collector unavailable\n",
-                    false,
-                ));
+                return Ok::<_, Infallible>(
+                    response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "collector unavailable\n",
+                        false,
+                    )
+                    .map(BodyExt::boxed_unsync),
+                );
             };
             if admission.send((deadline, lease)).is_err() {
-                return Ok::<_, Infallible>(response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "collector unavailable\n",
-                    false,
-                ));
+                return Ok::<_, Infallible>(
+                    response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "collector unavailable\n",
+                        false,
+                    )
+                    .map(BodyExt::boxed_unsync),
+                );
             }
-            let response = if admitted {
+            let mut response = if admitted {
                 prepare(request).await
             } else {
                 response(StatusCode::SERVICE_UNAVAILABLE, "collector busy\n", false)
+                    .map(BodyExt::boxed_unsync)
             };
+            if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+                response.headers_mut().insert(
+                    hyper::header::CONNECTION,
+                    hyper::header::HeaderValue::from_static("close"),
+                );
+            }
             Ok::<_, Infallible>(response)
         }
     });
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder
-        .keep_alive(false)
+        .keep_alive(true)
         .max_buf_size(16 * 1024)
         .timer(hyper_util::rt::TokioTimer::new())
         .header_read_timeout(Duration::from_secs(5));
-    let connection = builder.serve_connection(hyper_util::rt::TokioIo::new(stream), service);
+    let connection = builder
+        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+        .with_upgrades();
     tokio::pin!(connection);
     let admission = tokio::select! {
         _ = &mut connection => return,
         admission = admission_rx => admission,
     };
     if let Ok((deadline, lease)) = admission {
-        // HTTP keepalive is disabled, so this lease and deadline cover the one response's flush.
-        let _lease = lease;
-        let _ = tokio::time::timeout_at(deadline, connection).await;
+        if let Some(fence) = fence {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {}
+                _ = &mut connection => {}
+                _ = fence.started() => {
+                    drop(lease);
+                    let _ = connection.await;
+                }
+            }
+        } else {
+            let _lease = lease;
+            let _ = tokio::time::timeout_at(deadline, connection).await;
+        }
     }
 }
 
@@ -566,6 +666,9 @@ async fn mark_error(state: &State, node: String, error: net::Error) {
     if error == net::Error::Denied {
         if let Some(issuer) = &state.issuer {
             issuer.set_node_masked(&node, true);
+        }
+        if let Some(hub) = &state.read_hub {
+            let _ = hub.mask_poll(&node, true, state.store.epoch_now());
         }
         if let Ok(mut denied) = state.denied.lock() {
             denied.insert(node.clone());
@@ -627,6 +730,9 @@ fn observe_scope(state: &State, node: &str, scope: &str) {
             if let Some(issuer) = &state.issuer {
                 issuer.set_node_masked(node, true);
             }
+            if let Some(hub) = &state.read_hub {
+                let _ = hub.mask_poll(node, false, state.store.epoch_now());
+            }
             if let Ok(mut hidden) = state.scope_hidden.lock() {
                 hidden.insert(node.to_owned());
             }
@@ -645,8 +751,10 @@ fn initial_success(_store: &Store) -> BTreeMap<String, (tokio::time::Instant, i6
 }
 
 fn accepted_scope(state: &State, node: &str, scope: String) {
-    if let Some(issuer) = &state.issuer {
-        issuer.set_node_masked(node, false);
+    if state.read_hub.is_none() {
+        if let Some(issuer) = &state.issuer {
+            issuer.set_node_masked(node, false);
+        }
     }
     if let Ok(mut failures) = state.failures.lock() {
         failures.remove(node);
@@ -689,7 +797,16 @@ async fn publish_poll_view(state: &State, node: &str) {
         .ok()
         .and_then(|success| success.get(node).copied());
     let stale = observed.is_none_or(|(time, _)| time.elapsed() > FRESH);
+    let denied = state.denied.lock().map_or(true, |set| set.contains(node));
+    let transitioning = state
+        .scope_hidden
+        .lock()
+        .map_or(true, |set| set.contains(node));
+    if denied || transitioning {
+        return;
+    }
     for view in views {
+        let unmask = !view.history_hidden && view.status != NodeStatus::Denied;
         if hub
             .accept_poll(
                 view,
@@ -700,6 +817,13 @@ async fn publish_poll_view(state: &State, node: &str) {
             .is_err()
         {
             tracing::warn!("Mission Control upstream update refused");
+            continue;
+        }
+        if unmask {
+            if let Some(issuer) = &state.issuer {
+                issuer.set_node_masked(node, false);
+                hub.wake();
+            }
         }
     }
 }
@@ -947,7 +1071,7 @@ pub async fn run(args: Args) -> Result<(), Error> {
             hub.accept_poll(view, None, true, store.epoch_now())
                 .map_err(|_| Error::Storage)?;
         }
-        Some(hub)
+        Some(Arc::new(hub))
     } else {
         None
     };

@@ -23,6 +23,8 @@ pub(crate) enum AuthorityError {
     Invalid,
     #[error("authority request refused")]
     Denied,
+    #[error("authority principal no longer entitled")]
+    Forbidden,
     #[error("authority lock held")]
     Busy,
     #[error("authority storage unavailable")]
@@ -118,6 +120,12 @@ pub(crate) enum Carrier {
     Bearer,
 }
 
+impl Class {
+    pub(super) fn matches_carrier(self, carrier: Carrier) -> bool {
+        (self == Self::Browser) == (carrier == Carrier::Cookie)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Scope {
@@ -208,7 +216,7 @@ fn bounded(value: &str, max: usize) -> bool {
     !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
 }
 
-fn valid_node(node: &str) -> bool {
+pub(super) fn valid_node(node: &str) -> bool {
     !node.is_empty()
         && node.len() <= 128
         && node
@@ -216,7 +224,7 @@ fn valid_node(node: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
 }
 
-fn valid_endpoint(node: &str, endpoint: &str) -> bool {
+pub(super) fn valid_endpoint(node: &str, endpoint: &str) -> bool {
     if !valid_node(node) || endpoint.len() > 512 {
         return false;
     }
@@ -832,11 +840,16 @@ impl Authority {
             .ok_or(AuthorityError::Denied)?;
         let mut record = entry.record.clone();
         if !fresh(&record, at)
-            || (record.class == Class::Browser) != (carrier == Carrier::Cookie)
+            || !record.class.matches_carrier(carrier)
             || record.class == Class::Delegated
-            || !entitled(&state.conn, owner_for(&record))?
         {
             return Err(AuthorityError::Denied);
+        }
+        if !entitled(&state.conn, owner_for(&record))? {
+            return Err(match record.class {
+                Class::Browser | Class::Native => AuthorityError::Forbidden,
+                Class::Machine | Class::Delegated => AuthorityError::Denied,
+            });
         }
         let idle = match record.class {
             Class::Browser => self.config.session_idle_secs as i64,
@@ -1206,6 +1219,10 @@ impl Authority {
         })
     }
 
+    pub(super) fn masked_nodes(&self) -> Result<HashSet<String>> {
+        Ok(self.locked()?.masked_nodes.clone())
+    }
+
     pub(crate) fn set_node_masked(&self, node: &str, masked: bool) -> Result<()> {
         if !self
             .config
@@ -1268,10 +1285,29 @@ impl Live {
         }
     }
 
+    pub(super) async fn change(&self) -> Option<Invalidation> {
+        let mut receiver = self.receiver.clone();
+        loop {
+            if let Some(change) = *receiver.borrow_and_update() {
+                return Some(change);
+            }
+            receiver.changed().await.ok()?;
+        }
+    }
+
     #[allow(dead_code, reason = "Mission Control transport dequeue fence")]
     pub(crate) fn authorize_send<T>(
         &self,
         node: Option<&str>,
+        handoff: impl FnOnce() -> T,
+    ) -> Result<T> {
+        self.authorize_payload(node, || true, handoff)
+    }
+
+    pub(super) fn authorize_payload<'a, T>(
+        &self,
+        nodes: impl IntoIterator<Item = &'a str>,
+        current: impl FnOnce() -> bool,
         handoff: impl FnOnce() -> T,
     ) -> Result<T> {
         let authority = self.authority.upgrade().ok_or(AuthorityError::Denied)?;
@@ -1280,7 +1316,14 @@ impl Live {
         if reg.invalidation.is_some()
             || reg.generation != state.generation
             || Instant::now() >= reg.lease
-            || node.is_some_and(|name| state.masked_nodes.contains(name))
+            || !state
+                .records
+                .get(&reg.record_id)
+                .is_some_and(|entry| !entry.record.revoked)
+            || nodes
+                .into_iter()
+                .any(|name| state.masked_nodes.contains(name))
+            || !current()
         {
             return Err(AuthorityError::Denied);
         }

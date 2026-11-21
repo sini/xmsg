@@ -1,10 +1,13 @@
 pub mod admin;
+#[allow(dead_code, reason = "Mission Control transport integration")]
+mod admission;
 #[allow(
     dead_code,
     reason = "Mission Control read-only hub staged before transport integration"
 )]
 mod attention;
 pub mod authority;
+mod budgets;
 #[allow(
     dead_code,
     reason = "Mission Control read-only hub staged before transport integration"
@@ -21,11 +24,18 @@ mod hub;
     reason = "Mission Control read-only hub staged before transport integration"
 )]
 mod protocol;
+#[allow(dead_code, reason = "Mission Control transport integration")]
+mod request;
+pub(crate) mod stream;
+pub(crate) mod transport;
 #[allow(
     dead_code,
     reason = "Mission Control read-only hub staged before transport integration"
 )]
 pub(crate) mod upstream;
+pub(crate) mod websocket;
+#[allow(dead_code, reason = "Mission Control transport integration")]
+mod writer;
 
 use crate::enroll_oidc::web::{self, Provider};
 use crate::storage::now_epoch_secs;
@@ -744,4 +754,4 @@ fn csrf(handle: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
