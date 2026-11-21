@@ -157,6 +157,18 @@ pub(super) enum Delta {
 }
 
 impl Delta {
+    pub(super) fn coalesce_key(&self) -> Option<(u8, &str, &str)> {
+        match self {
+            Self::NodeStatus(status) => Some((0, &status.node, "")),
+            Self::EndpointUpserted { node, endpoint } => Some((1, node, &endpoint.descriptor.id)),
+            Self::EndpointRemoved { node, id } => Some((1, node, id)),
+            Self::ActivityChanged { node, event } => Some((2, node, event.from.as_deref()?)),
+            Self::AttentionUpserted { item } => Some((3, &item.id, "")),
+            Self::AttentionCleared { id, .. } => Some((3, id, "")),
+            Self::Exchange { .. } | Self::SourceGap { .. } => None,
+        }
+    }
+
     pub(super) fn node(&self) -> &str {
         match self {
             Self::NodeStatus(status) => &status.node,
