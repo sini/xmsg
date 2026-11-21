@@ -383,23 +383,29 @@ fn accounted_bytes(c: &Connection, node: &str) -> Result<i64, StoreError> {
     let (metadata,events):(i64,i64)=c.query_row("SELECT coalesce(length(snapshot),0)+coalesce(length(snapshot_activity),0)+coalesce(length(snapshot_fingerprint),0)+coalesce(length(CAST(snapshot_origin_hub AS BLOB)),0)+CASE WHEN node LIKE 'reverse-v1:%' THEN length(node) ELSE 0 END+coalesce(length(epoch),0)+coalesce(length(scope),0)+length(gaps)+192,(SELECT coalesce(sum(bytes),0) FROM events WHERE node=?1) FROM nodes WHERE node=?1",[node],|r|Ok((r.get(0)?,r.get(1)?)))?;
     metadata.checked_add(events).ok_or(StoreError::Full)
 }
-fn split_snapshot_for_storage(snapshot: &ExportSnapshot) -> Result<(Vec<u8>, Vec<u8>), StoreError> {
+fn split_snapshot_for_storage(
+    snapshot: &ExportSnapshot,
+    fingerprint: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), StoreError> {
     let mut value = serde_json::to_value(snapshot).map_err(|_| StoreError::Invalid)?;
     let obj = value.as_object_mut().ok_or(StoreError::Invalid)?;
     let top_activity = obj.remove("activity").ok_or(StoreError::Invalid)?;
-    let mut endpoint_activities = Vec::new();
+    let mut endpoint_activities = serde_json::Map::new();
     if let Some(endpoints) = obj.get_mut("endpoints").and_then(|v| v.as_array_mut()) {
-        endpoint_activities.reserve(endpoints.len());
         for ep in endpoints {
-            let act = ep
-                .as_object_mut()
-                .and_then(|m| m.remove("activity"))
-                .unwrap_or(serde_json::Value::Null);
-            endpoint_activities.push(act);
+            if let Some(m) = ep.as_object_mut() {
+                let id = m.get("id").and_then(|v| v.as_str()).map(str::to_owned);
+                if let (Some(id), Some(act)) = (id, m.remove("activity")) {
+                    if !act.is_null() {
+                        endpoint_activities.insert(id, act);
+                    }
+                }
+            }
         }
     }
     let compat_bytes = serde_json::to_vec(&value).map_err(|_| StoreError::Invalid)?;
     let sidecar = serde_json::json!({
+        "fingerprint": hex::encode(fingerprint),
         "activity": top_activity,
         "endpoints": endpoint_activities,
     });
@@ -409,33 +415,61 @@ fn split_snapshot_for_storage(snapshot: &ExportSnapshot) -> Result<(Vec<u8>, Vec
 fn decode_stored_snapshot(
     bytes: &[u8],
     activity_bytes: Option<&[u8]>,
+    snapshot_fingerprint: Option<&[u8]>,
 ) -> Result<ExportSnapshot, StoreError> {
     let mut value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|_| StoreError::Storage)?;
     let obj = value.as_object_mut().ok_or(StoreError::Storage)?;
-    if let Some(ab) = activity_bytes {
-        let sidecar: serde_json::Value =
-            serde_json::from_slice(ab).map_err(|_| StoreError::Storage)?;
+    let expected_fp = snapshot_fingerprint.map(hex::encode);
+    let mut matched_sidecar = None;
+    if let (Some(ab), Some(fp)) = (activity_bytes, expected_fp.as_deref()) {
+        if let Ok(sidecar) = serde_json::from_slice::<serde_json::Value>(ab) {
+            if sidecar.get("fingerprint").and_then(|v| v.as_str()) == Some(fp) {
+                matched_sidecar = Some(sidecar);
+            }
+        }
+    }
+    if let Some(sidecar) = matched_sidecar {
         if let Some(top) = sidecar.get("activity") {
             obj.insert("activity".to_owned(), top.clone());
+        } else {
+            obj.insert(
+                "activity".to_owned(),
+                serde_json::json!({"status": "disabled", "complete": false}),
+            );
         }
         if let (Some(eps), Some(ep_acts)) = (
             obj.get_mut("endpoints").and_then(|v| v.as_array_mut()),
-            sidecar.get("endpoints").and_then(|v| v.as_array()),
+            sidecar.get("endpoints").and_then(|v| v.as_object()),
         ) {
-            for (ep, act) in eps.iter_mut().zip(ep_acts.iter()) {
-                if !act.is_null() {
-                    if let Some(m) = ep.as_object_mut() {
-                        m.insert("activity".to_owned(), act.clone());
+            for ep in eps.iter_mut() {
+                if let Some(m) = ep.as_object_mut() {
+                    if let Some(act) = m
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .and_then(|id| ep_acts.get(id))
+                    {
+                        if !act.is_null() {
+                            m.insert("activity".to_owned(), act.clone());
+                        }
                     }
                 }
             }
         }
-    } else if !obj.contains_key("activity") {
+    } else {
+        // Unmatched or absent activity sidecar (e.g. after rollback to an older writer):
+        // suppress stale evidence and report incomplete/unknown status.
         obj.insert(
             "activity".to_owned(),
-            serde_json::json!({"status": "disabled", "complete": true}),
+            serde_json::json!({"status": "disabled", "complete": false}),
         );
+        if let Some(eps) = obj.get_mut("endpoints").and_then(|v| v.as_array_mut()) {
+            for ep in eps.iter_mut() {
+                if let Some(m) = ep.as_object_mut() {
+                    m.remove("activity");
+                }
+            }
+        }
     }
     serde_json::from_value(value).map_err(|_| StoreError::Storage)
 }
@@ -975,7 +1009,7 @@ impl Store {
         validate_snapshot(Self::policy(&inner, node)?, &snapshot)?;
         let bytes = encoded(&snapshot, PAGE_BYTES)?;
         let fingerprint = Sha256::digest(&bytes).to_vec();
-        let (compat_bytes, activity_bytes) = split_snapshot_for_storage(&snapshot)?;
+        let (compat_bytes, activity_bytes) = split_snapshot_for_storage(&snapshot, &fingerprint)?;
         let policy = Self::policy(&inner, node)?.clone();
         let key = policy.storage_key();
         let origin = policy.origin_hub();
@@ -1174,13 +1208,17 @@ impl Store {
                 let name = key.as_str();
                 validate_origins(c, name, origin)?;
                 v.cursor = Some(read_cursor(c, name)?);
-                let (snapshot,snapshot_activity,receipt,gaps,truncated,backfill,snapshot_origin)=c.query_row("SELECT CASE WHEN snapshot_base>=?2 THEN snapshot END,CASE WHEN snapshot_base>=?2 THEN snapshot_activity END,CASE WHEN snapshot_base>=?2 THEN snapshot_receipt END,CAST(gaps AS BLOB),truncated,backfill,snapshot_origin_hub FROM nodes WHERE node=?1",params![name,cutoff],|r|Ok((r.get::<_,Option<Vec<u8>>>(0)?,r.get::<_,Option<Vec<u8>>>(1)?,r.get::<_,Option<i64>>(2)?,r.get::<_,Vec<u8>>(3)?,r.get::<_,bool>(4)?,r.get::<_,bool>(5)?,r.get::<_,Option<String>>(6)?)))?;
+                let (snapshot,snapshot_activity,snapshot_fingerprint,receipt,gaps,truncated,backfill,snapshot_origin)=c.query_row("SELECT CASE WHEN snapshot_base>=?2 THEN snapshot END,CASE WHEN snapshot_base>=?2 THEN snapshot_activity END,CASE WHEN snapshot_base>=?2 THEN snapshot_fingerprint END,CASE WHEN snapshot_base>=?2 THEN snapshot_receipt END,CAST(gaps AS BLOB),truncated,backfill,snapshot_origin_hub FROM nodes WHERE node=?1",params![name,cutoff],|r|Ok((r.get::<_,Option<Vec<u8>>>(0)?,r.get::<_,Option<Vec<u8>>>(1)?,r.get::<_,Option<Vec<u8>>>(2)?,r.get::<_,Option<i64>>(3)?,r.get::<_,Vec<u8>>(4)?,r.get::<_,bool>(5)?,r.get::<_,bool>(6)?,r.get::<_,Option<String>>(7)?)))?;
                 v.gaps = serde_json::from_slice(&gaps).map_err(|_| StoreError::Storage)?;
                 v.truncated = truncated;
                 v.truncated |= c.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE node=?1 AND base<?3) OR (SELECT count(*) FROM events WHERE node=?1 AND base>=?3)>?2 OR EXISTS(SELECT 1 FROM nodes WHERE node=?1 AND snapshot_base<?3)",params![name,limit.min(ROWS) as i64,cutoff],|r|r.get::<_,bool>(0))?;
                 v.backfill = backfill;
                 if let (Some(bytes), Some(received_at)) = (snapshot, receipt) {
-                    let snapshot = decode_stored_snapshot(&bytes, snapshot_activity.as_deref())?;
+                    let snapshot = decode_stored_snapshot(
+                        &bytes,
+                        snapshot_activity.as_deref(),
+                        snapshot_fingerprint.as_deref(),
+                    )?;
                     v.latest_snapshot = Some(CachedSnapshot {
                         origin_hub: snapshot_origin,
                         source_age_seconds: now.saturating_sub(snapshot.observed_at).max(0),

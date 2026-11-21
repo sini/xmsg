@@ -2552,3 +2552,155 @@ fn lpjc_capacity_full_evicts_oldest_inactive_first() {
         "oldest-inactive node0 should be evicted first"
     );
 }
+
+#[test]
+fn rollback_refresh_suppresses_stale_activity_sidecar_and_preserves_valid_rows() {
+    let dir = private_temp();
+    let clock = Arc::new(|| 1_700_000_100i64);
+    let policies = vec![
+        NodePolicy {
+            relay: None,
+            node: "node-a".into(),
+            labels: false,
+            supported: true,
+        },
+        NodePolicy {
+            relay: None,
+            node: "node-b".into(),
+            labels: false,
+            supported: true,
+        },
+    ];
+    let store = Store::open(dir.path(), policies.clone(), clock.clone()).unwrap();
+    let act_working = crate::activity::ActivityDescriptor {
+        state: crate::activity::ActivityState::Working,
+        block: None,
+        reason: None,
+        state_epoch: "1".repeat(32),
+        changed_at: 1_700_000_050,
+        fresh_at: 1_700_000_090,
+        incarnation: 1,
+        revision: 1,
+    };
+    let act_blocked = crate::activity::ActivityDescriptor {
+        state: crate::activity::ActivityState::Blocked,
+        block: Some(crate::activity::BlockKind::Permission),
+        reason: None,
+        state_epoch: "2".repeat(32),
+        changed_at: 1_700_000_060,
+        fresh_at: 1_700_000_095,
+        incarnation: 1,
+        revision: 1,
+    };
+    let snap_a: crate::observe_export::ExportSnapshot = serde_json::from_value(serde_json::json!({
+        "v": 2,
+        "node": "node-a",
+        "scope": "a".repeat(64),
+        "observed_at": 1_700_000_090,
+        "endpoints": [{
+            "id": "claude-1@node-a",
+            "node": "node-a",
+            "kind": "instance",
+            "harness": "claude_code",
+            "state": "registered",
+            "activity": act_working
+        }],
+        "truncated": false,
+        "available": "available",
+        "activity": { "status": "enabled", "complete": true }
+    }))
+    .unwrap();
+    let snap_b: crate::observe_export::ExportSnapshot = serde_json::from_value(serde_json::json!({
+        "v": 2,
+        "node": "node-b",
+        "scope": "a".repeat(64),
+        "observed_at": 1_700_000_095,
+        "endpoints": [{
+            "id": "claude-2@node-b",
+            "node": "node-b",
+            "kind": "instance",
+            "harness": "claude_code",
+            "state": "registered",
+            "activity": act_blocked
+        }],
+        "truncated": false,
+        "available": "available",
+        "activity": { "status": "enabled", "complete": true }
+    }))
+    .unwrap();
+    store.ingest_snapshot("node-a", snap_a).unwrap();
+    store.ingest_snapshot("node-b", snap_b).unwrap();
+    drop(store);
+
+    // Simulate an old-collector (8090f652) same-scope direct refresh of node-a:
+    // updates `snapshot` and `snapshot_fingerprint` without touching `snapshot_activity`.
+    let refreshed_v1 = serde_json::to_vec(&serde_json::json!({
+        "v": 1,
+        "node": "node-a",
+        "scope": "a".repeat(64),
+        "observed_at": 1_700_000_100,
+        "endpoints": [{
+            "id": "claude-9@node-a",
+            "node": "node-a",
+            "kind": "instance",
+            "harness": "claude_code",
+            "state": "registered"
+        }],
+        "truncated": false,
+        "available": "available"
+    }))
+    .unwrap();
+    let refreshed_fp = Sha256::digest(&refreshed_v1).to_vec();
+    let db_path = dir.path().join("collector.sqlite");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute(
+        "UPDATE nodes SET snapshot=?1, snapshot_fingerprint=?2 WHERE node='node-a'",
+        rusqlite::params![refreshed_v1, refreshed_fp],
+    )
+    .unwrap();
+    drop(conn);
+
+    // Re-upgrade: new collector validates and reads both rows.
+    let store = Store::open(dir.path(), policies, clock).unwrap();
+    for (n, mut p) in [("node-a", page(0)), ("node-b", page(0))] {
+        p.node = n.into();
+        p.scope = "a".repeat(64);
+        p.events.clear();
+        p.next = 0;
+        let cur = store.cursor(n).unwrap();
+        store.ingest_page(n, &cur, p).unwrap();
+    }
+    let views = store.view(None, 100).unwrap();
+    let view_a = views.iter().find(|v| v.node == "node-a").unwrap();
+    let view_b = views.iter().find(|v| v.node == "node-b").unwrap();
+    let snap_a_out = &view_a.latest_snapshot.as_ref().unwrap().snapshot;
+    assert_eq!(snap_a_out.observed_at, 1_700_000_100);
+    assert_eq!(snap_a_out.endpoints[0].id, "claude-9@node-a");
+    assert!(
+        snap_a_out.endpoints[0].activity.is_none(),
+        "stale prior-capture activity must not attach to refreshed row"
+    );
+    assert_eq!(
+        snap_a_out.activity,
+        crate::activity::SnapshotActivity {
+            status: crate::activity::ActivityStatus::Disabled,
+            complete: false,
+        },
+        "unmatched sidecar must surface as incomplete/unknown, never stale"
+    );
+
+    let snap_b_out = &view_b.latest_snapshot.as_ref().unwrap().snapshot;
+    assert_eq!(snap_b_out.observed_at, 1_700_000_095);
+    assert_eq!(
+        snap_b_out.endpoints[0].activity.as_ref().unwrap().state,
+        crate::activity::ActivityState::Blocked,
+        "valid same-capture activity on node-b must survive"
+    );
+    assert_eq!(
+        snap_b_out.activity,
+        crate::activity::SnapshotActivity {
+            status: crate::activity::ActivityStatus::Enabled,
+            complete: true,
+        }
+    );
+}
