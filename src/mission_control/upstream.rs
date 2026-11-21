@@ -3,14 +3,19 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::attention::{self, ObservedCondition};
-use super::hub::{Hub, ReplayLimits};
-use super::protocol::{ActivityAuthority, Delivery, Delta, Endpoint, Exchange, Node, Status};
+use super::cursor::Partition;
+use super::hub::{Hub, ReplayLimits, Reset, Sequenced, Snapshot};
+use super::protocol::{
+    ActivityAuthority, Delivery, Delta, Endpoint, Exchange, Node, Projection, Status,
+};
 use crate::activity::{reconcile::CollectorActivityReconciler, ActivityStatus};
 use crate::observe_collector_store::{NodeStatus, NodeView, UnavailableKind};
 use crate::observe_export::{EventKind, ExportGap};
 
 pub(crate) struct ReadHub {
     state: Mutex<ReadState>,
+    changed: tokio::sync::watch::Sender<u64>,
+    pub(super) budgets: std::sync::Arc<super::budgets::Budgets>,
 }
 
 struct ReadState {
@@ -21,6 +26,8 @@ struct ReadState {
 impl ReadHub {
     pub(crate) fn new() -> Result<Self, ring::error::Unspecified> {
         Ok(Self {
+            changed: tokio::sync::watch::channel(0).0,
+            budgets: std::sync::Arc::default(),
             state: Mutex::new(ReadState {
                 hub: Hub::new(ReplayLimits {
                     events: 4096,
@@ -47,7 +54,94 @@ impl ReadHub {
             .update(view, success_at, stale);
         update
             .apply(&mut state.hub, milliseconds(now), Instant::now())
-            .map_err(|_| ())
+            .map_err(|_| ())?;
+        self.changed.send_if_modified(|seq| {
+            if *seq == state.hub.watermark() {
+                false
+            } else {
+                *seq = state.hub.watermark();
+                true
+            }
+        });
+        Ok(())
+    }
+
+    pub(crate) fn mask_poll(&self, node: &str, denied: bool, now: i64) -> Result<(), ()> {
+        let mut state = self.state.lock().map_err(|_| ())?;
+        state.poll.remove(node);
+        state
+            .hub
+            .hide(node, denied, milliseconds(now), Instant::now())
+            .map_err(|_| ())?;
+        self.changed.send_replace(state.hub.watermark());
+        Ok(())
+    }
+
+    pub(super) fn snapshot(
+        &self,
+        projection: &Projection<'_>,
+    ) -> Result<Option<(Snapshot, String)>, ()> {
+        let state = self.state.lock().map_err(|_| ())?;
+        Ok(state
+            .hub
+            .scope_available(projection)
+            .then(|| (state.hub.snapshot(projection), state.hub.epoch())))
+    }
+
+    pub(super) fn subscribed_snapshot(
+        &self,
+        projection: &Projection<'_>,
+    ) -> Result<(Snapshot, String), ()> {
+        let state = self.state.lock().map_err(|_| ())?;
+        Ok((state.hub.snapshot(projection), state.hub.epoch()))
+    }
+
+    pub(super) fn cursor(&self, seq: u64, partition: &Partition) -> Result<String, ()> {
+        let state = self.state.lock().map_err(|_| ())?;
+        Ok(state.hub.cursor(seq, partition))
+    }
+
+    pub(super) fn resume(&self, cursor: &str, partition: &Partition) -> Result<u64, Reset> {
+        let mut state = self.state.lock().map_err(|_| Reset::EpochChanged)?;
+        state.hub.resume(cursor, partition, Instant::now())
+    }
+
+    pub(super) fn after(
+        &self,
+        seq: u64,
+        projection: &Projection<'_>,
+        cap: usize,
+    ) -> Result<(Vec<Sequenced>, u64), Reset> {
+        let mut state = self.state.lock().map_err(|_| Reset::EpochChanged)?;
+        let mut delivered_through = seq;
+        let mut output = Vec::new();
+        for event in state.hub.after(seq, Instant::now())? {
+            if let Some(delta) = projection.project_delta(&event.delta) {
+                if output.len() == cap {
+                    return Ok((output, delivered_through));
+                }
+                output.push(Sequenced {
+                    delta,
+                    ..event.clone()
+                });
+            }
+            delivered_through = event.seq;
+        }
+        Ok((output, delivered_through.max(state.hub.watermark())))
+    }
+
+    pub(super) fn current(&self, event: &Sequenced) -> bool {
+        self.state
+            .lock()
+            .is_ok_and(|state| state.hub.current(event))
+    }
+
+    pub(crate) fn wake(&self) {
+        self.changed.send_modify(|_| {});
+    }
+
+    pub(super) fn watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changed.subscribe()
     }
 }
 
