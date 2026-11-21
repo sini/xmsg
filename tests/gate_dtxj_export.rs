@@ -513,12 +513,18 @@ async fn admission_precedes_query_parsing_and_queries_are_bounded() {
         "oversized snapshot query accepted"
     );
     assert_eq!(
-        fixture.request("/fed/v2/observe/snapshot?after=0&v=2").await.0,
+        fixture
+            .request("/fed/v2/observe/snapshot?after=0&v=2")
+            .await
+            .0,
         400,
         "snapshot accepted a cursor field"
     );
     assert_eq!(
-        fixture.request("/fed/v2/observe/events?after=0&v=2").await.0,
+        fixture
+            .request("/fed/v2/observe/events?after=0&v=2")
+            .await
+            .0,
         200
     );
 }
