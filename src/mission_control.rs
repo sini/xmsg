@@ -1,6 +1,31 @@
 pub mod admin;
+#[allow(
+    dead_code,
+    reason = "Mission Control read-only hub staged before transport integration"
+)]
+mod attention;
 pub mod authority;
+#[allow(
+    dead_code,
+    reason = "Mission Control read-only hub staged before transport integration"
+)]
+mod cursor;
 mod device;
+#[allow(
+    dead_code,
+    reason = "Mission Control read-only hub staged before transport integration"
+)]
+mod hub;
+#[allow(
+    dead_code,
+    reason = "Mission Control read-only hub staged before transport integration"
+)]
+mod protocol;
+#[allow(
+    dead_code,
+    reason = "Mission Control read-only hub staged before transport integration"
+)]
+pub(crate) mod upstream;
 
 use crate::enroll_oidc::web::{self, Provider};
 use crate::storage::now_epoch_secs;

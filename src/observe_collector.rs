@@ -85,6 +85,7 @@ impl Drop for PollerGuard {
 struct State {
     verifier: Option<Verifier>,
     issuer: Option<Arc<crate::mission_control::Issuer>>,
+    read_hub: Option<crate::mission_control::upstream::ReadHub>,
     store: Arc<Store>,
     store_slots: Arc<Semaphore>,
     requests: Arc<Semaphore>,
@@ -664,6 +665,42 @@ fn accepted_scope(state: &State, node: &str, scope: String) {
     }
 }
 
+async fn publish_poll_view(state: &State, node: &str) {
+    let Some(hub) = &state.read_hub else {
+        return;
+    };
+    let name = node.to_owned();
+    let Ok(views) = store_call_counted(
+        state.store.clone(),
+        state.store_slots.clone(),
+        Some(state.store_slot_refusals.clone()),
+        move |store| store.view(Some(&name), 200),
+    )
+    .await
+    else {
+        return;
+    };
+    let observed = state
+        .success
+        .lock()
+        .ok()
+        .and_then(|success| success.get(node).copied());
+    let stale = observed.is_none_or(|(time, _)| time.elapsed() > FRESH);
+    for view in views {
+        if hub
+            .accept_poll(
+                view,
+                observed.map(|(_, at)| at),
+                stale,
+                state.store.epoch_now(),
+            )
+            .is_err()
+        {
+            tracing::warn!("Mission Control upstream update refused");
+        }
+    }
+}
+
 async fn poll_source(client: Arc<Client>, state: Arc<State>, index: usize) {
     let source = &client.sources[index];
     if !source.supported {
@@ -762,6 +799,7 @@ async fn poll_source(client: Arc<Client>, state: Arc<State>, index: usize) {
                 mark_error(&state, source.node.clone(), error).await;
             }
         }
+        publish_poll_view(&state, &source.node).await;
         tokio::time::sleep_until(next_start).await;
     }
 }
@@ -900,9 +938,20 @@ pub async fn run(args: Args) -> Result<(), Error> {
     let requests = issuer.as_ref().map_or_else(request_slots, |issuer| {
         Arc::new(Semaphore::new(issuer.config().pending_handshakes_global))
     });
+    let read_hub = if issuer.is_some() {
+        let hub = crate::mission_control::upstream::ReadHub::new().map_err(|_| Error::Storage)?;
+        for view in store.view(None, 200)? {
+            hub.accept_poll(view, None, true, store.epoch_now())
+                .map_err(|_| Error::Storage)?;
+        }
+        Some(hub)
+    } else {
+        None
+    };
     let state = Arc::new(State {
         verifier,
         issuer,
+        read_hub,
         store: Arc::new(store),
         store_slots: Arc::new(Semaphore::new(1)),
         requests,
