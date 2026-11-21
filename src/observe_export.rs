@@ -73,7 +73,7 @@ impl Scope {
     }
 }
 fn version() -> u8 {
-    1
+    0
 }
 fn default_limit() -> usize {
     100
@@ -94,7 +94,7 @@ pub struct ExportQuery {
 }
 impl ExportQuery {
     pub fn validate(&self) -> Result<(), Error> {
-        if self.v != 1
+        if self.v != 2
             || self.after < 0
             || !(1..=MAX_EVENTS).contains(&self.limit)
             || self
@@ -141,7 +141,7 @@ pub struct SnapshotQuery {
 }
 impl SnapshotQuery {
     pub fn validate(&self) -> Result<(), Error> {
-        if self.v != 1 {
+        if self.v != 2 {
             return Err(Error::BadQuery);
         }
         Ok(())
@@ -163,6 +163,7 @@ closed_enum!(EventKind {
     ReplyPushOutcomeChanged,
     RecordRemoved,
     RecordTransferred,
+    ActivityChanged,
     Gap,
     Unknown
 });
@@ -295,6 +296,8 @@ pub struct ExportEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<Reason>,
     pub available: Availability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<crate::activity::ActivityDescriptor>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -324,6 +327,7 @@ pub struct SnapshotRecord {
     pub source_at: Option<i64>,
     pub label: Option<String>,
     pub context: Option<crate::session_context::SessionContext>,
+    pub activity: Option<crate::activity::ActivityDescriptor>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -339,6 +343,8 @@ pub struct EndpointDescriptor {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<crate::session_context::SessionContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<crate::activity::ActivityDescriptor>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -350,6 +356,7 @@ pub struct ExportSnapshot {
     pub endpoints: Vec<EndpointDescriptor>,
     pub truncated: bool,
     pub available: SnapshotAvailability,
+    pub activity: crate::activity::SnapshotActivity,
 }
 fn valid_node(value: &str) -> bool {
     !value.is_empty()
@@ -358,6 +365,24 @@ fn valid_node(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
 }
+pub fn valid_activity_endpoint(value: &str, expected_node: &str) -> Option<String> {
+    if value.len() > 512 {
+        return None;
+    }
+    let (key, node) = value.split_once('@').unwrap_or((value, expected_node));
+    if !valid_node(node) || node != expected_node || key.starts_with("svc:") {
+        return None;
+    }
+    let valid = if let Some((parent, child)) = crate::client::split_subaddress(key) {
+        (crate::client::is_instance_ref(parent)
+            || crate::client::validate_service_name(parent).is_ok())
+            && crate::claim::validate_subagent_id(child).is_ok_and(|checked| checked == child)
+    } else {
+        crate::client::is_instance_ref(key)
+    };
+    valid.then(|| format!("{key}@{node}"))
+}
+
 fn canonical_endpoint(value: &str, local_node: &str) -> Option<String> {
     if value.len() > 512 {
         return None;
@@ -399,6 +424,7 @@ fn kind(value: &str) -> EventKind {
         "reply_push_outcome_changed" => EventKind::ReplyPushOutcomeChanged,
         "record_removed" => EventKind::RecordRemoved,
         "record_transferred" => EventKind::RecordTransferred,
+        "activity_changed" => EventKind::ActivityChanged,
         "gap" => EventKind::Gap,
         _ => EventKind::Unknown,
     }
@@ -515,7 +541,7 @@ pub fn project_page(
         return Err(Error::InvalidSource);
     }
     let mut output = ExportPage {
-        v: 1,
+        v: 2,
         node: source.node,
         epoch: source.epoch,
         scope: scope.fingerprint.clone(),
@@ -559,28 +585,61 @@ pub fn project_page(
             add_gap(&mut output.gaps, Reason::Expired, false);
             continue;
         }
-        let from = observation
-            .from
-            .as_deref()
-            .and_then(|value| scope.canonical_endpoint(value));
-        let to = observation
-            .to
-            .as_deref()
-            .and_then(|value| scope.canonical_endpoint(value));
-        if scope.targets.as_ref().is_some_and(|targets| {
-            !from.as_ref().is_some_and(|id| targets.contains(id))
-                || !to.as_ref().is_some_and(|id| targets.contains(id))
-        }) {
-            output.next = event.sequence;
-            add_gap(&mut output.gaps, Reason::PolicyFiltered, false);
-            continue;
-        }
+        let ev_kind = kind(&observation.kind);
+        let (from, to, activity) = if ev_kind == EventKind::ActivityChanged {
+            if observation.to.is_some() {
+                output.next = event.sequence;
+                add_gap(&mut output.gaps, Reason::SourceFiltered, false);
+                continue;
+            }
+            let Some(valid_from) = observation
+                .from
+                .as_deref()
+                .and_then(|value| valid_activity_endpoint(value, &scope.node))
+            else {
+                output.next = event.sequence;
+                add_gap(&mut output.gaps, Reason::SourceFiltered, false);
+                continue;
+            };
+            let Some(act) = observation
+                .activity
+                .filter(crate::activity::ActivityDescriptor::is_valid)
+            else {
+                output.next = event.sequence;
+                add_gap(&mut output.gaps, Reason::SourceFiltered, false);
+                continue;
+            };
+            if !scope.allows(&valid_from) {
+                output.next = event.sequence;
+                add_gap(&mut output.gaps, Reason::PolicyFiltered, false);
+                continue;
+            }
+            (Some(valid_from), None, Some(act))
+        } else {
+            let from = observation
+                .from
+                .as_deref()
+                .and_then(|value| scope.canonical_endpoint(value));
+            let to = observation
+                .to
+                .as_deref()
+                .and_then(|value| scope.canonical_endpoint(value));
+            if scope.targets.as_ref().is_some_and(|targets| {
+                !from.as_ref().is_some_and(|id| targets.contains(id))
+                    || !to.as_ref().is_some_and(|id| targets.contains(id))
+            }) {
+                output.next = event.sequence;
+                add_gap(&mut output.gaps, Reason::PolicyFiltered, false);
+                continue;
+            }
+            (from, to, None)
+        };
         let projected = ExportEvent {
             sequence: event.sequence,
             source_at: observation.source_at.filter(|value| valid_time(*value)),
             observed_at: event.observed_at,
             persisted_at: event.persisted_at,
-            kind: kind(&observation.kind),
+            kind: ev_kind,
             from,
             to,
             message_id: correlation(&observation.message_id),
@@ -593,6 +652,7 @@ pub fn project_page(
             } else {
                 Availability::NotRecorded
             },
+            activity,
         };
         if encoded_size(&projected, MAX_EVENT_BYTES).is_err() {
             output.has_more = true;
@@ -623,6 +683,25 @@ pub fn project_snapshot(
     candidates: Vec<SnapshotRecord>,
     observed_at: i64,
     partial: bool,
+) -> Result<ExportSnapshot, Error> {
+    project_snapshot_with_activity(
+        scope,
+        candidates,
+        observed_at,
+        partial,
+        crate::activity::SnapshotActivity {
+            status: crate::activity::ActivityStatus::Disabled,
+            complete: true,
+        },
+    )
+}
+
+pub fn project_snapshot_with_activity(
+    scope: &Scope,
+    candidates: Vec<SnapshotRecord>,
+    observed_at: i64,
+    partial: bool,
+    snapshot_activity: crate::activity::SnapshotActivity,
 ) -> Result<ExportSnapshot, Error> {
     if candidates.len() > MAX_CANDIDATES || !valid_time(observed_at) {
         return Err(Error::InvalidSource);
@@ -655,6 +734,13 @@ pub fn project_snapshot(
             source_at,
             label,
             context: candidate.context,
+            activity: if snapshot_activity.status == crate::activity::ActivityStatus::Enabled {
+                candidate
+                    .activity
+                    .filter(crate::activity::ActivityDescriptor::is_valid)
+            } else {
+                None
+            },
         };
         if let Some(previous) = endpoints.get_mut(&id) {
             let identity_conflict =
@@ -680,7 +766,7 @@ pub fn project_snapshot(
         }
     }
     let mut output = ExportSnapshot {
-        v: 1,
+        v: 2,
         node: scope.node.clone(),
         scope: scope.fingerprint.clone(),
         observed_at,
@@ -691,6 +777,7 @@ pub fn project_snapshot(
         } else {
             SnapshotAvailability::Available
         },
+        activity: snapshot_activity,
     };
     for descriptor in endpoints.into_values() {
         if output.endpoints.len() >= MAX_EVENTS {
@@ -722,7 +809,7 @@ mod tests {
         Scope::new("local.node", "collector", targets, labels).unwrap()
     }
     fn query() -> ExportQuery {
-        serde_json::from_value(json!({})).unwrap()
+        serde_json::from_value(json!({"v": 2})).unwrap()
     }
     fn event(sequence: i64) -> Event {
         Event {
@@ -742,6 +829,7 @@ mod tests {
                 outcome: Some("delivered".into()),
                 reason: None,
                 body_availability: "retained_at_capture".into(),
+                activity: None,
             },
         }
     }
@@ -773,6 +861,7 @@ mod tests {
             source_at: Some(NOW),
             label: Some("private label".into()),
             context: None,
+            activity: None,
         }
     }
     #[test]
@@ -781,7 +870,8 @@ mod tests {
         let q = query();
         assert_eq!(q.journal_query(&s).unwrap().after, Some(0));
         for bad in [
-            json!({"v":2}),
+            json!({}),
+            json!({"v":1}),
             json!({"epoch":""}),
             json!({"epoch":"x".repeat(129)}),
             json!({"after":-1}),
@@ -806,14 +896,21 @@ mod tests {
             "snapshot query accepted unknown field"
         );
         assert!(SnapshotQuery {
-            v: 2,
+            v: 1,
             labels: false
         }
         .validate()
         .is_err());
-        let q: ExportQuery =
-            serde_json::from_value(json!({"after":i64::MAX,"epoch":"e","scope":s.fingerprint()}))
-                .unwrap();
+        assert!(SnapshotQuery {
+            v: 0,
+            labels: false
+        }
+        .validate()
+        .is_err());
+        let q: ExportQuery = serde_json::from_value(
+            json!({"v":2,"after":i64::MAX,"epoch":"e","scope":s.fingerprint()}),
+        )
+        .unwrap();
         assert!(q.validate().is_ok());
         assert_eq!(q.journal_query(&s).unwrap().after, Some(i64::MAX));
     }
@@ -979,7 +1076,7 @@ mod tests {
                 "v"
             ]
         );
-        assert!(serde_json::from_value::<ExportPage>(json!({"v":1,"node":"n","epoch":"e","scope":"s","events":[],"next":0,"has_more":false,"gaps":[],"available":true,"body":"canary"})).is_err());
+        assert!(serde_json::from_value::<ExportPage>(json!({"v":2,"node":"n","epoch":"e","scope":"s","events":[],"next":0,"has_more":false,"gaps":[],"available":true,"body":"canary"})).is_err());
     }
     #[test]
     fn ttl_and_extreme_times_never_extend_retention() {

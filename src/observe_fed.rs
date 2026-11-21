@@ -220,11 +220,13 @@ async fn snapshot_inner(state: Arc<ExportState>, request: Request) -> Result<Res
         #[cfg(any(test, feature = "test-hooks"))]
         controls.before_io.pause_blocking();
         let (records, partial) = crate::observe_snapshot::collect(&reader);
-        crate::observe_export::project_snapshot(
+        let snap_activity = crate::activity::runtime_snapshot_activity(&reader.db);
+        crate::observe_export::project_snapshot_with_activity(
             &scope,
             records,
             crate::storage::now_epoch_secs(),
             partial,
+            snap_activity,
         )
         .map_err(|_| unavailable())
     })

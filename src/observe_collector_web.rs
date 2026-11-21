@@ -404,7 +404,32 @@ fn render_with_health_and_cap(
                         }
                         EndpointKind::Unknown => "<text x=\"10\" y=\"27\">?</text>",
                     };
-                    out.push(&format!("<svg class=\"endpoint\" role=\"img\" aria-label=\"reported endpoint\" viewBox=\"0 0 1000 62\">{shape}<text x=\"40\" y=\"22\">{}</text><text x=\"40\" y=\"46\">{}</text></svg><p class=\"endpoint-label\">{} <small>kind: {}; harness: {}; state: {}</small></p>", svg_text(&endpoint.id),svg_text(endpoint.label.as_deref().unwrap_or("label not reported")),html_text(endpoint.label.as_deref().unwrap_or("label not reported")),name(endpoint.kind),name(&endpoint.harness),name(endpoint.state)));
+                    let activity_text = match &endpoint.activity {
+                        Some(act) => {
+                            let block_s = act
+                                .block
+                                .map(|b| format!("/{}", b.as_str()))
+                                .unwrap_or_default();
+                            let reason_s = act
+                                .reason
+                                .map(|r| format!(" ({})", r.as_str()))
+                                .unwrap_or_default();
+                            let changed_age =
+                                snapshot.received_at.saturating_sub(act.changed_at).max(0);
+                            let fresh_age =
+                                snapshot.received_at.saturating_sub(act.fresh_at).max(0);
+                            format!(
+                                "; activity: {}{}{} changed_age={}s fresh_age={}s",
+                                act.state.as_str(),
+                                block_s,
+                                reason_s,
+                                changed_age,
+                                fresh_age
+                            )
+                        }
+                        None => String::new(),
+                    };
+                    out.push(&format!("<svg class=\"endpoint\" role=\"img\" aria-label=\"reported endpoint\" viewBox=\"0 0 1000 62\">{shape}<text x=\"40\" y=\"22\">{}</text><text x=\"40\" y=\"46\">{}</text></svg><p class=\"endpoint-label\">{} <small>kind: {}; harness: {}; state: {}{}</small></p>", svg_text(&endpoint.id),svg_text(endpoint.label.as_deref().unwrap_or("label not reported")),html_text(endpoint.label.as_deref().unwrap_or("label not reported")),name(endpoint.kind),name(&endpoint.harness),name(endpoint.state),html_text(&activity_text)));
                 }
             } else {
                 out.push("<p>Source inventory unknown: no retained snapshot.</p>");

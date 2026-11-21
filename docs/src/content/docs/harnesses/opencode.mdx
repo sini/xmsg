@@ -76,3 +76,12 @@ It cannot be shadowed by a descriptor in `--harnesses-file`. To add an external 
 harness without changing `xmsg`, declare it via
 [`--harnesses-file`](/concepts/sessions-services-subagents/#declared-plugin-harnesses).
 
+
+## Activity export hook
+
+<Status id="fleet-observer.activity-export" />
+
+Set `XMSG_ACTIVITY=1` to enable the in-process activity handler in
+`extensions/opencode/xmsg.ts` (stamping per-session `native_seq`; delivery
+handlers remain untouched). Supports `session.status`, `session.idle`,
+`session.execution.*`, `permission.asked`/`replied`, and `question.asked`/`replied`.

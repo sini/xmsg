@@ -29,10 +29,34 @@ struct Cli {
     command: Commands,
 }
 
+#[derive(clap::Args, Debug)]
+struct ActivityArgs {
+    #[command(subcommand)]
+    command: ActivitySubcommand,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum ActivitySubcommand {
+    /// Fail-open bounded hook handler for a harness
+    Hook {
+        /// Harness name: claude, codex, agy, opencode, pi, hermes
+        harness: String,
+        /// Enable correlated tool-id resolution
+        #[arg(long)]
+        correlated: bool,
+        /// Override agent.sock path
+        #[arg(long, env = "XMSG_AGENT_SOCK")]
+        sock: Option<PathBuf>,
+    },
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Collect authorized read-only observation metadata
     ObserveCollector(xmsg::observe_collector::Args),
+
+    /// Session activity hook helpers
+    Activity(ActivityArgs),
 
     /// List mesh recipients and node status
     List(operator::ListArgs),
@@ -393,6 +417,14 @@ pub struct ServeArgs {
     /// Owner-private enrollment root directory
     #[arg(long)]
     pub enroll_ca_dir: Option<PathBuf>,
+
+    /// Enable optional session activity export (off by default)
+    #[arg(long, env = "XMSG_ACTIVITY")]
+    pub activity: bool,
+
+    /// Use correlated PostToolUse prompt resolution when native IDs are proven (off by default)
+    #[arg(long, env = "XMSG_ACTIVITY_CORRELATED")]
+    pub activity_correlated: bool,
     /// Enrollment provider and issuance policy JSON
     #[arg(long)]
     pub enroll_policy: Option<PathBuf>,
@@ -526,6 +558,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
+        Commands::Activity(args) => match args.command {
+            ActivitySubcommand::Hook {
+                harness,
+                correlated,
+                sock,
+            } => {
+                let agent_sock = sock.or_else(|| xmsg::agent::default_agent_sock_path().ok());
+                let (code, stdout_str) = xmsg::activity::hook::run_activity_hook(
+                    &harness,
+                    agent_sock.as_deref(),
+                    correlated,
+                );
+                if !stdout_str.is_empty() {
+                    print!("{stdout_str}");
+                }
+                std::process::exit(code);
+            }
+        },
         Commands::Send(args) => operator::send(args)?,
         Commands::Replies(args) => operator::replies(args)?,
         Commands::Show(args) => operator::show(args)?,
@@ -1546,6 +1596,160 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         &node_name,
         xmsg::observe::Config::default(),
     );
+
+    if args.activity {
+        let resolver = xmsg::activity::DbOwnerResolver {
+            db: db.clone(),
+            sessions_dirs: sessions_dirs.clone(),
+        };
+        let proofs = xmsg::activity::ProofFlags {
+            correlated_mode: args.activity_correlated,
+            ..Default::default()
+        };
+        let now_secs = storage::now_epoch_secs();
+        let now_mono = tokio::time::Instant::now();
+        let (engine, restart_transitions, had_rows) = {
+            let mut conn = db.lock().map_err(|e| e.to_string())?;
+            xmsg::activity::ActivityEngine::load_or_init(
+                &mut conn, true, proofs, &resolver, now_secs, now_mono,
+            )
+            .map_err(|e| format!("failed to initialize activity engine: {e}"))?
+        };
+        let engine = Arc::new(std::sync::Mutex::new(engine));
+        let (act_tx, mut act_rx) = tokio::sync::mpsc::channel::<xmsg::activity::ActivityFrame>(
+            xmsg::activity::model::ACTIVITY_INGEST_QUEUE_CAP,
+        );
+        xmsg::activity::register_runtime(
+            &db,
+            xmsg::activity::ActivityRuntime {
+                engine: engine.clone(),
+                tx: act_tx,
+            },
+        );
+        if had_rows {
+            _observer.publish(vec![xmsg::observe::Observation {
+                kind: "gap".to_owned(),
+                reason: Some("writer_restart".to_owned()),
+                body_availability: "not_recorded".to_owned(),
+                ..Default::default()
+            }]);
+        }
+        let mut obs_init = Vec::new();
+        for tr in restart_transitions {
+            obs_init.push(xmsg::observe::Observation {
+                kind: "activity_changed".to_owned(),
+                from: Some(tr.address),
+                body_availability: "not_recorded".to_owned(),
+                activity: Some(tr.descriptor),
+                ..Default::default()
+            });
+        }
+        if !obs_init.is_empty() {
+            _observer.publish(obs_init);
+        }
+        let act_db = db.clone();
+        let act_obs = _observer.clone();
+        let act_engine = engine.clone();
+        bg_tasks.push(tokio::spawn(async move {
+            let mut queue = xmsg::activity::ActivityIngestQueue::default();
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut bucket_tokens: u32 = xmsg::activity::ACTIVITY_RATE_LIMIT_PER_SEC;
+            let mut bucket_last = tokio::time::Instant::now();
+            loop {
+                tokio::select! {
+                    maybe = act_rx.recv() => {
+                        let Some(first) = maybe else { break; };
+                        let key = format!("{}:{}", first.harness.as_str(), first.session);
+                        if let Some(dropped_key) = queue.push(key, first) {
+                            if let Ok(mut conn) = act_db.lock() {
+                                if let Ok(mut eng) = act_engine.lock() {
+                                    let _ = eng.mark_evidence_lost(&mut conn, &dropped_key, storage::now_epoch_secs(), tokio::time::Instant::now());
+                                }
+                            }
+                        }
+                        while let Ok(more) = act_rx.try_recv() {
+                            let key = format!("{}:{}", more.harness.as_str(), more.session);
+                            if let Some(dropped_key) = queue.push(key, more) {
+                                if let Ok(mut conn) = act_db.lock() {
+                                    if let Ok(mut eng) = act_engine.lock() {
+                                        let _ = eng.mark_evidence_lost(&mut conn, &dropped_key, storage::now_epoch_secs(), tokio::time::Instant::now());
+                                    }
+                                }
+                            }
+                        }
+                        let mut transitions = Vec::new();
+                        if let (Ok(mut conn), Ok(mut eng)) = (act_db.lock(), act_engine.lock()) {
+                            let now_s = storage::now_epoch_secs();
+                            let now_m = tokio::time::Instant::now();
+                            while let Some((_, f)) = queue.pop() {
+                                if let Ok(Some(tr)) = eng.ingest(&mut conn, &f, &resolver, now_s, now_m) {
+                                    transitions.push(tr);
+                                }
+                            }
+                        }
+                        if !transitions.is_empty() {
+                            let now_m = tokio::time::Instant::now();
+                            let elapsed_secs = now_m.saturating_duration_since(bucket_last).as_secs() as u32;
+                            if elapsed_secs > 0 {
+                                bucket_tokens = (bucket_tokens + elapsed_secs * xmsg::activity::ACTIVITY_RATE_LIMIT_PER_SEC)
+                                    .min(xmsg::activity::ACTIVITY_RATE_LIMIT_PER_SEC);
+                                bucket_last = now_m;
+                            }
+                            let mut out = Vec::new();
+                            let mut coalesced = false;
+                            for tr in transitions {
+                                if bucket_tokens > 0 {
+                                    bucket_tokens -= 1;
+                                    out.push(xmsg::observe::Observation {
+                                        kind: "activity_changed".to_owned(),
+                                        from: Some(tr.address),
+                                        body_availability: "not_recorded".to_owned(),
+                                        activity: Some(tr.descriptor),
+                                        ..Default::default()
+                                    });
+                                } else {
+                                    coalesced = true;
+                                }
+                            }
+                            if coalesced {
+                                out.push(xmsg::observe::Observation {
+                                    kind: "gap".to_owned(),
+                                    reason: Some("capture_overflow".to_owned()),
+                                    body_availability: "not_recorded".to_owned(),
+                                    ..Default::default()
+                                });
+                            }
+                            if !out.is_empty() {
+                                act_obs.publish(out);
+                            }
+                        }
+                    }
+                    _ = interval.tick() => {
+                        let now_s = storage::now_epoch_secs();
+                        let now_m = tokio::time::Instant::now();
+                        let mut transitions = Vec::new();
+                        if let (Ok(mut conn), Ok(mut eng)) = (act_db.lock(), act_engine.lock()) {
+                            let _ = xmsg::activity::store::prune_ended_incarnations(&conn, now_s);
+                            if let Ok(trs) = eng.tick_aging(&mut conn, &resolver, now_s, now_m) {
+                                transitions = trs;
+                            }
+                        }
+                        if !transitions.is_empty() {
+                            let out: Vec<_> = transitions.into_iter().map(|tr| xmsg::observe::Observation {
+                                kind: "activity_changed".to_owned(),
+                                from: Some(tr.address),
+                                body_availability: "not_recorded".to_owned(),
+                                activity: Some(tr.descriptor),
+                                ..Default::default()
+                            }).collect();
+                            act_obs.publish(out);
+                        }
+                    }
+                }
+            }
+        }));
+    }
 
     // Keys a stopped server left `pending` are settled before anything is served.
     {

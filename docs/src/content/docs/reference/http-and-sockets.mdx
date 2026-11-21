@@ -601,3 +601,20 @@ locator results, and node observation snapshots. TCP recipient listings omit it.
 surface mask before serialization. Upgrade daemons and clients together because
 older strict wire readers can reject the new field. Re-pin the gateway after the
 daemon and client upgrade.
+
+## Observe export v2 and `activity_changed`
+
+<Status id="fleet-observer.activity-export" />
+
+- **Query version:** `/fed/v2/observe/events` and `/fed/v2/observe/snapshot`
+  require explicit `v=2`. Both `v=1` and omitted `v` return `400 Bad Query`.
+- **`ExportSnapshot.activity`:** `{ "status": "enabled" | "disabled", "complete": bool }`.
+- **`ActivityDescriptor`:** `{ state, block?, reason?, state_epoch, incarnation, revision, changed_at, fresh_at }`
+  with closed enums (`idle | working | blocked | unknown`, `input | permission`,
+  `background | scheduled_wake | aged | restarted | contradictory | unverified | evidence_lost | registry_unavailable | unreported | incarnation_ended`).
+- **Single-endpoint scope rule (`activity_changed` only):** Applied identically
+  on node egress and relay validation (including unrestricted targets): `from`
+  must be a canonical typed `instance` or `subagent` endpoint on the exporting
+  or verified leaf node (`svc:`, malformed, or cross-node `from` refused), `to`
+  must be absent, and `from` must be in the peer's targets where set. Ordinary
+  message event kinds keep their two-endpoint rules unchanged.

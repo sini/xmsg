@@ -398,3 +398,14 @@ tells a hosted client to read its mailbox.
 <Status id="xmsg.discovery" />
 
 A **candidate** is an untrusted discovered socket address. A **verified presence** binds an actual certificate URI to an endpoint after mutual TLS under an exact configured identity rule. An announced root fingerprint is an eligibility hint; the configured CA root remains the trust anchor. Presence expires with its proof and policy generation. See [peer discovery](/concepts/discovery/).
+
+## Session activity & incarnation
+
+<Status id="fleet-observer.activity-export" />
+
+- **activity:** Optional hook-derived session state (`idle`, `working`,
+  `blocked`, `unknown`) exported in observe v2 when `xmsg serve --activity` is
+  enabled.
+- **incarnation:** Monotonically increasing per-endpoint generation (`u64`)
+  within a `state_epoch`, binding activity frames to the current verified owner
+  so late hooks from an ended or superseded session never mutate live state.
