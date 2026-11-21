@@ -157,7 +157,18 @@ programs.xmsg.observeCollector = {
   enable = true;
   stateDir = "/var/lib/xmsg/observe-collector";
   config = {
-    nodes = [
+    client_cert = "/run/xmsg-observer/client.pem";
+    client_key = "/run/xmsg-observer/client.key";
+    auth = {
+      issuer = "https://idp.example.org/oauth2/openid/observer";
+      introspection_url = "https://idp.example.org/oauth2/token/introspect";
+      subjects = [ "owner-subject" ];
+      audience = "observer";
+      hosted_client = "observer";
+      lookup_client = "observer-lookup";
+      lookup_secret_file = "/run/xmsg-observer/lookup-secret";
+    };
+    sources = [
       {
         node = "workstation.example.org";
         address = "workstation.example.org:7788";

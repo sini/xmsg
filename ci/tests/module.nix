@@ -1098,11 +1098,27 @@ in
     test-observe-collector =
       let
         ocCfg = {
-          nodes = {
-            cortex = {
-              address = "cortex.example.org:7788";
-            };
+          client_cert = "/run/xmsg-observer/client.pem";
+          client_key = "/run/xmsg-observer/client.key";
+          auth = {
+            issuer = "https://idp.example.org/oauth2/openid/observer";
+            introspection_url = "https://idp.example.org/oauth2/token/introspect";
+            subjects = [ "owner-subject" ];
+            audience = "observer";
+            hosted_client = "observer";
+            lookup_client = "observer-lookup";
+            lookup_secret_file = "/run/xmsg-observer/lookup-secret";
           };
+          web_tls = {
+            cert = "/run/xmsg-observer/server.pem";
+            key = "/run/xmsg-observer/server.key";
+          };
+          sources = [
+            {
+              node = "cortex.example.org";
+              address = "cortex.example.org:7788";
+            }
+          ];
         };
         linuxOc = hmEval "x86_64-linux" {
           programs.xmsg.observeCollector = {
@@ -1187,6 +1203,55 @@ in
           };
         };
       };
+    test-observe-collector-no-secrets = {
+      expr = {
+        inlineKey = failedAssertions (
+          hmEval "x86_64-linux" {
+            programs.xmsg.observeCollector = {
+              enable = true;
+              config = {
+                client_cert = "/run/xmsg-observer/client.pem";
+                client_key = "-----BEGIN PRIVATE KEY-----\nCANARY_KEY";
+              };
+            };
+          }
+        );
+        storeCert = failedAssertions (
+          hmEval "x86_64-linux" {
+            programs.xmsg.observeCollector = {
+              enable = true;
+              config = {
+                client_cert = "${builtins.storeDir}/xxx-client.pem";
+                client_key = "/run/xmsg-observer/client.key";
+              };
+            };
+          }
+        );
+        inlineSecret = failedAssertions (
+          hmEval "x86_64-linux" {
+            programs.xmsg.observeCollector = {
+              enable = true;
+              config = {
+                client_cert = "/run/xmsg-observer/client.pem";
+                client_key = "/run/xmsg-observer/client.key";
+                auth.lookup_secret = "CANARY_SECRET";
+              };
+            };
+          }
+        );
+      };
+      expected = {
+        inlineKey = [
+          "programs.xmsg.observeCollector.config.client_key: must be a runtime file path, never a Nix store path or inline key/cert material."
+        ];
+        storeCert = [
+          "programs.xmsg.observeCollector.config.client_cert: must be a runtime file path, never a Nix store path or inline key/cert material."
+        ];
+        inlineSecret = [
+          "programs.xmsg.observeCollector.config.auth: must reference secrets by runtime file path (lookup_secret_file), never inline secret values."
+        ];
+      };
+    };
 
     # D19 (and XH3 oracle 7): a switch whose harness module is off is refused, naming the option.
     test-switch-needs-harness = {

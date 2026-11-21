@@ -831,6 +831,43 @@ in
             ]
           ) fed.peers
         )
+        ++ lib.optionals oc.enable (
+          let
+            isRuntimePath =
+              v:
+              builtins.isString v
+              && !builtins.hasContext v
+              && !lib.hasPrefix builtins.storeDir v
+              && !lib.hasInfix "\n" v
+              && !lib.hasInfix "-----BEGIN" v;
+            pathCheck = field: v: {
+              assertion = isRuntimePath v;
+              message = "programs.xmsg.observeCollector.config.${field}: must be a runtime file path, never a Nix store path or inline key/cert material.";
+            };
+          in
+          lib.optional (oc.config ? client_cert) (pathCheck "client_cert" oc.config.client_cert)
+          ++ lib.optional (oc.config ? client_key) (pathCheck "client_key" oc.config.client_key)
+          ++ lib.optional (oc.config ? web_tls && oc.config.web_tls != null && oc.config.web_tls ? cert) (
+            pathCheck "web_tls.cert" oc.config.web_tls.cert
+          )
+          ++ lib.optional (oc.config ? web_tls && oc.config.web_tls != null && oc.config.web_tls ? key) (
+            pathCheck "web_tls.key" oc.config.web_tls.key
+          )
+          ++ lib.optional (
+            oc.config ? auth && oc.config.auth != null && oc.config.auth ? lookup_secret_file
+          ) (pathCheck "auth.lookup_secret_file" oc.config.auth.lookup_secret_file)
+          ++
+            lib.optional
+              (
+                oc.config ? auth
+                && oc.config.auth != null
+                && (oc.config.auth ? lookup_secret || oc.config.auth ? client_secret)
+              )
+              {
+                assertion = false;
+                message = "programs.xmsg.observeCollector.config.auth: must reference secrets by runtime file path (lookup_secret_file), never inline secret values.";
+              }
+        )
         # The module owns hooks.json through `.source`; a `.text` definition elsewhere would
         # otherwise lose silently to it (HM sets `source` from `text` at default priority).
         ++ lib.optional cfg.harnesses.agy.enable {
