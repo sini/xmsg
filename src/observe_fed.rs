@@ -332,8 +332,7 @@ pub mod test_hooks {
 
     impl Signal {
         pub(crate) fn record(&self) {
-            self.count
-                .fetch_add(1, std::sync::atomic::Ordering::Release);
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.changed.notify_waiters();
         }
 
@@ -342,15 +341,31 @@ pub mod test_hooks {
                 let changed = self.changed.notified();
                 tokio::pin!(changed);
                 changed.as_mut().enable();
-                if self.count.load(std::sync::atomic::Ordering::Acquire) >= count {
+                if self.count.load(std::sync::atomic::Ordering::SeqCst) >= count {
                     return;
                 }
                 changed.await;
             }
         }
 
+        pub async fn wait_for_timeout(
+            &self,
+            count: usize,
+            timeout: std::time::Duration,
+            name: &str,
+        ) -> Result<(), String> {
+            tokio::time::timeout(timeout, self.wait_for(count))
+                .await
+                .map_err(|_| {
+                    format!(
+                        "timed out after {timeout:?} waiting for signal `{name}` >= {count} (observed {})",
+                        self.count()
+                    )
+                })
+        }
+
         pub fn count(&self) -> usize {
-            self.count.load(std::sync::atomic::Ordering::Acquire)
+            self.count.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 

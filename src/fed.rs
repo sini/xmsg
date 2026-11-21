@@ -7198,6 +7198,10 @@ pub async fn run_fed_listener_with_acceptor(
             let count = counts.entry(remote_ip).or_insert(0);
             if *count >= MAX_UNAUTH_PER_IP {
                 debug!("pre-handshake connection cap reached for {remote_addr}, dropping");
+                #[cfg(any(test, feature = "test-hooks"))]
+                crate::observe_fed::test_hooks::controls(&fed_state)
+                    .tls_handshake_done
+                    .record();
                 drop(tcp_stream);
                 continue;
             }
@@ -7212,6 +7216,10 @@ pub async fn run_fed_listener_with_acceptor(
             Ok(p) => p,
             Err(_) => {
                 debug!("federation listener at max connection capacity, dropping {remote_addr}");
+                #[cfg(any(test, feature = "test-hooks"))]
+                crate::observe_fed::test_hooks::controls(&fed_state)
+                    .tls_handshake_done
+                    .record();
                 drop(tcp_stream);
                 continue;
             }
@@ -7223,6 +7231,20 @@ pub async fn run_fed_listener_with_acceptor(
         let peer_conn_counts = peer_conn_counts.clone();
 
         tokio::spawn(async move {
+            #[cfg(any(test, feature = "test-hooks"))]
+            struct TlsHandshakeDoneGuard(Option<Arc<crate::observe_fed::test_hooks::Controls>>);
+            #[cfg(any(test, feature = "test-hooks"))]
+            impl Drop for TlsHandshakeDoneGuard {
+                fn drop(&mut self) {
+                    if let Some(controls) = self.0.take() {
+                        controls.tls_handshake_done.record();
+                    }
+                }
+            }
+            #[cfg(any(test, feature = "test-hooks"))]
+            let _handshake_done_guard =
+                TlsHandshakeDoneGuard(Some(crate::observe_fed::test_hooks::controls(&fed_state)));
+
             let _permit = permit;
             let unauth_guard = unauth_guard;
             #[cfg(any(test, feature = "test-hooks"))]
@@ -7240,19 +7262,13 @@ pub async fn run_fed_listener_with_acceptor(
                 Ok(Err(e)) => {
                     debug!("TLS handshake failed from {remote_addr}: {e}");
                     #[cfg(any(test, feature = "test-hooks"))]
-                    {
-                        let controls = crate::observe_fed::test_hooks::controls(&fed_state);
-                        controls.tls_handshake_refusals.record();
-                        controls.tls_handshake_done.record();
-                    }
+                    crate::observe_fed::test_hooks::controls(&fed_state)
+                        .tls_handshake_refusals
+                        .record();
                     return;
                 }
                 Err(_) => {
                     debug!("TLS handshake timed out from {remote_addr}");
-                    #[cfg(any(test, feature = "test-hooks"))]
-                    crate::observe_fed::test_hooks::controls(&fed_state)
-                        .tls_handshake_done
-                        .record();
                     return;
                 }
             };
@@ -7279,11 +7295,9 @@ pub async fn run_fed_listener_with_acceptor(
                     Err(e) => {
                         debug!("Failed to resolve peer from TLS certificate: {e}");
                         #[cfg(any(test, feature = "test-hooks"))]
-                        {
-                            let controls = crate::observe_fed::test_hooks::controls(&fed_state);
-                            controls.tls_handshake_refusals.record();
-                            controls.tls_handshake_done.record();
-                        }
+                        crate::observe_fed::test_hooks::controls(&fed_state)
+                            .tls_handshake_refusals
+                            .record();
                         return;
                     }
                 };
@@ -7326,6 +7340,8 @@ pub async fn run_fed_listener_with_acceptor(
                 Ok(authority) => authority,
                 Err(_) => return,
             };
+            #[cfg(any(test, feature = "test-hooks"))]
+            drop(_handshake_done_guard);
             let peer_info = Arc::new(AuthenticatedPeer {
                 leaf_authority,
                 name: peer_config.name.clone(),
