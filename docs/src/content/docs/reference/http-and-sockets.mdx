@@ -121,7 +121,7 @@ for MCP and federation listing.
 
 An older daemon rejects the unknown `read_only` query field with `400 bad_request`. A client
 requiring a read-only snapshot must report that failure rather than retry the ordinary list.
-The planned [`xmsg watch`](/reference/cli-and-mcp/#xmsg-watch) uses this mode exclusively
+[`xmsg watch`](/reference/cli-and-mcp/#xmsg-watch) uses this mode exclusively
 for its roster. The local observation journal supplies its separate exchange timeline.
 
 ### Registered process liveness
@@ -231,7 +231,7 @@ correlation, source/capture/persistence times and the actual stored outcome.
 `delivered`, `queued` and `delivery_unknown` retain their bus meanings; none
 asserts that an agent read a message or finished a task.
 
-The planned `arrival` event records that the daemon committed a queued item's delivery mark
+The `arrival` event records that the daemon committed a queued item's delivery mark
 for an inbox result. It does not prove that the client received the response, that an agent
 read it, or that a task completed. It carries message/correlation metadata when known, never
 the queued body, sender label or envelope; missing correlation remains unknown.
@@ -309,7 +309,7 @@ loopback routes:
 | `/fed/v2/messages` | `POST` | Delivers a federated message (or relays a single-hop forward when the peer has `"forward"`). |
 | `/fed/v2/replies` | `POST` | Delivers a reply back to the originating node. |
 | `/fed/v2/messages/{id}/replies` | `GET` | Pulls stored replies for a message sent by an outbound-linked or leaf node. |
-| `/fed/v2/observe/events`, `/fed/v2/observe/snapshot` | `GET` | Planned: bounded stored metadata for a peer with an explicit `observe` grant. |
+| `/fed/v2/observe/events`, `/fed/v2/observe/snapshot` | `GET` | Bounded stored metadata for a peer with an explicit `observe` grant. |
 | `/fed/v2/sessions` | `GET` | Returns this node's filtered recipient list for mesh `list`. |
 | `/fed/v2/inbox`, `/fed/v2/inbox/{id}/ack` | `GET`, `POST` | Long-polls and acknowledges items in a leaf or outbound-linked peer's hub mailbox. |
 | `/fed/v2/attachments/{item_id}/{index}?offset=&length=` | `GET` | Planned: reads a bounded raw file range; requires the item's downstream peer and its current hop permission. |
@@ -335,7 +335,7 @@ later mailbox items. Mail that starts on the hub itself is delivered without thi
 check uses the existing origin fields and does not change the wire shape. It is on the main
 branch and is not yet in a release.
 
-### Planned node observation export
+### Node observation export
 
 <Status id="fleet-observer.collector" />
 
@@ -373,14 +373,14 @@ Each event has `sequence`, `observed_at`, `persisted_at`, `kind` and `available`
 optional fields are `source_at`, `from`, `to`, `message_id`, `reply_id`, `thread_id`,
 `outcome` and `reason`. Timestamps are Unix seconds. Kind, outcome and reason
 are closed enums; unknown internal classes become `unknown`, not arbitrary text.
-The planned `arrival` kind preserves the inbox delivery-mark meaning described above in the
+The `arrival` kind preserves the inbox delivery-mark meaning described above in the
 node export; it adds no content or acknowledgement to the export.
 Endpoint references are canonical `key@node` values. There is no body, text,
 excerpt, path, cwd, environment or token field. Event `available` is the enum
 `not_recorded` or `retained_at_capture`: capture-time history, not a content-fetch
 API or a guarantee that content remains today.
 
-The planned collector [unknown event kind](/glossary/#unknown-event-kind) fallback
+The collector [unknown event kind](/glossary/#unknown-event-kind) fallback
 accepts an unrecognized `kind` string only when it matches `[a-z][a-z0-9_]*` and is
 at most 64 ASCII bytes. It maps that kind to the unit `Unknown` value for validation
 and the fixed caption **“unknown event kind (newer node)”** for display. Known
@@ -394,7 +394,7 @@ other enum values remain refused. The node exporter and public DTO enum remain
 closed; this is a collector receive rule, not a payload-schema extension.
 
 Stored newer rows use the same fallback after fresh scope validation, without a
-database migration. This compatibility change is planned and requires an updated
+database migration. This compatibility rule requires an updated
 collector. An unpatched older binary may reject newer pages or stored rows; a
 downgrade to one does not gain the fallback. See the
 [mixed-kind example](/operations/fleet-observer/#read-newer-event-kinds).
@@ -467,7 +467,7 @@ and `length`. Only the authenticated queried peer can answer, once. Raw ranges u
 message-body limit and the separate `attach:<peer>` rate bucket. See
 [file attachments](/concepts/attachments/) for staging, read permissions, expiry and an example.
 
-## Planned collector HTTP view
+## Collector HTTP view
 
 <Status id="fleet-observer.collector" />
 

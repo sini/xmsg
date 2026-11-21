@@ -86,7 +86,7 @@ or a complete fleet inventory. Neither request has a body. Normal HTTP and MCP
 do not expose these routes. The existing Unix `/v1/observe/events` remains private
 to the node's UID.
 
-See the [wire reference](/reference/http-and-sockets/#planned-node-observation-export)
+See the [wire reference](/reference/http-and-sockets/#node-observation-export)
 for schemas and bounds. Preserve `gaps`, epoch resets and `scope_changed` visibly.
 An empty event list can mean policy filtering; it is not proof of inactivity.
 On timeout or unavailability, keep any historical data visibly stale rather than
@@ -269,7 +269,7 @@ node name; a pinned source uses `pin` instead of `ca` and `identity`. Relative f
 paths resolve against the configuration file. `outbound_only` entries are shown
 as unsupported and never polled through custody or opened to inbound traffic.
 
-Planned command:
+Command:
 
 ```sh
 xmsg observe-collector --config collector.json --state-dir ./observer-state --listen 127.0.0.1:9428
@@ -325,7 +325,7 @@ masks old data before attempting a purge, and a failed purge keeps it hidden.
 Once validated in the current process, temporarily unreachable nodes may show
 retained data marked stale.
 
-**Planned (freshness and collector self-health):**
+**Freshness and collector self-health:**
 - **Node state precedence:** authorization masks (`denied`, scope/restart `pending revalidation`)
   always outrank cached metadata and hide events, snapshots, gaps and last-success times;
   next is a current failure class (`Timeout`, `Malformed`, `RateLimited`, `Unreachable`,
@@ -345,7 +345,7 @@ retained data marked stale.
 
 <Status id="fleet-observer.unknown-event-kind" />
 
-A collector with the planned [unknown event kind](/glossary/#unknown-event-kind)
+A collector with the [unknown event kind](/glossary/#unknown-event-kind)
 fallback can read a newer node's kind within the existing metadata envelope. For
 example, a page with `message_recorded`, `future_delivery` and `reply_recorded`
 keeps the first and last events and their sequence order. The middle row displays
@@ -366,7 +366,7 @@ migration or new configuration switch.
 
 Upgrade to a collector with this compatibility change before relying on the
 fallback. It does not make unpatched older binaries able to read newer events or
-stored rows. See the [wire contract](/reference/http-and-sockets/#planned-node-observation-export).
+stored rows. See the [wire contract](/reference/http-and-sockets/#node-observation-export).
 
 ## Retention and bounds
 
