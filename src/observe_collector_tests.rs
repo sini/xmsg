@@ -179,6 +179,7 @@ impl Fixture {
         let state = Arc::new(State {
             verifier: Some(Verifier::new(config.auth.clone().unwrap(), clock).unwrap()),
             issuer: None,
+            read_hub: None,
             store,
             store_slots: Arc::new(Semaphore::new(1)),
             requests: request_slots(),
@@ -746,6 +747,7 @@ fn scheduler_state(fixture: &Fixture, node: &str, store: Arc<Store>) -> Arc<Stat
             Verifier::new(fixture.config.auth.clone().unwrap(), Arc::new(|| 1000)).unwrap(),
         ),
         issuer: None,
+        read_hub: None,
         store,
         store_slots: Arc::new(Semaphore::new(1)),
         requests: request_slots(),
@@ -1458,6 +1460,7 @@ async fn a2_healthy_no_change_advances_last_success() {
     let state = Arc::new(State {
         verifier: Some(Verifier::new(fixture.config.auth.clone().unwrap(), clock).unwrap()),
         issuer: None,
+        read_hub: None,
         store: store.clone(),
         store_slots: Arc::new(Semaphore::new(1)),
         requests: request_slots(),
@@ -1662,6 +1665,7 @@ async fn a5_restart_with_history_shows_hidden_and_none_since_start() {
     let state = Arc::new(State {
         verifier: Some(Verifier::new(fixture.config.auth.clone().unwrap(), clock).unwrap()),
         issuer: None,
+        read_hub: None,
         store: reopened,
         store_slots: Arc::new(Semaphore::new(1)),
         requests: request_slots(),
@@ -1725,6 +1729,7 @@ async fn a6_monotonic_health_ignores_epoch_clock_shifts() {
     let state = Arc::new(State {
         verifier: Some(Verifier::new(fixture.config.auth.clone().unwrap(), clock).unwrap()),
         issuer: None,
+        read_hub: None,
         store: store.clone(),
         store_slots: Arc::new(Semaphore::new(1)),
         requests: request_slots(),
