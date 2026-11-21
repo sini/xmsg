@@ -283,3 +283,20 @@ or application-support paths can exceed that. Embedders should use
 `OwnerRuntimeConfig::for_user` or pass a shorter explicit `runtime_root` to
 `OwnerRuntimeConfig::new`. Invalid or overly permissive runtime directories are
 refused without chmod or takeover. See the [runtime socket location](/reference/executor-contracts/#runtime-socket-location).
+
+
+## Executor attribution is unavailable
+
+<Status id="teams.attribution-bridge" />
+
+This release ships the bridge mechanism with qualification off on every
+OS/runtime tuple. `attestation_unavailable` is therefore expected even when
+socket configuration is correct. There is no force-enable flag or sample
+record to install. Ordinary messaging continues to work.
+
+Future enablement requires current native identity and deployment qualification.
+A missing PID, inconsistent process evidence, changed session binding, wrong
+socket, deadline expiry or unknown context must refuse. Repeating the request
+as another principal or sending control-looking bus text is not a recovery
+path. Check the [bridge boundary](/reference/executor-contracts/#daemon-caller-attribution-bridge)
+before treating unavailable as a transport failure.

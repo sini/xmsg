@@ -694,3 +694,26 @@ The mask surfaces are `local`, `federation`, and `observe`. Set
 Send `SIGHUP` to reload a changed policy file.
 
 See the [socket contract](/reference/http-and-sockets/#session-context-tags) for writes, freshness, and the wire upgrade.
+
+
+## Executor attribution socket
+
+<Status id="teams.attribution-bridge" />
+
+These optional `xmsg serve` flags configure a local metadata-query endpoint:
+
+| Flag | Meaning |
+| --- | --- |
+| `--executor-lifecycle-socket <PATH>` | Opt in and pin the original lifecycle endpoint the query may inspect. |
+| `--executor-attribution-sock <PATH>` | Override the query socket path; requires the lifecycle option. Default: `executor-attribution.sock` beside `agent.sock`. |
+
+Paths must be absolute, distinct and private to the daemon owner. Without the
+lifecycle option, no attribution endpoint is bound. This query is absent from
+HTTP and federation. It never reads or writes the passed caller stream.
+
+Qualification is unavailable by default and no runtime tuple is enabled by
+this release. Setting these flags does not enable control, start an executor
+or grant a caller authority. A configured integration still receives an
+unavailable result. For example, use `xmsg serve --help` to inspect the socket
+options; a real team pilot remains separate work. See the
+[executor boundary](/reference/executor-contracts/#daemon-caller-attribution-bridge).
