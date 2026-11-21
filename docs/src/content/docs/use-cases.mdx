@@ -148,7 +148,8 @@ will dispatch separate Codex and Antigravity teammates, communicate through the
 bus, and use typed, separately granted lifecycle controls. Human-only local
 parity comes before the dedicated reviewer lane.
 
-The first increment is developer-facing contracts and fake ACP fixtures only.
-There is no team launcher or control endpoint to run yet. Ordinary
+The foundation is developer-facing contracts, fake ACP fixtures and a
+fail-closed library control journal. There is no team launcher to run, and real
+lifecycle requests cannot pass the unavailable attestor yet. Ordinary
 [`xmsg send`](/reference/cli-and-mcp/) remains messaging; a body saying
 “interrupt this teammate” does not invoke a future interrupt operation.

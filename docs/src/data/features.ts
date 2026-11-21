@@ -23,6 +23,15 @@ export interface SiblingAllowlistEntry {
 }
 
 export const FEATURES: Record<string, FeatureEntry> = {
+	'teams.control-journal': {
+		id: 'teams.control-journal',
+		title: 'Fail-closed executor control journal library',
+		owner: 'sini',
+		evidence: [{ path: 'extensions/executor/src/control.rs', anchor: 'pub struct ControlService' }],
+		plannedSince: '2026-11-20',
+		note: 'Production lifecycle attribution unavailable; success paths are test-only, not a runtime executor.',
+	},
+
 	'session-context.tags': {
 		id: 'session-context.tags',
 		title: 'Self-reported session context tags',
