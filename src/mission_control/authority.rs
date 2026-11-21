@@ -341,6 +341,8 @@ struct State {
     #[cfg(test)]
     suppress_push: bool,
     #[cfg(test)]
+    admission_reads: u64,
+    #[cfg(test)]
     synthetic_records: HashSet<[u8; 32]>,
     #[cfg(test)]
     last_revoke: Option<(i64, Instant)>,
@@ -348,6 +350,8 @@ struct State {
     last_handoff: Option<Instant>,
     #[cfg(test)]
     watchdog_tick: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    projection_gate: Option<Arc<super::writer::ProjectionGate>>,
 
     masked_nodes: HashSet<String>,
     live: HashMap<u64, Registration>,
@@ -544,6 +548,8 @@ impl Authority {
                 #[cfg(test)]
                 suppress_push: false,
                 #[cfg(test)]
+                admission_reads: 0,
+                #[cfg(test)]
                 synthetic_records: HashSet::new(),
                 #[cfg(test)]
                 last_revoke: None,
@@ -551,6 +557,8 @@ impl Authority {
                 last_handoff: None,
                 #[cfg(test)]
                 watchdog_tick: Arc::default(),
+                #[cfg(test)]
+                projection_gate: None,
 
                 masked_nodes: HashSet::new(),
                 live: HashMap::new(),
@@ -855,6 +863,10 @@ impl Authority {
     fn admit_at(&self, handle: &str, carrier: Carrier, at: i64) -> Result<Record> {
         let digest = handle_digest(handle)?;
         let mut state = self.locked()?;
+        #[cfg(test)]
+        {
+            state.admission_reads += 1;
+        }
         let entry = state
             .by_digest
             .get(&digest)
@@ -966,6 +978,47 @@ impl Authority {
             self.cutoff(),
         );
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn admission_reads(&self) -> u64 {
+        self.locked().unwrap().admission_reads
+    }
+
+    #[cfg(test)]
+    pub(super) fn edit_fixture_record(&self, id: &str, change: impl FnOnce(&mut Record)) {
+        let mut state = self.locked().unwrap();
+        change(&mut state.records.get_mut(id).unwrap().record);
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture_entitlement(&self, value: bool) {
+        self.locked()
+            .unwrap()
+            .conn
+            .execute("UPDATE owners SET entitled=?1", [value])
+            .unwrap();
+    }
+
+    #[cfg(test)]
+    pub(super) fn fail_fixture_store(&self) {
+        self.locked()
+            .unwrap()
+            .conn
+            .execute("DROP TABLE owners", [])
+            .unwrap();
+    }
+
+    #[cfg(test)]
+    pub(super) fn projection_gate(&self) -> Option<Arc<super::writer::ProjectionGate>> {
+        self.locked().unwrap().projection_gate.clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn arm_projection_gate(&self, snapshot: bool) -> Arc<super::writer::ProjectionGate> {
+        let gate = Arc::new(super::writer::ProjectionGate::with_snapshot(snapshot));
+        self.locked().unwrap().projection_gate = Some(gate.clone());
+        gate
     }
 
     #[cfg(test)]

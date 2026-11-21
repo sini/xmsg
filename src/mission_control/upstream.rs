@@ -243,6 +243,58 @@ impl ReadHub {
         event
     }
 
+    #[cfg(test)]
+    pub(crate) fn queue_mask_canaries(&self, node: &str) {
+        let vector: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../tests/vectors/mission-control/v1/V-E2.json"
+        ))
+        .unwrap();
+        let mut event: crate::observe_export::ExportEvent =
+            serde_json::from_value(vector["delta"]["event"].clone()).unwrap();
+        event.kind = EventKind::MessageRecorded;
+        event.activity = None;
+        event.from = Some(format!("planted-counterpart@{node}"));
+        event.to = Some(format!("target@{node}"));
+        let mut state = self.state.lock().unwrap();
+        for n in 1..=520 {
+            event.sequence = n;
+            state
+                .hub
+                .append(
+                    Delta::Exchange {
+                        node: node.to_owned(),
+                        event: event.clone(),
+                    },
+                    1000,
+                    Instant::now(),
+                )
+                .unwrap();
+        }
+        self.changed.send_replace(state.hub.watermark());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_source_gap_for_test(&self, node: &str) {
+        let vector: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../tests/vectors/mission-control/v1/V-E3.json"
+        ))
+        .unwrap();
+        let gap = serde_json::from_value(vector["delta"]["gap"].clone()).unwrap();
+        let mut state = self.state.lock().unwrap();
+        state
+            .hub
+            .append(
+                Delta::SourceGap {
+                    node: node.to_owned(),
+                    gap,
+                },
+                1000,
+                Instant::now(),
+            )
+            .unwrap();
+        self.changed.send_replace(state.hub.watermark());
+    }
+
     pub(super) fn watch(&self) -> tokio::sync::watch::Receiver<u64> {
         self.changed.subscribe()
     }

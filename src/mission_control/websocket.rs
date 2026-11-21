@@ -374,8 +374,20 @@ async fn send_error(
     socket.send(Message::Text(json.to_string().into())).await
 }
 
+#[derive(Clone, Copy)]
+enum WriteFailure {
+    ScopeBeforeHandoff,
+    Ended,
+}
+
+impl From<WriteFailure> for () {
+    fn from(_: WriteFailure) {}
+}
+
 async fn send_value(socket: &mut Socket, writer: &SessionWriter, value: Value) -> Result<(), ()> {
-    send(socket, writer, &[], None, value.to_string()).await
+    send(socket, writer, &[], None, value.to_string())
+        .await
+        .map_err(Into::into)
 }
 
 async fn send(
@@ -384,10 +396,14 @@ async fn send(
     nodes: &[&str],
     source: Option<(&ReadHub, &Sequenced)>,
     payload: String,
-) -> Result<(), ()> {
+) -> Result<(), WriteFailure> {
+    #[cfg(test)]
+    writer
+        .queued_projection_gate(!nodes.is_empty(), source.is_none())
+        .await;
     let limits = &writer.limits;
     if payload.len() > limits.max_server_message_bytes {
-        return Err(());
+        return Err(WriteFailure::Ended);
     }
     let count = payload.len().div_ceil(limits.max_server_frame_bytes);
     tokio::time::timeout(
@@ -398,12 +414,24 @@ async fn send(
                 .chunks(limits.max_server_frame_bytes)
                 .enumerate()
             {
+                let (guarded, cursor) = if index == 0 {
+                    (nodes, source)
+                } else {
+                    (&[][..], None)
+                };
+                let refused = || {
+                    if index == 0 && writer.still_live() {
+                        WriteFailure::ScopeBeforeHandoff
+                    } else {
+                        WriteFailure::Ended
+                    }
+                };
                 poll_fn(|cx| {
-                    match writer.handoff(nodes.iter().copied(), source, || {
+                    match writer.handoff(guarded.iter().copied(), cursor, || {
                         Pin::new(&mut *socket).poll_ready(cx)
                     }) {
-                        Ok(poll) => poll.map_err(|_| ()),
-                        Err(_) => Poll::Ready(Err(())),
+                        Ok(poll) => poll.map_err(|_| WriteFailure::Ended),
+                        Err(_) => Poll::Ready(Err(refused())),
                     }
                 })
                 .await?;
@@ -418,17 +446,15 @@ async fn send(
                     index + 1 == count,
                 );
                 writer
-                    .handoff(nodes.iter().copied(), source, || {
+                    .handoff(guarded.iter().copied(), cursor, || {
                         Pin::new(&mut *socket).start_send(Message::Frame(frame))
                     })
-                    .map_err(|_| ())?
-                    .map_err(|_| ())?;
+                    .map_err(|_| refused())?
+                    .map_err(|_| WriteFailure::Ended)?;
                 poll_fn(|cx| {
-                    match writer.handoff(nodes.iter().copied(), source, || {
-                        Pin::new(&mut *socket).poll_flush(cx)
-                    }) {
-                        Ok(poll) => poll.map_err(|_| ()),
-                        Err(_) => Poll::Ready(Err(())),
+                    match writer.handoff([], None, || Pin::new(&mut *socket).poll_flush(cx)) {
+                        Ok(poll) => poll.map_err(|_| WriteFailure::Ended),
+                        Err(_) => Poll::Ready(Err(WriteFailure::Ended)),
                     }
                 })
                 .await?;
@@ -437,7 +463,7 @@ async fn send(
         },
     )
     .await
-    .map_err(|_| ())?
+    .map_err(|_| WriteFailure::Ended)?
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -573,36 +599,39 @@ async fn drain(
     state: &mut Subscription,
     activity: bool,
 ) -> Result<(), ()> {
-    let mask = issuer.authority.masked_nodes().map_err(|_| ())?;
-    let projection = Projection {
-        scope: &state.scope,
-        grants: grants(record),
-        masked: &|node| mask.contains(node),
-        activity,
-    };
-    if state
-        .masked
-        .symmetric_difference(&mask)
-        .any(|node| projection.node_allowed(node))
-    {
-        let (snapshot, epoch) = hub.frozen(&projection, false)?.ok_or(())?;
-        gap(socket, writer, sub, Reset::ScopeChanged).await?;
-        state.seq = snapshot.watermark;
-        state.replay_through = None;
-        parts(
-            socket,
-            writer,
-            hub,
-            sub,
-            &state.partition,
-            snapshot,
-            &epoch,
-            &projection,
-        )
-        .await?;
-    }
-    state.masked.clone_from(&mask);
-    loop {
+    let mut scope_fenced = false;
+    'batch: loop {
+        let mask = issuer.authority.masked_nodes().map_err(|_| ())?;
+        let projection = Projection {
+            scope: &state.scope,
+            grants: grants(record),
+            masked: &|node| mask.contains(node),
+            activity,
+        };
+        if scope_fenced
+            || state
+                .masked
+                .symmetric_difference(&mask)
+                .any(|node| projection.node_allowed(node))
+        {
+            let (snapshot, epoch) = hub.frozen(&projection, false)?.ok_or(())?;
+            gap(socket, writer, sub, Reset::ScopeChanged).await?;
+            state.seq = snapshot.watermark;
+            state.replay_through = None;
+            parts(
+                socket,
+                writer,
+                hub,
+                sub,
+                &state.partition,
+                snapshot,
+                &epoch,
+                &projection,
+            )
+            .await?;
+        }
+        state.masked.clone_from(&mask);
+        scope_fenced = false;
         let replaying = state
             .replay_through
             .is_some_and(|through| state.seq < through);
@@ -641,14 +670,22 @@ async fn drain(
             } else {
                 vec![]
             };
-            send(
+            match send(
                 socket,
                 writer,
                 &nodes,
                 Some((hub, &event)),
                 message.to_string(),
             )
-            .await?;
+            .await
+            {
+                Ok(()) => {}
+                Err(WriteFailure::ScopeBeforeHandoff) => {
+                    scope_fenced = true;
+                    continue 'batch;
+                }
+                Err(WriteFailure::Ended) => return Err(()),
+            }
         }
         if state.seq == batch.through {
             return Ok(());
@@ -725,7 +762,9 @@ async fn parts(
                 .filter(|item| item.endpoint.is_some())
                 .map(|item| item.node.as_str())
                 .collect();
-            return send(socket, writer, &guarded, None, frame).await;
+            return send(socket, writer, &guarded, None, frame)
+                .await
+                .map_err(Into::into);
         }
         let items = attention.filter(|items| !items.is_empty()).ok_or(())?;
         attention = Some(&items[..items.len() / 2]);
