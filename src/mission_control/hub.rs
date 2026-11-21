@@ -563,6 +563,23 @@ mod tests {
             [550, 551, 552],
             "history events cannot coalesce"
         );
+        let restricted = Scope::Session {
+            node: "laptop".into(),
+            endpoint: "agent@laptop".into(),
+        };
+        let scoped = Projection {
+            scope: &Scope::Fleet,
+            grants: std::slice::from_ref(&restricted),
+            masked: &|_| false,
+            activity: true,
+        };
+        let owner = hub.project_after(550, &projection, 8, true, now).unwrap();
+        let machine = hub.project_after(550, &scoped, 8, true, now).unwrap();
+        assert_eq!(owner.events.len(), 2);
+        assert!(
+            machine.events.is_empty(),
+            "replay disclosed an out-of-scope exchange counterpart"
+        );
         for seq in 0..1024 {
             hub.append(exchange(seq), 100, now).unwrap();
         }
