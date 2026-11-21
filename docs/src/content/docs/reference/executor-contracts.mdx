@@ -1,0 +1,77 @@
+---
+title: Executor Contracts
+description: The internal library and fake ACP fixtures that precede the optional teams runtime.
+---
+
+import Status from '../../../components/Status.astro';
+
+<Status id="teams.executor-contracts" />
+
+The standalone `xmsg-executor` library lives in `extensions/executor/`. This
+increment contains data contracts, bounded ACP framing and test-only fake
+fixtures. It has no executable, listener, launcher, control-service endpoint or
+real harness integration. The [teams runtime](/concepts/teams/) remains planned.
+The default xmsg installation does not acquire an executor dependency.
+
+## Developer checks
+
+From a source checkout:
+
+```sh
+cargo test --manifest-path extensions/executor/Cargo.toml --locked
+cargo clippy --manifest-path extensions/executor/Cargo.toml --locked --all-targets -- -D warnings
+cargo fmt --manifest-path extensions/executor/Cargo.toml -- --check
+```
+
+The package has its own manifest, lockfile and test inventory/census. These checks
+exercise fake peers and contracts; they do not start Claude, Codex or Antigravity
+or qualify a native effect. No adapter package installation or credentials are
+needed for them.
+
+## Contract boundary
+
+`protocol::ControlRequest` separates `version`, `request_id`, `verb`, `target`,
+`args` and `deadline`. Targets distinguish team, session, execution and turn.
+Dispatch keeps the harness and model separate and carries a locally resolved,
+cross-host-shaped executor/workspace descriptor.
+
+The uniform verbs are `dispatch`, `send`, `steer`, `interrupt`, `resume`, `stop`,
+`status`, `result` and `approve`. Best-effort “send, prefer live” is distinct from
+strict steer. Authorization, durable admission, native submission and observed
+effect are separate receipt concepts. The DTOs do not authenticate callers,
+enforce grants, persist a journal or perform these operations.
+
+Future lifecycle calls require peer UID plus an owner-configured verb/target
+grant tied to the attested caller for that call. There are no per-agent minted
+control credentials. Separate credentials belong only to owner administration
+and the human-decision channel. An ordinary bus message or a field claiming to
+be a parent/human is not a control grant.
+
+## Pins are not conformance evidence
+
+`capability::PinManifest` and `fixtures/pins.json` record these planned ACP v1
+tuples:
+
+| Harness | Adapter | Native runtime |
+| --- | --- | --- |
+| Claude | claude-agent-acp 0.108.0 | Claude 2.1.327 |
+| Codex | codex-acp 2.7.0 | Codex 0.169.1 |
+| Antigravity | native agy ACP | agy 1.5.10 |
+
+Every real-pin capability starts **unproven**. Capability states are `unproven`,
+`proven` and `not_supported`; evidence classes distinguish `fake_only` from
+`pinned_runtime`. A passing fake fixture is never a native-runtime proof. In
+particular, it establishes neither strict live steering nor cancellation
+quiescence, resume, reviewer isolation or preservation of human-only approval
+subtypes.
+
+SAFE human-only is the default profile contract. The owner-only UNSAFE profile
+is representable for every pin, with per-protection states `proved_retained`,
+`unknown` and `lost`; the initial fixture records unknown protections. That is
+not an implemented permissions-off launcher or a claim that safeguards survive.
+No agent may select/edit that profile in the future control service.
+
+`framing::MAX_FRAME_BYTES` bounds frame decoding. Structured native permission
+requests remain distinct from failed tool status and content. All child-supplied
+text and metadata remain data. Harness-owned child observations do not become
+managed dispatches or additional prompts.

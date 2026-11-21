@@ -31,6 +31,22 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		plannedSince: '2026-11-20',
 		note: 'Optional session metadata with publication masks on the source node.',
 	},
+	'teams.executor-contracts': {
+		id: 'teams.executor-contracts',
+		title: 'Executor contracts and fake ACP test harness',
+		owner: 'sini',
+		evidence: [{ path: 'extensions/executor/src/protocol.rs', anchor: 'pub struct ControlRequest' }],
+		plannedSince: '2026-11-20',
+		note: 'Internal library only; no launcher, endpoint or real harness qualification.',
+	},
+	'teams.local-parity': {
+		id: 'teams.local-parity',
+		title: 'Optional local mixed-harness teams runtime',
+		owner: 'sini',
+		evidence: [],
+		plannedSince: '2026-11-20',
+		note: 'Planned runtime; contracts and fake fixtures do not launch or qualify a harness.',
+	},
 	'session-locator.cli': {
 		id: 'session-locator.cli',
 		title: 'Read-only session locator CLI and Unix HTTP endpoint',

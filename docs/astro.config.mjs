@@ -100,6 +100,7 @@ export default defineConfig({
 					items: [
 						{ label: 'Addressing & Resolution', slug: 'concepts/addressing' },
 						{ label: 'Sessions, Services & Subagents', slug: 'concepts/sessions-services-subagents' },
+						{ label: 'Teams (planned)', slug: 'concepts/teams' },
 						{ label: 'Delivery, Queueing & Replies', slug: 'concepts/replies' },
 						{ label: 'Federation', slug: 'concepts/federation' },
 						{ label: 'Peer & LAN Discovery (planned)', slug: 'concepts/discovery' },
@@ -134,6 +135,7 @@ export default defineConfig({
 						{ label: 'CLI & MCP Server', slug: 'reference/cli-and-mcp' },
 						{ label: 'HTTP API & Unix Sockets', slug: 'reference/http-and-sockets' },
 						{ label: 'Daemon Protocol & Rust Client', slug: 'reference/service-client' },
+						{ label: 'Executor Contracts (planned)', slug: 'reference/executor-contracts' },
 					],
 				},
 				{
