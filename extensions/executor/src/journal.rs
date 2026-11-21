@@ -513,6 +513,10 @@ fn admit_new(
         }) {
             return Err(ErrorCode::ResourceLimit);
         }
+        let mut resolved = d.resolved.clone();
+        if let Some(budget) = &args.requested.budget {
+            resolved.budget = budget.clone();
+        }
         let live: i64 = tx
             .query_row(
                 "SELECT COUNT(*) FROM sessions WHERE state!='ended'",
@@ -520,14 +524,14 @@ fn admit_new(
                 |r| r.get(0),
             )
             .map_err(storage)?;
-        if live >= i64::from(d.resolved.budget.worker_slots) {
+        if live >= i64::from(resolved.budget.worker_slots) {
             return Err(ErrorCode::ResourceLimit);
         }
         (
             Target::Team {
                 team_id: d.team_id.clone(),
             },
-            serde_json::to_string(&d.resolved).map_err(storage)?,
+            serde_json::to_string(&resolved).map_err(storage)?,
         )
     } else {
         let target = request.target.as_ref().ok_or(ErrorCode::UnknownTarget)?;

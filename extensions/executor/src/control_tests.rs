@@ -803,3 +803,68 @@ fn human_pending_expiry_is_checked_at_consumption() {
     assert_eq!(consumed(&f), 0, "expired pending action was consumed");
     assert_eq!(result.unwrap_err(), ErrorCode::DeadlineExpired);
 }
+
+#[test]
+fn grant_for_other_principal_has_no_admission_effect() {
+    let mut other = grant(Verb::Send, "session-a", 1);
+    other.principal = "parent".into();
+    assert_denied(&fixture(config(vec![other])), send("principal-scope"));
+}
+
+#[test]
+fn tighter_caller_budget_survives_reopen_and_limits_admission() {
+    let mut c = config(vec![Grant {
+        principal: "worker".into(),
+        verb: Verb::Dispatch,
+        target: GrantTarget::Team {
+            team_id: "team-a".into(),
+        },
+    }]);
+    c.defaults.push(template());
+    let wanted = crate::protocol::ResourceBudget {
+        worker_slots: 4,
+        reviewer_slots: 0,
+        max_wall_ms: 100,
+        max_content_bytes: 128,
+    };
+    let f = fixture(c.clone());
+    let mut request = ControlRequest::dispatch("bounded-dispatch".into(), "fixture".into());
+    if let Action::Dispatch(a) = &mut request.action {
+        a.requested.budget = Some(wanted.clone());
+    }
+    let receipt = f.service.lifecycle(peer(), request, 100).unwrap();
+    let f = reopen(f, c);
+    let stored: String = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT resolved FROM admissions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<ResolvedDispatch>(&stored)
+            .unwrap()
+            .budget,
+        wanted,
+        "caller budget widened in durable admission"
+    );
+    assert_eq!(receipt.dispatch.unwrap().resolved.budget, wanted);
+    let mut request = ControlRequest::dispatch("tighter-quota".into(), "fixture".into());
+    if let Action::Dispatch(a) = &mut request.action {
+        a.requested.budget = Some(crate::protocol::ResourceBudget {
+            worker_slots: 1,
+            ..wanted
+        });
+    }
+    let denied = f.service.lifecycle(peer(), request, 101).unwrap();
+    assert_eq!(
+        count(&f.service, "admissions"),
+        1,
+        "effective caller quota was ignored"
+    );
+    assert!(matches!(
+        denied.receipt.authorization,
+        Authorization::Denied { .. }
+    ));
+}
