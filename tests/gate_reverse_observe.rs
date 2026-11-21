@@ -264,7 +264,7 @@ impl RelayFixture {
         request_to(self.address, &self.hub, caller, method, uri, body, headers).await
     }
     fn uri(&self, kind: &str) -> String {
-        format!("/fed/v2/observe/relay/{}/{kind}?v=2", self.leaf.node)
+        format!("/fed/v2/observe/relay/{}/{kind}", self.leaf.node)
     }
 }
 async fn request_to(
@@ -321,7 +321,7 @@ async fn request_to(
 #[tokio::test]
 async fn hub_relays_exact_raw_snapshot_only_via_advertising_control_poll() {
     let f = RelayFixture::new().await;
-    let uri = f.uri("snapshot");
+    let uri = format!("{}?v=2", f.uri("snapshot"));
     let collector = f.request(
         &f.collector,
         "GET",
@@ -358,7 +358,7 @@ async fn hub_relays_exact_raw_snapshot_only_via_advertising_control_poll() {
             f.collector.full(),
             "attestation uses actual TLS collector"
         );
-        let body=format!("{{ \"v\":1,\"node\":\"{}\",\"scope\":\"{}\",\"observed_at\":1,\"endpoints\":[],\"truncated\":false,\"available\":\"available\" }}",f.leaf.node,"a".repeat(64)).into_bytes();
+        let body=format!("{{ \"v\":2,\"node\":\"{}\",\"scope\":\"{}\",\"observed_at\":1,\"endpoints\":[],\"truncated\":false,\"available\":\"available\",\"activity\":{{\"status\":\"disabled\",\"complete\":true}} }}",f.leaf.node,"a".repeat(64)).into_bytes();
         let (status, _) = f
             .request(
                 &f.leaf,
@@ -393,12 +393,18 @@ async fn production_leaf_exports_events_and_snapshot_without_listener_or_custody
         xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
     for kind in ["events", "snapshot"] {
         let (status, body) = f
-            .request(&f.collector, "GET", &f.uri(kind), vec![], &[])
+            .request(
+                &f.collector,
+                "GET",
+                &format!("{}?v=2", f.uri(kind)),
+                vec![],
+                &[],
+            )
             .await;
         assert_eq!(status, 200, "production leaf exports {kind}");
         let dto: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(dto["node"], f.leaf.node, "DTO comes from the outbound leaf");
-        assert_eq!(dto["v"], 1);
+        assert_eq!(dto["v"], 2);
         if kind == "events" {
             assert!(
                 dto.get("events").is_some(),
@@ -499,7 +505,15 @@ async fn refusal(hub: bool, edit: impl FnOnce(&RelayFixture, &mut Value), query:
         .request(
             &f.collector,
             "GET",
-            &format!("{}{}", f.uri("snapshot"), query),
+            &if query.is_empty() {
+                format!("{}?v=2", f.uri("snapshot"))
+            } else {
+                format!(
+                    "{}?v=2&{}",
+                    f.uri("snapshot"),
+                    query.trim_start_matches('?')
+                )
+            },
             vec![],
             &[("xmsg-origin", "forged"), ("x-forwarded-for", "127.0.0.1")],
         )
@@ -600,7 +614,13 @@ async fn hub_target_exclusion_refuses_whole_leaf_dto() {
     let _worker =
         xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
     let (status, _) = f
-        .request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
+        .request(
+            &f.collector,
+            "GET",
+            &format!("{}?v=2", f.uri("snapshot")),
+            vec![],
+            &[],
+        )
         .await;
     assert_eq!(
         status, 403,
@@ -619,7 +639,7 @@ async fn both_label_opt_ins_and_leaf_target_projection_apply() {
         .request(
             &f.collector,
             "GET",
-            &format!("{}?labels=true", f.uri("snapshot")),
+            &format!("{}?v=2&labels=true", f.uri("snapshot")),
             vec![],
             &[],
         )
@@ -640,7 +660,7 @@ async fn both_label_opt_ins_and_leaf_target_projection_apply() {
         .request(
             &f.collector,
             "GET",
-            &format!("{}?labels=true", f.uri("snapshot")),
+            &format!("{}?v=2&labels=true", f.uri("snapshot")),
             vec![],
             &[],
         )
@@ -651,7 +671,13 @@ async fn both_label_opt_ins_and_leaf_target_projection_apply() {
         "both label opt-ins expose synthetic label"
     );
     let (status, body) = f
-        .request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
+        .request(
+            &f.collector,
+            "GET",
+            &format!("{}?v=2", f.uri("snapshot")),
+            vec![],
+            &[],
+        )
         .await;
     assert_eq!(status, 200);
     assert!(
@@ -665,7 +691,13 @@ async fn both_label_opt_ins_and_leaf_target_projection_apply() {
     let _worker =
         xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
     let (status, body) = f
-        .request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
+        .request(
+            &f.collector,
+            "GET",
+            &format!("{}?v=2", f.uri("snapshot")),
+            vec![],
+            &[],
+        )
         .await;
     assert_eq!(status, 200);
     assert_eq!(
@@ -691,7 +723,7 @@ async fn control(f: &RelayFixture) -> Value {
     value["request"].clone()
 }
 fn empty_snapshot(f: &RelayFixture) -> Vec<u8> {
-    format!("{{\"v\":1,\"node\":\"{}\",\"scope\":\"{}\",\"observed_at\":1,\"endpoints\":[],\"truncated\":false,\"available\":\"available\"}}",f.leaf.node,"a".repeat(64)).into_bytes()
+    format!("{{\"v\":2,\"node\":\"{}\",\"scope\":\"{}\",\"observed_at\":1,\"endpoints\":[],\"truncated\":false,\"available\":\"available\",\"activity\":{{\"status\":\"disabled\",\"complete\":true}}}}",f.leaf.node,"a".repeat(64)).into_bytes()
 }
 async fn submit(f: &RelayFixture, request: &Value, body: Vec<u8>) -> (u16, Vec<u8>) {
     f.request(
@@ -715,8 +747,14 @@ async fn pair_reservation_lasts_through_final_forward_check() {
     let gates = xmsg::observe_relay::test_hooks::controls(&f.state);
     gates.before_forward.arm(1);
     let first = async {
-        f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-            .await
+        f.request(
+            &f.collector,
+            "GET",
+            &format!("{}?v=2", f.uri("snapshot")),
+            vec![],
+            &[],
+        )
+        .await
     };
     let race = async {
         let request = control(&f).await;
@@ -724,7 +762,13 @@ async fn pair_reservation_lasts_through_final_forward_check() {
         assert_eq!(status, 200);
         gates.before_forward.wait_for(1).await;
         let (status, _) = f
-            .request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
+            .request(
+                &f.collector,
+                "GET",
+                &format!("{}?v=2", f.uri("snapshot")),
+                vec![],
+                &[],
+            )
             .await;
         gates.before_forward.release();
         assert_eq!(
@@ -749,8 +793,14 @@ async fn leaf_policy_revocation_after_projection_blocks_successful_post() {
         let _worker =
             xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
         let request = async {
-            f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-                .await
+            f.request(
+                &f.collector,
+                "GET",
+                &format!("{}?v=2", f.uri("snapshot")),
+                vec![],
+                &[],
+            )
+            .await
         };
         let revoke = async {
             gate.wait_for(1).await;
@@ -771,8 +821,14 @@ async fn leaf_policy_revocation_after_projection_blocks_successful_post() {
 async fn live_waiter_is_bound_to_expected_leaf_kind_and_id_and_consumed_once() {
     let f = RelayFixture::new().await;
     let caller = async {
-        f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-            .await
+        f.request(
+            &f.collector,
+            "GET",
+            &format!("{}?v=2", f.uri("snapshot")),
+            vec![],
+            &[],
+        )
+        .await
     };
     let leaf = async {
         let request = control(&f).await;
@@ -848,9 +904,9 @@ async fn raw_answer(
         .replace("LEAF_NODE", &f.leaf.node);
     body = text.into_bytes();
     let uri = if kind == "events" {
-        format!("{}?limit=200", f.uri(kind))
+        format!("{}?v=2&limit=200", f.uri(kind))
     } else {
-        f.uri(kind)
+        format!("{}?v=2", f.uri(kind))
     };
     let caller = async { f.request(&f.collector, "GET", &uri, vec![], &[]).await };
     let leaf = async {
@@ -873,7 +929,7 @@ async fn raw_answer(
     tokio::join!(caller, leaf)
 }
 fn future_page() -> Vec<u8> {
-    format!("{{ \"v\":1,\"node\":\"LEAF_NODE\",\"epoch\":\"epoch\",\"scope\":\"{}\",\"events\":[{{\"sequence\":1,\"observed_at\":1,\"persisted_at\":1,\"kind\":\"future_delivery\",\"available\":\"not_recorded\"}}],\"next\":1,\"has_more\":false,\"gaps\":[],\"available\":true }}","a".repeat(64)).into_bytes()
+    format!("{{ \"v\":2,\"node\":\"LEAF_NODE\",\"epoch\":\"epoch\",\"scope\":\"{}\",\"events\":[{{\"sequence\":1,\"observed_at\":1,\"persisted_at\":1,\"kind\":\"future_delivery\",\"available\":\"not_recorded\"}}],\"next\":1,\"has_more\":false,\"gaps\":[],\"available\":true }}","a".repeat(64)).into_bytes()
 }
 #[tokio::test]
 async fn hub_preserves_future_kind_event_bytes_and_refuses_nonmetadata_fields() {
@@ -979,7 +1035,7 @@ async fn snapshot_dto_node_version_count_and_closed_schema_are_independent() {
     let mut wrong_node = valid.clone();
     wrong_node["node"] = json!("unrelated.node");
     let mut wrong_version = valid.clone();
-    wrong_version["v"] = json!(2);
+    wrong_version["v"] = json!(1);
     let mut body_field = valid.clone();
     body_field["body"] = json!("SYNTHETIC_BODY_NOT_METADATA");
     let mut cwd_field = valid.clone();
@@ -999,7 +1055,7 @@ async fn snapshot_dto_node_version_count_and_closed_schema_are_independent() {
     let duplicate =
         serde_json::to_string(&valid)
             .unwrap()
-            .replacen("\"v\":1", "\"v\":1,\"v\":1", 1);
+            .replacen("\"v\":2", "\"v\":2,\"v\":2", 1);
     assert_raw_dto_status(
         duplicate.into_bytes(),
         "snapshot",
@@ -1043,7 +1099,7 @@ async fn events_dto_version_and_count_are_independent_of_transport_bounds() {
         "valid200-event neighbor preserves cursor"
     );
     let mut wrong_version = valid;
-    wrong_version["v"] = json!(2);
+    wrong_version["v"] = json!(1);
     assert_raw_dto_status(
         serde_json::to_vec(&wrong_version).unwrap(),
         "events",
@@ -1078,7 +1134,7 @@ async fn exact_query_bound_and_closed_query_fields_apply_before_dispatch() {
     let f = RelayFixture::new().await;
     let _worker =
         xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
-    let valid = format!("v={}1", "0".repeat(1021));
+    let valid = format!("v={}2", "0".repeat(1021));
     assert_eq!(valid.len(), 1024);
     assert_eq!(
         f.request(
@@ -1094,7 +1150,7 @@ async fn exact_query_bound_and_closed_query_fields_apply_before_dispatch() {
         "1024-byte query passes"
     );
     for invalid in [
-        format!("v={}1", "0".repeat(1022)),
+        format!("v={}2", "0".repeat(1022)),
         "v=1&v=2".into(),
         "v=1&url=http://elsewhere".into(),
         "v=1&unknown=1".into(),
@@ -1127,8 +1183,14 @@ async fn declared_and_streaming_dto_bounds_allow_exact_limit_and_refuse_one_over
                 .answer_read_attempts
                 .store(0, std::sync::atomic::Ordering::Relaxed);
             let caller = async {
-                f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-                    .await
+                f.request(
+                    &f.collector,
+                    "GET",
+                    &format!("{}?v=2", f.uri("snapshot")),
+                    vec![],
+                    &[],
+                )
+                .await
             };
             let leaf = async {
                 let request = control(&f).await;
@@ -1180,8 +1242,14 @@ async fn declared_and_streaming_dto_bounds_allow_exact_limit_and_refuse_one_over
 async fn concurrent_legacy_poll_cannot_take_observe_and_capability_is_not_cached() {
     let f = RelayFixture::new().await;
     let caller = async {
-        f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-            .await
+        f.request(
+            &f.collector,
+            "GET",
+            &format!("{}?v=2", f.uri("snapshot")),
+            vec![],
+            &[],
+        )
+        .await
     };
     let old = async {
         let r = f
@@ -1207,8 +1275,14 @@ async fn concurrent_legacy_poll_cannot_take_observe_and_capability_is_not_cached
     let (response, (), ()) = tokio::join!(caller, old, capable);
     assert_eq!(response.0, 200);
     let caller = async {
-        f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-            .await
+        f.request(
+            &f.collector,
+            "GET",
+            &format!("{}?v=2", f.uri("snapshot")),
+            vec![],
+            &[],
+        )
+        .await
     };
     let old = async {
         let r = f
@@ -1232,8 +1306,14 @@ async fn concurrent_legacy_poll_cannot_take_observe_and_capability_is_not_cached
 async fn explicit_unsupported_is_distinct_from_no_capable_poll() {
     let f = RelayFixture::new().await;
     let caller = async {
-        f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-            .await
+        f.request(
+            &f.collector,
+            "GET",
+            &format!("{}?v=2", f.uri("snapshot")),
+            vec![],
+            &[],
+        )
+        .await
     };
     let leaf = async {
         let request = control(&f).await;
@@ -1401,8 +1481,14 @@ async fn slow_busy_answer_does_not_block_list_or_attachment_controls() {
     let pressure = async {
         reads.before_read.wait_for(8).await;
         let reverse = async {
-            f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-                .await
+            f.request(
+                &f.collector,
+                "GET",
+                &format!("{}?v=2", f.uri("snapshot")),
+                vec![],
+                &[],
+            )
+            .await
         };
         let controls = async {
             assert_shared_read_bound(&reads).await;
@@ -1504,8 +1590,14 @@ async fn hub_last_slot_and_same_pair_races_reserve_atomically_and_cancel_cleanly
         let f = f.clone();
         let caller = identity.clone();
         held.push(tokio::spawn(async move {
-            f.request(&caller, "GET", &f.uri("snapshot"), vec![], &[])
-                .await
+            f.request(
+                &caller,
+                "GET",
+                &format!("{}?v=2", f.uri("snapshot")),
+                vec![],
+                &[],
+            )
+            .await
         }));
     }
     wait_pending(&f.state, 7).await;
@@ -1516,8 +1608,14 @@ async fn hub_last_slot_and_same_pair_races_reserve_atomically_and_cancel_cleanly
         let f = f.clone();
         let caller = identity.clone();
         race.push(tokio::spawn(async move {
-            f.request(&caller, "GET", &f.uri("snapshot"), vec![], &[])
-                .await
+            f.request(
+                &caller,
+                "GET",
+                &format!("{}?v=2", f.uri("snapshot")),
+                vec![],
+                &[],
+            )
+            .await
         }));
     }
     gates.before_admission.wait_for(2).await;
@@ -1528,9 +1626,15 @@ async fn hub_last_slot_and_same_pair_races_reserve_atomically_and_cancel_cleanly
     assert_eq!(busy.0, 429, "only one contender gets the eighth waiter");
     wait_pending(&f.state, 8).await;
     assert_eq!(
-        f.request(&identities[0], "GET", &f.uri("snapshot"), vec![], &[])
-            .await
-            .0,
+        f.request(
+            &identities[0],
+            "GET",
+            &format!("{}?v=2", f.uri("snapshot")),
+            vec![],
+            &[]
+        )
+        .await
+        .0,
         429,
         "a second live request for the same pair refuses"
     );
@@ -1550,8 +1654,14 @@ async fn answer_routing_header_limit_and_id_shape_are_enforced() {
     let f = RelayFixture::new().await;
     for over in [false, true] {
         let caller = async {
-            f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-                .await
+            f.request(
+                &f.collector,
+                "GET",
+                &format!("{}?v=2", f.uri("snapshot")),
+                vec![],
+                &[],
+            )
+            .await
         };
         let leaf = async {
             let request = control(&f).await;
@@ -1633,8 +1743,14 @@ async fn hub_rechecks_original_policy_at_admission_dispatch_and_forward() {
         };
         gate.arm(1);
         let caller = async {
-            f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-                .await
+            f.request(
+                &f.collector,
+                "GET",
+                &format!("{}?v=2", f.uri("snapshot")),
+                vec![],
+                &[],
+            )
+            .await
         };
         let revoke = async {
             if stage == "forward" {
@@ -1683,8 +1799,14 @@ async fn injected_deadline_rejects_prepared_response_and_removes_pending() {
     let gates = xmsg::observe_relay::test_hooks::controls(&f.state);
     gates.before_forward.arm(1);
     let caller = async {
-        f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-            .await
+        f.request(
+            &f.collector,
+            "GET",
+            &format!("{}?v=2", f.uri("snapshot")),
+            vec![],
+            &[],
+        )
+        .await
     };
     let leaf = async {
         let request = control(&f).await;
@@ -1712,8 +1834,14 @@ async fn returned_labels_and_targets_are_independently_refused() {
             });
         }
         let caller = async {
-            f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-                .await
+            f.request(
+                &f.collector,
+                "GET",
+                &format!("{}?v=2", f.uri("snapshot")),
+                vec![],
+                &[],
+            )
+            .await
         };
         let leaf = async {
             let request = control(&f).await;
@@ -1841,7 +1969,13 @@ async fn pinned_leaf_with_uri_san_is_explicitly_unsupported_but_ordinary_control
     let _worker =
         xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
     let (status, body) = f
-        .request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
+        .request(
+            &f.collector,
+            "GET",
+            &format!("{}?v=2", f.uri("snapshot")),
+            vec![],
+            &[],
+        )
         .await;
     assert_eq!(
         status, 501,
@@ -1904,7 +2038,7 @@ async fn control_envelope_declared_and_streaming_bounds_are_independent_of_json_
     for chunked in [false, true] {
         for size in [8192, 8193] {
             let mut f = RelayFixture::new().await;
-            let mut body=serde_json::to_vec(&json!({"kind":"observe","request":{"id":"opaque123","hub":f.hub.full(),"leaf":f.leaf.full(),"collector":f.collector.full(),"read":"snapshot","query":"","remaining_ms":5000}})).unwrap();
+            let mut body=serde_json::to_vec(&json!({"kind":"observe","request":{"id":"opaque123","hub":f.hub.full(),"leaf":f.leaf.full(),"collector":f.collector.full(),"read":"snapshot","query":"v=2","remaining_ms":5000}})).unwrap();
             body.resize(size, b' ');
             let metrics = xmsg::observe_relay::test_hooks::controls(&f.leaf_state);
             let result = poll_control_body(&mut f, body, chunked).await;
@@ -2073,9 +2207,15 @@ async fn witnessed_matching_source_cidrs_allow_actual_connections() {
     let _worker =
         xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
     assert_eq!(
-        f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-            .await
-            .0,
+        f.request(
+            &f.collector,
+            "GET",
+            &format!("{}?v=2", f.uri("snapshot")),
+            vec![],
+            &[]
+        )
+        .await
+        .0,
         200,
         "both witnessed matching source CIDRs pass"
     );
@@ -2099,7 +2239,7 @@ async fn leaf_scope_only_narrowing_after_projection_cannot_send_old_bytes() {
             f.request(
                 &f.collector,
                 "GET",
-                &format!("{}?labels=true", f.uri("snapshot")),
+                &format!("{}?v=2&labels=true", f.uri("snapshot")),
                 vec![],
                 &[],
             )
@@ -2130,8 +2270,14 @@ async fn hub_scope_only_change_invalidates_prepared_even_empty_dto() {
     let gates = xmsg::observe_relay::test_hooks::controls(&f.state);
     gates.before_forward.arm(1);
     let caller = async {
-        f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-            .await
+        f.request(
+            &f.collector,
+            "GET",
+            &format!("{}?v=2", f.uri("snapshot")),
+            vec![],
+            &[],
+        )
+        .await
     };
     let narrow = async {
         let request = control(&f).await;
@@ -2164,8 +2310,14 @@ async fn relay_reads_fill_the_same_leaf_budget_seen_by_direct_export() {
     for (index, identity) in identities.into_iter().enumerate() {
         let f = f.clone();
         tasks.push(tokio::spawn(async move {
-            f.request(&identity, "GET", &f.uri("snapshot"), vec![], &[])
-                .await
+            f.request(
+                &identity,
+                "GET",
+                &format!("{}?v=2", f.uri("snapshot")),
+                vec![],
+                &[],
+            )
+            .await
         }));
         tokio::time::timeout(
             Duration::from_secs(2),
@@ -2239,8 +2391,14 @@ async fn old_tls_poll_cannot_take_new_generation_observe_work() {
     let caller = {
         let f = f.clone();
         tokio::spawn(async move {
-            f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-                .await
+            f.request(
+                &f.collector,
+                "GET",
+                &format!("{}?v=2", f.uri("snapshot")),
+                vec![],
+                &[],
+            )
+            .await
         })
     };
     wait_pending(&f.state, 1).await;
@@ -2315,7 +2473,13 @@ async fn literal_ca_uri_routes_export_and_same_node_foreign_authority_refuses() 
         xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
     for kind in ["events", "snapshot"] {
         let (status, body) = f
-            .request(&f.collector, "GET", &f.uri(kind), vec![], &[])
+            .request(
+                &f.collector,
+                "GET",
+                &format!("{}?v=2", f.uri(kind)),
+                vec![],
+                &[],
+            )
             .await;
         assert_eq!(status, 200, "real CA/URI reverse {kind}");
         assert_eq!(
@@ -2328,9 +2492,15 @@ async fn literal_ca_uri_routes_export_and_same_node_foreign_authority_refuses() 
         c["reverse_observe"]["routes"][0]["leaf"] = json!("spiffe://realm-two/ns/leaves/sa/leaf")
     });
     assert_eq!(
-        f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-            .await
-            .0,
+        f.request(
+            &f.collector,
+            "GET",
+            &format!("{}?v=2", f.uri("snapshot")),
+            vec![],
+            &[]
+        )
+        .await
+        .0,
         403,
         "same-derived-node foreign authority cannot substitute configured leaf"
     );
@@ -2350,8 +2520,14 @@ async fn refusal_budget_survives_worker_restart_and_full_lane_keeps_controls_pro
         let f = f.clone();
         let identity = identity.clone();
         callers.push(tokio::spawn(async move {
-            f.request(&identity, "GET", &f.uri("snapshot"), vec![], &[])
-                .await
+            f.request(
+                &identity,
+                "GET",
+                &format!("{}?v=2", f.uri("snapshot")),
+                vec![],
+                &[],
+            )
+            .await
         }));
         tokio::time::timeout(
             Duration::from_secs(2),
@@ -2448,8 +2624,14 @@ async fn refusal_budget_survives_worker_restart_and_full_lane_keeps_controls_pro
         let f = f.clone();
         let identity = identities[8].clone();
         tokio::spawn(async move {
-            f.request(&identity, "GET", &f.uri("snapshot"), vec![], &[])
-                .await
+            f.request(
+                &identity,
+                "GET",
+                &format!("{}?v=2", f.uri("snapshot")),
+                vec![],
+                &[],
+            )
+            .await
         })
     };
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -2528,7 +2710,7 @@ async fn control_scheduler_is_fair_with_observe_backlog_and_preserves_query_bind
                         .unwrap();
                     assert_eq!(
                         request["query"],
-                        format!("v=1&limit={}", index + 1),
+                        format!("v=2&limit={}", index + 1),
                         "each actual collector retains its bound query and route"
                     );
                     let body = String::from_utf8(future_page())
@@ -2663,8 +2845,14 @@ async fn fresh_snapshot(f: &Arc<RelayFixture>) -> Vec<u8> {
     let caller = {
         let f = f.clone();
         tokio::spawn(async move {
-            f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-                .await
+            f.request(
+                &f.collector,
+                "GET",
+                &format!("{}?v=2", f.uri("snapshot")),
+                vec![],
+                &[],
+            )
+            .await
         })
     };
     let request = control(f).await;
@@ -2691,8 +2879,14 @@ async fn actual_streamed_answer_obeys_deadline_after_its_first_chunk() {
         let caller = {
             let f = f.clone();
             tokio::spawn(async move {
-                f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-                    .await
+                f.request(
+                    &f.collector,
+                    "GET",
+                    &format!("{}?v=2", f.uri("snapshot")),
+                    vec![],
+                    &[],
+                )
+                .await
             })
         };
         let request = control(&f).await;
@@ -2767,8 +2961,14 @@ async fn stalled_partial_answer_terminates_at_original_five_second_deadline() {
     let caller = {
         let f = f.clone();
         tokio::spawn(async move {
-            f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-                .await
+            f.request(
+                &f.collector,
+                "GET",
+                &format!("{}?v=2", f.uri("snapshot")),
+                vec![],
+                &[],
+            )
+            .await
         })
     };
     let request = control(&f).await;
@@ -2860,8 +3060,14 @@ async fn cancellation_during_answer_read_retains_reservations_until_stream_drops
     let caller = {
         let f = f.clone();
         tokio::spawn(async move {
-            f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-                .await
+            f.request(
+                &f.collector,
+                "GET",
+                &format!("{}?v=2", f.uri("snapshot")),
+                vec![],
+                &[],
+            )
+            .await
         })
     };
     let request = control(&f).await;
@@ -2922,8 +3128,14 @@ async fn old_answer_after_worker_restart_cannot_satisfy_fresh_waiter() {
     let caller = {
         let f = f.clone();
         tokio::spawn(async move {
-            f.request(&f.collector, "GET", &f.uri("events"), vec![], &[])
-                .await
+            f.request(
+                &f.collector,
+                "GET",
+                &format!("{}?v=2", f.uri("events")),
+                vec![],
+                &[],
+            )
+            .await
         })
     };
     tokio::time::timeout(Duration::from_secs(2), gates.before_post.wait_for(1))
@@ -2952,8 +3164,14 @@ async fn old_answer_after_worker_restart_cannot_satisfy_fresh_waiter() {
     let fresh = {
         let f = f.clone();
         tokio::spawn(async move {
-            f.request(&f.collector, "GET", &f.uri("events"), vec![], &[])
-                .await
+            f.request(
+                &f.collector,
+                "GET",
+                &format!("{}?v=2", f.uri("events")),
+                vec![],
+                &[],
+            )
+            .await
         })
     };
     tokio::time::timeout(Duration::from_secs(2), gates.before_post.wait_for(2))
@@ -3024,8 +3242,14 @@ async fn leaf_default_off_refuses_current_direct_admission_before_any_metadata_r
         let caller = {
             let f = f.clone();
             tokio::spawn(async move {
-                f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-                    .await
+                f.request(
+                    &f.collector,
+                    "GET",
+                    &format!("{}?v=2", f.uri("snapshot")),
+                    vec![],
+                    &[],
+                )
+                .await
             })
         };
         let request = control(&f).await;
@@ -3065,7 +3289,7 @@ fn policy_control(f: &RelayFixture) -> xmsg::observe_relay::Control {
         leaf: f.leaf.full(),
         collector: f.collector.full(),
         read: xmsg::observe_relay::Kind::Snapshot,
-        query: "".into(),
+        query: "v=2".into(),
         remaining_ms: 5000,
     }
 }
@@ -3076,7 +3300,11 @@ async fn leaf_request_label_opt_in_is_applied_before_any_hub_filter() {
         config["peers"][&f.collector.node]["observe_labels"] = json!(true)
     });
     let mut control = policy_control(&f);
-    for (query, labels) in [("", false), ("labels=false", false), ("labels=true", true)] {
+    for (query, labels) in [
+        ("v=2", false),
+        ("v=2&labels=false", false),
+        ("v=2&labels=true", true),
+    ] {
         control.query = query.into();
         let bytes = xmsg::observe_relay::test_hooks::project_control(
             &f.leaf_state,
@@ -3190,8 +3418,14 @@ async fn hub_forward_generation_change(change: impl FnOnce(&RelayFixture, &mut V
     let gates = xmsg::observe_relay::test_hooks::controls(&f.state);
     gates.before_forward.arm(1);
     let caller = async {
-        f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-            .await
+        f.request(
+            &f.collector,
+            "GET",
+            &format!("{}?v=2", f.uri("snapshot")),
+            vec![],
+            &[],
+        )
+        .await
     };
     let narrow = async {
         let request = control(&f).await;
@@ -3239,7 +3473,13 @@ async fn authorized_collector_with_spoofed_origin_still_attests_actual_tls_ident
             );
         });
         let response = f
-            .request(&identities[0], "GET", &f.uri("snapshot"), vec![], &headers)
+            .request(
+                &identities[0],
+                "GET",
+                &format!("{}?v=2", f.uri("snapshot")),
+                vec![],
+                &headers,
+            )
             .await;
         if response.0 != 200 {
             leaf.abort();
@@ -3260,8 +3500,14 @@ async fn same_pair_race_refuses_duplicate_with_global_slots_available() {
     for _ in 0..2 {
         let f = f.clone();
         callers.push(tokio::spawn(async move {
-            f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-                .await
+            f.request(
+                &f.collector,
+                "GET",
+                &format!("{}?v=2", f.uri("snapshot")),
+                vec![],
+                &[],
+            )
+            .await
         }));
     }
     gates.before_admission.wait_for(2).await;
@@ -3403,8 +3649,14 @@ async fn deny_mid_upload_refuses_the_next_frame_before_buffering_or_progress() {
         let caller = {
             let f = f.clone();
             tokio::spawn(async move {
-                f.request(&f.collector, "GET", &f.uri("snapshot"), vec![], &[])
-                    .await
+                f.request(
+                    &f.collector,
+                    "GET",
+                    &format!("{}?v=2", f.uri("snapshot")),
+                    vec![],
+                    &[],
+                )
+                .await
             })
         };
         let request = control(&f).await;
