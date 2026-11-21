@@ -1,0 +1,162 @@
+[
+  {
+    "id": "missing-grant",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": "if !config.grants.iter().any(|g| {",
+    "replacement": "if false && !config.grants.iter().any(|g| {",
+    "test": "missing_grant_has_no_admission_effect",
+    "assertion": "unauthorized admission effect reached journal"
+  },
+  {
+    "id": "wrong-verb",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": " && g.verb == request.action.verb()",
+    "replacement": "",
+    "test": "wrong_verb_has_no_admission_effect",
+    "assertion": "unauthorized admission effect reached journal"
+  },
+  {
+    "id": "wrong-target",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": " && g.target.matches(&target)",
+    "replacement": "",
+    "test": "wrong_target_has_no_admission_effect",
+    "assertion": "unauthorized admission effect reached journal"
+  },
+  {
+    "id": "ambient-parent-binding",
+    "file": "extensions/executor/src/auth.rs",
+    "needle": "if principal.binding != *binding {",
+    "replacement": "if false && principal.binding != *binding {",
+    "test": "ambient_parent_binding_has_no_admission_effect",
+    "assertion": "ambient authority reached admission"
+  },
+  {
+    "id": "peer-uid",
+    "file": "extensions/executor/src/auth.rs",
+    "needle": "if binding.peer.uid != expected_uid {",
+    "replacement": "if false && binding.peer.uid != expected_uid {",
+    "test": "wrong_peer_uid_has_no_admission_effect",
+    "assertion": "wrong UID reached admission"
+  },
+  {
+    "id": "changed-request-id",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": "if prior != input {",
+    "replacement": "if false && prior != input {",
+    "test": "changed_request_id_is_conflict_not_replay_or_effect",
+    "assertion": "changed request incorrectly published historical receipt"
+  },
+  {
+    "id": "stale-generation",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": "if *generation != current.0 {",
+    "replacement": "if false && *generation != current.0 {",
+    "test": "stale_generation_has_no_admission_effect",
+    "assertion": "unauthorized admission effect reached journal"
+  },
+  {
+    "id": "stale-turn",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": "if current.1.as_ref() != Some(turn_id) {",
+    "replacement": "if false && current.1.as_ref() != Some(turn_id) {",
+    "test": "stale_turn_has_no_admission_effect",
+    "assertion": "unauthorized admission effect reached journal"
+  },
+  {
+    "id": "expired-envelope",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": "if request.deadline.is_some_and(|d| d <= now) {",
+    "replacement": "if false && request.deadline.is_some_and(|d| d <= now) {",
+    "test": "expired_request_has_no_admission_effect",
+    "assertion": "unauthorized admission effect reached journal"
+  },
+  {
+    "id": "revoked-profile",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": "p.id == id && p.enabled",
+    "replacement": "p.id == id",
+    "test": "revoked_profile_has_no_admission_effect",
+    "assertion": "unauthorized admission effect reached journal"
+  },
+  {
+    "id": "owner-credential-role",
+    "file": "extensions/executor/src/control.rs",
+    "needle": "if !self.credentials.verify(credential, CredentialRole::Owner) {",
+    "replacement": "if false && !self.credentials.verify(credential, CredentialRole::Owner) {",
+    "test": "owner_and_human_credentials_are_distinct",
+    "assertion": "human proof changed owner policy"
+  },
+  {
+    "id": "human-credential-role",
+    "file": "extensions/executor/src/control.rs",
+    "needle": "if !self.credentials.verify(credential, CredentialRole::Human) {",
+    "replacement": "if false && !self.credentials.verify(credential, CredentialRole::Human) {",
+    "test": "human_channel_rejects_owner_credential_without_consumption",
+    "assertion": "owner proof consumed human pending action"
+  },
+  {
+    "id": "agent-cannot-approve",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": "if matches!(request.action, Action::Approve(_)) {",
+    "replacement": "if false && matches!(request.action, Action::Approve(_)) {",
+    "test": "agent_grant_cannot_replace_human_channel",
+    "assertion": "unauthorized admission effect reached journal"
+  },
+  {
+    "id": "pending-operation-digest",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": "            || p.3 != args.operation_digest\n",
+    "replacement": "",
+    "test": "human_pending_digest_is_bound_to_exact_operation",
+    "assertion": "wrong operation consumed pending action"
+  },
+  {
+    "id": "pending-policy-revision",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": "            || p.4 != configuration.revision.to_string()\n",
+    "replacement": "",
+    "test": "human_pending_policy_revision_is_current",
+    "assertion": "stale policy consumed pending action"
+  },
+  {
+    "id": "human-generation",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": "if current.0 != *generation {",
+    "replacement": "if false && current.0 != *generation {",
+    "test": "human_pending_generation_is_current",
+    "assertion": "stale generation consumed pending action"
+  },
+  {
+    "id": "human-turn",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": "if current.1.as_deref() != Some(turn_id) {",
+    "replacement": "if false && current.1.as_deref() != Some(turn_id) {",
+    "test": "human_pending_turn_is_current",
+    "assertion": "stale turn consumed pending action"
+  },
+  {
+    "id": "malformed-profile-default",
+    "file": "extensions/executor/src/control.rs",
+    "needle": "                || p.project != d.resolved.environment.project\n",
+    "replacement": "",
+    "test": "malformed_default_profile_is_rejected_atomically",
+    "assertion": "mismatched default replaced owner policy"
+  },
+  {
+    "id": "resolved-payload-persistence",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": "serde_json::to_string(request).map_err(storage)?,resolved]",
+    "replacement": "serde_json::to_string(request).map_err(storage)?,String::new()]",
+    "test": "resolved_admission_survives_policy_change_and_reopen",
+    "assertion": "resolved admission payload was not durable"
+  },
+  {
+    "id": "human-decision-persistence",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": "serde_json::to_string(&args.decision).map_err(storage)?",
+    "replacement": "serde_json::to_string(&crate::protocol::Decision::Deny).map_err(storage)?",
+    "test": "exact_human_decisions_survive_reopen_without_credentials",
+    "assertion": "exact human meaning was lost"
+  }
+]

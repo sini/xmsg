@@ -145,6 +145,7 @@ fn brief_cannot_supply_flags_executable_or_raw_workspace_path() {
 #[test]
 fn harness_model_and_cross_host_environment_are_distinct() {
     let descriptor = EnvironmentDescriptor {
+        id: "workspace-environment".into(),
         executor: "executor-a".into(),
         host: "host-b".into(),
         backend: EnvironmentBackend::Headless,

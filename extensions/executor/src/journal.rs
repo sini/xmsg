@@ -1,5 +1,5 @@
 use crate::{
-    control::{AdminCommand, ControlReply, ErrorCode, OwnerConfig},
+    control::{AdminCommand, AdmittedDispatch, ControlReply, ErrorCode, OwnerConfig},
     protocol::{
         Action, Admission, Authorization, ControlRequest, ObservedEffect, OperationReceipt,
         Submission, Target,
@@ -47,7 +47,8 @@ impl Journal {
           CREATE TABLE IF NOT EXISTS configuration(singleton INTEGER PRIMARY KEY CHECK(singleton=1),revision INTEGER NOT NULL,body TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS requests(principal TEXT NOT NULL,request_id TEXT NOT NULL,input_digest TEXT NOT NULL,fingerprint TEXT NOT NULL,reply TEXT NOT NULL,PRIMARY KEY(principal,request_id));
           CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,team_id TEXT NOT NULL,generation INTEGER NOT NULL,active_turn TEXT,state TEXT NOT NULL,profile_id TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS admissions(id INTEGER PRIMARY KEY AUTOINCREMENT,principal TEXT NOT NULL,request_id TEXT NOT NULL,verb TEXT NOT NULL,target TEXT NOT NULL,policy_revision INTEGER NOT NULL,payload TEXT NOT NULL,UNIQUE(principal,request_id));
+          CREATE TABLE IF NOT EXISTS admissions(id INTEGER PRIMARY KEY AUTOINCREMENT,principal TEXT NOT NULL,request_id TEXT NOT NULL,verb TEXT NOT NULL,target TEXT NOT NULL,policy_revision INTEGER NOT NULL,payload TEXT NOT NULL,resolved TEXT NOT NULL,session_id TEXT,UNIQUE(principal,request_id));
+          CREATE TABLE IF NOT EXISTS decisions(approval_id TEXT PRIMARY KEY,request_id TEXT NOT NULL,session_id TEXT NOT NULL,generation INTEGER NOT NULL,turn_id TEXT NOT NULL,decision TEXT NOT NULL,payload TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,principal TEXT,request_id TEXT NOT NULL,event TEXT NOT NULL,at INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,generation INTEGER NOT NULL,turn_id TEXT NOT NULL,operation_digest TEXT NOT NULL,policy_revision TEXT NOT NULL,expires_at INTEGER NOT NULL,option_id TEXT NOT NULL,consumed INTEGER NOT NULL DEFAULT 0);").map_err(storage)?;
         db.execute(
@@ -88,9 +89,10 @@ impl Journal {
             Ok((target, resolved)) => (Some(target), resolved, None),
             Err(code) => (request.target.clone(), String::new(), Some(code)),
         };
+        let mut dispatch = None;
         let admission = if denial.is_none() {
             let target = target.as_ref().ok_or(ErrorCode::UnknownTarget)?;
-            tx.execute("INSERT INTO admissions(principal,request_id,verb,target,policy_revision,payload) VALUES(?1,?2,?3,?4,?5,?6)",params![principal,request.request_id,serde_json::to_string(&request.action.verb()).map_err(storage)?,serde_json::to_string(target).map_err(storage)?,sql_u64(configuration.revision)?,serde_json::to_string(request).map_err(storage)?]).map_err(storage)?;
+            tx.execute("INSERT INTO admissions(principal,request_id,verb,target,policy_revision,payload,resolved) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![principal,request.request_id,serde_json::to_string(&request.action.verb()).map_err(storage)?,serde_json::to_string(target).map_err(storage)?,sql_u64(configuration.revision)?,serde_json::to_string(request).map_err(storage)?,resolved]).map_err(storage)?;
             let id = tx.last_insert_rowid();
             let generation = match target {
                 Target::Execution { generation, .. } | Target::Turn { generation, .. } => {
@@ -104,15 +106,21 @@ impl Journal {
                     .iter()
                     .find(|d| matches!(target,Target::Team {team_id} if d.team_id==*team_id))
                     .ok_or(ErrorCode::InvalidConfiguration)?;
+                let session_id = format!("session-{id}");
                 tx.execute(
                     "INSERT INTO sessions VALUES(?1,?2,1,NULL,'admitted',?3)",
-                    params![
-                        format!("session-{id}"),
-                        template.team_id,
-                        template.profile_id
-                    ],
+                    params![&session_id, template.team_id, template.profile_id],
                 )
                 .map_err(storage)?;
+                tx.execute(
+                    "UPDATE admissions SET session_id=?1 WHERE id=?2",
+                    params![session_id, id],
+                )
+                .map_err(storage)?;
+                dispatch = Some(AdmittedDispatch {
+                    session_id,
+                    resolved: serde_json::from_str(&resolved).map_err(storage)?,
+                });
             }
             Admission::Durable {
                 admission_id: format!("admission-{id}"),
@@ -141,6 +149,8 @@ impl Journal {
             replayed: false,
             historical: false,
             receipt,
+            dispatch,
+            decision: None,
         };
         tx.execute(
             "INSERT INTO requests VALUES(?1,?2,?3,?4,?5)",
@@ -291,10 +301,25 @@ impl Journal {
             [&args.approval_id],
         )
         .map_err(storage)?;
+        tx.execute(
+            "INSERT INTO decisions VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                args.approval_id,
+                request.request_id,
+                session_id,
+                sql_u64(*generation)?,
+                turn_id,
+                serde_json::to_string(&args.decision).map_err(storage)?,
+                serde_json::to_string(&request).map_err(storage)?
+            ],
+        )
+        .map_err(storage)?;
         let reply = ControlReply {
             request_id: request.request_id.clone(),
             replayed: false,
             historical: false,
+            dispatch: None,
+            decision: Some(args.clone()),
             receipt: OperationReceipt {
                 request_id: request.request_id.clone(),
                 target: request.target.clone(),
@@ -442,7 +467,7 @@ fn admit_new(
         if d.resolved.environment.host != config.local_host
             || p.project != d.resolved.environment.project
             || p.harness != d.resolved.harness
-            || p.environment != d.resolved.environment.executor
+            || p.environment != d.resolved.environment.id
             || p.mode != d.resolved.profile.mode
         {
             return Err(ErrorCode::ProfileDenied);
@@ -466,7 +491,7 @@ fn admit_new(
                 .requested
                 .environment_selector
                 .as_ref()
-                .is_some_and(|s| *s != d.resolved.environment.executor)
+                .is_some_and(|s| *s != d.resolved.environment.id)
             || args
                 .requested
                 .workspace
