@@ -22,7 +22,7 @@ SAFE and human-only are defaults. Owner-selected UNSAFE is representable on ever
 
 `framing::FrameReader` accepts individual UTF-8 newline-delimited JSON-RPC 2.0 frames, bounded to 1 MiB including the newline. It supports ACP v1's signed 64-bit/string/null request IDs and omitted params, rejects batches and invalid envelopes, and is permanently poisoned after any frame error. A future transport must discard the failed stream; it cannot resume an oversized tail as a new request. ACP negotiation version 1 is distinct from the JSON-RPC 2.0 envelope.
 
-The test-only fake peer stays in `tests/support/`; it is an in-memory deterministic fixture, not a process or adapter. The corpus labels its observations `fake_only`. Fake steering/cancellation/child/denial observations do not establish any real-harness capability. All real tuples in `fixtures/pins.json` stay unproven:
+The test-only fake peers stay in `tests/support/`: deterministic in-memory and subprocess fixtures, not qualified native adapters. The corpus labels its observations `fake_only`. Fake steering/cancellation/child/denial observations do not establish any real-harness capability. All real tuples in `fixtures/pins.json` stay unproven:
 
 - Claude ACP 0.108.0 / Claude 2.1.327;
 - Codex ACP 2.7.0 / Codex 0.169.1;
@@ -31,6 +31,8 @@ The test-only fake peer stays in `tests/support/`; it is an in-memory determinis
 Per-call parent attribution, native ask-mode verification and effective reviewer isolation are explicitly first in the qualification backlog. A source version or a passing fake test is not runtime qualification.
 
 ## Staged supervisor, workspaces and content membership
+
+Stop attempts do not prove full group absence from a direct child wait. This stage reports unknown and retains the slot/workspace rather than claiming stopped or permitting cleanup without that proof. The supervisor owns one absolute startup-inclusive wall deadline, including ACP handshake and accepted-client I/O. Backend exit or loss of its output transport is observed before attach/events can publish running.
 
 Launch authority is a private journal-derived lease, never a serialized receipt. Current original-principal grants, profile/policy, generation and resource caps are checked again before launch. A durable spawn intent precedes the OS effect; uncertain ownership stays unknown and consumes its slot. Reconnect authenticates the existing supervisor rather than spawning or replaying prompts. Diagnostic PIDs are not kill authority.
 
