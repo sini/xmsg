@@ -257,6 +257,7 @@ async fn test_oracle_2_no_flag_no_tcp_bound() {
     let mut server = Command::new(bin)
         .scrub_agy_env()
         .env("HOME", temp_dir.path())
+        .env("XDG_RUNTIME_DIR", temp_dir.path())
         .args([
             "serve",
             "--http-sock",

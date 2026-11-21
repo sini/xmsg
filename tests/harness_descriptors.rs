@@ -40,6 +40,7 @@ struct Daemon {
 impl Daemon {
     fn start(harnesses_json: Option<&str>) -> Self {
         let tmp = tempdir().unwrap();
+        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let root = tmp.path().to_path_buf();
         let run = root.join("run");
         fs::create_dir_all(&run).unwrap();
