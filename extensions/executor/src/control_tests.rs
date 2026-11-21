@@ -868,3 +868,243 @@ fn tighter_caller_budget_survives_reopen_and_limits_admission() {
         Authorization::Denied { .. }
     ));
 }
+
+fn grant_arm_fixture(
+    target: GrantTarget,
+    verb: Verb,
+    session_id: &str,
+    generation: i64,
+    turn_id: &str,
+) -> Fixture {
+    let f = fixture(config(vec![Grant {
+        principal: "worker".into(),
+        verb,
+        target,
+    }]));
+    f.service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .execute(
+            "UPDATE sessions SET id=?1,generation=?2,active_turn=?3",
+            rusqlite::params![session_id, generation, turn_id],
+        )
+        .unwrap();
+    f
+}
+fn grant_arm_request(verb: Verb, target: Target) -> ControlRequest {
+    let action = match verb {
+        Verb::Send => Action::Send(SendArgs {
+            text: "fixture".into(),
+            prefer_live: None,
+        }),
+        Verb::Steer => Action::Steer(crate::protocol::SteerArgs {
+            text: "fixture".into(),
+        }),
+        Verb::Interrupt => Action::Interrupt(crate::protocol::EmptyArgs::default()),
+        _ => panic!("unsupported test verb"),
+    };
+    ControlRequest {
+        version: 1,
+        request_id: "grant-arm".into(),
+        target: Some(target),
+        action,
+        deadline: Some(200),
+    }
+}
+fn assert_grant_refused(f: &Fixture, request: ControlRequest) {
+    let reply = f.service.lifecycle(peer(), request, 100).unwrap();
+    assert_eq!(
+        count(&f.service, "admissions"),
+        0,
+        "grant target mismatch reached admission"
+    );
+    let Authorization::Denied { code } = reply.receipt.authorization else {
+        panic!("missing grant denial")
+    };
+    assert_eq!(
+        code,
+        ErrorCode::GrantDenied.to_string(),
+        "later state guard masked grant arm"
+    );
+}
+fn assert_grant_admitted(f: &Fixture, request: ControlRequest) {
+    let reply = f.service.lifecycle(peer(), request, 100).unwrap();
+    assert_eq!(
+        count(&f.service, "admissions"),
+        1,
+        "valid grant arm refused admission"
+    );
+    assert!(matches!(
+        reply.receipt.authorization,
+        Authorization::Allowed { .. }
+    ));
+}
+fn session_grant() -> GrantTarget {
+    GrantTarget::Session {
+        session_id: "session-a".into(),
+        generation: 1,
+    }
+}
+fn turn_grant() -> GrantTarget {
+    GrantTarget::Turn {
+        session_id: "session-a".into(),
+        generation: 1,
+        turn_id: "turn-a".into(),
+    }
+}
+fn addressed_turn(session: &str, generation: u64, turn: &str) -> Target {
+    Target::Turn {
+        session_id: session.into(),
+        generation,
+        turn_id: turn.into(),
+    }
+}
+#[test]
+fn session_grant_turn_valid_generation_admits_steer_and_interrupt() {
+    for verb in [Verb::Steer, Verb::Interrupt] {
+        let f = grant_arm_fixture(session_grant(), verb.clone(), "session-a", 1, "turn-a");
+        assert_grant_admitted(
+            &f,
+            grant_arm_request(verb, addressed_turn("session-a", 1, "turn-a")),
+        );
+    }
+}
+#[test]
+fn session_grant_turn_new_generation_has_no_admission_effect() {
+    for verb in [Verb::Steer, Verb::Interrupt] {
+        let f = grant_arm_fixture(session_grant(), verb.clone(), "session-a", 2, "turn-a");
+        assert_grant_refused(
+            &f,
+            grant_arm_request(verb, addressed_turn("session-a", 2, "turn-a")),
+        );
+    }
+}
+#[test]
+fn session_grant_turn_other_session_has_no_admission_effect() {
+    let f = grant_arm_fixture(session_grant(), Verb::Steer, "session-b", 1, "turn-a");
+    assert_grant_refused(
+        &f,
+        grant_arm_request(Verb::Steer, addressed_turn("session-b", 1, "turn-a")),
+    );
+}
+#[test]
+fn session_grant_execution_valid_binding_admits_send() {
+    let f = grant_arm_fixture(session_grant(), Verb::Send, "session-a", 1, "turn-a");
+    assert_grant_admitted(
+        &f,
+        grant_arm_request(
+            Verb::Send,
+            Target::Execution {
+                session_id: "session-a".into(),
+                generation: 1,
+            },
+        ),
+    );
+}
+#[test]
+fn session_grant_execution_new_generation_has_no_admission_effect() {
+    let f = grant_arm_fixture(session_grant(), Verb::Send, "session-a", 2, "turn-a");
+    assert_grant_refused(
+        &f,
+        grant_arm_request(
+            Verb::Send,
+            Target::Execution {
+                session_id: "session-a".into(),
+                generation: 2,
+            },
+        ),
+    );
+}
+#[test]
+fn session_grant_execution_other_session_has_no_admission_effect() {
+    let f = grant_arm_fixture(session_grant(), Verb::Send, "session-b", 1, "turn-a");
+    assert_grant_refused(
+        &f,
+        grant_arm_request(
+            Verb::Send,
+            Target::Execution {
+                session_id: "session-b".into(),
+                generation: 1,
+            },
+        ),
+    );
+}
+#[test]
+fn turn_grant_turn_valid_binding_admits_steer() {
+    let f = grant_arm_fixture(turn_grant(), Verb::Steer, "session-a", 1, "turn-a");
+    assert_grant_admitted(
+        &f,
+        grant_arm_request(Verb::Steer, addressed_turn("session-a", 1, "turn-a")),
+    );
+}
+#[test]
+fn turn_grant_turn_other_session_has_no_admission_effect() {
+    let f = grant_arm_fixture(turn_grant(), Verb::Steer, "session-b", 1, "turn-a");
+    assert_grant_refused(
+        &f,
+        grant_arm_request(Verb::Steer, addressed_turn("session-b", 1, "turn-a")),
+    );
+}
+#[test]
+fn turn_grant_turn_new_generation_has_no_admission_effect() {
+    let f = grant_arm_fixture(turn_grant(), Verb::Steer, "session-a", 2, "turn-a");
+    assert_grant_refused(
+        &f,
+        grant_arm_request(Verb::Steer, addressed_turn("session-a", 2, "turn-a")),
+    );
+}
+#[test]
+fn turn_grant_turn_other_turn_has_no_admission_effect() {
+    let f = grant_arm_fixture(turn_grant(), Verb::Steer, "session-a", 1, "turn-b");
+    assert_grant_refused(
+        &f,
+        grant_arm_request(Verb::Steer, addressed_turn("session-a", 1, "turn-b")),
+    );
+}
+fn team_grant_fixture(requested: &str) -> Fixture {
+    let mut c = config(vec![Grant {
+        principal: "worker".into(),
+        verb: Verb::Dispatch,
+        target: GrantTarget::Team {
+            team_id: "team-a".into(),
+        },
+    }]);
+    let mut d = template();
+    d.team_id = requested.into();
+    c.defaults.push(d);
+    fixture(c)
+}
+fn team_grant_request(requested: &str) -> ControlRequest {
+    let mut r = ControlRequest::dispatch("grant-team".into(), "fixture".into());
+    r.target = Some(Target::Team {
+        team_id: requested.into(),
+    });
+    r
+}
+#[test]
+fn team_grant_team_valid_binding_admits_dispatch() {
+    assert_grant_admitted(&team_grant_fixture("team-a"), team_grant_request("team-a"));
+}
+#[test]
+fn team_grant_team_other_team_has_no_admission_effect() {
+    assert_grant_refused(&team_grant_fixture("team-b"), team_grant_request("team-b"));
+}
+
+#[test]
+fn cross_kind_grant_has_no_admission_effect() {
+    let f = grant_arm_fixture(
+        GrantTarget::Team {
+            team_id: "team-a".into(),
+        },
+        Verb::Steer,
+        "session-a",
+        1,
+        "turn-a",
+    );
+    assert_grant_refused(
+        &f,
+        grant_arm_request(Verb::Steer, addressed_turn("session-a", 1, "turn-a")),
+    );
+}
