@@ -147,6 +147,9 @@ fn reply<T: Serialize>(
 }
 fn prepare(stream: &UnixStream) -> Result<(), ErrorCode> {
     stream
+        .set_nonblocking(false)
+        .map_err(|_| ErrorCode::Storage)?;
+    stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .map_err(|_| ErrorCode::Storage)?;
     stream

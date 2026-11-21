@@ -310,5 +310,26 @@
     "assertion": "permissive XDG root was accepted",
     "test_module": "supervisor::tests",
     "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-production-accepted-mode",
+    "file": "extensions/executor/src/unix.rs",
+    "needle": "    stream\n        .set_nonblocking(false)\n        .map_err(|_| ErrorCode::Storage)?;\n",
+    "replacement": "",
+    "test": "production_handler_normalizes_nonblocking_before_fragmented_request",
+    "assertion": "nonblocking handler returned before fragmented request completed",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-fixture-accepted-mode",
+    "file": "extensions/executor/src/supervisor_tests.rs",
+    "needle": "    stream.set_nonblocking(false)?;\n",
+    "replacement": "",
+    "test": "fixture_accepted_stream_normalizes_forced_nonblocking_mode",
+    "assertion": "fixture accepted stream retained nonblocking mode",
+    "scope": "fixture-source regression control, not a production authority mutant",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
   }
 ]

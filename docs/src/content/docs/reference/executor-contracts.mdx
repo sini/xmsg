@@ -152,6 +152,25 @@ inventory before the owned effect. It does not copy a dirty checkout or harness
 authentication files. Cleanup preserves modified work rather than silently
 discarding it.
 
+### Runtime socket location
+
+The internal `OwnerRuntimeConfig::for_user` chooser separates socket storage
+from the journal and workspace. On Linux it prefers an absolute
+`XDG_RUNTIME_DIR` owned by the current UID, mode `0700`, with no symlink
+components. A configured but invalid value is refused. On macOS, or Linux
+without that variable, it selects a short per-user namespace under canonical
+`/tmp`. The namespace is created only after backend availability and genuine
+admission checks; pre-existing unsafe directories are refused rather than
+chmodded or taken over.
+
+`OwnerRuntimeConfig::new(runtime_root, ...)` preserves an explicit root. Before
+creating an execution directory or workspace, the controller checks the entire
+derived Unix socket path against the platform capacity, including space for its
+terminating NUL (104 bytes on macOS). A typed error reports the platform, byte
+count and capacity. Use the short `for_user` chooser or supply a shorter
+`runtime_root`; this stage adds no CLI configuration flag. Long state or
+workspace paths are not themselves shortened.
+
 ### Ordinary bus service proxies
 
 Each proxy is an ordinary service recipient registered through the existing
