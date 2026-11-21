@@ -35,6 +35,8 @@
                 relative = nixpkgs.lib.removePrefix ((toString ./.) + "/") (toString path);
               in
               (if nixpkgs.lib.hasPrefix "ci/" relative then relative == "ci/xmsg-pin.toml" else true)
+              && relative != "extensions/executor"
+              && !(nixpkgs.lib.hasPrefix "extensions/executor/" relative)
               && !(
                 base == "nix"
                 || base == "docs"
