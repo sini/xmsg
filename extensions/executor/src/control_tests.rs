@@ -29,7 +29,7 @@ fn config(grants: Vec<Grant>) -> OwnerConfig {
             revision: "1".into(),
             project: "project".into(),
             harness: Harness::Claude,
-            environment: "local".into(),
+            environment: "environment-a".into(),
             mode: TrustProfile::Safe,
             enabled: true,
             owner_selected: false,
@@ -498,4 +498,288 @@ fn credentials_and_database_permissions_have_transport_bounds() {
             & 0o777,
         0o600
     );
+}
+
+fn template() -> DispatchTemplate {
+    use crate::capability::{
+        ProfileContract, ProtectionReport, ProtectionState, QualificationKey, ReviewMode,
+    };
+    use crate::protocol::{
+        EnvironmentBackend, EnvironmentDescriptor, Model, ResourceBudget, WorkspaceSpec,
+    };
+    let unknown = ProtectionState::Unknown {
+        reason: "unproven fixture".into(),
+    };
+    DispatchTemplate {
+        team_id: "team-a".into(),
+        profile_id: "safe".into(),
+        resolved: ResolvedDispatch {
+            harness: Harness::Claude,
+            model: Model {
+                provider: "fake".into(),
+                name: "fake".into(),
+            },
+            environment: EnvironmentDescriptor {
+                id: "environment-a".into(),
+                executor: "local".into(),
+                host: "host-a".into(),
+                backend: EnvironmentBackend::Headless,
+                project: "project".into(),
+                profile: "safe".into(),
+            },
+            profile: ProfileContract {
+                mode: TrustProfile::Safe,
+                owner_selection_required: false,
+                protections: ProtectionReport {
+                    hard_denials: unknown.clone(),
+                    human_checkpoints: unknown,
+                },
+            },
+            qualification: QualificationKey {
+                pin_id: "unproven".into(),
+                adapter_version: "fake".into(),
+                runtime_version: "fake".into(),
+                protocol_version: 1,
+                profile: TrustProfile::Safe,
+                native_mode: "fake".into(),
+                review_mode: ReviewMode::HumanOnly,
+                protocol_schema: "fake".into(),
+                model: Model {
+                    provider: "fake".into(),
+                    name: "fake".into(),
+                },
+                effective_config_digest: "a".repeat(64),
+            },
+            workspace: WorkspaceSpec {
+                repo_identity: "fixture-repo".into(),
+                base_revision: "b".repeat(40),
+                destination_selector: "fixture".into(),
+                context_refs: vec![],
+                patch_ref: None,
+            },
+            required_capabilities: vec![],
+            budget: ResourceBudget {
+                worker_slots: 8,
+                reviewer_slots: 1,
+                max_wall_ms: 1000,
+                max_content_bytes: 1024,
+            },
+        },
+    }
+}
+#[test]
+fn malformed_default_profile_is_rejected_atomically() {
+    let f = fixture(config(vec![]));
+    let mut c = config(vec![]);
+    c.revision = 2;
+    let mut d = template();
+    d.resolved.environment.project = "other-project".into();
+    c.defaults.push(d);
+    let result = f.service.admin(
+        peer(),
+        OWNER,
+        AdminCommand::ReplacePolicy {
+            request_id: "bad-default".into(),
+            expected_revision: 1,
+            configuration: c,
+        },
+        100,
+    );
+    let revision: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT revision FROM configuration", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(revision, 1, "mismatched default replaced owner policy");
+    assert_eq!(count(&f.service, "audit"), 0);
+    assert_eq!(result.unwrap_err(), ErrorCode::InvalidConfiguration);
+}
+#[test]
+fn dispatch_admits_intent_with_resolved_defaults_without_runtime_effect() {
+    let mut c = config(vec![Grant {
+        principal: "worker".into(),
+        verb: Verb::Dispatch,
+        target: GrantTarget::Team {
+            team_id: "team-a".into(),
+        },
+    }]);
+    c.defaults.push(template());
+    let f = fixture(c);
+    let reply = f
+        .service
+        .lifecycle(
+            peer(),
+            ControlRequest::dispatch("dispatch".into(), "fixture brief".into()),
+            100,
+        )
+        .unwrap();
+    assert_eq!(count(&f.service, "admissions"), 1);
+    assert_eq!(count(&f.service, "sessions"), 2);
+    assert!(matches!(
+        reply.receipt.submission,
+        crate::protocol::Submission::NotAttempted
+    ));
+    assert!(matches!(
+        reply.receipt.observed_effect,
+        crate::protocol::ObservedEffect::NotObserved
+    ));
+}
+
+fn reopen(f: Fixture, configuration: OwnerConfig) -> Fixture {
+    let Fixture { _dir, service } = f;
+    drop(service);
+    let mut service = ControlService::open(
+        &_dir.path().join("journal.db"),
+        uid(),
+        configuration,
+        ProvisionedCredentials::from_bytes(OWNER, HUMAN).unwrap(),
+    )
+    .unwrap();
+    service.attestor = Box::new(FakeAttestor {
+        principal: "worker".into(),
+        wrong_binding: false,
+    });
+    Fixture { _dir, service }
+}
+#[test]
+fn resolved_admission_survives_policy_change_and_reopen() {
+    let mut c = config(vec![Grant {
+        principal: "worker".into(),
+        verb: Verb::Dispatch,
+        target: GrantTarget::Team {
+            team_id: "team-a".into(),
+        },
+    }]);
+    c.defaults.push(template());
+    let f = fixture(c.clone());
+    let request = ControlRequest::dispatch("durable-dispatch".into(), "fixture".into());
+    let first = f.service.lifecycle(peer(), request.clone(), 100).unwrap();
+    let expected = first.dispatch.unwrap();
+    assert_eq!(expected.session_id, "session-1");
+    c.revision = 2;
+    c.defaults[0].resolved.model.name = "new-model".into();
+    c.defaults[0].resolved.workspace.base_revision = "c".repeat(40);
+    c.defaults[0].resolved.budget.max_wall_ms = 2000;
+    c.defaults[0].resolved.qualification.pin_id = "new-pin".into();
+    f.service
+        .admin(
+            peer(),
+            OWNER,
+            AdminCommand::ReplacePolicy {
+                request_id: "change-defaults".into(),
+                expected_revision: 1,
+                configuration: c.clone(),
+            },
+            101,
+        )
+        .unwrap();
+    let f = reopen(f, c);
+    let replay = f.service.lifecycle(peer(), request, 102).unwrap();
+    assert!(replay.historical);
+    let actual = replay.dispatch.unwrap();
+    assert_eq!(
+        actual.session_id, expected.session_id,
+        "created session identity was lost"
+    );
+    assert_eq!(
+        actual.resolved, expected.resolved,
+        "historical admission inherited current defaults"
+    );
+    let (resolved, session_id): (String, String) = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT resolved,session_id FROM admissions", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(
+        resolved,
+        serde_json::to_string(&expected.resolved).unwrap(),
+        "resolved admission payload was not durable"
+    );
+    assert_eq!(
+        serde_json::from_str::<ResolvedDispatch>(&resolved).unwrap(),
+        expected.resolved
+    );
+    assert_eq!(session_id, expected.session_id);
+}
+#[test]
+fn exact_human_decisions_survive_reopen_without_credentials() {
+    use crate::protocol::Decision;
+    for decision in [Decision::AllowOnce, Decision::Deny, Decision::Escalate] {
+        let f = fixture(config(vec![]));
+        pending(&f);
+        let mut request = approve("durable-decision");
+        if let Action::Approve(a) = &mut request.action {
+            a.decision = decision.clone()
+        };
+        f.service
+            .human(peer(), HUMAN, request.clone(), 100)
+            .unwrap();
+        let f = reopen(f, config(vec![]));
+        let (stored, body): (String, String) = f
+            .service
+            .journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row("SELECT decision,payload FROM decisions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Decision>(&stored).unwrap(),
+            decision,
+            "exact human meaning was lost"
+        );
+        assert_eq!(
+            serde_json::from_str::<ControlRequest>(&body).unwrap(),
+            request
+        );
+        assert!(!body.contains(std::str::from_utf8(HUMAN).unwrap()));
+        assert!(!body.contains(std::str::from_utf8(OWNER).unwrap()));
+        let receipt = f.service.human(peer(), HUMAN, request, 101).unwrap();
+        assert!(receipt.historical);
+        assert_eq!(receipt.decision.unwrap().decision, decision);
+        assert_eq!(consumed(&f), 1);
+    }
+}
+#[test]
+fn environment_and_executor_selectors_are_distinct() {
+    let mut c = config(vec![Grant {
+        principal: "worker".into(),
+        verb: Verb::Dispatch,
+        target: GrantTarget::Team {
+            team_id: "team-a".into(),
+        },
+    }]);
+    c.defaults.push(template());
+    let f = fixture(c);
+    let mut request = ControlRequest::dispatch("right-environment".into(), "fixture".into());
+    if let Action::Dispatch(a) = &mut request.action {
+        a.requested.environment_selector = Some("environment-a".into());
+        a.requested.executor_selector = Some("local".into());
+    }
+    f.service.lifecycle(peer(), request, 100).unwrap();
+    assert_eq!(count(&f.service, "admissions"), 1);
+    let mut request = ControlRequest::dispatch("wrong-environment".into(), "fixture".into());
+    if let Action::Dispatch(a) = &mut request.action {
+        a.requested.environment_selector = Some("local".into())
+    };
+    let reply = f.service.lifecycle(peer(), request, 100).unwrap();
+    assert_eq!(
+        count(&f.service, "admissions"),
+        1,
+        "executor selector was accepted as environment identity"
+    );
+    assert!(matches!(
+        reply.receipt.authorization,
+        Authorization::Denied { .. }
+    ));
 }

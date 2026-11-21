@@ -107,7 +107,7 @@ impl OwnerConfig {
             if d.resolved.environment.host != self.local_host
                 || p.project != d.resolved.environment.project
                 || p.harness != d.resolved.harness
-                || p.environment != d.resolved.environment.executor
+                || p.environment != d.resolved.environment.id
                 || p.id != d.resolved.environment.profile
                 || p.mode != d.resolved.profile.mode
                 || d.resolved.profile.validate_metadata().is_err()
@@ -144,6 +144,15 @@ pub struct ControlReply {
     pub replayed: bool,
     pub historical: bool,
     pub receipt: OperationReceipt,
+    pub dispatch: Option<AdmittedDispatch>,
+    pub decision: Option<crate::protocol::ApproveArgs>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmittedDispatch {
+    pub session_id: String,
+    pub resolved: ResolvedDispatch,
 }
 
 pub struct ControlService {

@@ -53,6 +53,7 @@ pub enum EnvironmentBackend {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentDescriptor {
+    pub id: String,
     pub executor: String,
     pub host: String,
     pub backend: EnvironmentBackend,
