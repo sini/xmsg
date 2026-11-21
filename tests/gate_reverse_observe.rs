@@ -385,12 +385,72 @@ async fn hub_relays_exact_raw_snapshot_only_via_advertising_control_poll() {
 #[tokio::test]
 async fn production_leaf_exports_events_and_snapshot_without_listener_or_custody() {
     let f = RelayFixture::new().await;
+    struct FixtureOwner;
+    impl xmsg::activity::OwnerResolver for FixtureOwner {
+        fn resolve(&self, frame: &xmsg::activity::ActivityFrame) -> xmsg::activity::BindingOutcome {
+            xmsg::activity::BindingOutcome::Verified {
+                address: frame.session.clone(),
+                incarnation: 1,
+                owner: frame.owner.unwrap(),
+                has_pending_wake: false,
+            }
+        }
+
+        fn is_owner_live(&self, _: xmsg::activity::OwnerProof) -> bool {
+            true
+        }
+    }
+    let id = "22222222-2222-4222-8222-222222222222";
+    let endpoint = format!("{id}@{}", f.leaf.node);
+    let now = xmsg::storage::now_epoch_secs();
+    let mono = tokio::time::Instant::now();
+    let frame = xmsg::activity::hook::normalize_hook_payload(
+        xmsg::activity::ActivityHarness::Claude,
+        br#"{"hook_event_name":"UserPromptSubmit","session_id":"22222222-2222-4222-8222-222222222222"}"#,
+        false,
+        Some(xmsg::activity::OwnerProof { pid: 1001, started_at: 500 }),
+    )
+    .unwrap();
+    let engine = {
+        let mut db = f.leaf_state.db.lock().unwrap();
+        let (mut engine, _, _) = xmsg::activity::ActivityEngine::load_or_init(
+            &mut db,
+            true,
+            Default::default(),
+            &FixtureOwner,
+            now,
+            mono,
+        )
+        .unwrap();
+        let transition = engine
+            .ingest(&mut db, &frame, &FixtureOwner, now, mono)
+            .unwrap()
+            .unwrap();
+        f._observer.publish(vec![xmsg::observe::Observation {
+            kind: "activity_changed".into(),
+            from: Some(endpoint.clone()),
+            body_availability: "not_recorded".into(),
+            activity: Some(transition.descriptor),
+            ..Default::default()
+        }]);
+        engine
+    };
+    assert!(f._observer.flush_for_test(Duration::from_secs(3)));
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    xmsg::activity::register_runtime(
+        &f.leaf_state.db,
+        xmsg::activity::ActivityRuntime {
+            engine: Arc::new(Mutex::new(engine)),
+            tx,
+        },
+    );
     let primary_before = [
         f.state.db.lock().unwrap().total_changes(),
         f.leaf_state.db.lock().unwrap().total_changes(),
     ];
     let _worker =
         xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
+    let mut reconciler = xmsg::activity::reconcile::CollectorActivityReconciler::default();
     for kind in ["events", "snapshot"] {
         let (status, body) = f
             .request(
@@ -410,11 +470,30 @@ async fn production_leaf_exports_events_and_snapshot_without_listener_or_custody
                 dto.get("events").is_some(),
                 "events request returns an event page"
             );
+            assert!(dto["events"].as_array().unwrap().iter().any(|event| {
+                event["kind"] == "activity_changed"
+                    && event["from"] == endpoint
+                    && event.get("to").is_none()
+                    && event["activity"]["state"] == "working"
+            }));
             assert!(
                 dto.get("endpoints").is_none(),
                 "events request never becomes a snapshot"
             );
         } else {
+            assert_eq!(
+                dto["activity"]["status"], "enabled",
+                "relay preserves leaf activity status"
+            );
+            let snapshot: xmsg::observe_export::ExportSnapshot =
+                serde_json::from_value(dto.clone()).unwrap();
+            reconciler.apply_snapshot(&snapshot, now);
+            assert_eq!(
+                reconciler.nodes[&f.leaf.node].endpoints[&endpoint]
+                    .descriptor
+                    .state,
+                xmsg::activity::ActivityState::Working
+            );
             assert!(
                 dto.get("endpoints").is_some(),
                 "snapshot request returns an endpoint snapshot"
@@ -470,6 +549,67 @@ async fn production_leaf_exports_events_and_snapshot_without_listener_or_custody
             .unwrap();
         assert_eq!(rows, 0, "observation has no mailbox custody");
     }
+
+    {
+        let db = f.leaf_state.db.lock().unwrap();
+        for n in 0..200 {
+            db.execute(
+                "INSERT INTO instance_seen(id,harness,last_live) VALUES (?1,'codex',?2)",
+                rusqlite::params![format!("00000000-0000-4000-8000-{n:012}"), now],
+            )
+            .unwrap();
+        }
+    }
+    let (status, body) = f
+        .request(
+            &f.collector,
+            "GET",
+            &format!("{}?v=2", f.uri("snapshot")),
+            vec![],
+            &[],
+        )
+        .await;
+    assert_eq!(status, 200);
+    let truncated: xmsg::observe_export::ExportSnapshot = serde_json::from_slice(&body).unwrap();
+    assert!(truncated.truncated);
+    assert!(!truncated.endpoints.iter().any(|entry| entry.id == endpoint));
+    reconciler.apply_snapshot(&truncated, now);
+    let retained = &reconciler.nodes[&f.leaf.node].endpoints[&endpoint];
+    assert!(retained.stale);
+    assert_eq!(
+        retained.descriptor.state,
+        xmsg::activity::ActivityState::Working
+    );
+
+    drop(_worker);
+    reload(&f.leaf_state, |c| {
+        c["peers"][&f.collector.node]["targets"] = json!([])
+    });
+    let _worker =
+        xmsg::observe_relay::test_hooks::start_worker(f.leaf_state.clone(), f.hub.node.clone());
+    for kind in ["events", "snapshot"] {
+        let (status, body) = f
+            .request(
+                &f.collector,
+                "GET",
+                &format!("{}?v=2", f.uri(kind)),
+                vec![],
+                &[],
+            )
+            .await;
+        assert_eq!(status, 200);
+        let dto: Value = serde_json::from_slice(&body).unwrap();
+        if kind == "events" {
+            assert!(dto["events"].as_array().unwrap().is_empty());
+        } else {
+            let snapshot: xmsg::observe_export::ExportSnapshot =
+                serde_json::from_value(dto).unwrap();
+            assert!(snapshot.endpoints.is_empty());
+            reconciler.apply_snapshot(&snapshot, now);
+            assert!(reconciler.nodes[&f.leaf.node].endpoints.is_empty());
+        }
+    }
+    xmsg::activity::unregister_runtime(&f.leaf_state.db);
 }
 
 fn current_config(fs: &Arc<FedState>) -> Value {

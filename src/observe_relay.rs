@@ -1349,11 +1349,12 @@ async fn leaf_read(
             Kind::Snapshot => {
                 let (records, partial) = crate::observe_snapshot::collect(&source);
                 serde_json::to_vec(
-                    &crate::observe_export::project_snapshot(
+                    &crate::observe_export::project_snapshot_with_activity(
                         &scope,
                         records,
                         crate::storage::now_epoch_secs(),
                         partial,
+                        crate::activity::runtime_snapshot_activity(&source.db),
                     )
                     .map_err(|_| Failure::Unreachable)?,
                 )
