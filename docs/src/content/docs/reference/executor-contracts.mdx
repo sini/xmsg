@@ -10,8 +10,9 @@ import Status from '../../../components/Status.astro';
 The standalone `xmsg-executor` library lives in `extensions/executor/`. This
 foundation contains data contracts, bounded ACP framing and test-only fake
 fixtures, a private Unix control handler and a separate journal.
-**Real lifecycle calls fail closed** until the independent
-host-attestation bridge exists. There is no installed executable or real harness integration.
+**Real lifecycle calls fail closed** while caller-attribution qualification
+is unavailable. The metadata-only bridge exists, but enables no runtime tuple
+in this release. There is no installed executable or real harness integration.
 Supervisor subprocess fixtures use a fake ACP backend only. The [teams runtime](/concepts/teams/) remains planned.
 The default xmsg installation does not acquire an executor dependency.
 
@@ -94,7 +95,7 @@ unavailable, so a valid same-UID lifecycle request returns
 `attestation_unavailable`; a caller of the wrong UID is rejected. Grant-success
 paths use a sealed, test-only attestor in unit tests. No request field, parent
 relationship, copied bus origin, ambient MCP process or owner/human credential
-substitutes for lifecycle attribution. A production bridge is separate work.
+substitutes for lifecycle attribution. The opt-in bridge below adds no enabled production tuple.
 
 Owner-configured grants name a principal, verb and target. The journal keeps
 authorization, durable admission and observed effect distinct. The same
@@ -191,3 +192,59 @@ established, the result stays `unknown` and reserves the slot; it does not spawn
 another child to recover availability. Dirty workspace contents remain available
 for inspection. These are fake-backend library checks, not instructions for
 starting a production team.
+
+
+## Daemon caller-attribution bridge
+
+<Status id="teams.attribution-bridge" />
+
+The bridge is an optional local metadata query. It does not launch a team or
+replace lifecycle grants. `ControlService::open` retains the unavailable
+attestor; an embedder can explicitly select
+`ControlService::open_with_daemon_attribution` with
+`DaemonAttributionConfig { query_socket, lifecycle_socket, expected_uid }`.
+Owner and human decision channels keep their separate credentials.
+
+The lifecycle handler duplicates its actual accepted Unix socket and passes the
+duplicate to the daemon with `SCM_RIGHTS`. The daemon checks the original
+socket's kernel peer and current session state. It never consumes, peeks at or
+writes caller bytes, changes the original flags/timeouts, or shuts it down.
+The scoped reply is bound to one request and caller context; it is not a token
+or a grant. Query and response framing are bounded, and failed, contradictory,
+expired or ambiguous evidence cannot become another principal.
+
+Production qualification is sealed and absent in this release. Configuring the
+endpoint therefore returns unavailable; it is not a way to turn on attribution.
+There is no sample qualification record, record loader or enable flag. Positive
+fixtures use test-only eligibility facts with real processes and daemon state;
+they are not proof that a deployed OS/runtime tuple is qualified.
+
+The daemon exposes the endpoint only with `--executor-lifecycle-socket`.
+`--executor-attribution-sock` overrides the query path and requires that option;
+otherwise the query socket is `executor-attribution.sock` beside `agent.sock`.
+Both paths must be distinct, absolute and private to the owner UID. These
+options name sockets; they do not start a lifecycle server or install an
+executor. See the [CLI reference](/reference/cli-and-mcp/#executor-attribution-socket).
+
+### Identity and availability limits
+
+Current exact principal/verb/target grants remain required. A known child needs
+its own grant. The query refuses an unregistered caller whose current ancestry
+reaches the querying executor before a session match. Re-parenting can escape
+that intact-chain stop: future enablement must exclude deployments where any
+process that can reap executor descendants is, or has in its current ancestry,
+a principal matched by the resolver. This includes trusted Codex owners,
+observed Antigravity entries, and foreign same-UID PID-namespace reapers. That
+exclusion must remain true throughout enablement, not only during one test.
+
+A shared Codex owner can select among roots it actually holds, with a matching
+configured grant. Sibling roots under that owner are not isolated from one
+another. Deliberate same-UID socket delegation or impersonation is outside the
+isolation claim. On macOS, the socket PID can identify its last operator rather
+than its connector; missing or contradictory evidence refuses attribution.
+
+The query has four fixed workers and a two-second deadline. Partial clients
+cannot create an unbounded worker queue. Same-UID code can occupy all four
+slots, making attribution unavailable; ordinary messaging remains independent.
+Expiry is checked again after the executor acquires its admission lock and at
+the effect boundary.

@@ -14,8 +14,7 @@ recipients will continue to work without an executor or a prescribed workflow.
 The foundation supplies [internal contracts, a fake ACP test harness and a
 fail-closed control journal and fake-backend supervisor](/reference/executor-contracts/). There is no runtime
 launcher, team CLI or team MCP tool. The library control boundary denies real
-lifecycle calls as `attestation_unavailable` until the separately commissioned
-attribution bridge exists. No real harness capability is qualified by fake
+lifecycle calls as `attestation_unavailable` while the bridge has no qualified production runtime tuple. No real harness capability is qualified by fake
 tests. Installing xmsg does not start an executor.
 
 ## Messages and control
@@ -94,3 +93,19 @@ revalidated before use. Stopping does not discard changed work. Bus membership
 uses ordinary service recipients: incoming messages become durable content,
 never control or approval authority. Only fake ACP subprocesses are exercised
 at this stage; a real mixed-harness runtime remains planned.
+
+
+## Caller attribution is separate from bus identity
+
+<Status id="teams.attribution-bridge" />
+
+The optional metadata bridge asks the daemon to identify the peer on the
+original lifecycle socket. A bus proxy's service name, a message origin, a
+label and parentage do not supply a lifecycle grant. A scoped attribution reply
+still needs the owner's exact configured principal, verb and target grant.
+
+The bridge currently ships with no enabled OS/runtime qualification. Its
+endpoint can be configured for integration, but production lifecycle calls
+remain unavailable. It installs no team runtime, adapter or model. The
+[bridge reference](/reference/executor-contracts/#daemon-caller-attribution-bridge)
+describes the qualification and shared-UID limits.
