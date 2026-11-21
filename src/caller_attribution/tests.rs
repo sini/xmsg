@@ -117,15 +117,31 @@ fn fixture_process() {
             | "expired-facts"
             | "incomplete-reaper"
             | "incomplete-match"
+            | "wrong-endpoint"
     ));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     let _entered = runtime.enter();
+    let wrong_listener = if role == "wrong-endpoint" {
+        let listener = UnixListener::bind(root.join("other-life.sock")).unwrap();
+        std::fs::set_permissions(
+            root.join("other-life.sock"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        Some(listener)
+    } else {
+        None
+    };
     let config = ServerConfig {
         query_socket: root.join("query.sock"),
-        lifecycle_socket: root.join("life.sock"),
+        lifecycle_socket: root.join(if wrong_listener.is_some() {
+            "other-life.sock"
+        } else {
+            "life.sock"
+        }),
         expected_uid: crate::client::current_uid(),
     };
     let app = state(&root);
@@ -167,6 +183,39 @@ fn directory() -> tempfile::TempDir {
 fn roundtrip(role: &str) -> Reply {
     roundtrip_with_peer(role).0
 }
+fn authority_snapshot(file: &std::path::Path) -> Vec<(String, Vec<String>)> {
+    let connection = rusqlite::Connection::open(file).unwrap();
+    let mut statement = connection
+        .prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name")
+        .unwrap();
+    let tables = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    tables
+        .into_iter()
+        .map(|table| {
+            let escaped = table.replace('"', "\"\"");
+            let mut query = connection
+                .prepare(&format!("SELECT * FROM \"{escaped}\""))
+                .unwrap();
+            let columns = query.column_count();
+            let mut rows = query
+                .query_map([], |row| {
+                    Ok((0..columns)
+                        .map(|column| format!("{:?}", row.get_ref(column).unwrap()))
+                        .collect::<Vec<_>>()
+                        .join("|"))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            rows.sort();
+            (table, rows)
+        })
+        .collect()
+}
 fn roundtrip_with_peer(role: &str) -> (Reply, u32) {
     use std::os::fd::AsFd;
     let directory = directory();
@@ -195,6 +244,7 @@ fn roundtrip_with_peer(role: &str) -> (Reply, u32) {
     }).to_string()).unwrap();
     let (daemon, mut daemon_control) = helper(role, directory.path());
     daemon_control.read_exact(&mut ready).unwrap();
+    let before = authority_snapshot(&directory.path().join("state.db"));
     let deadline = Instant::now() + AUTHORITY_BUDGET;
     let stream = wire::connect(&directory.path().join("query.sock"), deadline).unwrap();
     let mut hash = Sha256::new();
@@ -210,6 +260,11 @@ fn roundtrip_with_peer(role: &str) -> (Reply, u32) {
     };
     wire::send_query(&stream, original.as_fd(), &query, deadline).unwrap();
     let reply = wire::receive_reply(&stream, deadline).unwrap();
+    assert_eq!(
+        authority_snapshot(&directory.path().join("state.db")),
+        before,
+        "real daemon query mutated authority or queue rows"
+    );
     original.write_all(b"D").unwrap();
     daemon_control.write_all(b"D").unwrap();
     let original_pid = caller.0.id();
@@ -304,6 +359,19 @@ fn incomplete_match_domain_never_publishes_principal() {
             }
         ),
         "incomplete matched domain published principal"
+    );
+}
+#[test]
+fn original_from_another_owner_endpoint_never_publishes_principal() {
+    assert!(
+        matches!(
+            roundtrip("wrong-endpoint"),
+            Reply::Unavailable {
+                reason: FailureReason::Endpoint,
+                ..
+            }
+        ),
+        "wrong lifecycle endpoint published a principal"
     );
 }
 

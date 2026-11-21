@@ -1832,6 +1832,13 @@ mod strict_peer {
                 return Err(FailureReason::AuthorityUnavailable);
             }
             let pid = option_i32(fd, 0, libc::LOCAL_PEERPID)?;
+            #[cfg(test)]
+            let pid = TEST_READINGS.with(|r| {
+                r.borrow()
+                    .as_ref()
+                    .and_then(|x| x.credential_pid)
+                    .unwrap_or(pid)
+            });
             let pid = u32::try_from(pid)
                 .ok()
                 .filter(|p| *p > 0)
@@ -2243,7 +2250,6 @@ mod strict_peer {
                 );
             }
         }
-        #[cfg(target_os = "linux")]
         #[test]
         fn strict_peer_missing_pid_never_becomes_uid_only() {
             let _reset = Reset;
@@ -2255,10 +2261,69 @@ mod strict_peer {
                 })
             });
             assert_eq!(
+                credentials(original.as_fd()).err(),
+                Some(FailureReason::MissingPid),
+                "missing PID became UID-only credentials"
+            );
+            assert_eq!(
                 strict_peer_cred_from_fd(original.as_fd(), Path::new(super::super::LIVE_PROC_ROOT))
                     .err(),
                 Some(FailureReason::MissingPid),
                 "missing PID constructed a strict peer"
+            );
+        }
+        #[test]
+        fn strict_peer_changed_kernel_observation_never_becomes_authority() {
+            let _reset = Reset;
+            let root = tempfile::tempdir().unwrap();
+            let pid = std::process::id();
+            for value in [pid, pid + 1] {
+                std::fs::create_dir(root.path().join(value.to_string())).unwrap();
+                let mut fields = vec!["0"; 20];
+                fields[0] = "S";
+                fields[19] = "42";
+                std::fs::write(
+                    root.path().join(value.to_string()).join("stat"),
+                    format!("{value} (fixture) {}\n", fields.join(" ")),
+                )
+                .unwrap();
+            }
+            let (_sender, original) = std::os::unix::net::UnixStream::pair().unwrap();
+            TEST_READINGS.with(|r| {
+                *r.borrow_mut() = Some(TestReadings {
+                    pidfd_errno: Some(libc::ENOPROTOOPT),
+                    ..Default::default()
+                })
+            });
+            let peer = strict_peer_cred_from_fd(original.as_fd(), root.path()).unwrap();
+            TEST_READINGS.with(|r| {
+                *r.borrow_mut() = Some(TestReadings {
+                    credential_pid: Some(pid as i32 + 1),
+                    pidfd_errno: Some(libc::ENOPROTOOPT),
+                    ..Default::default()
+                })
+            });
+            assert_eq!(
+                strict_revalidate(&peer, original.as_fd(), root.path()).err(),
+                Some(FailureReason::ContradictoryPeer),
+                "changed kernel peer observation constructed authority"
+            );
+        }
+        #[test]
+        fn strict_peer_dead_socket_metadata_never_becomes_authority() {
+            let _reset = Reset;
+            let (_sender, original) = std::os::unix::net::UnixStream::pair().unwrap();
+            TEST_READINGS.with(|r| {
+                *r.borrow_mut() = Some(TestReadings {
+                    socket_revents: Some(libc::POLLHUP),
+                    ..Default::default()
+                })
+            });
+            assert_eq!(
+                strict_peer_cred_from_fd(original.as_fd(), Path::new(super::super::LIVE_PROC_ROOT))
+                    .err(),
+                Some(FailureReason::DeadPeer),
+                "dead socket metadata constructed authority"
             );
         }
         #[cfg(target_os = "linux")]
