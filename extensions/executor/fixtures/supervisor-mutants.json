@@ -1,0 +1,192 @@
+[
+  {
+    "id": "pr3-original-principal",
+    "file": "extensions/executor/src/execution.rs",
+    "needle": "g.principal == record.principal && ",
+    "replacement": "",
+    "test": "launch_rechecks_original_principal_against_current_dispatch_grant",
+    "assertion": "revoked original principal reached execution resources",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-current-profile",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": "p.id == id && p.enabled",
+    "replacement": "p.id == id",
+    "test": "launch_rechecks_current_profile_before_workspace_or_spawn",
+    "assertion": "disabled profile reached execution resources",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-frozen-policy",
+    "file": "extensions/executor/src/execution.rs",
+    "needle": "            || revision != lease.identity.policy_revision\n",
+    "replacement": "",
+    "test": "frozen_policy_change_after_reservation_cannot_commit_spawn_intent",
+    "assertion": "stale policy lease committed spawn intent",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-durable-before-spawn",
+    "file": "extensions/executor/src/supervisor.rs",
+    "needle": "        journal.commit_spawn_intent(&lease, now)?;",
+    "replacement": "",
+    "test": "broker_crash_after_spawn_reconciles_live_supervisor_without_relaunch",
+    "assertion": "OS child exists without durable spawn intent",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-inherited-lock",
+    "file": "extensions/executor/src/supervisor.rs",
+    "needle": "    let _lock = unsafe { File::from_raw_fd(manifest.lock_fd) };",
+    "replacement": "    let lock = unsafe { File::from_raw_fd(manifest.lock_fd) }; drop(lock);",
+    "test": "live_supervisor_holds_execution_lock_after_broker_death",
+    "assertion": "supervisor lost its inherited execution lock",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-server-nonce",
+    "file": "extensions/executor/src/supervisor.rs",
+    "needle": "if expected != &manifest.identity {",
+    "replacement": "if false && expected != &manifest.identity {",
+    "test": "wrong_supervisor_nonce_cannot_stop_an_owned_backend",
+    "assertion": "wrong nonce stopped the owned backend",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-live-hello",
+    "file": "extensions/executor/src/supervisor.rs",
+    "needle": "if hello.identity != *expected {",
+    "replacement": "if false && hello.identity != *expected {",
+    "test": "mismatched_live_hello_cannot_publish_running_state",
+    "assertion": "mismatched live hello published running state",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-owned-group",
+    "file": "extensions/executor/src/supervisor.rs",
+    "needle": "if unsafe { libc::kill(-own, libc::SIGTERM) } != 0 {",
+    "replacement": "if 0 != 0 {",
+    "test": "owned_group_stop_closes_a_real_grandchild_probe",
+    "assertion": "owned process group left a child alive",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-monotonic-cursor",
+    "file": "extensions/executor/src/execution.rs",
+    "needle": "AND state IN('spawn_intent','running','unknown') AND cursor<=?2",
+    "replacement": "AND state IN('spawn_intent','running','unknown')",
+    "test": "authenticated_event_cursor_reconnect_is_bounded_and_monotonic",
+    "assertion": "reconnect rolled event cursor backward",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-content-generation",
+    "file": "extensions/executor/src/execution.rs",
+    "needle": " AND s.generation=e.generation AND e.state='running'",
+    "replacement": " AND e.state='running'",
+    "test": "current_generation_content_binding_is_checked_before_durable_row",
+    "assertion": "stale generation content reached durable row",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-cumulative-content",
+    "file": "extensions/executor/src/execution.rs",
+    "needle": "if total.checked_add(bytes).is_none_or(|n| n > limit) {",
+    "replacement": "if false && total.checked_add(bytes).is_none_or(|n| n > limit) {",
+    "test": "content_store_deduplicates_before_ack_and_enforces_cumulative_execution_budget",
+    "assertion": "execution cumulative content budget was exceeded",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-c11-content-control",
+    "file": "extensions/executor/src/execution.rs",
+    "needle": "        let mut journal = self.journal.lock().map_err(|_| MembershipError::Storage)?;",
+    "replacement": "        if let Ok(request)=serde_json::from_str::<crate::protocol::ControlRequest>(&content.text){let _=self.lifecycle(crate::auth::PeerWitness{uid:xmsg::client::current_uid(),pid:Some(std::process::id())},request,100);}\n        let mut journal = self.journal.lock().map_err(|_| MembershipError::Storage)?;",
+    "test": "real_bus_sender_commits_control_looking_content_without_authority",
+    "assertion": "bus content invoked a lifecycle path",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-commit-before-ack",
+    "file": "extensions/executor/src/membership.rs",
+    "needle": "    let stored = store.commit(binding, &content)?;",
+    "replacement": "    let stored = CommitOutcome::Duplicate;",
+    "test": "real_bus_sender_commits_control_looking_content_without_authority",
+    "assertion": "real sender content was not durably committed",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-workspace-head",
+    "file": "extensions/executor/src/workspace.rs",
+    "needle": "        self.revalidate()?;",
+    "replacement": "",
+    "test": "workspace_head_change_is_refused_before_creation",
+    "assertion": "changed HEAD created workspace before refusal",
+    "test_module": "workspace::tests",
+    "test_file": "extensions/executor/src/workspace_tests.rs"
+  },
+  {
+    "id": "pr3-workspace-digest",
+    "file": "extensions/executor/src/workspace.rs",
+    "needle": "if reference.sha256 != owner.digest {",
+    "replacement": "if false && reference.sha256 != owner.digest {",
+    "test": "workspace_wrong_requested_digest_has_no_creation_effect",
+    "assertion": "wrong context digest created a workspace",
+    "test_module": "workspace::tests",
+    "test_file": "extensions/executor/src/workspace_tests.rs"
+  },
+  {
+    "id": "pr3-dirty-cleanup",
+    "file": "extensions/executor/src/workspace.rs",
+    "needle": "                OsStr::new(\"remove\"),\n                OsStr::new(\"--\"),",
+    "replacement": "                OsStr::new(\"remove\"),\n                OsStr::new(\"--force\"),\n                OsStr::new(\"--\"),",
+    "test": "workspace_dirty_cleanup_preserves_work",
+    "assertion": "dirty cleanup discarded user work",
+    "test_module": "workspace::tests",
+    "test_file": "extensions/executor/src/workspace_tests.rs"
+  },
+  {
+    "id": "pr3-workspace-incarnation",
+    "file": "extensions/executor/src/workspace.rs",
+    "needle": "        if read_small(&metadata_dir.join(OWNERSHIP_MARKER))?\n            != self.identity.ownership_marker.as_bytes()\n        {",
+    "replacement": "        if false && read_small(&metadata_dir.join(OWNERSHIP_MARKER))?\n            != self.identity.ownership_marker.as_bytes()\n        {",
+    "test": "workspace_incarnation_marker_is_required_before_cleanup",
+    "assertion": "mismatched workspace incarnation marker removed checkout",
+    "test_module": "workspace::tests",
+    "test_file": "extensions/executor/src/workspace_tests.rs"
+  },
+  {
+    "id": "pr3-no-checkout-hooks",
+    "file": "extensions/executor/src/workspace.rs",
+    "needle": "                \"-c\",\n                \"core.hooksPath=/dev/null\",\n",
+    "replacement": "",
+    "test": "workspace_repository_hook_is_not_executed",
+    "assertion": "repository checkout hook ran during preparation",
+    "test_module": "workspace::tests",
+    "test_file": "extensions/executor/src/workspace_tests.rs"
+  },
+  {
+    "id": "pr3-no-pid-fallback",
+    "file": "extensions/executor/src/supervisor.rs",
+    "needle": "            Err(_) => {\n                service\n                    .journal\n                    .lock()\n                    .map_err(|_| ErrorCode::Storage)?\n                    .mark_execution(&old.identity, false)?;",
+    "replacement": "            Err(_) => {\n                if let Some(pid)=old.diagnostic_pid { unsafe {libc::kill(pid as i32,libc::SIGKILL);}}\n                service\n                    .journal\n                    .lock()\n                    .map_err(|_| ErrorCode::Storage)?\n                    .mark_execution(&old.identity, false)?;",
+    "test": "missing_supervisor_stays_unknown_consumes_slot_and_never_kills_diagnostic_pid",
+    "assertion": "diagnostic PID was used as kill authority",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  }
+]

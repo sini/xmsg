@@ -461,6 +461,18 @@ fn broker_crash_after_spawn_reconciles_live_supervisor_without_relaunch() {
     let (mut broker, _barrier, event) = broker_at_barrier(&f, "after_spawn");
     let original = event["pid"].as_u64().unwrap();
     assert!(original > 0);
+    let state: String = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT state FROM executions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        state, "spawn_intent",
+        "OS child exists without durable spawn intent"
+    );
     broker.kill().unwrap();
     broker.wait().unwrap();
     let controller = SupervisorController::new(f.runtime.clone());
@@ -842,7 +854,12 @@ fn wrong_supervisor_nonce_cannot_stop_an_owned_backend() {
         .join(component("session-1", 1))
         .join("supervisor.sock");
     assert!(call(&socket, &wrong, true).is_err());
-    let after = call(&socket, &running.identity, false).unwrap();
+    let after = call(&socket, &running.identity, false);
+    assert!(
+        after.is_ok(),
+        "wrong nonce stopped the owned backend: {after:?}"
+    );
+    let after = after.unwrap();
     assert!(!after.stopped, "wrong nonce stopped the owned backend");
     assert_eq!(after.diagnostic_pid, running.diagnostic_pid.unwrap());
     assert_eq!(stop(&f, &controller).state, ExecutionState::Stopped);
@@ -867,9 +884,14 @@ fn missing_supervisor_stays_unknown_consumes_slot_and_never_kills_diagnostic_pid
         .unwrap();
     drop(lock);
     let mut bystander = Command::new(fake_runtime(&f).fixture.unwrap().python)
-        .args(["-c", "import sys;sys.stdin.read()"])
+        .args([
+            "-u",
+            "-c",
+            "import sys;[(print(line.strip(),flush=True)) for line in sys.stdin]",
+        ])
+        .env_clear()
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
@@ -885,8 +907,15 @@ fn missing_supervisor_stays_unknown_consumes_slot_and_never_kills_diagnostic_pid
     let after = controller
         .reconcile(&f.service, "session-1", 1, 101)
         .unwrap();
+    let challenge = bystander
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"still-owned\n");
+    let mut reply = String::new();
+    let answered = BufReader::new(bystander.stdout.as_mut().unwrap()).read_line(&mut reply);
     assert!(
-        bystander.try_wait().unwrap().is_none(),
+        challenge.is_ok() && matches!(answered,Ok(n)if n>0) && reply.trim() == "still-owned",
         "diagnostic PID was used as kill authority"
     );
     assert_eq!(after.state, ExecutionState::Unknown);
@@ -909,4 +938,445 @@ fn missing_supervisor_stays_unknown_consumes_slot_and_never_kills_diagnostic_pid
     assert_eq!(slots, 1, "unknown execution released its resource slot");
     bystander.kill().unwrap();
     bystander.wait().unwrap();
+}
+
+#[test]
+fn owned_group_stop_closes_a_real_grandchild_probe() {
+    let f = fixture();
+    admit(&f);
+    let probe = f.dir.path().join("grandchild.sock");
+    let listener = UnixListener::bind(&probe).unwrap();
+    let wrapper = f.dir.path().join("group_backend.py");
+    let original = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_acp_process.py");
+    let grandchild="import os,signal,sys; fd=int(sys.argv[1]); signal.alarm(30); os.write(fd,b'R'); signal.pause()";
+    let code=format!("import socket,subprocess,sys,runpy\ns=socket.socket(socket.AF_UNIX);s.connect({})\np=subprocess.Popen([sys.executable,'-c',{},str(s.fileno())],pass_fds=(s.fileno(),))\nrunpy.run_path({},run_name='__main__')\n",serde_json::to_string(&probe.to_string_lossy()).unwrap(),serde_json::to_string(grandchild).unwrap(),serde_json::to_string(&original.to_string_lossy()).unwrap());
+    fs::write(&wrapper, code).unwrap();
+    let mut runtime = fake_runtime(&f);
+    runtime.fixture.as_mut().unwrap().backend = wrapper;
+    let controller = SupervisorController::new(runtime);
+    controller.start_admitted(&f.service, 1, 100).unwrap();
+    let (mut stream, _) = listener.accept().unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut byte = [0];
+    stream.read_exact(&mut byte).unwrap();
+    assert_eq!(byte[0], b'R');
+    let stopped = stop(&f, &controller);
+    let observed = stream.read(&mut byte);
+    assert!(
+        matches!(observed, Ok(0)),
+        "owned process group left a child alive: {observed:?}"
+    );
+    assert_eq!(stopped.state, ExecutionState::Stopped);
+}
+
+#[test]
+fn concurrent_brokers_consume_one_launch_and_one_process() {
+    let f = fixture();
+    admit(&f);
+    let (mut parent, child) = UnixStream::pair().unwrap();
+    parent
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let mut config = fake_runtime(&f);
+    config.barrier = Some(FixtureBarrier {
+        point: "before_spawn".into(),
+        fd: child.as_raw_fd(),
+    });
+    let first = SupervisorController::new(config);
+    let second = SupervisorController::new(fake_runtime(&f));
+    std::thread::scope(|scope| {
+        let a = scope.spawn(|| first.start_admitted(&f.service, 1, 100));
+        let event: serde_json::Value = read_frame(&parent).unwrap();
+        assert_eq!(event["point"], "before_spawn");
+        let b = scope.spawn(|| second.start_admitted(&f.service, 1, 100));
+        parent.write_all(b"1").unwrap();
+        assert_eq!(a.join().unwrap().unwrap().state, ExecutionState::Running);
+        assert!(matches!(b.join().unwrap(), Err(SupervisorError::Busy)));
+    });
+    let count: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*) FROM executions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1, "concurrent claims created duplicate execution");
+    assert_eq!(stop(&f, &second).state, ExecutionState::Stopped);
+}
+#[test]
+fn authenticated_event_cursor_reconnect_is_bounded_and_monotonic() {
+    let f = fixture();
+    admit(&f);
+    let controller = SupervisorController::new(fake_runtime(&f));
+    let running = controller.start_admitted(&f.service, 1, 100).unwrap();
+    let socket = f
+        .runtime
+        .root
+        .join(component("session-1", 1))
+        .join("supervisor.sock");
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    frame(
+        &mut stream,
+        &SupervisorRequest::ReadEvents {
+            identity: running.identity.clone(),
+            after: 0,
+            max: 1,
+        },
+    )
+    .unwrap();
+    let response: SupervisorHello = read_frame(&stream).unwrap();
+    assert_eq!(response.events.len(), 1);
+    assert_eq!(response.events[0].cursor, 1);
+    assert_eq!(response.event_cursor, 2);
+    let lower = f.service.journal.lock().unwrap().mark_running(
+        &running.identity,
+        running.diagnostic_pid.unwrap(),
+        1,
+        101,
+    );
+    let stored = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .execution("session-1", 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.cursor, 2, "reconnect rolled event cursor backward");
+    assert!(lower.is_err());
+    assert_eq!(stop(&f, &controller).state, ExecutionState::Stopped);
+    let final_state = controller
+        .reconcile(&f.service, "session-1", 1, 102)
+        .unwrap();
+    assert_eq!(
+        final_state.state,
+        ExecutionState::Stopped,
+        "observed stop reverted to unknown"
+    );
+    assert_eq!(final_state.cursor, 3);
+}
+#[test]
+fn last_launch_check_rejects_changed_grant_after_reservation() {
+    let f = fixture();
+    admit(&f);
+    let lock = ExecutionLock::acquire(&f.runtime.root, "session-1", 1).unwrap();
+    let lease = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .reserve_launch(1, 100)
+        .unwrap();
+    let mut cfg = f.config.clone();
+    cfg.revision = 2;
+    cfg.grants.retain(|g| g.verb != Verb::Dispatch);
+    f.service
+        .admin(
+            peer(),
+            OWNER,
+            crate::control::AdminCommand::ReplacePolicy {
+                request_id: "late-grant".into(),
+                expected_revision: 1,
+                configuration: cfg,
+            },
+            101,
+        )
+        .unwrap();
+    let result = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .commit_spawn_intent(&lease, 101);
+    let state: String = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT state FROM executions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        state, "reserved",
+        "revoked launch committed an external spawn intent"
+    );
+    assert!(matches!(result, Err(ErrorCode::GrantDenied)));
+    drop(lock);
+}
+
+#[test]
+fn mismatched_live_hello_cannot_publish_running_state() {
+    for changed in ["nonce", "generation", "policy", "build", "protocol"] {
+        let f = fixture();
+        admit(&f);
+        let lock = ExecutionLock::acquire(&f.runtime.root, "session-1", 1).unwrap();
+        let lease = f
+            .service
+            .journal
+            .lock()
+            .unwrap()
+            .reserve_launch(1, 100)
+            .unwrap();
+        f.service
+            .journal
+            .lock()
+            .unwrap()
+            .commit_spawn_intent(&lease, 100)
+            .unwrap();
+        let socket = lock.directory.join("supervisor.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut bad = lease.identity.clone();
+        match changed {
+            "nonce" => bad.launch_nonce = "0".repeat(32),
+            "generation" => bad.generation += 1,
+            "policy" => bad.policy_revision += 1,
+            "build" => bad.build_version = "other-build".into(),
+            "protocol" => bad.protocol_version += 1,
+            _ => unreachable!(),
+        };
+        std::thread::scope(|scope| {
+            let server = scope.spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let _: SupervisorRequest = read_frame(&stream).unwrap();
+                frame(
+                    &mut stream,
+                    &SupervisorHello {
+                        identity: bad,
+                        event_cursor: 2,
+                        diagnostic_pid: std::process::id(),
+                        stopped: false,
+                        events: Vec::new(),
+                    },
+                )
+                .unwrap();
+            });
+            let result = SupervisorController::new(f.runtime.clone())
+                .reconcile(&f.service, "session-1", 1, 101)
+                .unwrap();
+            let state: String = f
+                .service
+                .journal
+                .lock()
+                .unwrap()
+                .db
+                .query_row("SELECT state FROM executions", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(
+                state, "unknown",
+                "mismatched live hello published running state"
+            );
+            assert_eq!(result.state, ExecutionState::Unknown);
+            server.join().unwrap();
+        });
+        drop(lock);
+    }
+}
+
+#[test]
+fn frozen_policy_change_after_reservation_cannot_commit_spawn_intent() {
+    let f = fixture();
+    admit(&f);
+    let lock = ExecutionLock::acquire(&f.runtime.root, "session-1", 1).unwrap();
+    let lease = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .reserve_launch(1, 100)
+        .unwrap();
+    let mut cfg = f.config.clone();
+    cfg.revision = 2;
+    f.service
+        .admin(
+            peer(),
+            OWNER,
+            crate::control::AdminCommand::ReplacePolicy {
+                request_id: "same-grants-new-policy".into(),
+                expected_revision: 1,
+                configuration: cfg,
+            },
+            101,
+        )
+        .unwrap();
+    let result = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .commit_spawn_intent(&lease, 101);
+    let state: String = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT state FROM executions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        state, "reserved",
+        "stale policy lease committed spawn intent"
+    );
+    assert!(matches!(result, Err(ErrorCode::RequestConflict)));
+    drop(lock);
+}
+#[test]
+fn live_supervisor_holds_execution_lock_after_broker_death() {
+    let f = fixture();
+    admit(&f);
+    let (mut broker, _barrier, _) = broker_at_barrier(&f, "after_spawn");
+    broker.kill().unwrap();
+    broker.wait().unwrap();
+    let duplicate = ExecutionLock::acquire(&f.runtime.root, "session-1", 1);
+    assert!(
+        matches!(duplicate, Err(SupervisorError::Busy)),
+        "supervisor lost its inherited execution lock"
+    );
+    let controller = SupervisorController::new(f.runtime.clone());
+    assert_eq!(
+        controller
+            .reconcile(&f.service, "session-1", 1, 101)
+            .unwrap()
+            .state,
+        ExecutionState::Running
+    );
+    assert_eq!(stop(&f, &controller).state, ExecutionState::Stopped);
+}
+#[test]
+fn content_store_deduplicates_before_ack_and_enforces_cumulative_execution_budget() {
+    use crate::membership::{CommitOutcome, ContentRecord, ContentStore, MembershipError};
+    let f = fixture();
+    let mut cfg = f.config.clone();
+    cfg.revision = 2;
+    cfg.defaults[0].resolved.budget.max_content_bytes = 2048;
+    f.service
+        .admin(
+            peer(),
+            OWNER,
+            crate::control::AdminCommand::ReplacePolicy {
+                request_id: "bounded-content".into(),
+                expected_revision: 1,
+                configuration: cfg,
+            },
+            99,
+        )
+        .unwrap();
+    admit(&f);
+    let controller = SupervisorController::new(fake_runtime(&f));
+    let running = controller.start_admitted(&f.service, 1, 100).unwrap();
+    let binding = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .proxy_binding(&running.identity)
+        .unwrap();
+    let mut store = &f.service;
+    let content = ContentRecord {
+        message_id: "message-a".into(),
+        from_name: "ordinary".into(),
+        text: "x".repeat(900),
+        envelope: "data".into(),
+        origin: xmsg::client::Origin {
+            node: "node".into(),
+            id: None,
+            service: Some("sender".into()),
+            label: None,
+        },
+        attachments: Vec::new(),
+        in_reply_to: None,
+    };
+    assert_eq!(
+        store.commit(&binding, &content).unwrap(),
+        CommitOutcome::Inserted
+    );
+    assert_eq!(
+        store.commit(&binding, &content).unwrap(),
+        CommitOutcome::Duplicate
+    );
+    let mut changed = content.clone();
+    changed.text = "changed".into();
+    assert!(matches!(
+        store.commit(&binding, &changed),
+        Err(MembershipError::MessageConflict)
+    ));
+    let mut second = content;
+    second.message_id = "message-b".into();
+    let result = store.commit(&binding, &second);
+    let count: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*) FROM execution_content", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1, "execution cumulative content budget was exceeded");
+    assert!(matches!(result, Err(MembershipError::ContentLimit)));
+    assert_eq!(stop(&f, &controller).state, ExecutionState::Stopped);
+}
+
+#[test]
+fn current_generation_content_binding_is_checked_before_durable_row() {
+    use crate::membership::{ContentRecord, ContentStore, MembershipError};
+    let f = fixture();
+    admit(&f);
+    let controller = SupervisorController::new(fake_runtime(&f));
+    let running = controller.start_admitted(&f.service, 1, 100).unwrap();
+    let binding = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .proxy_binding(&running.identity)
+        .unwrap();
+    f.service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .execute("UPDATE sessions SET generation=2", [])
+        .unwrap();
+    let content = ContentRecord {
+        message_id: "stale-content".into(),
+        from_name: "sender".into(),
+        text: "data".into(),
+        envelope: "data".into(),
+        origin: xmsg::client::Origin {
+            node: "node".into(),
+            id: None,
+            service: Some("sender".into()),
+            label: None,
+        },
+        attachments: Vec::new(),
+        in_reply_to: None,
+    };
+    let result = (&f.service).commit(&binding, &content);
+    let count: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*) FROM execution_content", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0, "stale generation content reached durable row");
+    assert!(matches!(result, Err(MembershipError::StaleGeneration)));
+    f.service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .execute("UPDATE sessions SET generation=1", [])
+        .unwrap();
+    assert_eq!(stop(&f, &controller).state, ExecutionState::Stopped);
 }
