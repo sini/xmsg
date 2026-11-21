@@ -275,3 +275,11 @@ external effect could not be proved. The slot stays reserved. Reconnect must
 reconcile the existing execution; guessing that a saved PID is dead and starting
 another child could duplicate work. Workspace cleanup also refuses to discard
 modified files. See the [supervisor boundary](/reference/executor-contracts/#supervisor-and-workspace-boundary).
+
+
+A supervisor socket-path refusal reports the path's byte count and the platform
+capacity. macOS permits 104 bytes including the terminating NUL; long temporary
+or application-support paths can exceed that. Embedders should use
+`OwnerRuntimeConfig::for_user` or pass a shorter explicit `runtime_root` to
+`OwnerRuntimeConfig::new`. Invalid or overly permissive runtime directories are
+refused without chmod or takeover. See the [runtime socket location](/reference/executor-contracts/#runtime-socket-location).
