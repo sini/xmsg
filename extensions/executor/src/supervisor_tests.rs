@@ -14,6 +14,181 @@ use crate::{
 use std::os::unix::fs::PermissionsExt;
 const OWNER: &[u8] = b"synthetic-owner-only-proof-0000000000";
 const HUMAN: &[u8] = b"synthetic-human-only-proof-0000000000";
+
+#[test]
+fn long_socket_path_refuses_before_execution_or_workspace_effects() {
+    let f = fixture();
+    admit(&f);
+    let mut runtime = fake_runtime(&f);
+    runtime.root = f.runtime.root.join("x".repeat(120));
+    runtime.fixture.as_mut().unwrap().executable = f.dir.path().join("absent-fixture");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&runtime.root)
+        .unwrap();
+    let root = runtime.root.clone();
+    let result = SupervisorController::new(runtime).start_admitted(&f.service, 1, 101);
+    assert!(
+        fs::read_dir(&root).unwrap().next().is_none(),
+        "overlong socket created runtime effects"
+    );
+    let count: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*) FROM executions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0, "overlong socket reserved execution");
+    assert!(
+        matches!(result, Err(SupervisorError::SocketPath { .. })),
+        "overlong socket must fail with typed capacity refusal"
+    );
+}
+
+#[test]
+fn runtime_namespace_refuses_precreation_without_taking_it_over() {
+    let f = fixture();
+    let mut runtime = fake_runtime(&f);
+    runtime.root = f.runtime.root.join("namespace");
+    runtime.namespace_identity = Some(b"exact-journal-identity".to_vec());
+    fs::create_dir(&runtime.root).unwrap();
+    fs::set_permissions(&runtime.root, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(runtime.ensure_root().is_err());
+    assert_eq!(fs::metadata(&runtime.root).unwrap().mode() & 0o777, 0o755);
+    assert!(
+        fs::read_dir(&runtime.root).unwrap().next().is_none(),
+        "permissive namespace gained identity marker"
+    );
+    fs::remove_dir(&runtime.root).unwrap();
+    runtime.ensure_root().unwrap();
+    fs::set_permissions(&runtime.root, fs::Permissions::from_mode(0o755)).unwrap();
+    admit(&f);
+    runtime.fixture.as_mut().unwrap().executable = f.dir.path().join("absent-fixture");
+    let result = SupervisorController::new(runtime.clone()).start_admitted(&f.service, 1, 101);
+    assert_eq!(
+        fs::read_dir(&runtime.root).unwrap().count(),
+        1,
+        "permissive precreated namespace reached execution effects"
+    );
+    assert!(matches!(result, Err(SupervisorError::Directory)));
+    fs::remove_file(runtime.root.join("journal.identity")).unwrap();
+    fs::remove_dir(&runtime.root).unwrap();
+    std::os::unix::fs::symlink(&f.runtime.root, &runtime.root).unwrap();
+    assert!(matches!(
+        runtime.ensure_root(),
+        Err(SupervisorError::Directory)
+    ));
+    assert!(fs::symlink_metadata(&runtime.root)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[test]
+fn runtime_namespace_identity_collision_never_adopts_existing_root() {
+    let f = fixture();
+    let mut runtime = fake_runtime(&f);
+    runtime.root = f.runtime.root.join("namespace");
+    runtime.namespace_identity = Some(b"journal-one".to_vec());
+    runtime.ensure_root().unwrap();
+    runtime.ensure_root().unwrap();
+    runtime.namespace_identity = Some(b"journal-two".to_vec());
+    assert!(
+        matches!(runtime.ensure_root(), Err(SupervisorError::Directory)),
+        "different journal identity adopted existing namespace"
+    );
+    assert_eq!(
+        fs::read(runtime.root.join("journal.identity")).unwrap(),
+        b"journal-one"
+    );
+}
+
+#[test]
+fn runtime_directory_metadata_rejects_other_uid_at_component_scope() {
+    let uid = xmsg::client::current_uid();
+    assert!(private_directory_metadata(true, uid, 0o700, uid));
+    assert!(
+        !private_directory_metadata(true, uid.wrapping_add(1), 0o700, uid),
+        "foreign UID metadata was accepted"
+    );
+}
+
+#[test]
+fn configured_xdg_parent_refuses_invalid_directory_without_fallback() {
+    let f = fixture();
+    let cwd = std::env::current_dir().unwrap();
+    let relative = PathBuf::from("../".repeat(cwd.components().count() - 1))
+        .join(f.runtime.root.strip_prefix("/").unwrap());
+    assert_eq!(relative.canonicalize().unwrap(), f.runtime.root);
+    assert!(
+        matches!(
+            checked_xdg_parent(&relative),
+            Err(SupervisorError::Directory)
+        ),
+        "relative XDG root was accepted"
+    );
+    assert_eq!(checked_xdg_parent(&f.runtime.root).unwrap(), f.runtime.root);
+    fs::set_permissions(&f.runtime.root, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        matches!(
+            checked_xdg_parent(&f.runtime.root),
+            Err(SupervisorError::Directory)
+        ),
+        "permissive XDG root was accepted"
+    );
+    assert!(fs::read_dir(&f.runtime.root).unwrap().next().is_none());
+}
+
+#[test]
+fn for_user_chooses_readonly_namespace_and_unavailable_backend_has_no_effects() {
+    let f = fixture();
+    admit(&f);
+    let runtime = OwnerRuntimeConfig::for_user(
+        &f.dir.path().join("journal.db"),
+        f.runtime.workspace.clone(),
+    )
+    .unwrap();
+    assert!(!runtime.root.exists());
+    let root = runtime.root.clone();
+    let result = SupervisorController::new(runtime).start_admitted(&f.service, 1, 101);
+    assert!(matches!(result, Err(SupervisorError::BackendUnavailable)));
+    assert!(
+        !root.exists(),
+        "unavailable backend created default runtime namespace"
+    );
+}
+
+#[test]
+fn missing_startup_connection_is_bounded_and_child_is_reaped() {
+    let f = fixture();
+    let listener = UnixListener::bind(f.dir.path().join("missing.sock")).unwrap();
+    let python = fake_runtime(&f).fixture.unwrap().python;
+    let child = Command::new(python)
+        .args(["-c", "import sys; sys.stdin.buffer.read()"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id() as libc::pid_t;
+    {
+        let _child = FixtureDaemon(child);
+        let failure = accept_fixture(&listener, "forced absent startup").unwrap_err();
+        assert_eq!(failure.kind(), std::io::ErrorKind::TimedOut);
+        assert!(failure.to_string().contains("forced absent startup"));
+    }
+    assert_eq!(
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+        -1
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD),
+        "fixture child was not reaped"
+    );
+}
 struct Fixture {
     dir: tempfile::TempDir,
     service: ControlService,
@@ -37,8 +212,13 @@ fn git(repo: &Path, args: &[&str]) -> String {
     String::from_utf8(o.stdout).unwrap().trim().into()
 }
 fn fixture() -> Fixture {
-    let dir = tempfile::tempdir().unwrap();
+    let base = Path::new("/tmp").canonicalize().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("xe-")
+        .tempdir_in(base)
+        .unwrap();
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    private_directory(dir.path()).unwrap();
     let repo = dir.path().join("repo");
     let roots = dir.path().join("worktrees");
     let runtime = dir.path().join("runtime");
@@ -236,7 +416,7 @@ struct BrokerFixture {
     point: String,
     fd: RawFd,
 }
-fn spawn_broker(f: &Fixture, point: &str, backend: Option<PathBuf>) -> (Child, UnixStream) {
+fn spawn_broker(f: &Fixture, point: &str, backend: Option<PathBuf>) -> (FixtureDaemon, UnixStream) {
     let (parent, child) = UnixStream::pair().unwrap();
     parent
         .set_read_timeout(Some(Duration::from_secs(30)))
@@ -292,11 +472,11 @@ fn spawn_broker(f: &Fixture, point: &str, backend: Option<PathBuf>) -> (Child, U
             Ok(())
         });
     }
-    let broker = command.spawn().unwrap();
+    let broker = FixtureDaemon(command.spawn().unwrap());
     drop(child);
     (broker, parent)
 }
-fn broker_at_barrier(f: &Fixture, point: &str) -> (Child, UnixStream, serde_json::Value) {
+fn broker_at_barrier(f: &Fixture, point: &str) -> (FixtureDaemon, UnixStream, serde_json::Value) {
     let (mut broker, parent) = spawn_broker(f, point, None);
     let event = match read_frame(&parent) {
         Ok(event) => event,
@@ -609,6 +789,46 @@ fn real_sender(
     (sender, parent, ids)
 }
 struct FixtureDaemon(Child);
+impl std::ops::Deref for FixtureDaemon {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for FixtureDaemon {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+fn accept_fixture(listener: &UnixListener, phase: &str) -> std::io::Result<UnixStream> {
+    listener.set_nonblocking(true)?;
+    let expires = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return Ok(stream),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(e),
+        }
+        let left = expires.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("fixture phase {phase}: no startup connection"),
+            ));
+        }
+        let mut p = libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let wait = i32::try_from(left.as_millis().saturating_add(1)).unwrap_or(i32::MAX);
+        let ready = unsafe { libc::poll(&mut p, 1, wait) };
+        if ready < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+}
+
 impl Drop for FixtureDaemon {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -982,7 +1202,7 @@ fn owned_group_stop_closes_a_real_grandchild_probe() {
     runtime.fixture.as_mut().unwrap().backend = wrapper;
     let controller = SupervisorController::new(runtime);
     controller.start_admitted(&f.service, 1, 100).unwrap();
-    let (mut stream, _) = listener.accept().unwrap();
+    let mut stream = accept_fixture(&listener, "backend probe").unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
@@ -1185,7 +1405,7 @@ fn mismatched_live_hello_cannot_publish_running_state() {
         };
         std::thread::scope(|scope| {
             let server = scope.spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
+                let mut stream = accept_fixture(&listener, "backend probe").unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(3)))
                     .unwrap();
@@ -1467,7 +1687,7 @@ fn resistant_descendant_stop_is_unknown_and_retains_slot_and_workspace() {
     cfg.fixture.as_mut().unwrap().backend = wrapper;
     let controller = SupervisorController::new(cfg);
     controller.start_admitted(&f.service, 1, 100).unwrap();
-    let (mut stream, _) = listener.accept().unwrap();
+    let mut stream = accept_fixture(&listener, "backend probe").unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
@@ -1515,7 +1735,7 @@ fn broker_death_during_initialize_cannot_bypass_supervisor_wall_budget() {
     let listener = UnixListener::bind(&probe).unwrap();
     let backend = budget_probe_backend(&f, &probe, true);
     let (mut broker, _barrier) = spawn_broker(&f, "after_spawn", Some(backend));
-    let (mut stream, _) = listener.accept().unwrap();
+    let mut stream = accept_fixture(&listener, "backend probe").unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -1548,7 +1768,7 @@ fn stalled_accepted_client_cannot_postpone_execution_wall_budget() {
     cfg.fixture.as_mut().unwrap().accept_probe = Some(accepted);
     let controller = SupervisorController::new(cfg);
     let running = controller.start_admitted(&f.service, 1, 100).unwrap();
-    let (mut backend, _) = backend_listener.accept().unwrap();
+    let mut backend = accept_fixture(&backend_listener, "wall-budget backend").unwrap();
     backend
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -1561,7 +1781,7 @@ fn stalled_accepted_client_cannot_postpone_execution_wall_budget() {
         .join("supervisor.sock");
     let mut client = UnixStream::connect(socket).unwrap();
     client.write_all(b"{").unwrap();
-    let (accepted_signal, _) = accepted_listener.accept().unwrap();
+    let accepted_signal = accept_fixture(&accepted_listener, "client accepted").unwrap();
     let accepted_text: String = read_frame(&accepted_signal).unwrap();
     assert_eq!(accepted_text, "accepted");
     let ended = backend.read(&mut byte);
@@ -1584,7 +1804,7 @@ fn held_backend_exit_is_observed_before_attach_can_publish_running() {
     cfg.fixture.as_mut().unwrap().backend = script;
     let controller = SupervisorController::new(cfg);
     controller.start_admitted(&f.service, 1, 100).unwrap();
-    let (mut stream, _) = listener.accept().unwrap();
+    let mut stream = accept_fixture(&listener, "backend probe").unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
