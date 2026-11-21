@@ -1324,3 +1324,8 @@ mod process_observation_tests {
             .load(Ordering::Acquire));
     }
 }
+pub(crate) fn strict_registration_connected(info: &SvcSessionInfo) -> bool {
+    info.liveness
+        .as_ref()
+        .is_some_and(|witness| witness.connected.load(Ordering::Acquire))
+}
