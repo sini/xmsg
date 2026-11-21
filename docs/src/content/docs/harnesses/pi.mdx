@@ -57,3 +57,13 @@ to authorized readers, subject to its [context controls](/reference/cli-and-mcp/
 
 A reporter sends the context actions on its registered `register.sock` connection.
 See the [socket frames](/reference/http-and-sockets/#session-context-tags).
+
+## Activity export hook
+
+<Status id="fleet-observer.activity-export" />
+
+Set `XMSG_ACTIVITY=1` to enable the in-process activity handler in
+`extensions/pi/index.ts` (stamping per-session `native_seq`; delivery handlers
+remain untouched). Maps `agent_start`/`turn_start` -> `working`,
+`ui_prompt_start`/`end` -> `blocked(input)`/`working`, `agent_settled` ->
+`idle` (`agent_end` is not treated as idle).

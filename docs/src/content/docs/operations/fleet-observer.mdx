@@ -452,3 +452,36 @@ relay storage keys preserve this distinction without changing exporter JSON.
 Downgrading to an older collector **permanently deletes relay history**, including
 up to seven days of metadata; direct history remains subject to normal retention.
 A later upgrade starts a fresh relay poll, without restoring deleted history.
+
+## Session activity export
+
+<Status id="fleet-observer.activity-export" />
+
+### Coordinated export v2 rollout
+
+Observe export `v=2` is a breaking cut with no dual serving (`v=1` and omitted
+`v` return HTTP 400). Upgrade node daemons, relay hubs, and collectors
+together. Reference Home Manager packaging (`programs.xmsg.activity.enable`) is
+one way to configure it, not a requirement.
+
+### Plain-daemon install and rollback
+
+1. **Enable:** Start each node daemon with `xmsg serve --activity` (optional
+   `--activity-correlated` only where native tool IDs are proven on both edges;
+   `turn` resolution is the default).
+2. **Install hooks:** Add `xmsg activity hook <harness>` entries beside (never
+   inside) delivery hooks per harness, or set `XMSG_ACTIVITY=1` for in-process
+   extensions (`opencode`, `pi`, `hermes`). Re-applying the snippet is
+   idempotent.
+3. **Budgets & aging:** Daemon ingest uses a separate 256-frame per-endpoint
+   coalesced queue (`unknown(evidence_lost)` on drop), 10 transitions/s node
+   token bucket, 2,000-row / 2 MiB activity journal budget, 1,024-row
+   `session_activity` table, and monotonic aging (`working` 30m, `blocked` 24h ->
+   `unknown(aged)`). Daemon restart marks `working`/`blocked` as
+   `unknown(restarted)` and emits a `writer_restart` gap.
+4. **No-provider local test:** Run one `xmsg serve --activity` node and one
+   `xmsg observe-collector` on loopback with no OIDC provider, reverse proxy, or
+   hosted service.
+5. **Rollback:** Stop the daemon, run the previous v1 binary across node, relay
+   hub, and collector, and remove the `xmsg activity hook` entries. Delivery
+   hooks remain untouched.

@@ -421,3 +421,66 @@ def register(ctx):
     ctx.register_hook("pre_llm_call", x.pre_llm_call)
     ctx.register_hook("on_session_reset", x.on_session_reset)
     ctx.register_hook("on_session_finalize", x.on_session_finalize)
+    if os.environ.get("XMSG_ACTIVITY") == "1":
+        _register_activity_hooks(ctx)
+
+
+_ACTIVITY_SEQS = {}
+
+
+def _emit_hermes_activity(ev, session_id, block=None, correlation=None):
+    if not session_id:
+        return
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if not runtime:
+        return
+    seq = _ACTIVITY_SEQS.get(session_id, 0) + 1
+    _ACTIVITY_SEQS[session_id] = seq
+    payload = {
+        "action": "activity",
+        "schema_version": 1,
+        "harness": "hermes",
+        "event": ev,
+        "session": str(session_id),
+        "native_seq": seq,
+        "background": "absent",
+        "wake": "absent",
+    }
+    if block:
+        payload["block"] = block
+    if correlation:
+        payload["correlation"] = str(correlation)
+    raw = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(raw) > 1024:
+        return
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(0.05)
+        s.connect(os.path.join(runtime, "xmsg", "agent.sock"))
+        s.sendall(raw)
+        s.close()
+    except Exception:
+        pass
+
+
+def _register_activity_hooks(ctx):
+    def _sid(event_ctx):
+        if isinstance(event_ctx, dict):
+            return event_ctx.get("session_id")
+        return getattr(event_ctx, "session_id", None)
+
+    for ev in ("pre_llm_call", "pre_tool_call", "post_llm_call", "on_session_end"):
+        ctx.register_hook(ev, lambda ec=None, _ev=ev: _emit_hermes_activity(_ev, _sid(ec)))
+
+    def _on_human_input(ec=None):
+        kind = ec.get("kind") if isinstance(ec, dict) else getattr(ec, "kind", None)
+        cid = ec.get("id") if isinstance(ec, dict) else getattr(ec, "id", None)
+        blk = "input" if kind == "clarify" else "permission"
+        _emit_hermes_activity("on_human_input_request", _sid(ec), block=blk, correlation=cid)
+
+    def _post_approval(ec=None):
+        cid = ec.get("id") if isinstance(ec, dict) else getattr(ec, "id", None)
+        _emit_hermes_activity("post_approval_response", _sid(ec), correlation=cid)
+
+    ctx.register_hook("on_human_input_request", _on_human_input)
+    ctx.register_hook("post_approval_response", _post_approval)

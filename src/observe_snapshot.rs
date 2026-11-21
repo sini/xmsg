@@ -63,6 +63,7 @@ pub(crate) fn collect(state: &std::sync::Arc<FedState>) -> (Vec<SnapshotRecord>,
                     let id: String = row.get(0)?;
                     let source: String = row.get(1)?;
                     let context = project(connection, &id, &source, Surface::Observe);
+                    let activity = crate::activity::runtime_snapshot_state(&state.db, &id);
                     records.push(SnapshotRecord {
                         id,
                         kind,
@@ -71,6 +72,7 @@ pub(crate) fn collect(state: &std::sync::Arc<FedState>) -> (Vec<SnapshotRecord>,
                         source_at: row.get(2)?,
                         label: row.get(3)?,
                         context,
+                        activity,
                     });
                 }
                 Ok(())
@@ -88,6 +90,7 @@ pub(crate) fn collect(state: &std::sync::Arc<FedState>) -> (Vec<SnapshotRecord>,
                 source_at: Some(value.registered_at),
                 label: Some(label(&value.name)),
                 context: None,
+                activity: None,
             });
         }
     }
@@ -103,6 +106,10 @@ pub(crate) fn collect(state: &std::sync::Arc<FedState>) -> (Vec<SnapshotRecord>,
                 context: connection
                     .as_ref()
                     .and_then(|db| project(db, &value.conversation_id, "agy", Surface::Observe)),
+                activity: crate::activity::runtime_snapshot_state(
+                    &state.db,
+                    &value.conversation_id,
+                ),
             });
         }
     }
@@ -118,6 +125,7 @@ pub(crate) fn collect(state: &std::sync::Arc<FedState>) -> (Vec<SnapshotRecord>,
                 context: connection
                     .as_ref()
                     .and_then(|db| project(db, &value.session_id, "pi", Surface::Observe)),
+                activity: crate::activity::runtime_snapshot_state(&state.db, &value.session_id),
             });
         }
     }

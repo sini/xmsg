@@ -187,7 +187,7 @@ fn hold_writer<T>(
 async fn source_bound(cache: Cache) {
     let fixture = PostAuthFixture::new();
     fixture.populate(cache);
-    let (status, page) = fixture.snapshot("?v=1").await;
+    let (status, page) = fixture.snapshot("?v=2").await;
     assert_eq!(
         status,
         200,
@@ -219,7 +219,7 @@ async fn nonblocking_cache(cache: Cache) {
         .await
         .expect("fixture cache writer did not acquire its lock")
         .unwrap();
-    let (status, page) = fixture.snapshot("?v=1").await;
+    let (status, page) = fixture.snapshot("?v=2").await;
     release_tx.send(()).unwrap();
     holder.await.unwrap();
     assert_eq!(
@@ -230,7 +230,7 @@ async fn nonblocking_cache(cache: Cache) {
     );
     assert_eq!(page["available"], "partial");
     assert_eq!(
-        fixture.snapshot("?v=1").await.0,
+        fixture.snapshot("?v=2").await.0,
         200,
         "released cache lock did not recover"
     );
@@ -239,14 +239,19 @@ async fn nonblocking_cache(cache: Cache) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snapshot_rejects_unsupported_versions_after_auth() {
     let fixture = PostAuthFixture::new();
-    let (status, page) = fixture.snapshot("?v=1").await;
+    let (status, page) = fixture.snapshot("?v=2").await;
     assert_eq!(status, 200);
-    assert_eq!(page["v"], 1);
+    assert_eq!(page["v"], 2);
     assert_eq!(page["available"], "partial");
     assert_eq!(
-        fixture.snapshot("?v=2").await.0,
+        fixture.snapshot("?v=1").await.0,
         400,
-        "snapshot accepted an unsupported version after authentication"
+        "snapshot accepted v=1 after authentication"
+    );
+    assert_eq!(
+        fixture.snapshot("").await.0,
+        400,
+        "snapshot accepted omitted v after authentication"
     );
 }
 
@@ -305,7 +310,7 @@ async fn observe_snapshot_publishes_and_masks_live_session_context() {
             .unwrap()
             .clone()
     };
-    let (status, page) = fixture.snapshot("?v=1").await;
+    let (status, page) = fixture.snapshot("?v=2").await;
     assert_eq!(status, 200);
     assert_eq!(endpoint(page)["context"]["task"], "example");
     {
@@ -316,7 +321,7 @@ async fn observe_snapshot_publishes_and_masks_live_session_context() {
         )
         .unwrap();
     }
-    let (_, page) = fixture.snapshot("?v=1").await;
+    let (_, page) = fixture.snapshot("?v=2").await;
     let masked = endpoint(page);
     assert!(masked["context"].get("task").is_none());
     assert_eq!(masked["context"]["branch"], "public-feature");
@@ -328,6 +333,6 @@ async fn observe_snapshot_publishes_and_masks_live_session_context() {
         )
         .unwrap();
     }
-    let (_, page) = fixture.snapshot("?v=1").await;
+    let (_, page) = fixture.snapshot("?v=2").await;
     assert!(endpoint(page).get("context").is_none());
 }

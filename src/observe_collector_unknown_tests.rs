@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 const NODE: &str = "fixture.node";
 fn packet(kind: &str) -> Value {
-    json!({"v":1,"node":NODE,"epoch":"future-epoch","scope":"a".repeat(64),
+    json!({"v":2,"node":NODE,"epoch":"future-epoch","scope":"a".repeat(64),
         "events":[
             {"sequence":1,"observed_at":1000,"persisted_at":1000,"kind":"message_recorded","available":"not_recorded"},
             {"sequence":2,"observed_at":1000,"persisted_at":1000,"kind":kind,"available":"not_recorded"},

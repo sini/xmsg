@@ -402,7 +402,7 @@ async fn whole_rpc_deadline_aborts_header_and_body_drivers() {
 async fn wire_schema_and_fixed_paths_preserve_explicit_backfill() {
     let fixture = Fixture::new().await;
     let client = Client::new(&fixture.load().unwrap()).unwrap();
-    fixture.set_response("200 OK","",br#"{"v":1,"node":"fixture.node","scope":"x","observed_at":100,"endpoints":[],"truncated":false,"available":"available","body":"synthetic-body-canary"}"#);
+    fixture.set_response("200 OK","",br#"{"v":2,"node":"fixture.node","scope":"x","observed_at":100,"endpoints":[],"truncated":false,"available":"available","body":"synthetic-body-canary"}"#);
     assert!(
         matches!(client.snapshot(0).await, Err(Error::Malformed)),
         "unknown exporter field accepted"
@@ -411,9 +411,9 @@ async fn wire_schema_and_fixed_paths_preserve_explicit_backfill() {
     fixture.set_response("200 OK", "", br#"{}"#);
     let _ = client.events(0, None, None, 0).await;
     let ledger = fixture.ledger.lock().unwrap();
-    assert!(ledger[0].starts_with("GET /fed/v2/observe/snapshot?v=1&labels=false "));
+    assert!(ledger[0].starts_with("GET /fed/v2/observe/snapshot?v=2&labels=false "));
     assert!(
-        ledger[1].starts_with("GET /fed/v2/observe/events?v=1&after=0&limit=200&labels=false "),
+        ledger[1].starts_with("GET /fed/v2/observe/events?v=2&after=0&limit=200&labels=false "),
         "initial history did not use explicit zero cursor"
     );
     assert!(
@@ -719,8 +719,8 @@ async fn closed_wire_object(which: &str) {
     let fixture = Fixture::new().await;
     let client = Client::new(&fixture.load().unwrap()).unwrap();
     let node = fixture.config["sources"][0]["node"].as_str().unwrap();
-    let mut snapshot = json!({"v":1,"node":node,"scope":"a".repeat(64),"observed_at":1000,"endpoints":[{"id":format!("fixture@{node}"),"node":node,"kind":"service","harness":"unknown","state":"registered"}],"truncated":false,"available":"available"});
-    let mut page = json!({"v":1,"node":node,"epoch":"fixture-epoch","scope":"a".repeat(64),"events":[{"sequence":1,"observed_at":1000,"persisted_at":1000,"kind":"message_recorded","available":"not_recorded"}],"next":1,"has_more":false,"gaps":[{"reason":"queue_loss","unknown_loss":true}],"available":true});
+    let mut snapshot = json!({"v":2,"node":node,"scope":"a".repeat(64),"observed_at":1000,"endpoints":[{"id":format!("fixture@{node}"),"node":node,"kind":"service","harness":"unknown","state":"registered"}],"truncated":false,"available":"available","activity":{"status":"disabled","complete":true}});
+    let mut page = json!({"v":2,"node":node,"epoch":"fixture-epoch","scope":"a".repeat(64),"events":[{"sequence":1,"observed_at":1000,"persisted_at":1000,"kind":"message_recorded","available":"not_recorded"}],"next":1,"has_more":false,"gaps":[{"reason":"queue_loss","unknown_loss":true}],"available":true});
     let is_snapshot = matches!(which, "snapshot" | "endpoint");
     let positive = if is_snapshot { &snapshot } else { &page };
     fixture.set_response("200 OK", "", &serde_json::to_vec(positive).unwrap());
@@ -774,7 +774,7 @@ async fn incoming_unknown_snapshot_refuses() {
 async fn unknown_event_kinds_preserve_other_enum_refusals() {
     let fixture = Fixture::new().await;
     let client = Client::new(&fixture.load().unwrap()).unwrap();
-    let mut page = json!({"v":1,"node":fixture.config["sources"][0]["node"],"epoch":"fixture-epoch","scope":"a".repeat(64),"events":[],"next":0,"has_more":false,"gaps":[],"available":true});
+    let mut page = json!({"v":2,"node":fixture.config["sources"][0]["node"],"epoch":"fixture-epoch","scope":"a".repeat(64),"events":[],"next":0,"has_more":false,"gaps":[],"available":true});
     fixture.set_response("200 OK", "", &serde_json::to_vec(&page).unwrap());
     client.events(0, None, None, 0).await.unwrap();
     page["events"] = json!([{"sequence":1,"observed_at":1000,"persisted_at":1000,"kind":"agent_read_completed","available":"not_recorded"}]);
@@ -891,7 +891,7 @@ async fn relay_transport_fixed_status_path_and_no_bearer() {
         let ledger = fixture.ledger.lock().unwrap();
         let request = ledger.last().unwrap();
         assert!(
-            request.starts_with("GET /fed/v2/observe/relay/leaf.fleet/snapshot?v=1&labels=false "),
+            request.starts_with("GET /fed/v2/observe/relay/leaf.fleet/snapshot?v=2&labels=false "),
             "relay request did not use configured leaf snapshot path: {status}"
         );
         assert!(
@@ -1055,12 +1055,12 @@ async fn relay_dto_binding_and_future_kind_persist_configured_origin() {
         Arc::new(|| 1000),
     )
     .unwrap();
-    let snapshot = json!({"v":1,"node":node,"scope":"a".repeat(64),"observed_at":1000,"endpoints":[],"truncated":false,"available":"available"});
+    let snapshot = json!({"v":2,"node":node,"scope":"a".repeat(64),"observed_at":1000,"endpoints":[],"truncated":false,"available":"available","activity":{"status":"disabled","complete":true}});
     fixture.set_response("200 OK", "", &serde_json::to_vec(&snapshot).unwrap());
     store
         .ingest_snapshot(node, client.snapshot(0).await.unwrap())
         .unwrap();
-    let page = json!({"v":1,"node":node,"epoch":"relay-fixture","scope":"a".repeat(64),"events":[{"sequence":1,"observed_at":1000,"persisted_at":1000,"kind":"future_relay_fixture","available":"not_recorded"}],"next":1,"has_more":false,"gaps":[],"available":true});
+    let page = json!({"v":2,"node":node,"epoch":"relay-fixture","scope":"a".repeat(64),"events":[{"sequence":1,"observed_at":1000,"persisted_at":1000,"kind":"future_relay_fixture","available":"not_recorded"}],"next":1,"has_more":false,"gaps":[],"available":true});
     fixture.set_response("200 OK", "", &serde_json::to_vec(&page).unwrap());
     reset_spacing(&client);
     store
@@ -1214,7 +1214,7 @@ async fn relay_equal_display_hubs_at_distinct_addresses_both_succeed() {
     for (index, fixture) in fixtures.iter().enumerate() {
         let leaf = format!("leaf{index}.fleet");
         sources.push(json!({"node":leaf,"relay":{"hub":identities[index],"leaf":format!("spiffe://fleet/ns/fleet/sa/leaf{index}"),"address":fixture.net.config["sources"][0]["address"],"ca":fixture.ca_file}}));
-        fixture.net.set_response("200 OK","",&serde_json::to_vec(&json!({"v":1,"node":leaf,"scope":"a".repeat(64),"observed_at":1000,"endpoints":[],"truncated":false,"available":"available"})).unwrap());
+        fixture.net.set_response("200 OK","",&serde_json::to_vec(&json!({"v":2,"node":leaf,"scope":"a".repeat(64),"observed_at":1000,"endpoints":[],"truncated":false,"available":"available","activity":{"status":"disabled","complete":true}})).unwrap());
     }
     assert_ne!(
         sources[0]["relay"]["address"], sources[1]["relay"]["address"],
@@ -1245,7 +1245,7 @@ async fn relay_equal_display_hubs_at_distinct_addresses_both_succeed() {
         );
         assert!(
             fixture.net.ledger.lock().unwrap()[0].starts_with(&format!(
-                "GET /fed/v2/observe/relay/leaf{index}.fleet/snapshot?v=1&labels=false "
+                "GET /fed/v2/observe/relay/leaf{index}.fleet/snapshot?v=2&labels=false "
             )),
             "distinct hub destination received wrong configured leaf path: hub {index}"
         );

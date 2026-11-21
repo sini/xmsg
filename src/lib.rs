@@ -1,4 +1,6 @@
 #[cfg(feature = "daemon")]
+pub mod activity;
+#[cfg(feature = "daemon")]
 pub mod adapter;
 #[cfg(feature = "daemon")]
 pub mod agent;

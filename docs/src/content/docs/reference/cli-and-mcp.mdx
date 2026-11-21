@@ -692,3 +692,16 @@ The mask surfaces are `local`, `federation`, and `observe`. Set
 Send `SIGHUP` to reload a changed policy file.
 
 See the [socket contract](/reference/http-and-sockets/#session-context-tags) for writes, freshness, and the wire upgrade.
+
+## `xmsg serve --activity` and `xmsg activity hook`
+
+<Status id="fleet-observer.activity-export" />
+
+- `xmsg serve --activity` (`XMSG_ACTIVITY=1`): Enables hook-derived session
+  activity tracking and export (off by default).
+- `xmsg serve --activity-correlated` (`XMSG_ACTIVITY_CORRELATED=1`): Enables
+  correlated `PostToolUse` prompt resolution for Claude when native `tool_use_id`
+  correlation is proven on both edges (default is `turn` mode).
+- `xmsg activity hook <harness> [--correlated] [--sock <path>]`: Isolated,
+  fail-open hook helper (1 MiB bounded stdin, depth-32 JSON parse, 100 ms
+  application deadline, allowlisted 1 KiB frame, always exits `0`).

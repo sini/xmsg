@@ -490,6 +490,8 @@ let
       "--http-sock"
       srv.httpSocket
     ]
+    ++ lib.optionals cfg.activity.enable [ "--activity" ]
+    ++ lib.optionals (cfg.activity.enable && cfg.activity.correlated) [ "--activity-correlated" ]
     ++ lib.concatMap (p: [
       "--agy-exe"
       p
@@ -565,6 +567,19 @@ in
       default = packages.${pkgs.stdenv.hostPlatform.system}.default;
       defaultText = lib.literalExpression "xmsg.packages.\${system}.default";
       description = "The xmsg package.";
+    };
+
+    activity = {
+      enable = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Enable optional hook-derived session activity export (reference packaging; off by default).";
+      };
+      correlated = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Use correlated PostToolUse prompt resolution for Claude when native IDs are proven.";
+      };
     };
 
     server = {
@@ -889,20 +904,45 @@ in
           permissions.allow = lib.concatMap (
             prefix: map (tool: "${prefix}__${tool}") claudeTools
           ) cfg.harnesses.claude.permissionPrefixes;
-          hooks = {
-            PreToolUse = map (prefix: {
-              matcher = "^${prefix}__(send|reply|inbox|list|replies)$";
-              hooks = claudeHook;
-            }) cfg.harnesses.claude.permissionPrefixes;
-            PostToolUse = [
-              {
-                matcher = "^(Agent|SendMessage)$";
+          hooks =
+            let
+              actHook = [
+                {
+                  type = "command";
+                  command = "${cfg.package}/bin/xmsg activity hook claude${lib.optionalString cfg.activity.correlated " --correlated"}";
+                  timeout = 1;
+                }
+              ];
+            in
+            {
+              PreToolUse = map (prefix: {
+                matcher = "^${prefix}__(send|reply|inbox|list|replies)$";
                 hooks = claudeHook;
-              }
-            ];
-            SubagentStart = [ { hooks = claudeHook; } ];
-            SubagentStop = [ { hooks = claudeHook; } ];
-          };
+              }) cfg.harnesses.claude.permissionPrefixes;
+              PostToolUse = [
+                {
+                  matcher = "^(Agent|SendMessage)$";
+                  hooks = claudeHook;
+                }
+              ]
+              ++ lib.optionals (cfg.activity.enable && cfg.activity.correlated) [
+                {
+                  matcher = "*";
+                  hooks = actHook;
+                }
+              ];
+              SubagentStart = [ { hooks = claudeHook; } ];
+              SubagentStop = [ { hooks = claudeHook; } ];
+            }
+            // lib.optionalAttrs cfg.activity.enable {
+              UserPromptSubmit = [ { hooks = actHook; } ];
+              Stop = [ { hooks = actHook; } ];
+              StopFailure = [ { hooks = actHook; } ];
+              SessionStart = [ { hooks = actHook; } ];
+              SessionEnd = [ { hooks = actHook; } ];
+              PermissionRequest = [ { hooks = actHook; } ];
+              Notification = [ { hooks = actHook; } ];
+            };
         };
       };
     })

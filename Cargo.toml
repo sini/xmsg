@@ -637,3 +637,8 @@ required-features = ["daemon"]
 name = "harness_descriptors"
 path = "tests/harness_descriptors.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "gate_activity_export"
+path = "tests/gate_activity_export.rs"
+required-features = ["daemon"]

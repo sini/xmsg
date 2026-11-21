@@ -130,6 +130,8 @@ fn canonical_event(event: &ExportEvent, kind: &str) -> Result<Vec<u8>, DecodeErr
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<crate::observe_export::Reason>,
         available: crate::observe_export::Availability,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        activity: &'a Option<crate::activity::ActivityDescriptor>,
     }
     serde_json::to_vec(&Envelope {
         sequence: event.sequence,
@@ -145,6 +147,7 @@ fn canonical_event(event: &ExportEvent, kind: &str) -> Result<Vec<u8>, DecodeErr
         outcome: event.outcome,
         reason: event.reason,
         available: event.available,
+        activity: &event.activity,
     })
     .map_err(|_| DecodeError)
 }

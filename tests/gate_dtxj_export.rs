@@ -822,7 +822,7 @@ async fn literal_ca_identity_needs_its_own_observe_grant() {
     });
     assert_eq!(
         fixture
-            .request("/fed/v2/observe/events?v=1&after=0&limit=100")
+            .request("/fed/v2/observe/events?v=2&after=0&limit=100")
             .await
             .0,
         200,
@@ -830,7 +830,7 @@ async fn literal_ca_identity_needs_its_own_observe_grant() {
     );
     assert_eq!(
         fixture
-            .request("/fed/v2/observe/snapshot?v=1&labels=false")
+            .request("/fed/v2/observe/snapshot?v=2&labels=false")
             .await
             .0,
         200
