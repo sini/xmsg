@@ -198,8 +198,16 @@ def main():
         if any(marker in output.lower() for marker in [b'timed out', b'elapsed(', b'test-hang', b'running for over']):
             raise RuntimeError('timeout or hung test is not a semantic kill')
         if phase == 'red':
-            if result.returncode != 101 or not record['assertion_present'] or b'1 failed' not in output:
+            if case.get('expected_outcome') == 'equivalent':
+                if result.returncode or b'1 passed' not in output:
+                    raise RuntimeError('equivalence control did not preserve effect invariant: ' + stem)
+                record['outcome'] = 'equivalent_survivor_not_kill'
+                persist()
+            elif result.returncode != 101 or not record['assertion_present'] or b'1 failed' not in output:
                 raise RuntimeError('fault survived or failed for the wrong reason: ' + stem)
+            else:
+                record['outcome'] = 'semantic_kill'
+                persist()
         elif result.returncode or b'1 passed' not in output:
             raise RuntimeError('restored test is not green: ' + stem)
         print(stem + ': exit=' + str(result.returncode) + ' nonce=' + nonce, flush=True)
