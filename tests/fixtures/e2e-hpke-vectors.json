@@ -1,0 +1,30 @@
+{
+  "source": "RFC 9180 Base mode (mode=0, kem_id=0x0020, kdf_id=0x0001, aead_id=0x0003)",
+  "vectors": [
+    {
+      "kem_id": 32,
+      "kdf_id": 1,
+      "aead_id": 3,
+      "info": "4f6465206f6e2061204772656369616e2055726e",
+      "ikmE": "909a9b35d3dc4713a5e72a4da274b55d3d3821a37e5d099e74a647db583a904b",
+      "ikmR": "1ac01f181fdf9f352797655161c58b75c656a6cc2716dcb66372da835542e1df",
+      "skRm": "8057991eef8f1f1af18f4a9491d16a1ce333f695d4db8e38da75975c4478e0fb",
+      "pkRm": "4310ee97d88cc1f088a5576c77ab0cf5c3ac797f3d95139c6c84b5429c59662a",
+      "enc": "1afa08d3dec047a643885163f1180476fa7ddb54c6a8029ea33f95796bf2ac4a",
+      "encryptions": [
+        {
+          "aad": "436f756e742d30",
+          "ct": "1c5250d8034ec2b784ba2cfd69dbdb8af406cfe3ff938e131f0def8c8b60b4db21993c62ce81883d2dd1b51a28",
+          "nonce": "5c4d98150661b848853b547f",
+          "pt": "4265617574792069732074727574682c20747275746820626561757479"
+        },
+        {
+          "aad": "436f756e742d31",
+          "ct": "6b53c051e4199c518de79594e1c4ab18b96f081549d45ce015be002090bb119e85285337cc95ba5f59992dc98c",
+          "nonce": "5c4d98150661b848853b547e",
+          "pt": "4265617574792069732074727574682c20747275746820626561757479"
+        }
+      ]
+    }
+  ]
+}

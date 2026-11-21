@@ -1,0 +1,51 @@
+# cargo-deny configuration for xmsg (checked in CI `deps` job and weekly schedule).
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# Pre-existing advisories on base main (634c11f8) lockfile; none are in S1 E2E deps.
+# Review / remove each entry as upstream dependencies are bumped (target review: 2027-02-01).
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "rsa 0.9.10 via openidconnect; pre-existing on main" },
+    { id = "RUSTSEC-2026-0346", reason = "rustls 0.23.45; pre-existing on main" },
+    { id = "RUSTSEC-2026-0347", reason = "rustls 0.23.45; pre-existing on main" },
+    { id = "RUSTSEC-2026-0348", reason = "rustls 0.23.45; pre-existing on main" },
+    { id = "RUSTSEC-2026-0349", reason = "rustls 0.23.45; pre-existing on main" },
+    { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.103.15; pre-existing on main" },
+    { id = "RUSTSEC-2026-0386", reason = "tokio 1.53.2; pre-existing on main" },
+    { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys 0.38.2; pre-existing on main" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 unmaintained; pre-existing on main" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "OpenSSL",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

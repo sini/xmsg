@@ -55,6 +55,10 @@ ring = { version = "=0.17.14", optional = true }
 data-encoding = { version = "=2.11.1", optional = true }
 ciborium = { version = "=0.2.2", optional = true }
 coset = { version = "=0.4.2", optional = true }
+hpke = { version = "=0.14.1", optional = true, default-features = false, features = ["alloc", "x25519", "chacha", "getrandom"] }
+aead-stream = { version = "=0.6.0", optional = true, default-features = false, features = ["alloc"] }
+chacha20poly1305 = { version = "0.11", optional = true, default-features = false, features = ["alloc"] }
+zeroize = { version = "1.9", optional = true, features = ["derive"] }
 mdns-sd = { version = "=0.21.7", optional = true, default-features = false }
 if-addrs = { version = "=0.15.0", optional = true }
 socket2 = { version = "=0.6.5", optional = true, features = ["all"] }
@@ -63,7 +67,7 @@ socket2 = { version = "=0.6.5", optional = true, features = ["all"] }
 [features]
 default = ["daemon", "mdns"]
 client = []
-daemon = ["client", "dep:toml", "dep:openidconnect", "dep:time", "dep:chrono", "dep:axum", "dep:clap", "dep:tracing", "dep:tracing-subscriber", "dep:gethostname", "dep:unicode-general-category", "dep:regex", "dep:rusqlite", "dep:ulid", "dep:reqwest", "dep:rustls", "dep:tokio-rustls", "dep:rcgen", "dep:sha2", "dep:hex", "dep:base64", "dep:http-body-util", "dep:tower", "dep:hyper-util", "dep:x509-parser", "dep:bytes", "dep:hyper", "dep:webpki", "dep:getrandom", "dep:subtle", "dep:ring", "dep:data-encoding", "dep:ciborium", "dep:coset"]
+daemon = ["client", "dep:toml", "dep:openidconnect", "dep:time", "dep:chrono", "dep:axum", "dep:clap", "dep:tracing", "dep:tracing-subscriber", "dep:gethostname", "dep:unicode-general-category", "dep:regex", "dep:rusqlite", "dep:ulid", "dep:reqwest", "dep:rustls", "dep:tokio-rustls", "dep:rcgen", "dep:sha2", "dep:hex", "dep:base64", "dep:http-body-util", "dep:tower", "dep:hyper-util", "dep:x509-parser", "dep:bytes", "dep:hyper", "dep:webpki", "dep:getrandom", "dep:subtle", "dep:ring", "dep:data-encoding", "dep:ciborium", "dep:coset", "dep:hpke", "dep:aead-stream", "dep:chacha20poly1305", "dep:zeroize"]
 test-hooks = []
 mdns = ["daemon", "dep:mdns-sd", "dep:if-addrs", "dep:socket2"]
 

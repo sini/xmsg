@@ -19,6 +19,8 @@ pub mod discovery;
 #[cfg(feature = "daemon")]
 mod doctor_peers;
 #[cfg(feature = "daemon")]
+pub mod e2e;
+#[cfg(feature = "daemon")]
 pub mod enroll_ca;
 #[cfg(feature = "daemon")]
 pub mod error;
