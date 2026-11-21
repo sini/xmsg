@@ -637,3 +637,18 @@ required-features = ["daemon"]
 name = "harness_descriptors"
 path = "tests/harness_descriptors.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "gate_tmjs12_install_contract"
+path = "tests/gate_tmjs12_install_contract.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_tmjs12_doctor"
+path = "tests/gate_tmjs12_doctor.rs"
+required-features = ["daemon"]
+
+[[test]]
+name = "gate_tmjs12_socket_publish"
+path = "tests/gate_tmjs12_socket_publish.rs"
+required-features = ["daemon"]
