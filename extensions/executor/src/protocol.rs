@@ -561,14 +561,27 @@ impl OperationReceipt {
                 return Err(ContractError::Receipt);
             }
         }
-        if let ObservedEffect::Injected { turn_id } | ObservedEffect::Interrupted { turn_id } =
-            &self.observed_effect
-        {
-            if !matches!(&self.target,Some(Target::Turn {turn_id:addressed,..}) if turn_id==addressed)
-                || self.submission != Submission::Submitted
+        match &self.observed_effect {
+            ObservedEffect::Injected { turn_id } => {
+                token(turn_id, "observed_turn_id")?;
+                if self.submission != Submission::Submitted {
+                    return Err(ContractError::Receipt);
+                }
+                match &self.target {
+                    Some(Target::Turn {
+                        turn_id: addressed, ..
+                    }) if addressed == turn_id => {}
+                    Some(Target::Session { .. } | Target::Execution { .. }) => {}
+                    _ => return Err(ContractError::Receipt),
+                }
+            }
+            ObservedEffect::Interrupted { turn_id }
+                if !matches!(&self.target,Some(Target::Turn {turn_id:addressed,..}) if turn_id==addressed)
+                    || self.submission != Submission::Submitted =>
             {
                 return Err(ContractError::Receipt);
             }
+            _ => {}
         }
         Ok(())
     }
