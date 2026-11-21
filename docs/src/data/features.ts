@@ -23,6 +23,34 @@ export interface SiblingAllowlistEntry {
 }
 
 export const FEATURES: Record<string, FeatureEntry> = {
+	'mission-control.session': {
+		id: 'mission-control.session',
+		title: 'Mission Control session issuer',
+		owner: 'sini',
+		evidence: [{ path: 'src/mission_control.rs', anchor: 'pub struct Config' }],
+		plannedSince: '2026-11-21',
+	},
+	'mission-control.http': {
+		id: 'mission-control.http',
+		title: 'Mission Control snapshot and stream transports',
+		owner: 'sini',
+		evidence: [],
+		plannedSince: '2026-11-21',
+	},
+	'mission-control.machine-tokens': {
+		id: 'mission-control.machine-tokens',
+		title: 'Mission Control read-only machine tokens',
+		owner: 'sini',
+		evidence: [{ path: 'src/mission_control/authority.rs', anchor: 'fn mint_machine(' }],
+		plannedSince: '2026-11-21',
+	},
+	'mission-control.delegated-grants': {
+		id: 'mission-control.delegated-grants',
+		title: 'Mission Control delegated grants',
+		owner: 'sini',
+		evidence: [{ path: 'src/mission_control/authority.rs', anchor: 'struct DelegatedGrant' }],
+		plannedSince: '2026-11-21',
+	},
 	'session-context.tags': {
 		id: 'session-context.tags',
 		title: 'Self-reported session context tags',

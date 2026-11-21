@@ -3,6 +3,8 @@ title: Use cases
 description: What you can do with xmsg, from spreading work across machines to working with a teammate's agents, each with the pages to read next.
 ---
 
+import Status from '../../components/Status.astro';
+
 Each case below links to the pages that explain how it works. For one real example with every
 case at once, read [how this site was built](/how-this-site-was-built/).
 
@@ -152,3 +154,23 @@ The first increment is developer-facing contracts and fake ACP fixtures only.
 There is no team launcher or control endpoint to run yet. Ordinary
 [`xmsg send`](/reference/cli-and-mcp/) remains messaging; a body saying
 “interrupt this teammate” does not invoke a future interrupt operation.
+
+## Poll for open attention items from a script
+
+<Status id="mission-control.http" />
+
+The planned attention snapshot gives an operator's script a read-only view
+of open items. Issue a machine token with the explicit
+`{"kind":"attention"}` scope. Save the handle once into an owner-only
+credential file. A poller sends the credential in the Authorization header.
+
+```sh
+IFS= read -r mc_token < "$HOME/.config/xmsg/attention-token"
+printf 'Authorization: Bearer %s\n' "$mc_token" |
+  curl --fail --silent --show-error --header @- \
+    https://fleet.example.org/v1/mission-control/snapshot/attention
+unset mc_token
+```
+
+See [issuer configuration](/operations/fleet-observer/#mission-control-issuer)
+and the [owner CLI](/reference/cli-and-mcp/#mission-control-owner-cli).

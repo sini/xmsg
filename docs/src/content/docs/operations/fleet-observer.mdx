@@ -282,7 +282,7 @@ mode-0600 database. Unsafe existing paths are refused rather than repaired.
 
 ## Admit the owner
 
-Configure ingress OIDC to enforce the exact issuer/subject allowlist, strip public
+For the collector introspection configuration, configure ingress OIDC to enforce the exact issuer/subject allowlist, strip public
 identity headers and forward the original access token as `Authorization: Bearer`.
 The collector independently introspects that token for every request. Direct backend
 requests have the same owner boundary; `X-Forwarded-User` and similar headers do not
@@ -303,6 +303,82 @@ UI logout is not assumed to invalidate an otherwise active token.
 Ingress forwarding/allowlisting, actual owner IDs, client registration, server TLS
 and namespace policy must be verified on the deployed versions by the operator.
 Fixture tests do not claim production compatibility or real owner sign-in.
+
+## Mission Control issuer
+
+<Status id="mission-control.session" />
+
+Add a `mission_control` object to the collector JSON file to enable the
+issuer. Keep the collector's source, TLS, and state settings. Mission Control
+selects its local credentials for the web view when configured. Omitting the
+object leaves the existing collector authentication in place.
+
+Register a web application with an upstream OIDC provider. The callback URL
+must be HTTPS on the configured `public_origin`. Supply the verified email
+addresses of the people who can sign in. The first successful login binds each
+entry to the provider's issuer and immutable subject. Rebinding requires the
+owner CLI and revokes credentials from the former binding.
+
+This example uses a Google web OAuth client. Replace the client ID, public
+origin, paths, and allowlisted email for your installation.
+
+```json
+{
+  "mission_control": {
+    "public_origin": "https://fleet.example.org",
+    "issuer": "https://accounts.google.com",
+    "accepted_iss": ["accounts.google.com"],
+    "client_id": "example.apps.googleusercontent.com",
+    "client_secret_file": "/etc/xmsg/mc-oidc-client-secret",
+    "redirect_uri": "https://fleet.example.org/login/callback",
+    "allowlist": ["owner@example.org"],
+    "native_client_id": "xmsg-tui"
+  }
+}
+```
+
+Discovery is pinned to `issuer`. Entries in `accepted_iss` are exact
+aliases accepted in ID tokens from that issuer. The browser exchanges the
+authorization code through the collector, which verifies the signed ID token
+and issues its own browser credential. The collector discards the upstream
+access and ID tokens.
+
+### Upstream re-validation
+
+An unset `upstream_token_key_file` disables offline access and upstream
+re-validation. The collector records this mode at startup. To enable the
+daily re-validation path, configure a separate owner-readable 0600 file
+containing 32 random bytes. Store the file apart from the authority database.
+With `request_offline_access` enabled, the issuer stores any returned refresh
+token encrypted under that key. Providers that use extra authorization
+parameters can receive them through `provider_auth_params`. For example,
+Google uses `{"access_type":"offline","prompt":"consent"}`.
+
+On browser or native re-admission after `upstream_revalidate_secs`
+(default 86,400), the issuer coalesces refresh checks per principal.
+Upstream `invalid_grant` refuses admission and revokes all of that owner's
+local credentials. Network errors and upstream outages leave local credentials
+valid and trigger another attempt on the next admission. The daily interval is
+a target while the upstream is reachable and issued a refresh token.
+
+### Native and machine access
+
+The TUI uses Mission Control's device grant. The owner reviews and approves the
+code in a signed-in browser. The first successful poll exchanges the approved
+device code for a native Mission Control bearer.
+
+<Status id="mission-control.machine-tokens" />
+
+Machine tokens are owner-issued and read-only. Give each token the smallest
+explicit scope it needs, such as `{"kind":"attention"}` for an attention
+poller. See the [owner CLI](/reference/cli-and-mcp/#mission-control-owner-cli)
+for minting and revocation.
+
+For the planned session and stream transports, a reverse proxy passes WebSocket
+upgrades and streaming responses through without buffering. Preserve
+`Origin`, `Sec-Fetch-Site`, `Cookie`, and `Authorization` unchanged. Keep
+the proxy's idle timeout above the session's heartbeat interval and its request
+header limits compatible with the collector's handshake budget.
 
 ## Read the view
 

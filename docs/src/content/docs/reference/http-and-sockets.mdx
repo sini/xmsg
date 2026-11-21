@@ -472,6 +472,7 @@ message-body limit and the separate `attach:<peer>` rate bucket. See
 <Status id="fleet-observer.collector" />
 
 The separate `observe-collector` listener never exposes the exporter routes on ordinary bus HTTP or initializes bus state.
+This section describes the introspection configuration. The optional [Mission Control issuer](#mission-control-issuer-routes) adds its own routes.
 
 | Method and path | Boundary and result |
 | --- | --- |
@@ -601,3 +602,59 @@ locator results, and node observation snapshots. TCP recipient listings omit it.
 surface mask before serialization. Upgrade daemons and clients together because
 older strict wire readers can reject the new field. Re-pin the gateway after the
 daemon and client upgrade.
+
+## Mission Control issuer routes
+
+<Status id="mission-control.session" />
+
+The optional Mission Control issuer uses the collector's configured HTTPS origin.
+A non-loopback collector listener requires configured server TLS.
+
+| Route | Credential or flow |
+| --- | --- |
+| `GET /login` | Begins authorization code login with PKCE S256, state, and nonce |
+| `GET /login/callback` | Consumes the matching single-use state and `__Host-mc_flow` cookie |
+| `POST /logout` | Revokes the browser session with exact Origin and a synchronizer token |
+| `POST /oauth/device_authorization` | Starts a device grant for the configured native client ID |
+| `GET /device` and `POST /device` | Browser review and approval or denial, with exact Origin and a synchronizer token for POST |
+| `POST /oauth/token` | Polls the device grant with its original client ID |
+
+Both cookies are host-only, Secure and HttpOnly with `Path=/`. The
+flow cookie uses SameSite=Lax so the upstream top-level redirect carries it.
+The `__Host-mc_session` browser cookie uses SameSite=Strict. Native handles use
+`Authorization: Bearer`. A successful device poll consumes the grant and
+returns `access_token`, `token_type`, and `expires_in` with
+`Cache-Control: no-store`. Early polls get `slow_down`. Each early poll
+increases the required interval by five seconds.
+
+### Issuer defaults
+
+| Setting under `mission_control` | Default |
+| --- | --- |
+| `login_flow_ttl_secs`, `device_code_ttl_secs` | 600 seconds each |
+| `device_poll_secs` | 5 seconds |
+| `device_codes_live`, `device_authorizations_per_min` | 16 live codes, 10 authorizations per minute |
+| `device_code_attempts_per_session` | 5 attempts per 10 minutes |
+| `session_idle_secs`, `session_absolute_secs` | 7 days and 30 days |
+| `native_idle_secs`, `native_absolute_secs` | 30 days and 90 days |
+| `clock_skew_secs`, `jwks_refresh_secs` | 60 seconds and 3,600 seconds |
+| `revocation_slo_ms`, `authority_watchdog_ms` | 1,000 ms and 250 ms |
+
+### Planned Mission Control read transports
+
+<Status id="mission-control.http" />
+
+The session transport uses `/v1/mission-control/session` with WebSocket
+subprotocol `xmsg.mission-control.v1`. The client begins with `hello`
+and subscribes to a scoped view. The HTTP snapshot and SSE stream use
+`/v1/mission-control/snapshot/{scope}` and
+`/v1/mission-control/stream/{scope}`. Both use the same snapshot model,
+and the stream carries subsequent events, gaps, and heartbeats.
+Snapshot uses a browser cookie or a suitably scoped bearer. Stream uses a
+native or machine bearer.
+
+The lease expires at the earliest of the credential's idle expiry, absolute
+expiry, and the connection lease cap. WebSocket close codes include 4401
+for an expired lease and 4403 for revocation or a policy change. The cutoff
+runs from the authority change. The issuer's live registry supplies this
+deadline for the planned WebSocket and SSE writers.
