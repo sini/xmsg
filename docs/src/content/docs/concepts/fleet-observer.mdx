@@ -21,7 +21,7 @@ poll inboxes or replies, acknowledge messages, or wake agents.
 ```mermaid
 flowchart LR
   N["Directly reachable node: stored metadata"] -->|"mTLS and explicit observe grant"| C["Collector: separate bounded cache"]
-  C -->|"Every-request owner introspection"| B["Escaped owner view"]
+  C -->|"Owner introspection configuration"| B["Escaped owner view"]
 ```
 
 Direct export uses the node's existing federation listener. **Reverse observation
@@ -149,3 +149,27 @@ withhold every tag from the export, use `--context-mask 'observe:*'`.
 
 The source node applies the mask before export. The observation grant still
 controls who can read the export. See [session context and node policy](/reference/cli-and-mcp/#session-context-tags).
+
+## Mission Control sessions
+
+<Status id="mission-control.session" />
+
+Mission Control is an optional collector extension. A browser owner signs in
+through a configured OIDC provider. The issuer turns that verified identity
+into a revocable local session. A native client obtains its own credential
+through a browser-approved device grant. Both use the same owner principal
+and have independent credential records and expiration times.
+
+<Status id="mission-control.http" />
+
+The planned session transports show one scoped view of fleet metadata and
+open attention items. The view starts Unknown until a complete snapshot
+arrives. A synchronized connection is Live when its nodes deliver live
+updates. It is Delayed when at least one node delivers in batches.
+Reconnecting means the client is attempting to resume. Stale means the
+connection has been silent past its freshness deadline or retries ended.
+The last known data stays visible and marked. Node freshness and the age of
+the last applied observation are shown separately from connection state.
+
+See [issuer setup](/operations/fleet-observer/#mission-control-issuer) and
+the [wire reference](/reference/http-and-sockets/#mission-control-issuer-routes).

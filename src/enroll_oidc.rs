@@ -1,4 +1,5 @@
 //! OIDC browser-flow verification for node enrollment.
+pub mod web;
 use crate::enroll_ca::{Flow, Provider as ProviderConfig, VerifiedClaims};
 use base64::Engine;
 use openidconnect::core::{
@@ -250,35 +251,8 @@ impl Provider {
             }
             let secret = client
                 .client_secret_file
-                .as_ref()
-                .map(|file| {
-                    let opened = std::fs::OpenOptions::new()
-                        .read(true)
-                        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-                        .open(file)
-                        .map_err(|_| Error::Configuration)?;
-                    let metadata = opened.metadata().map_err(|_| Error::Configuration)?;
-                    if !metadata.is_file()
-                        || metadata.uid() != unsafe { libc::geteuid() }
-                        || metadata.permissions().mode() & 0o077 != 0
-                        || metadata.len() > 4096
-                    {
-                        return Err(Error::Configuration);
-                    }
-                    let mut value = String::new();
-                    opened
-                        .take(4097)
-                        .read_to_string(&mut value)
-                        .map_err(|_| Error::Configuration)?;
-                    if value.len() > 4096 {
-                        return Err(Error::Configuration);
-                    }
-                    let value = value.trim_end_matches('\n');
-                    if value.is_empty() {
-                        return Err(Error::Configuration);
-                    }
-                    Ok(ClientSecret::new(value.into()))
-                })
+                .as_deref()
+                .map(read_client_secret)
                 .transpose()?;
             clients.insert(
                 *flow,
@@ -740,6 +714,35 @@ fn allowed_algs(metadata: &CoreProviderMetadata) -> Vec<CoreJwsSigningAlgorithm>
         })
         .cloned()
         .collect()
+}
+
+fn read_client_secret(file: &std::path::Path) -> Result<ClientSecret, Error> {
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(file)
+        .map_err(|_| Error::Configuration)?;
+    let metadata = opened.metadata().map_err(|_| Error::Configuration)?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o077 != 0
+        || metadata.len() > 4096
+    {
+        return Err(Error::Configuration);
+    }
+    let mut value = String::new();
+    opened
+        .take(4097)
+        .read_to_string(&mut value)
+        .map_err(|_| Error::Configuration)?;
+    if value.len() > 4096 {
+        return Err(Error::Configuration);
+    }
+    let value = value.trim_end_matches('\n');
+    if value.is_empty() {
+        return Err(Error::Configuration);
+    }
+    Ok(ClientSecret::new(value.into()))
 }
 
 fn https_url(url: &reqwest::Url) -> bool {

@@ -17,14 +17,22 @@ use tokio::sync::Semaphore;
 const FRESH: Duration = Duration::from_secs(15);
 
 #[derive(clap::Parser, Debug)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
 pub struct Args {
-    #[arg(long)]
-    pub config: PathBuf,
-    #[arg(long)]
-    pub state_dir: PathBuf,
+    #[arg(long, required = true)]
+    pub config: Option<PathBuf>,
+    #[arg(long, required = true)]
+    pub state_dir: Option<PathBuf>,
+    #[command(subcommand)]
+    pub action: Option<Action>,
     /// Web listener; non-loopback addresses require configured server TLS
     #[arg(long, default_value = "127.0.0.1:9428")]
     pub listen: SocketAddr,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum Action {
+    Admin(crate::mission_control::admin::Args),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -40,6 +48,8 @@ pub enum Error {
     },
     #[error("collector listener unavailable")]
     Listener,
+    #[error(transparent)]
+    Admin(crate::mission_control::admin::AdminError),
 }
 
 impl From<StoreError> for Error {
@@ -73,7 +83,8 @@ impl Drop for PollerGuard {
 }
 
 struct State {
-    verifier: Verifier,
+    verifier: Option<Verifier>,
+    issuer: Option<Arc<crate::mission_control::Issuer>>,
     store: Arc<Store>,
     store_slots: Arc<Semaphore>,
     requests: Arc<Semaphore>,
@@ -163,7 +174,14 @@ impl State {
         {
             return response(StatusCode::OK, "available\n", false);
         }
-        let _owner = match self.verifier.authorize(request.headers()).await {
+        let Some(verifier) = &self.verifier else {
+            return response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "collector unavailable\n",
+                false,
+            );
+        };
+        let _owner = match verifier.authorize(request.headers()).await {
             Ok(owner) => owner,
             Err(error) => {
                 return response(
@@ -408,7 +426,7 @@ async fn serve_with_admission(
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (tcp, _) = accepted.map_err(|_| Error::Listener)?;
+                let (tcp, peer) = accepted.map_err(|_| Error::Listener)?;
                 let Ok(lease) = connections.clone().try_acquire_owned() else { drop(tcp); continue };
                 let state = state.clone();
                 let tls = tls.clone();
@@ -416,9 +434,9 @@ async fn serve_with_admission(
                     let _lease = lease;
                     if let Some(tls) = tls {
                         if let Ok(Ok(stream)) = tokio::time::timeout(Duration::from_secs(5), tls.accept(tcp)).await {
-                            serve_stream(stream, state).await;
+                            serve_stream(stream, state, Some(peer)).await;
                         }
-                    } else { serve_stream(tcp, state).await; }
+                    } else { serve_stream(tcp, state, Some(peer)).await; }
                 });
             }
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
@@ -428,17 +446,52 @@ async fn serve_with_admission(
 
 const WEB_BUDGET: Duration = Duration::from_secs(5);
 
-async fn serve_stream<I>(stream: I, state: Arc<State>)
+async fn serve_stream<I>(stream: I, state: Arc<State>, peer: Option<SocketAddr>)
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    serve_http(stream, state.requests.clone(), move |request| async move {
-        state.prepare(request).await
-    })
+    let budget = state.issuer.as_ref().map_or(WEB_BUDGET, |issuer| {
+        Duration::from_millis(issuer.config().handshake_timeout_ms)
+    });
+    serve_http(
+        stream,
+        state.requests.clone(),
+        budget,
+        move |mut request| async move {
+            if let Some(issuer) = &state.issuer {
+                if request.method() != hyper::Method::GET
+                    || request.uri().path() != "/health"
+                    || request.uri().query().is_some()
+                {
+                    if let Some(peer) = peer {
+                        request.extensions_mut().insert(peer);
+                    }
+                    let header_bytes =
+                        request
+                            .headers()
+                            .iter()
+                            .fold(0usize, |size, (name, value)| {
+                                size.saturating_add(
+                                    name.as_str().len() + value.as_bytes().len() + 4,
+                                )
+                            });
+                    if header_bytes > issuer.config().max_handshake_header_bytes {
+                        return response(
+                            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                            "request headers too large\n",
+                            false,
+                        );
+                    }
+                    return issuer.handle(request).await;
+                }
+            }
+            state.prepare(request).await
+        },
+    )
     .await;
 }
 
-async fn serve_http<I, F, Fut>(stream: I, requests: Arc<Semaphore>, prepare: F)
+async fn serve_http<I, F, Fut>(stream: I, requests: Arc<Semaphore>, budget: Duration, prepare: F)
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     F: FnOnce(Request<Incoming>) -> Fut + Send + 'static,
@@ -455,7 +508,7 @@ where
         async move {
             let lease = requests.try_acquire_owned().ok();
             let admitted = lease.is_some();
-            let deadline = tokio::time::Instant::now() + WEB_BUDGET;
+            let deadline = tokio::time::Instant::now() + budget;
             let Some((admission, prepare)) = operation else {
                 return Ok::<_, Infallible>(response(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -507,6 +560,9 @@ fn remember_failure(state: &State, node: &str, kind: UnavailableKind) {
 
 async fn mark_error(state: &State, node: String, error: net::Error) {
     if error == net::Error::Denied {
+        if let Some(issuer) = &state.issuer {
+            issuer.set_node_masked(&node, true);
+        }
         if let Ok(mut denied) = state.denied.lock() {
             denied.insert(node.clone());
         }
@@ -564,6 +620,9 @@ fn observe_scope(state: &State, node: &str, scope: &str) {
     }
     if let Ok(scopes) = state.scopes.lock() {
         if scopes.get(node).is_some_and(|old| old != scope) {
+            if let Some(issuer) = &state.issuer {
+                issuer.set_node_masked(node, true);
+            }
             if let Ok(mut hidden) = state.scope_hidden.lock() {
                 hidden.insert(node.to_owned());
             }
@@ -582,6 +641,9 @@ fn initial_success(_store: &Store) -> BTreeMap<String, (tokio::time::Instant, i6
 }
 
 fn accepted_scope(state: &State, node: &str, scope: String) {
+    if let Some(issuer) = &state.issuer {
+        issuer.set_node_masked(node, false);
+    }
     if let Ok(mut failures) = state.failures.lock() {
         failures.remove(node);
     }
@@ -745,12 +807,42 @@ fn background_tasks(client: Arc<Client>, state: Arc<State>) -> tokio::task::Join
 
 pub async fn run(args: Args) -> Result<(), Error> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let config = Config::load(&args.config).map_err(|_| Error::Configuration)?;
+    if let Some(Action::Admin(action)) = args.action {
+        return crate::mission_control::admin::run(action, |file| {
+            let config = Config::load(file)
+                .map_err(|_| crate::mission_control::admin::AdminError::Configuration)?;
+            let issuer = config
+                .mission_control
+                .ok_or(crate::mission_control::admin::AdminError::Configuration)?;
+            issuer
+                .validate()
+                .map_err(|_| crate::mission_control::admin::AdminError::Configuration)?;
+            let nodes = config
+                .sources
+                .into_iter()
+                .map(|source| source.node)
+                .collect();
+            Ok(issuer.authority_config(nodes))
+        })
+        .await
+        .map_err(Error::Admin);
+    }
+    let config_file = args.config.ok_or(Error::Configuration)?;
+    let mut config = Config::load(&config_file).map_err(|_| Error::Configuration)?;
     let tls = tls_config(&config, args.listen)?;
     let clock: crate::observe_collector_store::EpochClock =
         Arc::new(crate::storage::now_epoch_secs);
-    let verifier =
-        Verifier::new(config.auth.clone(), clock.clone()).map_err(|_| Error::Configuration)?;
+    let verifier = if config.mission_control.is_none() {
+        Some(
+            Verifier::new(
+                config.auth.clone().ok_or(Error::Configuration)?,
+                clock.clone(),
+            )
+            .map_err(|_| Error::Configuration)?,
+        )
+    } else {
+        None
+    };
     let client = Arc::new(Client::new(&config).map_err(|_| Error::Configuration)?);
     let policies = client
         .sources
@@ -762,7 +854,34 @@ pub async fn run(args: Args) -> Result<(), Error> {
             relay: s.relay.clone(),
         })
         .collect();
-    let directory = args.state_dir;
+    let directory = args.state_dir.ok_or(Error::Configuration)?;
+    let mut issuer_tasks = tokio::task::JoinSet::new();
+    let issuer = if let Some(settings) = config.mission_control.take() {
+        use crate::mission_control::{admin, authority::Authority, Issuer};
+        let nodes = config
+            .sources
+            .iter()
+            .map(|source| source.node.clone())
+            .collect();
+        let authority_config = settings.authority_config(nodes);
+        let prepared = Issuer::prepare(settings)
+            .await
+            .map_err(|_| Error::Configuration)?;
+        let authority =
+            Authority::open(&directory, authority_config).map_err(|_| Error::Storage)?;
+        let listener = admin::bind(&directory, &authority).map_err(Error::Admin)?;
+        let issuer = Issuer::start(prepared, authority.clone());
+        let watchdog = authority.clone();
+        issuer_tasks.spawn(async move { watchdog.watchdog().await.map_err(|_| Error::Storage) });
+        issuer_tasks.spawn(async move {
+            admin::serve(listener, authority)
+                .await
+                .map_err(Error::Admin)
+        });
+        Some(issuer)
+    } else {
+        None
+    };
     let retention_secs = config.retention_after_inactive_secs;
     let store = tokio::task::spawn_blocking(move || {
         Store::open_with_retention(Path::new(&directory), policies, clock, retention_secs)
@@ -778,11 +897,15 @@ pub async fn run(args: Args) -> Result<(), Error> {
     nodes.sort();
     let supported_sources = client.sources.iter().filter(|s| s.supported).count();
     let initial_succ = initial_success(&store);
+    let requests = issuer.as_ref().map_or_else(request_slots, |issuer| {
+        Arc::new(Semaphore::new(issuer.config().pending_handshakes_global))
+    });
     let state = Arc::new(State {
         verifier,
+        issuer,
         store: Arc::new(store),
         store_slots: Arc::new(Semaphore::new(1)),
-        requests: request_slots(),
+        requests,
         nodes,
         denied: Mutex::new(BTreeSet::new()),
         failures: Mutex::new(BTreeMap::new()),
@@ -800,6 +923,9 @@ pub async fn run(args: Args) -> Result<(), Error> {
     let _tasks = background_tasks(client, state.clone());
     tokio::select! {
         result = serve(listener, state, tls) => result,
+        exit = issuer_tasks.join_next(), if !issuer_tasks.is_empty() => {
+            exit.and_then(Result::ok).unwrap_or(Err(Error::Listener))
+        },
         _ = tokio::signal::ctrl_c() => Ok(()),
     }
 }

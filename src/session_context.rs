@@ -15,13 +15,58 @@ pub struct ContextFields {
     pub pr: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SessionContext {
     #[serde(flatten)]
     pub fields: ContextFields,
     pub updated_at: i64,
     pub generation: u64,
     pub stale: bool,
+}
+
+impl<'de> Deserialize<'de> for SessionContext {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            repo: Option<String>,
+            branch: Option<String>,
+            worktree: Option<String>,
+            task: Option<String>,
+            pr: Option<String>,
+            updated_at: i64,
+            generation: u64,
+            stale: bool,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            fields: ContextFields {
+                repo: wire.repo,
+                branch: wire.branch,
+                worktree: wire.worktree,
+                task: wire.task,
+                pr: wire.pr,
+            },
+            updated_at: wire.updated_at,
+            generation: wire.generation,
+            stale: wire.stale,
+        })
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn strict_context_preserves_wire_shape_and_refuses_unknown_fields() {
+    let original = serde_json::json!({
+        "repo":"github.com/example/repo", "branch":"main",
+        "updated_at":100, "generation":1, "stale":false
+    });
+    let parsed: SessionContext = serde_json::from_value(original.clone()).unwrap();
+    assert_eq!(serde_json::to_value(parsed).unwrap(), original);
+    let mut unexpected = original;
+    unexpected["extra"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<SessionContext>(unexpected).is_err());
 }
 
 #[cfg(feature = "daemon")]

@@ -468,3 +468,21 @@ fields never leave the source node. Existing recipient labels remain unchanged
 and can already contain harness session names. Run `xmsg locate` on that node for local details. A reach hint
 can come only from the viewer's explicitly selected local configuration; peer
 recipes or hints are not accepted. Reach strings are displayed, never executed.
+
+## Mission Control delegated grants
+
+<Status id="mission-control.delegated-grants" />
+
+The owner can define an expiring grant for a separate holder with an explicit
+set of verbs and canonical endpoint targets. The mint path requires a
+`{node, endpoint}` pair for each target, including its exact endpoint
+address. An optional read scope narrows what the holder can observe.
+Rebinding or removing the minting owner ends its grants.
+
+The planned command stage uses the current grant directly, without an owner
+round trip for each request. Audit records distinguish the holder, an
+independently authenticated presenting service when present, and the
+minting owner. The planned confirmation option applies only to selected verbs
+after the owner opts in through the management panel.
+
+See the [owner CLI](/reference/cli-and-mcp/#mission-control-owner-cli).
