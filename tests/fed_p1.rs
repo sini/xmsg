@@ -4284,6 +4284,11 @@ async fn test_n7_f6_bind_fatal() {
 #[tokio::test]
 async fn test_n7_f6_unspecified_address_binds() {
     let tmp = TempDir::new().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let cert_file = tmp.path().join("cert.pem");
     let key_file = tmp.path().join("key.pem");
     let peers_file = tmp.path().join("peers.json");
@@ -4355,6 +4360,11 @@ async fn test_n7_f6_unspecified_address_binds() {
 #[tokio::test]
 async fn test_n7_f6_cert_key_required() {
     let tmp = TempDir::new().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let peers_file = tmp.path().join("peers.json");
     std::fs::write(&peers_file, "{}").unwrap();
 

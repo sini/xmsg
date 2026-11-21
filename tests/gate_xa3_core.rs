@@ -55,6 +55,7 @@ struct Node {
 impl Node {
     /// Starts `xmsg serve` in `dir`, trusting this test binary as each of `services`.
     fn start(dir: &Path, services: &[&str]) -> Node {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
         let run = dir.join("run");
         let sessions = dir.join("sessions");
         for d in [&run, &sessions] {
@@ -652,6 +653,7 @@ fn user_version(conn: &rusqlite::Connection) -> i64 {
 async fn test_oracle_9_populated_v0_ee1b6ca_refused_without_writes() {
     for with_forwarded in [false, true] {
         let tmp = tempdir().unwrap();
+        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let run = tmp.path().join("run");
         let sessions = tmp.path().join("sessions");
         for d in [&run, &sessions] {

@@ -87,6 +87,7 @@ struct Fixture {
 impl Fixture {
     fn start() -> Self {
         let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
         for name in ["run", "sessions"] {
             fs::create_dir(dir.path().join(name)).unwrap();
             fs::set_permissions(dir.path().join(name), fs::Permissions::from_mode(0o700)).unwrap();

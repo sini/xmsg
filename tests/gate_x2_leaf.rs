@@ -53,7 +53,7 @@ async fn test_oracle_1_leaf_binds_no_harness_sockets_or_fed_listener() {
 
     let lookup = xmsg::install_paths::SystemHomeLookup;
     let mut env_for_resolve = xmsg::install_paths::ResolveEnv::from_process(&lookup);
-    env_for_resolve.xdg_runtime_dir = Some(runtime_dir.to_string_lossy().into_owned());
+    env_for_resolve.xdg_runtime_dir = Some(runtime_dir.as_os_str().to_os_string());
     let expected = xmsg::install_paths::resolve_install(
         &xmsg::install_paths::ResolveRequest {
             leaf: true,

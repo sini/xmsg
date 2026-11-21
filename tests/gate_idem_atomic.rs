@@ -67,6 +67,7 @@ struct Node {
 
 impl Node {
     fn start(dir: &Path, services: &[&str]) -> Node {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
         let run = dir.join("run");
         let sessions = dir.join("sessions");
         for d in [&run, &sessions] {
