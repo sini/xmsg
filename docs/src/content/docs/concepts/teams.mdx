@@ -1,0 +1,78 @@
+---
+title: Teams
+description: Optional mixed-harness teams, typed lifecycle control, and the current implementation boundary.
+---
+
+import Status from '../../../components/Status.astro';
+
+<Status id="teams.local-parity" />
+
+Teams is a planned optional executor extension. A Claude parent will be able to
+work with independent Codex and Antigravity teammates on one host. Ordinary xmsg
+recipients will continue to work without an executor or a prescribed workflow.
+
+The first increment supplies [internal contracts and a fake ACP test
+harness](/reference/executor-contracts/). It provides no runtime launcher,
+control endpoint, team CLI or team MCP tool. No real harness capability is
+qualified by the fake tests. Installing xmsg does not start an executor.
+
+## Messages and control
+
+A message is content, never management authority. A future typed control service
+will expose dispatch, send, steer, interrupt, resume, stop, status and result.
+Lifecycle calls require the local peer UID and an owner-configured verb/target
+grant bound to the attested caller for that call. Parentage and text that looks
+like a command confer no grant; no per-agent control credentials are minted.
+Owner administration and human approval decisions use separate credentials.
+
+The planned meanings are precise:
+
+- **send** queues content for the next eligible turn. **Send, prefer live** is
+  explicitly best effort, with a deadline, generation and next-turn allowance.
+- **steer** is strict intervention in an addressed active turn. It cannot start
+  a turn or silently queue for a replacement execution.
+- **interrupt** affects the turn, not the session. Submitted, confirmed,
+  already-ended, unknown and unsupported are different outcomes; it has no
+  stop/kill fallback.
+- **resume** distinguishes reconnecting to a surviving execution from loading a
+  stored conversation. Reconnect reconciles rather than spawning twice.
+- **stop** concerns the owned runtime. It is separately authorized from interrupt.
+
+Dispatch keeps harness and model separate. Its descriptor names an executor,
+workspace identity and immutable base, environment/profile and resource budget.
+The shape allows a foreign executor later, but v1 resolves locally and must
+report unsupported placement rather than switch host or harness.
+
+## Approvals and trust profiles
+
+The planned product default is SAFE with human-only approval. Only a genuinely
+pending structured ACP permission request can enter review. A native hard denial
+stays terminal; failed tool status and ordinary messages never become approval
+requests. A known human-mandatory request remains human-only.
+
+An optional overseer comes after human-only local parity. It is a dedicated
+reviewer with no tools or messaging authority and a fixed policy snapshot.
+Child-controlled titles, arguments, paths, patches and output remain untrusted
+data. Empty MCP configuration alone does not establish isolation; each pinned
+reviewer profile needs its own proof. Opaque effects and arbitrary shell are not
+made safe merely by a model's approval.
+
+The owner will also have an explicitly labelled **UNSAFE full-trust** path on
+every pin. Agents cannot select or edit it. Receipts, status and documentation
+must identify which native hard rules and human-only protections are proved
+retained, unknown or lost for that pin. Unknown protection does not disable the
+owner's UNSAFE path, and must never be presented as retained. Revocation stops
+the runtime. Full trust is not containment and cannot roll back side effects.
+These owner controls do not isolate arbitrary code already running under the
+same UID.
+
+## Capability evidence
+
+Capabilities belong to a harness, adapter/runtime version, mode and session.
+Fake fixtures test contracts; they do not prove that a real adapter can inject
+into a turn, interrupt it, resume it or preserve human-only approval provenance.
+Unsupported and unknown outcomes are part of the interface.
+
+Harness-owned ACP child sessions will be observed, not turned into managed
+teammates. Their messages do not trigger extra prompts or management grants.
+Explicit mixed-harness teammates have independent managed identities.

@@ -140,3 +140,15 @@ that a conversation is absent. A live locator gives location only. Resume
 recipes remain unproven for every harness, so the command never launches or
 prints a suggested resume command. For a remote match, run the locator on its
 node when you need a native ID or local terminal detail.
+
+## Plan a mixed-harness team
+
+[Teams](/concepts/teams/) is planned as an optional extension: a Claude parent
+will dispatch separate Codex and Antigravity teammates, communicate through the
+bus, and use typed, separately granted lifecycle controls. Human-only local
+parity comes before the dedicated reviewer lane.
+
+The first increment is developer-facing contracts and fake ACP fixtures only.
+There is no team launcher or control endpoint to run yet. Ordinary
+[`xmsg send`](/reference/cli-and-mcp/) remains messaging; a body saying
+“interrupt this teammate” does not invoke a future interrupt operation.
