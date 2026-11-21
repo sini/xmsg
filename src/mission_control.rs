@@ -36,7 +36,7 @@ pub(crate) mod transport;
 pub(crate) mod upstream;
 pub(crate) mod websocket;
 #[allow(dead_code, reason = "Mission Control transport integration")]
-mod writer;
+pub(crate) mod writer;
 
 use crate::enroll_oidc::web::{self, Provider};
 use crate::storage::now_epoch_secs;

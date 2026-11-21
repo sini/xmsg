@@ -513,25 +513,22 @@ mod tests {
         })
         .unwrap();
         let mut poll_source = PollSource::default();
-        let delayed = poll_source.update(
-            NodeView {
-                failure: None,
-                origin_hub: None,
-                history_hidden: false,
-                has_stored_history: false,
-                node: "laptop".to_owned(),
-                status: NodeStatus::Healthy,
-                events: Vec::new(),
-                latest_snapshot: None,
-                cursor: None,
-                gaps: Vec::new(),
-                truncated: false,
-                backfill: false,
-                last_activity: None,
-            },
-            Some(1),
-            false,
-        );
+        let known = NodeView {
+            failure: None,
+            origin_hub: None,
+            history_hidden: false,
+            has_stored_history: false,
+            node: "laptop".to_owned(),
+            status: NodeStatus::Healthy,
+            events: Vec::new(),
+            latest_snapshot: None,
+            cursor: None,
+            gaps: Vec::new(),
+            truncated: false,
+            backfill: false,
+            last_activity: None,
+        };
+        let delayed = poll_source.update(known.clone(), Some(1), false);
         let live = Update {
             node: Node {
                 delivery: Delivery::Live,
@@ -556,5 +553,33 @@ mod tests {
             item.as_object_mut().unwrap().remove("delivery");
         }
         assert_eq!(delayed, live);
+        let retained = poll_source.update(
+            NodeView {
+                status: NodeStatus::RemovedRetained,
+                last_activity: Some((1, 0)),
+                ..known
+            },
+            None,
+            false,
+        );
+        retained.apply(&mut hub, 1000, Instant::now()).unwrap();
+        let fleet = hub.snapshot(&projection);
+        assert_eq!(fleet.nodes[0].status, Status::RemovedRetained);
+        assert_eq!(fleet.nodes[0].last_activity_at, Some(1000));
+        assert_eq!(fleet.nodes[0].delivery, Delivery::Delayed);
+        assert!(fleet.nodes[0].endpoints.is_empty());
+        assert!(fleet.nodes[0].exchanges.is_empty());
+        let node = Scope::Node {
+            node: "laptop".to_owned(),
+        };
+        assert!(!hub.scope_available(&Projection {
+            scope: &node,
+            ..projection
+        }));
+        let attention = hub.snapshot(&Projection {
+            scope: &Scope::Attention,
+            ..projection
+        });
+        assert!(attention.attention.unwrap().is_empty());
     }
 }
