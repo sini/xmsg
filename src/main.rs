@@ -240,6 +240,13 @@ pub struct RegisterAgyArgs {
 
 #[derive(Parser, Debug)]
 pub struct ServeArgs {
+    /// Opt in to an owner-local attribution query for this lifecycle socket; qualification remains unavailable by default.
+    #[arg(long)]
+    pub executor_lifecycle_socket: Option<PathBuf>,
+
+    /// Override the attribution query socket path (requires the lifecycle endpoint).
+    #[arg(long, requires = "executor_lifecycle_socket")]
+    pub executor_attribution_sock: Option<PathBuf>,
     /// Read session context tags and masking policy from a TOML file.
     #[arg(long, env = "XMSG_CONTEXT_TAGS_CONFIG")]
     pub context_tags_config: Option<PathBuf>,
@@ -1867,6 +1874,25 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         }
     }));
 
+    let attribution = if let Some(lifecycle_socket) = args.executor_lifecycle_socket {
+        let query_socket = args.executor_attribution_sock.unwrap_or_else(|| {
+            agent_sock_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("/"))
+                .join("executor-attribution.sock")
+        });
+        Some(xmsg::caller_attribution::bind_unqualified(
+            xmsg::caller_attribution::ServerConfig {
+                query_socket,
+                lifecycle_socket,
+                expected_uid: my_uid,
+            },
+            state.clone(),
+        )?)
+    } else {
+        None
+    };
+
     if !args.leaf {
         let reg_listener = match activated.register.take() {
             Some(listener) => listener,
@@ -2018,6 +2044,14 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
             tracing::error!("unix http server error: {e}");
         }
     }));
+
+    if let Some(attribution) = attribution {
+        let mut shutdown_rx_attribution = shutdown_rx.clone();
+        server_tasks.push(tokio::spawn(async move {
+            let _ = shutdown_rx_attribution.wait_for(|&value| value).await;
+            attribution.stop();
+        }));
+    }
 
     xmsg::discovery::spawn(fed_state.clone(), discovery_listen);
     xmsg::systemd::notify_ready();

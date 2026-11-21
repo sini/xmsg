@@ -161,6 +161,29 @@ pub struct ControlService {
     credentials: ProvisionedCredentials,
     attestor: Box<dyn HostAttestor>,
     next_call: AtomicU64,
+    bridge: Option<DaemonAttributionConfig>,
+    runtime_epoch: String,
+    clock: Box<dyn WallClock>,
+}
+pub use crate::auth::daemon::DaemonAttributionConfig;
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleCall {
+    pub request: ControlRequest,
+    #[serde(default)]
+    pub caller_context: Option<xmsg::client::caller_attribution::CallerContext>,
+}
+pub(crate) trait WallClock: Send + Sync {
+    fn now(&self) -> i64;
+}
+struct SystemClock;
+impl WallClock for SystemClock {
+    fn now(&self) -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+            .unwrap_or(0)
+    }
 }
 impl ControlService {
     #[cfg(test)]
@@ -183,13 +206,121 @@ impl ControlService {
     ) -> Result<Self, ErrorCode> {
         configuration.validate()?;
         let database_path = crate::unix::private_parent(path, uid)?;
+        let mut epoch = [0u8; 16];
+        getrandom::fill(&mut epoch).map_err(|_| ErrorCode::Storage)?;
         Ok(Self {
             journal: Mutex::new(Journal::open(&database_path, &configuration)?),
             uid,
             credentials,
             attestor: Box::new(auth::Unavailable),
             next_call: AtomicU64::new(1),
+            bridge: None,
+            runtime_epoch: hex::encode(epoch),
+            clock: Box::new(SystemClock),
         })
+    }
+    pub fn open_with_daemon_attribution(
+        path: &Path,
+        uid: u32,
+        configuration: OwnerConfig,
+        credentials: ProvisionedCredentials,
+        bridge: DaemonAttributionConfig,
+    ) -> Result<Self, ErrorCode> {
+        bridge.validate(uid)?;
+        let mut service = Self::open(path, uid, configuration, credentials)?;
+        service.bridge = Some(bridge);
+        Ok(service)
+    }
+    pub(crate) fn bridge_configured(&self) -> bool {
+        self.bridge.is_some()
+    }
+    fn call_nonce(&self) -> Result<u64, ErrorCode> {
+        let mut value = self.next_call.load(Ordering::Relaxed);
+        loop {
+            let next = value.checked_add(1).ok_or(ErrorCode::ResourceLimit)?;
+            match self.next_call.compare_exchange_weak(
+                value,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(previous) => return Ok(previous),
+                Err(current) => value = current,
+            }
+        }
+    }
+    pub(crate) fn lifecycle_from_stream(
+        &self,
+        stream: &std::os::unix::net::UnixStream,
+        call: LifecycleCall,
+    ) -> Result<ControlReply, ErrorCode> {
+        call.request
+            .validate()
+            .map_err(|_| ErrorCode::MalformedFrame)?;
+        let bridge = self
+            .bridge
+            .clone()
+            .ok_or(ErrorCode::AttestationUnavailable)?;
+        let peer = crate::unix::peer(stream)?;
+        let input = crate::journal::input_digest(&call.request)?;
+        let binding = auth::CallBinding {
+            peer,
+            call_nonce: self.call_nonce()?,
+            input_digest: input.clone(),
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let duplicate =
+            xmsg::client::caller_attribution::with_fd_inheritance_gate(|| stream.try_clone())
+                .map_err(|_| ErrorCode::Storage)?;
+        let attestor = auth::daemon::ScopedDaemonAttestor::new(
+            bridge,
+            duplicate.into(),
+            self.runtime_epoch.clone(),
+            call.caller_context,
+            deadline,
+        )?;
+        let principal = auth::principal(&attestor, &binding, self.uid)?;
+        let mut journal = loop {
+            match self.journal.try_lock() {
+                Ok(guard) => break guard,
+                Err(std::sync::TryLockError::Poisoned(_)) => return Err(ErrorCode::Storage),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(ErrorCode::DeadlineExpired);
+                    }
+                    std::thread::yield_now();
+                }
+            }
+        };
+        if std::time::Instant::now() >= deadline {
+            return Err(ErrorCode::DeadlineExpired);
+        }
+        let old_timeout: u32 = journal
+            .db
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .map_err(|_| ErrorCode::Storage)?;
+        journal
+            .db
+            .busy_timeout(std::time::Duration::ZERO)
+            .map_err(|_| ErrorCode::Storage)?;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            journal.admit_bound(
+                principal.id(),
+                &input,
+                &call.request,
+                &|| self.clock.now(),
+                deadline,
+            )
+        }));
+        let restored = journal
+            .db
+            .busy_timeout(std::time::Duration::from_millis(u64::from(old_timeout)))
+            .map_err(|_| ErrorCode::Storage);
+        restored?;
+        match result {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
     pub(crate) fn lifecycle(
         &self,
@@ -201,7 +332,7 @@ impl ControlService {
         let input = crate::journal::input_digest(&request)?;
         let binding = CallBinding {
             peer,
-            call_nonce: self.next_call.fetch_add(1, Ordering::Relaxed),
+            call_nonce: self.call_nonce()?,
             input_digest: input.clone(),
         };
         let principal = auth::principal(self.attestor.as_ref(), &binding, self.uid)?;

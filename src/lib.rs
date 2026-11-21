@@ -7,6 +7,8 @@ pub mod agy;
 #[cfg(feature = "daemon")]
 pub mod attachments;
 #[cfg(feature = "daemon")]
+pub mod caller_attribution;
+#[cfg(feature = "daemon")]
 pub mod claim;
 #[cfg(feature = "client")]
 pub mod client;

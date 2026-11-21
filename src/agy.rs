@@ -1903,7 +1903,12 @@ pub async fn deliver_agy_envelope(
     #[cfg(target_os = "macos")]
     crate::spawn::cloexec_inherited_fds(&mut cmd);
 
-    let output = match tokio::time::timeout(Duration::from_secs(5), cmd.output()).await {
+    let child = crate::client::caller_attribution::with_fd_inheritance_gate(|| cmd.spawn());
+    let output = match tokio::time::timeout(Duration::from_secs(5), async {
+        child?.wait_with_output().await
+    })
+    .await
+    {
         Ok(Ok(out)) => out,
         Ok(Err(e)) => {
             return Err(AppError::InboxUnavailable(format!(

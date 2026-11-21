@@ -72,6 +72,114 @@ fn peer() -> PeerWitness {
         pid: Some(123),
     }
 }
+
+struct FixedBridgeClock(i64);
+impl WallClock for FixedBridgeClock {
+    fn now(&self) -> i64 {
+        self.0
+    }
+}
+
+fn run_scripted_bridge(
+    mutate: impl FnOnce(&mut xmsg::client::caller_attribution::Reply) + Send,
+) -> (serde_json::Value, i64) {
+    use std::{
+        io::{Read, Write},
+        os::fd::AsFd,
+        os::unix::net::{UnixListener, UnixStream},
+        time::Instant,
+    };
+    use xmsg::client::caller_attribution::{self as wire, AuthorityStamp, Reply};
+    let base = std::path::Path::new("/tmp").canonicalize().unwrap();
+    let directory = tempfile::Builder::new()
+        .prefix("xa-")
+        .tempdir_in(base)
+        .unwrap();
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let life_path = directory.path().join("life.sock");
+    let query_path = directory.path().join("query.sock");
+    let life = UnixListener::bind(&life_path).unwrap();
+    let query = UnixListener::bind(&query_path).unwrap();
+    for socket in [&life_path, &query_path] {
+        std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let mut f = fixture(config(vec![grant(Verb::Send, "session-a", 1)]));
+    f.service.bridge = Some(DaemonAttributionConfig {
+        query_socket: query_path,
+        lifecycle_socket: life_path.clone(),
+        expected_uid: uid(),
+    });
+    f.service.clock = Box::new(FixedBridgeClock(100));
+    let response = std::thread::scope(|scope| {
+        let script = scope.spawn(move || {
+            let (stream, _) = query.accept().unwrap();
+            let deadline = Instant::now() + std::time::Duration::from_secs(2);
+            let (request, original) = wire::receive_query(&stream, deadline).unwrap();
+            let (peer_uid, peer_pid) = wire::socket_peer(original.as_fd()).unwrap();
+            let mut reply = Reply::Ok {
+                v: wire::VERSION,
+                runtime_epoch: request.runtime_epoch,
+                call_nonce: request.call_nonce,
+                input_digest: request.input_digest,
+                context_digest: request.context_digest,
+                peer_uid,
+                peer_pid: peer_pid.unwrap(),
+                principal: "worker".into(),
+                authority_stamp: Box::new(AuthorityStamp {
+                    source: "scripted-test".into(),
+                    matched_pid: peer_pid.unwrap(),
+                    matched_start: "fixture".into(),
+                    registration_digest: "d".repeat(64),
+                    root_generation: None,
+                    child_generation: None,
+                }),
+            };
+            mutate(&mut reply);
+            wire::send_reply(&stream, &reply, deadline).unwrap();
+        });
+        let mut client = UnixStream::connect(life_path).unwrap();
+        let (server, _) = life.accept().unwrap();
+        let handler = scope.spawn(|| f.service.handle_lifecycle_connection(server).unwrap());
+        let body = serde_json::to_vec(&LifecycleCall {
+            request: send("real-socket"),
+            caller_context: None,
+        })
+        .unwrap();
+        client.write_all(&body).unwrap();
+        client.write_all(b"\n").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .unwrap();
+        let mut result = String::new();
+        client.read_to_string(&mut result).unwrap();
+        handler.join().unwrap();
+        script.join().unwrap();
+        serde_json::from_str(&result).unwrap()
+    });
+    (response, count(&f.service, "admissions"))
+}
+
+#[test]
+fn bridge_scripted_socket_positive_admits_bound_principal() {
+    let (reply, rows) = run_scripted_bridge(|_| {});
+    assert_eq!(
+        rows, 1,
+        "valid bound scripted response did not reach admission"
+    );
+    assert_eq!(reply["status"], "ok");
+}
+
+#[test]
+fn bridge_wrong_epoch_has_no_admission_even_with_valid_grant() {
+    let (reply, rows) = run_scripted_bridge(|reply| {
+        if let xmsg::client::caller_attribution::Reply::Ok { runtime_epoch, .. } = reply {
+            *runtime_epoch = "f".repeat(32);
+        }
+    });
+    assert_eq!(rows, 0, "wrong epoch reached durable admission");
+    assert_eq!(reply["code"], "attestation_binding");
+}
 fn send(id: &str) -> ControlRequest {
     ControlRequest {
         version: 1,

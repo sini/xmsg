@@ -69,10 +69,35 @@ impl Journal {
         request: &ControlRequest,
         now: i64,
     ) -> Result<ControlReply, ErrorCode> {
+        self.admit_clock(principal, input, request, &|| Ok(now))
+    }
+    pub(crate) fn admit_bound(
+        &mut self,
+        principal: &str,
+        input: &str,
+        request: &ControlRequest,
+        clock: &dyn Fn() -> i64,
+        deadline: std::time::Instant,
+    ) -> Result<ControlReply, ErrorCode> {
+        self.admit_clock(principal, input, request, &|| {
+            if std::time::Instant::now() >= deadline {
+                return Err(ErrorCode::DeadlineExpired);
+            }
+            Ok(clock())
+        })
+    }
+    fn admit_clock(
+        &mut self,
+        principal: &str,
+        input: &str,
+        request: &ControlRequest,
+        clock: &dyn Fn() -> Result<i64, ErrorCode>,
+    ) -> Result<ControlReply, ErrorCode> {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
+        let now = clock()?;
         if let Some(reply) = replay(&tx, principal, &request.request_id, input)? {
             audit(
                 &tx,
