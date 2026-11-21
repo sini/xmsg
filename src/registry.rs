@@ -64,12 +64,9 @@ impl SessionDirs for &[&Path] {
 }
 
 pub fn expand_tilde(p: PathBuf) -> PathBuf {
-    if let Ok(stripped) = p.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(stripped);
-        }
-    }
-    p
+    let lookup = crate::install_paths::SystemHomeLookup;
+    let env = crate::install_paths::ResolveEnv::from_process(&lookup);
+    crate::install_paths::expand_explicit_path(&p, &env).unwrap_or(p)
 }
 
 pub fn resolve_sessions_dirs(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -87,9 +84,14 @@ pub fn resolve_sessions_dirs(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
         }
     }
 
+    let lookup = crate::install_paths::SystemHomeLookup;
+    let env = crate::install_paths::ResolveEnv::from_process(&lookup);
+
     if raw_dirs.is_empty() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        return vec![PathBuf::from(home).join(".claude").join("sessions")];
+        // Optional harness discovery input: omit when account home is unavailable; never fall back to CWD.
+        return crate::install_paths::resolve_optional_home(&env)
+            .map(|home| vec![home.join(".claude").join("sessions")])
+            .unwrap_or_default();
     }
 
     let mut result = Vec::new();
@@ -118,8 +120,9 @@ pub fn resolve_sessions_dirs(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
     }
 
     if result.is_empty() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        return vec![PathBuf::from(home).join(".claude").join("sessions")];
+        return crate::install_paths::resolve_optional_home(&env)
+            .map(|home| vec![home.join(".claude").join("sessions")])
+            .unwrap_or_default();
     }
 
     result
