@@ -210,6 +210,12 @@ def main():
                 assert before == data, "canonical event/snapshot JSON changed across downgrade and fresh upgrade"
             results.append({"scenario":scenario,"mode":mode,"exit":0,"output":text})
             print(f"{scenario}/{mode}: exit 0 {text}",flush=True)
+    refresh_store = output / "rollback-refresh-store"
+    refresh_store.mkdir(mode=0o700)
+    for binary, mode in ((newer, "refresh_write"), (older, "refresh_old"), (newer, "refresh_read")):
+        text = run([binary, mode, refresh_store], source, os.environ.copy(), output / f"rollback-refresh-{mode}.log")
+        results.append({"scenario": "rollback_refresh", "mode": mode, "exit": 0, "output": text})
+        print(f"rollback_refresh/{mode}: exit 0 {text}", flush=True)
     (output/"results.json").write_text(json.dumps({"old_revision":pin["revision"],"scope":"production Store/render; no live OIDC acceptance","results":results},indent=2)+'\n')
 
 
