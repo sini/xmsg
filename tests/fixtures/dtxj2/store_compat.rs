@@ -10,7 +10,7 @@ const FUTURE: &str = "future_writer_fixture";
 
 fn page(kinds: &[&str], next: i64) -> ExportPage {
     serde_json::from_value(json!({
-        "v": 1, "node": NODE, "epoch": "compat-fixture", "scope": "a".repeat(64),
+        "v": 2, "node": NODE, "epoch": "compat-fixture", "scope": "a".repeat(64),
         "events": kinds.iter().enumerate().map(|(index, kind)| json!({
             "sequence": index + 1, "observed_at": 1000, "persisted_at": 1000,
             "kind": kind, "available": "not_recorded"

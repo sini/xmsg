@@ -1957,7 +1957,7 @@ fn relay_key_and_origin_bytes_are_independently_accounted() {
         hub.len() as i64,
         "snapshot origin bytes omitted"
     );
-    let expected:i64=c.query_row("SELECT coalesce(length(snapshot),0)+coalesce(length(snapshot_fingerprint),0)+coalesce(length(epoch),0)+coalesce(length(scope),0)+length(gaps)+192+(SELECT sum(bytes) FROM events) FROM nodes",[],|r|r.get(0)).unwrap();
+    let expected:i64=c.query_row("SELECT coalesce(length(snapshot),0)+coalesce(length(snapshot_activity),0)+coalesce(length(snapshot_fingerprint),0)+coalesce(length(epoch),0)+coalesce(length(scope),0)+length(gaps)+192+(SELECT sum(bytes) FROM events) FROM nodes",[],|r|r.get(0)).unwrap();
     assert_eq!(
         accounted_bytes(c, &key).unwrap() - expected,
         key.len() as i64,

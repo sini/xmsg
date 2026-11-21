@@ -376,12 +376,68 @@ fn read_cursor(c: &Connection, node: &str) -> Result<Cursor, StoreError> {
 }
 fn purge(c: &Connection, node: &str) -> Result<(), StoreError> {
     c.execute("DELETE FROM events WHERE node=?1", [node])?;
-    c.execute("UPDATE nodes SET epoch=NULL,scope=NULL,next=0,snapshot=NULL,snapshot_receipt=NULL,snapshot_base=NULL,snapshot_fingerprint=NULL,snapshot_origin_hub=NULL,gaps='[]',truncated=1,backfill=1 WHERE node=?1",[node])?;
+    c.execute("UPDATE nodes SET epoch=NULL,scope=NULL,next=0,snapshot=NULL,snapshot_activity=NULL,snapshot_receipt=NULL,snapshot_base=NULL,snapshot_fingerprint=NULL,snapshot_origin_hub=NULL,gaps='[]',truncated=1,backfill=1 WHERE node=?1",[node])?;
     Ok(())
 }
 fn accounted_bytes(c: &Connection, node: &str) -> Result<i64, StoreError> {
-    let (metadata,events):(i64,i64)=c.query_row("SELECT coalesce(length(snapshot),0)+coalesce(length(snapshot_fingerprint),0)+coalesce(length(CAST(snapshot_origin_hub AS BLOB)),0)+CASE WHEN node LIKE 'reverse-v1:%' THEN length(node) ELSE 0 END+coalesce(length(epoch),0)+coalesce(length(scope),0)+length(gaps)+192,(SELECT coalesce(sum(bytes),0) FROM events WHERE node=?1) FROM nodes WHERE node=?1",[node],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    let (metadata,events):(i64,i64)=c.query_row("SELECT coalesce(length(snapshot),0)+coalesce(length(snapshot_activity),0)+coalesce(length(snapshot_fingerprint),0)+coalesce(length(CAST(snapshot_origin_hub AS BLOB)),0)+CASE WHEN node LIKE 'reverse-v1:%' THEN length(node) ELSE 0 END+coalesce(length(epoch),0)+coalesce(length(scope),0)+length(gaps)+192,(SELECT coalesce(sum(bytes),0) FROM events WHERE node=?1) FROM nodes WHERE node=?1",[node],|r|Ok((r.get(0)?,r.get(1)?)))?;
     metadata.checked_add(events).ok_or(StoreError::Full)
+}
+fn split_snapshot_for_storage(snapshot: &ExportSnapshot) -> Result<(Vec<u8>, Vec<u8>), StoreError> {
+    let mut value = serde_json::to_value(snapshot).map_err(|_| StoreError::Invalid)?;
+    let obj = value.as_object_mut().ok_or(StoreError::Invalid)?;
+    let top_activity = obj.remove("activity").ok_or(StoreError::Invalid)?;
+    let mut endpoint_activities = Vec::new();
+    if let Some(endpoints) = obj.get_mut("endpoints").and_then(|v| v.as_array_mut()) {
+        endpoint_activities.reserve(endpoints.len());
+        for ep in endpoints {
+            let act = ep
+                .as_object_mut()
+                .and_then(|m| m.remove("activity"))
+                .unwrap_or(serde_json::Value::Null);
+            endpoint_activities.push(act);
+        }
+    }
+    let compat_bytes = serde_json::to_vec(&value).map_err(|_| StoreError::Invalid)?;
+    let sidecar = serde_json::json!({
+        "activity": top_activity,
+        "endpoints": endpoint_activities,
+    });
+    let activity_bytes = serde_json::to_vec(&sidecar).map_err(|_| StoreError::Invalid)?;
+    Ok((compat_bytes, activity_bytes))
+}
+fn decode_stored_snapshot(
+    bytes: &[u8],
+    activity_bytes: Option<&[u8]>,
+) -> Result<ExportSnapshot, StoreError> {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| StoreError::Storage)?;
+    let obj = value.as_object_mut().ok_or(StoreError::Storage)?;
+    if let Some(ab) = activity_bytes {
+        let sidecar: serde_json::Value =
+            serde_json::from_slice(ab).map_err(|_| StoreError::Storage)?;
+        if let Some(top) = sidecar.get("activity") {
+            obj.insert("activity".to_owned(), top.clone());
+        }
+        if let (Some(eps), Some(ep_acts)) = (
+            obj.get_mut("endpoints").and_then(|v| v.as_array_mut()),
+            sidecar.get("endpoints").and_then(|v| v.as_array()),
+        ) {
+            for (ep, act) in eps.iter_mut().zip(ep_acts.iter()) {
+                if !act.is_null() {
+                    if let Some(m) = ep.as_object_mut() {
+                        m.insert("activity".to_owned(), act.clone());
+                    }
+                }
+            }
+        }
+    } else if !obj.contains_key("activity") {
+        obj.insert(
+            "activity".to_owned(),
+            serde_json::json!({"status": "disabled", "complete": true}),
+        );
+    }
+    serde_json::from_value(value).map_err(|_| StoreError::Storage)
 }
 fn validate_origins(c: &Connection, key: &str, origin: Option<&str>) -> Result<(), StoreError> {
     let invalid: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE node=?1 AND origin_hub IS NOT ?2) OR EXISTS(SELECT 1 FROM nodes WHERE node=?1 AND snapshot IS NOT NULL AND snapshot_origin_hub IS NOT ?2)", params![key, origin], |r| r.get(0))?;
@@ -574,6 +630,7 @@ impl Store {
             for (table, column, ty) in [
                 ("events", "origin_hub", "TEXT"),
                 ("nodes", "snapshot_origin_hub", "TEXT"),
+                ("nodes", "snapshot_activity", "BLOB"),
                 ("nodes", "display_name", "TEXT"),
                 ("nodes", "last_activity", "INTEGER"),
             ] {
@@ -918,6 +975,7 @@ impl Store {
         validate_snapshot(Self::policy(&inner, node)?, &snapshot)?;
         let bytes = encoded(&snapshot, PAGE_BYTES)?;
         let fingerprint = Sha256::digest(&bytes).to_vec();
+        let (compat_bytes, activity_bytes) = split_snapshot_for_storage(&snapshot)?;
         let policy = Self::policy(&inner, node)?.clone();
         let key = policy.storage_key();
         let origin = policy.origin_hub();
@@ -948,7 +1006,7 @@ impl Store {
             } else {
                 (now, snapshot.observed_at.min(now))
             };
-            c.execute("UPDATE nodes SET scope=?2,snapshot=?3,snapshot_receipt=?4,snapshot_base=?5,snapshot_fingerprint=?6,snapshot_origin_hub=?7,last_activity=?8 WHERE node=?1",params![node,snapshot.scope,bytes,receipt,base,fingerprint,origin,now])?;
+            c.execute("UPDATE nodes SET scope=?2,snapshot=?3,snapshot_activity=?4,snapshot_receipt=?5,snapshot_base=?6,snapshot_fingerprint=?7,snapshot_origin_hub=?8,last_activity=?9 WHERE node=?1",params![node,snapshot.scope,compat_bytes,activity_bytes,receipt,base,fingerprint,origin,now])?;
             self.retain(c, node, now)?;
             Ok(CommitOutcome {
                 cursor: read_cursor(c, node)?,
@@ -961,7 +1019,7 @@ impl Store {
             Err(StoreError::Full) if self.evict_oldest_inactive(&mut inner)? => {
                 transaction(&mut inner, |c| {
                     let node = key.as_str();
-                    c.execute("UPDATE nodes SET scope=?2,snapshot=?3,snapshot_receipt=?4,snapshot_base=?5,snapshot_fingerprint=?6,snapshot_origin_hub=?7,last_activity=?8 WHERE node=?1",params![node,snapshot.scope,bytes,now,snapshot.observed_at.min(now),fingerprint,origin,now])?;
+                    c.execute("UPDATE nodes SET scope=?2,snapshot=?3,snapshot_activity=?4,snapshot_receipt=?5,snapshot_base=?6,snapshot_fingerprint=?7,snapshot_origin_hub=?8,last_activity=?9 WHERE node=?1",params![node,snapshot.scope,compat_bytes,activity_bytes,now,snapshot.observed_at.min(now),fingerprint,origin,now])?;
                     self.retain(c, node, now)?;
                     Ok(CommitOutcome {
                         cursor: read_cursor(c, node)?,
@@ -1007,7 +1065,7 @@ impl Store {
             "DELETE FROM events WHERE node=?1 AND base<?2",
             params![node, cutoff],
         )?;
-        removed += c.execute("UPDATE nodes SET snapshot=NULL WHERE node=?1 AND snapshot IS NOT NULL AND snapshot_base<?2",params![node,cutoff])?;
+        removed += c.execute("UPDATE nodes SET snapshot=NULL,snapshot_activity=NULL WHERE node=?1 AND snapshot IS NOT NULL AND snapshot_base<?2",params![node,cutoff])?;
         let rows: i64 = c.query_row("SELECT count(*) FROM events WHERE node=?1", [node], |r| {
             r.get(0)
         })?;
@@ -1030,7 +1088,7 @@ impl Store {
             }
             if total > self.limits.bytes as i64 {
                 removed += c.execute(
-                    "UPDATE nodes SET snapshot=NULL WHERE node=?1 AND snapshot IS NOT NULL",
+                    "UPDATE nodes SET snapshot=NULL,snapshot_activity=NULL WHERE node=?1 AND snapshot IS NOT NULL",
                     [node],
                 )?;
             }
@@ -1116,14 +1174,13 @@ impl Store {
                 let name = key.as_str();
                 validate_origins(c, name, origin)?;
                 v.cursor = Some(read_cursor(c, name)?);
-                let (snapshot,receipt,gaps,truncated,backfill,snapshot_origin)=c.query_row("SELECT CASE WHEN snapshot_base>=?2 THEN snapshot END,CASE WHEN snapshot_base>=?2 THEN snapshot_receipt END,CAST(gaps AS BLOB),truncated,backfill,snapshot_origin_hub FROM nodes WHERE node=?1",params![name,cutoff],|r|Ok((r.get::<_,Option<Vec<u8>>>(0)?,r.get::<_,Option<i64>>(1)?,r.get::<_,Vec<u8>>(2)?,r.get::<_,bool>(3)?,r.get::<_,bool>(4)?,r.get::<_,Option<String>>(5)?)))?;
+                let (snapshot,snapshot_activity,receipt,gaps,truncated,backfill,snapshot_origin)=c.query_row("SELECT CASE WHEN snapshot_base>=?2 THEN snapshot END,CASE WHEN snapshot_base>=?2 THEN snapshot_activity END,CASE WHEN snapshot_base>=?2 THEN snapshot_receipt END,CAST(gaps AS BLOB),truncated,backfill,snapshot_origin_hub FROM nodes WHERE node=?1",params![name,cutoff],|r|Ok((r.get::<_,Option<Vec<u8>>>(0)?,r.get::<_,Option<Vec<u8>>>(1)?,r.get::<_,Option<i64>>(2)?,r.get::<_,Vec<u8>>(3)?,r.get::<_,bool>(4)?,r.get::<_,bool>(5)?,r.get::<_,Option<String>>(6)?)))?;
                 v.gaps = serde_json::from_slice(&gaps).map_err(|_| StoreError::Storage)?;
                 v.truncated = truncated;
                 v.truncated |= c.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE node=?1 AND base<?3) OR (SELECT count(*) FROM events WHERE node=?1 AND base>=?3)>?2 OR EXISTS(SELECT 1 FROM nodes WHERE node=?1 AND snapshot_base<?3)",params![name,limit.min(ROWS) as i64,cutoff],|r|r.get::<_,bool>(0))?;
                 v.backfill = backfill;
                 if let (Some(bytes), Some(received_at)) = (snapshot, receipt) {
-                    let snapshot: ExportSnapshot =
-                        serde_json::from_slice(&bytes).map_err(|_| StoreError::Storage)?;
+                    let snapshot = decode_stored_snapshot(&bytes, snapshot_activity.as_deref())?;
                     v.latest_snapshot = Some(CachedSnapshot {
                         origin_hub: snapshot_origin,
                         source_age_seconds: now.saturating_sub(snapshot.observed_at).max(0),
