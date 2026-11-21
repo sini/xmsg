@@ -3285,3 +3285,51 @@ async fn mission_control_sse_buffered_mask_resets_without_leaking_or_closing() {
     assert_no_canary(&buffered);
     assert_eq!(payload(&tick)["type"], "tick");
 }
+
+#[tokio::test]
+async fn mission_control_sse_bounds_live_snapshot_refusal() {
+    let provider =
+        crate::enroll_oidc::signed_fixture::Fixture::new_at(crate::storage::now_epoch_secs()).await;
+    let directory = tempfile::tempdir().unwrap();
+    let (issuer, issued) =
+        crate::mission_control::tests::transport_fixture(&provider, &directory).await;
+    let probe = Arc::new(crate::mission_control::stream::WireProbe::default());
+    probe.refuse_snapshot.store(true, Ordering::SeqCst);
+    let fixture = Fixture::with_issuer(false, true, Some(issuer), Some(probe.clone())).await;
+    let client = reqwest::Client::new();
+    let body = tokio::time::timeout(Duration::from_secs(3), async {
+        client
+            .get(format!("{}/v1/mission-control/stream/fleet", fixture.url))
+            .header(hyper::header::ACCEPT, "text/event-stream")
+            .bearer_auth(&issued.handle)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    })
+    .await
+    .expect("persistent live snapshot refusal did not end the SSE stream");
+    let (opening, terminal) = body.split_once("\n\n").unwrap();
+    assert!(opening.starts_with(": lease_expires_at="));
+    let data = terminal
+        .strip_prefix("event: error\ndata: ")
+        .and_then(|data| data.strip_suffix("\n\n"))
+        .expect("terminal SSE error and EOF");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(data).unwrap(),
+        json!({"v":1,"type":"error","code":"unavailable","fatal":true})
+    );
+    assert_eq!(probe.snapshot_attempts.load(Ordering::SeqCst), 4);
+
+    let snapshot = client
+        .get(format!("{}/v1/mission-control/snapshot/fleet", fixture.url))
+        .bearer_auth(&issued.handle)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(snapshot.status(), StatusCode::OK);
+}

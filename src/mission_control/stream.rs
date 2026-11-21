@@ -24,6 +24,7 @@ use super::upstream::ReadHub;
 use super::writer::SessionWriter;
 use super::Issuer;
 
+const SNAPSHOT_REPROJECTIONS: usize = 3;
 const STREAM_PREFIX: &str = "/v1/mission-control/stream/";
 
 pub(crate) type Body = UnsyncBoxBody<Bytes, Infallible>;
@@ -83,6 +84,8 @@ impl Fence {
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct WireProbe {
+    pub(crate) refuse_snapshot: std::sync::atomic::AtomicBool,
+    pub(crate) snapshot_attempts: std::sync::atomic::AtomicUsize,
     pub(crate) armed: std::sync::atomic::AtomicBool,
     pub(crate) blocked: tokio::sync::Notify,
     pub(crate) closed: tokio::sync::Notify,
@@ -404,6 +407,7 @@ impl Reader {
                 self.writer.lease_at
             )));
         }
+        let mut reprojections = 0;
         loop {
             if let Some(reset) = self.reset.take() {
                 let reason = match reset {
@@ -461,12 +465,34 @@ impl Reader {
                     .filter(|item| item.endpoint.is_some())
                     .map(|item| item.node.as_str());
                 let body = std::str::from_utf8(&body).ok()?;
-                let result = match self.writer.handoff(nodes.chain(attention), None, || {
-                    frame("snapshot", Some(&cursor), body)
-                }) {
+                let handoff = || {
+                    self.writer.handoff(nodes.chain(attention), None, || {
+                        frame("snapshot", Some(&cursor), body)
+                    })
+                };
+                #[cfg(not(test))]
+                let result = handoff();
+                #[cfg(test)]
+                let result = match &self.fence.probe {
+                    Some(probe)
+                        if probe
+                            .refuse_snapshot
+                            .load(std::sync::atomic::Ordering::SeqCst) =>
+                    {
+                        probe
+                            .snapshot_attempts
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Err(fenced())
+                    }
+                    _ => handoff(),
+                };
+                let result = match result {
                     Ok(result) => result,
                     Err(_) if self.writer.still_live() => {
-                        // Reproject the pending snapshot under the latest mask.
+                        if reprojections == SNAPSHOT_REPROJECTIONS {
+                            return Some(self.terminal_error("unavailable"));
+                        }
+                        reprojections += 1;
                         tokio::task::yield_now().await;
                         continue;
                     }
@@ -534,15 +560,12 @@ impl Reader {
             }
             tokio::select! {
                 change = self.writer.live.change() => {
-                    self.ended = true;
                     let code = match change?.reason {
                         InvalidationReason::LeaseExpired => "lease_expired",
                         InvalidationReason::Revoked => "revoked",
                         InvalidationReason::PolicyChanged => "policy_changed",
                     };
-                    let terminal = frame("error",None,&json!({"v":1,"type":"error","code":code,"fatal":true}).to_string());
-                    self.fence.permit_terminal(&terminal);
-                    return Some(terminal);
+                    return Some(self.terminal_error(code));
                 }
                 result = self.changes.changed() => { result.ok()?; }
                 _ = tokio::time::sleep_until(self.next_tick) => {
@@ -551,6 +574,17 @@ impl Reader {
                 }
             }
         }
+    }
+
+    fn terminal_error(&mut self, code: &str) -> Bytes {
+        self.ended = true;
+        let terminal = frame(
+            "error",
+            None,
+            &json!({"v":1,"type":"error","code":code,"fatal":true}).to_string(),
+        );
+        self.fence.permit_terminal(&terminal);
+        terminal
     }
 }
 
