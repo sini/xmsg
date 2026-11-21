@@ -21,9 +21,34 @@ An instance is a live or [parked](/glossary/#parked) conversation in an agent
   conversation UUID. A conversation can close, or pause between turns. Then its ID stays `parked`
   in SQLite for the [reply TTL](/glossary/#reply-ttl) (`--reply-ttl`, 7 days by default).
   Incoming messages wait for its next turn.
-- **Process-bound session IDs (`pi`, `opencode`, `hermes`):** `xmsg` makes a new UUID v4 at
-  registration. When a Pi process exits, its address becomes [`gone`](/glossary/#gone) (`410`).
-  The same occurs when an `opencode` or `hermes` session is deleted or finalized.
+- **Process-bound session IDs (`pi`, `opencode`, `hermes`, and declared plugin harnesses):** `xmsg`
+  makes a new UUID v4 at registration. When a Pi process exits, its address becomes
+  [`gone`](/glossary/#gone) (`410`). The same occurs when an `opencode`, `hermes`, or declared
+  plugin harness session is deleted, finalized, or disconnected.
+
+### Declared plugin harnesses
+
+<Status id="xmsg.harness-descriptors" />
+
+Pure-bus deployments do not need `--harnesses-file`; declared plugin harnesses are optional and off
+by default. When configured with `xmsg serve --harnesses-file <PATH>` (`XMSG_HARNESSES_FILE`),
+operators can register additional multiplexed plugin harnesses on `register.sock` without modifying
+or rebuilding `xmsg`:
+
+- **Non-shadowing:** Built-in harnesses (`claude`, `codex`, `agy`, `pi`, `opencode`, `hermes`,
+  `svc`) and reserved names (`unknown`, `daemon`, `bus`, `system`, `all`, `default`) are rejected
+  if declared in the file.
+- **v1 poll-only lifecycle:** Declared harnesses use `delivery_mode: "poll"` on `register.sock`.
+  `reclaim`, `continues`, and `subagent` frames are refused, and `capabilities.attachments`
+  defaults to `false` (default-deny).
+- **Drain by default, immediate security revocation:** Removing a harness from the file drains its
+  existing live connections for `drain_window_secs` (default `600` seconds) while refusing new
+  registrations. Explicit revocation (`"revoked": true`, `revoked_harnesses`, or
+  `xmsg harness revoke <name>`) closes live connections immediately without waiting for the drain
+  window.
+- **No silent fallback:** Undeclared or missing harness names remain `unknown` across listings,
+  routing, and observation snapshots rather than falling back to `claude` or `pi`. Disconnected
+  declared or unknown sessions report `closed` and return `410 gone`, never `parked`.
 
 ### Concurrent processes and fork suffixes (`instance_claims`)
 
@@ -170,9 +195,12 @@ An unreachable node is reported separately from a node with no match.
 A bus address is not necessarily a harness resume ID: fork suffixes, agy
 session keys and Hermes conversation changes can make them different. The
 locator records the native ID at registration instead of deriving it from the
-address. Old registrations can have no native ID. No resume mapping is proven
-yet: `resume` is always `null`, with `reason: live` for live or stale-unknown
-sessions and `reason: unproven` otherwise.
+address. Old registrations can have no native ID. Built-in harness resume
+mappings remain unproven (`resume` is `null`, with `reason: live` for live or
+stale-unknown sessions and `reason: unproven` otherwise). A declared plugin
+harness (<Status id="xmsg.harness-descriptors" />) with a typed `resume_argv`
+template renders inert display-only argv tokens for non-live sessions with a
+validated native ID (refusing leading-dash IDs and never executing the command).
 
 Environment hints come only from adapter registration. An absent hint means
 unknown; an explicit `none` means the adapter reported no supported terminal

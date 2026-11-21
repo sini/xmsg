@@ -304,9 +304,20 @@ pub fn locate(args: LocateArgs) -> Result<()> {
             inert(&row.status),
             inert(row.label.as_deref().unwrap_or("-"))
         );
+        let resume_display = match &item.resume {
+            Some(argv) => format!(
+                "[{}]",
+                argv.iter()
+                    .map(|token| inert(token))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            None => "none".to_string(),
+        };
         println!(
-            "  native_id={}  resume=none ({})",
+            "  native_id={}  resume={} ({})",
             inert(item.native_id.as_deref().unwrap_or("unknown")),
+            resume_display,
             inert(&item.reason)
         );
         if let Some(env) = item.env {
@@ -342,4 +353,60 @@ pub fn locate(args: LocateArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Args, Debug)]
+pub struct HarnessArgs {
+    #[command(subcommand)]
+    pub action: HarnessAction,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum HarnessAction {
+    /// Immediately security-revoke a declared harness on the local daemon (zero drain delay)
+    Revoke {
+        name: String,
+        #[command(flatten)]
+        options: Options,
+    },
+    /// Atomically reload --harnesses-file on the local daemon
+    Reload {
+        #[command(flatten)]
+        options: Options,
+    },
+}
+
+pub fn harness(args: HarnessArgs) -> Result<()> {
+    match args.action {
+        HarnessAction::Revoke { name, options } => {
+            let value = request(
+                &options,
+                "POST",
+                endpoint(&["v1", "harnesses", &name, "revoke"]),
+                None,
+                Duration::from_secs(5),
+            )?;
+            if options.json {
+                print_json(&value, true)
+            } else {
+                println!("revoked harness {}", xmsg::locator::inert(&name));
+                Ok(())
+            }
+        }
+        HarnessAction::Reload { options } => {
+            let value = request(
+                &options,
+                "POST",
+                endpoint(&["v1", "harnesses", "reload"]),
+                None,
+                Duration::from_secs(5),
+            )?;
+            if options.json {
+                print_json(&value, true)
+            } else {
+                println!("reloaded harnesses file");
+                Ok(())
+            }
+        }
+    }
 }

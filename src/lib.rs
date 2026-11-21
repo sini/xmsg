@@ -29,6 +29,8 @@ pub mod federated_attachments;
 #[cfg(feature = "daemon")]
 pub mod handoff;
 #[cfg(feature = "daemon")]
+pub mod harnesses;
+#[cfg(feature = "daemon")]
 pub mod http;
 #[cfg(feature = "daemon")]
 pub mod inbox;

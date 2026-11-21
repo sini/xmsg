@@ -2377,8 +2377,7 @@ pub fn parked_instances(
     Ok(rows
         .into_iter()
         .filter_map(|(id, harness, last_live, has_reclaim, within_window)| {
-            let is_reclaim_harness =
-                harness == "pi" || harness == "codex" || crate::plugin::harness(&harness).is_some();
+            let is_reclaim_harness = harness != "claude" && harness != "agy";
             if is_reclaim_harness {
                 if has_reclaim && within_window {
                     Some((id, harness, last_live))
@@ -2821,9 +2820,7 @@ pub fn inactive_instances(
         .into_iter()
         .filter_map(
             |(id, harness, last_seen, within_parked_ttl, has_reclaim, within_reclaim_window)| {
-                let is_reclaim_harness = harness == "pi"
-                    || harness == "codex"
-                    || crate::plugin::harness(&harness).is_some();
+                let is_reclaim_harness = harness != "claude" && harness != "agy";
                 if is_reclaim_harness {
                     let status = if has_reclaim && within_reclaim_window {
                         "parked"

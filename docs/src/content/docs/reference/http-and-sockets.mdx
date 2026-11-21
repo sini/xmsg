@@ -44,6 +44,8 @@ curl -s --unix-socket "$sock" "http://localhost/v1/messages/<message_id>/replies
 | `POST /v1/messages` | Sends `{ "to", "text", "from"?, "idempotency_key"? }`. Returns `202 Accepted` with `{ "message_id", "address", "outcome" }`. |
 | `POST /v1/messages/{id}/replies` | Replies to `{id}` with `{ "text", "idempotency_key"? }`. Requires traced session/service caller (or leaf principal). Returns `200 OK` with `{ "seq", "messageId", "createdAt", "replierSessionId", "text", "pushOutcome", "pushedMessageId" }`. |
 | `GET /v1/messages/{id}/replies?after={seq}&wait={seconds}` | Reads stored replies to `{id}`, waiting up to `wait` seconds (max `60`, max `128` concurrent waiters). |
+| `POST /v1/harnesses/reload` | Local `http.sock` non-plugin owner only (<Status id="xmsg.harness-descriptors" />): atomically reloads `--harnesses-file`. |
+| `POST /v1/harnesses/{name}/revoke` | Local `http.sock` non-plugin owner only (<Status id="xmsg.harness-descriptors" />): immediately revokes a declared harness and closes live connections. |
 | `GET /v1/messages/{id}` | Returns the stored message record and its replies. |
 
 ### Local daemon build metadata
@@ -274,12 +276,16 @@ These clients use `register.sock`:
 - multiplexed plugin harnesses ([opencode](/harnesses/opencode/) and
   [Hermes](/harnesses/hermes/)).
 
-### Multiplexed plugin protocol (`opencode`, `hermes`)
+### Multiplexed plugin protocol (`opencode`, `hermes`, and declared harnesses)
 
-The plugin opens `register.sock` with `{"harness":"opencode"}` or `{"harness":"hermes"}`. The
-answer is `{"status":"ok","node":"<node>"}`. Each later frame has a `request_id`, and the response
-has the same `request_id`. Thus xmsg can answer tool calls while a `poll` waits on the same
-connection:
+The plugin opens `register.sock` with `{"harness":"opencode"}`, `{"harness":"hermes"}`, or
+`{"harness":"<declared-name>"}` (<Status id="xmsg.harness-descriptors" /> when configured via
+`--harnesses-file`). The answer is `{"status":"ok","node":"<node>"}`. An undeclared harness name
+is rejected with `bad_request`; a revoked declared harness is rejected with `denied`. Each later
+frame has a `request_id`, and the response has the same `request_id`. Thus xmsg can answer tool
+calls while a `poll` waits on the same connection. Declared v1 harnesses are poll-only: `reclaim`,
+`continues`, and `subagent` frames are refused, `env_hint_sources` filters reported terminal hints,
+and attachment operations require `"capabilities": {"attachments": true}` (default `false`):
 
 | Frame | Response |
 |---|---|
@@ -398,7 +404,10 @@ Its object has `v`, `node`, `scope`, `observed_at`, `endpoints`, `truncated` and
 `available`. Here `available` is the enum `available`, `partial` or `unavailable`.
 Each descriptor has `id`, `node`, `kind`, `harness` and `state`, with optional
 `source_at` and `label`. Kinds are `instance`, `subagent`, `service` or `unknown`;
-harnesses are `claude`, `codex`, `agy`, `pi`, `opencode`, `hermes` or `unknown`;
+harnesses are built-ins (`claude`, `codex`, `agy`, `pi`, `opencode`, `hermes`),
+validated declared harness names (`[a-z][a-z0-9_-]{0,31}`, <Status id="xmsg.harness-descriptors" />),
+or `unknown` (adding declared harness names to the observation snapshot wire enum is a breaking
+wire change; upgrade daemon, clients, and `observe-collector` together);
 states are `registered`, `released`, `seen` or `unknown`. These are cached facts,
 not current process liveness. Labels are at most 256 UTF-8 bytes and require
 both opt-ins. This implementation always reports a successful cached snapshot as
@@ -514,10 +523,31 @@ reference fields. This endpoint is absent from the TCP and federation listeners.
 
 The strict response has `locators` and `nodes`. Each locator contains its
 unchanged `recipient` row, `native_id`, `resume`, `reason`, `env` and `cwd`.
-`resume` is always `null`. `reason` is `live` for live or stale-unknown
-registrations, otherwise `unproven`. Missing native IDs or environment hints
-are `null`; a reported environment is `{kind, ref?}`, with kind `zellij`,
-`tmux`, `herdr` or `none`. `none` is distinct from an unknown environment.
+For built-in harnesses, `resume` is `null` (`reason` is `live` for live or
+stale-unknown registrations, otherwise `unproven`). For a declared plugin
+harness (<Status id="xmsg.harness-descriptors" />) with a typed `resume_argv`
+template, non-live registrations with a validated non-leading-dash native ID
+return inert argv tokens in `resume` (display-only; never executed). Missing
+native IDs or environment hints are `null`; a reported environment is
+`{kind, ref?}`, with kind `zellij`, `tmux`, `herdr` or `none`. `none` is
+distinct from an unknown environment.
+
+## Declared plugin harness administration
+
+<Status id="xmsg.harness-descriptors" />
+
+`POST /v1/harnesses/reload` and `POST /v1/harnesses/{name}/revoke` are mounted
+only on the local `http.sock` Unix router. Both verify that the Unix peer
+belongs to the daemon's UID and is not a registered plugin process (`403 denied`
+otherwise). Neither route is mounted on the optional local TCP listener or the
+mTLS `/fed/v2` listener.
+
+- `POST /v1/harnesses/reload` atomically re-reads and validates
+  `--harnesses-file` (failing closed and retaining the previous table on error),
+  starts the configured `drain_window_secs` countdown for removed harnesses, and
+  immediately terminates live connections for any newly revoked harness.
+- `POST /v1/harnesses/{name}/revoke` revokes a declared harness immediately and
+  closes its active plugin connections without waiting for the drain window.
 
 Local lookup gathers all matches without the ordinary list display cap,
 reconciliation, purge or queued delivery. Remote results expose only recipient

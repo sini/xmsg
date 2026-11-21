@@ -3,6 +3,8 @@ title: Hermes
 description: Integrating Hermes Agent with xmsg via the extensions/hermes plugin.
 ---
 
+import Status from '../../../components/Status.astro';
+
 Hermes loads the `xmsg` plugin (`extensions/hermes/plugin.yaml` and
 `extensions/hermes/__init__.py`) from `$HERMES_HOME/plugins/` when `plugins.enabled` includes
 `"xmsg"`. As for `opencode`, the Hermes plugin holds one multiplexed `register.sock` connection
@@ -62,3 +64,12 @@ harness-native ID at registration. Resume remains **unproven**: no resume
 command is offered. An adapter may report a typed terminal hint from its own
 environment; an omitted hint means unknown. Terminal references require local
 detail opt-in and are never published to peers.
+
+## Built-in vs. declared plugin harnesses
+
+<Status id="xmsg.harness-descriptors" />
+
+`hermes` is a compiled-in plugin harness with push delivery and compression-chain `continues`
+support. It cannot be shadowed by a descriptor in `--harnesses-file`. To add an external poll-only
+plugin harness without changing `xmsg`, declare it via
+[`--harnesses-file`](/concepts/sessions-services-subagents/#declared-plugin-harnesses).

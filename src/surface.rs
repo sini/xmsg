@@ -1127,7 +1127,7 @@ pub async fn deliver(
     message_id: &str,
     body: &str,
     origin: Origin,
-) -> Result<(String, &'static str, &'static str), AppError> {
+) -> Result<(String, String, &'static str), AppError> {
     deliver_with_in_reply_to(local, target, from_name, message_id, body, origin, None).await
 }
 
@@ -1141,7 +1141,7 @@ pub async fn deliver_with_in_reply_to(
     body: &str,
     origin: Origin,
     in_reply_to: Option<&str>,
-) -> Result<(String, &'static str, &'static str), AppError> {
+) -> Result<(String, String, &'static str), AppError> {
     crate::fed::check_origin(&origin)?;
     crate::fed::validate_no_control_chars("from_name", from_name)?;
     crate::fed::validate_no_control_chars("message_id", message_id)?;
@@ -1182,7 +1182,7 @@ pub async fn deliver_with_in_reply_to(
             };
             let db = local.db.lock().map_err(db_err)?;
             storage::insert_queued(&db, &queued).map_err(db_err)?;
-            Ok((session.session_id.clone(), "claude", "queued"))
+            Ok((session.session_id.clone(), "claude".to_string(), "queued"))
         }
         ResolvedTarget::Claude(session, socket_path) => {
             let body_with_footer = match in_reply_to {
@@ -1193,7 +1193,11 @@ pub async fn deliver_with_in_reply_to(
             };
             let line = inbox::encode_transport_line(from_name, &body_with_footer)?;
             inbox::deliver_to_socket(socket_path, &line).await?;
-            Ok((session.session_id.clone(), "claude", "delivered"))
+            Ok((
+                session.session_id.clone(),
+                "claude".to_string(),
+                "delivered",
+            ))
         }
         ResolvedTarget::SubagentInTurn {
             session,
@@ -1224,7 +1228,7 @@ pub async fn deliver_with_in_reply_to(
                 storage::insert_queued(&db, &queued).map_err(db_err)?;
             }
             let _ = local.notify_tx.send(session.session_id.clone());
-            Ok((session.session_id.clone(), harness, "queued"))
+            Ok((session.session_id.clone(), harness.to_string(), "queued"))
         }
         ResolvedTarget::SubagentFallback {
             session,
@@ -1232,7 +1236,7 @@ pub async fn deliver_with_in_reply_to(
             subagent_header,
             expires_at,
         } => {
-            let harness = parent.recipient_harness();
+            let harness = parent.recipient_harness().to_string();
             let body_with_header = format!("{subagent_header}\n{body}");
             let subagent_envelope = || {
                 match in_reply_to {
@@ -1272,10 +1276,14 @@ pub async fn deliver_with_in_reply_to(
                     };
                     let line = inbox::encode_transport_line(from_name, &body_with_footer)?;
                     match inbox::deliver_to_socket(socket_path, &line).await {
-                        Ok(()) => Ok((session.session_id.clone(), "claude", "delivered")),
+                        Ok(()) => Ok((
+                            session.session_id.clone(),
+                            "claude".to_string(),
+                            "delivered",
+                        )),
                         Err(_) => {
                             queue_for_retry(local)?;
-                            Ok((session.session_id.clone(), "claude", "queued"))
+                            Ok((session.session_id.clone(), "claude".to_string(), "queued"))
                         }
                     }
                 }
@@ -1308,10 +1316,10 @@ pub async fn deliver_with_in_reply_to(
                             &pi_msg.envelope,
                         )
                         .await?;
-                        Ok((session.session_id.clone(), "codex", outcome))
+                        Ok((session.session_id.clone(), "codex".to_string(), outcome))
                     } else {
                         queue_for_retry(local)?;
-                        Ok((session.session_id.clone(), "codex", "queued"))
+                        Ok((session.session_id.clone(), "codex".to_string(), "queued"))
                     }
                 }
                 ResolvedTarget::Pi(parent_session) => {
@@ -1378,7 +1386,9 @@ pub async fn deliver_with_in_reply_to(
                     .map(|_| ()),
                 };
                 match res {
-                    Ok(_) => return Ok((session.session_id.clone(), "agy", "delivered")),
+                    Ok(_) => {
+                        return Ok((session.session_id.clone(), "agy".to_string(), "delivered"))
+                    }
                     Err(AppError::CredentialsStale(_)) => {}
                     Err(e) => return Err(e),
                 }
@@ -1400,7 +1410,7 @@ pub async fn deliver_with_in_reply_to(
             };
             let db = local.db.lock().map_err(db_err)?;
             storage::insert_agy_message(&db, &agy_msg).map_err(db_err)?;
-            Ok((session.session_id.clone(), "agy", "queued"))
+            Ok((session.session_id.clone(), "agy".to_string(), "queued"))
         }
         ResolvedTarget::ParkedCodex {
             session,
@@ -1445,7 +1455,7 @@ pub async fn deliver_with_in_reply_to(
                     _ => "queued",
                 }
             };
-            Ok((session.session_id.clone(), "codex", outcome))
+            Ok((session.session_id.clone(), "codex".to_string(), outcome))
         }
         ResolvedTarget::Codex(root_snap, session) => {
             let pi_msg = storage::PiPendingMessage {
@@ -1476,7 +1486,7 @@ pub async fn deliver_with_in_reply_to(
             let outcome =
                 try_push_codex_queued_message(local, root_snap, message_id, &pi_msg.envelope)
                     .await?;
-            Ok((session.session_id.clone(), "codex", outcome))
+            Ok((session.session_id.clone(), "codex".to_string(), outcome))
         }
         ResolvedTarget::Pi(session) => {
             let pi_msg = storage::PiPendingMessage {
@@ -1498,7 +1508,11 @@ pub async fn deliver_with_in_reply_to(
                 }
             }
             let _ = local.pi_notify_tx.send(session.session_id.clone());
-            let harness = crate::plugin::harness(&session.harness).unwrap_or("pi");
+            let harness = if session.harness.is_empty() {
+                "unknown".to_string()
+            } else {
+                session.harness.clone()
+            };
             // `delivered` once the harness acks it (HA3): `storage::ack_pi_message`.
             Ok((session.session_id.clone(), harness, "queued"))
         }
@@ -1526,7 +1540,7 @@ pub async fn deliver_with_in_reply_to(
             }
             let _ = local.svc_notify_tx.send(session.session_id.clone());
             // `delivered` once the service acks it: `storage::ack_svc_message`.
-            Ok((session.session_id.clone(), "svc", "queued"))
+            Ok((session.session_id.clone(), "svc".to_string(), "queued"))
         }
     }
 }
@@ -1876,7 +1890,10 @@ pub async fn push_reply_with_error(
                 _ => ("push_failed", None),
             }
         }
-        h if h == "pi" || crate::plugin::harness(h).is_some() => {
+        h if h == "pi"
+            || crate::plugin::harness(h).is_some()
+            || crate::harnesses::valid_declared_name(h) =>
+        {
             let found = if ret_harness == "pi" {
                 crate::pi::resolve_pi_session(
                     &local.agy_config.proc_root,

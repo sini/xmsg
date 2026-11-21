@@ -79,6 +79,9 @@ enum Commands {
     Enroll(xmsg::enroll_cli::Args),
     /// Manage the local enrollment authority
     EnrollCa(EnrollCaArgs),
+
+    /// Manage declared plugin harness descriptors on the local daemon
+    Harness(operator::HarnessArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -349,6 +352,10 @@ pub struct ServeArgs {
     #[arg(long, env = "XMSG_PEERS_FILE")]
     pub peers_file: Option<PathBuf>,
 
+    /// Optional path to declared plugin harness descriptors file (JSON)
+    #[arg(long, env = "XMSG_HARNESSES_FILE")]
+    pub harnesses_file: Option<PathBuf>,
+
     /// Federation listen address (IP:PORT), e.g. <ts-ip>:7788
     #[arg(long, env = "XMSG_FED_LISTEN")]
     pub fed_listen: Option<String>,
@@ -491,6 +498,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::List(args) => operator::list(args)?,
         Commands::Locate(args) => operator::locate(args)?,
+        Commands::Harness(args) => operator::harness(args)?,
         Commands::Watch(args) => {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -1700,16 +1708,37 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         }
     }));
 
+    let harnesses_reg = match args.harnesses_file {
+        Some(ref path) => {
+            let reg = xmsg::harnesses::HarnessRegistry::load_file(path)
+                .map_err(|e| format!("failed to load --harnesses-file: {e}"))?;
+            xmsg::harnesses::init_for_db(&db, reg)
+        }
+        None => xmsg::harnesses::HarnessRegistry::disabled(),
+    };
+
     {
         let reloader_sighup = reloader_for_sighup.clone();
+        let harnesses_sighup = harnesses_reg.clone();
         bg_tasks.push(tokio::spawn(async move {
             while sighup.recv().await.is_some() {
                 info!("SIGHUP received, reloading configuration");
+                let mut reloaded_any = false;
                 if let Some(ref reloader) = reloader_sighup {
+                    reloaded_any = true;
                     if let Err(e) = reloader.force_reload() {
                         tracing::error!("SIGHUP credential reload failed: {e}");
                     }
-                } else {
+                }
+                if harnesses_sighup.is_configured() {
+                    reloaded_any = true;
+                    if let Err(e) = harnesses_sighup.reload() {
+                        tracing::error!(
+                            "SIGHUP harnesses reload failed (retaining previous snapshot): {e}"
+                        );
+                    }
+                }
+                if !reloaded_any {
                     xmsg::systemd::notify_reloading();
                     xmsg::systemd::notify_ready_with_status("nothing to reload");
                 }

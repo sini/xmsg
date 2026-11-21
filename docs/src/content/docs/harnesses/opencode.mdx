@@ -3,6 +3,8 @@ title: opencode
 description: Integrating opencode 1.x and 2.x with xmsg via the multiplexed register.sock plugin.
 ---
 
+import Status from '../../../components/Status.astro';
+
 `opencode` loads `<config>/opencode/plugin/xmsg.ts` (`extensions/opencode/xmsg.ts`) at startup.
 The plugin's default export supports `opencode` 1.x (`server` hook) and `opencode` 2.x (`setup`
 hook in `opencode service`).
@@ -52,3 +54,12 @@ harness-native ID at registration. Resume remains **unproven**: no resume
 command is offered. An adapter may report a typed terminal hint from its own
 environment; an omitted hint means unknown. Terminal references require local
 detail opt-in and are never published to peers.
+
+## Built-in vs. declared plugin harnesses
+
+<Status id="xmsg.harness-descriptors" />
+
+`opencode` is a compiled-in plugin harness with push delivery, reclaim, and child-session support.
+It cannot be shadowed by a descriptor in `--harnesses-file`. To add an external poll-only plugin
+harness without changing `xmsg`, declare it via
+[`--harnesses-file`](/concepts/sessions-services-subagents/#declared-plugin-harnesses).

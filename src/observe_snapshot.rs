@@ -3,7 +3,7 @@ use crate::observe_export::{EndpointKind, Harness, RegistrationState, SnapshotRe
 
 const SOURCE_ROWS: usize = 201;
 
-fn harness(value: &str) -> Harness {
+fn harness(reg: &crate::harnesses::HarnessRegistry, value: &str) -> Harness {
     match value {
         "claude" => Harness::Claude,
         "codex" => Harness::Codex,
@@ -11,6 +11,7 @@ fn harness(value: &str) -> Harness {
         "pi" => Harness::Pi,
         "opencode" => Harness::Opencode,
         "hermes" => Harness::Hermes,
+        other if reg.is_declared(other) => Harness::Declared(other.to_string()),
         _ => Harness::Unknown,
     }
 }
@@ -20,6 +21,7 @@ fn label(value: &str) -> String {
 }
 
 pub(crate) fn collect(state: &std::sync::Arc<FedState>) -> (Vec<SnapshotRecord>, bool) {
+    let harnesses = crate::harnesses::for_db(&state.db);
     let mut records = Vec::new();
     // A cached catalog cannot enumerate filesystem-only registrations.
     let mut partial = true;
@@ -60,7 +62,7 @@ pub(crate) fn collect(state: &std::sync::Arc<FedState>) -> (Vec<SnapshotRecord>,
                     records.push(SnapshotRecord {
                         id: row.get(0)?,
                         kind,
-                        harness: harness(&row.get::<_, String>(1)?),
+                        harness: harness(&harnesses, &row.get::<_, String>(1)?),
                         state: registration,
                         source_at: row.get(2)?,
                         label: row.get(3)?,

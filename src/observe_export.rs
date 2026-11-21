@@ -209,15 +209,57 @@ closed_enum!(EndpointKind {
     Service,
     Unknown
 });
-closed_enum!(Harness {
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Harness {
     Claude,
     Codex,
     Agy,
     Pi,
     Opencode,
     Hermes,
-    Unknown
-});
+    Declared(String),
+    Unknown,
+}
+
+impl Harness {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Harness::Claude => "claude",
+            Harness::Codex => "codex",
+            Harness::Agy => "agy",
+            Harness::Pi => "pi",
+            Harness::Opencode => "opencode",
+            Harness::Hermes => "hermes",
+            Harness::Declared(name) => name.as_str(),
+            Harness::Unknown => "unknown",
+        }
+    }
+}
+
+impl Serialize for Harness {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Harness {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "claude" => Ok(Harness::Claude),
+            "codex" => Ok(Harness::Codex),
+            "agy" => Ok(Harness::Agy),
+            "pi" => Ok(Harness::Pi),
+            "opencode" => Ok(Harness::Opencode),
+            "hermes" => Ok(Harness::Hermes),
+            "unknown" => Ok(Harness::Unknown),
+            other if crate::harnesses::valid_declared_name(other) => Ok(Harness::Declared(value)),
+            other => Err(serde::de::Error::custom(format!(
+                "invalid harness '{other}'"
+            ))),
+        }
+    }
+}
 closed_enum!(RegistrationState {
     Registered,
     Released,
@@ -605,7 +647,7 @@ pub fn project_snapshot(
             id: id.clone(),
             node,
             kind: candidate.kind,
-            harness: candidate.harness,
+            harness: candidate.harness.clone(),
             state: candidate.state,
             source_at,
             label,
