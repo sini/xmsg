@@ -164,6 +164,11 @@ impl ControlService {
         let mut reader = BufReader::new(stream.try_clone().map_err(|_| ErrorCode::Storage)?);
         let result = (|| {
             let body = line(&mut reader, MAX_FRAME_BYTES)?;
+            if self.bridge_configured() {
+                let call: crate::control::LifecycleCall =
+                    serde_json::from_slice(&body).map_err(|_| ErrorCode::MalformedFrame)?;
+                return self.lifecycle_from_stream(&stream, call);
+            }
             let request: ControlRequest =
                 serde_json::from_slice(&body).map_err(|_| ErrorCode::MalformedFrame)?;
             self.lifecycle(peer, request, now())
