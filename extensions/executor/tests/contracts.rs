@@ -739,19 +739,23 @@ fn unsafe_unknown_or_lost_is_representable_but_caller_bool_is_not_authority() {
 }
 
 #[test]
-fn duplicate_raw_control_arguments_are_rejected_before_value_loss() {
-    let steer = r#"{"version":1,"request_id":"r","verb":"steer","target":{"kind":"turn","session_id":"s","generation":1,"turn_id":"a"},"args":{"text":"A","text":"B"},"deadline":100}"#;
-    let dispatch = r#"{"version":1,"request_id":"r","verb":"dispatch","args":{"brief":"fixture","requested":{"model":{"provider":"p","name":"A","name":"B"}}}}"#;
-    for raw in [steer, dispatch] {
-        assert!(
-            serde_json::from_str::<ControlRequest>(raw).is_err(),
-            "duplicate arguments collapsed before typed decode"
-        );
-    }
+fn duplicate_raw_steer_arguments_are_rejected_before_value_loss() {
+    let raw = r#"{"version":1,"request_id":"r","verb":"steer","target":{"kind":"turn","session_id":"s","generation":1,"turn_id":"a"},"args":{"text":"A","text":"B"},"deadline":100}"#;
+    assert!(
+        serde_json::from_str::<ControlRequest>(raw).is_err(),
+        "duplicate steer arguments collapsed before typed decode"
+    );
 }
 #[test]
-fn receipt_generation_and_effect_turn_must_match_addressed_target() {
-    let mut receipt = OperationReceipt {
+fn duplicate_raw_nested_dispatch_arguments_are_rejected_before_value_loss() {
+    let raw = r#"{"version":1,"request_id":"r","verb":"dispatch","args":{"brief":"fixture","requested":{"model":{"provider":"p","name":"A","name":"B"}}}}"#;
+    assert!(
+        serde_json::from_str::<ControlRequest>(raw).is_err(),
+        "duplicate nested dispatch arguments collapsed before typed decode"
+    );
+}
+fn addressed_receipt() -> OperationReceipt {
+    OperationReceipt {
         request_id: "r".into(),
         target: Some(Target::Turn {
             session_id: "s".into(),
@@ -763,19 +767,40 @@ fn receipt_generation_and_effect_turn_must_match_addressed_target() {
         },
         admission: Admission::Durable {
             admission_id: "admitted".into(),
-            generation: 1,
+            generation: 2,
         },
         submission: Submission::Submitted,
         observed_effect: ObservedEffect::Injected {
             turn_id: "a".into(),
         },
-    };
-    assert_eq!(receipt.validate(), Err(ContractError::Receipt));
+    }
+}
+#[test]
+fn receipt_generation_must_match_addressed_target() {
+    let mut receipt = addressed_receipt();
+    assert!(receipt.validate().is_ok());
     receipt.admission = Admission::Durable {
         admission_id: "admitted".into(),
-        generation: 2,
+        generation: 1,
     };
+    assert_eq!(
+        receipt.validate(),
+        Err(ContractError::Receipt),
+        "receipt admission generation escaped target fence"
+    );
+}
+#[test]
+fn receipt_effect_turn_must_match_addressed_target() {
+    let mut receipt = addressed_receipt();
     receipt.observed_effect = ObservedEffect::Injected {
+        turn_id: "b".into(),
+    };
+    assert_eq!(
+        receipt.validate(),
+        Err(ContractError::Receipt),
+        "injected effect turn escaped target fence"
+    );
+    receipt.observed_effect = ObservedEffect::Interrupted {
         turn_id: "b".into(),
     };
     assert_eq!(receipt.validate(), Err(ContractError::Receipt));
@@ -783,4 +808,30 @@ fn receipt_generation_and_effect_turn_must_match_addressed_target() {
         turn_id: "a".into(),
     };
     assert!(receipt.validate().is_ok());
+}
+
+#[test]
+fn prefer_live_send_receipt_can_observe_an_actual_injected_turn() {
+    let mut receipt = addressed_receipt();
+    receipt.target = Some(Target::Session {
+        session_id: "s".into(),
+    });
+    assert!(receipt.validate().is_ok());
+    receipt.target = Some(Target::Execution {
+        session_id: "s".into(),
+        generation: 2,
+    });
+    assert!(receipt.validate().is_ok());
+    receipt.target = Some(Target::Execution {
+        session_id: "s".into(),
+        generation: 3,
+    });
+    assert_eq!(receipt.validate(), Err(ContractError::Receipt));
+    receipt.target = Some(Target::Session {
+        session_id: "s".into(),
+    });
+    receipt.observed_effect = ObservedEffect::Interrupted {
+        turn_id: "a".into(),
+    };
+    assert_eq!(receipt.validate(), Err(ContractError::Receipt));
 }
