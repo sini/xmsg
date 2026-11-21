@@ -24,6 +24,7 @@ env:
     ci-plane-coverage
     ci-self-input
     default
+    executor-contracts
     mdformat-plugins
     pi-extension
     pi-paths
