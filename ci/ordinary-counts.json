@@ -53,6 +53,9 @@
     "tests/gate_reverse_observe.rs",
     "tests/gate_svc_delivered_acked.rs",
     "tests/gate_svlt_device_cli.rs",
+    "tests/gate_tmjs12_doctor.rs",
+    "tests/gate_tmjs12_install_contract.rs",
+    "tests/gate_tmjs12_socket_publish.rs",
     "tests/gate_tvp_mailbox_runtime.rs",
     "tests/gate_tvp_mailbox_storage.rs",
     "tests/gate_u8_replies.rs",
@@ -122,16 +125,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1641,
+      "passed": 1671,
       "failed": 0,
       "ignored": 7,
-      "summaries": 118
+      "summaries": 121
     },
     "darwin": {
-      "passed": 1656,
+      "passed": 1686,
       "failed": 0,
       "ignored": 9,
-      "summaries": 118
+      "summaries": 121
     }
   }
 }
