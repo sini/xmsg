@@ -19,12 +19,16 @@ const MAX_PEERS: usize = 32;
 
 #[derive(Args, Debug)]
 pub struct DoctorArgs {
+    #[arg(long, env = "XMSG_LEAF")]
+    leaf: bool,
     #[arg(long, env = "XMSG_HTTP_SOCK")]
     http_sock: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(long, env = "XMSG_AGENT_SOCK")]
     agent_sock: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(long, env = "XMSG_REGISTER_SOCK")]
     register_sock: Option<PathBuf>,
+    #[arg(long, env = "XMSG_LEAF_REGISTER_SOCK")]
+    leaf_register_sock: Option<PathBuf>,
     #[arg(long, env = "XMSG_DB_PATH")]
     db_path: Option<PathBuf>,
     #[arg(long, env = "XMSG_PEERS_FILE")]
@@ -62,6 +66,13 @@ struct Report {
     daemon_liveness: &'static str,
     #[serde(skip)]
     daemon_revision: Option<String>,
+    http_socket: Option<String>,
+    agent_socket: Option<String>,
+    register_socket: Option<String>,
+    leaf_register_socket: Option<String>,
+    endpoints_usable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    install: Option<xmsg::doctor_install::InstallDoctorReport>,
     checks: Vec<Check>,
     passed: usize,
     warnings: usize,
@@ -76,6 +87,12 @@ impl Report {
             client_build_revision: option_env!("XMSG_BUILD_REVISION").unwrap_or("unknown"),
             daemon_liveness: "unknown",
             daemon_revision: None,
+            http_socket: None,
+            agent_socket: None,
+            register_socket: None,
+            leaf_register_socket: None,
+            endpoints_usable: false,
+            install: None,
             checks: vec![],
             passed: 0,
             warnings: 0,
@@ -889,18 +906,42 @@ async fn ca_application(
 async fn inspect(args: &DoctorArgs) -> Report {
     let mut report = Report::new();
     sqlite_engine_info(&mut report, rusqlite::version());
-    let http = args
-        .http_sock
-        .clone()
-        .or_else(|| xmsg::http::default_http_sock_path().ok());
-    let agent = args
-        .agent_sock
-        .clone()
-        .or_else(|| xmsg::agent::default_agent_sock_path().ok());
-    let register = args
-        .register_sock
-        .clone()
-        .or_else(|| xmsg::agent::default_register_sock_path().ok());
+
+    // Resolve endpoints read-only first without probing HTTP with a bare connect (health() probes
+    // HTTP properly via GET /healthz below, then inspect_install_with_http_probe finalizes owner).
+    let lookup = xmsg::install_paths::SystemHomeLookup;
+    let resolve_env = xmsg::install_paths::ResolveEnv::from_process(&lookup);
+    let resolve_req = xmsg::install_paths::ResolveRequest {
+        leaf: args.leaf,
+        db_path: args.db_path.clone(),
+        enroll_state: args.enroll_state.clone(),
+        peers_file: args.peers_file.clone(),
+        http_sock: args.http_sock.clone(),
+        agent_sock: args.agent_sock.clone(),
+        register_sock: args.register_sock.clone(),
+        leaf_register_sock: args.leaf_register_sock.clone(),
+        writable: false,
+        enforce_legacy_guard: false,
+    };
+    let resolved_preview = xmsg::install_paths::resolve_install(&resolve_req, &resolve_env).ok();
+
+    let http = resolved_preview
+        .as_ref()
+        .and_then(|r| r.http_sock.as_ref().map(|e| e.path.clone()))
+        .or_else(|| args.http_sock.clone());
+    let agent = resolved_preview
+        .as_ref()
+        .and_then(|r| r.agent_sock.as_ref().map(|e| e.path.clone()))
+        .or_else(|| args.agent_sock.clone());
+    let register = resolved_preview
+        .as_ref()
+        .and_then(|r| {
+            r.register_sock
+                .as_ref()
+                .or(r.leaf_register_sock.as_ref())
+                .map(|e| e.path.clone())
+        })
+        .or_else(|| args.register_sock.clone());
     let db = super::resolve_db_path(args.db_path.clone());
     report.path("database", &db);
     let mut http_good = false;
@@ -990,6 +1031,35 @@ async fn inspect(args: &DoctorArgs) -> Report {
     } else {
         report.not_checked.push("enrollment_metadata");
     }
+
+    let manager_roots = xmsg::doctor_install::ManagerScanRoots::from_env(&resolve_env);
+    let http_live = if http.is_some() {
+        Some(report.daemon_liveness == "up")
+    } else {
+        None
+    };
+    let install_report = xmsg::doctor_install::inspect_install_with_http_probe(
+        &resolve_req,
+        &resolve_env,
+        &manager_roots,
+        http_live,
+    );
+    report.http_socket = install_report.http_socket.clone();
+    report.agent_socket = install_report.agent_socket.clone();
+    report.register_socket = install_report.register_socket.clone();
+    report.leaf_register_socket = install_report.leaf_register_socket.clone();
+    report.endpoints_usable = install_report.endpoints_usable;
+    for check in &install_report.checks {
+        let status = match check.status {
+            "pass" => Status::Pass,
+            "warn" => Status::Warn,
+            "fail" => Status::Fail,
+            _ => Status::Info,
+        };
+        report.add(check.id.clone(), status, check.message.clone(), check.hint);
+    }
+    report.install = Some(install_report);
+
     report
 }
 fn inert(text: &str) -> String {

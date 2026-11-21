@@ -442,6 +442,11 @@ fn run_hook_bin_with_home(home: &Path, event: &str, stdin_str: &str) -> (i32, Va
     let mut child = Command::new(bin)
         .args(["register", "agy", "--hook", "--event", event])
         .env("HOME", home)
+        .env("XMSG_AGY_BRAIN_DIR", home.join(".gemini/antigravity-cli/brain"))
+        .env(
+            "XMSG_AGY_PRESENCE_DIR",
+            home.join(".gemini/antigravity-cli/presence"),
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

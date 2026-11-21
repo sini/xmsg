@@ -829,10 +829,20 @@ async fn test_oracle_4_pre_migration_row_dropped_by_schema_n() {
     )
     .unwrap();
 
-    // 3. Run storage::init_db(&conn) to perform migration
-    storage::init_db(&conn).unwrap();
+    // 3. Schema preservation fence: storage::init_db refuses a populated unversioned (v0)
+    //    database BEFORE any schema write, preserving existing tables and rows intact.
+    let err = storage::init_db(&conn)
+        .expect_err("init_db must refuse a populated v0 database before any schema write");
+    assert!(
+        err.to_string().contains("refusing to open unversioned"),
+        "expected schema preservation refusal, got: {err}"
+    );
 
-    // Verify origin column was added
+    // Verify no schema write occurred: user_version remains 0 and origin column was not added.
+    let version: u32 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 0, "refused database user_version must stay 0");
     {
         let mut stmt = conn
             .prepare("PRAGMA table_info(svc_pending_messages)")
@@ -846,16 +856,21 @@ async fn test_oracle_4_pre_migration_row_dropped_by_schema_n() {
             }
         }
         assert!(
-            has_origin_col,
-            "init_db must add origin column to pre-existing svc_pending_messages table"
+            !has_origin_col,
+            "refused v0 database must not have origin column written"
         );
     }
 
-    // 4. Schema N (XA3) supersedes this column migration: a database below schema N has
-    //    its message state dropped, so the pre-migration row is gone, not delivered.
-    let retrieved = storage::get_next_pending_svc_message(&conn, &target_session_id).unwrap();
-    assert!(
-        retrieved.is_none(),
-        "a row from before schema N must be dropped by the migration"
+    // 4. Pre-migration row is preserved intact.
+    let remaining: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM svc_pending_messages WHERE id = ?1",
+            [pre_msg_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        remaining, 1,
+        "populated v0 row must be preserved intact after refusal"
     );
 }

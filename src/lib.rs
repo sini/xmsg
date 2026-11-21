@@ -21,6 +21,8 @@ pub mod codex_relay;
 #[cfg(feature = "daemon")]
 pub mod discovery;
 #[cfg(feature = "daemon")]
+pub mod doctor_install;
+#[cfg(feature = "daemon")]
 mod doctor_peers;
 #[cfg(feature = "daemon")]
 pub mod e2e;
@@ -40,6 +42,8 @@ pub mod harnesses;
 pub mod http;
 #[cfg(feature = "daemon")]
 pub mod inbox;
+#[cfg(feature = "daemon")]
+pub mod install_paths;
 #[cfg(feature = "daemon")]
 pub mod locator;
 #[cfg(feature = "daemon")]
@@ -91,6 +95,8 @@ pub mod process;
 mod recipient_snapshot;
 #[cfg(feature = "daemon")]
 pub mod registry;
+#[cfg(feature = "daemon")]
+pub mod runtime_lock;
 #[cfg(feature = "daemon")]
 pub mod schema_status;
 #[cfg(feature = "client")]

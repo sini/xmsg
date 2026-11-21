@@ -1132,7 +1132,8 @@ async fn get_message_handler(
         .into_response())
 }
 pub fn default_http_sock_path() -> Result<PathBuf, AppError> {
-    crate::agent::default_socket_dir().map(|d| d.join("http.sock"))
+    crate::install_paths::resolve_client_endpoint("http", None, None, false)
+        .map_err(|e| AppError::InsecureSocketDir(e.to_string()))
 }
 
 pub type PeerUidChecker = Arc<dyn Fn(&tokio::net::UnixStream) -> io::Result<u32> + Send + Sync>;

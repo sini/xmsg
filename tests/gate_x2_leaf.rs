@@ -35,6 +35,7 @@ use xmsg::svc::new_svc_store;
 #[tokio::test]
 async fn test_oracle_1_leaf_binds_no_harness_sockets_or_fed_listener() {
     let tmp = TempDir::new().unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let runtime_dir = tmp.path().join("run");
     fs::create_dir_all(&runtime_dir).unwrap();
     fs::set_permissions(&runtime_dir, fs::Permissions::from_mode(0o700)).unwrap();
@@ -50,9 +51,32 @@ async fn test_oracle_1_leaf_binds_no_harness_sockets_or_fed_listener() {
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
 
-    let register_sock = runtime_dir.join("xmsg/register.sock");
-    let agent_sock = runtime_dir.join("xmsg/agent.sock");
-    let http_sock = runtime_dir.join("xmsg/http.sock");
+    let lookup = xmsg::install_paths::SystemHomeLookup;
+    let mut env_for_resolve = xmsg::install_paths::ResolveEnv::from_process(&lookup);
+    env_for_resolve.xdg_runtime_dir = Some(runtime_dir.to_string_lossy().into_owned());
+    let expected = xmsg::install_paths::resolve_install(
+        &xmsg::install_paths::ResolveRequest {
+            leaf: true,
+            db_path: Some(tmp.path().join("leaf.db")),
+            writable: false,
+            enforce_legacy_guard: false,
+            ..Default::default()
+        },
+        &env_for_resolve,
+    )
+    .expect("resolve managed leaf endpoints");
+    let register_sock = expected
+        .leaf_register_sock
+        .as_ref()
+        .expect("leaf_register_sock")
+        .path
+        .clone();
+    let agent_sock = expected.agent_sock.as_ref().expect("agent_sock").path.clone();
+    let http_sock = expected
+        .runtime_namespace
+        .as_ref()
+        .expect("runtime_namespace")
+        .join("http.sock");
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(1))
@@ -157,6 +181,9 @@ async fn test_oracle_1_leaf_binds_no_harness_sockets_or_fed_listener() {
 
     let _ = child.kill();
     let _ = child.wait();
+    if let Some(ref ns) = expected.runtime_namespace {
+        let _ = fs::remove_dir_all(ns);
+    }
 }
 
 // -----------------------------------------------------------------------------

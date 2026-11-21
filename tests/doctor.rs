@@ -76,6 +76,7 @@ impl Fixture {
         ca: Option<Value>,
     ) -> Self {
         let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let run = root.path().join("run");
         fs::create_dir(&run).unwrap();
         fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).unwrap();

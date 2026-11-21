@@ -135,10 +135,10 @@ impl CodexConfig {
                 }
             }
             if codex_homes.is_empty() {
-                if let Ok(home) = std::env::var("HOME") {
-                    if !home.trim().is_empty() {
-                        codex_homes.push(PathBuf::from(home).join(".codex"));
-                    }
+                let lookup = crate::install_paths::SystemHomeLookup;
+                let env = crate::install_paths::ResolveEnv::from_process(&lookup);
+                if let Some(home) = crate::install_paths::resolve_optional_home(&env) {
+                    codex_homes.push(home.join(".codex"));
                 }
             }
         } else {

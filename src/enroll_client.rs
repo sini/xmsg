@@ -337,15 +337,13 @@ pub fn atomic_write(directory: &Path, filename: &str, bytes: &[u8]) -> Result<()
     result
 }
 pub fn default_state_directory() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".local/state")
-        })
-        .join("xmsg/enroll")
+    default_state_directory_checked().unwrap_or_else(|_| PathBuf::new())
+}
+
+pub fn default_state_directory_checked() -> std::result::Result<PathBuf, crate::install_paths::InstallError> {
+    let lookup = crate::install_paths::SystemHomeLookup;
+    let env = crate::install_paths::ResolveEnv::from_process(&lookup);
+    Ok(crate::install_paths::default_state_root(&env)?.join("enroll"))
 }
 #[cfg(test)]
 mod tests {
