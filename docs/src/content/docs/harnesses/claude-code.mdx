@@ -189,3 +189,16 @@ detail opt-in and are never published to peers.
 A context-reporting hook running with the session's existing local attribution can supply optional tags such as a
 branch, worktree handle, or task ID. The node publishes submitted tags by default
 to authorized readers, subject to its [context controls](/reference/cli-and-mcp/#session-context-tags).
+
+## Activity export hook
+
+<Status id="fleet-observer.activity-export" />
+
+When `xmsg serve --activity` is enabled, add `xmsg activity hook claude` beside
+(never inside) your delivery hooks in `~/.claude/settings.json` for
+`UserPromptSubmit`, `Stop`, `StopFailure`, `SessionStart`, `SessionEnd`,
+`PermissionRequest`, and `Notification` (plus `PostToolUse` `*` with
+`--correlated` only if opt-in correlated mode is enabled).
+
+- **Proven / degraded:** `SessionStart` yields `unknown(unreported)` unless
+  proven ready; `Stop` with absent `background_tasks` yields `unknown(unreported)`.

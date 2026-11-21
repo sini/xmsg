@@ -30,6 +30,7 @@
     "tests/gate2_agent.rs",
     "tests/gate2_comm.rs",
     "tests/gate2_http.rs",
+    "tests/gate_activity_export.rs",
     "tests/gate_delivered_acked.rs",
     "tests/gate_dtxj_collector.rs",
     "tests/gate_dtxj_export.rs",
@@ -121,16 +122,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1588,
+      "passed": 1598,
       "failed": 0,
       "ignored": 7,
-      "summaries": 117
+      "summaries": 118
     },
     "darwin": {
-      "passed": 1603,
+      "passed": 1613,
       "failed": 0,
       "ignored": 9,
-      "summaries": 117
+      "summaries": 118
     }
   }
 }

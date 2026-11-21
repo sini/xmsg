@@ -42,7 +42,14 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		plannedSince: '2026-11-20',
 		note: 'Production lifecycle attribution unavailable; success paths are test-only, not a runtime executor.',
 	},
-
+	'fleet-observer.activity-export': {
+		id: 'fleet-observer.activity-export',
+		title: 'Optional hook-derived session activity and observe export v2',
+		owner: 'sini',
+		evidence: [{ path: 'src/activity/mod.rs', anchor: 'pub struct ActivityEngine' }],
+		plannedSince: '2026-11-21',
+		note: 'Opt-in via xmsg serve --activity; observe export v2 requires coordinated node/relay/collector rollout.',
+	},
 	'session-context.tags': {
 		id: 'session-context.tags',
 		title: 'Self-reported session context tags',

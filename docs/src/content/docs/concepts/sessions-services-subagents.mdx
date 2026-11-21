@@ -228,3 +228,13 @@ See [fields and publication controls](/reference/cli-and-mcp/#session-context-ta
 Codex roots sharing one app-server daemon can overwrite each other's tags
 because the daemon is the attested owner for those roots. Tags are self-reports.
 Use session identities and grants for authorization.
+
+## Session activity vs registration
+
+<Status id="fleet-observer.activity-export" />
+
+Registration (`registered` / `seen`) tracks whether an endpoint can receive
+messages. Optional session activity (`idle`, `working`, `blocked`, `unknown`)
+reports what the session is currently doing without altering registration,
+liveness, or routing. Only evidence positively bound to the endpoint's current
+verified owner and incarnation can reduce activity state or refresh `fresh_at`.

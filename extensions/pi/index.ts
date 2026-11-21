@@ -682,4 +682,46 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     bridge.stop();
   });
+
+  if (process.env.XMSG_ACTIVITY === "1") {
+    let actSeq = 0;
+    const emitPiActivity = (ev: string, sessionId: string, block?: string, correlation?: string) => {
+      const dir = process.env.XDG_RUNTIME_DIR;
+      if (!dir || !sessionId) return;
+      actSeq += 1;
+      const frame = JSON.stringify({
+        action: "activity",
+        schema_version: 1,
+        harness: "pi",
+        event: ev,
+        session: sessionId,
+        native_seq: actSeq,
+        ...(correlation ? { correlation } : {}),
+        ...(block ? { block } : {}),
+        background: "absent",
+        wake: "absent",
+      });
+      if (frame.length >= 1024) return;
+      try {
+        const net = require("node:net");
+        const c = net.createConnection(`${dir}/xmsg/agent.sock`, () => c.end(`${frame}\n`));
+        c.setTimeout(50, () => c.destroy());
+        c.on("error", () => {});
+      } catch {}
+    };
+    for (const ev of ["agent_start", "turn_start", "agent_settled", "agent_end"] as const) {
+      pi.on(ev as any, async (_e: any, ctx: any) => {
+        const sid = ctx?.sessionManager?.getSessionId?.();
+        if (sid) emitPiActivity(ev, sid);
+      });
+    }
+    pi.on("ui_prompt_start" as any, async (e: any, ctx: any) => {
+      const sid = ctx?.sessionManager?.getSessionId?.();
+      if (sid) emitPiActivity("ui_prompt_start", sid, "input", e?.id ? String(e.id) : undefined);
+    });
+    pi.on("ui_prompt_end" as any, async (e: any, ctx: any) => {
+      const sid = ctx?.sessionManager?.getSessionId?.();
+      if (sid) emitPiActivity("ui_prompt_end", sid, undefined, e?.id ? String(e.id) : undefined);
+    });
+  }
 }

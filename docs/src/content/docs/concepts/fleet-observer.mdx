@@ -149,3 +149,24 @@ withhold every tag from the export, use `--context-mask 'observe:*'`.
 
 The source node applies the mask before export. The observation grant still
 controls who can read the export. See [session context and node policy](/reference/cli-and-mcp/#session-context-tags).
+
+## Session activity export
+
+<Status id="fleet-observer.activity-export" />
+
+When enabled with `xmsg serve --activity`, each node can export bounded,
+hook-derived session activity (`idle`, `working`, `blocked`, `unknown`)
+alongside registration state. Activity is off by default: when disabled, no
+activity is recorded, `EndpointDescriptor.activity` and `activity_changed`
+events are omitted, and `ExportSnapshot.activity.status` is `disabled`.
+
+- **Precedence:** `blocked` > `working(background)` > `idle(scheduled_wake)` > `idle`.
+  Only positive settled evidence yields `idle`; missing signals or unverified
+  owners yield `unknown` with a bounded reason (`unreported`, `unverified`,
+  `aged`, `restarted`, `contradictory`, `evidence_lost`, `registry_unavailable`,
+  `incarnation_ended`).
+- **Export v2 (breaking cut):** `ExportQuery` and `SnapshotQuery` require
+  explicit `v=2`; `v=1` and omitted `v` are refused with HTTP 400. Upgrade
+  node daemons, relay hubs, and collectors together.
+- **Provider-neutral:** No OIDC provider, reverse proxy, or hosted service is
+  required. See [activity operations](/operations/fleet-observer/#session-activity-export).
