@@ -11,6 +11,7 @@ use super::Issuer;
 pub(super) struct SessionWriter {
     pub live: std::sync::Arc<Live>,
     pub lease_at: i64,
+    pub limits: super::limits::ReadLimits,
 }
 
 impl SessionWriter {
@@ -31,6 +32,7 @@ impl SessionWriter {
         Ok(Self {
             live: std::sync::Arc::new(issuer.authority.register(record, lease, abort)?),
             lease_at: lease_at.saturating_mul(1000),
+            limits: issuer.config.session_limits.clone(),
         })
     }
 

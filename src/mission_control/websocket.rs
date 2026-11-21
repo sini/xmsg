@@ -13,7 +13,13 @@ use serde_json::{json, Value};
 use tokio_tungstenite::{
     tungstenite::{
         handshake::derive_accept_key,
-        protocol::{frame::coding::CloseCode, CloseFrame, Role, WebSocketConfig},
+        protocol::{
+            frame::{
+                coding::{CloseCode, Data, OpCode},
+                Frame as RawFrame,
+            },
+            CloseFrame, Role, WebSocketConfig,
+        },
         Error, Message,
     },
     WebSocketStream,
@@ -33,11 +39,6 @@ use super::{response, Issuer, WebResponse};
 
 const PATH: &str = "/v1/mission-control/session";
 const PROTOCOL: &str = "xmsg.mission-control.v1";
-const MAX_CLIENT: usize = 16_384;
-const MAX_SERVER: usize = 262_144;
-const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
-const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
-const TICK: Duration = Duration::from_secs(15);
 
 type Socket = WebSocketStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>;
 
@@ -65,7 +66,12 @@ pub(crate) async fn upgrade(
             let issuer = issuer.clone();
             tokio::spawn(async move {
                 let _slot = slot;
-                if let Ok(Ok(stream)) = tokio::time::timeout(HELLO_TIMEOUT, upgrade).await {
+                if let Ok(Ok(stream)) = tokio::time::timeout(
+                    Duration::from_millis(writer.limits.hello_timeout_ms),
+                    upgrade,
+                )
+                .await
+                {
                     session(issuer, hub, record, writer, stream).await;
                 }
             });
@@ -108,12 +114,14 @@ async fn accept(
         return Err(Refusal::INVALID);
     }
     let record = admission::authenticate(issuer, Route::Upgrade, hdr).await?;
-    let slot = hub.budgets.take(&record, Mode::Upgrade)?;
+    let slot = hub
+        .budgets
+        .take(&record, Mode::Upgrade, &issuer.config.session_limits)?;
     let writer = SessionWriter::register(
         issuer,
         &record,
         abort.ok_or(Refusal::UNAVAILABLE)?,
-        Duration::from_secs(900),
+        Duration::from_secs(issuer.config.session_limits.lease_max_secs),
     )?;
     let accepted = hyper::Response::builder()
         .status(StatusCode::SWITCHING_PROTOCOLS)
@@ -136,11 +144,12 @@ async fn session(
     writer: SessionWriter,
     stream: hyper::upgrade::Upgraded,
 ) {
+    let limits = &writer.limits;
     let config = WebSocketConfig::default()
-        .max_frame_size(Some(MAX_CLIENT))
-        .max_message_size(Some(MAX_CLIENT))
+        .max_frame_size(Some(limits.max_client_frame_bytes))
+        .max_message_size(Some(limits.max_client_message_bytes))
         .write_buffer_size(0)
-        .max_write_buffer_size(MAX_SERVER + 64);
+        .max_write_buffer_size(limits.max_server_frame_bytes + 64);
     let mut socket = WebSocketStream::from_raw_socket(
         hyper_util::rt::TokioIo::new(stream),
         Role::Server,
@@ -152,14 +161,18 @@ async fn session(
             if let Some(invalidated) = invalidated { finish(&mut socket, invalidated).await; }
             return;
         }
-        hello = tokio::time::timeout(HELLO_TIMEOUT, socket.next()) => hello,
+        hello = tokio::time::timeout(Duration::from_millis(limits.hello_timeout_ms), socket.next()) => hello,
     };
     let Ok(Some(frame)) = hello else {
         let _ = close(&mut socket, 4400, "bad_message").await;
         return;
     };
     let (id, offered, required, protocol) = match frame {
-        Ok(Message::Text(text)) => match request::decode(text.as_bytes(), 16, 4096) {
+        Ok(Message::Text(text)) => match request::decode(
+            text.as_bytes(),
+            limits.max_json_depth,
+            limits.max_string_bytes,
+        ) {
             Ok(ClientMessage::Hello {
                 id,
                 capabilities,
@@ -200,8 +213,8 @@ async fn session(
     let hello = json!({"v":1,"type":"hello","re":id,"protocol":1,"capabilities":capabilities,
         "connection":connection,"actor":{"principal":record.principal,"display":display(&record),"class":record.class},
         "lease_expires_at":writer.lease_at,"server_at":stamp(),
-        "limits":{"max_client_message_bytes":MAX_CLIENT,"max_server_message_bytes":MAX_SERVER,
-            "max_json_depth":16,"subscriptions_per_connection":16,"tick_interval_ms":15000}});
+        "limits":{"max_client_message_bytes":limits.max_client_message_bytes,"max_server_message_bytes":limits.max_server_message_bytes,
+            "max_json_depth":limits.max_json_depth,"subscriptions_per_connection":limits.subscriptions_per_connection,"tick_interval_ms":limits.tick_interval_ms}});
     if send(&mut socket, &writer, &[], None, hello.to_string())
         .await
         .is_err()
@@ -210,8 +223,16 @@ async fn session(
     }
 
     let mut changes = hub.watch();
-    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + TICK, TICK);
+    let tick_interval = Duration::from_millis(limits.tick_interval_ms);
+    let mut tick =
+        tokio::time::interval_at(tokio::time::Instant::now() + tick_interval, tick_interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut client_at = tokio::time::Instant::now();
+    let mut client_tokens = f64::from(limits.client_message_burst);
+    let mut refused = 0;
+    let ping_period = Duration::from_millis(limits.ping_interval_ms);
+    let mut ping = tokio::time::interval_at(client_at + ping_period, ping_period);
+    let mut pong_deadline = None;
     let mut subscriptions = BTreeMap::<String, Subscription>::new();
     loop {
         tokio::select! {
@@ -223,7 +244,22 @@ async fn session(
             frame = socket.next() => {
                 match frame {
                     Some(Ok(Message::Text(text))) => {
-                        match request::decode(text.as_bytes(),16,4096) {
+                        let now = tokio::time::Instant::now();
+                        client_tokens = (client_tokens + now.duration_since(client_at).as_secs_f64() * f64::from(limits.client_messages_per_sec))
+                            .min(f64::from(limits.client_message_burst));
+                        client_at = now;
+                        if client_tokens < 1.0 {
+                            refused += 1;
+                            if send_error(&mut socket, None, Code::RateLimited, refused >= 3).await.is_err() { break; }
+                            if refused >= 3 {
+                                let _ = close(&mut socket, 4429, "rate_limited").await;
+                                break;
+                            }
+                            continue;
+                        }
+                        refused = 0;
+                        client_tokens -= 1.0;
+                        match request::decode(text.as_bytes(),limits.max_json_depth,limits.max_string_bytes) {
                             Ok(ClientMessage::Hello { id, .. }) => {
                                 let _ = send_error(&mut socket,Some(id),Code::BadMessage,true).await;
                                 let _ = close(&mut socket,4400,"bad_message").await;
@@ -236,7 +272,7 @@ async fn session(
                             Ok(ClientMessage::Subscribe { id, sub, scope, cursor, .. }) => {
                                 let code = if subscriptions.contains_key(&sub) {
                                     Some(Code::DuplicateSub)
-                                } else if subscriptions.len() >= 16 {
+                                } else if subscriptions.len() >= limits.subscriptions_per_connection {
                                     Some(Code::TooManySubscriptions)
                                 } else { None };
                                 if let Some(code) = code {
@@ -254,6 +290,7 @@ async fn session(
                             }
                         }
                     }
+                    Some(Ok(Message::Pong(body))) if body.as_ref() == b"xmsg" => { pong_deadline = None; }
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(other) => { refuse_frame(&mut socket,other).await; break; }
@@ -265,6 +302,21 @@ async fn session(
                         return;
                     }
                 }
+            }
+            _ = tokio::time::sleep_until(client_at + Duration::from_millis(limits.idle_close_ms)), if subscriptions.is_empty() => {
+                let _ = close(&mut socket, 1000, "idle").await;
+                break;
+            }
+            _ = ping.tick(), if pong_deadline.is_none() => {
+                if socket.send(Message::Ping(hyper::body::Bytes::from_static(b"xmsg"))).await.is_err() { break; }
+                pong_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(limits.pong_timeout_ms));
+            }
+            _ = async {
+                if let Some(deadline) = pong_deadline { tokio::time::sleep_until(deadline).await; }
+                else { std::future::pending::<()>().await; }
+            } => {
+                let _ = close(&mut socket, 1011, "pong_timeout").await;
+                break;
             }
             _ = tick.tick() => {
                 if send_value(&mut socket,&writer,json!({"v":1,"type":"tick","server_at":stamp()})).await.is_err() { break; }
@@ -333,35 +385,57 @@ async fn send(
     source: Option<(&ReadHub, &Sequenced)>,
     payload: String,
 ) -> Result<(), ()> {
-    if payload.len() > MAX_SERVER {
+    let limits = &writer.limits;
+    if payload.len() > limits.max_server_message_bytes {
         return Err(());
     }
-    tokio::time::timeout(WRITE_TIMEOUT, async {
-        poll_fn(|cx| {
-            match writer.handoff(nodes.iter().copied(), source, || {
-                Pin::new(&mut *socket).poll_ready(cx)
-            }) {
-                Ok(poll) => poll.map_err(|_| ()),
-                Err(_) => Poll::Ready(Err(())),
+    let count = payload.len().div_ceil(limits.max_server_frame_bytes);
+    tokio::time::timeout(
+        Duration::from_millis(limits.slow_consumer_close_ms),
+        async {
+            for (index, chunk) in payload
+                .as_bytes()
+                .chunks(limits.max_server_frame_bytes)
+                .enumerate()
+            {
+                poll_fn(|cx| {
+                    match writer.handoff(nodes.iter().copied(), source, || {
+                        Pin::new(&mut *socket).poll_ready(cx)
+                    }) {
+                        Ok(poll) => poll.map_err(|_| ()),
+                        Err(_) => Poll::Ready(Err(())),
+                    }
+                })
+                .await?;
+                let opcode = OpCode::Data(if index == 0 {
+                    Data::Text
+                } else {
+                    Data::Continue
+                });
+                let frame = RawFrame::message(
+                    hyper::body::Bytes::copy_from_slice(chunk),
+                    opcode,
+                    index + 1 == count,
+                );
+                writer
+                    .handoff(nodes.iter().copied(), source, || {
+                        Pin::new(&mut *socket).start_send(Message::Frame(frame))
+                    })
+                    .map_err(|_| ())?
+                    .map_err(|_| ())?;
+                poll_fn(|cx| {
+                    match writer.handoff(nodes.iter().copied(), source, || {
+                        Pin::new(&mut *socket).poll_flush(cx)
+                    }) {
+                        Ok(poll) => poll.map_err(|_| ()),
+                        Err(_) => Poll::Ready(Err(())),
+                    }
+                })
+                .await?;
             }
-        })
-        .await?;
-        writer
-            .handoff(nodes.iter().copied(), source, || {
-                Pin::new(&mut *socket).start_send(Message::Text(payload.into()))
-            })
-            .map_err(|_| ())?
-            .map_err(|_| ())?;
-        poll_fn(|cx| {
-            match writer.handoff(nodes.iter().copied(), source, || {
-                Pin::new(&mut *socket).poll_flush(cx)
-            }) {
-                Ok(poll) => poll.map_err(|_| ()),
-                Err(_) => Poll::Ready(Err(())),
-            }
-        })
-        .await
-    })
+            Ok(())
+        },
+    )
     .await
     .map_err(|_| ())?
 }
@@ -625,8 +699,9 @@ async fn parts(
         .filter_map(|node| projection.project_node(node))
     {
         let frame = format(std::slice::from_ref(&node), None, number, false, None)?;
-        if frame.len() > MAX_SERVER
-            || used.saturating_add(frame.len()) > super::transport::MAX_SNAPSHOT - 1024
+        if frame.len() > writer.limits.max_server_message_bytes
+            || used.saturating_add(frame.len())
+                > writer.limits.snapshot_max_bytes.saturating_sub(1024)
         {
             truncated = true;
             break;
@@ -643,7 +718,7 @@ async fn parts(
     let mut attention = snapshot.attention.as_deref();
     loop {
         let frame = format(&[], attention, number, true, Some(truncated))?;
-        if frame.len() <= MAX_SERVER {
+        if frame.len() <= writer.limits.max_server_message_bytes {
             let guarded: Vec<_> = attention
                 .iter()
                 .flat_map(|items| items.iter())

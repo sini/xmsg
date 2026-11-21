@@ -19,6 +19,7 @@ mod device;
     reason = "Mission Control read-only hub staged before transport integration"
 )]
 mod hub;
+pub(crate) mod limits;
 #[allow(
     dead_code,
     reason = "Mission Control read-only hub staged before transport integration"
@@ -118,6 +119,8 @@ pub struct Config {
     pub revocation_slo_ms: u64,
     #[serde(default = "watchdog")]
     pub authority_watchdog_ms: u64,
+    #[serde(default)]
+    pub(crate) session_limits: limits::ReadLimits,
 }
 
 fn yes() -> bool {
@@ -252,6 +255,7 @@ impl Config {
             || self.device_codes_live == 0
             || self.device_authorizations_per_min == 0
             || self.device_code_attempts_per_session == 0
+            || !self.session_limits.valid()
         {
             return Err(Error::Configuration);
         }
