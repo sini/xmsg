@@ -1,0 +1,25 @@
+{
+  "v": 1,
+  "type": "hello",
+  "re": 1,
+  "protocol": 1,
+  "capabilities": [
+    "observe",
+    "activity"
+  ],
+  "connection": "c_01",
+  "actor": {
+    "principal": "p_7f3a",
+    "display": "owner",
+    "class": "browser"
+  },
+  "lease_expires_at": 1795000900000,
+  "server_at": 1795000000000,
+  "limits": {
+    "max_client_message_bytes": 16384,
+    "max_server_message_bytes": 262144,
+    "max_json_depth": 16,
+    "subscriptions_per_connection": 16,
+    "tick_interval_ms": 15000
+  }
+}

@@ -236,7 +236,7 @@ fn decode_segment(value: &str) -> Result<String, Refusal> {
 
 pub(super) fn error(refusal: Refusal) -> WebResponse {
     let body =
-        serde_json::json!({"v":1,"type":"error","code":refusal.code,"fatal":false}).to_string();
+        serde_json::json!({"v":1,"type":"error","code":refusal.code,"fatal":true}).to_string();
     let mut response = response(refusal.status, "application/json", body);
     if refusal == Refusal::RATE_LIMIT {
         response

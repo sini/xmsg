@@ -1,0 +1,5 @@
+{
+  "method": "GET",
+  "path": "/v1/mission-control/snapshot/fleet?x=1",
+  "status": 400
+}

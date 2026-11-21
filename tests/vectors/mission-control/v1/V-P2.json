@@ -1,0 +1,23 @@
+{
+  "v": 1,
+  "type": "snapshot",
+  "part": 0,
+  "final": true,
+  "stream_epoch": "9f1c0e5a7b3d2c4e8f6a1b0c9d8e7f6a",
+  "cursor": "<C>",
+  "server_at": 1795000000100,
+  "truncated": false,
+  "nodes": [],
+  "attention": [
+    {
+      "id": "att_6cfc58099f26ef68a63fc71893e1bea7",
+      "kind": "blocked_permission",
+      "node": "laptop",
+      "endpoint": "claude-1@laptop",
+      "since": 1794999995000,
+      "detail": {
+        "delivery": "delayed"
+      }
+    }
+  ]
+}

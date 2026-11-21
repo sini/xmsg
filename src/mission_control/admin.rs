@@ -405,6 +405,20 @@ async fn execute(
     }
 }
 
+#[cfg(test)]
+pub(super) async fn revoke_fixture(directory: &Path, record_id: &str) {
+    let (reply, offline) = execute(
+        directory,
+        Operation::Revoke {
+            record_id: record_id.to_owned(),
+        },
+        || unreachable!(),
+    )
+    .await
+    .unwrap();
+    assert!(!offline && matches!(reply, Reply::Done {}));
+}
+
 pub(crate) async fn run(
     args: Args,
     load_config: impl FnOnce(&Path) -> Result<AuthorityConfig, AdminError>,

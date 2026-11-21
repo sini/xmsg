@@ -1,0 +1,6 @@
+{
+  "method": "GET",
+  "path": "/v1/mission-control/stream/fleet",
+  "Last-Event-ID": "<node/laptop cursor>",
+  "expect_gap": "cursor_invalid"
+}

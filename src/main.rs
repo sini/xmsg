@@ -55,6 +55,9 @@ enum Commands {
     /// Collect authorized read-only observation metadata
     ObserveCollector(xmsg::observe_collector::Args),
 
+    /// Inspect the Mission Control fleet after device approval
+    MissionControl(xmsg::mission_control_client::Args),
+
     /// Session activity hook helpers
     Activity(ActivityArgs),
 
@@ -543,6 +546,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .enable_all()
                 .build()?
                 .block_on(xmsg::observe_collector::run(args))?;
+        }
+        Commands::MissionControl(args) => {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(xmsg::mission_control_client::run(args))?;
         }
         Commands::List(args) => operator::list(args)?,
         Commands::Locate(args) => operator::locate(args)?,

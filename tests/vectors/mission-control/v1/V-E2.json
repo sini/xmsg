@@ -1,0 +1,30 @@
+{
+  "v": 1,
+  "type": "event",
+  "sub": "n1",
+  "seq": 1043,
+  "cursor": "<C>",
+  "replayed": true,
+  "at": 1795000001200,
+  "delta": {
+    "kind": "activity_changed",
+    "node": "laptop",
+    "event": {
+      "sequence": 1043,
+      "observed_at": 1795000000,
+      "persisted_at": 1795000000,
+      "kind": "activity_changed",
+      "from": "claude-1@laptop",
+      "available": "not_recorded",
+      "activity": {
+        "state": "blocked",
+        "block": "permission",
+        "state_epoch": "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+        "incarnation": 3,
+        "revision": 41,
+        "changed_at": 1794999995,
+        "fresh_at": 1794999998
+      }
+    }
+  }
+}

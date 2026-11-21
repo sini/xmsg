@@ -61,7 +61,7 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		id: 'mission-control.http',
 		title: 'Mission Control snapshot and stream transports',
 		owner: 'sini',
-		evidence: [],
+		evidence: [{ path: 'src/mission_control/websocket.rs', anchor: 'pub(crate) async fn upgrade(' }],
 		plannedSince: '2026-11-21',
 	},
 	'mission-control.machine-tokens': {

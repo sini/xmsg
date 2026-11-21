@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "type": "event",
+  "sub": "n1",
+  "seq": 1044,
+  "cursor": "<C>",
+  "at": 1795000001300,
+  "delta": {
+    "kind": "source_gap",
+    "node": "laptop",
+    "gap": {
+      "reason": "writer_restart",
+      "unknown_loss": true
+    }
+  }
+}
