@@ -23,6 +23,17 @@ export interface SiblingAllowlistEntry {
 }
 
 export const FEATURES: Record<string, FeatureEntry> = {
+	'teams.supervisor': {
+		id: 'teams.supervisor',
+		title: 'Fake-backend executor supervisor and workspace library',
+		owner: 'sini',
+		evidence: [
+			{ path: 'extensions/executor/src/supervisor.rs', anchor: 'pub(crate) struct SupervisorController' },
+			{ path: 'extensions/executor/src/workspace.rs', anchor: 'pub struct OwnerWorkspaceBinding' },
+		],
+		plannedSince: '2026-11-20',
+		note: 'No installed launcher or real harness qualification.',
+	},
 	'teams.control-journal': {
 		id: 'teams.control-journal',
 		title: 'Fail-closed executor control journal library',

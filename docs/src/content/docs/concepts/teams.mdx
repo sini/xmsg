@@ -12,7 +12,7 @@ work with independent Codex and Antigravity teammates on one host. Ordinary xmsg
 recipients will continue to work without an executor or a prescribed workflow.
 
 The foundation supplies [internal contracts, a fake ACP test harness and a
-fail-closed control journal](/reference/executor-contracts/). There is no runtime
+fail-closed control journal and fake-backend supervisor](/reference/executor-contracts/). There is no runtime
 launcher, team CLI or team MCP tool. The library control boundary denies real
 lifecycle calls as `attestation_unavailable` until the separately commissioned
 attribution bridge exists. No real harness capability is qualified by fake
@@ -78,3 +78,19 @@ Unsupported and unknown outcomes are part of the interface.
 Harness-owned ACP child sessions will be observed, not turned into managed
 teammates. Their messages do not trigger extra prompts or management grants.
 Explicit mixed-harness teammates have independent managed identities.
+
+
+## Execution ownership and recovery
+
+<Status id="teams.supervisor" />
+
+The supervisor foundation keeps execution ownership separate from the parent
+conversation. Launch claims come from the durable control journal and are
+rechecked before use. Reconnecting observes the same execution; an uncertain
+owner remains unknown and holds its slot instead of triggering another spawn.
+
+Workspaces are prepared from an immutable base under owner-approved roots and
+revalidated before use. Stopping does not discard changed work. Bus membership
+uses ordinary service recipients: incoming messages become durable content,
+never control or approval authority. Only fake ACP subprocesses are exercised
+at this stage; a real mixed-harness runtime remains planned.
