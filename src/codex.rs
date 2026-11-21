@@ -3551,13 +3551,13 @@ mod readonly_attribution_tests {
         root(&mut f, A, 1);
         assert_eq!(
             f.store
-                .readonly_attribution_binding(&f.config, 101, "42", A, A, None, deadline())
+                .readonly_attribution_binding(&f.config, (101, "42"), A, A, None, deadline())
                 .err(),
             Some(crate::client::caller_attribution::FailureReason::Context)
         );
         assert_eq!(
             f.store
-                .readonly_attribution_binding(&f.config, 100, "42", B, B, None, deadline())
+                .readonly_attribution_binding(&f.config, (100, "42"), B, B, None, deadline())
                 .err(),
             Some(crate::client::caller_attribution::FailureReason::Context)
         );
@@ -3600,8 +3600,7 @@ mod readonly_attribution_tests {
             f.store
                 .readonly_attribution_binding(
                     &f.config,
-                    100,
-                    "42",
+                    (100, "42"),
                     A,
                     CHILD,
                     Some("turn-a"),
@@ -3619,8 +3618,7 @@ mod readonly_attribution_tests {
             f.store
                 .readonly_attribution_binding(
                     &f.config,
-                    100,
-                    "42",
+                    (100, "42"),
                     A,
                     CHILD,
                     Some("turn-b"),
@@ -3646,7 +3644,7 @@ mod readonly_attribution_tests {
         std::fs::write(file_path,format!("{}\n",serde_json::json!({"type":"session_meta","payload":{"id":A,"session_id":A,"parent_thread_id":true}}))).unwrap();
         assert_eq!(
             f.store
-                .readonly_attribution_binding(&f.config, 100, "42", A, A, None, deadline())
+                .readonly_attribution_binding(&f.config, (100, "42"), A, A, None, deadline())
                 .err(),
             Some(crate::client::caller_attribution::FailureReason::Context)
         );
