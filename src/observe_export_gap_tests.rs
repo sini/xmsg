@@ -35,7 +35,7 @@ impl Fixture {
 
     fn query(&self, scope: &Scope, epoch: Option<String>) -> ExportQuery {
         ExportQuery {
-            v: 1,
+            v: 2,
             epoch,
             after: 0,
             limit: 100,

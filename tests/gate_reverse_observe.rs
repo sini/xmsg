@@ -949,7 +949,7 @@ async fn hub_preserves_future_kind_event_bytes_and_refuses_nonmetadata_fields() 
     }
 }
 fn snapshot_page(count: usize) -> Value {
-    json!({"v":1,"node":"LEAF_NODE","scope":"a".repeat(64),"observed_at":1,"endpoints":(0..count).map(|index|json!({"id":format!("endpoint-{index}@LEAF_NODE"),"node":"LEAF_NODE","kind":"service","harness":"unknown","state":"registered"})).collect::<Vec<_>>(),"truncated":false,"available":"available"})
+    json!({"v":2,"node":"LEAF_NODE","scope":"a".repeat(64),"observed_at":1,"endpoints":(0..count).map(|index|json!({"id":format!("endpoint-{index}@LEAF_NODE"),"node":"LEAF_NODE","kind":"service","harness":"unknown","state":"registered"})).collect::<Vec<_>>(),"truncated":false,"available":"available","activity":{"status":"disabled","complete":true}})
 }
 async fn assert_raw_dto_status(body: Vec<u8>, kind: &str, status: u16, name: &str) -> Value {
     assert!(
@@ -1095,7 +1095,7 @@ async fn exact_query_bound_and_closed_query_fields_apply_before_dispatch() {
     );
     for invalid in [
         format!("v={}1", "0".repeat(1022)),
-        "v=1&v=1".into(),
+        "v=1&v=2".into(),
         "v=1&url=http://elsewhere".into(),
         "v=1&unknown=1".into(),
     ] {
@@ -2487,7 +2487,7 @@ async fn control_scheduler_is_fair_with_observe_backlog_and_preserves_query_bind
             f.request(
                 &identity,
                 "GET",
-                &format!("{}?v=1&limit={}", f.uri("events"), index + 1),
+                &format!("{}?v=2&limit={}", f.uri("events"), index + 1),
                 vec![],
                 &[],
             )

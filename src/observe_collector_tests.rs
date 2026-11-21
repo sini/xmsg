@@ -157,13 +157,17 @@ impl Fixture {
             .unwrap(),
         );
         let snapshot = ExportSnapshot {
-            v: 1,
+            v: 2,
             node: "fixture.node".into(),
             scope: "a".repeat(64),
             observed_at: 1000,
             endpoints: vec![],
             truncated: false,
             available: SnapshotAvailability::Available,
+            activity: crate::activity::SnapshotActivity {
+                status: crate::activity::ActivityStatus::Disabled,
+                complete: true,
+            },
         };
         let mut initial_success = BTreeMap::new();
         if validated {
@@ -748,7 +752,7 @@ fn scheduler_state(fixture: &Fixture, node: &str, store: Arc<Store>) -> Arc<Stat
     })
 }
 fn scheduler_page(node: &str) -> crate::observe_export::ExportPage {
-    serde_json::from_value(json!({"v":1,"node":node,"epoch":"fixture-epoch","scope":"a".repeat(64),"events":[{"sequence":1,"observed_at":1000,"persisted_at":1000,"kind":"message_recorded","available":"not_recorded"}],"next":1,"has_more":false,"gaps":[],"available":true})).unwrap()
+    serde_json::from_value(json!({"v":2,"node":node,"epoch":"fixture-epoch","scope":"a".repeat(64),"events":[{"sequence":1,"observed_at":1000,"persisted_at":1000,"kind":"message_recorded","available":"not_recorded"}],"next":1,"has_more":false,"gaps":[],"available":true})).unwrap()
 }
 async fn backoff_case(snapshot_limited: bool) {
     let fixture = Fixture::new().await;
@@ -781,13 +785,17 @@ async fn backoff_case(snapshot_limited: bool) {
             "200 OK",
             "",
             &serde_json::to_vec(&ExportSnapshot {
-                v: 1,
+                v: 2,
                 node: node.clone(),
                 scope: "a".repeat(64),
                 observed_at: 1000,
                 endpoints: vec![],
                 truncated: false,
                 available: SnapshotAvailability::Available,
+                activity: crate::activity::SnapshotActivity {
+                    status: crate::activity::ActivityStatus::Disabled,
+                    complete: true,
+                },
             })
             .unwrap(),
         );
@@ -874,13 +882,17 @@ async fn runtime_preserves_original_future_kind() {
         "200 OK",
         "",
         &serde_json::to_vec(&ExportSnapshot {
-            v: 1,
+            v: 2,
             node: node.clone(),
             scope: "a".repeat(64),
             observed_at: 1000,
             endpoints: vec![],
             truncated: false,
             available: SnapshotAvailability::Available,
+            activity: crate::activity::SnapshotActivity {
+                status: crate::activity::ActivityStatus::Disabled,
+                complete: true,
+            },
         })
         .unwrap(),
     );
@@ -1120,13 +1132,17 @@ async fn relay_failure_overlay_survives_busy_store_slot_and_clears_on_fresh_inge
             .ingest_snapshot(
                 "fixture.node",
                 ExportSnapshot {
-                    v: 1,
+                    v: 2,
                     node: "fixture.node".into(),
                     scope: "a".repeat(64),
                     observed_at: 1000,
                     endpoints: vec![],
                     truncated: false,
                     available: SnapshotAvailability::Available,
+                    activity: crate::activity::SnapshotActivity {
+                        status: crate::activity::ActivityStatus::Disabled,
+                        complete: true,
+                    },
                 },
             )
             .unwrap();
@@ -1307,13 +1323,17 @@ async fn relay_failure_overlay_keeps_unvalidated_history_pending() {
         .ingest_snapshot(
             "fixture.node",
             ExportSnapshot {
-                v: 1,
+                v: 2,
                 node: "fixture.node".into(),
                 scope: "a".repeat(64),
                 observed_at: 1000,
                 endpoints: vec![],
                 truncated: false,
                 available: SnapshotAvailability::Available,
+                activity: crate::activity::SnapshotActivity {
+                    status: crate::activity::ActivityStatus::Disabled,
+                    complete: true,
+                },
             },
         )
         .expect("fresh relay snapshot validation positive refused");
@@ -1371,13 +1391,17 @@ async fn a1_stale_after_fresh_without_failure() {
         .ingest_snapshot(
             "fixture.node",
             ExportSnapshot {
-                v: 1,
+                v: 2,
                 node: "fixture.node".into(),
                 scope: "a".repeat(64),
                 observed_at: 1000,
                 endpoints: vec![],
                 truncated: false,
                 available: SnapshotAvailability::Available,
+                activity: crate::activity::SnapshotActivity {
+                    status: crate::activity::ActivityStatus::Disabled,
+                    complete: true,
+                },
             },
         )
         .unwrap();
@@ -1439,19 +1463,23 @@ async fn a2_healthy_no_change_advances_last_success() {
     });
 
     let snap = ExportSnapshot {
-        v: 1,
+        v: 2,
         node: "fixture.node".into(),
         scope: "a".repeat(64),
         observed_at: 1000,
         endpoints: vec![],
         truncated: false,
         available: SnapshotAvailability::Available,
+        activity: crate::activity::SnapshotActivity {
+            status: crate::activity::ActivityStatus::Disabled,
+            complete: true,
+        },
     };
     store.ingest_snapshot("fixture.node", snap.clone()).unwrap();
     accepted_scope(&state, "fixture.node", "a".repeat(64));
 
     let empty_page: crate::observe_export::ExportPage = serde_json::from_value(json!({
-        "v": 1,
+        "v": 2,
         "node": "fixture.node",
         "epoch": "fixture-epoch",
         "scope": "a".repeat(64),
@@ -1503,13 +1531,17 @@ async fn a3_connection_without_ingest_is_not_success() {
         .ingest_snapshot(
             "fixture.node",
             ExportSnapshot {
-                v: 1,
+                v: 2,
                 node: "fixture.node".into(),
                 scope: "a".repeat(64),
                 observed_at: 1000,
                 endpoints: vec![],
                 truncated: false,
                 available: SnapshotAvailability::Available,
+                activity: crate::activity::SnapshotActivity {
+                    status: crate::activity::ActivityStatus::Disabled,
+                    complete: true,
+                },
             },
         )
         .unwrap();
@@ -1535,13 +1567,17 @@ async fn a4_permission_loss_and_scope_change_mask_last_success() {
         .ingest_snapshot(
             "fixture.node",
             ExportSnapshot {
-                v: 1,
+                v: 2,
                 node: "fixture.node".into(),
                 scope: "a".repeat(64),
                 observed_at: 1000,
                 endpoints: vec![],
                 truncated: false,
                 available: SnapshotAvailability::Available,
+                activity: crate::activity::SnapshotActivity {
+                    status: crate::activity::ActivityStatus::Disabled,
+                    complete: true,
+                },
             },
         )
         .unwrap();
@@ -1593,13 +1629,17 @@ async fn a5_restart_with_history_shows_hidden_and_none_since_start() {
             .ingest_snapshot(
                 "fixture.node",
                 ExportSnapshot {
-                    v: 1,
+                    v: 2,
                     node: "fixture.node".into(),
                     scope: "a".repeat(64),
                     observed_at: 1000,
                     endpoints: vec![],
                     truncated: false,
                     available: SnapshotAvailability::Available,
+                    activity: crate::activity::SnapshotActivity {
+                        status: crate::activity::ActivityStatus::Disabled,
+                        complete: true,
+                    },
                 },
             )
             .unwrap();
@@ -1691,13 +1731,17 @@ async fn a6_monotonic_health_ignores_epoch_clock_shifts() {
         .ingest_snapshot(
             "fixture.node",
             ExportSnapshot {
-                v: 1,
+                v: 2,
                 node: "fixture.node".into(),
                 scope: "a".repeat(64),
                 observed_at: 10_000,
                 endpoints: vec![],
                 truncated: false,
                 available: SnapshotAvailability::Available,
+                activity: crate::activity::SnapshotActivity {
+                    status: crate::activity::ActivityStatus::Disabled,
+                    complete: true,
+                },
             },
         )
         .unwrap();
@@ -1814,13 +1858,17 @@ async fn r2a_direct_404_recovers_on_valid_response_and_403_stays_denied() {
         "200 OK",
         "",
         &serde_json::to_vec(&ExportSnapshot {
-            v: 1,
+            v: 2,
             node: node.clone(),
             scope: "a".repeat(64),
             observed_at: 1000,
             endpoints: vec![],
             truncated: false,
             available: SnapshotAvailability::Available,
+            activity: crate::activity::SnapshotActivity {
+                status: crate::activity::ActivityStatus::Disabled,
+                complete: true,
+            },
         })
         .unwrap(),
     );

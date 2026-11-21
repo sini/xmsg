@@ -738,6 +738,16 @@ pub async fn run_agent_server_with_listener(
                     continue;
                 }
 
+                if let Ok(act_frame) = serde_json::from_str::<crate::activity::ActivityFrame>(trimmed)
+                {
+                    if act_frame.action == "activity" {
+                        if let Some(rt) = crate::activity::runtime_for_db(&state_clone.db) {
+                            let _ = rt.tx.try_send(act_frame);
+                        }
+                        continue;
+                    }
+                }
+
                 let frame: AgentFrame = match parse_agent_frame(trimmed) {
                     Ok(f) => f,
                     Err(e) => {
@@ -764,6 +774,50 @@ pub async fn run_agent_server_with_listener(
                     .await
                     {
                         Ok(outcome) => {
+                            if let Some(rt) = crate::activity::runtime_for_db(&state_clone.db) {
+                                if let Some(sid) = payload.get("session_id").and_then(|v| v.as_str()) {
+                                    let bg = if outcome.stdout.contains("\"decision\"")
+                                        && outcome.stdout.contains("\"block\"")
+                                    {
+                                        crate::activity::BackgroundPresence::Active
+                                    } else {
+                                        crate::activity::BackgroundPresence::None
+                                    };
+                                    let ev_name = match event.as_str() {
+                                        "UserPromptSubmit" => "user_prompt_submit",
+                                        "PreModelRequest" => "pre_model_request",
+                                        "Stop" => "stop",
+                                        "PermissionRequest" => "permission_request",
+                                        "Interrupt" => "interrupt",
+                                        "SessionStart" => "session_start",
+                                        _ => "",
+                                    };
+                                    if !ev_name.is_empty() {
+                                        let _ = rt.tx.try_send(crate::activity::ActivityFrame {
+                                            action: "activity".to_owned(),
+                                            schema_version: 1,
+                                            harness: crate::activity::ActivityHarness::Codex,
+                                            event: ev_name.to_owned(),
+                                            session: sid.to_owned(),
+                                            owner: peer.pid.map(|p| crate::activity::OwnerProof {
+                                                pid: p,
+                                                started_at: 0,
+                                            }),
+                                            native_seq: None,
+                                            event_id: None,
+                                            correlation: None,
+                                            block: if ev_name == "permission_request" {
+                                                Some(crate::activity::BlockKind::Permission)
+                                            } else {
+                                                None
+                                            },
+                                            background: bg,
+                                            wake: crate::activity::WakePresence::Absent,
+                                            failed: None,
+                                        });
+                                    }
+                                }
+                            }
                             let has_handoff = !outcome.handoff_ids.is_empty();
                             let resp_json = serde_json::json!({
                                 "status": "ok",

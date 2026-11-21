@@ -342,7 +342,7 @@ impl Client {
         index: usize,
     ) -> Result<crate::observe_export::ExportSnapshot, Error> {
         let source = self.sources.get(index).ok_or(Error::Configuration)?;
-        let path = format!("/fed/v2/observe/snapshot?v=1&labels={}", source.labels);
+        let path = format!("/fed/v2/observe/snapshot?v=2&labels={}", source.labels);
         let bytes = self.get(index, path).await?;
         serde_json::from_slice(&bytes).map_err(|_| Error::Malformed)
     }
@@ -370,7 +370,7 @@ impl Client {
         {
             let mut query = url.query_pairs_mut();
             query
-                .append_pair("v", "1")
+                .append_pair("v", "2")
                 .append_pair("after", &after.to_string())
                 .append_pair("limit", "200")
                 .append_pair("labels", if source.labels { "true" } else { "false" });

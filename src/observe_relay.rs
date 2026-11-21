@@ -820,20 +820,44 @@ fn validate_dto(body: &[u8], control: &Control, config: &PeerConfig) -> Result<(
             let page = crate::observe_collector_decode::decode_page(body)
                 .map_err(|_| Failure::Invalid)?
                 .page;
-            if page.node != node || page.v != 1 {
+            if page.node != node || page.v != 2 {
                 return Err(Failure::Invalid);
             }
-            if page.events.iter().any(|e| {
-                e.from.as_deref().is_some_and(|id| !scope.allows(id))
+            for e in &page.events {
+                if e.kind == crate::observe_export::EventKind::ActivityChanged {
+                    if e.to.is_some() {
+                        return Err(Failure::Invalid);
+                    }
+                    let Some(from) = e.from.as_deref() else {
+                        return Err(Failure::Invalid);
+                    };
+                    let Some(canon) = crate::observe_export::valid_activity_endpoint(from, &node)
+                    else {
+                        return Err(Failure::Invalid);
+                    };
+                    if canon != from {
+                        return Err(Failure::Invalid);
+                    }
+                    let Some(ref act) = e.activity else {
+                        return Err(Failure::Invalid);
+                    };
+                    if !act.is_valid() {
+                        return Err(Failure::Invalid);
+                    }
+                    if !scope.allows(&canon) {
+                        return Err(Failure::Denied);
+                    }
+                } else if e.from.as_deref().is_some_and(|id| !scope.allows(id))
                     || e.to.as_deref().is_some_and(|id| !scope.allows(id))
-            }) {
-                return Err(Failure::Denied);
+                {
+                    return Err(Failure::Denied);
+                }
             }
         }
         Kind::Snapshot => {
             let page: ExportSnapshot =
                 serde_json::from_slice(body).map_err(|_| Failure::Invalid)?;
-            if page.node != node || page.v != 1 || page.endpoints.len() > 200 {
+            if page.node != node || page.v != 2 || page.endpoints.len() > 200 {
                 return Err(Failure::Invalid);
             }
             if page.endpoints.iter().any(|endpoint| {
@@ -841,6 +865,10 @@ fn validate_dto(body: &[u8], control: &Control, config: &PeerConfig) -> Result<(
                     .context
                     .as_ref()
                     .is_some_and(|context| !context.is_valid())
+                    || endpoint
+                        .activity
+                        .as_ref()
+                        .is_some_and(|act| !act.is_valid())
             }) {
                 return Err(Failure::Invalid);
             }

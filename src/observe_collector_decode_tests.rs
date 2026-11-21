@@ -7,7 +7,7 @@ fn bytes(value: &Value) -> Vec<u8> {
     serde_json::to_vec(value).unwrap()
 }
 fn page(events: Vec<Value>) -> Value {
-    json!({"v":1,"node":"local","epoch":"e","scope":"s","events":events,"next":1,"has_more":false,"gaps":[],"available":true})
+    json!({"v":2,"node":"local","epoch":"e","scope":"s","events":events,"next":1,"has_more":false,"gaps":[],"available":true})
 }
 #[test]
 fn known_canonical_matches_export_and_omits_nulls() {

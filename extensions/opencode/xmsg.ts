@@ -450,6 +450,7 @@ const server = async ({ client }: any) => {
       else if (event.type === "session.status" && event.properties?.status?.type === "idle") {
         await xmsg.stopped(event.properties.sessionID);
       }
+      if (process.env.XMSG_ACTIVITY === "1") emitOpenCodeActivity(event);
     },
     tool: Object.fromEntries(
       TOOLS.map((t) => [
@@ -513,5 +514,57 @@ const setup = async (ctx: any) => {
     xmsg.close();
   };
 };
+
+const activitySeqs = new Map<string, number>();
+
+function emitOpenCodeActivity(event: any): void {
+  const sid = event?.properties?.sessionID ?? event?.data?.sessionID;
+  if (!sid || typeof sid !== "string") return;
+  let mapped: string | undefined;
+  let block: string | undefined;
+  let correlation: string | undefined;
+  const t = event?.type;
+  if (t === "session.idle" || t === "session.execution.succeeded" || t === "session.execution.failed") {
+    mapped = t;
+  } else if (t === "session.status") {
+    const st = event?.properties?.status?.type;
+    if (st === "busy" || st === "retry" || st === "idle") mapped = `session.status.${st}`;
+  } else if (t === "session.execution.started") {
+    mapped = t;
+  } else if (t === "permission.asked" || t === "permission.replied") {
+    mapped = t;
+    block = t === "permission.asked" ? "permission" : undefined;
+    correlation = event?.properties?.id;
+  } else if (t === "question.asked" || t === "question.replied") {
+    mapped = t;
+    block = t === "question.asked" ? "input" : undefined;
+    correlation = event?.properties?.id;
+  }
+  if (!mapped) return;
+  const seq = (activitySeqs.get(sid) ?? 0) + 1;
+  activitySeqs.set(sid, seq);
+  const dir = process.env.XDG_RUNTIME_DIR;
+  if (!dir) return;
+  const sock = `${dir}/xmsg/agent.sock`;
+  const frame = JSON.stringify({
+    action: "activity",
+    schema_version: 1,
+    harness: "opencode",
+    event: mapped,
+    session: sid,
+    native_seq: seq,
+    ...(correlation ? { correlation: String(correlation) } : {}),
+    ...(block ? { block } : {}),
+    background: "absent",
+    wake: "absent",
+  });
+  if (frame.length >= 1024) return;
+  try {
+    const net = require("node:net");
+    const c = net.createConnection(sock, () => c.end(`${frame}\n`));
+    c.setTimeout(50, () => c.destroy());
+    c.on("error", () => {});
+  } catch {}
+}
 
 export default { id: "xmsg", server, setup };
