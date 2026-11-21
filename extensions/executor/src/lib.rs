@@ -8,3 +8,11 @@ pub mod auth;
 pub mod control;
 mod journal;
 pub mod unix;
+pub mod workspace;
+// Host effects remain staged until the separately commissioned attribution bridge exists.
+#[allow(dead_code)]
+mod execution;
+#[allow(dead_code)]
+mod membership;
+#[allow(dead_code)]
+mod supervisor;

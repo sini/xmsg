@@ -46,6 +46,7 @@
             );
             nativeBuildInputs = [
               pkgs.python3
+              pkgs.git
               pkgs.clippy
               pkgs.rustfmt
             ];
@@ -55,6 +56,13 @@
             checkPhase = ''
               runHook preCheck
               set -o pipefail
+              export XMSG_EXECUTOR_FIXTURE_DAEMON="${
+                inputs.xmsg.packages.${pkgs.stdenv.hostPlatform.system}.default
+              }/bin/xmsg"
+              export XMSG_EXECUTOR_FIXTURE_DAEMON_SHA256="$(sha256sum "$XMSG_EXECUTOR_FIXTURE_DAEMON" | cut -d' ' -f1)"
+              export XMSG_EXECUTOR_FIXTURE_PYTHON="${pkgs.python3}/bin/python3"
+              "$XMSG_EXECUTOR_FIXTURE_DAEMON" --version
+              "$XMSG_EXECUTOR_FIXTURE_PYTHON" --version
               cargoWithProfile test --manifest-path extensions/executor/Cargo.toml --locked -- --list > executor-list.log
               cargoWithProfile test --manifest-path extensions/executor/Cargo.toml --locked -- --test-threads=1 2>&1 | tee executor-tests.log
               python3 extensions/executor/scripts/census.py --self-test
