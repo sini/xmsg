@@ -112,9 +112,9 @@ fn fixture_arrival_controls() {
             Arc::new(|| 1000),
         )
         .unwrap();
-        let page: ExportPage = serde_json::from_value(json!({"v":1,"node":node,"epoch":"fixture-epoch","scope":"a".repeat(64),"events":[{"sequence":1,"observed_at":1000,"persisted_at":1000,"kind":"message_recorded","available":"not_recorded"}],"next":1,"has_more":false,"gaps":[],"available":true})).unwrap();
+        let page: ExportPage = serde_json::from_value(json!({"v":2,"node":node,"epoch":"fixture-epoch","scope":"a".repeat(64),"events":[{"sequence":1,"observed_at":1000,"persisted_at":1000,"kind":"message_recorded","available":"not_recorded"}],"next":1,"has_more":false,"gaps":[],"available":true})).unwrap();
         let catalog = ExportSnapshot {
-            v: 1,
+            v: 2,
             node: node.into(),
             scope: "a".repeat(64),
             observed_at: 1000,
@@ -127,9 +127,14 @@ fn fixture_arrival_controls() {
                 source_at: Some(1000),
                 label: Some("catalog label".into()),
                 context: None,
+                activity: None,
             }],
             truncated: false,
             available: SnapshotAvailability::Partial,
+            activity: xmsg::activity::SnapshotActivity {
+                status: xmsg::activity::ActivityStatus::Disabled,
+                complete: true,
+            },
         };
         let view = || {
             let nodes = store.view(Some(node), 200).unwrap();
@@ -275,7 +280,7 @@ async fn cli_fixture(ca_mode: bool) {
     let now = xmsg::storage::now_epoch_secs();
     let endpoint = format!("fixture@{node}");
     let snapshot = ExportSnapshot {
-        v: 1,
+        v: 2,
         node: node.clone(),
         scope: scope.fingerprint().into(),
         observed_at: now,
@@ -288,12 +293,17 @@ async fn cli_fixture(ca_mode: bool) {
             source_at: Some(now),
             label: (!ca_mode).then(|| LABEL.into()),
             context: None,
+            activity: None,
         }],
         truncated: false,
         available: SnapshotAvailability::Partial,
+        activity: xmsg::activity::SnapshotActivity {
+            status: xmsg::activity::ActivityStatus::Disabled,
+            complete: true,
+        },
     };
     let page = ExportPage {
-        v: 1,
+        v: 2,
         node: node.clone(),
         epoch: "fixture-epoch".into(),
         scope: scope.fingerprint().into(),
@@ -311,6 +321,7 @@ async fn cli_fixture(ca_mode: bool) {
             outcome: Some(Outcome::Queued),
             reason: None,
             available: Availability::NotRecorded,
+            activity: None,
         }],
         next: 1,
         has_more: false,
@@ -543,7 +554,7 @@ async fn cli_fixture(ca_mode: bool) {
     );
     assert!(
         ledger.iter().any(|r| r.contains(&format!(
-            "/events?v=1&after=0&limit=200&labels={}",
+            "/events?v=2&after=0&limit=200&labels={}",
             !ca_mode
         ))),
         "collector started at tail rather than explicit backfill"

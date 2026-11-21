@@ -1,0 +1,308 @@
+[
+  {
+    "label": "AE1-empty-bg-absent",
+    "oracle": "AE1/AE3 empty background_tasks array must be None, not Absent",
+    "target": "gate_activity_export",
+    "test": "ae1_ae2_ae3_ae4_ae5_claude_foreground_background_absent_and_wakes",
+    "test_file": "tests/gate_activity_export.rs",
+    "edits": [
+      {
+        "file": "src/activity/hook.rs",
+        "needle": "                background = if active {\n                    BackgroundPresence::Active\n                } else {\n                    BackgroundPresence::None\n                };",
+        "replacement": "                background = if active {\n                    BackgroundPresence::Active\n                } else {\n                    BackgroundPresence::Absent\n                };",
+        "start": "fn normalize_claude(",
+        "end": "fn normalize_codex("
+      }
+    ],
+    "expected_literal": "assertion `left == right` failed"
+  },
+  {
+    "label": "AE2-ignore-bg-active",
+    "oracle": "AE2 running background_tasks must yield Working(Background), not Idle",
+    "target": "gate_activity_export",
+    "test": "ae1_ae2_ae3_ae4_ae5_claude_foreground_background_absent_and_wakes",
+    "test_file": "tests/gate_activity_export.rs",
+    "edits": [
+      {
+        "file": "src/activity/reducer.rs",
+        "needle": "                        BackgroundPresence::Active => Some((\n                            ActivityState::Working,\n                            None,\n                            Some(ActivityReason::Background),\n                        )),",
+        "replacement": "                        BackgroundPresence::Active => Some((ActivityState::Idle, None, None)),",
+        "start": "            ActivityHarness::Claude => match frame.event.as_str() {",
+        "end": "            ActivityHarness::Codex => match frame.event.as_str() {"
+      }
+    ],
+    "expected_literal": "called `Option::unwrap()` on a `None` value"
+  },
+  {
+    "label": "AE4-carry-wake",
+    "oracle": "AE4 Stop with empty crons must clear ScheduledWake",
+    "target": "gate_activity_export",
+    "test": "ae1_ae2_ae3_ae4_ae5_claude_foreground_background_absent_and_wakes",
+    "test_file": "tests/gate_activity_export.rs",
+    "edits": [
+      {
+        "file": "src/activity/reducer.rs",
+        "needle": "                            if wake_pending {\n                                Some((\n                                    ActivityState::Idle,\n                                    None,\n                                    Some(ActivityReason::ScheduledWake),\n                                ))\n                            } else {\n                                Some((ActivityState::Idle, None, None))\n                            }",
+        "replacement": "                            if wake_pending || true {\n                                Some((\n                                    ActivityState::Idle,\n                                    None,\n                                    Some(ActivityReason::ScheduledWake),\n                                ))\n                            } else {\n                                Some((ActivityState::Idle, None, None))\n                            }",
+        "start": "            ActivityHarness::Claude => match frame.event.as_str() {",
+        "end": "            ActivityHarness::Codex => match frame.event.as_str() {"
+      }
+    ],
+    "expected_literal": "assertion `left == right` failed"
+  },
+  {
+    "label": "AE6-stale-owner-not-dropped",
+    "oracle": "AE6 stale owner frame must be dropped",
+    "target": "gate_activity_export",
+    "test": "ae6_ae19_ae21_owner_binding_and_unverified_fences",
+    "test_file": "tests/gate_activity_export.rs",
+    "edits": [
+      {
+        "file": "src/activity/reducer.rs",
+        "needle": "            BindingOutcome::StaleOwner => return Ok(None),",
+        "replacement": "            BindingOutcome::StaleOwner => (\"11111111-1111-4111-8111-111111111111\".to_owned(), 2, OwnerProof { pid: 1, started_at: 1 }, false),",
+        "start": "        let (address, incarnation, owner, has_pending_wake) = match binding {",
+        "end": "        let digest = frame_digest(frame);"
+      }
+    ],
+    "expected_literal": "assertion failed: eng.ingest"
+  },
+  {
+    "label": "AE7-remove-aging",
+    "oracle": "AE7/AE18 monotonic aging sweep must transition Working -> Unknown(Aged)",
+    "target": "gate_activity_export",
+    "test": "ae7_ae16_ae18_monotonic_aging_clock_step_and_codex_interrupt",
+    "test_file": "tests/gate_activity_export.rs",
+    "edits": [
+      {
+        "file": "src/activity/reducer.rs",
+        "needle": "                ActivityState::Working => {\n                    if elapsed >= Duration::from_secs(ACTIVITY_STALE_WORKING_SECS) {\n                        Some((ActivityState::Unknown, None, Some(ActivityReason::Aged)))",
+        "replacement": "                ActivityState::Working => {\n                    if false && elapsed >= Duration::from_secs(ACTIVITY_STALE_WORKING_SECS) {\n                        Some((ActivityState::Unknown, None, Some(ActivityReason::Aged)))",
+        "start": "    pub fn tick_aging(",
+        "end": null
+      }
+    ],
+    "expected_literal": "assertion `left == right` failed"
+  },
+  {
+    "label": "AE8-clear-any-post-tool",
+    "oracle": "AE8/AE20 PostToolUse without matching correlation must not clear prompt",
+    "target": "gate_activity_export",
+    "test": "ae8_ae20_correlated_prompt_resolution_and_overlapping_calls",
+    "test_file": "tests/gate_activity_export.rs",
+    "edits": [
+      {
+        "file": "src/activity/reducer.rs",
+        "needle": "                    let Some(ref cid) = frame.correlation else {\n                        // Tool completion without native id never clears a prompt (AE8).\n                        return None;\n                    };",
+        "replacement": "                    let Some(ref cid) = frame.correlation else {\n                        row.open_correlations.clear();\n                        return Some((ActivityState::Working, None, None));\n                    };",
+        "start": "                \"post_tool_use\" => {",
+        "end": "                \"notification\" => {"
+      }
+    ],
+    "expected_literal": "assertion failed: eng.ingest"
+  },
+  {
+    "label": "AE10-agy-blocked",
+    "oracle": "AE10 agy must never map to Blocked",
+    "target": "gate_activity_export",
+    "test": "ae9_ae10_ae11_ae14_ae15_ae23_harness_proofs_and_reaffirmation",
+    "test_file": "tests/gate_activity_export.rs",
+    "edits": [
+      {
+        "file": "src/activity/reducer.rs",
+        "needle": "                \"pre_invocation\" | \"post_invocation\" | \"pre_tool_use\" | \"post_tool_use\" => {\n                    // Never map agy ask_* tools to blocked (AE10).\n                    Some((ActivityState::Working, None, None))\n                }",
+        "replacement": "                \"pre_invocation\" | \"post_invocation\" | \"pre_tool_use\" | \"post_tool_use\" => {\n                    Some((ActivityState::Blocked, Some(BlockKind::Permission), None))\n                }",
+        "start": "            ActivityHarness::Agy => match frame.event.as_str() {",
+        "end": "            ActivityHarness::Opencode => match frame.event.as_str() {"
+      }
+    ],
+    "expected_literal": "assertion `left == right` failed"
+  },
+  {
+    "label": "AE11-blanket-le-drop",
+    "oracle": "AE11 equal native_seq with different content must yield Contradictory, not drop",
+    "target": "gate_activity_export",
+    "test": "ae9_ae10_ae11_ae14_ae15_ae23_harness_proofs_and_reaffirmation",
+    "test_file": "tests/gate_activity_export.rs",
+    "edits": [
+      {
+        "file": "src/activity/reducer.rs",
+        "needle": "if incoming_seq < last_seq {",
+        "replacement": "if incoming_seq <= last_seq {",
+        "start": "        if let Some(ref row) = existing {",
+        "end": "        let mut row = existing.unwrap_or("
+      }
+    ],
+    "expected_literal": "called `Option::unwrap()` on a `None` value"
+  },
+  {
+    "label": "AE14-skip-perm-proof",
+    "oracle": "AE14 unproven PermissionRequest must degrade, never Blocked",
+    "target": "gate_activity_export",
+    "test": "ae9_ae10_ae11_ae14_ae15_ae23_harness_proofs_and_reaffirmation",
+    "test_file": "tests/gate_activity_export.rs",
+    "edits": [
+      {
+        "file": "src/activity/reducer.rs",
+        "needle": "                    if !self.proofs.claude_permission_request_proven {",
+        "replacement": "                    if false && !self.proofs.claude_permission_request_proven {",
+        "start": "                \"permission_request\" => {",
+        "end": "                \"post_tool_use\" => {"
+      }
+    ],
+    "expected_literal": "assertion `left != right` failed"
+  },
+  {
+    "label": "AE15-session-start-idle",
+    "oracle": "AE15 unproven SessionStart must yield Unknown(Unreported), not Idle",
+    "target": "gate_activity_export",
+    "test": "ae9_ae10_ae11_ae14_ae15_ae23_harness_proofs_and_reaffirmation",
+    "test_file": "tests/gate_activity_export.rs",
+    "edits": [
+      {
+        "file": "src/activity/reducer.rs",
+        "needle": "                    if self.proofs.claude_session_start_ready {",
+        "replacement": "                    if true || self.proofs.claude_session_start_ready {",
+        "start": "                \"session_start\" => {",
+        "end": "                \"session_end\" => {"
+      }
+    ],
+    "expected_literal": "assertion `left == right` failed"
+  },
+  {
+    "label": "AE17-restart-keep-working",
+    "oracle": "AE17 restart must transition Working -> Unknown(Restarted)",
+    "target": "gate_activity_export",
+    "test": "ae17_ae22_ae24_restart_two_connection_replay_and_disable_fence",
+    "test_file": "tests/gate_activity_export.rs",
+    "edits": [
+      {
+        "file": "src/activity/store.rs",
+        "needle": "ActivityState::Working | ActivityState::Blocked => Some((\n                ActivityState::Unknown,\n                None,\n                Some(ActivityReason::Restarted),\n            )),",
+        "replacement": "ActivityState::Working | ActivityState::Blocked => None,",
+        "start": "pub fn apply_restart_policy<F>(",
+        "end": null
+      }
+    ],
+    "expected_literal": "index out of bounds"
+  },
+  {
+    "label": "AE22-replay-extends-fresh",
+    "oracle": "AE22 repeated indistinguishable command-hook frames across connections must not extend freshness",
+    "target": "gate_activity_export",
+    "test": "ae17_ae22_ae24_restart_two_connection_replay_and_disable_fence",
+    "test_file": "tests/gate_activity_export.rs",
+    "edits": [
+      {
+        "file": "src/activity/reducer.rs",
+        "needle": "                } else if !frame.harness.is_in_process()\n                    && frame.event_id.is_none()\n                    && row.last_payload_digest.as_deref() == Some(digest.as_str())\n                {",
+        "replacement": "                } else if false\n                    && !frame.harness.is_in_process()\n                    && frame.event_id.is_none()\n                    && row.last_payload_digest.as_deref() == Some(digest.as_str())\n                {",
+        "start": "        if let Some(ref row) = existing {",
+        "end": "        let mut row = existing.unwrap_or("
+      }
+    ],
+    "expected_literal": "assertion `left == right` failed"
+  },
+  {
+    "label": "AE24-no-disable-fence",
+    "oracle": "AE24 disabled snapshot fence must block buffered events until verified re-enable",
+    "target": "gate_activity_export",
+    "test": "ae17_ae22_ae24_restart_two_connection_replay_and_disable_fence",
+    "test_file": "tests/gate_activity_export.rs",
+    "edits": [
+      {
+        "file": "src/activity/reconcile.rs",
+        "needle": "        // AE24: preserve authoritative disable fence until a verified re-enable snapshot.\n        if entry.disabled {\n            return false;\n        }",
+        "replacement": "        if false && entry.disabled {\n            return false;\n        }",
+        "start": "    pub fn apply_event(",
+        "end": "    pub fn revoke_node("
+      }
+    ],
+    "expected_literal": "disabled fence must block buffered event"
+  },
+  {
+    "label": "AO2-unbounded-depth",
+    "oracle": "AO2 JSON nesting depth must be bounded at 32",
+    "target": "gate_activity_export",
+    "test": "ao2_ao4_ao5_ao7_bounded_hook_allowlist_scope_and_v2",
+    "test_file": "tests/gate_activity_export.rs",
+    "edits": [
+      {
+        "file": "src/activity/hook.rs",
+        "needle": "                if depth > max_depth {\n                    return false;\n                }",
+        "replacement": "                if false && depth > max_depth {\n                    return false;\n                }",
+        "start": "pub fn check_json_depth(",
+        "end": "pub fn read_bounded_stdin_with_deadline("
+      }
+    ],
+    "expected_literal": "assertion failed: !check_json_depth"
+  },
+  {
+    "label": "AO5-skip-to-check",
+    "oracle": "AO5 activity_changed with present `to` must be refused",
+    "target": "gate_activity_export",
+    "test": "ao2_ao4_ao5_ao7_bounded_hook_allowlist_scope_and_v2",
+    "test_file": "tests/gate_activity_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "        let (from, to, activity) = if ev_kind == EventKind::ActivityChanged {\n            if observation.to.is_some() {",
+        "replacement": "        let (from, to, activity) = if ev_kind == EventKind::ActivityChanged {\n            if false && observation.to.is_some() {",
+        "start": "pub fn project_page(",
+        "end": "fn bounded_label("
+      }
+    ],
+    "expected_literal": "assertion `left == right` failed"
+  },
+  {
+    "label": "AO5-allow-svc",
+    "oracle": "AO5 svc: endpoint must be refused for activity_changed",
+    "target": "gate_activity_export",
+    "test": "ao2_ao4_ao5_ao7_bounded_hook_allowlist_scope_and_v2",
+    "test_file": "tests/gate_activity_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "    if !valid_node(node) || node != expected_node || key.starts_with(\"svc:\") {\n        return None;\n    }\n    let valid = if let Some((parent, child)) = crate::client::split_subaddress(key) {\n        (crate::client::is_instance_ref(parent)\n            || crate::client::validate_service_name(parent).is_ok())\n            && crate::claim::validate_subagent_id(child).is_ok_and(|checked| checked == child)\n    } else {\n        crate::client::is_instance_ref(key)\n    };",
+        "replacement": "    if !valid_node(node) || node != expected_node {\n        return None;\n    }\n    let key = key.strip_prefix(\"svc:\").unwrap_or(key);\n    let valid = crate::client::is_instance_ref(key) || crate::client::validate_service_name(key).is_ok();",
+        "start": "pub fn valid_activity_endpoint(",
+        "end": "fn canonical_endpoint("
+      }
+    ],
+    "expected_literal": "assertion `left == right` failed"
+  },
+  {
+    "label": "AO7-accept-v1",
+    "oracle": "AO7 export v1 must be refused",
+    "target": "gate_activity_export",
+    "test": "ao2_ao4_ao5_ao7_bounded_hook_allowlist_scope_and_v2",
+    "test_file": "tests/gate_activity_export.rs",
+    "edits": [
+      {
+        "file": "src/observe_export.rs",
+        "needle": "        if self.v != 2",
+        "replacement": "        if self.v != 2 && self.v != 1",
+        "start": "impl ExportQuery {",
+        "end": "impl SnapshotQuery {"
+      }
+    ],
+    "expected_literal": "assertion failed:"
+  },
+  {
+    "label": "AO8-clear-on-incomplete",
+    "oracle": "AO8 incomplete snapshot must keep missing endpoints stale",
+    "target": "gate_activity_export",
+    "test": "ao1_ao8_ao9_ao10_opt_in_snapshot_authority_and_crash_recovery",
+    "test_file": "tests/gate_activity_export.rs",
+    "edits": [
+      {
+        "file": "src/activity/reconcile.rs",
+        "needle": "        if snapshot.activity.complete && !snapshot.truncated {",
+        "replacement": "        if true || (snapshot.activity.complete && !snapshot.truncated) {",
+        "start": "    pub fn apply_snapshot(",
+        "end": "    pub fn apply_event("
+      }
+    ],
+    "expected_literal": "assertion failed: rec.nodes[\"node-a\"].endpoints.contains_key(ep_a)"
+  }
+]

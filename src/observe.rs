@@ -61,32 +61,46 @@ pub struct Observation {
     pub outcome: Option<String>,
     pub reason: Option<String>,
     pub body_availability: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<crate::activity::ActivityDescriptor>,
 }
 
 impl Observation {
     fn bounded(&self) -> bool {
-        matches!(
-            self.kind.as_str(),
-            "message_recorded"
-                | "arrival"
-                | "recipient_resolved"
-                | "outcome_changed"
-                | "reply_recorded"
-                | "reply_push_outcome_changed"
-                | "record_removed"
-                | "record_transferred"
-                | "gap"
-        ) && [
-            self.from.as_deref(),
-            self.to.as_deref(),
-            self.message_id.as_deref(),
-            self.thread_id.as_deref(),
-            self.outcome.as_deref(),
-            self.reason.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .all(|value| value.len() <= 512)
+        let kind_ok = if self.kind == "activity_changed" {
+            self.from.is_some()
+                && self.to.is_none()
+                && self
+                    .activity
+                    .as_ref()
+                    .is_some_and(crate::activity::ActivityDescriptor::is_valid)
+        } else {
+            self.activity.is_none()
+                && matches!(
+                    self.kind.as_str(),
+                    "message_recorded"
+                        | "arrival"
+                        | "recipient_resolved"
+                        | "outcome_changed"
+                        | "reply_recorded"
+                        | "reply_push_outcome_changed"
+                        | "record_removed"
+                        | "record_transferred"
+                        | "gap"
+                )
+        };
+        kind_ok
+            && [
+                self.from.as_deref(),
+                self.to.as_deref(),
+                self.message_id.as_deref(),
+                self.thread_id.as_deref(),
+                self.outcome.as_deref(),
+                self.reason.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .all(|value| value.len() <= 512)
             && matches!(
                 self.body_availability.as_str(),
                 "not_recorded" | "retained_at_capture"
@@ -182,7 +196,53 @@ struct Pending {
 struct Queue {
     events: VecDeque<Pending>,
     bytes: usize,
+    activity_events: usize,
+    activity_bytes: usize,
     next_ticket: u64,
+}
+
+impl Queue {
+    fn push_pending(&mut self, pending: Pending) {
+        if pending.value.kind == "activity_changed" {
+            self.activity_events += 1;
+            self.activity_bytes += pending.bytes;
+        }
+        self.bytes += pending.bytes;
+        self.events.push_back(pending);
+    }
+
+    fn push_front_pending(&mut self, pending: Pending) {
+        if pending.value.kind == "activity_changed" {
+            self.activity_events += 1;
+            self.activity_bytes += pending.bytes;
+        }
+        self.bytes += pending.bytes;
+        self.events.push_front(pending);
+    }
+
+    fn pop_pending(&mut self) -> Option<Pending> {
+        let p = self.events.pop_front()?;
+        self.bytes -= p.bytes;
+        if p.value.kind == "activity_changed" {
+            self.activity_events = self.activity_events.saturating_sub(1);
+            self.activity_bytes = self.activity_bytes.saturating_sub(p.bytes);
+        }
+        Some(p)
+    }
+
+    fn pop_oldest_matching(&mut self, is_activity: bool) -> Option<Pending> {
+        let pos = self
+            .events
+            .iter()
+            .position(|p| (p.value.kind == "activity_changed") == is_activity)?;
+        let p = self.events.remove(pos)?;
+        self.bytes -= p.bytes;
+        if is_activity {
+            self.activity_events = self.activity_events.saturating_sub(1);
+            self.activity_bytes = self.activity_bytes.saturating_sub(p.bytes);
+        }
+        Some(p)
+    }
 }
 
 struct Shared {
@@ -390,20 +450,32 @@ impl Observer {
                     continue;
                 }
             };
-            while queue.events.len() >= self.config.queue_events
-                || queue.bytes + pending_bytes > self.config.queue_bytes
-            {
-                if let Some(old) = queue.events.pop_front() {
-                    queue.bytes -= old.bytes;
-                    self.shared.lost(1);
-                } else {
-                    break;
+            let is_activity = value.kind == "activity_changed";
+            if is_activity {
+                while queue.activity_events >= crate::activity::ACTIVITY_PUBLISH_QUEUE_CAP
+                    || queue.activity_bytes + pending_bytes > 512 * 1024
+                {
+                    if queue.pop_oldest_matching(true).is_some() {
+                        self.shared.lost(1);
+                    } else {
+                        break;
+                    }
+                }
+            } else {
+                while (queue.events.len() - queue.activity_events) >= self.config.queue_events
+                    || (queue.bytes - queue.activity_bytes) + pending_bytes
+                        > self.config.queue_bytes
+                {
+                    if queue.pop_oldest_matching(false).is_some() {
+                        self.shared.lost(1);
+                    } else {
+                        break;
+                    }
                 }
             }
             queue.next_ticket = queue.next_ticket.saturating_add(1);
             let ticket = queue.next_ticket;
-            queue.bytes += pending_bytes;
-            queue.events.push_back(Pending {
+            queue.push_pending(Pending {
                 value,
                 observed_at: self.shared.now(),
                 bytes: pending_bytes,
@@ -596,15 +668,35 @@ fn retain(conn: &Connection, config: &Config, now: i64) -> JournalResult<()> {
         "UPDATE observer_meta SET ttl=ttl+?1 WHERE singleton=1",
         [expired as i64],
     )?;
-    let (mut rows, mut bytes): (i64, i64) = conn.query_row(
-        "SELECT count(*),COALESCE(sum(bytes),0) FROM observer_events",
+    // Activity events have their own 2,000 rows / 2 MiB budget and never evict non-activity events.
+    let (mut act_rows, mut act_bytes): (i64, i64) = conn.query_row(
+        "SELECT count(*),COALESCE(sum(bytes),0) FROM observer_events WHERE payload LIKE '%\"kind\":\"activity_changed\"%'",
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let mut evicted = 0usize;
+    while act_rows > crate::activity::ACTIVITY_JOURNAL_MAX_ROWS
+        || act_bytes > crate::activity::ACTIVITY_JOURNAL_MAX_BYTES
+    {
+        let (sequence, size): (i64, i64) = conn.query_row(
+            "SELECT sequence,bytes FROM observer_events WHERE payload LIKE '%\"kind\":\"activity_changed\"%' ORDER BY sequence LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        conn.execute("DELETE FROM observer_events WHERE sequence=?1", [sequence])?;
+        act_rows -= 1;
+        act_bytes = act_bytes.saturating_sub(size);
+        evicted += 1;
+    }
+
+    let (mut rows, mut bytes): (i64, i64) = conn.query_row(
+        "SELECT count(*),COALESCE(sum(bytes),0) FROM observer_events WHERE payload NOT LIKE '%\"kind\":\"activity_changed\"%'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
     while rows > config.max_rows as i64 || bytes > config.max_bytes as i64 {
         let (sequence, size): (i64, i64) = conn.query_row(
-            "SELECT sequence,bytes FROM observer_events ORDER BY sequence LIMIT 1",
+            "SELECT sequence,bytes FROM observer_events WHERE payload NOT LIKE '%\"kind\":\"activity_changed\"%' ORDER BY sequence LIMIT 1",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
@@ -705,10 +797,9 @@ fn writer(shared: Arc<Shared>, path: PathBuf, node: String, config: Config) {
         let mut batch = Vec::new();
         if let Ok(mut queue) = shared.queue.lock() {
             for _ in 0..64 {
-                let Some(pending) = queue.events.pop_front() else {
+                let Some(pending) = queue.pop_pending() else {
                     break;
                 };
-                queue.bytes -= pending.bytes;
                 batch.push(pending);
             }
         }
@@ -730,15 +821,24 @@ fn writer(shared: Arc<Shared>, path: PathBuf, node: String, config: Config) {
                 shared.available.store(false, Ordering::Release);
                 if let Ok(mut queue) = shared.queue.lock() {
                     for pending in batch.into_iter().rev() {
-                        queue.bytes += pending.bytes;
-                        queue.events.push_front(pending);
+                        queue.push_front_pending(pending);
                     }
-                    while queue.events.len() > config.queue_events
-                        || queue.bytes > config.queue_bytes
+                    while (queue.events.len() - queue.activity_events) > config.queue_events
+                        || (queue.bytes - queue.activity_bytes) > config.queue_bytes
                     {
-                        if let Some(old) = queue.events.pop_front() {
-                            queue.bytes -= old.bytes;
+                        if queue.pop_oldest_matching(false).is_some() {
                             shared.lost(1);
+                        } else {
+                            break;
+                        }
+                    }
+                    while queue.activity_events > crate::activity::ACTIVITY_PUBLISH_QUEUE_CAP
+                        || queue.activity_bytes > 512 * 1024
+                    {
+                        if queue.pop_oldest_matching(true).is_some() {
+                            shared.lost(1);
+                        } else {
+                            break;
                         }
                     }
                 }

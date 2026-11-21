@@ -35,7 +35,7 @@ fn hostile_view() -> NodeView {
     node.latest_snapshot = Some(CachedSnapshot {
         origin_hub: None,
         snapshot: ExportSnapshot {
-            v: 1,
+            v: 2,
             node: node.node.clone(),
             scope: "s".repeat(64),
             observed_at: 100,
@@ -48,9 +48,14 @@ fn hostile_view() -> NodeView {
                 source_at: None,
                 label: Some(hostile.into()),
                 context: None,
+                activity: None,
             }],
             truncated: true,
             available: SnapshotAvailability::Partial,
+            activity: crate::activity::SnapshotActivity {
+                status: crate::activity::ActivityStatus::Disabled,
+                complete: true,
+            },
         },
         received_at: 110,
         source_age_seconds: 20,
@@ -73,6 +78,7 @@ fn hostile_view() -> NodeView {
             outcome: None,
             reason: None,
             available: Availability::NotRecorded,
+            activity: None,
         },
         received_at: 110,
         source_age_seconds: 20,

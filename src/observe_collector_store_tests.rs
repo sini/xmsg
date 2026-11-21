@@ -27,7 +27,7 @@ fn fixture() -> (tempfile::TempDir, Store, Arc<AtomicI64>) {
 }
 fn page(sequence: i64) -> ExportPage {
     ExportPage {
-        v: 1,
+        v: 2,
         node: "node".into(),
         epoch: "epoch".into(),
         scope: "a".repeat(64),
@@ -45,6 +45,7 @@ fn page(sequence: i64) -> ExportPage {
             outcome: None,
             reason: None,
             available: Availability::NotRecorded,
+            activity: None,
         }],
         next: sequence,
         has_more: false,
@@ -56,7 +57,7 @@ fn page(sequence: i64) -> ExportPage {
 fn arrival_wire_page_survives_ingest_and_view_without_payload() {
     let (_dir, store, _) = fixture();
     let wire = serde_json::json!({
-        "v": 1,
+        "v": 2,
         "node": "node",
         "epoch": "epoch",
         "scope": "a".repeat(64),
@@ -196,7 +197,7 @@ fn row_and_ttl_retention_are_honest() {
 fn snapshot() -> ExportSnapshot {
     use crate::observe_export::*;
     ExportSnapshot {
-        v: 1,
+        v: 2,
         node: "node".into(),
         scope: "a".repeat(64),
         observed_at: NOW,
@@ -209,9 +210,14 @@ fn snapshot() -> ExportSnapshot {
             source_at: None,
             label: None,
             context: None,
+            activity: None,
         }],
         truncated: false,
         available: SnapshotAvailability::Partial,
+        activity: crate::activity::SnapshotActivity {
+            status: crate::activity::ActivityStatus::Disabled,
+            complete: true,
+        },
     }
 }
 #[test]
@@ -222,7 +228,7 @@ fn wire_fields_refuse_independently_without_cursor_changes() {
         base["events"][0][field] = serde_json::Value::Null;
     }
     for (pointer, value) in [
-        ("/v", serde_json::json!(2)),
+        ("/v", serde_json::json!(1)),
         ("/node", serde_json::json!("foreign")),
         ("/epoch", serde_json::json!("")),
         ("/scope", serde_json::json!("A".repeat(64))),
@@ -726,7 +732,7 @@ fn independent_string_ranges_sequence_and_snapshot_guards() {
     ] {
         let mut s = snapshot();
         match field {
-            "v" => s.v = 2,
+            "v" => s.v = 1,
             "node" => s.node = "foreign".into(),
             "scope" => s.scope = "bad".into(),
             "time" => s.observed_at = -1,

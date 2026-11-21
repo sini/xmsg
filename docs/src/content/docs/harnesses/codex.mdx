@@ -171,3 +171,12 @@ to authorized readers, subject to its [context controls](/reference/cli-and-mcp/
 Codex roots sharing one app-server daemon can overwrite each other's tags
 because the daemon is the attested owner for those roots. Tags are self-reports.
 Use session identities and grants for authorization.
+
+## Activity export hook
+
+<Status id="fleet-observer.activity-export" />
+
+When `xmsg serve --activity` is enabled, Codex's existing hook frames are also
+reduced by the activity engine without changing hook replies. Add optional
+`xmsg activity hook codex` for `PermissionRequest` and `Interrupt`. Input and
+background-task gaps remain unclassified (`unknown(unreported)`).

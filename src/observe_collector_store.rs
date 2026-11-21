@@ -248,7 +248,7 @@ fn validate_page(
     requested: &Cursor,
     page: &ExportPage,
 ) -> Result<(), StoreError> {
-    if page.v != 1
+    if page.v != 2
         || page.node != policy.node
         || !valid_epoch(&page.epoch)
         || !valid_scope(&page.scope)
@@ -286,6 +286,19 @@ fn validate_page(
                 .thread_id
                 .as_deref()
                 .is_some_and(|id| !correlation(id))
+            || (event.kind == crate::observe_export::EventKind::ActivityChanged
+                && (event.to.is_some()
+                    || event
+                        .from
+                        .as_deref()
+                        .and_then(|id| {
+                            crate::observe_export::valid_activity_endpoint(id, &policy.node)
+                        })
+                        .is_none()
+                    || !event
+                        .activity
+                        .as_ref()
+                        .is_some_and(crate::activity::ActivityDescriptor::is_valid)))
         {
             return Err(StoreError::Invalid);
         }
@@ -298,7 +311,7 @@ fn validate_page(
     Ok(())
 }
 fn validate_snapshot(policy: &NodePolicy, snapshot: &ExportSnapshot) -> Result<(), StoreError> {
-    if snapshot.v != 1
+    if snapshot.v != 2
         || snapshot.node != policy.node
         || !valid_scope(&snapshot.scope)
         || !valid_time(snapshot.observed_at)
@@ -321,6 +334,7 @@ fn validate_snapshot(policy: &NodePolicy, snapshot: &ExportSnapshot) -> Result<(
             || e.context
                 .as_ref()
                 .is_some_and(|context| !context.is_valid())
+            || e.activity.as_ref().is_some_and(|act| !act.is_valid())
             || !ids.insert(&e.id)
         {
             return Err(StoreError::Invalid);
