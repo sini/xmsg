@@ -583,6 +583,7 @@ dependencies = [
 name = "xmsg-executor"
 version = "0.1.0"
 dependencies = [
+ "getrandom",
  "hex",
  "libc",
  "rusqlite",
@@ -591,6 +592,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "tokio",
  "xmsg",
 ]
 

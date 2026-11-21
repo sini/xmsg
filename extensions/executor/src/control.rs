@@ -156,13 +156,25 @@ pub struct AdmittedDispatch {
 }
 
 pub struct ControlService {
-    journal: Mutex<Journal>,
+    pub(crate) journal: Mutex<Journal>,
     uid: u32,
     credentials: ProvisionedCredentials,
     attestor: Box<dyn HostAttestor>,
     next_call: AtomicU64,
 }
 impl ControlService {
+    #[cfg(test)]
+    pub(crate) fn fixture_attributed(mut self, principal: &str) -> Self {
+        self.attestor = Box::new(auth::fake::FakeAttestor {
+            principal: principal.into(),
+            wrong_binding: false,
+        });
+        self
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture_call_count(&self) -> u64 {
+        self.next_call.load(Ordering::Relaxed)
+    }
     pub fn open(
         path: &Path,
         uid: u32,

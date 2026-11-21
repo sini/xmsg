@@ -30,6 +30,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .artifacts/executor
+          XMSG_BUILD_REVISION="$GITHUB_SHA" cargo +1.88 build --locked --no-default-features --features daemon --bin xmsg
+          export XMSG_EXECUTOR_FIXTURE_DAEMON="$PWD/target/debug/xmsg"
+          export XMSG_EXECUTOR_FIXTURE_DAEMON_SHA256
+          XMSG_EXECUTOR_FIXTURE_DAEMON_SHA256=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$XMSG_EXECUTOR_FIXTURE_DAEMON")
+          export XMSG_EXECUTOR_FIXTURE_PYTHON
+          XMSG_EXECUTOR_FIXTURE_PYTHON=$(python3 -c 'import sys;print(sys.executable)')
+          "$XMSG_EXECUTOR_FIXTURE_DAEMON" --version
+          "$XMSG_EXECUTOR_FIXTURE_PYTHON" --version
           manifest=extensions/executor/Cargo.toml
           cargo +1.88 test --manifest-path "$manifest" --locked -- --list > .artifacts/executor/list.log
           cargo +1.88 test --manifest-path "$manifest" --locked -- --test-threads=1 2>&1 | tee .artifacts/executor/tests.log
