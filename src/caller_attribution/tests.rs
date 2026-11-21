@@ -109,7 +109,15 @@ fn fixture_process() {
         stream.read_exact(&mut done).unwrap();
         return;
     }
-    assert!(role == "daemon" || role == "unqualified");
+    assert!(matches!(
+        role.as_str(),
+        "daemon"
+            | "unqualified"
+            | "changed-facts"
+            | "expired-facts"
+            | "incomplete-reaper"
+            | "incomplete-match"
+    ));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -122,13 +130,20 @@ fn fixture_process() {
     };
     let app = state(&root);
     let _ = crate::codex::for_state(&app);
-    let handle = if role == "daemon" {
+    let handle = if role != "unqualified" {
         bind(
             config,
             app.clone(),
             Arc::new(FixtureFacts {
-                expires: Instant::now() + Duration::from_secs(30),
+                expires: if role == "expired-facts" {
+                    Instant::now()
+                } else {
+                    Instant::now() + Duration::from_secs(30)
+                },
                 revision: std::sync::atomic::AtomicU64::new(1),
+                drift: role == "changed-facts",
+                reaper_complete: role != "incomplete-reaper",
+                match_complete: role != "incomplete-match",
             }),
         )
         .unwrap()
@@ -150,6 +165,9 @@ fn directory() -> tempfile::TempDir {
     directory
 }
 fn roundtrip(role: &str) -> Reply {
+    roundtrip_with_peer(role).0
+}
+fn roundtrip_with_peer(role: &str) -> (Reply, u32) {
     use std::os::fd::AsFd;
     let directory = directory();
     std::fs::create_dir(directory.path().join("sessions")).unwrap();
@@ -194,9 +212,10 @@ fn roundtrip(role: &str) -> Reply {
     let reply = wire::receive_reply(&stream, deadline).unwrap();
     original.write_all(b"D").unwrap();
     daemon_control.write_all(b"D").unwrap();
+    let original_pid = caller.0.id();
     drop(caller);
     drop(daemon);
-    reply
+    (reply, original_pid)
 }
 #[test]
 fn default_unqualified_receiver_never_returns_principal() {
@@ -210,12 +229,155 @@ fn default_unqualified_receiver_never_returns_principal() {
 }
 #[test]
 fn real_daemon_fixture_resolves_original_registered_process() {
-    let reply = roundtrip("daemon");
+    let (reply, original_pid) = roundtrip_with_peer("daemon");
     match reply {
-        Reply::Ok { principal, .. } => assert_eq!(
+        Reply::Ok {
             principal,
-            "11111111-1111-4111-8111-111111111111@attribution-test"
-        ),
+            peer_uid,
+            peer_pid,
+            ..
+        } => {
+            assert_eq!(
+                peer_uid,
+                crate::client::current_uid(),
+                "daemon reply used query UID instead of original"
+            );
+            assert_eq!(
+                peer_pid, original_pid,
+                "daemon reply used query PID instead of original"
+            );
+            assert_eq!(
+                principal,
+                "11111111-1111-4111-8111-111111111111@attribution-test"
+            );
+        }
         other => panic!("real daemon failed original attribution: {other:?}"),
+    }
+}
+#[test]
+fn changed_ongoing_eligibility_never_publishes_principal() {
+    assert!(
+        matches!(
+            roundtrip("changed-facts"),
+            Reply::Unavailable {
+                reason: FailureReason::Changed,
+                ..
+            }
+        ),
+        "changed eligibility published principal"
+    );
+}
+#[test]
+fn expired_eligibility_never_publishes_principal() {
+    assert!(
+        matches!(
+            roundtrip("expired-facts"),
+            Reply::Unavailable {
+                reason: FailureReason::Unqualified,
+                ..
+            }
+        ),
+        "expired eligibility published principal"
+    );
+}
+#[test]
+fn incomplete_reaper_domain_never_publishes_principal() {
+    assert!(
+        matches!(
+            roundtrip("incomplete-reaper"),
+            Reply::Unavailable {
+                reason: FailureReason::Unqualified,
+                ..
+            }
+        ),
+        "incomplete reaper domain published principal"
+    );
+}
+#[test]
+fn incomplete_match_domain_never_publishes_principal() {
+    assert!(
+        matches!(
+            roundtrip("incomplete-match"),
+            Reply::Unavailable {
+                reason: FailureReason::Unqualified,
+                ..
+            }
+        ),
+        "incomplete matched domain published principal"
+    );
+}
+
+#[test]
+fn stalled_clients_have_fixed_workers_and_bounded_shutdown() {
+    let directory = directory();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
+    let socket = directory.path().join("query.sock");
+    let handle = bind_unqualified(
+        ServerConfig {
+            query_socket: socket.clone(),
+            lifecycle_socket: directory.path().join("life.sock"),
+            expected_uid: crate::client::current_uid(),
+        },
+        state(directory.path()),
+    )
+    .unwrap();
+    assert_eq!(
+        handle.workers.len(),
+        4,
+        "accepted work must use exactly four reserved workers"
+    );
+    let mut clients = Vec::new();
+    for _ in 0..4 {
+        clients.push(UnixStream::connect(&socket).unwrap());
+    }
+    let stats = handle.stats();
+    let ready = Instant::now() + AUTHORITY_BUDGET;
+    while stats.active() != 4 && Instant::now() < ready {
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        stats.active(),
+        4,
+        "all four stalled clients must enter actual frame reads"
+    );
+    assert_eq!(
+        stats.peak(),
+        4,
+        "inflight work exceeded the reserved worker bound"
+    );
+    let stop = Instant::now();
+    handle.stop();
+    assert!(
+        stop.elapsed() < Duration::from_secs(3),
+        "stalled frame reads escaped the absolute worker deadline"
+    );
+    assert_eq!(
+        stats.active(),
+        0,
+        "shutdown must join and release all accepted work"
+    );
+    assert_eq!(
+        stats.resolved(),
+        0,
+        "partial requests must never resolve authority"
+    );
+    assert!(
+        !socket.exists(),
+        "shutdown must unlink only its own query endpoint"
+    );
+    for mut client in clients {
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            client.read(&mut byte).unwrap(),
+            0,
+            "stalled accepted sockets must close during shutdown"
+        );
     }
 }
