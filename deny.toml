@@ -6,18 +6,11 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-# Pre-existing advisories on base main (634c11f8) lockfile; none are in S1 E2E deps.
-# Review / remove each entry as upstream dependencies are bumped (target review: 2027-02-01).
+# Triaged advisories (2026-11-21); review or remove as upstream deps and MSRV advance (review date: 2027-02-01).
 ignore = [
-    { id = "RUSTSEC-2023-0071", reason = "rsa 0.9.10 via openidconnect; pre-existing on main" },
-    { id = "RUSTSEC-2026-0346", reason = "rustls 0.23.45; pre-existing on main" },
-    { id = "RUSTSEC-2026-0347", reason = "rustls 0.23.45; pre-existing on main" },
-    { id = "RUSTSEC-2026-0348", reason = "rustls 0.23.45; pre-existing on main" },
-    { id = "RUSTSEC-2026-0349", reason = "rustls 0.23.45; pre-existing on main" },
-    { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.103.15; pre-existing on main" },
-    { id = "RUSTSEC-2026-0386", reason = "tokio 1.53.2; pre-existing on main" },
-    { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys 0.38.2; pre-existing on main" },
-    { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 unmaintained; pre-existing on main" },
+    { id = "RUSTSEC-2023-0071", reason = "rsa 0.9.10 via openidconnect 4.1.0: prod performs public-key JWS verification only (no RSA private-key decryption/signing); blocked on openidconnect adopting rsa >= 0.10.0 (triaged 2026-11-21; review 2027-02-01)" },
+    { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys 0.38.2 via rusqlite 0.40.2: DBs live in same-UID 0700/0600 private dirs (UID trust boundary); fix requires breaking rusqlite >= 0.41 and MSRV 1.89 (triaged 2026-11-21; review 2027-02-01)" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 informational unmaintained (no vulnerability): unconditionally required by openidconnect 4.1.0 and oauth2 5.0.0 (triaged 2026-11-21; review 2027-02-01)" },
 ]
 
 [licenses]
