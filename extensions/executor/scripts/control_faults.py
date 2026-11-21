@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
@@ -45,7 +46,12 @@ def main():
     crate = Path(__file__).resolve().parent.parent
     root = crate.parent.parent
     cases = json.loads(args.manifest.read_text())
+    identifiers = [case['id'] for case in cases]
+    if len(identifiers) != len(set(identifiers)) or any(not re.fullmatch(r'[a-z][a-z0-9-]*', name) for name in identifiers):
+        raise ValueError('case IDs must be unique safe path components')
     if args.case:
+        if len(args.case) != len(set(args.case)):
+            raise ValueError('duplicate case selection')
         cases = [case for case in cases if case['id'] in args.case]
         if set(args.case) != {case['id'] for case in cases}:
             raise ValueError('unknown case selection')
@@ -134,6 +140,9 @@ def main():
             cached = run_build(source, target, nonce, stem + '-cache-control')
             if cached.returncode:
                 raise RuntimeError('cache positive control did not compile')
+            cached_binary, cached_fresh = artifact(cached.stdout, target, require_fresh=False)
+            if cached_fresh is not True or cached_binary != binary or digest(cached_binary.read_bytes()) != record['artifact_sha256']:
+                raise RuntimeError('cache positive control rebuilt or changed the artifact')
             try:
                 artifact(cached.stdout, target)
             except RuntimeError as error:
@@ -145,12 +154,16 @@ def main():
             persist()
         test = 'control::tests::' + case['test']
         if 'wrong_nonce_refused' not in ledger['controls']:
+            if digest(binary.read_bytes()) != record['artifact_sha256']:
+                raise RuntimeError('artifact changed before nonce control execution')
             wrong = subprocess.run([str(binary), '--exact', test, '--nocapture'], cwd=source, capture_output=True, timeout=30, env={**os.environ, 'XMSG_EXECUTOR_PROOF_NONCE': 'deliberately-wrong-nonce'})
             (evidence / 'compiled-nonce-negative.log').write_bytes(wrong.stdout + wrong.stderr)
             if wrong.returncode != 101 or b'compiled nonce mismatch' not in wrong.stdout + wrong.stderr:
                 raise RuntimeError('compiled nonce control survived')
             ledger['controls']['wrong_nonce_refused'] = True
             persist()
+        if digest(binary.read_bytes()) != record['artifact_sha256']:
+            raise RuntimeError('artifact changed immediately before execution')
         result = subprocess.run([str(binary), '--exact', test, '--nocapture'], cwd=source, capture_output=True, timeout=30, env={**os.environ, 'XMSG_EXECUTOR_PROOF_NONCE': nonce})
         output = result.stdout + result.stderr
         (evidence / (stem + '.log')).write_bytes(output)
@@ -163,6 +176,8 @@ def main():
         persist()
         if marker not in output:
             raise RuntimeError('compiled nonce was not observed in killing function')
+        if any(marker in output.lower() for marker in [b'timed out', b'elapsed(', b'test-hang', b'running for over']):
+            raise RuntimeError('timeout or hung test is not a semantic kill')
         if phase == 'red':
             if result.returncode != 101 or not record['assertion_present'] or b'1 failed' not in output:
                 raise RuntimeError('fault survived or failed for the wrong reason: ' + stem)
