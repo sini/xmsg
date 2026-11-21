@@ -1,5 +1,4 @@
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::Value;
 
 pub const CONTROL_VERSION: u16 = 1;
 pub const MAX_TEXT_BYTES: usize = 256 * 1024;
@@ -255,15 +254,15 @@ impl Action {
             Self::Approve(_) => Verb::Approve,
         }
     }
-    fn args(&self) -> Result<Value, serde_json::Error> {
+    fn args(&self) -> Result<Box<serde_json::value::RawValue>, serde_json::Error> {
         match self {
-            Self::Dispatch(a) => serde_json::to_value(a),
-            Self::Send(a) => serde_json::to_value(a),
-            Self::Steer(a) => serde_json::to_value(a),
-            Self::Interrupt(a) | Self::Stop(a) => serde_json::to_value(a),
-            Self::Resume(a) => serde_json::to_value(a),
-            Self::Status(a) | Self::Result(a) => serde_json::to_value(a),
-            Self::Approve(a) => serde_json::to_value(a),
+            Self::Dispatch(a) => serde_json::value::to_raw_value(a),
+            Self::Send(a) => serde_json::value::to_raw_value(a),
+            Self::Steer(a) => serde_json::value::to_raw_value(a),
+            Self::Interrupt(a) | Self::Stop(a) => serde_json::value::to_raw_value(a),
+            Self::Resume(a) => serde_json::value::to_raw_value(a),
+            Self::Status(a) | Self::Result(a) => serde_json::value::to_raw_value(a),
+            Self::Approve(a) => serde_json::value::to_raw_value(a),
         }
     }
 }
@@ -284,7 +283,7 @@ struct RawRequest {
     request_id: String,
     verb: Verb,
     target: Option<Target>,
-    args: Value,
+    args: Box<serde_json::value::RawValue>,
     deadline: Option<i64>,
 }
 
@@ -438,25 +437,31 @@ impl<'de> Deserialize<'de> for ControlRequest {
         let r = RawRequest::deserialize(d)?;
         let action = match r.verb {
             Verb::Dispatch => {
-                Action::Dispatch(serde_json::from_value(r.args).map_err(D::Error::custom)?)
+                Action::Dispatch(serde_json::from_str(r.args.get()).map_err(D::Error::custom)?)
             }
-            Verb::Send => Action::Send(serde_json::from_value(r.args).map_err(D::Error::custom)?),
-            Verb::Steer => Action::Steer(serde_json::from_value(r.args).map_err(D::Error::custom)?),
+            Verb::Send => {
+                Action::Send(serde_json::from_str(r.args.get()).map_err(D::Error::custom)?)
+            }
+            Verb::Steer => {
+                Action::Steer(serde_json::from_str(r.args.get()).map_err(D::Error::custom)?)
+            }
             Verb::Interrupt => {
-                Action::Interrupt(serde_json::from_value(r.args).map_err(D::Error::custom)?)
+                Action::Interrupt(serde_json::from_str(r.args.get()).map_err(D::Error::custom)?)
             }
             Verb::Resume => {
-                Action::Resume(serde_json::from_value(r.args).map_err(D::Error::custom)?)
+                Action::Resume(serde_json::from_str(r.args.get()).map_err(D::Error::custom)?)
             }
-            Verb::Stop => Action::Stop(serde_json::from_value(r.args).map_err(D::Error::custom)?),
+            Verb::Stop => {
+                Action::Stop(serde_json::from_str(r.args.get()).map_err(D::Error::custom)?)
+            }
             Verb::Status => {
-                Action::Status(serde_json::from_value(r.args).map_err(D::Error::custom)?)
+                Action::Status(serde_json::from_str(r.args.get()).map_err(D::Error::custom)?)
             }
             Verb::Result => {
-                Action::Result(serde_json::from_value(r.args).map_err(D::Error::custom)?)
+                Action::Result(serde_json::from_str(r.args.get()).map_err(D::Error::custom)?)
             }
             Verb::Approve => {
-                Action::Approve(serde_json::from_value(r.args).map_err(D::Error::custom)?)
+                Action::Approve(serde_json::from_str(r.args.get()).map_err(D::Error::custom)?)
             }
         };
         let request = Self {
@@ -542,6 +547,27 @@ impl OperationReceipt {
             token(admission_id, "admission_id")?;
             if *generation == 0 {
                 return Err(ContractError::Invalid("generation"));
+            }
+        }
+        if let (
+            Some(Target::Execution { generation, .. } | Target::Turn { generation, .. }),
+            Admission::Durable {
+                generation: admitted,
+                ..
+            },
+        ) = (&self.target, &self.admission)
+        {
+            if generation != admitted {
+                return Err(ContractError::Receipt);
+            }
+        }
+        if let ObservedEffect::Injected { turn_id } | ObservedEffect::Interrupted { turn_id } =
+            &self.observed_effect
+        {
+            if !matches!(&self.target,Some(Target::Turn {turn_id:addressed,..}) if turn_id==addressed)
+                || self.submission != Submission::Submitted
+            {
+                return Err(ContractError::Receipt);
             }
         }
         Ok(())
