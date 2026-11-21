@@ -239,5 +239,15 @@
     "test_module": "supervisor::tests",
     "test_file": "extensions/executor/src/supervisor_tests.rs",
     "expected_outcome": "equivalent"
+  },
+  {
+    "id": "pr3-final-group-enforcement",
+    "file": "extensions/executor/src/supervisor.rs",
+    "needle": "libc::kill(-libc::getpgrp(), libc::SIGKILL);",
+    "replacement": "0;",
+    "test": "broker_death_during_initialize_cannot_bypass_supervisor_wall_budget",
+    "assertion": "startup handshake escaped supervisor wall budget",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
   }
 ]
