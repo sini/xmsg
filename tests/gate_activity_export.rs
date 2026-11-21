@@ -662,32 +662,7 @@ fn ae17_ae22_ae24_restart_two_connection_replay_and_disable_fence() {
 
     // AE22: Deliver the same command-hook frame 5 times across TWO separate Unix socket connections.
     let dir = TempDir::new().unwrap();
-    let sock = dir.path().join("agent.sock");
-    let listener = UnixListener::bind(&sock).unwrap();
     let f = claude_frame("sess-1", "user_prompt_submit", BackgroundPresence::Absent);
-
-    let srv = std::thread::spawn(move || {
-        let mut received = Vec::new();
-        for _ in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut s = String::new();
-            stream.read_to_string(&mut s).unwrap();
-            for line in s.lines() {
-                received.push(serde_json::from_str::<ActivityFrame>(line).unwrap());
-            }
-        }
-        received
-    });
-
-    // Connection 1 sends 3 copies; Connection 2 sends 2 copies.
-    for _ in 0..3 {
-        let mut s = std::os::unix::net::UnixStream::connect(&sock).unwrap();
-        let line = serde_json::to_string(&f).unwrap() + "\n";
-        s.write_all(line.as_bytes()).unwrap();
-    }
-    // Actually test send_frame_with_deadline across 2 connections (1 frame per connection, repeated 5 times across 2 connections):
-    // Wait: let's re-do clean 2-connection listener for 5 frames (3 on conn1, 2 on conn2).
-    drop(srv);
 
     let sock2 = dir.path().join("agent2.sock");
     let listener2 = UnixListener::bind(&sock2).unwrap();
