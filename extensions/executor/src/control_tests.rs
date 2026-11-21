@@ -783,3 +783,23 @@ fn environment_and_executor_selectors_are_distinct() {
         Authorization::Denied { .. }
     ));
 }
+
+#[test]
+fn human_pending_expiry_is_checked_at_consumption() {
+    let f = fixture(config(vec![]));
+    pending(&f);
+    f.service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .execute("UPDATE approvals SET expires_at=99", [])
+        .unwrap();
+    let mut request = approve("expired-pending");
+    if let Action::Approve(a) = &mut request.action {
+        a.expires_at = 99
+    };
+    let result = f.service.human(peer(), HUMAN, request, 100);
+    assert_eq!(consumed(&f), 0, "expired pending action was consumed");
+    assert_eq!(result.unwrap_err(), ErrorCode::DeadlineExpired);
+}
