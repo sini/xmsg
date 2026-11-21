@@ -531,3 +531,43 @@ query. The peer update should be deployed together.
 The CLI's detail configuration is a viewer preference. A same-UID HTTP caller
 can request detail independently. Reach hints belong only to the viewer's
 explicitly selected CLI configuration and never appear in this API.
+
+## Session context tags
+
+<Status id="session-context.tags" />
+
+A registered session can publish or clear its own tags through `agent.sock`.
+The daemon derives ownership from the authenticated caller and the existing
+harness attribution rules. Example request frames, one JSON object per line:
+
+```jsonl
+{"action":"update_context","context":{"repo":"github.com/example/widget","branch":"feature/parser","worktree":"widget-parser","task":"issue-418","pr":"#73"}}
+{"action":"clear_context"}
+```
+
+Pi can send the same actions on its registered `register.sock` connection.
+OpenCode and Hermes send them on their existing multiplexed connection and
+include `request_id` and the connection-owned `session` key:
+
+```jsonl
+{"action":"update_context","request_id":"1","session":"thread-418","context":{"task":"issue-418"}}
+{"action":"clear_context","request_id":"2","session":"thread-418"}
+```
+
+Codex selects the root or thread with the runtime `codex_session` and
+`codex_thread` fields under the attested daemon owner. An optional
+`session_id` on either agent action asserts the resolved address's local part.
+An ownership mismatch returns `denied`.
+
+The node assigns `updated_at` in Unix seconds and a `generation` on each
+update. Tags become `stale: true` after 15 minutes. If they go unrefreshed for
+another 15 minutes, the daemon omits them. Clearing tags removes them from
+subsequent reads, and daemon restart discards all tags. Oversized and invalid values are refused,
+including raw paths and worktree names containing a path separator.
+The serialized context is capped at 512 bytes.
+
+An optional `context` object can appear on authorized recipient listings,
+locator results, and node observation snapshots. TCP recipient listings omit it. The daemon applies the selected
+surface mask before serialization. Upgrade daemons and clients together because
+older strict wire readers can reject the new field. Re-pin the gateway after the
+daemon and client upgrade.

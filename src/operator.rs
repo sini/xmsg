@@ -117,6 +117,25 @@ fn print_json(value: &Value, compact: bool) -> Result<()> {
     Ok(())
 }
 
+fn print_context(context: &xmsg::session_context::SessionContext) {
+    let fields = &context.fields;
+    let values = [
+        ("repo", fields.repo.as_deref()),
+        ("branch", fields.branch.as_deref()),
+        ("worktree", fields.worktree.as_deref()),
+        ("task", fields.task.as_deref()),
+        ("pr", fields.pr.as_deref()),
+    ];
+    let tags = values
+        .into_iter()
+        .filter_map(|(key, value)| {
+            value.map(|value| format!("{key}={}", xmsg::locator::inert(value)))
+        })
+        .collect::<Vec<_>>();
+    let stale = if context.stale { " [stale]" } else { "" };
+    println!("  {}{stale}", tags.join("  "));
+}
+
 pub fn list(args: ListArgs) -> Result<()> {
     let mut url = endpoint(&["v1", "recipients"]);
     for (key, value) in [
@@ -148,6 +167,9 @@ pub fn list(args: ListArgs) -> Result<()> {
             text(&row["status"]),
             text(&row["node"])
         );
+        if let Some(context) = row.get("context") {
+            print_context(&serde_json::from_value(context.clone())?);
+        }
     }
     println!("\nNODE\tSTATUS");
     for row in value["nodes"].as_array().ok_or("missing nodes")? {
@@ -317,6 +339,9 @@ pub fn locate(args: LocateArgs) -> Result<()> {
                     .map(|s| format!(" ref={}", inert(&s)))
                     .unwrap_or_default()
             );
+        }
+        if let Some(context) = &row.context {
+            print_context(context);
         }
         if let Some(cwd) = item.cwd {
             println!("  cwd={}", inert(&cwd));

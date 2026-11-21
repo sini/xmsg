@@ -433,7 +433,7 @@ async fn socket_specific_exact_frame_keys() {
         for response in [
             json!({"status":"ok","message_id":"sent","address":"receiver@fixture","outcome":"pending"}),
             json!({"status":"ok","reply":{"seq":1,"messageId":"msg","createdAt":1,"replierSessionId":"bridge","text":"reply","pushOutcome":"queued","pushedMessageId":"reply-id"}}),
-            json!({"status":"ok","recipients":[],"nodes":[],"total":0,"truncated":false}),
+            json!({"status":"ok","recipients":[{"address":"session@fixture","kind":"instance","status":"live","node":"fixture","user":"fixture","context":{"repo":"github.com/org/repo","updated_at":7,"generation":1,"stale":false}},{"address":"bridge@fixture","kind":"service","status":"live","node":"fixture","user":"fixture"}],"nodes":[],"total":2,"truncated":false}),
             json!({"status":"ok","recipients":[],"nodes":[],"total":80,"truncated":true}),
         ] {
             let mut stream = BufReader::new(agent.accept().await.unwrap().0);
@@ -465,12 +465,26 @@ async fn socket_specific_exact_frame_keys() {
             .as_deref(),
         Some("reply-id")
     );
-    assert!(client
-        .list(ListQuery::default())
-        .await
-        .unwrap()
-        .recipients
-        .is_empty());
+    let listed = client.list(ListQuery::default()).await.unwrap();
+    let current = serde_json::to_value(&listed.recipients).unwrap();
+    assert_eq!(current[0]["context"]["repo"], "github.com/org/repo");
+    assert!(current[1].get("context").is_none());
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LegacyRecipient {
+        #[serde(rename = "address")]
+        _address: String,
+        #[serde(rename = "kind")]
+        _kind: String,
+        #[serde(rename = "status")]
+        _status: String,
+        #[serde(rename = "node")]
+        _node: String,
+        #[serde(rename = "user")]
+        _user: String,
+    }
+    assert!(serde_json::from_value::<LegacyRecipient>(current[0].clone()).is_err());
+    assert!(serde_json::from_value::<LegacyRecipient>(current[1].clone()).is_ok());
     let bounded = client
         .list(ListQuery {
             limit: Some(3),

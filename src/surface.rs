@@ -358,6 +358,7 @@ fn live_entry(
         user: user.to_string(),
         registered_at: Some(registered_at),
         last_seen: None,
+        context: None,
     }
 }
 
@@ -377,6 +378,7 @@ fn inactive_entry(
         user: user.to_string(),
         registered_at: None,
         last_seen: Some(last_seen),
+        context: None,
     }
 }
 
@@ -391,6 +393,7 @@ fn recipient(e: FedListEntry, node: &str) -> Recipient {
         user: e.user,
         registered_at: e.registered_at,
         last_seen: e.last_seen,
+        context: e.context,
     }
 }
 
@@ -516,8 +519,8 @@ pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, App
         } else {
             listing_live(&state.local(), state.reply_ttl, &user).await?
         };
-        for e in local_entries {
-            recipients.push(recipient(e, node));
+        for entry in local_entries {
+            recipients.push(recipient(entry, node));
         }
         nodes.push(crate::fed::NodeStatus::ok(node));
     }
@@ -575,6 +578,25 @@ pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, App
     let total = recipients.len();
     let limit = query.limit.unwrap_or(50);
     recipients.truncate(limit);
+    {
+        use crate::session_context::{mask_remote, project, Surface};
+        let db = state.db.lock().map_err(db_err)?;
+        for row in &mut recipients {
+            row.context = if row.status != "live" || row.kind == "service" {
+                None
+            } else if row.node == node {
+                let id = row.address.rsplit_once('@').map_or("", |(id, _)| id);
+                project(
+                    &db,
+                    id,
+                    row.harness.as_deref().unwrap_or_default(),
+                    Surface::Local,
+                )
+            } else {
+                mask_remote(&db, row.context.take(), Surface::Local)
+            };
+        }
+    }
     Ok(ListResult {
         recipients,
         nodes,
@@ -629,6 +651,7 @@ pub(crate) async fn listing_live(
                     user: user.to_string(),
                     registered_at: Some(sub.bound_at),
                     last_seen: None,
+                    context: None,
                 });
             }
         }
@@ -664,6 +687,7 @@ pub(crate) async fn listing_live(
                         user: user.to_string(),
                         registered_at: Some(sub.bound_at),
                         last_seen: None,
+                        context: None,
                     });
                 }
             }
@@ -709,6 +733,7 @@ pub(crate) async fn listing_live(
                     user: user.to_string(),
                     registered_at: Some(sub.bound_at),
                     last_seen: None,
+                    context: None,
                 });
             }
         }
@@ -756,6 +781,7 @@ pub(crate) async fn listing_live(
                         user: user.to_string(),
                         registered_at: Some(verified_sub.bound_at),
                         last_seen: None,
+                        context: None,
                     });
                 }
             }
@@ -818,6 +844,7 @@ pub(crate) async fn listing_inactive(
                 user: user.to_string(),
                 registered_at: None,
                 last_seen: Some(seen_at),
+                context: None,
             });
         }
     }
@@ -846,6 +873,7 @@ pub(crate) async fn listing_inactive(
                     user: user.to_string(),
                     registered_at: None,
                     last_seen: Some(item.last_seen),
+                    context: None,
                 });
             }
         }
@@ -894,6 +922,7 @@ pub(crate) async fn listing(
                 user: user.to_string(),
                 registered_at: None,
                 last_seen: Some(seen_at),
+                context: None,
             });
         }
     }
@@ -913,6 +942,7 @@ pub(crate) async fn listing(
                     user: user.to_string(),
                     registered_at: None,
                     last_seen: Some(last_live),
+                    context: None,
                 });
             }
         }

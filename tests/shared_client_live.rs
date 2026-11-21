@@ -168,7 +168,7 @@ async fn exercise(binary: &Path) {
     assert!(listed
         .recipients
         .iter()
-        .any(|r| r.address == address && r.kind == "service"));
+        .any(|r| r.address == address && r.kind == "service" && r.context.is_none()));
     assert_eq!(listed.total, listed.recipients.len());
     assert!(!listed.truncated);
     let sent = client

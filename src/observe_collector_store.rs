@@ -294,6 +294,9 @@ fn validate_snapshot(policy: &NodePolicy, snapshot: &ExportSnapshot) -> Result<(
             || e.label
                 .as_ref()
                 .is_some_and(|s| !policy.labels || s.len() > 256)
+            || e.context
+                .as_ref()
+                .is_some_and(|context| !context.is_valid())
             || !ids.insert(&e.id)
         {
             return Err(StoreError::Invalid);

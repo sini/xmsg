@@ -836,6 +836,14 @@ fn validate_dto(body: &[u8], control: &Control, config: &PeerConfig) -> Result<(
             if page.node != node || page.v != 1 || page.endpoints.len() > 200 {
                 return Err(Failure::Invalid);
             }
+            if page.endpoints.iter().any(|endpoint| {
+                endpoint
+                    .context
+                    .as_ref()
+                    .is_some_and(|context| !context.is_valid())
+            }) {
+                return Err(Failure::Invalid);
+            }
             if page.endpoints.iter().any(|e| {
                 !scope.allows(&e.id)
                     || e.label.is_some() && !control.read.labels(&control.query).unwrap_or(false)

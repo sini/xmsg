@@ -407,6 +407,7 @@ pub fn init_db(conn: &Connection) -> Result<()> {
     conn.execute_batch(crate::plugin::SCHEMA)?;
     if version == SCHEMA_VERSION {
         conn.execute_batch(SCHEMA_N)?;
+        conn.execute_batch(crate::session_context::SCHEMA)?;
         let has_admitted: bool = conn.query_row(
             "SELECT COUNT(*)>0 FROM pragma_table_info('peer_mailbox') WHERE name='admitted'",
             [],
@@ -516,6 +517,7 @@ pub fn init_db(conn: &Connection) -> Result<()> {
         tx.execute_batch(&format!("DROP TABLE IF EXISTS {table};"))?;
     }
     tx.execute_batch(SCHEMA_N)?;
+    tx.execute_batch(crate::session_context::SCHEMA)?;
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
     tx.commit()
 }
@@ -2218,6 +2220,16 @@ pub fn mint_reclaimable_instance(
 /// cannot be reclaimed, answers `gone` on send, and lists as `closed` in inactive `list` (HA8).
 pub fn clear_reclaim_hash(conn: &Connection, id: &str, now: i64) -> Result<()> {
     crate::locator::forget(conn, id)?;
+    if let Some(harness) = conn
+        .query_row(
+            "SELECT harness FROM instance_seen WHERE id=?1",
+            [id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        crate::session_context::end(conn, id, &harness)?;
+    }
     conn.execute(
         "UPDATE instance_seen SET reclaim_hash = NULL, last_live = MAX(last_live, ?2) WHERE id = ?1",
         params![id, now],
@@ -3214,6 +3226,7 @@ pub(crate) fn park_codex_root_preserving_startup(conn: &Connection, root_id: &st
 
 fn park_codex_root_with_restart(conn: &Connection, root_id: &str, preserve: bool) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
+    crate::session_context::end(&tx, root_id, "codex")?;
     let now = now_epoch_secs();
     let gen: i64 = tx
         .query_row(
@@ -3243,6 +3256,7 @@ fn park_codex_root_with_restart(conn: &Connection, root_id: &str, preserve: bool
 /// and delete its child bindings and child queue entries (§2.1, §2.3, §6.2.1).
 pub fn invalidate_codex_root(conn: &Connection, root_id: &str) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
+    crate::session_context::end(&tx, root_id, "codex")?;
     crate::locator::forget(&tx, root_id)?;
     let now = now_epoch_secs();
     tx.execute(

@@ -39,6 +39,29 @@ pub struct PiSessionInfo {
     pub registered_at: i64,
 }
 
+impl PiSessionInfo {
+    fn session(&self) -> Session {
+        Session {
+            session_id: self.session_id.clone(),
+            name: self
+                .name
+                .as_deref()
+                .and_then(crate::inbox::clean_label)
+                .or_else(|| Some(self.session_id.clone())),
+            pid: self.pid,
+            cwd: self.cwd.clone(),
+            status: "idle".to_string(),
+            kind: "interactive".to_string(),
+            entrypoint: None,
+            version: None,
+            started_at: self.registered_at as u64,
+            updated_at: self.registered_at as u64,
+            harness: "pi".to_string(),
+            registered: Some(true),
+        }
+    }
+}
+
 pub type PiStore = Arc<RwLock<HashMap<String, PiSessionInfo>>>;
 
 pub fn new_pi_store() -> PiStore {
@@ -95,24 +118,7 @@ pub fn list_pi_sessions(proc_root: &Path, store: &PiStore, query: &SessionsQuery
             dead.push(id.clone());
             continue;
         }
-        let session = Session {
-            session_id: info.session_id.clone(),
-            name: info
-                .name
-                .as_deref()
-                .and_then(crate::inbox::clean_label)
-                .or_else(|| Some(info.session_id.clone())),
-            pid: info.pid,
-            cwd: info.cwd.clone(),
-            status: "idle".to_string(),
-            kind: "interactive".to_string(),
-            entrypoint: None,
-            version: None,
-            started_at: info.registered_at as u64,
-            updated_at: info.registered_at as u64,
-            harness: "pi".to_string(),
-            registered: Some(true),
-        };
+        let session = info.session();
 
         if let Some(ref q_status) = query.status {
             if session.status != *q_status {
@@ -282,6 +288,7 @@ pub async fn handle_pi_connection_peer<
 
     {
         let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+        crate::session_context::end(&conn, &session_id, "pi")?;
         crate::locator::record(
             &conn,
             &session_id,
@@ -310,27 +317,41 @@ pub async fn handle_pi_connection_peer<
         session_id: String,
         peer_pid: u32,
         starttime: String,
+        active: bool,
+    }
+    impl ClosingPi {
+        fn owns(&self, info: &PiSessionInfo) -> bool {
+            info.pid == self.peer_pid && info.starttime == self.starttime
+        }
     }
     impl Drop for ClosingPi {
         fn drop(&mut self) {
+            if !self.active {
+                return;
+            }
+            let conn = self.db.lock();
             if let Ok(mut store_lock) = self.store.write() {
                 if let Some(info) = store_lock.get(&self.session_id) {
-                    if info.pid == self.peer_pid && info.starttime == self.starttime {
+                    if self.owns(info) {
                         store_lock.remove(&self.session_id);
+                    } else {
+                        return;
                     }
                 }
             }
-            if let Ok(conn) = self.db.lock() {
+            if let Ok(conn) = conn {
+                let _ = crate::session_context::end(&conn, &self.session_id, "pi");
                 let _ = storage::mark_live(&conn, &self.session_id, "pi", now_epoch_secs());
             }
         }
     }
-    let _closing = ClosingPi {
+    let mut closing = ClosingPi {
         db: db.clone(),
         store: store.clone(),
         session_id: session_id.clone(),
         peer_pid,
         starttime: starttime.clone(),
+        active: true,
     };
 
     // Write initial registration ok with server-derived sessionId, address and reclaim secret (HA8).
@@ -391,6 +412,8 @@ pub async fn handle_pi_connection_peer<
         let known: &[&str] = match action {
             "poll" => &["action", "sessionId", "waitSecs"],
             "ack" => &["action", "messageId"],
+            "update_context" => &["action", "sessionId", "context"],
+            "clear_context" => &["action", "sessionId"],
             _ => &["action"],
         };
         if let Some(field) = cmd
@@ -404,6 +427,42 @@ pub async fn handle_pi_connection_peer<
         }
 
         match action {
+            "update_context" | "clear_context" => {
+                let result = (|| {
+                    let denied =
+                        || AppError::Denied("context requires the registered Pi connection".into());
+                    if !closing.active
+                        || !peer.is_alive(&proc_root, &starttime)
+                        || cmd
+                            .get("sessionId")
+                            .is_some_and(|id| id.as_str() != Some(&session_id))
+                    {
+                        return Err(denied());
+                    }
+                    let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+                    let entries = store
+                        .read()
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                    let info = entries
+                        .get(&session_id)
+                        .filter(|info| closing.owns(info))
+                        .ok_or_else(denied)?;
+                    if action == "clear_context" {
+                        crate::session_context::clear_locked(&conn, &info.session())
+                    } else {
+                        let value = cmd.get("context").ok_or_else(|| {
+                            AppError::BadRequest("update_context requires context".into())
+                        })?;
+                        let fields = serde_json::from_value(value.clone())
+                            .map_err(|_| AppError::BadRequest("invalid context fields".into()))?;
+                        crate::session_context::update_locked(&conn, &info.session(), fields)
+                    }
+                })();
+                let resp = result
+                    .map(|()| serde_json::json!({ "status": "ok" }))
+                    .unwrap_or_else(|e| e.frame());
+                writer.write_all(format!("{resp}\n").as_bytes()).await?;
+            }
             "poll" => {
                 let wait_secs = cmd
                     .get("waitSecs")
@@ -484,13 +543,18 @@ pub async fn handle_pi_connection_peer<
             "release" => {
                 {
                     let conn = db.lock().unwrap();
-                    let now = storage::now_epoch_secs();
-                    let _ = storage::mark_live(&conn, &session_id, "pi", now);
-                    let _ = storage::clear_reclaim_hash(&conn, &session_id, now);
-                }
-                {
                     let mut store_lock = store.write().unwrap();
-                    store_lock.remove(&session_id);
+                    let same_owner = store_lock
+                        .get(&session_id)
+                        .is_none_or(|info| closing.owns(info));
+                    if closing.active && same_owner {
+                        let now = storage::now_epoch_secs();
+                        let _ = storage::mark_live(&conn, &session_id, "pi", now);
+                        let _ = storage::clear_reclaim_hash(&conn, &session_id, now);
+                        crate::session_context::end(&conn, &session_id, "pi")?;
+                        store_lock.remove(&session_id);
+                        closing.active = false;
+                    }
                 }
                 let resp = serde_json::json!({ "status": "ok" });
                 writer.write_all(format!("{resp}\n").as_bytes()).await?;

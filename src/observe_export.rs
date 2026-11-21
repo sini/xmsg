@@ -281,6 +281,7 @@ pub struct SnapshotRecord {
     pub state: RegistrationState,
     pub source_at: Option<i64>,
     pub label: Option<String>,
+    pub context: Option<crate::session_context::SessionContext>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -294,6 +295,8 @@ pub struct EndpointDescriptor {
     pub source_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::session_context::SessionContext>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -609,12 +612,12 @@ pub fn project_snapshot(
             state: candidate.state,
             source_at,
             label,
+            context: candidate.context,
         };
         if let Some(previous) = endpoints.get_mut(&id) {
-            let conflict = previous.kind != descriptor.kind
-                || previous.harness != descriptor.harness
-                || previous.state != descriptor.state;
-            if conflict {
+            let identity_conflict =
+                previous.kind != descriptor.kind || previous.harness != descriptor.harness;
+            if identity_conflict || previous.state != descriptor.state {
                 previous.kind = EndpointKind::Unknown;
                 previous.harness = Harness::Unknown;
                 previous.state = RegistrationState::Unknown;
@@ -622,6 +625,9 @@ pub fn project_snapshot(
                 partial = true;
             } else if previous.label != descriptor.label {
                 previous.label = None;
+            }
+            if identity_conflict || previous.context != descriptor.context {
+                previous.context = None;
             }
             previous.source_at = match (previous.source_at, descriptor.source_at) {
                 (Some(a), Some(b)) => Some(a.min(b)),
@@ -724,6 +730,7 @@ mod tests {
             state: RegistrationState::Registered,
             source_at: Some(NOW),
             label: Some("private label".into()),
+            context: None,
         }
     }
     #[test]

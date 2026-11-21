@@ -813,11 +813,22 @@ async fn list_recipients_handler(
             request.limit
         },
     };
+    let include_context = local.is_some()
+        && peer
+            .as_ref()
+            .and_then(|p| p.0 .0.peer.as_ref())
+            .is_some_and(|cred| cred.uid == crate::agent::current_uid());
     if request.read_only {
-        let entries = crate::recipient_snapshot::collect(&state, &query, request.liveness)?;
+        let entries =
+            crate::recipient_snapshot::collect(&state, &query, request.liveness, include_context)?;
         return Ok((StatusCode::OK, Json(entries)).into_response());
     }
-    let entries = surface::list(&state, &query).await?;
+    let mut entries = surface::list(&state, &query).await?;
+    if !include_context {
+        for entry in &mut entries.recipients {
+            entry.context = None;
+        }
+    }
     Ok((StatusCode::OK, Json(entries)).into_response())
 }
 

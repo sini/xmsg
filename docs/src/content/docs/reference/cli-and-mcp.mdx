@@ -615,3 +615,51 @@ lookup uses the existing federation list grant with a read-only request. On a pe
 list (the peer may reconcile its claims as it does for `xmsg list`). Deploy peers
 together. New peers honor the read-only flag. Node errors are retained, with no
 client-side retry or fallback to a different query.
+
+## Session context tags
+
+<Status id="session-context.tags" />
+
+Authorized `xmsg list --json`, MCP `list`, and `xmsg locate --json` results can
+carry optional `context` supplied by the reporting session. With the daemon's
+default policy, tags are visible to authorized readers. The daemon uses
+self-reported values and does not inspect the session's Git checkout.
+
+| Field | Maximum UTF-8 bytes | Example |
+| --- | ---: | --- |
+| `repo` | 128 | `github.com/example/widget` |
+| `branch` | 128 | `feature/parser` |
+| `worktree` | 64 | `widget-parser` |
+| `task` | 160 | `issue-418` |
+| `pr` | 32 | `#73` |
+
+Use a normalized repository slug or a keyed or salted repository identifier prefixed with `id:`,
+a basename for the worktree, and an opaque task identifier if the title is
+private. A branch name or task title may itself contain sensitive information.
+
+Pass `--no-context-tags` to `xmsg serve` to disable collection and publication.
+Use the repeatable `--context-mask SURFACE:FIELD` option to suppress fields
+before publishing. For example, the following daemon options hide branch names
+from federated lists and omit all context tags from observation export.
+
+```sh
+--context-mask federation:branch --context-mask 'observe:*'
+```
+
+To load the policy from TOML, pass `--context-tags-config <path>` to `xmsg serve`.
+
+```toml
+[context_tags]
+enabled = true
+
+[context_mask]
+federation = ["branch"]
+observe = ["*"]
+```
+
+The mask surfaces are `local`, `federation`, and `observe`. Set
+`context_tags.enabled = false` to disable the extension and clear collected tags.
+`--no-context-tags` takes precedence over the file and CLI masks add to file masks.
+Send `SIGHUP` to reload a changed policy file.
+
+See the [socket contract](/reference/http-and-sockets/#session-context-tags) for writes, freshness, and the wire upgrade.

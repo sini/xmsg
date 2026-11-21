@@ -91,6 +91,15 @@ enum Frame {
         request_id: String,
         session: String,
     },
+    UpdateContext {
+        request_id: String,
+        session: String,
+        context: crate::session_context::ContextFields,
+    },
+    ClearContext {
+        request_id: String,
+        session: String,
+    },
     Continues {
         request_id: String,
         from: String,
@@ -292,6 +301,7 @@ fn detach(conn: &Connection, address: &str, harness: &str) -> rusqlite::Result<(
         params![address],
     )?;
     storage::subagent_park_for_parent(conn, address, now)?;
+    crate::session_context::end(conn, address, harness)?;
     storage::mark_live(conn, address, harness, now)
 }
 
@@ -614,6 +624,41 @@ where
                         .map_err(db_err)?
                         .ok_or_else(|| not_held(&session))?;
                     release(&c, &s.session_id, harness).map_err(db_err)?;
+                    Ok(json!({ "status": "ok" }))
+                })();
+                let _ = tx.send(answer(res, &request_id));
+            }
+            Frame::UpdateContext {
+                request_id,
+                session,
+                context,
+            } => {
+                let res = (|| {
+                    let c = db.lock().map_err(db_err)?;
+                    if !peer.is_alive(&state.agy_config.proc_root, &starttime) {
+                        return Err(not_held(&session));
+                    }
+                    let s = held(&c, &conn_id, &session)
+                        .map_err(db_err)?
+                        .ok_or_else(|| not_held(&session))?;
+                    crate::session_context::update_locked(&c, &s, context)?;
+                    Ok(json!({ "status": "ok" }))
+                })();
+                let _ = tx.send(answer(res, &request_id));
+            }
+            Frame::ClearContext {
+                request_id,
+                session,
+            } => {
+                let res = (|| {
+                    let c = db.lock().map_err(db_err)?;
+                    if !peer.is_alive(&state.agy_config.proc_root, &starttime) {
+                        return Err(not_held(&session));
+                    }
+                    let s = held(&c, &conn_id, &session)
+                        .map_err(db_err)?
+                        .ok_or_else(|| not_held(&session))?;
+                    crate::session_context::clear_locked(&c, &s)?;
                     Ok(json!({ "status": "ok" }))
                 })();
                 let _ = tx.send(answer(res, &request_id));

@@ -442,6 +442,39 @@ async fn snapshot_never_delivers_queued_parent_or_child_messages() {
 async fn unix_http_snapshot_keeps_caller_attribution_read_only() {
     let fixture = Fixture::new();
     fixture.seed();
+    {
+        let db = fixture.state.db.lock().unwrap();
+        db.execute(
+            "INSERT INTO session_context VALUES (?1,'claude',?1,?2,?3,1)",
+            rusqlite::params![
+                LIVE,
+                xmsg::storage::now_epoch_secs(),
+                json!({"repo": "github.com/org/repo", "branch": "private-branch"}).to_string()
+            ],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO session_context_mask VALUES ('local','branch')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            xmsg::session_context::project(
+                &db,
+                LIVE,
+                "claude",
+                xmsg::session_context::Surface::Local
+            )
+            .is_some(),
+            "fixture context did not survive the shared projection"
+        );
+    }
+    let (_, tcp) = fixture.get("?read_only=true").await;
+    assert!(tcp["recipients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row.get("context").is_none()));
     let socket = fixture.root.path().join("http.sock");
     let listener =
         xmsg::http::bind_ucred_unix_listener(&socket, xmsg::agent::current_uid(), None).unwrap();
@@ -470,6 +503,31 @@ async fn unix_http_snapshot_keeps_caller_attribution_read_only() {
     assert_eq!(response.status(), 200);
     let value: Value = response.json().await.unwrap();
     assert_eq!(value["read_only"], true);
+    let recipient = value["recipients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["address"] == format!("{LIVE}@snapshot.example"))
+        .unwrap();
+    assert_eq!(
+        recipient["context"]["repo"], "github.com/org/repo",
+        "{recipient}"
+    );
+    assert!(recipient["context"].get("branch").is_none());
+    let located: Value = client
+        .get(format!("http://localhost/v1/locate?address={LIVE}"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        located["locators"][0]["recipient"]["context"],
+        recipient["context"]
+    );
     assert_eq!(fixture.state.db.lock().unwrap().total_changes(), before);
     assert_eq!(fixture.store_snapshot(), stores);
     assert_eq!(

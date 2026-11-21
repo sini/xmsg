@@ -4,6 +4,68 @@ use xmsg::storage::{
     purge_pi_messages, PiPendingMessage,
 };
 
+#[tokio::test]
+async fn context_is_bound_to_the_pi_registration() {
+    use serde_json::{json, Value};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (client, server) = tokio::io::duplex(4096);
+    let (reader, writer) = tokio::io::split(server);
+    let (client_reader, mut client_writer) = tokio::io::split(client);
+    let mut response = BufReader::new(client_reader).lines();
+    let conn = Connection::open_in_memory().unwrap();
+    storage::init_db(&conn).unwrap();
+    let db = Arc::new(Mutex::new(conn));
+    let server = tokio::spawn(xmsg::pi::handle_pi_connection(
+        BufReader::new(reader),
+        writer,
+        xmsg::process::LIVE_PROC_ROOT.into(),
+        xmsg::pi::new_pi_store(),
+        xmsg::agent::current_uid(),
+        xmsg::agent::current_uid(),
+        std::process::id(),
+        serde_json::from_value(json!({"harness": "pi"})).unwrap(),
+        db.clone(),
+        tokio::sync::broadcast::channel(4).0,
+        Duration::from_secs(3600),
+    ));
+
+    let registered: Value =
+        serde_json::from_str(&response.next_line().await.unwrap().unwrap()).unwrap();
+    let id = registered["sessionId"].as_str().unwrap();
+    let update = json!({"action": "update_context", "context": {"task": "report"}});
+    client_writer
+        .write_all(format!("{update}\n").as_bytes())
+        .await
+        .unwrap();
+    let accepted: Value =
+        serde_json::from_str(&response.next_line().await.unwrap().unwrap()).unwrap();
+    assert_eq!(accepted["status"], "ok", "{accepted}");
+    let wrong = json!({"action": "clear_context", "sessionId": "other"});
+    client_writer
+        .write_all(format!("{wrong}\n").as_bytes())
+        .await
+        .unwrap();
+    let refused: Value =
+        serde_json::from_str(&response.next_line().await.unwrap().unwrap()).unwrap();
+    assert_eq!(refused["error"], "denied", "{refused}");
+
+    let project = || {
+        xmsg::session_context::project(
+            &db.lock().unwrap(),
+            id,
+            "pi",
+            xmsg::session_context::Surface::Local,
+        )
+    };
+    assert_eq!(project().unwrap().fields.task.as_deref(), Some("report"));
+    client_writer.shutdown().await.unwrap();
+    server.await.unwrap().unwrap();
+    assert!(project().is_none());
+}
+
 #[test]
 fn test_pi_pending_messages_fifo_and_ack() {
     let conn = Connection::open_in_memory().unwrap();
