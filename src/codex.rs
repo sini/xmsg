@@ -2979,3 +2979,425 @@ pub fn admit_codex_subagent(
         }
     }
 }
+pub fn readonly_runtime_for_db(
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    deadline: std::time::Instant,
+) -> Result<Arc<Mutex<CodexRuntime>>, crate::client::caller_attribution::FailureReason> {
+    use crate::client::caller_attribution::FailureReason;
+    let registry = CODEX_REGISTRY
+        .get()
+        .ok_or(FailureReason::AuthorityUnavailable)?;
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return Err(FailureReason::Deadline);
+        }
+        match registry.try_lock() {
+            Ok(map) => {
+                let key = Arc::as_ptr(db) as usize;
+                let weak = Arc::downgrade(db);
+                return map
+                    .get(&key)
+                    .filter(|slot| Weak::ptr_eq(&slot.weak_db, &weak))
+                    .map(|slot| slot.runtime.clone())
+                    .ok_or(FailureReason::AuthorityUnavailable);
+            }
+            Err(std::sync::TryLockError::WouldBlock) => std::thread::yield_now(),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(FailureReason::AuthorityUnavailable)
+            }
+        }
+    }
+}
+
+pub fn readonly_codex_owner_step(
+    config: &CodexConfig,
+    pid: u32,
+    start: &str,
+    deadline: std::time::Instant,
+) -> Result<bool, crate::client::caller_attribution::FailureReason> {
+    use crate::client::caller_attribution::FailureReason;
+    if std::time::Instant::now() >= deadline {
+        return Err(FailureReason::Deadline);
+    }
+    if config.trusted_codex_exes.is_empty() {
+        return Ok(false);
+    }
+    if crate::process::strict_process_link(&config.proc_root, pid)?.start != start {
+        return Err(FailureReason::Changed);
+    }
+    let before = crate::process::exe_path(&config.proc_root, pid)
+        .map_err(|_| FailureReason::AuthorityUnavailable)?
+        .canonicalize()
+        .map_err(|_| FailureReason::AuthorityUnavailable)?;
+    let matched = crate::process::evaluate_trusted_exe(
+        &config.trusted_codex_exes,
+        &before,
+        config.codex_exe_strict,
+    );
+    if matched == crate::process::ExeMatch::RefusedPathDrift {
+        return Err(FailureReason::Context);
+    }
+    let after = crate::process::exe_path(&config.proc_root, pid)
+        .map_err(|_| FailureReason::AuthorityUnavailable)?
+        .canonicalize()
+        .map_err(|_| FailureReason::AuthorityUnavailable)?;
+    if before != after
+        || crate::process::strict_process_link(&config.proc_root, pid)?.start != start
+    {
+        return Err(FailureReason::Changed);
+    }
+    Ok(matched != crate::process::ExeMatch::NoMatch)
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct ReadonlyCodexBinding {
+    pub codex_home: String,
+    pub principal_id: String,
+    pub root_id: String,
+    pub owner_pid: u32,
+    pub owner_starttime: String,
+    pub root_generation: u64,
+    pub child_generation: Option<u64>,
+    pub root_rollout: (u64, u64),
+    pub child_rollout: Option<(u64, u64)>,
+    pub active_turns: Vec<String>,
+}
+impl CodexStore {
+    pub fn readonly_attribution_binding(
+        &self,
+        config: &CodexConfig,
+        owner_pid: u32,
+        owner_start: &str,
+        root_id: &str,
+        thread_id: &str,
+        turn_id: Option<&str>,
+        deadline: std::time::Instant,
+    ) -> Result<ReadonlyCodexBinding, crate::client::caller_attribution::FailureReason> {
+        use crate::client::caller_attribution::FailureReason;
+        if std::time::Instant::now() >= deadline {
+            return Err(FailureReason::Deadline);
+        }
+        if !crate::claim::is_uuid_shaped(root_id) || !crate::claim::is_uuid_shaped(thread_id) {
+            return Err(FailureReason::Context);
+        }
+        if self.revoked_by_operator.contains(root_id) {
+            return Err(FailureReason::Context);
+        }
+        let root = self.roots.get(root_id).ok_or(FailureReason::Context)?;
+        if root.owner_pid != owner_pid
+            || root.owner_starttime != owner_start
+            || root.generation == 0
+        {
+            return Err(FailureReason::Context);
+        }
+        root.watch
+            .readonly_continuity(&config.proc_root, owner_pid, owner_start, deadline)?;
+        let meta = readonly_rollout(&root.codex_home, root_id, root_id, None, deadline)?;
+        if (meta.rollout_dev, meta.rollout_ino) != (root.rollout_dev, root.rollout_ino) {
+            return Err(FailureReason::Changed);
+        }
+        let mut out = ReadonlyCodexBinding {
+            codex_home: root
+                .codex_home
+                .to_str()
+                .ok_or(FailureReason::Context)?
+                .to_owned(),
+            principal_id: root_id.into(),
+            root_id: root_id.into(),
+            owner_pid,
+            owner_starttime: owner_start.into(),
+            root_generation: root.generation,
+            child_generation: None,
+            root_rollout: (root.rollout_dev, root.rollout_ino),
+            child_rollout: None,
+            active_turns: Vec::new(),
+        };
+        if thread_id != root_id {
+            if self.roots.contains_key(thread_id) || self.candidates.contains_key(thread_id) {
+                return Err(FailureReason::Context);
+            }
+            let child = self
+                .children
+                .get(&(root_id.into(), thread_id.into()))
+                .ok_or(FailureReason::Context)?;
+            if child.root_generation != root.generation
+                || child.owner_pid != owner_pid
+                || child.owner_starttime != owner_start
+                || child.stopped_all
+                || child.active_turns.is_empty()
+            {
+                return Err(FailureReason::Context);
+            }
+            if turn_id.is_some_and(|turn| !child.active_turns.contains(turn)) {
+                return Err(FailureReason::Context);
+            }
+            let meta = readonly_rollout(
+                &root.codex_home,
+                thread_id,
+                root_id,
+                Some(root_id),
+                deadline,
+            )?;
+            if (meta.rollout_dev, meta.rollout_ino) != (child.rollout_dev, child.rollout_ino) {
+                return Err(FailureReason::Changed);
+            }
+            out.principal_id = format!("{root_id}/{thread_id}");
+            out.child_generation = Some(child.root_generation);
+            out.child_rollout = Some((child.rollout_dev, child.rollout_ino));
+            out.active_turns = child.active_turns.iter().cloned().collect();
+            out.active_turns.sort();
+        }
+        root.watch
+            .readonly_continuity(&config.proc_root, owner_pid, owner_start, deadline)?;
+        Ok(out)
+    }
+}
+impl LockLeaseWatch {
+    fn readonly_continuity(
+        &self,
+        proc_root: &Path,
+        pid: u32,
+        start: &str,
+        deadline: std::time::Instant,
+    ) -> Result<(), crate::client::caller_attribution::FailureReason> {
+        use crate::client::caller_attribution::FailureReason;
+        self.readonly_watch_clear()?;
+        let entries = crate::process::strict_open_file_vnodes(proc_root, pid, start, deadline)?;
+        let metadata = std::fs::symlink_metadata(&self.lock_path)
+            .map_err(|_| FailureReason::AuthorityUnavailable)?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.uid() != effective_uid()
+            || metadata.nlink() == 0
+            || (metadata.dev(), metadata.ino()) != (self.lock_dev, self.lock_ino)
+        {
+            return Err(FailureReason::Context);
+        }
+        if !entries.iter().any(|v| {
+            v.path == self.lock_path
+                && v.uid == effective_uid()
+                && v.nlink > 0
+                && (v.mode & libc::S_IFMT) == libc::S_IFREG
+                && (v.dev, v.ino) == (self.lock_dev, self.lock_ino)
+                && v.has_flock
+        }) {
+            return Err(FailureReason::Context);
+        }
+        self.readonly_watch_clear()?;
+        Ok(())
+    }
+    fn readonly_watch_clear(&self) -> Result<(), crate::client::caller_attribution::FailureReason> {
+        use crate::client::caller_attribution::FailureReason;
+        #[cfg(target_os = "linux")]
+        let (watch, held) = (self.inotify_fd.as_raw_fd(), self.lock_opath_fd.as_raw_fd());
+        #[cfg(target_os = "macos")]
+        let (watch, held) = (self.kq_fd.as_raw_fd(), self.lock_evtonly_fd.as_raw_fd());
+        let mut poll = libc::pollfd {
+            fd: watch,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        if unsafe { libc::poll(&mut poll, 1, 0) } < 0 || poll.revents != 0 {
+            return Err(FailureReason::AuthorityUnavailable);
+        }
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(held, &mut stat) } != 0
+            || stat.st_nlink == 0
+            || (stat.st_dev as u64, stat.st_ino as u64) != (self.lock_dev, self.lock_ino)
+        {
+            return Err(FailureReason::Context);
+        }
+        Ok(())
+    }
+}
+
+fn readonly_rollout(
+    home: &Path,
+    target: &str,
+    session: &str,
+    parent: Option<&str>,
+    deadline: std::time::Instant,
+) -> Result<CodexRolloutMeta, crate::client::caller_attribution::FailureReason> {
+    use crate::client::caller_attribution::FailureReason;
+    let sessions = home.join("sessions");
+    let expected =
+        std::fs::canonicalize(&sessions).map_err(|_| FailureReason::AuthorityUnavailable)?;
+    if expected != sessions || !expected.starts_with(home) {
+        return Err(FailureReason::Context);
+    }
+    let mut pending = vec![(expected.clone(), 0usize)];
+    let mut seen = 0usize;
+    let mut matches = Vec::new();
+    while let Some((directory, depth)) = pending.pop() {
+        if std::time::Instant::now() >= deadline {
+            return Err(FailureReason::Deadline);
+        }
+        if depth > 8 {
+            return Err(FailureReason::Limit);
+        }
+        let dir = open_dir_nofollow(&directory, effective_uid())
+            .map_err(|_| FailureReason::AuthorityUnavailable)?;
+        if !opened_fd_kernel_path(dir.as_raw_fd())
+            .map_err(|_| FailureReason::AuthorityUnavailable)?
+            .starts_with(&expected)
+        {
+            return Err(FailureReason::Context);
+        }
+        let dup = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+        if dup < 0 {
+            return Err(FailureReason::AuthorityUnavailable);
+        }
+        let stream = unsafe { libc::fdopendir(dup) };
+        if stream.is_null() {
+            unsafe { libc::close(dup) };
+            return Err(FailureReason::AuthorityUnavailable);
+        }
+        struct Stream(*mut libc::DIR);
+        impl Drop for Stream {
+            fn drop(&mut self) {
+                unsafe { libc::closedir(self.0) };
+            }
+        }
+        let stream = Stream(stream);
+        let mut names = Vec::new();
+        loop {
+            if std::time::Instant::now() >= deadline {
+                return Err(FailureReason::Deadline);
+            }
+            #[cfg(target_os = "linux")]
+            unsafe {
+                *libc::__errno_location() = 0;
+            }
+            #[cfg(target_os = "macos")]
+            unsafe {
+                *libc::__error() = 0;
+            }
+            let item = unsafe { libc::readdir(stream.0) };
+            if item.is_null() {
+                if std::io::Error::last_os_error().raw_os_error() != Some(0) {
+                    return Err(FailureReason::AuthorityUnavailable);
+                }
+                break;
+            }
+            let name = unsafe { std::ffi::CStr::from_ptr((*item).d_name.as_ptr()) }
+                .to_str()
+                .map_err(|_| FailureReason::AuthorityUnavailable)?;
+            if name == "." || name == ".." {
+                continue;
+            }
+            seen += 1;
+            if seen > 8192 {
+                return Err(FailureReason::Limit);
+            }
+            names.push(name.to_owned());
+        }
+        drop(stream);
+        names.sort();
+        for name in names {
+            if std::time::Instant::now() >= deadline {
+                return Err(FailureReason::Deadline);
+            }
+            let c_name = CString::new(name.as_str()).map_err(|_| FailureReason::Context)?;
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe {
+                libc::fstatat(
+                    dir.as_raw_fd(),
+                    c_name.as_ptr(),
+                    &mut stat,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            } != 0
+            {
+                return Err(FailureReason::AuthorityUnavailable);
+            }
+            let kind = stat.st_mode & libc::S_IFMT;
+            if kind == libc::S_IFDIR {
+                if stat.st_uid != effective_uid() {
+                    return Err(FailureReason::Context);
+                }
+                pending.push((directory.join(name), depth + 1));
+                continue;
+            }
+            if !name.ends_with(".jsonl") && !name.contains(target) {
+                continue;
+            }
+            if kind != libc::S_IFREG || stat.st_uid != effective_uid() {
+                return Err(FailureReason::Context);
+            }
+            let raw = unsafe {
+                libc::openat(
+                    dir.as_raw_fd(),
+                    c_name.as_ptr(),
+                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                )
+            };
+            if raw < 0 {
+                return Err(FailureReason::AuthorityUnavailable);
+            }
+            let owned = unsafe { OwnedFd::from_raw_fd(raw) };
+            let mut after: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstat(owned.as_raw_fd(), &mut after) } != 0
+                || (after.st_dev, after.st_ino) != (stat.st_dev, stat.st_ino)
+                || after.st_uid != effective_uid()
+            {
+                return Err(FailureReason::Changed);
+            }
+            if !opened_fd_kernel_path(owned.as_raw_fd())
+                .map_err(|_| FailureReason::AuthorityUnavailable)?
+                .starts_with(&expected)
+            {
+                return Err(FailureReason::Context);
+            }
+            let text = read_bounded_first_line(owned, &name)
+                .map_err(|_| FailureReason::AuthorityUnavailable)?;
+            let value: Value =
+                serde_json::from_str(&text).map_err(|_| FailureReason::AuthorityUnavailable)?;
+            if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+                return Err(FailureReason::Context);
+            }
+            let payload = value
+                .get("payload")
+                .and_then(Value::as_object)
+                .ok_or(FailureReason::Context)?;
+            let id = payload
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or(FailureReason::Context)?;
+            if name.contains(target) && id != target {
+                return Err(FailureReason::Context);
+            }
+            if id != target {
+                continue;
+            }
+            if payload.get("session_id").and_then(Value::as_str) != Some(session) {
+                return Err(FailureReason::Context);
+            }
+            let actual_parent = payload
+                .get("parent_thread_id")
+                .filter(|p| !p.is_null())
+                .and_then(Value::as_str);
+            if actual_parent != parent
+                || parent.is_none()
+                    && payload
+                        .get("source")
+                        .and_then(|s| s.get("subagent"))
+                        .is_some()
+            {
+                return Err(FailureReason::Context);
+            }
+            matches.push(CodexRolloutMeta {
+                id: id.into(),
+                session_id: session.into(),
+                parent_thread_id: parent.map(str::to_owned),
+                cwd: None,
+                agent_type: None,
+                rollout_dev: after.st_dev as u64,
+                rollout_ino: after.st_ino as u64,
+            });
+            if matches.len() > 1 {
+                return Err(FailureReason::Ambiguous);
+            }
+        }
+    }
+    matches.pop().ok_or(FailureReason::Context)
+}
