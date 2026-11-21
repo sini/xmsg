@@ -149,7 +149,7 @@ impl Tasks {
     async fn stop(mut self) {
         for task in self.0.drain(..) {
             task.abort();
-            let _ = task.await;
+            let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
         }
     }
 }
@@ -216,6 +216,9 @@ async fn sender(hub: &Arc<FedState>, directory: &Path, tasks: &mut Tasks) -> Reg
     .expect("grt4 concrete cycle hub sender registration failed")
 }
 
+const SIGNAL_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+const PROBE_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
+
 async fn probe_hostile_inbox(
     fed_state: &FedState,
     peer_name: &str,
@@ -238,18 +241,39 @@ async fn probe_hostile_inbox(
     )?;
     let name = rustls::pki_types::ServerName::try_from(peer.name.clone())
         .map_err(|e| xmsg::error::AppError::Internal(e.to_string()))?;
-    let tcp = tokio::net::TcpStream::connect(&peer.address)
+    let tcp = tokio::time::timeout(
+        PROBE_STAGE_TIMEOUT,
+        tokio::net::TcpStream::connect(&peer.address),
+    )
+    .await
+    .map_err(|_| {
+        xmsg::error::AppError::Internal(format!(
+            "probe_hostile_inbox timed out after {PROBE_STAGE_TIMEOUT:?} during tcp_connect"
+        ))
+    })?
+    .map_err(|e| xmsg::error::AppError::PeerUnreachable(format!("connecting: {e}")))?;
+    let tls = tokio::time::timeout(PROBE_STAGE_TIMEOUT, connector.connect(name, tcp))
         .await
-        .map_err(|e| xmsg::error::AppError::PeerUnreachable(format!("connecting: {e}")))?;
-    let tls = connector.connect(name, tcp).await.map_err(|e| {
-        xmsg::error::AppError::PeerUnreachable(format!("TLS handshake failed: {e}"))
-    })?;
-    let io = hyper_util::rt::TokioIo::new(tls);
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
-        .await
+        .map_err(|_| {
+            xmsg::error::AppError::Internal(format!(
+                "probe_hostile_inbox timed out after {PROBE_STAGE_TIMEOUT:?} during tls_connect"
+            ))
+        })?
         .map_err(|e| {
-            xmsg::error::AppError::PeerUnreachable(format!("HTTP handshake failed: {e}"))
+            xmsg::error::AppError::PeerUnreachable(format!("TLS handshake failed: {e}"))
         })?;
+    let io = hyper_util::rt::TokioIo::new(tls);
+    let (mut sender, conn) = tokio::time::timeout(
+        PROBE_STAGE_TIMEOUT,
+        hyper::client::conn::http1::handshake(io),
+    )
+    .await
+    .map_err(|_| {
+        xmsg::error::AppError::Internal(format!(
+            "probe_hostile_inbox timed out after {PROBE_STAGE_TIMEOUT:?} during http1_handshake"
+        ))
+    })?
+    .map_err(|e| xmsg::error::AppError::PeerUnreachable(format!("HTTP handshake failed: {e}")))?;
     let conn_task = tokio::spawn(conn);
     let req = hyper::Request::builder()
         .method("GET")
@@ -257,13 +281,17 @@ async fn probe_hostile_inbox(
         .header("host", peer.name.as_str())
         .body(http_body_util::Empty::<bytes::Bytes>::new())
         .map_err(|e| xmsg::error::AppError::Internal(e.to_string()))?;
-    let result = sender
-        .send_request(req)
-        .await
-        .map(|resp| resp.status())
-        .map_err(|e| xmsg::error::AppError::PeerUnreachable(format!("Request failed: {e}")));
+    let result = match tokio::time::timeout(PROBE_STAGE_TIMEOUT, sender.send_request(req)).await {
+        Ok(Ok(resp)) => Ok(resp.status()),
+        Ok(Err(e)) => Err(xmsg::error::AppError::PeerUnreachable(format!(
+            "Request failed: {e}"
+        ))),
+        Err(_) => Err(xmsg::error::AppError::Internal(format!(
+            "probe_hostile_inbox timed out after {PROBE_STAGE_TIMEOUT:?} during send_request"
+        ))),
+    };
     conn_task.abort();
-    let _ = conn_task.await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), conn_task).await;
     result
 }
 
@@ -277,7 +305,11 @@ async fn concrete_addressless_ca_leaf_survives_mixed_patterns_and_hub_restart() 
     let hub_database = directory.path().join("hub.db");
 
     for generation in 0..2 {
-        let runtime = tempfile::tempdir().unwrap();
+        // Keep Unix socket paths well below macOS's 104-byte sun_path limit regardless of TMPDIR.
+        let runtime = tempfile::Builder::new()
+            .prefix("grt4-")
+            .tempdir_in("/tmp")
+            .unwrap();
         std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let peers = ca.hub_peers();
         let concrete = peers.get(LEAF).unwrap();
@@ -294,10 +326,30 @@ async fn concrete_addressless_ca_leaf_survives_mixed_patterns_and_hub_restart() 
         let address = listener.local_addr().unwrap();
         let hub_controls = xmsg::observe_fed::test_hooks::controls(&hub);
         let state = hub.clone();
+        let (startup_err_tx, startup_err_rx) = tokio::sync::oneshot::channel::<String>();
         let mut tasks = Tasks(vec![tokio::spawn(async move {
-            xmsg::fed::run_fed_listener(listener, state).await.unwrap();
+            if let Err(err) = xmsg::fed::run_fed_listener(listener, state).await {
+                let _ = startup_err_tx.send(err.to_string());
+                panic!("grt4 hub federation listener failed: {err}");
+            }
         })]);
-        hub_controls.listener_ready.wait_for(1).await;
+        tokio::select! {
+            ready = hub_controls.listener_ready.wait_for_timeout(1, SIGNAL_WAIT_TIMEOUT, "listener_ready") => {
+                ready.unwrap_or_else(|err| {
+                    panic!("grt4 concrete cycle generation {generation}: {err}")
+                });
+            }
+            startup_err = startup_err_rx => {
+                match startup_err {
+                    Ok(err) => panic!(
+                        "grt4 concrete cycle generation {generation}: federation listener failed before listener_ready: {err}"
+                    ),
+                    Err(_) => panic!(
+                        "grt4 concrete cycle generation {generation}: federation listener task exited before listener_ready"
+                    ),
+                }
+            }
+        }
         let leaf = node(
             LEAF,
             ca.leaf_peers(address),
@@ -314,9 +366,9 @@ async fn concrete_addressless_ca_leaf_survives_mixed_patterns_and_hub_restart() 
             runtime.path(),
             true,
         );
-        match probe_hostile_inbox(&hostile, HUB).await {
-            Err(xmsg::error::AppError::PeerUnreachable(_))
-            | Err(xmsg::error::AppError::PeerRejected(_)) => {}
+        let hostile_err = match probe_hostile_inbox(&hostile, HUB).await {
+            Err(err @ xmsg::error::AppError::PeerUnreachable(_))
+            | Err(err @ xmsg::error::AppError::PeerRejected(_)) => err,
             Err(err) => {
                 panic!("grt4 concrete cycle hostile host failed with unexpected error: {err:?}")
             }
@@ -325,8 +377,17 @@ async fn concrete_addressless_ca_leaf_survives_mixed_patterns_and_hub_restart() 
                     "grt4 concrete cycle hostile host was admitted (captured the pod alias): HTTP {status}"
                 )
             }
-        }
-        hub_controls.tls_handshake_done.wait_for(1).await;
+        };
+        hub_controls
+            .tls_handshake_done
+            .wait_for_timeout(1, SIGNAL_WAIT_TIMEOUT, "tls_handshake_done")
+            .await
+            .unwrap_or_else(|err| {
+                panic!(
+                    "grt4 concrete cycle generation {generation}: {err} (client_err={hostile_err:?}, refusals={})",
+                    hub_controls.tls_handshake_refusals.count()
+                )
+            });
         assert_eq!(
             hub_controls.tls_handshake_refusals.count(),
             1,
