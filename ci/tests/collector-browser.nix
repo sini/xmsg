@@ -11,6 +11,9 @@
         rev = "8090f65259ecb947d72cd74382881763fd6b5da6";
         hash = "sha256-IEyXgGpBG93oso7rNuG+IH50229EyIWQdzZapCgamP0=";
       };
+      oldCollectorVendorDir = craneLib.vendorCargoDeps {
+        cargoLock = "${oldCollectorSource}/Cargo.lock";
+      };
     in
     {
       checks = lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
@@ -44,9 +47,11 @@
               --source "$PWD" \
               --output "$TMPDIR/collector-compat" \
               --artifact-seed "''${CARGO_TARGET_DIR:-target}" | tee collector-compat.log
+            python3 tests/fixtures/reverse_observe/test_runner.py
             python3 tests/fixtures/reverse_observe/run_compat.py \
               --source "$PWD" \
               --old-source ${oldCollectorSource} \
+              --old-vendor ${oldCollectorVendorDir} \
               --output "$TMPDIR/reverse-collector-compat" \
               --artifact-seed "''${CARGO_TARGET_DIR:-target}" | tee reverse-collector-compat.log
           '';
