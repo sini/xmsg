@@ -1562,7 +1562,12 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
         .env_remove("XMSG_AGY_LABEL")
         .output()
         .unwrap();
-    assert_eq!(out_2.status.code(), Some(0));
+    assert_eq!(
+        out_2.status.code(),
+        Some(0),
+        "second agy registration failed: {}",
+        String::from_utf8_lossy(&out_2.stderr)
+    );
 
     let (st_amb, amb_body) = node.http_send("agy", "should be ambiguous").await;
     assert_eq!(
