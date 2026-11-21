@@ -27,7 +27,7 @@ flowchart LR
 Direct export uses the node's existing federation listener. **Reverse observation
 through an owner-administered hub** (<Status id="fleet-observer.reverse-relay" />): an outbound-only
 leaf can answer metadata reads over its existing control-only polls, without an
-inbound listener, message custody, ACK, or agent wake. A planned collector source
+inbound listener, message custody, ACK, or agent wake. A collector relay source
 selects one explicit relay route and shows the configured leaf `via hub` in event,
 inventory, and stale history. Direct sources keep their existing transport.
 
@@ -44,7 +44,7 @@ policy and refuses an entire excluded response; it forwards accepted DTO bytes
 unchanged. Caller origin headers and browser bearer tokens are not forwarded.
 The hub is trusted to inspect, withhold, or fabricate its attested metadata;
 this is not an independently signed statement from the leaf. Cross-owner hubs
-are unsupported. See the [planned route example](/operations/fleet-observer/#reverse-observation-through-a-trusted-hub).
+are unsupported. See the [route example](/operations/fleet-observer/#reverse-observation-through-a-trusted-hub).
 
 Source-IP restrictions use witnessed connections: the hub checks the collector's
 actual IP, and the leaf checks the hub's actual IP. A collector `from` condition
@@ -114,13 +114,13 @@ boundaries. Stored history is hidden after restart until its node validates the
 current scope; the view explicitly says “history hidden until this node answers”.
 Once validated in this process, retained metadata may remain visible as stale
 during a temporary outage. Denial and scope changes mask old history before purge. Body detail and transcript views (<Status id="fleet-observer.body-transcript-views" />) remain unimplemented. See [operations](/operations/fleet-observer/) and the
-[wire reference](/reference/http-and-sockets/#planned-node-observation-export).
+[wire reference](/reference/http-and-sockets/#node-observation-export).
 
 ## New event kinds
 
 <Status id="fleet-observer.unknown-event-kind" />
 
-The planned collector [unknown event kind](/glossary/#unknown-event-kind) fallback
+The collector [unknown event kind](/glossary/#unknown-event-kind) fallback
 lets a collector read metadata from a newer node without losing known neighboring
 events or cursor progress. It displays **“unknown event kind (newer node)”** in place
 of an unrecognized kind. The original identifier never appears in the view.
