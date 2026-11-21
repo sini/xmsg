@@ -12,6 +12,8 @@ on:
         description: Measure native per-arm client build costs without Nix or cache publication
         type: boolean
         default: false
+  schedule:
+    - cron: '0 6 * * 1'
 
 # Cancel superseded PR runs; non-PR runs use run_id so main pushes never cancel or queue.
 concurrency:
@@ -42,7 +44,7 @@ env:
     pre-xl1-compat
     shared-client-release-compat
   SHARED_CLIENT_CHECKS: shared-client
-  TEST_CHECKS: tests collector-browser ca-health
+  TEST_CHECKS: tests collector-browser ca-health e2e-hooks-absent
   COMPAT_CHECKS: >-
     shared-client-compat-0
     shared-client-compat-1
@@ -123,6 +125,8 @@ jobs:
             .#packages.x86_64-linux.cargoArtifacts \
             ./ci#checks.x86_64-linux.tests.cargoArtifacts \
             ./ci#checks.x86_64-linux.shared-client.cargoArtifacts | tee -a /tmp/attic-paths
+      - name: Cargo deny (advisories, bans, licenses, sources)
+        run: nix shell --inputs-from . nixpkgs#cargo-deny -c cargo deny check advisories bans licenses sources
       - name: Push to Attic cache
         id: attic_publish
         timeout-minutes: 10
@@ -461,3 +465,23 @@ jobs:
                   module.require(red.returncode == 101 and f"test {selected} ... FAILED" in red.stdout, (name, "wrong red", red.stdout, red.stderr))
           print("client-build-probe:2/2 GREEN baseline / RED intended")
           PY
+
+  e2e-mutants:
+    if: ${{ !inputs.client_build_probe && github.event_name != 'schedule' }}
+    needs: [deps]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: 4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Fetch locked crates and pre-build test binary
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal && rustup default 1.95.0
+          cargo fetch --locked
+          cargo test --locked --lib --no-run
+      - name: Run E2E mutants
+        run: python3 tests/enroll_mutants.py --cases tests/e2e_mutants.json

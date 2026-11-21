@@ -1,0 +1,104 @@
+[
+  {
+    "label": "M-aad-id",
+    "oracle": "O2 Transcript encodes message_id into AAD/cbor",
+    "target": "lib",
+    "test": "e2e::vectors_tests::transcript_vector_roundtrip_and_tamper",
+    "test_file": "src/e2e/vectors_tests.rs",
+    "edits": [
+      {
+        "file": "src/e2e/transcript.rs",
+        "needle": "Value::Text(self.message_id.clone()),",
+        "replacement": "Value::Text(\"mutated-id\".to_owned()),",
+        "start": "    pub fn encode(&self) -> Result<Vec<u8>, E2eError> {",
+        "end": "    pub fn decode(bytes: &[u8]) -> Result<Self, E2eError> {"
+      }
+    ],
+    "expected_literal": "NonCanonicalCbor"
+  },
+  {
+    "label": "M-skip-sig",
+    "oracle": "O2 Envelope signature verification cannot be skipped",
+    "target": "lib",
+    "test": "e2e::vectors_tests::transcript_vector_roundtrip_and_tamper",
+    "test_file": "src/e2e/vectors_tests.rs",
+    "edits": [
+      {
+        "file": "src/e2e/suite.rs",
+        "needle": "    UnparsedPublicKey::new(&ED25519, sig_pk)\n        .verify(&payload, signature)\n        .map_err(|_| E2eError::Signature(\"signature verification failed\"))",
+        "replacement": "    Ok(())",
+        "start": "pub fn verify_envelope(",
+        "end": "pub fn generate_signing_keypair("
+      }
+    ],
+    "expected_literal": "assertion failed:"
+  },
+  {
+    "label": "M-accept-partial",
+    "oracle": "O7 Range verification never claims whole-file completion",
+    "target": "lib",
+    "test": "e2e::vectors_tests::blob_vectors_empty_exact_boundary_and_range",
+    "test_file": "src/e2e/vectors_tests.rs",
+    "edits": [
+      {
+        "file": "src/e2e/blob.rs",
+        "needle": "complete: false,",
+        "replacement": "complete: true,",
+        "start": "    Ok(VerifiedRange {",
+        "end": "fn decrypt_single_chunk("
+      }
+    ],
+    "expected_literal": "assertion failed: !r0.complete"
+  },
+  {
+    "label": "M-le31-nonce",
+    "oracle": "O7 xmsg-blob/1 uses StreamBE32 big-endian chunk counter",
+    "target": "lib",
+    "test": "e2e::vectors_tests::blob_vectors_empty_exact_boundary_and_range",
+    "test_file": "src/e2e/vectors_tests.rs",
+    "edits": [
+      {
+        "file": "src/e2e/blob.rs",
+        "needle": "nonce[NONCE_PREFIX_LEN..NONCE_PREFIX_LEN + 4].copy_from_slice(&chunk_idx.to_be_bytes());",
+        "replacement": "nonce[NONCE_PREFIX_LEN..NONCE_PREFIX_LEN + 4].copy_from_slice(&chunk_idx.to_le_bytes());",
+        "start": "fn decrypt_single_chunk(",
+        "end": null
+      }
+    ],
+    "expected_literal": "cross-chunk range"
+  },
+  {
+    "label": "M-index-base-1",
+    "oracle": "O7 xmsg-blob/1 chunk index is 0-based",
+    "target": "lib",
+    "test": "e2e::vectors_tests::blob_vectors_empty_exact_boundary_and_range",
+    "test_file": "src/e2e/vectors_tests.rs",
+    "edits": [
+      {
+        "file": "src/e2e/blob.rs",
+        "needle": "nonce[NONCE_PREFIX_LEN..NONCE_PREFIX_LEN + 4].copy_from_slice(&chunk_idx.to_be_bytes());",
+        "replacement": "nonce[NONCE_PREFIX_LEN..NONCE_PREFIX_LEN + 4].copy_from_slice(&(chunk_idx + 1).to_be_bytes());",
+        "start": "fn decrypt_single_chunk(",
+        "end": null
+      }
+    ],
+    "expected_literal": "range at 0"
+  },
+  {
+    "label": "M-empty-no-final",
+    "oracle": "O7 0-byte blob must encrypt an empty final chunk",
+    "target": "lib",
+    "test": "e2e::vectors_tests::blob_vectors_empty_exact_boundary_and_range",
+    "test_file": "src/e2e/vectors_tests.rs",
+    "edits": [
+      {
+        "file": "src/e2e/blob.rs",
+        "needle": ".encrypt_last(",
+        "replacement": ".encrypt_next(",
+        "start": "    if plaintext.is_empty() {",
+        "end": "    let mut all_chunks"
+      }
+    ],
+    "expected_literal": "assertion `left == right` failed"
+  }
+]

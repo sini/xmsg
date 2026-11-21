@@ -1,0 +1,19 @@
+{
+  "description": "Deterministic xmsg-blob/1 StreamBE32 vectors (A4)",
+  "file_key_hex": "7777777777777777777777777777777777777777777777777777777777777777",
+  "nonce_prefix_hex": "01020304050607",
+  "empty": {
+    "message_id": "msg-empty",
+    "attachment_index": 0,
+    "header_hex": "786d73672d626c6f622f3101020304050607000000000000000000010000",
+    "chunk0_hex": "2cf08a4f06642fe0e5b67ae1f37b4fc3"
+  },
+  "multi": {
+    "message_id": "msg-multi",
+    "attachment_index": 1,
+    "plaintext_len": 131089,
+    "chunk_count": 3,
+    "header_hex": "786d73672d626c6f622f3101020304050607000000000002001100010000",
+    "chunk2_hex": "df4e797392ed4fc816e61633d270117639521c618308259809e54732a8686cbed8"
+  }
+}
