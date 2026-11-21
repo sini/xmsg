@@ -13,7 +13,8 @@ use std::{
     os::{
         fd::{AsRawFd, RawFd},
         unix::{
-            fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+            ffi::OsStrExt,
+            fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
             net::{UnixListener, UnixStream},
             process::CommandExt,
         },
@@ -37,6 +38,12 @@ pub(crate) enum SupervisorError {
     Protocol,
     #[error("unsafe owner runtime directory")]
     Directory,
+    #[error("socket path {bytes} bytes exceeds {platform} capacity {capacity} including its terminating NUL; use a shorter runtime_root with OwnerRuntimeConfig::new or OwnerRuntimeConfig::for_user")]
+    SocketPath {
+        bytes: usize,
+        capacity: usize,
+        platform: &'static str,
+    },
     #[error("supervisor I/O failed")]
     Io(#[from] std::io::Error),
     #[error("journal rejected execution: {0}")]
@@ -48,6 +55,8 @@ pub(crate) enum SupervisorError {
 pub(crate) struct OwnerRuntimeConfig {
     root: PathBuf,
     workspace: Arc<OwnerWorkspaceBinding>,
+    namespace_identity: Option<Vec<u8>>,
+    private_parent: Option<PathBuf>,
     #[cfg(test)]
     fixture: Option<FixtureProgram>,
     #[cfg(test)]
@@ -58,16 +67,89 @@ impl OwnerRuntimeConfig {
         root: PathBuf,
         workspace: Arc<OwnerWorkspaceBinding>,
     ) -> Result<Self, SupervisorError> {
-        let root = root.canonicalize()?;
         private_directory(&root)?;
+        let root = root.canonicalize()?;
         Ok(Self {
             root,
             workspace,
+            namespace_identity: None,
+            private_parent: None,
             #[cfg(test)]
             fixture: None,
             #[cfg(test)]
             barrier: None,
         })
+    }
+    pub(crate) fn for_user(
+        journal: &Path,
+        workspace: Arc<OwnerWorkspaceBinding>,
+    ) -> Result<Self, SupervisorError> {
+        use sha2::{Digest, Sha256};
+        let journal = journal.canonicalize()?;
+        let metadata = fs::symlink_metadata(&journal)?;
+        let identity = serde_json::to_vec(&(
+            journal.as_os_str().as_bytes(),
+            metadata.dev(),
+            metadata.ino(),
+            metadata.uid(),
+        ))
+        .map_err(|_| SupervisorError::Directory)?;
+        let parent = user_runtime_parent()?;
+        let private_parent =
+            if cfg!(target_os = "linux") && std::env::var_os("XDG_RUNTIME_DIR").is_some() {
+                Some(parent.clone())
+            } else {
+                None
+            };
+        let root = parent.join(format!(
+            "xe-{}-{}",
+            xmsg::client::current_uid(),
+            hex::encode(&Sha256::digest(&identity)[..6])
+        ));
+        Ok(Self {
+            root,
+            workspace,
+            namespace_identity: Some(identity),
+            private_parent,
+            #[cfg(test)]
+            fixture: None,
+            #[cfg(test)]
+            barrier: None,
+        })
+    }
+    fn ensure_root(&self) -> Result<(), SupervisorError> {
+        let Some(identity) = &self.namespace_identity else {
+            return private_directory(&self.root);
+        };
+        if let Some(parent) = &self.private_parent {
+            private_directory(parent)?;
+        }
+        let created = match fs::DirBuilder::new().mode(0o700).create(&self.root) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(e) => return Err(e.into()),
+        };
+        private_directory(&self.root)?;
+        let marker = self.root.join("journal.identity");
+        if created {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&marker)?;
+            file.write_all(identity)?;
+            file.sync_all()?;
+        }
+        let metadata = fs::symlink_metadata(&marker)?;
+        if !metadata.is_file()
+            || metadata.uid() != xmsg::client::current_uid()
+            || metadata.mode() & 0o7777 != 0o600
+            || fs::read(marker)? != *identity
+        {
+            return Err(SupervisorError::Directory);
+        }
+        Ok(())
     }
     fn program(&self) -> Result<TrustedProgram, SupervisorError> {
         #[cfg(test)]
@@ -88,6 +170,39 @@ impl OwnerRuntimeConfig {
         }
         Err(SupervisorError::BackendUnavailable)
     }
+}
+fn user_runtime_parent() -> Result<PathBuf, SupervisorError> {
+    #[cfg(target_os = "linux")]
+    if let Some(root) = std::env::var_os("XDG_RUNTIME_DIR") {
+        return checked_xdg_parent(Path::new(&root));
+    }
+    Ok(Path::new("/tmp").canonicalize()?)
+}
+#[cfg(any(target_os = "linux", test))]
+fn checked_xdg_parent(root: &Path) -> Result<PathBuf, SupervisorError> {
+    if !root.is_absolute() {
+        return Err(SupervisorError::Directory);
+    }
+    private_directory(root)?;
+    Ok(root.canonicalize()?)
+}
+fn validate_socket_path(socket: &Path) -> Result<(), SupervisorError> {
+    let capacity = unsafe { std::mem::zeroed::<libc::sockaddr_un>() }
+        .sun_path
+        .len();
+    let bytes = socket.as_os_str().as_bytes();
+    if bytes.contains(&0) || bytes.len() >= capacity {
+        return Err(SupervisorError::SocketPath {
+            bytes: bytes.len(),
+            capacity,
+            platform: if cfg!(target_os = "macos") {
+                "macOS"
+            } else {
+                std::env::consts::OS
+            },
+        });
+    }
+    Ok(())
 }
 #[cfg(test)]
 #[derive(Clone)]
@@ -112,11 +227,21 @@ struct TrustedProgram {
     accept_probe: Option<PathBuf>,
 }
 fn private_directory(path: &Path) -> Result<(), SupervisorError> {
+    let mut prefix = PathBuf::new();
+    for part in path.components() {
+        prefix.push(part.as_os_str());
+        if fs::symlink_metadata(&prefix)?.file_type().is_symlink() {
+            return Err(SupervisorError::Directory);
+        }
+    }
     let m = fs::symlink_metadata(path)?;
-    if !m.is_dir() || m.uid() != xmsg::client::current_uid() || m.mode() & 0o777 != 0o700 {
+    if !private_directory_metadata(m.is_dir(), m.uid(), m.mode(), xmsg::client::current_uid()) {
         return Err(SupervisorError::Directory);
     }
     Ok(())
+}
+fn private_directory_metadata(is_dir: bool, uid: u32, mode: u32, expected_uid: u32) -> bool {
+    is_dir && uid == expected_uid && mode & 0o7777 == 0o700
 }
 fn component(session: &str, generation: u64) -> String {
     use sha2::{Digest, Sha256};
@@ -133,8 +258,8 @@ impl ExecutionLock {
     fn acquire(root: &Path, session: &str, generation: u64) -> Result<Self, SupervisorError> {
         private_directory(root)?;
         let directory = root.join(component(session, generation));
-        match fs::create_dir(&directory) {
-            Ok(()) => fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?,
+        match fs::DirBuilder::new().mode(0o700).create(&directory) {
+            Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e.into()),
         };
@@ -456,6 +581,14 @@ impl SupervisorController {
             .lock()
             .map_err(|_| ErrorCode::Storage)?
             .dispatch_identity(admission_id, now)?;
+        validate_socket_path(
+            &self
+                .config
+                .root
+                .join(component(&session, generation))
+                .join("supervisor.sock"),
+        )?;
+        self.config.ensure_root()?;
         let lock = ExecutionLock::acquire(&self.config.root, &session, generation)?;
         let existing = {
             let journal = service.journal.lock().map_err(|_| ErrorCode::Storage)?;

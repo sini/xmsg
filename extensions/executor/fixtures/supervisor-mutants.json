@@ -249,5 +249,66 @@
     "assertion": "startup handshake escaped supervisor wall budget",
     "test_module": "supervisor::tests",
     "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-socket-capacity",
+    "file": "extensions/executor/src/supervisor.rs",
+    "needle": "if bytes.contains(&0) || bytes.len() >= capacity {",
+    "replacement": "if bytes.contains(&0) {",
+    "test": "long_socket_path_refuses_before_execution_or_workspace_effects",
+    "assertion": "overlong socket created runtime effects",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-runtime-permissions",
+    "file": "extensions/executor/src/supervisor.rs",
+    "needle": "&& mode & 0o7777 == 0o700",
+    "replacement": "&& { let _ = mode; true }",
+    "test": "runtime_namespace_refuses_precreation_without_taking_it_over",
+    "assertion": "permissive precreated namespace reached execution effects",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-runtime-full-identity",
+    "file": "extensions/executor/src/supervisor.rs",
+    "needle": "|| fs::read(marker)? != *identity",
+    "replacement": "",
+    "test": "runtime_namespace_identity_collision_never_adopts_existing_root",
+    "assertion": "different journal identity adopted existing namespace",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-runtime-owner-classifier",
+    "file": "extensions/executor/src/supervisor.rs",
+    "needle": "uid == expected_uid",
+    "replacement": "{ let _ = (uid, expected_uid); true }",
+    "test": "runtime_directory_metadata_rejects_other_uid_at_component_scope",
+    "assertion": "foreign UID metadata was accepted",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs",
+    "scope": "classifier-level, not a foreign-owned filesystem"
+  },
+  {
+    "id": "pr3-xdg-absolute",
+    "file": "extensions/executor/src/supervisor.rs",
+    "needle": "if !root.is_absolute() {\n        return Err(SupervisorError::Directory);\n    }",
+    "replacement": "",
+    "test": "configured_xdg_parent_refuses_invalid_directory_without_fallback",
+    "assertion": "relative XDG root was accepted",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
+  },
+  {
+    "id": "pr3-xdg-private",
+    "file": "extensions/executor/src/supervisor.rs",
+    "needle": "private_directory(root)?;\n    Ok(root.canonicalize()?)",
+    "replacement": "Ok(root.canonicalize()?)",
+    "test": "configured_xdg_parent_refuses_invalid_directory_without_fallback",
+    "assertion": "permissive XDG root was accepted",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs"
   }
 ]
