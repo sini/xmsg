@@ -263,3 +263,15 @@ upgrade rather than through a store symlink.
 
 On Linux, `permission_suspected` or `failed` usually indicates a host firewall or routing
 rule blocking mDNS: allow UDP port `5353` (`224.0.0.251:5353`).
+
+
+## Executor ownership is unknown
+
+<Status id="teams.supervisor" />
+
+The optional executor supervisor currently has a fake-backend library boundary,
+not an installed runtime. In its fixtures, `unknown` means that ownership or an
+external effect could not be proved. The slot stays reserved. Reconnect must
+reconcile the existing execution; guessing that a saved PID is dead and starting
+another child could duplicate work. Workspace cleanup also refuses to discard
+modified files. See the [supervisor boundary](/reference/executor-contracts/#supervisor-and-workspace-boundary).
