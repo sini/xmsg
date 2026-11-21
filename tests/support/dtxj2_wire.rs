@@ -10,7 +10,7 @@ pub fn event(sequence: i64, kind: Value) -> Value {
 }
 
 pub fn page(events: Vec<Value>) -> Value {
-    json!({"v":1,"node":"placeholder","epoch":"fixture-epoch","scope":"a".repeat(64),
+    json!({"v":2,"node":"placeholder","epoch":"fixture-epoch","scope":"a".repeat(64),
         "next":events.len(),"events":events,"has_more":false,"gaps":[],"available":true})
 }
 
