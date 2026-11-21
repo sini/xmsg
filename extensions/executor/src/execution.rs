@@ -250,7 +250,7 @@ impl Journal {
         if authorize(&tx, &record, now)? != id.policy_revision {
             return Err(ErrorCode::RequestConflict);
         }
-        let changed=tx.execute("UPDATE executions SET state='running',diagnostic_pid=?1,cursor=?2 WHERE session_id=?3 AND generation=?4 AND identity=?5 AND state IN('spawn_intent','running','unknown')",params![i64::from(pid),integer(cursor)?,id.session_id,integer(id.generation)?,serde_json::to_string(id).map_err(storage)?]).map_err(storage)?;
+        let changed=tx.execute("UPDATE executions SET state='running',diagnostic_pid=?1,cursor=?2 WHERE session_id=?3 AND generation=?4 AND identity=?5 AND state IN('spawn_intent','running','unknown') AND cursor<=?2",params![i64::from(pid),integer(cursor)?,id.session_id,integer(id.generation)?,serde_json::to_string(id).map_err(storage)?]).map_err(storage)?;
         if changed != 1 {
             return Err(ErrorCode::StaleGeneration);
         }
@@ -466,5 +466,28 @@ impl Journal {
             .map_err(storage)?;
         let profile = profile.ok_or(ErrorCode::StaleGeneration)?;
         Ok(!cfg.profiles.iter().any(|p| p.id == profile && p.enabled))
+    }
+}
+
+impl Journal {
+    pub(crate) fn mark_stopped(
+        &mut self,
+        id: &ExecutionIdentity,
+        cursor: u64,
+    ) -> Result<(), ErrorCode> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let changed=tx.execute("UPDATE executions SET state='stopped',cursor=?1 WHERE session_id=?2 AND generation=?3 AND identity=?4 AND cursor<=?1",params![integer(cursor)?,id.session_id,integer(id.generation)?,serde_json::to_string(id).map_err(storage)?]).map_err(storage)?;
+        if changed != 1 {
+            return Err(ErrorCode::RequestConflict);
+        }
+        tx.execute(
+            "UPDATE sessions SET state='ended' WHERE id=?1 AND generation=?2",
+            params![id.session_id, integer(id.generation)?],
+        )
+        .map_err(storage)?;
+        tx.commit().map_err(storage)
     }
 }
