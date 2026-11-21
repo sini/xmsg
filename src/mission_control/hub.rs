@@ -20,6 +20,12 @@ pub(super) struct Snapshot {
     pub watermark: u64,
 }
 
+pub(super) struct Frozen {
+    pub nodes: Vec<Arc<Node>>,
+    pub attention: Option<Vec<Attention>>,
+    pub watermark: u64,
+}
+
 #[derive(Clone)]
 pub(super) struct Sequenced {
     pub seq: u64,
@@ -39,7 +45,17 @@ pub(super) enum Reset {
     CursorExpired,
     EpochChanged,
     ScopeChanged,
+    SlowConsumer,
 }
+
+pub(super) struct Batch {
+    pub events: Vec<Sequenced>,
+    pub through: u64,
+    pub coalesced: bool,
+}
+
+const QUEUE_BYTES: usize = 1024 * 1024;
+const QUEUE_MESSAGES: usize = 1024;
 
 pub(super) struct Hub {
     key: CursorKey,
@@ -47,7 +63,7 @@ pub(super) struct Hub {
     seq: u64,
     bytes: usize,
     replay: VecDeque<Entry>,
-    nodes: BTreeMap<String, Node>,
+    nodes: BTreeMap<String, Arc<Node>>,
     history_barriers: BTreeMap<String, u64>,
     attention: BTreeMap<String, Attention>,
 }
@@ -85,7 +101,7 @@ impl Hub {
         at: i64,
         now: Instant,
     ) -> Result<(), serde_json::Error> {
-        let Some(mut node) = self.nodes.get(name).cloned() else {
+        let Some(mut node) = self.nodes.get(name).map(|node| (**node).clone()) else {
             return Ok(());
         };
         node.history_hidden = true;
@@ -191,7 +207,7 @@ impl Hub {
         }
         self.attention.retain(|_, item| item.node != node.node);
         self.attention.extend(next_items);
-        self.nodes.insert(node.node.clone(), node);
+        self.nodes.insert(node.node.clone(), Arc::new(node));
         for (delta, bytes) in entries {
             self.append_encoded(delta, bytes, at, now);
         }
@@ -237,7 +253,7 @@ impl Hub {
         }
     }
 
-    pub(super) fn snapshot(&self, projection: &Projection<'_>) -> Snapshot {
+    pub(super) fn frozen(&self, projection: &Projection<'_>) -> Frozen {
         let attention = (projection.scope == &Scope::Attention).then(|| {
             let mut items: Vec<_> = self
                 .attention
@@ -248,14 +264,28 @@ impl Hub {
             items.sort_by(|a, b| (a.since, &a.id).cmp(&(b.since, &b.id)));
             items
         });
-        Snapshot {
+        Frozen {
             nodes: self
                 .nodes
                 .values()
-                .filter_map(|node| projection.project_node(node))
+                .filter(|node| projection.node_allowed(&node.node))
+                .cloned()
                 .collect(),
             attention,
             watermark: self.seq,
+        }
+    }
+
+    pub(super) fn snapshot(&self, projection: &Projection<'_>) -> Snapshot {
+        let frozen = self.frozen(projection);
+        Snapshot {
+            nodes: frozen
+                .nodes
+                .iter()
+                .filter_map(|node| projection.project_node(node))
+                .collect(),
+            attention: frozen.attention,
+            watermark: frozen.watermark,
         }
     }
 
@@ -327,6 +357,79 @@ impl Hub {
             .iter()
             .filter(move |entry| entry.update.seq > seq && view.current(&entry.update))
             .map(|entry| entry.update.as_ref()))
+    }
+
+    pub(super) fn project_after(
+        &mut self,
+        seq: u64,
+        projection: &Projection<'_>,
+        cap: usize,
+        replaying: bool,
+        now: Instant,
+    ) -> Result<Batch, Reset> {
+        self.check_sequence(seq, now)?;
+        let mut history = Vec::new();
+        let mut bytes: usize = 0;
+        for entry in self
+            .replay
+            .iter()
+            .filter(|entry| entry.update.seq > seq && self.current(&entry.update))
+        {
+            if projection.project_delta(&entry.update.delta).is_none() {
+                continue;
+            }
+            bytes = bytes.saturating_add(entry.bytes);
+            history.push(entry);
+        }
+        let original = history.len();
+        if !replaying && (bytes > QUEUE_BYTES / 2 || history.len() > QUEUE_MESSAGES / 2) {
+            let mut keys = std::collections::HashSet::new();
+            history.reverse();
+            history.retain(|&entry| {
+                let keep = entry
+                    .update
+                    .delta
+                    .coalesce_key()
+                    .is_none_or(|key| keys.insert(key));
+                if !keep {
+                    bytes -= entry.bytes;
+                }
+                keep
+            });
+            history.reverse();
+        }
+        if !replaying && (bytes > QUEUE_BYTES || history.len() > QUEUE_MESSAGES) {
+            return Err(Reset::SlowConsumer);
+        }
+        let retained = history.len();
+        let mut events = Vec::new();
+        let mut through = seq;
+        let mut queued_bytes = 0usize;
+        for entry in history {
+            if events.len() == cap
+                || (!events.is_empty() && queued_bytes.saturating_add(entry.bytes) > QUEUE_BYTES)
+            {
+                break;
+            }
+            queued_bytes = queued_bytes.saturating_add(entry.bytes);
+            through = entry.update.seq;
+            let Some(delta) = projection.project_delta(&entry.update.delta) else {
+                continue;
+            };
+            events.push(Sequenced {
+                delta,
+                seq: entry.update.seq,
+                at: entry.update.at,
+            });
+        }
+        if events.len() == retained {
+            through = self.seq;
+        }
+        Ok(Batch {
+            events,
+            through,
+            coalesced: original != retained,
+        })
     }
 
     pub(super) fn current(&self, event: &Sequenced) -> bool {
@@ -403,6 +506,72 @@ mod tests {
         assert_eq!(
             hub.resume(&cursor, &partition, now),
             Err(Reset::CursorExpired)
+        );
+    }
+    #[test]
+    fn sustained_backlog_coalesces_state_and_resets_history_without_silent_loss() {
+        use crate::observe_export::{Availability, EventKind, ExportEvent};
+        let mut hub = Hub::new(ReplayLimits {
+            events: 4096,
+            bytes: 8 * 1024 * 1024,
+            window: Duration::from_secs(120),
+        })
+        .unwrap();
+        let now = Instant::now();
+        let projection = Projection {
+            scope: &Scope::Fleet,
+            grants: &[Scope::Fleet],
+            masked: &|_| false,
+            activity: true,
+        };
+        let state = || Delta::EndpointRemoved {
+            node: "laptop".into(),
+            id: "agent@laptop".into(),
+        };
+        let exchange = |seq| Delta::Exchange {
+            node: "laptop".into(),
+            event: ExportEvent {
+                sequence: seq,
+                kind: EventKind::MessageRecorded,
+                source_at: None,
+                observed_at: 100,
+                persisted_at: 100,
+                from: Some("agent@laptop".into()),
+                to: Some("worker@laptop".into()),
+                message_id: None,
+                reply_id: None,
+                thread_id: None,
+                outcome: None,
+                reason: None,
+                available: Availability::NotRecorded,
+                activity: None,
+            },
+        };
+        for _ in 0..550 {
+            hub.append(state(), 100, now).unwrap();
+        }
+        hub.append(exchange(1), 100, now).unwrap();
+        hub.append(exchange(2), 100, now).unwrap();
+        let batch = hub.project_after(0, &projection, 8, false, now).unwrap();
+        assert!(batch.coalesced);
+        assert_eq!(
+            batch
+                .events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            [550, 551, 552],
+            "history events cannot coalesce"
+        );
+        for seq in 0..1024 {
+            hub.append(exchange(seq), 100, now).unwrap();
+        }
+        assert!(
+            matches!(
+                hub.project_after(0, &projection, 8, false, now),
+                Err(Reset::SlowConsumer)
+            ),
+            "overflow must reset instead of silently dropping history"
         );
     }
 }

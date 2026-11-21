@@ -32,9 +32,17 @@ pub(crate) type Body = UnsyncBoxBody<Bytes, Infallible>;
 pub(crate) struct Fence {
     live: Mutex<Option<Arc<Live>>>,
     headers_written: tokio::sync::Notify,
+    #[cfg(test)]
+    pub(crate) probe: Option<Arc<WireProbe>>,
 }
 
 impl Fence {
+    #[cfg(test)]
+    pub(crate) fn with_probe(mut self, probe: Option<Arc<WireProbe>>) -> Self {
+        self.probe = probe;
+        self
+    }
+
     pub(crate) async fn started(&self) {
         self.headers_written.notified().await;
     }
@@ -45,6 +53,30 @@ impl Fence {
             fence: self.clone(),
             header_suffix: 0,
             notified: false,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct WireProbe {
+    pub(crate) armed: std::sync::atomic::AtomicBool,
+    pub(crate) blocked: tokio::sync::Notify,
+    pub(crate) closed: tokio::sync::Notify,
+    pub(crate) closed_at: Mutex<Option<std::time::Instant>>,
+}
+
+#[cfg(test)]
+impl<S> Drop for Fenced<S> {
+    fn drop(&mut self) {
+        if let Some(probe) = self
+            .fence
+            .probe
+            .as_ref()
+            .filter(|probe| probe.armed.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            *probe.closed_at.lock().unwrap() = Some(std::time::Instant::now());
+            probe.closed.notify_one();
         }
     }
 }
@@ -102,6 +134,16 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Fenced<S> {
                         break;
                     }
                 }
+            }
+        }
+        #[cfg(test)]
+        if checked.is_pending() {
+            if let Some(probe) = owner
+                .probe
+                .as_ref()
+                .filter(|probe| probe.armed.load(std::sync::atomic::Ordering::SeqCst))
+            {
+                probe.blocked.notify_one();
             }
         }
         checked
@@ -216,6 +258,7 @@ async fn open(
         reset,
         needs_snapshot,
         opening: true,
+        pending: None,
         ended: false,
         changes: hub.watch(),
     };
@@ -270,6 +313,7 @@ struct Reader {
     reset: Option<Reset>,
     needs_snapshot: bool,
     opening: bool,
+    pending: Option<super::hub::Sequenced>,
     ended: bool,
     changes: tokio::sync::watch::Receiver<u64>,
 }
@@ -292,6 +336,7 @@ impl Reader {
                     Reset::CursorExpired => "cursor_expired",
                     Reset::EpochChanged => "epoch_changed",
                     Reset::ScopeChanged => "scope_changed",
+                    Reset::SlowConsumer => "slow_consumer",
                 };
                 let gap =
                     json!({"v":1,"type":"gap","reason":reason,"unknown_loss":true,"reset":true});
@@ -316,6 +361,7 @@ impl Reader {
                 self.reset = Some(Reset::ScopeChanged);
                 self.needs_snapshot = true;
                 self.replay_through = None;
+                self.pending = None;
                 continue;
             }
             if self.needs_snapshot {
@@ -344,10 +390,31 @@ impl Reader {
                 self.needs_snapshot = false;
                 return Some(result);
             }
-            match self.hub.after(self.seq, &projection, 1) {
-                Ok((events, through)) => {
-                    self.seq = through;
-                    if let Some(event) = events.first() {
+            let replaying = self
+                .replay_through
+                .is_some_and(|through| self.seq < through);
+            let mut event = self.pending.take();
+            match if event.is_some() {
+                Ok(None)
+            } else {
+                self.hub
+                    .after(self.seq, &projection, 1, replaying)
+                    .map(Some)
+            } {
+                Ok(batch) => {
+                    if let Some(batch) = batch {
+                        self.seq = batch.through;
+                        event = batch.events.into_iter().next();
+                        if batch.coalesced {
+                            self.pending = event;
+                            let gap = json!({"v":1,"type":"gap","reason":"coalesced","unknown_loss":false,"reset":false});
+                            return self
+                                .writer
+                                .handoff([], None, || frame("gap", None, &gap.to_string()))
+                                .ok();
+                        }
+                    }
+                    if let Some(event) = event.as_ref() {
                         let cursor = self.hub.cursor(event.seq, &self.partition).ok()?;
                         let mut body = json!({"v":1,"type":"event","seq":event.seq,"cursor":cursor,"at":event.at,"delta":event.delta});
                         if self.replay_through.is_some_and(|max| event.seq <= max) {

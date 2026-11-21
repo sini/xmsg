@@ -341,7 +341,14 @@ struct State {
     #[cfg(test)]
     suppress_push: bool,
     #[cfg(test)]
+    synthetic_records: HashSet<[u8; 32]>,
+    #[cfg(test)]
     last_revoke: Option<(i64, Instant)>,
+    #[cfg(test)]
+    last_handoff: Option<Instant>,
+    #[cfg(test)]
+    watchdog_tick: Arc<tokio::sync::Notify>,
+
     masked_nodes: HashSet<String>,
     live: HashMap<u64, Registration>,
     #[allow(dead_code, reason = "Mission Control transport registry")]
@@ -537,7 +544,14 @@ impl Authority {
                 #[cfg(test)]
                 suppress_push: false,
                 #[cfg(test)]
+                synthetic_records: HashSet::new(),
+                #[cfg(test)]
                 last_revoke: None,
+                #[cfg(test)]
+                last_handoff: None,
+                #[cfg(test)]
+                watchdog_tick: Arc::default(),
+
                 masked_nodes: HashSet::new(),
                 live: HashMap::new(),
                 next_live_id: 0,
@@ -847,10 +861,10 @@ impl Authority {
             .and_then(|id| state.records.get(id))
             .ok_or(AuthorityError::Denied)?;
         let mut record = entry.record.clone();
-        if !fresh(&record, at)
-            || !record.class.matches_carrier(carrier)
-            || record.class == Class::Delegated
-        {
+        let delegated_disabled = record.class == Class::Delegated;
+        #[cfg(test)]
+        let delegated_disabled = delegated_disabled && !state.synthetic_records.contains(&digest);
+        if !fresh(&record, at) || !record.class.matches_carrier(carrier) || delegated_disabled {
             return Err(AuthorityError::Denied);
         }
         if !entitled(&state.conn, owner_for(&record))? {
@@ -955,6 +969,18 @@ impl Authority {
     }
 
     #[cfg(test)]
+    pub(crate) fn allow_synthetic_for_test(&self, handle: &str) {
+        let digest = handle_digest(handle).unwrap();
+        let mut state = self.locked().unwrap();
+        assert!(state
+            .by_digest
+            .get(&digest)
+            .and_then(|id| state.records.get(id))
+            .is_some_and(|stored| stored.record.class == Class::Delegated));
+        state.synthetic_records.insert(digest);
+    }
+
+    #[cfg(test)]
     pub(crate) fn suppress_push_for_test(&self) {
         self.locked().unwrap().suppress_push = true;
     }
@@ -962,6 +988,16 @@ impl Authority {
     #[cfg(test)]
     pub(crate) fn last_revoke_for_test(&self) -> (i64, Instant) {
         self.locked().unwrap().last_revoke.unwrap()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_handoff_for_test(&self) -> Option<Instant> {
+        self.locked().unwrap().last_handoff
+    }
+
+    #[cfg(test)]
+    pub(crate) fn watchdog_tick_for_test(&self) -> Arc<tokio::sync::Notify> {
+        self.locked().unwrap().watchdog_tick.clone()
     }
 
     pub(crate) fn rebind(&self, owner: &str, issuer: &str, subject: &str) -> Result<()> {
@@ -1171,7 +1207,8 @@ impl Registration {
         self.sender.send_replace(Some(change));
         let socket = Arc::clone(&self.abort);
         let slo = change.cutoff - change.changed_at;
-        let abort_at = change.cutoff - (slo / 10).min(Duration::from_millis(25));
+        // Keep half the SLO for scheduling and socket wake-up, even after a missed push.
+        let abort_at = change.changed_at + slo / 2;
         self.runtime.spawn(async move {
             tokio::time::sleep_until(abort_at.into()).await;
             let _ = socket.shutdown(Shutdown::Both);
@@ -1295,6 +1332,8 @@ impl Authority {
                 return Ok(());
             };
             let mut state = authority.locked()?;
+            #[cfg(test)]
+            state.watchdog_tick.notify_one();
             let now = Instant::now();
             for registration in state.live.values_mut() {
                 if let Some(change) = registration.invalidation {
@@ -1353,6 +1392,8 @@ impl Live {
     ) -> Result<T> {
         let authority = self.authority.upgrade().ok_or(AuthorityError::Denied)?;
         let state = authority.locked()?;
+        #[cfg(test)]
+        let mut state = state;
         let reg = state.live.get(&self.id).ok_or(AuthorityError::Denied)?;
         if reg.invalidation.is_some()
             || reg.generation != state.generation
@@ -1367,6 +1408,10 @@ impl Live {
             || !current()
         {
             return Err(AuthorityError::Denied);
+        }
+        #[cfg(test)]
+        {
+            state.last_handoff = Some(Instant::now());
         }
         // Serialize the caller's nonblocking socket handoff with authority changes.
         Ok(handoff())

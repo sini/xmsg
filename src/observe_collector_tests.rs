@@ -65,12 +65,13 @@ impl Fixture {
         Self::with_validation(relay, true).await
     }
     async fn with_validation(relay: bool, validated: bool) -> Self {
-        Self::with_issuer(relay, validated, None).await
+        Self::with_issuer(relay, validated, None, None).await
     }
     async fn with_issuer(
         relay: bool,
         validated: bool,
         issuer: Option<Arc<crate::mission_control::Issuer>>,
+        wire_probe: Option<Arc<crate::mission_control::stream::WireProbe>>,
     ) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let files = tempfile::tempdir().unwrap();
@@ -195,6 +196,7 @@ impl Fixture {
             verifier: Some(Verifier::new(config.auth.clone().unwrap(), clock).unwrap()),
             issuer,
             read_hub,
+            wire_probe,
             store,
             store_slots: Arc::new(Semaphore::new(1)),
             requests: request_slots(),
@@ -763,6 +765,7 @@ fn scheduler_state(fixture: &Fixture, node: &str, store: Arc<Store>) -> Arc<Stat
         ),
         issuer: None,
         read_hub: None,
+        wire_probe: None,
         store,
         store_slots: Arc::new(Semaphore::new(1)),
         requests: request_slots(),
@@ -1476,6 +1479,7 @@ async fn a2_healthy_no_change_advances_last_success() {
         verifier: Some(Verifier::new(fixture.config.auth.clone().unwrap(), clock).unwrap()),
         issuer: None,
         read_hub: None,
+        wire_probe: None,
         store: store.clone(),
         store_slots: Arc::new(Semaphore::new(1)),
         requests: request_slots(),
@@ -1681,6 +1685,7 @@ async fn a5_restart_with_history_shows_hidden_and_none_since_start() {
         verifier: Some(Verifier::new(fixture.config.auth.clone().unwrap(), clock).unwrap()),
         issuer: None,
         read_hub: None,
+        wire_probe: None,
         store: reopened,
         store_slots: Arc::new(Semaphore::new(1)),
         requests: request_slots(),
@@ -1745,6 +1750,7 @@ async fn a6_monotonic_health_ignores_epoch_clock_shifts() {
         verifier: Some(Verifier::new(fixture.config.auth.clone().unwrap(), clock).unwrap()),
         issuer: None,
         read_hub: None,
+        wire_probe: None,
         store: store.clone(),
         store_slots: Arc::new(Semaphore::new(1)),
         requests: request_slots(),
@@ -1948,7 +1954,8 @@ async fn mission_control_three_transports_share_the_snapshot_and_cursor() {
     let directory = tempfile::tempdir().unwrap();
     let (issuer, issued) =
         crate::mission_control::tests::transport_fixture(&oidc, &directory).await;
-    let f = Fixture::with_issuer(false, true, Some(issuer.clone())).await;
+    let f = Fixture::with_issuer(false, true, Some(issuer.clone()), None).await;
+    f.state.read_hub.as_ref().unwrap().fill_snapshot_for_test();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
@@ -1962,7 +1969,18 @@ async fn mission_control_three_transports_share_the_snapshot_and_cursor() {
         .error_for_status()
         .unwrap();
     let etag = response.headers()[hyper::header::ETAG].clone();
-    let http: serde_json::Value = response.json().await.unwrap();
+    let raw = response.bytes().await.unwrap();
+    assert!(
+        raw.len() > 1024 * 1024,
+        "fixture must exceed the output queue"
+    );
+    let http: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(http["nodes"].as_array().unwrap().len(), 64);
+    assert!(http["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|node| node["endpoints"].as_array().unwrap().len() == 200));
     let mut req = format!(
         "{}/v1/mission-control/session",
         f.url.replacen("http://", "ws://", 1)
@@ -2010,10 +2028,20 @@ async fn mission_control_three_transports_share_the_snapshot_and_cursor() {
         .await
         .unwrap();
     assert_eq!(receive(&mut socket).await["type"], "subscribed");
-    let ws = receive(&mut socket).await;
-    assert_eq!(ws["type"], "snapshot");
-    assert_eq!(ws["cursor"], http["cursor"]);
-    assert_eq!(ws["nodes"], http["nodes"]);
+    let mut nodes = Vec::new();
+    let mut cursor = None;
+    for _ in 0..65 {
+        let ws = receive(&mut socket).await;
+        assert_eq!(ws["type"], "snapshot");
+        nodes.extend(ws["nodes"].as_array().unwrap().iter().cloned());
+        if ws["final"] == true {
+            assert_eq!(ws["truncated"], false);
+            cursor = ws["cursor"].as_str().map(str::to_owned);
+            break;
+        }
+    }
+    assert_eq!(cursor.as_deref(), http["cursor"].as_str());
+    assert_eq!(nodes, *http["nodes"].as_array().unwrap());
 
     let mut sse = client
         .get(format!("{}/v1/mission-control/stream/fleet", f.url))
@@ -2065,4 +2093,343 @@ async fn mission_control_three_transports_share_the_snapshot_and_cursor() {
         .await
         .unwrap();
     assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mission_control_blocked_writes_end_by_audited_cutoff() {
+    use futures_util::{SinkExt, StreamExt};
+    use std::io::Write as _;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+
+    let oidc =
+        crate::enroll_oidc::signed_fixture::Fixture::new_at(crate::storage::now_epoch_secs()).await;
+    for websocket in [true, false] {
+        let mut samples = Vec::with_capacity(20);
+        for _ in 0..20 {
+            let probe = Arc::new(crate::mission_control::stream::WireProbe::default());
+            let directory = tempfile::tempdir().unwrap();
+            let (issuer, issued) =
+                crate::mission_control::tests::transport_fixture(&oidc, &directory).await;
+            let f =
+                Fixture::with_issuer(false, true, Some(issuer.clone()), Some(probe.clone())).await;
+            let address = f.url.strip_prefix("http://").unwrap();
+            let tcp = tokio::net::TcpStream::connect(address).await.unwrap();
+            socket2::SockRef::from(&tcp)
+                .set_recv_buffer_size(4096)
+                .unwrap();
+            let mut keep_ws = None;
+            let mut keep_sse = None;
+            if websocket {
+                let mut req = format!("ws://{address}/v1/mission-control/session")
+                    .into_client_request()
+                    .unwrap();
+                req.headers_mut().insert(
+                    hyper::header::SEC_WEBSOCKET_PROTOCOL,
+                    "xmsg.mission-control.v1".parse().unwrap(),
+                );
+                req.headers_mut().insert(
+                    hyper::header::AUTHORIZATION,
+                    format!("Bearer {}", issued.handle).parse().unwrap(),
+                );
+                let (mut socket, response) = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    tokio_tungstenite::client_async(req, tcp),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+                socket
+                    .send(Message::Text(
+                        r#"{"v":1,"type":"hello","id":1,"protocol":1,"capabilities":["observe"]}"#
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(tokio::time::timeout(Duration::from_secs(5), socket.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()
+                    .to_text()
+                    .unwrap()
+                    .contains(r#""type":"hello""#));
+                socket.send(Message::Text(r#"{"v":1,"type":"subscribe","id":2,"sub":"fleet","scope":{"kind":"fleet"}}"#.into())).await.unwrap();
+                let mut subscribed = false;
+                loop {
+                    let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                    let body: serde_json::Value =
+                        serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                    if !subscribed {
+                        assert_eq!(body["type"], "subscribed");
+                        subscribed = true;
+                    } else {
+                        assert_eq!(body["type"], "snapshot");
+                        if body["final"] == true {
+                            break;
+                        }
+                    }
+                }
+                keep_ws = Some(socket);
+            } else {
+                let mut tcp = tcp;
+                tcp.write_all(format!("GET /v1/mission-control/stream/fleet HTTP/1.1\r\nHost: {address}\r\nAccept: text/event-stream\r\nAuthorization: Bearer {}\r\n\r\n", issued.handle).as_bytes()).await.unwrap();
+                let mut socket = BufReader::new(tcp);
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    let mut line = String::new();
+                    socket.read_line(&mut line).await.unwrap();
+                    assert!(line.starts_with("HTTP/1.1 200"));
+                    loop {
+                        line.clear();
+                        assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                        if line.starts_with("data: ") {
+                            let body: serde_json::Value =
+                                serde_json::from_str(line.trim_start_matches("data: ").trim_end())
+                                    .unwrap();
+                            assert_eq!(body["type"], "snapshot");
+                            break;
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+                keep_sse = Some(socket);
+            }
+            probe.armed.store(true, Ordering::SeqCst);
+            f.state
+                .read_hub
+                .as_ref()
+                .unwrap()
+                .force_backlog_for_test("fixture.node");
+            tokio::time::timeout(Duration::from_secs(5), probe.blocked.notified())
+                .await
+                .expect("real socket write must become pending");
+            let change = crate::mission_control::tests::suppress_and_revoke(
+                &issuer,
+                &directory,
+                &issued.record.record_id,
+            )
+            .await;
+            let cutoff = tokio::time::Instant::from_std(change + Duration::from_millis(1000));
+            tokio::time::timeout_at(cutoff, probe.closed.notified())
+                .await
+                .expect("blocked socket remained open past the recorded cutoff");
+            let closed = probe.closed_at.lock().unwrap().unwrap();
+            assert!(
+                crate::mission_control::tests::last_handoff(&issuer).unwrap() <= change,
+                "post-change payload admitted"
+            );
+            assert!(closed <= cutoff.into_std());
+            samples.push(closed.saturating_duration_since(change));
+            drop(keep_ws);
+            drop(keep_sse);
+        }
+        samples.sort_unstable();
+        let percentile =
+            |percent: usize| samples[(samples.len() * percent).div_ceil(100) - 1].as_millis();
+        writeln!(
+            std::io::stderr().lock(),
+            "SP5 {} blocked writes: runs=20 p50={}ms p95={}ms max={}ms (abort timer at T_change + SLO/2)",
+            if websocket { "WebSocket" } else { "SSE" },
+            percentile(50), percentile(95), percentile(100),
+        ).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn mission_control_upgrade_validates_carriers_and_version() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Error as WsError, Message};
+
+    let oidc =
+        crate::enroll_oidc::signed_fixture::Fixture::new_at(crate::storage::now_epoch_secs()).await;
+    let directory = tempfile::tempdir().unwrap();
+    let (issuer, machine) =
+        crate::mission_control::tests::transport_fixture(&oidc, &directory).await;
+    let (browser, native, delegated) =
+        crate::mission_control::tests::transport_owner_records(&issuer, &oidc.issuer());
+    let f = Fixture::with_issuer(false, true, Some(issuer.clone()), None).await;
+    let address = f.url.strip_prefix("http://").unwrap();
+    let request = |subprotocol: bool, target: &str| {
+        let mut req = format!("ws://{address}{target}")
+            .into_client_request()
+            .unwrap();
+        if subprotocol {
+            req.headers_mut().insert(
+                hyper::header::SEC_WEBSOCKET_PROTOCOL,
+                "xmsg.mission-control.v1".parse().unwrap(),
+            );
+        }
+        req
+    };
+    let with_origin = |headers: &mut hyper::HeaderMap, origin: &str| {
+        headers.insert(hyper::header::ORIGIN, origin.parse().unwrap());
+    };
+    let cookie = |handle: &str| format!("__Host-mc_session={handle}");
+    let session = "/v1/mission-control/session";
+    let cases = [
+        (
+            false,
+            session,
+            Some(machine.handle.as_str()),
+            None,
+            None,
+            400,
+        ),
+        (
+            true,
+            "/v1/mission-control/session?access_token=fixture",
+            None,
+            None,
+            None,
+            400,
+        ),
+        (true, session, None, None, None, 401),
+        (true, session, Some("invalid-handle"), None, None, 401),
+        (
+            true,
+            session,
+            Some(&machine.handle),
+            Some(browser.handle.as_str()),
+            Some("https://collector.example"),
+            401,
+        ),
+        (true, session, Some(&browser.handle), None, None, 401),
+        (
+            true,
+            session,
+            None,
+            Some(native.handle.as_str()),
+            Some("https://collector.example"),
+            401,
+        ),
+        (true, session, Some(&delegated.handle), None, None, 401),
+        (
+            true,
+            session,
+            Some(&native.handle),
+            None,
+            Some("https://collector.example"),
+            403,
+        ),
+        (
+            true,
+            session,
+            None,
+            Some(browser.handle.as_str()),
+            None,
+            403,
+        ),
+        (
+            true,
+            session,
+            None,
+            Some(browser.handle.as_str()),
+            Some("http://collector.example"),
+            403,
+        ),
+        (
+            true,
+            session,
+            None,
+            Some(browser.handle.as_str()),
+            Some("https://collector.example:444"),
+            403,
+        ),
+        (
+            true,
+            session,
+            None,
+            Some(browser.handle.as_str()),
+            Some("https://other.collector.example"),
+            403,
+        ),
+        (
+            true,
+            session,
+            None,
+            Some(browser.handle.as_str()),
+            Some("null"),
+            403,
+        ),
+    ];
+    for (protocol, target, bearer, browser_cookie, origin, expected) in cases {
+        let mut req = request(protocol, target);
+        if let Some(origin) = origin {
+            with_origin(req.headers_mut(), origin);
+        }
+        if let Some(bearer) = bearer {
+            req.headers_mut().insert(
+                hyper::header::AUTHORIZATION,
+                format!("Bearer {bearer}").parse().unwrap(),
+            );
+        }
+        if let Some(handle) = browser_cookie {
+            req.headers_mut()
+                .insert(hyper::header::COOKIE, cookie(handle).parse().unwrap());
+        }
+        let tcp = tokio::net::TcpStream::connect(address).await.unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio_tungstenite::client_async(req, tcp),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, Err(WsError::Http(response)) if response.status().as_u16() == expected),
+            "unexpected refusal status {expected}"
+        );
+    }
+
+    crate::mission_control::tests::synthetic_transport_record(&issuer, &delegated.handle);
+    for (credential, from_cookie, class) in [
+        (&browser, true, "browser"),
+        (&native, false, "native"),
+        (&machine, false, "machine"),
+        (&delegated, false, "delegated"),
+    ] {
+        let mut req = request(true, session);
+        if from_cookie {
+            with_origin(req.headers_mut(), "https://collector.example");
+            req.headers_mut().insert(
+                hyper::header::COOKIE,
+                cookie(&credential.handle).parse().unwrap(),
+            );
+        } else {
+            req.headers_mut().insert(
+                hyper::header::AUTHORIZATION,
+                format!("Bearer {}", credential.handle).parse().unwrap(),
+            );
+        }
+        let tcp = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (mut ws, response) = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio_tungstenite::client_async(req, tcp),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        ws.send(Message::Text(
+            r#"{"v":1,"type":"hello","protocol":1,"id":1,"capabilities":["observe","commands"]}"#
+                .into(),
+        ))
+        .await
+        .unwrap();
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+        assert_eq!(json["type"], "hello");
+        assert_eq!(json["actor"]["class"], class);
+        assert_eq!(json["actor"]["principal"], credential.record.principal);
+        assert_eq!(json["capabilities"], serde_json::json!(["observe"]));
+    }
 }
