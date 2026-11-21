@@ -810,10 +810,46 @@ mod tests {
             receive_query(&server, Instant::now() + Duration::from_secs(2)).is_err(),
             "wrong query marker accepted"
         );
-        assert_eq!(
-            peer.read(&mut [0]).unwrap(),
-            0,
+        assert!(
+            matches!(peer.read(&mut [0]), Ok(0)),
             "malformed query leaked received descriptor"
+        );
+    }
+    #[test]
+    fn attribution_cleanup_eof_waits_for_an_independent_transient_holder() {
+        use std::io::Read;
+        let (client, server) = UnixStream::pair().unwrap();
+        let (original, mut peer) = UnixStream::pair().unwrap();
+        let held = original.try_clone().unwrap();
+        let (release_rx, release_tx) = std::sync::mpsc::sync_channel::<()>(0);
+        let holder = std::thread::spawn(move || {
+            release_tx.recv().unwrap();
+            drop(held);
+        });
+        send(
+            &client,
+            &frame(0x11, &query()).unwrap(),
+            Some(original.as_fd()),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        drop(original);
+        let refused = receive_query(&server, Instant::now() + Duration::from_secs(2)).is_err();
+        peer.set_nonblocking(true).unwrap();
+        let postponed =
+            matches!(peer.read(&mut[0]),Err(error) if error.kind()==io::ErrorKind::WouldBlock);
+        release_rx.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(refused);
+        assert!(
+            postponed,
+            "independent holder must postpone EOF despite receiver cleanup"
+        );
+        peer.set_nonblocking(false).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        assert!(
+            matches!(peer.read(&mut [0]), Ok(0)),
+            "receiver cleanup leaked after independent holder was released"
         );
     }
     #[test]
@@ -889,14 +925,12 @@ mod tests {
             ),
             "multiple original descriptors accepted"
         );
-        assert_eq!(
-            first_peer.read(&mut [0]).unwrap(),
-            0,
+        assert!(
+            matches!(first_peer.read(&mut [0]), Ok(0)),
             "first excess descriptor leaked"
         );
-        assert_eq!(
-            second_peer.read(&mut [0]).unwrap(),
-            0,
+        assert!(
+            matches!(second_peer.read(&mut [0]), Ok(0)),
             "second excess descriptor leaked"
         );
     }
@@ -926,9 +960,8 @@ mod tests {
             "truncated rights accepted"
         );
         for peer in [&mut ap, &mut bp, &mut cp] {
-            assert_eq!(
-                peer.read(&mut [0]).unwrap(),
-                0,
+            assert!(
+                matches!(peer.read(&mut [0]), Ok(0)),
                 "truncated rights leaked descriptor"
             );
         }

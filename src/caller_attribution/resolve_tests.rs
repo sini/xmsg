@@ -327,6 +327,39 @@ fn strict_reader_locked_store_honors_absolute_deadline() {
 }
 
 #[test]
+fn strict_reader_late_store_release_cannot_publish_stale_authority() {
+    let f = fixture();
+    file(&f, 100, "30", FIRST);
+    let held = f.state.agy_store.write().unwrap();
+    let deadline = Instant::now() + Duration::from_millis(30);
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+    let answer = std::thread::scope(|scope| {
+        let state = &f.state;
+        let worker = scope.spawn(move || {
+            started_tx.send(()).unwrap();
+            resolve(
+                state,
+                &PeerCred::unpinned(unsafe { libc::geteuid() }, 100),
+                &PeerCred::unpinned(unsafe { libc::geteuid() }, 900),
+                None,
+                deadline,
+            )
+        });
+        started_rx.recv().unwrap();
+        while Instant::now() <= deadline {
+            std::thread::yield_now();
+        }
+        drop(held);
+        worker.join().unwrap()
+    });
+    assert!(
+        answer.is_err(),
+        "late authority-store completion published a stale principal"
+    );
+    assert_eq!(answer.err(), Some(FailureReason::Deadline));
+}
+
+#[test]
 fn strict_reader_claim_suffix_change_invalidates_selected_binding() {
     let f = fixture();
     file(&f, 100, "30", FIRST);

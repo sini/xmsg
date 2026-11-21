@@ -27,12 +27,6 @@ fn strict_original_metadata_retains_nondefault_timeouts_flags_and_bytes() {
         Path::new(crate::process::LIVE_PROC_ROOT),
     )
     .unwrap();
-    crate::process::strict_revalidate(
-        &witness,
-        original.as_fd(),
-        Path::new(crate::process::LIVE_PROC_ROOT),
-    )
-    .unwrap();
     assert_eq!(
         original.read_timeout().unwrap(),
         read,
@@ -69,6 +63,12 @@ fn strict_original_metadata_retains_nondefault_timeouts_flags_and_bytes() {
         &back, b"still-live",
         "metadata query shut down original transport"
     );
+    crate::process::strict_revalidate(
+        &witness,
+        original.as_fd(),
+        Path::new(crate::process::LIVE_PROC_ROOT),
+    )
+    .unwrap();
 }
 
 #[cfg(target_os = "linux")]
