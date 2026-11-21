@@ -3379,6 +3379,10 @@ fn readonly_rollout(
             if actual_parent != parent
                 || parent.is_none()
                     && payload
+                        .get("parent_thread_id")
+                        .is_some_and(|value| !value.is_null())
+                || parent.is_none()
+                    && payload
                         .get("source")
                         .and_then(|s| s.get("subagent"))
                         .is_some()
@@ -3400,4 +3404,252 @@ fn readonly_rollout(
         }
     }
     matches.pop().ok_or(FailureReason::Context)
+}
+
+#[cfg(test)]
+mod readonly_attribution_tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, OpenOptionsExt};
+    const A: &str = "11111111-1111-4111-8111-111111111111";
+    const B: &str = "22222222-2222-4222-8222-222222222222";
+    const CHILD: &str = "33333333-3333-4333-8333-333333333333";
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        home: PathBuf,
+        config: CodexConfig,
+        store: CodexStore,
+        locks: Vec<std::fs::File>,
+    }
+    fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("codex");
+        std::fs::create_dir_all(home.join("sessions")).unwrap();
+        std::fs::create_dir_all(home.join("thread-writer-locks")).unwrap();
+        let home = home.canonicalize().unwrap();
+        let proc_root = dir.path().join("proc");
+        std::fs::create_dir_all(proc_root.join("100/fd")).unwrap();
+        std::fs::create_dir_all(proc_root.join("100/fdinfo")).unwrap();
+        let mut fields = vec!["0"; 20];
+        fields[0] = "S";
+        fields[19] = "42";
+        std::fs::write(
+            proc_root.join("100/stat"),
+            format!("100 (fixture) {}\n", fields.join(" ")),
+        )
+        .unwrap();
+        let config = CodexConfig {
+            proc_root,
+            codex_homes: vec![home.clone()],
+            ..Default::default()
+        };
+        Fixture {
+            _dir: dir,
+            home,
+            config,
+            store: CodexStore::default(),
+            locks: Vec::new(),
+        }
+    }
+    fn rollout(f: &Fixture, id: &str, root: &str, parent: Option<&str>) -> (u64, u64) {
+        let file_path = f.home.join("sessions").join(format!("rollout-{id}.jsonl"));
+        std::fs::write(&file_path,format!("{}\n",serde_json::json!({"type":"session_meta","payload":{"id":id,"session_id":root,"parent_thread_id":parent}}))).unwrap();
+        let meta = std::fs::metadata(file_path).unwrap();
+        (meta.dev(), meta.ino())
+    }
+    fn root(f: &mut Fixture, id: &str, generation: u64) {
+        let lock_path = f
+            .home
+            .join("thread-writer-locks")
+            .join(format!("{id}.lock"));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&lock_path)
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let meta = file.metadata().unwrap();
+        let number = f.locks.len() + 4;
+        symlink(
+            &lock_path,
+            f.config.proc_root.join(format!("100/fd/{number}")),
+        )
+        .unwrap();
+        std::fs::write(
+            f.config.proc_root.join(format!("100/fdinfo/{number}")),
+            format!(
+                "lock: 1: FLOCK ADVISORY WRITE 100 {:02x}:{:02x}:{} 0 EOF\n",
+                crate::agy::dev_major(meta.dev()),
+                crate::agy::dev_minor(meta.dev()),
+                meta.ino()
+            ),
+        )
+        .unwrap();
+        let (dev, ino) = rollout(f, id, id, None);
+        let watch = LockLeaseWatch::install(&f.home, id).unwrap();
+        f.store.roots.insert(
+            id.into(),
+            CodexRootEntry {
+                root_id: id.into(),
+                codex_home: f.home.clone(),
+                owner_pid: 100,
+                owner_starttime: "42".into(),
+                generation,
+                label: "fixture".into(),
+                cwd: None,
+                registered_at: 1,
+                rollout_dev: dev,
+                rollout_ino: ino,
+                watch,
+            },
+        );
+        f.locks.push(file);
+    }
+    fn deadline() -> std::time::Instant {
+        std::time::Instant::now() + std::time::Duration::from_secs(2)
+    }
+    #[test]
+    fn readonly_held_sibling_roots_do_not_require_single_root_owner() {
+        let mut f = fixture();
+        root(&mut f, A, 1);
+        root(&mut f, B, 2);
+        let before = (
+            f.store.roots.len(),
+            f.store.children.len(),
+            f.store.candidates.len(),
+            f.store.stale_roots.len(),
+        );
+        let first = f
+            .store
+            .readonly_attribution_binding(&f.config, 100, "42", A, A, None, deadline())
+            .unwrap();
+        let second = f
+            .store
+            .readonly_attribution_binding(&f.config, 100, "42", B, B, None, deadline())
+            .unwrap();
+        assert_eq!(first.principal_id, A);
+        assert_eq!(second.principal_id, B);
+        assert_eq!(second.root_generation, 2);
+        assert_eq!(
+            (
+                f.store.roots.len(),
+                f.store.children.len(),
+                f.store.candidates.len(),
+                f.store.stale_roots.len()
+            ),
+            before,
+            "readonly snapshot mutated Codex authority"
+        );
+    }
+    #[test]
+    fn readonly_codex_wrong_owner_and_unheld_root_refuse() {
+        let mut f = fixture();
+        root(&mut f, A, 1);
+        assert_eq!(
+            f.store
+                .readonly_attribution_binding(&f.config, 101, "42", A, A, None, deadline())
+                .err(),
+            Some(crate::client::caller_attribution::FailureReason::Context)
+        );
+        assert_eq!(
+            f.store
+                .readonly_attribution_binding(&f.config, 100, "42", B, B, None, deadline())
+                .err(),
+            Some(crate::client::caller_attribution::FailureReason::Context)
+        );
+    }
+    #[test]
+    fn readonly_existing_child_checks_owner_generation_and_turn_without_repair() {
+        let mut f = fixture();
+        root(&mut f, A, 1);
+        let (dev, ino) = rollout(&f, CHILD, A, Some(A));
+        let state = CodexChildState {
+            root_id: A.into(),
+            child_id: CHILD.into(),
+            root_generation: 1,
+            owner_pid: 100,
+            owner_starttime: "42".into(),
+            agent_type: None,
+            rollout_dev: dev,
+            rollout_ino: ino,
+            active_turns: HashSet::from(["turn-a".into()]),
+            stopped_turns: HashSet::new(),
+            stopped_all: false,
+        };
+        f.store.children.insert((A.into(), CHILD.into()), state);
+        let snapshot = f
+            .store
+            .readonly_attribution_binding(
+                &f.config,
+                100,
+                "42",
+                A,
+                CHILD,
+                Some("turn-a"),
+                deadline(),
+            )
+            .unwrap();
+        assert_eq!(snapshot.principal_id, format!("{A}/{CHILD}"));
+        assert_eq!(snapshot.child_generation, Some(1));
+        let child = f.store.children.get_mut(&(A.into(), CHILD.into())).unwrap();
+        child.root_generation = 2;
+        assert_eq!(
+            f.store
+                .readonly_attribution_binding(
+                    &f.config,
+                    100,
+                    "42",
+                    A,
+                    CHILD,
+                    Some("turn-a"),
+                    deadline()
+                )
+                .err(),
+            Some(crate::client::caller_attribution::FailureReason::Context)
+        );
+        f.store
+            .children
+            .get_mut(&(A.into(), CHILD.into()))
+            .unwrap()
+            .root_generation = 1;
+        assert_eq!(
+            f.store
+                .readonly_attribution_binding(
+                    &f.config,
+                    100,
+                    "42",
+                    A,
+                    CHILD,
+                    Some("turn-b"),
+                    deadline()
+                )
+                .err(),
+            Some(crate::client::caller_attribution::FailureReason::Context)
+        );
+        assert_eq!(
+            f.store
+                .children
+                .get(&(A.into(), CHILD.into()))
+                .unwrap()
+                .active_turns,
+            HashSet::from(["turn-a".into()])
+        );
+    }
+    #[test]
+    fn readonly_root_rollout_nonstring_parent_is_not_root_scope() {
+        let mut f = fixture();
+        root(&mut f, A, 1);
+        let file_path = f.home.join("sessions").join(format!("rollout-{A}.jsonl"));
+        std::fs::write(file_path,format!("{}\n",serde_json::json!({"type":"session_meta","payload":{"id":A,"session_id":A,"parent_thread_id":true}}))).unwrap();
+        assert_eq!(
+            f.store
+                .readonly_attribution_binding(&f.config, 100, "42", A, A, None, deadline())
+                .err(),
+            Some(crate::client::caller_attribution::FailureReason::Context)
+        );
+    }
 }
