@@ -432,7 +432,7 @@ impl Reader {
                 .symmetric_difference(&masked)
                 .any(|node| projection.node_allowed(node));
             self.masked.clone_from(&masked);
-            if changed {
+            if changed && !self.needs_snapshot {
                 self.reset = Some(Reset::ScopeChanged);
                 self.needs_snapshot = true;
                 self.replay_through = None;
@@ -461,12 +461,17 @@ impl Reader {
                     .filter(|item| item.endpoint.is_some())
                     .map(|item| item.node.as_str());
                 let body = std::str::from_utf8(&body).ok()?;
-                let result = self
-                    .writer
-                    .handoff(nodes.chain(attention), None, || {
-                        frame("snapshot", Some(&cursor), body)
-                    })
-                    .ok()?;
+                let result = match self.writer.handoff(nodes.chain(attention), None, || {
+                    frame("snapshot", Some(&cursor), body)
+                }) {
+                    Ok(result) => result,
+                    Err(_) if self.writer.still_live() => {
+                        // Reproject the pending snapshot under the latest mask.
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    Err(_) => return None,
+                };
                 self.seq = snapshot.watermark;
                 self.needs_snapshot = false;
                 return Some(result);
