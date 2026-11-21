@@ -325,3 +325,68 @@ fn strict_reader_locked_store_honors_absolute_deadline() {
     );
     assert_eq!(answer.err(), Some(FailureReason::Deadline));
 }
+
+#[test]
+fn strict_reader_claim_suffix_change_invalidates_selected_binding() {
+    let f = fixture();
+    file(&f, 100, "30", FIRST);
+    f.state
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO instance_claims VALUES(?1,100,'30',1,0,42)",
+            [FIRST],
+        )
+        .unwrap();
+    let db = f.state.db.clone();
+    REVALIDATION_BARRIER.with(|cell| {
+        *cell.borrow_mut() = Some(Box::new(move || {
+            db.lock()
+                .unwrap()
+                .execute("UPDATE instance_claims SET suffix=2 WHERE id=?1", [FIRST])
+                .unwrap();
+        }))
+    });
+    let reply = query(&f, 100, 900);
+    assert!(
+        reply.is_err(),
+        "changed claim suffix constructed the old principal"
+    );
+    assert_eq!(reply.err(), Some(FailureReason::Changed));
+}
+#[test]
+fn strict_reader_registry_duplicate_binding_is_ambiguous_not_first_match() {
+    let f = fixture();
+    file(&f, 100, "30", FIRST);
+    let entry = std::fs::read(f.state.sessions_dirs[0].join("100.json")).unwrap();
+    std::fs::write(f.state.sessions_dirs[0].join("duplicate.json"), entry).unwrap();
+    assert_eq!(
+        query(&f, 100, 900).err(),
+        Some(FailureReason::Ambiguous),
+        "duplicate session binding selected first source"
+    );
+}
+#[test]
+fn strict_reader_missing_session_directory_is_not_empty_authority() {
+    let f = fixture();
+    std::fs::remove_dir(&f.state.sessions_dirs[0]).unwrap();
+    assert_eq!(
+        query(&f, 100, 900).err(),
+        Some(FailureReason::AuthorityUnavailable)
+    );
+}
+#[test]
+fn strict_reader_session_symlink_is_not_read_as_authority() {
+    use std::os::unix::fs::symlink;
+    let f = fixture();
+    file(&f, 100, "30", FIRST);
+    let entry = f.state.sessions_dirs[0].join("100.json");
+    let external = f._dir.path().join("outside.json");
+    std::fs::rename(&entry, &external).unwrap();
+    symlink(external, entry).unwrap();
+    assert_eq!(
+        query(&f, 100, 900).err(),
+        Some(FailureReason::AuthorityUnavailable)
+    );
+}
