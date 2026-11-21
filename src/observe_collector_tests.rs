@@ -2979,6 +2979,8 @@ async fn mission_control_independent_wire_client_exercises_read_vectors() {
 
 #[tokio::test]
 async fn mission_control_buffered_mask_resets_without_leaking_or_closing() {
+    use tokio::io::AsyncBufReadExt;
+
     let oidc =
         crate::enroll_oidc::signed_fixture::Fixture::new_at(crate::storage::now_epoch_secs()).await;
     let directory = tempfile::tempdir().unwrap();
@@ -3012,6 +3014,12 @@ async fn mission_control_buffered_mask_resets_without_leaking_or_closing() {
     hub.mask_poll("fixture.node", true, crate::storage::now_epoch_secs())
         .unwrap();
     gate.release.notify_one();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), socket.io.fill_buf())
+            .await
+            .is_ok_and(|result| result.is_ok_and(|bytes| !bytes.is_empty())),
+        "SP6 queued-mask transition closed the established WebSocket before a scope reset"
+    );
     let gap = socket.json().await;
     assert_eq!(gap["type"], "gap");
     assert_eq!(gap["reason"], "scope_changed");
