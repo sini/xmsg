@@ -103,6 +103,21 @@ pub(crate) fn transport_owner_records(
     (browser, native, delegated)
 }
 
+pub(crate) fn scoped_transport_machine(issuer: &Issuer, owner: &str) -> authority::Issued {
+    issuer
+        .authority
+        .mint_machine(
+            owner,
+            "fixture-scope",
+            vec![authority::Scope::Node {
+                node: "fixture.node".into(),
+            }],
+            None,
+            3,
+        )
+        .unwrap()
+}
+
 pub(crate) fn synthetic_transport_record(issuer: &Issuer, handle: &str) {
     issuer.authority.allow_synthetic_for_test(handle);
 }

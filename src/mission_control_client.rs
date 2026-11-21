@@ -557,9 +557,18 @@ pub async fn run(args: Args) -> Result<(), Error> {
     let mut immediate = true;
     loop {
         let started = Instant::now();
-        let result = tokio::select! {
-            result = connect(&args.origin, &handle, &mut view) => result?,
+        let outcome = tokio::select! {
+            result = connect(&args.origin, &handle, &mut view) => result,
             _ = tokio::signal::ctrl_c() => return Ok(()),
+        };
+        let result = match outcome {
+            Err(Error::Reauthenticate) => {
+                view = View::default();
+                view.render(&mut io::stdout().lock())
+                    .map_err(|_| Error::Output)?;
+                return Err(Error::Reauthenticate);
+            }
+            other => other?,
         };
         view.open = false;
         view.parts.clear();
@@ -621,6 +630,30 @@ mod tests {
             Connection::Reconnecting
         );
         assert_eq!(view.state(now + Duration::from_secs(56)), Connection::Stale);
+        let mut view = View {
+            open: true,
+            ..View::default()
+        };
+        assert_eq!(view.state(now), Connection::Unknown);
+        let snapshot = codec::decode(
+            include_bytes!("../tests/vectors/mission-control/v1/V-P1.json"),
+            262_144,
+        )
+        .unwrap();
+        view.apply(snapshot, now).unwrap();
+        assert_eq!(view.state(now), Connection::Delayed);
+        view.apply(
+            Message::Gap {
+                v: 1,
+                sub: None,
+                reason: codec::GapReason::CursorExpired,
+                unknown_loss: true,
+                reset: true,
+            },
+            now,
+        )
+        .unwrap();
+        assert_eq!(view.state(now), Connection::Unknown);
         for status in [302, 401, 403] {
             let response = http::Response::builder().status(status).body(None).unwrap();
             assert!(terminal_handshake_error(&WebSocketError::Http(Box::new(

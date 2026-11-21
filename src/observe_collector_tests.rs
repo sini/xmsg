@@ -2081,10 +2081,22 @@ async fn mission_control_three_transports_share_the_snapshot_and_cursor() {
     let ended = tokio::time::timeout_at(expires, sse.chunk())
         .await
         .expect("revoked SSE missed cutoff");
-    assert!(
-        matches!(ended, Ok(None) | Err(_)),
-        "revoked SSE received data"
-    );
+    let Some(terminal) = ended.unwrap() else {
+        panic!("idle SSE omitted revocation error");
+    };
+    let terminal = std::str::from_utf8(&terminal).unwrap();
+    assert!(terminal.starts_with("event: error\n"));
+    let data = terminal
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(data).unwrap();
+    assert_eq!(value["code"], "revoked");
+    assert!(tokio::time::timeout_at(expires, sse.chunk())
+        .await
+        .unwrap()
+        .unwrap()
+        .is_none());
     let revoked = client
         .get(format!("{}/v1/mission-control/snapshot/fleet", f.url))
         .header(hyper::header::IF_NONE_MATCH, etag)
@@ -2431,5 +2443,365 @@ async fn mission_control_upgrade_validates_carriers_and_version() {
         assert_eq!(json["actor"]["class"], class);
         assert_eq!(json["actor"]["principal"], credential.record.principal);
         assert_eq!(json["capabilities"], serde_json::json!(["observe"]));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let snapshot = format!("{}/v1/mission-control/snapshot/fleet", f.url);
+    for (origin, site, expect) in [
+        (Some("https://collector.example"), None, 200),
+        (None, Some("same-origin"), 200),
+        (None, Some("cross-site"), 403),
+        (None, Some("same-site"), 403),
+        (None, None, 403),
+        (
+            Some("https://other.collector.example"),
+            Some("same-origin"),
+            403,
+        ),
+    ] {
+        let mut req = client
+            .get(&snapshot)
+            .header(hyper::header::COOKIE, cookie(&browser.handle));
+        if let Some(origin) = origin {
+            req = req.header(hyper::header::ORIGIN, origin);
+        }
+        if let Some(site) = site {
+            req = req.header("sec-fetch-site", site);
+        }
+        let response = req.send().await.unwrap();
+        assert_eq!(response.status().as_u16(), expect);
+        assert_eq!(response.headers()[hyper::header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response.headers()[hyper::header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff"
+        );
+        assert!(!response
+            .headers()
+            .contains_key(hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN));
+    }
+    let duplicated = client
+        .head(&snapshot)
+        .header(hyper::header::COOKIE, cookie(&browser.handle))
+        .header("sec-fetch-site", "same-origin")
+        .header("sec-fetch-site", "same-origin")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(duplicated.status(), StatusCode::FORBIDDEN);
+    let invalid = client
+        .get(format!("{snapshot}?x=1"))
+        .bearer_auth(&machine.handle)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        invalid.json::<serde_json::Value>().await.unwrap()["code"],
+        "bad_message"
+    );
+    let refused = client.get(&snapshot).send().await.unwrap();
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        refused.json::<serde_json::Value>().await.unwrap()["code"],
+        "unauthenticated"
+    );
+    let cookie_stream = client
+        .get(format!("{}/v1/mission-control/stream/fleet", f.url))
+        .header(hyper::header::COOKIE, cookie(&browser.handle))
+        .header(hyper::header::ORIGIN, "https://collector.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cookie_stream.status(), StatusCode::UNAUTHORIZED);
+    for route in ["commands/prepare", "commands/commit"] {
+        let response = client
+            .post(format!("{}/v1/mission-control/{route}", f.url))
+            .bearer_auth(&machine.handle)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    let receipt = client
+        .get(format!("{}/v1/receipts/fixture", f.url))
+        .bearer_auth(&machine.handle)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(receipt.status(), StatusCode::NOT_FOUND);
+
+    f.state.read_hub.as_ref().unwrap().fill_snapshot_for_test();
+    let narrow =
+        crate::mission_control::tests::scoped_transport_machine(&issuer, &browser.record.principal);
+    let mut denied = Vec::new();
+    for node in ["node-01", "missing"] {
+        let response = client
+            .get(format!("{}/v1/mission-control/snapshot/node/{node}", f.url))
+            .bearer_auth(&narrow.handle)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        denied.push(response.bytes().await.unwrap());
+    }
+    assert_eq!(denied[0], denied[1]);
+    let fleet = client
+        .get(&snapshot)
+        .bearer_auth(&narrow.handle)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(fleet.status(), StatusCode::OK);
+    let fleet: serde_json::Value = fleet.json().await.unwrap();
+    assert_eq!(fleet["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(fleet["nodes"][0]["node"], "fixture.node");
+    let over_budget = client
+        .get(&snapshot)
+        .bearer_auth(&narrow.handle)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(over_budget.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(over_budget
+        .headers()
+        .contains_key(hyper::header::RETRY_AFTER));
+}
+
+struct VectorSocket {
+    io: tokio::io::BufReader<tokio::net::TcpStream>,
+}
+
+impl VectorSocket {
+    async fn open(fixture: &Fixture, handle: &str) -> Self {
+        use tokio::io::AsyncBufReadExt;
+        let address = fixture.url.strip_prefix("http://").unwrap();
+        let mut io = tokio::net::TcpStream::connect(address).await.unwrap();
+        io.write_all(format!(
+            "GET /v1/mission-control/session HTTP/1.1\r\nHost: {address}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: xmsg.mission-control.v1\r\nSec-WebSocket-Extensions: permessage-deflate\r\nAuthorization: Bearer {handle}\r\n\r\n",
+        ).as_bytes()).await.unwrap();
+        let mut io = tokio::io::BufReader::new(io);
+        let mut status = String::new();
+        io.read_line(&mut status).await.unwrap();
+        assert!(
+            status.starts_with("HTTP/1.1 101"),
+            "independent upgrade refused"
+        );
+        let mut selected = false;
+        loop {
+            let mut header = String::new();
+            assert!(io.read_line(&mut header).await.unwrap() > 0);
+            if header == "\r\n" {
+                break;
+            }
+            let header = header.to_ascii_lowercase();
+            assert!(!header.starts_with("sec-websocket-extensions:"));
+            selected |= header == "sec-websocket-protocol: xmsg.mission-control.v1\r\n";
+        }
+        assert!(selected, "subprotocol was not selected");
+        Self { io }
+    }
+
+    async fn send(&mut self, opcode: u8, payload: &[u8], masked: bool) {
+        let mut wire = vec![0x80 | opcode];
+        let mask_bit = if masked { 0x80 } else { 0 };
+        if payload.len() < 126 {
+            wire.push(mask_bit | payload.len() as u8);
+        } else {
+            wire.push(mask_bit | 126);
+            wire.extend_from_slice(&(u16::try_from(payload.len()).unwrap()).to_be_bytes());
+        }
+        if masked {
+            let mask = [0x61, 0x62, 0x63, 0x64];
+            wire.extend_from_slice(&mask);
+            wire.extend(
+                payload
+                    .iter()
+                    .enumerate()
+                    .map(|(index, byte)| byte ^ mask[index % 4]),
+            );
+        } else {
+            wire.extend_from_slice(payload);
+        }
+        self.io.get_mut().write_all(&wire).await.unwrap();
+    }
+
+    async fn frame(&mut self) -> (u8, Vec<u8>) {
+        tokio::time::timeout(Duration::from_secs(6), async {
+            let first = self.io.read_u8().await.unwrap();
+            let second = self.io.read_u8().await.unwrap();
+            assert_eq!(second & 0x80, 0);
+            let length = match second & 0x7f {
+                126 => self.io.read_u16().await.unwrap() as usize,
+                127 => usize::try_from(self.io.read_u64().await.unwrap()).unwrap(),
+                length => length as usize,
+            };
+            assert!(length <= 262_144);
+            let mut bytes = vec![0; length];
+            self.io.read_exact(&mut bytes).await.unwrap();
+            (first & 0xf, bytes)
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn json(&mut self) -> serde_json::Value {
+        let (opcode, bytes) = self.frame().await;
+        assert_eq!(opcode, 1);
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn close_code(&mut self) -> u16 {
+        let (opcode, bytes) = self.frame().await;
+        assert_eq!(opcode, 8);
+        u16::from_be_bytes(bytes[..2].try_into().unwrap())
+    }
+
+    async fn hello(&mut self) {
+        self.send(
+            1,
+            include_bytes!("../tests/vectors/mission-control/v1/V-H1.json"),
+            true,
+        )
+        .await;
+        assert_eq!(self.json().await["type"], "hello");
+    }
+}
+
+#[tokio::test]
+async fn mission_control_independent_wire_client_exercises_read_vectors() {
+    let oidc =
+        crate::enroll_oidc::signed_fixture::Fixture::new_at(crate::storage::now_epoch_secs()).await;
+    let directory = tempfile::tempdir().unwrap();
+    let (issuer, issued) =
+        crate::mission_control::tests::transport_fixture(&oidc, &directory).await;
+    let f = Fixture::with_issuer(false, true, Some(issuer), None).await;
+
+    let mut socket = VectorSocket::open(&f, &issued.handle).await;
+    socket
+        .send(
+            1,
+            include_bytes!("../tests/vectors/mission-control/v1/V-I2.json"),
+            true,
+        )
+        .await;
+    assert_eq!(socket.json().await["code"], "version_mismatch");
+    assert_eq!(socket.close_code().await, 4409);
+
+    let mut socket = VectorSocket::open(&f, &issued.handle).await;
+    socket
+        .send(
+            1,
+            include_bytes!("../tests/vectors/mission-control/v1/V-S1.json"),
+            true,
+        )
+        .await;
+    assert_eq!(socket.json().await["code"], "bad_message");
+    assert_eq!(socket.close_code().await, 4400);
+
+    let mut socket = VectorSocket::open(&f, &issued.handle).await;
+    socket.hello().await;
+    for (vector, code) in [
+        ("V-I3", "bad_message"),
+        ("V-I4", "bad_message"),
+        ("V-I5", "bad_message"),
+        ("V-I6", "not_found_or_denied"),
+        ("V-I7", "bad_message"),
+        ("V-I8", "bad_message"),
+        ("V-I10", "unsupported_type"),
+        ("V-I11", "unsupported"),
+        ("V-I25", "bad_message"),
+        ("V-I26", "bad_message"),
+    ] {
+        let bytes = std::fs::read(format!(
+            "{}/tests/vectors/mission-control/v1/{vector}.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        socket.send(1, &bytes, true).await;
+        assert_eq!(socket.json().await["code"], code, "{vector}");
+    }
+
+    socket
+        .send(
+            1,
+            include_bytes!("../tests/vectors/mission-control/v1/V-S1.json"),
+            true,
+        )
+        .await;
+    assert_eq!(socket.json().await["type"], "subscribed");
+    let cursor = loop {
+        let value = socket.json().await;
+        assert_eq!(value["type"], "snapshot");
+        if value["final"] == true {
+            break value["cursor"].as_str().unwrap().to_owned();
+        }
+    };
+    assert!(!cursor.is_empty());
+    let source_event = f
+        .state
+        .read_hub
+        .as_ref()
+        .unwrap()
+        .witness_activity_for_test("fixture.node");
+    let observed = socket.json().await;
+    assert_eq!(observed["type"], "event");
+    assert!(observed.get("replayed").is_none());
+    assert_eq!(
+        observed["delta"]["event"],
+        serde_json::to_value(source_event).unwrap()
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let mut sse = client
+        .get(format!("{}/v1/mission-control/stream/fleet", f.url))
+        .header("last-event-id", &cursor)
+        .bearer_auth(&issued.handle)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let mut bytes = Vec::new();
+    let replayed = loop {
+        bytes.extend(sse.chunk().await.unwrap().unwrap());
+        let text = std::str::from_utf8(&bytes).unwrap();
+        if let Some((_, tail)) = text.split_once("data: ") {
+            if let Some((data, _)) = tail.split_once("\n\n") {
+                break serde_json::from_str::<serde_json::Value>(data).unwrap();
+            }
+        }
+    };
+    assert_eq!(replayed["type"], "event");
+    assert_eq!(replayed["replayed"], true);
+    assert_eq!(replayed["delta"], observed["delta"]);
+    assert_eq!(replayed["cursor"], observed["cursor"]);
+    drop(sse);
+
+    socket
+        .send(
+            1,
+            br#"{"v":1,"type":"unsubscribe","id":9,"sub":"fleet"}"#,
+            true,
+        )
+        .await;
+    assert_eq!(socket.json().await["type"], "unsubscribed");
+    let replay = json!({"v":1,"type":"subscribe","id":10,"sub":"fleet","scope":{"kind":"fleet"},"cursor":cursor});
+    socket.send(1, replay.to_string().as_bytes(), true).await;
+    assert_eq!(socket.json().await["mode"], "resume");
+
+    for (opcode, length, masked, code) in [
+        (2, 1, true, 1003),
+        (1, 1, false, 1002),
+        (1, 16_385, true, 1009),
+    ] {
+        let mut socket = VectorSocket::open(&f, &issued.handle).await;
+        socket.hello().await;
+        socket.send(opcode, &vec![b'x'; length], masked).await;
+        assert_eq!(socket.close_code().await, code);
     }
 }
