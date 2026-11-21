@@ -1,0 +1,590 @@
+use crate::install_paths::{
+    canonicalize_best_effort, check_legacy_components, resolve_install, resolve_optional_home,
+    validate_private_dir, validate_socket_path, LegacyConflict, LegacyInventory, Platform,
+    ResolveEnv, ResolveRequest, ResolvedInstall,
+};
+use crate::runtime_lock::{verify_runtime_dir_readonly, OwnerRecord};
+use serde::Serialize;
+use std::fs;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceOwner {
+    HomebrewLaunchagent,
+    SystemdUser,
+    Foreground,
+    Stopped,
+    Unmanaged,
+    Ambiguous,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ManagerEntry {
+    pub kind: String,
+    pub id: String,
+    pub restarts: bool,
+    pub targets_same_install: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallCheck {
+    pub id: String,
+    pub status: &'static str, // "info" | "pass" | "warn" | "fail"
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallDoctorReport {
+    pub platform: Platform,
+    pub target: String,
+    pub executable_revision: &'static str,
+    pub http_socket: Option<String>,
+    pub agent_socket: Option<String>,
+    pub register_socket: Option<String>,
+    pub leaf_register_socket: Option<String>,
+    pub endpoints_usable: bool,
+    pub profile_state_root: Option<String>,
+    pub profile_config_root: Option<String>,
+    pub service_owner: ServiceOwner,
+    pub competing_managers: Vec<ManagerEntry>,
+    pub legacy_conflicts: Vec<LegacyConflict>,
+    pub claude_adapter_status: &'static str,
+    pub claude_coordinator_status: &'static str,
+    pub checks: Vec<InstallCheck>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ManagerScanRoots {
+    pub launch_agents_dir: Option<PathBuf>,
+    pub systemd_user_dir: Option<PathBuf>,
+}
+
+impl ManagerScanRoots {
+    pub fn from_env(env: &ResolveEnv<'_>) -> Self {
+        let Some(home) = resolve_optional_home(env) else {
+            return Self::default();
+        };
+        let launch_agents_dir = if env.platform == Platform::MacOs {
+            Some(home.join("Library/LaunchAgents"))
+        } else {
+            None
+        };
+        let systemd_user_dir = if env.platform == Platform::Linux {
+            let cfg = env
+                .xdg_config_home
+                .as_deref()
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .unwrap_or_else(|| home.join(".config"));
+            Some(cfg.join("systemd/user"))
+        } else {
+            None
+        };
+        Self {
+            launch_agents_dir,
+            systemd_user_dir,
+        }
+    }
+}
+
+fn redact_path(path: &Path, account_home: Option<&Path>) -> String {
+    if let Some(home) = account_home {
+        if let Ok(rel) = path.strip_prefix(home) {
+            return format!("~/{}", rel.display());
+        }
+    }
+    path.display().to_string()
+}
+
+/// Strictly read-only installation check for `xmsg doctor`.
+///
+/// Guarantees:
+/// - Never creates directories, files, sockets, or locks.
+/// - Never attempts to acquire `serve.lock` or any endpoint lock (`M-S7b`).
+/// - Exposes unredacted resolved endpoints (`http_socket`, `agent_socket`, `register_socket`,
+///   `leaf_register_socket`) and sets `endpoints_usable = false` on any conflict/unsafe condition.
+pub fn inspect_install(
+    req: &ResolveRequest,
+    env: &ResolveEnv<'_>,
+    managers: &ManagerScanRoots,
+) -> InstallDoctorReport {
+    inspect_install_with_http_probe(req, env, managers, None)
+}
+
+pub fn inspect_install_with_http_probe(
+    req: &ResolveRequest,
+    env: &ResolveEnv<'_>,
+    managers: &ManagerScanRoots,
+    http_live_override: Option<bool>,
+) -> InstallDoctorReport {
+    let mut ro_req = req.clone();
+    ro_req.writable = false;
+    ro_req.enforce_legacy_guard = false;
+
+    let account_home = resolve_optional_home(env);
+    let target = format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS);
+    let executable_revision = option_env!("XMSG_BUILD_REVISION").unwrap_or("unknown");
+
+    let mut checks = Vec::new();
+    let (claude_adapter_status, claude_coordinator_status) = if account_home.is_some() {
+        ("not_installed", "absent")
+    } else {
+        ("unknown", "unknown")
+    };
+
+    let resolved = match resolve_install(&ro_req, env) {
+        Ok(r) => r,
+        Err(err) => {
+            checks.push(InstallCheck {
+                id: "install.resolve".into(),
+                status: "fail",
+                message: format!("installation resolution failed: {err}"),
+                hint: Some("Check explicit flags, XDG_* roots, or authoritative account home."),
+            });
+            return InstallDoctorReport {
+                platform: env.platform,
+                target,
+                executable_revision,
+                http_socket: None,
+                agent_socket: None,
+                register_socket: None,
+                leaf_register_socket: None,
+                endpoints_usable: false,
+                profile_state_root: None,
+                profile_config_root: None,
+                service_owner: ServiceOwner::Unknown,
+                competing_managers: Vec::new(),
+                legacy_conflicts: Vec::new(),
+                claude_adapter_status,
+                claude_coordinator_status,
+                checks,
+            };
+        }
+    };
+
+    let mut usable = true;
+
+    // Scan configured service managers read-only (never invokes mutating commands).
+    let (detected_managers, inventory) = scan_service_managers(&resolved, managers);
+
+    // Check legacy conflicts read-only (including prior service inventory when known).
+    let legacy_conflicts = match check_legacy_components(&resolved, env, &inventory) {
+        Ok(list) => list,
+        Err(err) => {
+            usable = false;
+            checks.push(InstallCheck {
+                id: "install.legacy_guard".into(),
+                status: "fail",
+                message: format!("inconclusive legacy state inspection: {err}"),
+                hint: Some("Resolve ownership/symlink issues at legacy paths before starting."),
+            });
+            Vec::new()
+        }
+    };
+    if !legacy_conflicts.is_empty() {
+        usable = false;
+        let summary = legacy_conflicts
+            .iter()
+            .map(|c| {
+                format!(
+                    "{} at {} (pin: {})",
+                    c.component,
+                    redact_path(&c.legacy_path, account_home.as_deref()),
+                    c.compatible_pin
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        checks.push(InstallCheck {
+            id: "install.legacy_guard".into(),
+            status: "fail",
+            message: format!("legacy default state would be bypassed: {summary}"),
+            hint: Some("Pin compatible explicit flags/env or run a verified migration."),
+        });
+    } else {
+        checks.push(InstallCheck {
+            id: "install.legacy_guard".into(),
+            status: "pass",
+            message: "no bypassed legacy default state detected.".into(),
+            hint: None,
+        });
+    }
+
+    // Validate state root ownership/mode read-only (if present).
+    if resolved.state_root.exists() {
+        if let Err(err) = validate_private_dir(&resolved.state_root, env.euid) {
+            usable = false;
+            checks.push(InstallCheck {
+                id: "install.state_root".into(),
+                status: "fail",
+                message: format!("state root ownership/permissions invalid: {err}"),
+                hint: Some("Ensure the state root is owned by the service UID with mode 0700."),
+            });
+        } else {
+            checks.push(InstallCheck {
+                id: "install.state_root".into(),
+                status: "pass",
+                message: format!(
+                    "state root {} is private and owned by UID {}.",
+                    redact_path(&resolved.state_root, account_home.as_deref()),
+                    env.euid
+                ),
+                hint: None,
+            });
+        }
+    } else {
+        checks.push(InstallCheck {
+            id: "install.state_root".into(),
+            status: "warn",
+            message: format!(
+                "state root {} does not exist yet (doctor does not create it).",
+                redact_path(&resolved.state_root, account_home.as_deref())
+            ),
+            hint: None,
+        });
+    }
+
+    // Validate managed runtime directory + identity.json read-only (if derived).
+    if let (Some(ns_dir), Some(ns_id)) = (&resolved.runtime_namespace, &resolved.namespace_identity)
+    {
+        if ns_dir.exists() {
+            if let Err(err) = verify_runtime_dir_readonly(ns_dir, ns_id, env.euid) {
+                usable = false;
+                checks.push(InstallCheck {
+                    id: "install.runtime_namespace".into(),
+                    status: "fail",
+                    message: format!("managed runtime directory failed identity verification: {err}"),
+                    hint: Some(
+                        "Establish ownership offline before removing an unproven directory; doctor never repairs it.",
+                    ),
+                });
+            } else {
+                checks.push(InstallCheck {
+                    id: "install.runtime_namespace".into(),
+                    status: "pass",
+                    message: "managed runtime directory and identity.json verified.".into(),
+                    hint: None,
+                });
+            }
+        }
+    }
+
+    // Validate socket byte budgets and live connect probe read-only.
+    let mut any_live = false;
+    for ep in resolved.enabled_endpoints() {
+        if let Err(err) = validate_socket_path(&ep.path) {
+            usable = false;
+            checks.push(InstallCheck {
+                id: format!("install.socket_budget.{}", ep.name),
+                status: "fail",
+                message: format!("socket path exceeds platform budget: {err}"),
+                hint: Some("Use a shorter explicit socket path or standard runtime directory."),
+            });
+            continue;
+        }
+        if ep.name == "http" {
+            if let Some(live) = http_live_override {
+                if live {
+                    any_live = true;
+                }
+                continue;
+            }
+        }
+        if UnixStream::connect(&ep.path).is_ok() {
+            any_live = true;
+        }
+    }
+
+    // Read owner.json read-only (NEVER touch or flock serve.lock!).
+    let owner_rec = OwnerRecord::load(&resolved.state_root).ok().flatten();
+
+    // Classify service owner and detect competing managers (M-S7).
+    let competing: Vec<ManagerEntry> = detected_managers
+        .iter()
+        .filter(|m| m.targets_same_install)
+        .cloned()
+        .collect();
+    let service_owner = classify_service_owner(&resolved, owner_rec.as_ref(), any_live, &competing);
+
+    if service_owner == ServiceOwner::Ambiguous {
+        usable = false;
+        let names = competing
+            .iter()
+            .map(|m| format!("{}({})", m.kind, m.id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        checks.push(InstallCheck {
+            id: "install.service_owner".into(),
+            status: "fail",
+            message: format!(
+                "competing service managers target the same xmsg installation: {names}"
+            ),
+            hint: Some("Stop and disable all but one service manager for this installation."),
+        });
+    } else {
+        let status = match service_owner {
+            ServiceOwner::HomebrewLaunchagent
+            | ServiceOwner::SystemdUser
+            | ServiceOwner::Foreground => "pass",
+            ServiceOwner::Stopped => "warn",
+            ServiceOwner::Unmanaged | ServiceOwner::Unknown => "info",
+            ServiceOwner::Ambiguous => "fail",
+        };
+        checks.push(InstallCheck {
+            id: "install.service_owner".into(),
+            status,
+            message: format!("service owner classified as {service_owner:?}."),
+            hint: None,
+        });
+    }
+
+    if account_home.is_none() {
+        checks.push(InstallCheck {
+            id: "install.home_observations".into(),
+            status: "info",
+            message: "account home unavailable: Claude adapter and coordinator observations are unknown."
+                .into(),
+            hint: None,
+        });
+    }
+
+    InstallDoctorReport {
+        platform: env.platform,
+        target,
+        executable_revision,
+        http_socket: resolved
+            .http_sock
+            .as_ref()
+            .map(|e| e.path.to_string_lossy().into_owned()),
+        agent_socket: resolved
+            .agent_sock
+            .as_ref()
+            .map(|e| e.path.to_string_lossy().into_owned()),
+        register_socket: resolved
+            .register_sock
+            .as_ref()
+            .map(|e| e.path.to_string_lossy().into_owned()),
+        leaf_register_socket: resolved
+            .leaf_register_sock
+            .as_ref()
+            .map(|e| e.path.to_string_lossy().into_owned()),
+        endpoints_usable: usable,
+        profile_state_root: Some(redact_path(&resolved.state_root, account_home.as_deref())),
+        profile_config_root: resolved
+            .config_root
+            .as_deref()
+            .map(|p| redact_path(p, account_home.as_deref())),
+        service_owner,
+        competing_managers: competing,
+        legacy_conflicts,
+        claude_adapter_status,
+        claude_coordinator_status,
+        checks,
+    }
+}
+
+fn classify_service_owner(
+    resolved: &ResolvedInstall,
+    owner_rec: Option<&OwnerRecord>,
+    any_live: bool,
+    competing: &[ManagerEntry],
+) -> ServiceOwner {
+    // Two or more distinct configured managers targeting the same state/sockets is ALWAYS a
+    // conflict (ambiguous), even if one is stopped and configured to restart (M-S7).
+    if competing.len() >= 2 {
+        return ServiceOwner::Ambiguous;
+    }
+
+    if !any_live {
+        return ServiceOwner::Stopped;
+    }
+
+    // Live socket answers: require trusted local owner.json + live PID + matching bound socket
+    // inode to verify ownership (stale owner.json alone cannot identify a live owner).
+    let Some(rec) = owner_rec else {
+        return ServiceOwner::Unmanaged;
+    };
+    let pid_alive = rec.pid > 0 && unsafe { libc::kill(rec.pid as libc::pid_t, 0) == 0 };
+    if !pid_alive {
+        return ServiceOwner::Unknown;
+    }
+
+    // Verify at least one live resolved endpoint matches the recorded (dev, ino, uid).
+    let mut inode_verified = false;
+    for ep in resolved.enabled_endpoints() {
+        if let Some(bound) = rec.endpoints.get(ep.name) {
+            if let Ok(meta) = fs::symlink_metadata(&ep.path) {
+                if meta.file_type().is_socket()
+                    && meta.dev() == bound.dev
+                    && meta.ino() == bound.ino
+                    && meta.uid() == rec.uid
+                {
+                    inode_verified = true;
+                    break;
+                }
+            }
+        }
+    }
+    if !inode_verified {
+        return ServiceOwner::Unknown;
+    }
+
+    match rec.manager_hint.as_deref() {
+        Some("homebrew_launchagent") => ServiceOwner::HomebrewLaunchagent,
+        Some("systemd_user") => ServiceOwner::SystemdUser,
+        Some("foreground") => ServiceOwner::Foreground,
+        _ => {
+            if let Some(single) = competing.first() {
+                match single.kind.as_str() {
+                    "homebrew_launchagent" => ServiceOwner::HomebrewLaunchagent,
+                    "systemd_user" => ServiceOwner::SystemdUser,
+                    _ => ServiceOwner::Unknown,
+                }
+            } else {
+                ServiceOwner::Unknown
+            }
+        }
+    }
+}
+
+fn scan_service_managers(
+    resolved: &ResolvedInstall,
+    roots: &ManagerScanRoots,
+) -> (Vec<ManagerEntry>, LegacyInventory) {
+    let mut managers = Vec::new();
+    let mut inventory = LegacyInventory::default();
+
+    let state_canon = canonicalize_best_effort(&resolved.state_root)
+        .unwrap_or_else(|_| resolved.state_root.clone());
+    let db_canon =
+        canonicalize_best_effort(&resolved.db_path).unwrap_or_else(|_| resolved.db_path.clone());
+    let sock_canons: Vec<PathBuf> = resolved
+        .enabled_endpoints()
+        .into_iter()
+        .map(|ep| canonicalize_best_effort(&ep.path).unwrap_or_else(|_| ep.path.clone()))
+        .collect();
+
+    let targets_install = |text: &str| -> bool {
+        let mentions_xmsg = text.contains("xmsg") && text.contains("serve");
+        if !mentions_xmsg {
+            return false;
+        }
+        // Check explicit path overlap, or if no --db-path/--http-sock override is present, assume
+        // it targets the user's default install.
+        let mentions_db = text.contains(&db_canon.to_string_lossy().to_string())
+            || text.contains(&resolved.db_path.to_string_lossy().to_string())
+            || text.contains(&state_canon.to_string_lossy().to_string());
+        let mentions_sock = sock_canons
+            .iter()
+            .any(|s| text.contains(&s.to_string_lossy().to_string()));
+        let has_explicit_db = text.contains("--db-path") || text.contains("XMSG_DB_PATH");
+        mentions_db || mentions_sock || !has_explicit_db
+    };
+
+    if let Some(dir) = &roots.launch_agents_dir {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("plist") {
+                    continue;
+                }
+                let Ok(text) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                if !text.contains("xmsg") {
+                    continue;
+                }
+                let id = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "launchagent".into());
+                let kind = if id.contains("homebrew.mxcl.xmsg") {
+                    "homebrew_launchagent"
+                } else {
+                    "launchagent"
+                };
+                let restarts = text.contains("KeepAlive") || text.contains("RunAtLoad");
+                if let Some(h) = extract_plist_env_string(&text, "HOME") {
+                    inventory.prior_homes.push(PathBuf::from(h));
+                }
+                if let Some(wd) = extract_plist_string_key(&text, "WorkingDirectory") {
+                    inventory.prior_cwd = Some(PathBuf::from(wd));
+                }
+                managers.push(ManagerEntry {
+                    kind: kind.into(),
+                    id,
+                    restarts,
+                    targets_same_install: targets_install(&text),
+                });
+            }
+        }
+    }
+
+    if let Some(dir) = &roots.systemd_user_dir {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("service") {
+                    continue;
+                }
+                let Ok(text) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                if !text.contains("xmsg") {
+                    continue;
+                }
+                let id = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "systemd".into());
+                let restarts = text.contains("Restart=always")
+                    || text.contains("Restart=on-failure")
+                    || text.contains("WantedBy=");
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if let Some(rest) = trimmed.strip_prefix("WorkingDirectory=") {
+                        inventory.prior_cwd = Some(PathBuf::from(rest.trim()));
+                    }
+                    if let Some(rest) = trimmed.strip_prefix("Environment=") {
+                        for tok in rest.split_whitespace() {
+                            let tok = tok.trim_matches('"');
+                            if let Some(h) = tok.strip_prefix("HOME=") {
+                                inventory.prior_homes.push(PathBuf::from(h));
+                            }
+                        }
+                    }
+                }
+                managers.push(ManagerEntry {
+                    kind: "systemd_user".into(),
+                    id,
+                    restarts,
+                    targets_same_install: targets_install(&text),
+                });
+            }
+        }
+    }
+
+    managers.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.id.cmp(&b.id)));
+    (managers, inventory)
+}
+
+fn extract_plist_string_key(xml: &str, key: &str) -> Option<String> {
+    let needle = format!("<key>{key}</key>");
+    let pos = xml.find(&needle)?;
+    let rest = &xml[pos + needle.len()..];
+    let s_start = rest.find("<string>")? + "<string>".len();
+    let s_end = rest[s_start..].find("</string>")?;
+    Some(rest[s_start..s_start + s_end].trim().to_string())
+}
+
+fn extract_plist_env_string(xml: &str, env_key: &str) -> Option<String> {
+    let env_pos = xml.find("<key>EnvironmentVariables</key>")?;
+    extract_plist_string_key(&xml[env_pos..], env_key)
+}

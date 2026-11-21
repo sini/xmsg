@@ -20,16 +20,30 @@ pub struct McpConfig {
 
 impl McpConfig {
     pub fn new(sessions_dirs: Vec<PathBuf>, xmsg_url: String) -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let lookup = crate::install_paths::SystemHomeLookup;
+        let env = crate::install_paths::ResolveEnv::from_process(&lookup);
+        let presence_dir = std::env::var("XMSG_AGY_PRESENCE_DIR")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .and_then(|v| {
+                crate::install_paths::expand_explicit_path(std::path::Path::new(v.trim()), &env)
+                    .ok()
+            })
+            .or_else(|| {
+                crate::install_paths::resolve_optional_home(&env)
+                    .map(|home| home.join(".gemini/antigravity-cli/presence"))
+            })
+            .unwrap_or_default();
         let agent_sock = std::env::var("XMSG_AGENT_SOCK")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
+            .ok()
+            .and_then(|v| crate::install_paths::expand_explicit_path(std::path::Path::new(&v), &env).ok())
+            .unwrap_or_else(|| {
                 crate::agent::default_agent_sock_path()
                     .unwrap_or_else(|_| PathBuf::from("/nonexistent/agent.sock"))
             });
         let http_sock = std::env::var("XMSG_HTTP_SOCK")
-            .map(PathBuf::from)
             .ok()
+            .and_then(|v| crate::install_paths::expand_explicit_path(std::path::Path::new(&v), &env).ok())
             .or_else(|| crate::http::default_http_sock_path().ok());
         Self {
             sessions_dirs,
@@ -37,7 +51,7 @@ impl McpConfig {
             http_sock,
             agent_sock,
             proc_root: PathBuf::from(crate::process::LIVE_PROC_ROOT),
-            presence_dir: PathBuf::from(home).join(".gemini/antigravity-cli/presence"),
+            presence_dir,
             proc_locks_path: PathBuf::from(crate::agy::LIVE_PROC_LOCKS),
             reply_only: false,
         }

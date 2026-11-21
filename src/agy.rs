@@ -504,10 +504,40 @@ impl AgyConfig {
 
 impl Default for AgyConfig {
     fn default() -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let lookup = crate::install_paths::SystemHomeLookup;
+        let env = crate::install_paths::ResolveEnv::from_process(&lookup);
+        // Optional harness discovery: explicit env wins; otherwise omit when account home is
+        // unavailable and never fall back to CWD.
+        let opt_home = crate::install_paths::resolve_optional_home(&env);
+        let presence_dir = std::env::var("XMSG_AGY_PRESENCE_DIR")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .and_then(|v| {
+                crate::install_paths::expand_explicit_path(std::path::Path::new(v.trim()), &env)
+                    .ok()
+            })
+            .or_else(|| {
+                opt_home
+                    .as_ref()
+                    .map(|home| home.join(".gemini/antigravity-cli/presence"))
+            })
+            .unwrap_or_default();
+        let brain_dir = std::env::var("XMSG_AGY_BRAIN_DIR")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .and_then(|v| {
+                crate::install_paths::expand_explicit_path(std::path::Path::new(v.trim()), &env)
+                    .ok()
+            })
+            .or_else(|| {
+                opt_home
+                    .as_ref()
+                    .map(|home| home.join(".gemini/antigravity-cli/brain"))
+            })
+            .unwrap_or_default();
         Self {
-            presence_dir: PathBuf::from(&home).join(".gemini/antigravity-cli/presence"),
-            brain_dir: PathBuf::from(home).join(".gemini/antigravity-cli/brain"),
+            presence_dir,
+            brain_dir,
             proc_locks_path: PathBuf::from(LIVE_PROC_LOCKS),
             proc_root: PathBuf::from(crate::process::LIVE_PROC_ROOT),
             agy_bin: DEFAULT_AGY_BIN.to_string(),
@@ -1990,7 +2020,7 @@ pub fn is_conversation_proc_watched(config: &AgyConfig, conv_id: &str) -> bool {
     if !crate::claim::is_uuid_shaped(conv_id) {
         return false;
     }
-    if !locks_supported(&config.proc_locks_path) {
+    if !locks_supported(&config.proc_locks_path) || config.presence_dir.as_os_str().is_empty() {
         return false;
     }
     let lock_path = config.presence_dir.join(format!("{conv_id}.lock"));
@@ -2132,7 +2162,7 @@ fn eligible_holder(
     let already_registered = store.read().unwrap().values().any(|info| {
         (info.conversation_id == conv_id || info.session_key == conv_id) && info.has_credentials()
     });
-    if already_registered {
+    if already_registered || config.presence_dir.as_os_str().is_empty() {
         return None;
     }
 
