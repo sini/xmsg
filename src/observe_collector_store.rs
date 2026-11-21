@@ -127,6 +127,13 @@ pub enum StoreError {
         required: &'static str,
         found: &'static str,
     },
+    #[error("{file} is {actual_bytes} bytes, which exceeds the {ceiling_bytes}-byte ceiling for {configured_nodes} configured nodes; restore the node list (or raise capacity) until retention ages out the removed nodes' rows, or stop the collector and move the store aside to start fresh, which keeps the old file")]
+    CeilingExceeded {
+        file: &'static str,
+        actual_bytes: u64,
+        ceiling_bytes: u64,
+        configured_nodes: usize,
+    },
     #[error("observation storage full")]
     Full,
     #[error("observation cursor changed")]
@@ -353,9 +360,25 @@ fn private_file_metadata(m: &fs::Metadata, expected_uid: u32, cap: u64) -> Resul
     }
     Ok(())
 }
-fn private_file(file: &Path, cap: u64, required: bool) -> Result<(), StoreError> {
+fn private_file(
+    file: &Path,
+    name: &'static str,
+    cap: u64,
+    configured_nodes: usize,
+    required: bool,
+) -> Result<(), StoreError> {
     match fs::symlink_metadata(file) {
-        Ok(m) => private_file_metadata(&m, unsafe { libc::geteuid() }, cap)?,
+        Ok(m) => {
+            private_file_metadata(&m, unsafe { libc::geteuid() }, u64::MAX)?;
+            if m.len() > cap {
+                return Err(StoreError::CeilingExceeded {
+                    file: name,
+                    actual_bytes: m.len(),
+                    ceiling_bytes: cap,
+                    configured_nodes,
+                });
+            }
+        }
         Err(e) if !required && e.kind() == std::io::ErrorKind::NotFound => (),
         Err(_) => return Err(StoreError::UnsafePath),
     }
@@ -572,6 +595,7 @@ impl Store {
         {
             return Err(StoreError::Invalid);
         }
+        let configured_nodes = nodes.len();
         let mut inventory = BTreeMap::new();
         for policy in nodes {
             Scope::new(&policy.node, "collector", None, policy.labels)
@@ -620,8 +644,14 @@ impl Store {
             .checked_mul(4104)
             .and_then(|v| v.checked_add(131072))
             .ok_or(StoreError::Invalid)?;
-        private_file(&db, db_cap, false)?;
-        private_file(&journal, journal_cap, false)?;
+        private_file(&db, "collector.sqlite", db_cap, configured_nodes, false)?;
+        private_file(
+            &journal,
+            "collector.sqlite-journal",
+            journal_cap,
+            configured_nodes,
+            false,
+        )?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -631,7 +661,7 @@ impl Store {
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
             .open(&db)
             .map_err(|_| StoreError::UnsafePath)?;
-        private_file(&db, db_cap, true)?;
+        private_file(&db, "collector.sqlite", db_cap, configured_nodes, true)?;
         let c = Connection::open_with_flags(
             &db,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -650,6 +680,14 @@ impl Store {
         ] {
             let value: i64 = c.pragma_query_value(None, name, |r| r.get(0))?;
             if value != expected {
+                if name == "max_page_count" && value > limits.pages {
+                    return Err(StoreError::CeilingExceeded {
+                        file: "collector.sqlite",
+                        actual_bytes: (value as u64).saturating_mul(4096),
+                        ceiling_bytes: db_cap,
+                        configured_nodes,
+                    });
+                }
                 return Err(StoreError::Storage);
             }
         }

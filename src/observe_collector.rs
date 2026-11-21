@@ -46,6 +46,8 @@ pub enum Error {
         required: &'static str,
         found: &'static str,
     },
+    #[error("{0}")]
+    CeilingExceeded(String),
     #[error("collector listener unavailable")]
     Listener,
     #[error(transparent)]
@@ -58,6 +60,7 @@ impl From<StoreError> for Error {
             StoreError::UnsupportedEngine { required, found } => {
                 Self::UnsupportedEngine { required, found }
             }
+            e @ StoreError::CeilingExceeded { .. } => Self::CeilingExceeded(e.to_string()),
             _ => Self::Storage,
         }
     }

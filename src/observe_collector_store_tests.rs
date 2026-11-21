@@ -2704,3 +2704,88 @@ fn rollback_refresh_suppresses_stale_activity_sidecar_and_preserves_valid_rows()
         }
     );
 }
+
+#[test]
+fn dtxj9_lowering_capacity_past_existing_db_size_refuses_open() {
+    let dir = private_temp();
+    let clock: EpochClock = Arc::new(|| NOW);
+    let p0 = NodePolicy {
+        node: "node0".into(),
+        labels: false,
+        supported: true,
+        relay: None,
+    };
+    let p1 = NodePolicy {
+        node: "node1".into(),
+        labels: false,
+        supported: true,
+        relay: None,
+    };
+    let store = Store::open_limits(
+        dir.path(),
+        vec![p0.clone(), p1],
+        clock.clone(),
+        Limits {
+            rows: ROWS,
+            bytes: BYTES,
+            pages: 64,
+            retention_after_inactive_secs: 600,
+        },
+    )
+    .unwrap();
+    let mut cur0 = Cursor::default();
+    let mut cur1 = Cursor::default();
+    for seq in 1..=100i64 {
+        let mut pg0 = page(seq);
+        pg0.node = "node0".into();
+        cur0 = store.ingest_page("node0", &cur0, pg0).unwrap().cursor;
+
+        let mut pg1 = page(seq);
+        pg1.node = "node1".into();
+        cur1 = store.ingest_page("node1", &cur1, pg1).unwrap().cursor;
+    }
+    drop(store);
+
+    let db_len = std::fs::metadata(dir.path().join("collector.sqlite"))
+        .unwrap()
+        .len();
+    assert!(
+        db_len > 12 * 4096,
+        "populated N=2 store ({db_len} bytes) must exceed N-1 cap (49152 bytes)"
+    );
+
+    let reopened = Store::open_limits(
+        dir.path(),
+        vec![p0],
+        clock,
+        Limits {
+            rows: ROWS,
+            bytes: BYTES,
+            pages: 12,
+            retention_after_inactive_secs: 600,
+        },
+    );
+    let err = reopened
+        .err()
+        .expect("expected startup refusal on lowered cap");
+    assert_eq!(
+        err,
+        StoreError::CeilingExceeded {
+            file: "collector.sqlite",
+            actual_bytes: db_len,
+            ceiling_bytes: 12 * 4096,
+            configured_nodes: 1,
+        }
+    );
+    let msg = err.to_string();
+    assert_eq!(
+        msg,
+        format!(
+            "collector.sqlite is {db_len} bytes, which exceeds the {} -byte ceiling for 1 configured nodes; restore the node list (or raise capacity) until retention ages out the removed nodes' rows, or stop the collector and move the store aside to start fresh, which keeps the old file",
+            12 * 4096
+        )
+        .replace(" -byte", "-byte")
+    );
+    let collector_err = crate::observe_collector::Error::from(err);
+    assert_eq!(collector_err.to_string(), msg);
+}

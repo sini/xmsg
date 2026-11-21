@@ -457,12 +457,21 @@ rows or refresh their retention age; expiry also runs while polling is idle.
 Retention uses observation time capped by collector receipt time, not a future
 source timestamp that could indefinitely extend an old capture.
 
-The SQLite file has a separate physical ceiling of 32 MiB per configured node plus
-64 MiB reserve. Rollback journaling is separately bounded; memory-only temporary
-storage and disabled cache spill have a RAM cost. These are managed file-length
-bounds, not exact filesystem allocation or forensic erasure guarantees. Physical
-storage exhaustion can stop ingestion before the logical limit; it is visible and
-cannot commit a cursor without its page.
+The SQLite file has a separate physical ceiling derived from the configured node
+count: 32 MiB per configured node plus 64 MiB reserve. Rollback journaling is
+separately bounded; memory-only temporary storage and disabled cache spill have
+a RAM cost. These are managed file-length bounds, not exact filesystem allocation
+or forensic erasure guarantees. Physical storage exhaustion can stop ingestion
+before the logical limit; it is visible and cannot commit a cursor without its
+page.
+
+Because capacity follows the configured node count, removing nodes while the
+existing store exceeds the new ceiling makes startup refuse to open with a
+ceiling error (`collector.sqlite is X bytes, which exceeds the Y-byte ceiling for
+N configured nodes`) rather than silently dropping retained data. Either restore
+the node list (or raise capacity) until retention ages out the removed nodes'
+rows, or stop the collector and move the store aside to start fresh, which keeps
+the old file.
 
 If startup reports `UnsupportedEngine` (for example, `required 3.53.2, found 3.54.0`; the found version may differ), rebuild with bundled SQLite without `LIBSQLITE3_SYS_USE_PKG_CONFIG` overriding it; do not remove the engine pin.
 
