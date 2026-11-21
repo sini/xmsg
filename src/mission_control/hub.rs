@@ -38,6 +38,7 @@ pub(super) enum Reset {
     CursorInvalid,
     CursorExpired,
     EpochChanged,
+    ScopeChanged,
 }
 
 pub(super) struct Hub {
@@ -65,12 +66,49 @@ impl Hub {
         })
     }
 
+    pub(super) fn watermark(&self) -> u64 {
+        self.seq
+    }
+
     pub(super) fn epoch(&self) -> String {
         self.key.epoch()
     }
 
     pub(super) fn cursor(&self, seq: u64, partition: &Partition) -> String {
         self.key.issue(seq, partition)
+    }
+
+    pub(super) fn hide(
+        &mut self,
+        name: &str,
+        denied: bool,
+        at: i64,
+        now: Instant,
+    ) -> Result<(), serde_json::Error> {
+        let Some(mut node) = self.nodes.get(name).cloned() else {
+            return Ok(());
+        };
+        node.history_hidden = true;
+        node.status = if denied {
+            Status::Denied
+        } else {
+            Status::PendingRevalidation
+        };
+        node.endpoints.clear();
+        node.exchanges.clear();
+        node.source_gaps.clear();
+        node.endpoints_truncated = false;
+        node.activity_authority = None;
+        let (status_since, coverage_since) = self.condition_since(&node, false, at);
+        let items = super::attention::derive(
+            &node,
+            &super::attention::ObservedCondition {
+                status_since,
+                coverage_since,
+                unreachable: false,
+            },
+        );
+        self.apply(node, items, Vec::new(), at, now)
     }
 
     pub(super) fn apply(
