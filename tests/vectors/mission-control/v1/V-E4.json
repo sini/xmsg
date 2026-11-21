@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "type": "event",
+  "seq": 1045,
+  "cursor": "<C>",
+  "at": 1795000001400,
+  "delta": {
+    "kind": "attention_cleared",
+    "id": "att_6cfc58099f26ef68a63fc71893e1bea7",
+    "cleared_at": 1795000001400
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "type": "subscribe",
+  "id": 2,
+  "sub": "fleet",
+  "scope": {
+    "kind": "fleet"
+  }
+}
