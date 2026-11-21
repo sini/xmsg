@@ -325,13 +325,13 @@ impl Fixture {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn observe_right_is_explicit_and_exports_only_metadata() {
     let denied = Fixture::new(&["list", "send", "reply"]).await;
-    let (status, _) = denied.request("/fed/v2/observe/events?after=0").await;
+    let (status, _) = denied.request("/fed/v2/observe/events?after=0&v=2").await;
     assert_eq!(
         status, 403,
         "peer without explicit observe right must be denied"
     );
     let granted = Fixture::new(&["observe"]).await;
-    let (status, page) = granted.request("/fed/v2/observe/events?after=0").await;
+    let (status, page) = granted.request("/fed/v2/observe/events?after=0&v=2").await;
     assert_eq!(
         status, 200,
         "explicit observe peer must read journal metadata"
@@ -366,7 +366,7 @@ async fn snapshot_is_cached_scoped_and_labels_need_both_opt_ins() {
     let fixture = Fixture::new(&["observe"]).await;
     let before = fixture.primary_state();
     let (status, snapshot) = fixture
-        .request("/fed/v2/observe/snapshot?labels=true")
+        .request("/fed/v2/observe/snapshot?labels=true&v=2")
         .await;
     assert_eq!(status, 200);
     assert_eq!(
@@ -384,14 +384,14 @@ async fn snapshot_is_cached_scoped_and_labels_need_both_opt_ins() {
     fixture.configure(|config| {
         config["observe_labels"] = json!(true);
     });
-    let (status, snapshot) = fixture.request("/fed/v2/observe/snapshot").await;
+    let (status, snapshot) = fixture.request("/fed/v2/observe/snapshot?v=2").await;
     assert_eq!(status, 200);
     assert!(
         !snapshot.to_string().contains(LABEL_CANARY),
         "labels leaked without request opt-in"
     );
     let (status, snapshot) = fixture
-        .request("/fed/v2/observe/snapshot?labels=true")
+        .request("/fed/v2/observe/snapshot?labels=true&v=2")
         .await;
     assert_eq!(status, 200);
     assert!(
@@ -420,7 +420,7 @@ async fn target_scope_omission_and_empty_are_distinct() {
     fixture.configure(|config| {
         config["targets"] = json!(["sender"]);
     });
-    let (_, page) = fixture.request("/fed/v2/observe/events?after=0").await;
+    let (_, page) = fixture.request("/fed/v2/observe/events?after=0&v=2").await;
     assert!(
         page["events"].as_array().unwrap().is_empty(),
         "excluded destination leaked through a correlation"
@@ -429,7 +429,7 @@ async fn target_scope_omission_and_empty_are_distinct() {
     fixture.configure(|config| {
         config["targets"] = json!(["receiver"]);
     });
-    let (_, page) = fixture.request("/fed/v2/observe/events?after=0").await;
+    let (_, page) = fixture.request("/fed/v2/observe/events?after=0&v=2").await;
     assert!(
         page["events"].as_array().unwrap().is_empty(),
         "excluded sender leaked through a correlation"
@@ -437,7 +437,7 @@ async fn target_scope_omission_and_empty_are_distinct() {
     fixture.configure(|config| {
         config["targets"] = json!([]);
     });
-    let (_, snapshot) = fixture.request("/fed/v2/observe/snapshot").await;
+    let (_, snapshot) = fixture.request("/fed/v2/observe/snapshot?v=2").await;
     assert!(
         snapshot["endpoints"].as_array().unwrap().is_empty(),
         "empty targets widened to all registrations"
@@ -445,7 +445,7 @@ async fn target_scope_omission_and_empty_are_distinct() {
     fixture.configure(|config| {
         config.as_object_mut().unwrap().remove("targets");
     });
-    let (_, page) = fixture.request("/fed/v2/observe/events?after=0").await;
+    let (_, page) = fixture.request("/fed/v2/observe/events?after=0&v=2").await;
     assert!(page["events"]
         .as_array()
         .unwrap()
@@ -458,7 +458,7 @@ async fn admission_precedes_query_parsing_and_queries_are_bounded() {
     let denied = Fixture::new(&["list"]).await;
     assert_eq!(
         denied
-            .request("/fed/v2/observe/events?after=not-a-number")
+            .request("/fed/v2/observe/events?after=not-a-number&v=2")
             .await
             .0,
         403,
@@ -466,7 +466,8 @@ async fn admission_precedes_query_parsing_and_queries_are_bounded() {
     );
     let fixture = Fixture::new(&["observe"]).await;
     for query in [
-        "v=2",
+        "",
+        "v=1",
         "after=-1",
         "after=1",
         "limit=0",
@@ -491,16 +492,16 @@ async fn admission_precedes_query_parsing_and_queries_are_bounded() {
     );
     assert_eq!(
         fixture
-            .request(&format!("/fed/v2/observe/events?after={zeroes}"))
+            .request(&format!("/fed/v2/observe/events?after={zeroes}&v=2"))
             .await
             .0,
         400,
         "oversized raw query accepted"
     );
-    let version = format!("{zeroes}1");
+    let version = format!("{zeroes}2");
     assert_eq!(
         version.parse::<u8>().unwrap(),
-        1,
+        2,
         "oversize snapshot fixture must remain a valid version"
     );
     assert_eq!(
@@ -512,12 +513,12 @@ async fn admission_precedes_query_parsing_and_queries_are_bounded() {
         "oversized snapshot query accepted"
     );
     assert_eq!(
-        fixture.request("/fed/v2/observe/snapshot?after=0").await.0,
+        fixture.request("/fed/v2/observe/snapshot?after=0&v=2").await.0,
         400,
         "snapshot accepted a cursor field"
     );
     assert_eq!(
-        fixture.request("/fed/v2/observe/events?after=0").await.0,
+        fixture.request("/fed/v2/observe/events?after=0&v=2").await.0,
         200
     );
 }
@@ -549,7 +550,7 @@ async fn export_time_filter_does_not_depend_on_journal_maintenance() {
             .any(|v| v.observation.message_id.as_deref() == Some("expired-canary")),
         "expiry fixture was deleted before the export predicate"
     );
-    let (_, page) = fixture.request("/fed/v2/observe/events?after=0").await;
+    let (_, page) = fixture.request("/fed/v2/observe/events?after=0&v=2").await;
     assert!(
         !page.to_string().contains("expired-canary"),
         "export leaked expired metadata before maintenance"
@@ -561,21 +562,21 @@ async fn reload_invalidates_old_tls_but_fresh_handshake_succeeds() {
     let fixture = Fixture::new(&["observe"]).await;
     let (mut sender, connection) = fixture.connect().await;
     assert_eq!(
-        Fixture::exchange(&mut sender, "/fed/v2/observe/events", "")
+        Fixture::exchange(&mut sender, "/fed/v2/observe/events?v=2", "")
             .await
             .0,
         200
     );
     fixture.configure(|_| {});
     assert_eq!(
-        Fixture::exchange(&mut sender, "/fed/v2/observe/events", "")
+        Fixture::exchange(&mut sender, "/fed/v2/observe/events?v=2", "")
             .await
             .0,
         403,
         "old TLS policy survived reload"
     );
     assert_eq!(
-        fixture.request("/fed/v2/observe/events").await.0,
+        fixture.request("/fed/v2/observe/events?v=2").await.0,
         200,
         "fresh TLS did not recover after policy reload"
     );
@@ -585,7 +586,7 @@ async fn reload_invalidates_old_tls_but_fresh_handshake_succeeds() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reload_during_prepared_response_refuses_events_and_snapshot() {
     let fixture = Fixture::new(&["observe"]).await;
-    for uri in ["/fed/v2/observe/events", "/fed/v2/observe/snapshot"] {
+    for uri in ["/fed/v2/observe/events?v=2", "/fed/v2/observe/snapshot?v=2"] {
         fixture.controls.before_emit.arm(1);
         let request = fixture.request(uri);
         let reload = async {
@@ -619,7 +620,7 @@ async fn reload_during_prepared_response_refuses_events_and_snapshot() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn held_read_expires_inside_the_server_budget() {
     let fixture = Fixture::new(&["observe"]).await;
-    for uri in ["/fed/v2/observe/events", "/fed/v2/observe/snapshot"] {
+    for uri in ["/fed/v2/observe/events?v=2", "/fed/v2/observe/snapshot?v=2"] {
         fixture.controls.before_read.arm(1);
         let request = fixture.request(uri);
         let release = async {
@@ -652,18 +653,18 @@ async fn primary_lock_contention_returns_partial_without_waiting() {
         release_rx.recv_timeout(Duration::from_secs(7)).unwrap();
     });
     ready_rx.await.unwrap();
-    let (status, page) = fixture.request("/fed/v2/observe/snapshot").await;
+    let (status, page) = fixture.request("/fed/v2/observe/snapshot?v=2").await;
     release_tx.send(()).unwrap();
     holder.await.unwrap();
     assert_eq!(status, 200, "snapshot waited on primary bus lock");
     assert_eq!(page["available"], "partial");
-    assert_eq!(fixture.request("/fed/v2/observe/snapshot").await.0, 200);
+    assert_eq!(fixture.request("/fed/v2/observe/snapshot?v=2").await.0, 200);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn request_body_and_disallowed_source_are_refused() {
     let fixture = Fixture::new(&["observe"]).await;
-    for uri in ["/fed/v2/observe/events", "/fed/v2/observe/snapshot"] {
+    for uri in ["/fed/v2/observe/events?v=2", "/fed/v2/observe/snapshot?v=2"] {
         let (mut sender, connection) = fixture.connect().await;
         assert_eq!(
             Fixture::exchange(&mut sender, uri, "nonempty").await.0,
@@ -683,7 +684,7 @@ async fn request_body_and_disallowed_source_are_refused() {
         config["from"] = json!(["192.0.2.0/24"]);
     });
     assert_eq!(
-        fixture.request("/fed/v2/observe/events").await.0,
+        fixture.request("/fed/v2/observe/events?v=2").await.0,
         403,
         "observe ignored peer source policy"
     );
@@ -697,17 +698,17 @@ async fn observe_rate_bucket_is_separate_and_shared_by_both_export_routes() {
         .rate_limiter
         .check_and_consume(&fixture.client_name, None));
     assert_eq!(
-        fixture.request("/fed/v2/observe/events").await.0,
+        fixture.request("/fed/v2/observe/events?v=2").await.0,
         200,
         "normal federation bucket throttled observation"
     );
     assert_eq!(
-        fixture.request("/fed/v2/observe/events").await.0,
+        fixture.request("/fed/v2/observe/events?v=2").await.0,
         429,
         "observation peer rate limit bypassed"
     );
     assert_eq!(
-        fixture.request("/fed/v2/observe/snapshot").await.0,
+        fixture.request("/fed/v2/observe/snapshot?v=2").await.0,
         429,
         "snapshot bypassed shared observation bucket"
     );
@@ -745,9 +746,9 @@ async fn slot_bound_control(wait_for_timeout: bool) {
         reads.push(tokio::spawn(async move {
             fixture
                 .request(if index % 2 == 0 {
-                    "/fed/v2/observe/events"
+                    "/fed/v2/observe/events?v=2"
                 } else {
-                    "/fed/v2/observe/snapshot"
+                    "/fed/v2/observe/snapshot?v=2"
                 })
                 .await
                 .0
@@ -771,7 +772,7 @@ async fn slot_bound_control(wait_for_timeout: bool) {
     let (mut sender, connection) = fixture
         .connect_as(&second_cert, &second.signing_key.serialize_der())
         .await;
-    let ninth = Fixture::exchange(&mut sender, "/fed/v2/observe/events", "")
+    let ninth = Fixture::exchange(&mut sender, "/fed/v2/observe/events?v=2", "")
         .await
         .0;
     fixture.controls.before_io.release();
@@ -793,7 +794,7 @@ async fn slot_bound_control(wait_for_timeout: bool) {
         "ninth cross-peer read bypassed the global eight-slot cap"
     );
     assert_eq!(
-        Fixture::exchange(&mut sender, "/fed/v2/observe/snapshot", "")
+        Fixture::exchange(&mut sender, "/fed/v2/observe/snapshot?v=2", "")
             .await
             .0,
         200,
@@ -811,7 +812,7 @@ async fn literal_ca_identity_needs_its_own_observe_grant() {
     }}));
     assert_eq!(
         fixture
-            .request("/fed/v2/observe/events?after=invalid")
+            .request("/fed/v2/observe/events?after=invalid&v=2")
             .await
             .0,
         403,
@@ -841,7 +842,7 @@ async fn literal_ca_identity_needs_its_own_observe_grant() {
 async fn handshake_spanning_reload_does_not_acquire_the_new_policy_witness() {
     let fixture = Fixture::new(&["observe"]).await;
     fixture.controls.before_handshake.arm(1);
-    let request = fixture.request("/fed/v2/observe/events");
+    let request = fixture.request("/fed/v2/observe/events?v=2");
     let reload = async {
         tokio::time::timeout(
             Duration::from_secs(2),
@@ -857,7 +858,7 @@ async fn handshake_spanning_reload_does_not_acquire_the_new_policy_witness() {
         status, 403,
         "handshake spanning reload acquired the new policy witness"
     );
-    assert_eq!(fixture.request("/fed/v2/observe/events").await.0, 200);
+    assert_eq!(fixture.request("/fed/v2/observe/events?v=2").await.0, 200);
 }
 
 async fn held_dispatcher_readiness_control() {
@@ -932,12 +933,12 @@ async fn stale_hub_resolver_cannot_restore_revoked_observe_authority() {
         }})
     };
     fixture.replace_peers(hub(vec!["observe"]));
-    assert_eq!(fixture.request("/fed/v2/observe/events").await.0, 200);
+    assert_eq!(fixture.request("/fed/v2/observe/events?v=2").await.0, 200);
     let old = fixture.state.current_peers();
     fixture.replace_peers(hub(vec!["list"]));
     let (mut sender, connection) = fixture.connect().await;
     assert_eq!(
-        Fixture::exchange(&mut sender, "/fed/v2/observe/events", "")
+        Fixture::exchange(&mut sender, "/fed/v2/observe/events?v=2", "")
             .await
             .0,
         403
@@ -974,14 +975,14 @@ async fn stale_hub_resolver_cannot_restore_revoked_observe_authority() {
         "current rule lookup restored a stale observe grant"
     );
     assert_eq!(
-        Fixture::exchange(&mut sender, "/fed/v2/observe/events", "")
+        Fixture::exchange(&mut sender, "/fed/v2/observe/events?v=2", "")
             .await
             .0,
         403,
         "old shared hub cache restored revoked observe authority"
     );
     assert_eq!(
-        Fixture::exchange(&mut sender, "/fed/v2/observe/snapshot", "")
+        Fixture::exchange(&mut sender, "/fed/v2/observe/snapshot?v=2", "")
             .await
             .0,
         403
@@ -1002,7 +1003,7 @@ async fn external_database_lock_cannot_stall_the_primary_bus_mutex() {
         "external lock control needs rollback-journal locking"
     );
     writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
-    let (status, page) = fixture.request("/fed/v2/observe/snapshot").await;
+    let (status, page) = fixture.request("/fed/v2/observe/snapshot?v=2").await;
     let primary_available = fixture
         .state
         .db
@@ -1024,7 +1025,7 @@ async fn external_database_lock_cannot_stall_the_primary_bus_mutex() {
         "snapshot did not return partial promptly under an external database lock"
     );
     assert_eq!(page["available"], "partial");
-    assert_eq!(fixture.request("/fed/v2/observe/snapshot").await.0, 200);
+    assert_eq!(fixture.request("/fed/v2/observe/snapshot?v=2").await.0, 200);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1044,7 +1045,7 @@ async fn snapshot_bounds_source_work_before_projecting_the_catalog() {
             connection.execute("INSERT INTO codex_roots(root_id,codex_home,owner_pid,owner_starttime,generation,label,registered_at) VALUES(?1,'/synthetic',0,'synthetic',1,'synthetic',?2)",rusqlite::params![codex,xmsg::storage::now_epoch_secs()]).unwrap();
         }
     }
-    let (status, page) = fixture.request("/fed/v2/observe/snapshot").await;
+    let (status, page) = fixture.request("/fed/v2/observe/snapshot?v=2").await;
     assert_eq!(status, 200);
     assert_eq!(page["endpoints"].as_array().unwrap().len(), 200);
     assert_eq!(page["truncated"], true);
