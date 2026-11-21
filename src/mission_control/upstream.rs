@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use super::attention::{self, ObservedCondition};
 use super::cursor::Partition;
-use super::hub::{Hub, ReplayLimits, Reset, Sequenced, Snapshot};
+use super::hub::{Batch, Frozen, Hub, ReplayLimits, Reset, Sequenced, Snapshot};
 use super::protocol::{
     ActivityAuthority, Delivery, Delta, Endpoint, Exchange, Node, Projection, Status,
 };
@@ -88,6 +88,18 @@ impl ReadHub {
             .then(|| (state.hub.snapshot(projection), state.hub.epoch())))
     }
 
+    pub(super) fn frozen(
+        &self,
+        projection: &Projection<'_>,
+        require_available: bool,
+    ) -> Result<Option<(Frozen, String)>, ()> {
+        let state = self.state.lock().map_err(|_| ())?;
+        if require_available && !state.hub.scope_available(projection) {
+            return Ok(None);
+        }
+        Ok(Some((state.hub.frozen(projection), state.hub.epoch())))
+    }
+
     pub(super) fn subscribed_snapshot(
         &self,
         projection: &Projection<'_>,
@@ -111,23 +123,12 @@ impl ReadHub {
         seq: u64,
         projection: &Projection<'_>,
         cap: usize,
-    ) -> Result<(Vec<Sequenced>, u64), Reset> {
+        replaying: bool,
+    ) -> Result<Batch, Reset> {
         let mut state = self.state.lock().map_err(|_| Reset::EpochChanged)?;
-        let mut delivered_through = seq;
-        let mut output = Vec::new();
-        for event in state.hub.after(seq, Instant::now())? {
-            if let Some(delta) = projection.project_delta(&event.delta) {
-                if output.len() == cap {
-                    return Ok((output, delivered_through));
-                }
-                output.push(Sequenced {
-                    delta,
-                    ..event.clone()
-                });
-            }
-            delivered_through = event.seq;
-        }
-        Ok((output, delivered_through.max(state.hub.watermark())))
+        state
+            .hub
+            .project_after(seq, projection, cap, replaying, Instant::now())
     }
 
     pub(super) fn current(&self, event: &Sequenced) -> bool {
@@ -138,6 +139,76 @@ impl ReadHub {
 
     pub(crate) fn wake(&self) {
         self.changed.send_modify(|_| {});
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_backlog_for_test(&self, name: &str) {
+        let mut state = self.state.lock().unwrap();
+        let now = Instant::now();
+        for id in 0..120 {
+            let delta = Delta::NodeStatus(super::protocol::NodeStatus {
+                status: Status::Healthy,
+                node: name.to_owned(),
+                delivery: Delivery::Delayed,
+                last_success_at: Some(1000),
+                last_source_at: Some(1000),
+                via_hub: Some(format!("{id}{}", "x".repeat(4000))),
+                history_hidden: false,
+            });
+            state.hub.append(delta, 1000, now).unwrap();
+        }
+        self.changed.send_replace(state.hub.watermark());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fill_snapshot_for_test(&self) {
+        use crate::observe_export::{EndpointDescriptor, EndpointKind, Harness, RegistrationState};
+        let mut state = self.state.lock().unwrap();
+        let now = Instant::now();
+        for index in 0..64 {
+            let name = if index == 0 {
+                "fixture.node".to_owned()
+            } else {
+                format!("node-{index:02}")
+            };
+            let endpoints = (0..200)
+                .map(|index| Endpoint {
+                    descriptor: EndpointDescriptor {
+                        id: format!("agent-{index:03}@{name}"),
+                        node: name.clone(),
+                        kind: EndpointKind::Instance,
+                        harness: Harness::Claude,
+                        state: RegistrationState::Registered,
+                        source_at: Some(1),
+                        label: Some("synthetic label ".repeat(5)),
+                        context: None,
+                        activity: None,
+                    },
+                    activity: None,
+                    activity_stale: None,
+                })
+                .collect();
+            let view = Node {
+                node: name,
+                status: Status::Healthy,
+                delivery: Delivery::Delayed,
+                last_success_at: Some(1000),
+                last_source_at: Some(1000),
+                via_hub: None,
+                history_hidden: false,
+                last_activity_at: None,
+                activity_authority: Some(ActivityAuthority::Disabled),
+                endpoints,
+                endpoints_truncated: false,
+                exchanges: Vec::new(),
+                source_gaps: Vec::new(),
+            };
+            state
+                .hub
+                .apply(view, Vec::new(), Vec::new(), 1000, now)
+                .unwrap();
+        }
+        self.changed.send_replace(state.hub.watermark());
     }
 
     pub(super) fn watch(&self) -> tokio::sync::watch::Receiver<u64> {

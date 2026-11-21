@@ -23,7 +23,7 @@ use super::admission::{self, Refusal, Route};
 use super::authority::{Invalidation, InvalidationReason, Record, Scope};
 use super::budgets::{Mode, Slot};
 use super::cursor::Partition;
-use super::hub::{Reset, Sequenced};
+use super::hub::{Frozen, Reset, Sequenced};
 use super::protocol::Projection;
 use super::request::{self, Code, Request as ClientMessage};
 use super::transport::{grants, partition, SnapshotMessage};
@@ -386,7 +386,7 @@ async fn begin_subscription(
         masked: &|node| mask.contains(node),
         activity,
     };
-    let Some((snapshot, epoch)) = hub.snapshot(&projection)? else {
+    let Some((snapshot, epoch)) = hub.frozen(&projection, true)? else {
         send_error(socket, Some(id), Code::NotFoundOrDenied, false)
             .await
             .map_err(|_| ())?;
@@ -414,6 +414,12 @@ async fn begin_subscription(
         replay_through: None,
         masked: mask.clone(),
     };
+    let projection = Projection {
+        scope: &subscription.scope,
+        grants: grants(record),
+        masked: &|node| mask.contains(node),
+        activity,
+    };
     match resume {
         Some(Ok(seq)) => {
             subscription.seq = seq;
@@ -429,6 +435,7 @@ async fn begin_subscription(
                 &subscription.partition,
                 snapshot,
                 &epoch,
+                &projection,
             )
             .await?;
         }
@@ -441,6 +448,7 @@ async fn begin_subscription(
                 &subscription.partition,
                 snapshot,
                 &epoch,
+                &projection,
             )
             .await?
         }
@@ -470,6 +478,7 @@ async fn gap(
         Reset::CursorExpired => "cursor_expired",
         Reset::EpochChanged => "epoch_changed",
         Reset::ScopeChanged => "scope_changed",
+        Reset::SlowConsumer => "slow_consumer",
     };
     send_value(
         socket,
@@ -502,26 +511,52 @@ async fn drain(
         .symmetric_difference(&mask)
         .any(|node| projection.node_allowed(node))
     {
-        let (snapshot, epoch) = hub.subscribed_snapshot(&projection)?;
+        let (snapshot, epoch) = hub.frozen(&projection, false)?.ok_or(())?;
         gap(socket, writer, sub, Reset::ScopeChanged).await?;
         state.seq = snapshot.watermark;
         state.replay_through = None;
-        parts(socket, writer, hub, sub, &state.partition, snapshot, &epoch).await?;
+        parts(
+            socket,
+            writer,
+            hub,
+            sub,
+            &state.partition,
+            snapshot,
+            &epoch,
+            &projection,
+        )
+        .await?;
     }
     state.masked.clone_from(&mask);
     loop {
-        let (events, through) = match hub.after(state.seq, &projection, 8) {
+        let replaying = state
+            .replay_through
+            .is_some_and(|through| state.seq < through);
+        let batch = match hub.after(state.seq, &projection, 8, replaying) {
             Ok(events) => events,
             Err(reason) => {
-                let (snapshot, epoch) = hub.subscribed_snapshot(&projection)?;
+                let (snapshot, epoch) = hub.frozen(&projection, false)?.ok_or(())?;
                 gap(socket, writer, sub, reason).await?;
                 state.seq = snapshot.watermark;
                 state.replay_through = None;
-                parts(socket, writer, hub, sub, &state.partition, snapshot, &epoch).await?;
+                parts(
+                    socket,
+                    writer,
+                    hub,
+                    sub,
+                    &state.partition,
+                    snapshot,
+                    &epoch,
+                    &projection,
+                )
+                .await?;
                 continue;
             }
         };
-        for event in events {
+        if batch.coalesced {
+            send_value(socket, writer, json!({"v":1,"type":"gap","sub":sub,"reason":"coalesced","unknown_loss":false,"reset":false})).await?;
+        }
+        for event in batch.events {
             let cursor = hub.cursor(event.seq, &state.partition)?;
             let mut message = json!({"v":1,"type":"event","sub":sub,"seq":event.seq,"cursor":cursor,"at":event.at,"delta":event.delta});
             if state.replay_through.is_some_and(|max| event.seq <= max) {
@@ -541,68 +576,86 @@ async fn drain(
             )
             .await?;
         }
-        if state.seq == through {
+        if state.seq == batch.through {
             return Ok(());
         }
-        state.seq = through;
+        state.seq = batch.through;
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn parts(
     socket: &mut Socket,
     writer: &SessionWriter,
     hub: &ReadHub,
     sub: &str,
     partition: &Partition,
-    snapshot: super::hub::Snapshot,
+    snapshot: Frozen,
     epoch: &str,
+    projection: &Projection<'_>,
 ) -> Result<(), ()> {
     let cursor = hub.cursor(snapshot.watermark, partition)?;
-    let count = snapshot.nodes.len().max(1);
     let server_at = stamp();
-    for number in 0..count {
-        let nodes = snapshot
-            .nodes
-            .get(number)
-            .map_or(&[][..], std::slice::from_ref);
-        let final_part = number + 1 == count;
-        let msg = SnapshotMessage {
+    let mut number = 0;
+    let mut used = 0usize;
+    let mut truncated = false;
+    let format = |nodes: &[super::protocol::Node],
+                  attention: Option<&[super::protocol::Attention]>,
+                  part,
+                  final_part: bool,
+                  truncated| {
+        serde_json::to_string(&SnapshotMessage {
             v: 1,
             r#type: "snapshot",
             sub: Some(sub),
-            part: number as u32,
+            part,
             final_part,
             stream_epoch: epoch,
-            cursor: final_part.then_some(&cursor),
+            cursor: final_part.then_some(cursor.as_str()),
             server_at,
-            truncated: final_part.then_some(false),
+            truncated,
             nodes,
-            attention: snapshot.attention.as_deref(),
+            attention,
+        })
+        .map_err(|_| ())
+    };
+    for node in snapshot
+        .nodes
+        .iter()
+        .filter_map(|node| projection.project_node(node))
+    {
+        let frame = format(std::slice::from_ref(&node), None, number, false, None)?;
+        if frame.len() > MAX_SERVER
+            || used.saturating_add(frame.len()) > super::transport::MAX_SNAPSHOT - 1024
+        {
+            truncated = true;
+            break;
+        }
+        used += frame.len();
+        number += 1;
+        let guards: &[&str] = if node.history_hidden {
+            &[]
+        } else {
+            &[node.node.as_str()]
         };
-        let contains_history = |node: &&super::protocol::Node| !node.history_hidden;
-        let mut guarded: Vec<_> = nodes
-            .iter()
-            .filter(contains_history)
-            .map(|node| node.node.as_str())
-            .collect();
-        guarded.extend(
-            snapshot
-                .attention
-                .iter()
-                .flatten()
-                .filter(|item| item.endpoint.is_some())
-                .map(|item| item.node.as_str()),
-        );
-        send(
-            socket,
-            writer,
-            &guarded,
-            None,
-            serde_json::to_string(&msg).map_err(|_| ())?,
-        )
-        .await?;
+        send(socket, writer, guards, None, frame).await?;
     }
-    Ok(())
+    let mut attention = snapshot.attention.as_deref();
+    loop {
+        let frame = format(&[], attention, number, true, Some(truncated))?;
+        if frame.len() <= MAX_SERVER {
+            let guarded: Vec<_> = attention
+                .iter()
+                .flat_map(|items| items.iter())
+                .filter(|item| item.endpoint.is_some())
+                .map(|item| item.node.as_str())
+                .collect();
+            return send(socket, writer, &guarded, None, frame).await;
+        }
+        let items = attention.filter(|items| !items.is_empty()).ok_or(())?;
+        attention = Some(&items[..items.len() / 2]);
+        truncated = true;
+    }
 }
 
 fn stamp() -> i64 {
