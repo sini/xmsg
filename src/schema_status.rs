@@ -316,7 +316,7 @@ const ADDITIVE_COLUMNS: [(&str, &str); 12] = [
 
 fn required_objects() -> Vec<(&'static str, String)> {
     let declarations = regex::Regex::new(r"(?i)\bCREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX)\s+IF\s+NOT\s+EXISTS\s+([a-zA-Z_][a-zA-Z_0-9]*)").expect("static schema declaration pattern");
-    let mut out: Vec<(&'static str, String)> = declarations
+    declarations
         .captures_iter(crate::storage::SCHEMA_N)
         .map(|capture| {
             (
@@ -328,22 +328,7 @@ fn required_objects() -> Vec<(&'static str, String)> {
                 capture[2].to_owned(),
             )
         })
-        .collect();
-    out.extend(
-        declarations
-            .captures_iter(crate::activity::SCHEMA)
-            .map(|capture| {
-                (
-                    if capture[1].eq_ignore_ascii_case("table") {
-                        "table"
-                    } else {
-                        "index"
-                    },
-                    capture[2].to_owned(),
-                )
-            }),
-    );
-    out
+        .collect()
 }
 
 struct View {
