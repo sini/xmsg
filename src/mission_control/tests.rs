@@ -220,6 +220,10 @@ pub(crate) fn start_watchdog(issuer: &Issuer) -> tokio::task::JoinHandle<()> {
     })
 }
 
+pub(crate) fn without_push(issuer: &Issuer) {
+    issuer.authority.suppress_push_for_test();
+}
+
 pub(crate) fn arm_projection(
     issuer: &Issuer,
     snapshot: bool,

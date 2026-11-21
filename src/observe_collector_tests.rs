@@ -2983,70 +2983,81 @@ async fn mission_control_buffered_mask_resets_without_leaking_or_closing() {
 
     let oidc =
         crate::enroll_oidc::signed_fixture::Fixture::new_at(crate::storage::now_epoch_secs()).await;
-    let directory = tempfile::tempdir().unwrap();
-    let (issuer, machine) =
-        crate::mission_control::tests::transport_fixture(&oidc, &directory).await;
-    let gate = crate::mission_control::tests::arm_projection(&issuer, false);
-    let f = Fixture::with_issuer(false, true, Some(issuer.clone()), None).await;
-    let mut socket = VectorSocket::open(&f, &machine.handle).await;
-    socket.hello().await;
-    socket
-        .send(
-            1,
-            include_bytes!("../tests/vectors/mission-control/v1/V-S1.json"),
-            true,
-        )
-        .await;
-    assert_eq!(socket.json().await["type"], "subscribed");
-    let cursor = loop {
-        let snapshot = socket.json().await;
-        assert_eq!(snapshot["type"], "snapshot");
-        if snapshot["final"] == true {
-            break snapshot["cursor"].as_str().unwrap().to_owned();
-        }
-    };
-    let hub = f.state.read_hub.as_ref().unwrap();
-    hub.queue_mask_canaries("fixture.node");
-    tokio::time::timeout(Duration::from_secs(3), gate.ready.notified())
-        .await
-        .unwrap();
-    issuer.set_node_masked("fixture.node", true);
-    hub.mask_poll("fixture.node", true, crate::storage::now_epoch_secs())
-        .unwrap();
-    gate.release.notify_one();
-    assert!(
-        tokio::time::timeout(Duration::from_secs(3), socket.io.fill_buf())
+    for (mask, barrier) in [(true, false), (false, true), (true, true)] {
+        let directory = tempfile::tempdir().unwrap();
+        let (issuer, machine) =
+            crate::mission_control::tests::transport_fixture(&oidc, &directory).await;
+        crate::mission_control::tests::without_push(&issuer);
+        let gate = crate::mission_control::tests::arm_projection(&issuer, false);
+        let f = Fixture::with_issuer(false, true, Some(issuer.clone()), None).await;
+        let mut socket = VectorSocket::open(&f, &machine.handle).await;
+        socket.hello().await;
+        socket
+            .send(
+                1,
+                include_bytes!("../tests/vectors/mission-control/v1/V-S1.json"),
+                true,
+            )
+            .await;
+        assert_eq!(socket.json().await["type"], "subscribed");
+        let cursor = loop {
+            let snapshot = socket.json().await;
+            assert_eq!(snapshot["type"], "snapshot");
+            if snapshot["final"] == true {
+                break snapshot["cursor"].as_str().unwrap().to_owned();
+            }
+        };
+        let hub = f.state.read_hub.as_ref().unwrap();
+        hub.queue_mask_canaries("fixture.node");
+        tokio::time::timeout(Duration::from_secs(3), gate.ready.notified())
             .await
-            .is_ok_and(|result| result.is_ok_and(|bytes| !bytes.is_empty())),
-        "SP6 queued-mask transition closed the established WebSocket before a scope reset"
-    );
-    let gap = socket.json().await;
-    assert_eq!(gap["type"], "gap");
-    assert_eq!(gap["reason"], "scope_changed");
-    assert_eq!(gap["reset"], true);
-    loop {
-        let snapshot = socket.json().await;
-        assert_eq!(snapshot["type"], "snapshot");
-        assert!(!snapshot.to_string().contains("planted-counterpart"));
-        if snapshot["final"] == true {
-            break;
+            .unwrap();
+        if mask {
+            issuer.set_node_masked("fixture.node", true);
         }
-        assert_eq!(snapshot["nodes"][0]["history_hidden"], true);
+        if barrier {
+            hub.mask_poll("fixture.node", true, crate::storage::now_epoch_secs())
+                .unwrap();
+        }
+        gate.release.notify_one();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), socket.io.fill_buf())
+                .await
+                .is_ok_and(|result| result.is_ok_and(|bytes| !bytes.is_empty())),
+            "SP6 queued-mask transition closed the established WebSocket before a scope reset"
+        );
+        let gap = socket.json().await;
+        assert_eq!(gap["type"], "gap");
+        assert_eq!(gap["reason"], "scope_changed");
+        assert_eq!(gap["reset"], true);
+        loop {
+            let snapshot = socket.json().await;
+            assert_eq!(snapshot["type"], "snapshot");
+            assert!(!snapshot.to_string().contains("planted-counterpart"));
+            if snapshot["final"] == true {
+                break;
+            }
+            assert_eq!(snapshot["nodes"][0]["history_hidden"], true);
+        }
+        socket
+            .send(
+                1,
+                br#"{"v":1,"type":"unsubscribe","id":10,"sub":"fleet"}"#,
+                true,
+            )
+            .await;
+        assert_eq!(socket.json().await["type"], "unsubscribed");
+        if !barrier {
+            hub.mask_poll("fixture.node", true, crate::storage::now_epoch_secs())
+                .unwrap();
+        }
+        let resume = json!({"v":1,"type":"subscribe","id":11,"sub":"fleet","scope":{"kind":"fleet"},"cursor":cursor});
+        socket.send(1, resume.to_string().as_bytes(), true).await;
+        assert_eq!(socket.json().await["mode"], "resume");
+        let after = socket.json().await;
+        assert_eq!(after["delta"]["history_hidden"], true);
+        assert!(!after.to_string().contains("planted-counterpart"));
     }
-    socket
-        .send(
-            1,
-            br#"{"v":1,"type":"unsubscribe","id":10,"sub":"fleet"}"#,
-            true,
-        )
-        .await;
-    assert_eq!(socket.json().await["type"], "unsubscribed");
-    let resume = json!({"v":1,"type":"subscribe","id":11,"sub":"fleet","scope":{"kind":"fleet"},"cursor":cursor});
-    socket.send(1, resume.to_string().as_bytes(), true).await;
-    assert_eq!(socket.json().await["mode"], "resume");
-    let after = socket.json().await;
-    assert_eq!(after["delta"]["history_hidden"], true);
-    assert!(!after.to_string().contains("planted-counterpart"));
 }
 
 #[tokio::test]

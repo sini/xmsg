@@ -1034,6 +1034,16 @@ impl Authority {
     }
 
     #[cfg(test)]
+    fn change_without_register_invalidation(&self, record_id: &str, revoke: bool) {
+        let mut state = self.locked().unwrap();
+        if revoke {
+            state.records.get_mut(record_id).unwrap().record.revoked = true;
+        } else {
+            state.generation += 1;
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn suppress_push_for_test(&self) {
         self.locked().unwrap().suppress_push = true;
     }
@@ -1753,6 +1763,88 @@ mod tests {
                 authority.admit(&machine.handle, Carrier::Bearer),
                 Err(AuthorityError::Denied)
             ));
+        }
+    }
+    #[tokio::test]
+    async fn write_boundary_rechecks_generation_and_record_with_push_suppressed() {
+        use std::io::Read;
+        const OTHER: &str = "other@example.test";
+        for (revoke, backstop) in [(false, false), (true, false), (false, true), (true, true)] {
+            let directory = state_dir();
+            let mut settings = configured();
+            settings.allowlist.push(OTHER.to_owned());
+            let authority = Authority::open(directory.path(), settings).unwrap();
+            let browser = authority
+                .login(EMAIL, ISSUER, "owner-subject", None)
+                .unwrap();
+            let other = authority
+                .login(OTHER, ISSUER, "other-subject", None)
+                .unwrap();
+            let issued = authority
+                .mint_machine(
+                    &browser.record.principal,
+                    "writer-fixture",
+                    vec![Scope::Fleet],
+                    None,
+                    1,
+                )
+                .unwrap();
+            let current = authority.admit(&issued.handle, Carrier::Bearer).unwrap();
+            let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let mut reader = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (mut writer, _) = listener.accept().unwrap();
+            writer.set_nonblocking(true).unwrap();
+            let live = authority
+                .register(
+                    &current,
+                    Instant::now() + Duration::from_secs(10),
+                    writer.try_clone().unwrap(),
+                )
+                .unwrap();
+            live.authorize_payload([], || true, || writer.write_all(b"a"))
+                .unwrap()
+                .unwrap();
+            reader
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut byte = [0];
+            reader.read_exact(&mut byte).unwrap();
+            assert_eq!(byte, *b"a");
+
+            authority.suppress_push_for_test();
+            if backstop {
+                authority.change_without_register_invalidation(&current.record_id, revoke);
+            } else if revoke {
+                authority.revoke(&current.record_id).unwrap();
+            } else {
+                authority
+                    .rebind(&other.record.principal, ISSUER, "new-other-subject")
+                    .unwrap();
+            }
+            {
+                let state = authority.locked().unwrap();
+                assert_eq!(state.records[&current.record_id].record.revoked, revoke);
+                assert_eq!(state.generation == current.policy_generation, revoke);
+                assert!(state.masked_nodes.is_empty());
+                assert_eq!(
+                    state.live[&live.id].invalidation.is_none(),
+                    backstop,
+                    "fixture must isolate the table-only backstop",
+                );
+            }
+            assert!(live.receiver.borrow().is_none(), "test requires no push");
+            let result = live.authorize_payload([], || true, || writer.write_all(b"b"));
+            if revoke {
+                assert!(
+                    result.is_err(),
+                    "revoked record reached the socket without a push"
+                );
+            } else {
+                assert!(
+                    result.is_err(),
+                    "stale generation reached the socket without a push"
+                );
+            }
         }
     }
 }
