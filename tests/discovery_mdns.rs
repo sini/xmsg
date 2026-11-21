@@ -56,29 +56,12 @@ fn udp_port_open(pid: u32, port: u16) -> bool {
     String::from_utf8_lossy(&out.stdout).contains("UDP")
 }
 
-/// Whether process `pid` holds a UDP socket bound to `port`.
 #[cfg(target_os = "linux")]
-fn udp_port_open(pid: u32, port: u16) -> bool {
-    let inodes: std::collections::HashSet<String> = fs::read_dir(format!("/proc/{pid}/fd"))
-        .expect("read fds")
-        .filter_map(|e| fs::read_link(e.ok()?.path()).ok())
-        .filter_map(|l| {
-            let l = l.to_string_lossy().into_owned();
-            Some(l.strip_prefix("socket:[")?.strip_suffix(']')?.to_string())
-        })
-        .collect();
-    let suffix = format!(":{port:04X}");
-    ["udp", "udp6"].iter().any(|table| {
-        fs::read_to_string(format!("/proc/{pid}/net/{table}"))
-            .unwrap_or_default()
-            .lines()
-            .skip(1)
-            .any(|row| {
-                let cols: Vec<&str> = row.split_whitespace().collect();
-                cols.len() > 9 && cols[1].ends_with(&suffix) && inodes.contains(cols[9])
-            })
-    })
-}
+#[path = "discovery_mdns/udp_diag.rs"]
+mod udp_diag;
+
+#[cfg(target_os = "linux")]
+use udp_diag::udp_port_open;
 
 struct Node {
     _tmp: TempDir,
