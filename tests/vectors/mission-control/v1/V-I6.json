@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "type": "subscribe",
+  "id": 2,
+  "sub": "test",
+  "scope": {
+    "kind": "node",
+    "node": "not-configured"
+  }
+}

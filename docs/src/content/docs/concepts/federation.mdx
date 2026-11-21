@@ -486,3 +486,12 @@ minting owner. The planned confirmation option applies only to selected verbs
 after the owner opts in through the management panel.
 
 See the [owner CLI](/reference/cli-and-mcp/#mission-control-owner-cli).
+
+### Planned Mission Control delegation
+
+The planned delegated grant records a holder, explicit verbs and targets,
+and possibly a narrow read scope. The grant supplies the holder's
+authority within those bounds. Its audit chain distinguishes the holder,
+an authenticated presenter when applicable, and the minting owner.
+The separated management panel gates production use. The commands unit
+will separately gate the optional per-verb `confirm_verbs` setting.

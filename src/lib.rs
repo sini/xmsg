@@ -47,6 +47,8 @@ pub mod mesh;
 #[cfg(feature = "daemon")]
 pub mod mission_control;
 #[cfg(feature = "daemon")]
+pub mod mission_control_client;
+#[cfg(feature = "daemon")]
 pub mod node;
 #[cfg(feature = "daemon")]
 pub mod observe;

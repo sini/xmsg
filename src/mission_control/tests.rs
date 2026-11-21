@@ -1,6 +1,7 @@
 use super::*;
 use crate::enroll_oidc::signed_fixture::Fixture;
 use serde_json::{json, Value};
+use std::time::Duration;
 use tempfile::TempDir;
 
 fn config(issuer: &str) -> Config {
@@ -62,6 +63,32 @@ pub(crate) async fn transport_fixture(
         )
         .unwrap();
     (issuer, machine)
+}
+
+pub(crate) async fn suppress_and_revoke(
+    issuer: &Arc<Issuer>,
+    directory: &TempDir,
+    record_id: &str,
+) -> std::time::Instant {
+    let listener = admin::bind(directory.path(), &issuer.authority).unwrap();
+    let admin = tokio::spawn(admin::serve(listener, issuer.authority.clone()));
+    let watchdog = tokio::spawn(issuer.authority.clone().watchdog());
+    issuer.authority.suppress_push_for_test();
+    admin::revoke_fixture(directory.path(), record_id).await;
+    let (audit_row, at) = issuer.authority.last_revoke_for_test();
+    assert!(audit_row > 0);
+    assert!(issuer
+        .authority
+        .audit_records()
+        .unwrap()
+        .iter()
+        .any(|row| { row.action == "revoke" && row.record_id.as_deref() == Some(record_id) }));
+    admin.abort();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        watchdog.abort();
+    });
+    at
 }
 
 fn set_cookie_header(response: &WebResponse, name: &str) -> String {

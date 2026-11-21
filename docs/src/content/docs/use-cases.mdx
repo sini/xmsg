@@ -175,3 +175,14 @@ unset mc_token
 
 See [issuer configuration](/operations/fleet-observer/#mission-control-issuer)
 and the [owner CLI](/reference/cli-and-mcp/#mission-control-owner-cli).
+
+## Poll open Mission Control attention items
+
+<Status id="mission-control.http" />
+
+Give a read-only machine credential attention scope. Fetch
+`GET /v1/mission-control/snapshot/attention` with its bearer in the
+Authorization header. Diff the returned attention IDs between successful
+polls to see which conditions opened or cleared. Honor a 429 and its
+`Retry-After` header. A failed request gives no evidence that an item
+cleared. Protection and revocation use the collector's own credentials.

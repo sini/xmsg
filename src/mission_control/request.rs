@@ -267,3 +267,36 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[test]
+fn client_vectors_hit_the_production_decoder() {
+    use std::{fs, path::Path};
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/mission-control/v1");
+    for name in ["V-H1", "V-S1", "V-S2", "V-S4", "V-U1"] {
+        let file = fs::read(root.join(format!("{name}.json"))).unwrap();
+        let file = String::from_utf8(file).unwrap().replace("<C>", "Y3Vyc29y");
+        assert!(decode(file.as_bytes(), 16, 4096).is_ok(), "{name}");
+    }
+    for name in [
+        "V-I1", "V-I3", "V-I4", "V-I5", "V-I7", "V-I8", "V-I10", "V-I25", "V-I26",
+    ] {
+        let file = fs::read(root.join(format!("{name}.json"))).unwrap();
+        let code = if name == "V-I10" {
+            Code::UnsupportedType
+        } else {
+            Code::BadMessage
+        };
+        assert_eq!(decode(&file, 16, 4096).unwrap_err().code, code, "{name}");
+    }
+    let command = fs::read(root.join("V-I11.json")).unwrap();
+    assert_eq!(
+        decode(&command, 16, 4096).unwrap_err().code,
+        Code::Unsupported
+    );
+    let version = fs::read(root.join("V-I2.json")).unwrap();
+    assert!(matches!(
+        decode(&version, 16, 4096),
+        Ok(Request::Hello { protocol: 2, .. })
+    ));
+}

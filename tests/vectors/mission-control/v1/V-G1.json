@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "type": "gap",
+  "sub": "n1",
+  "reason": "cursor_expired",
+  "unknown_loss": true,
+  "reset": true
+}

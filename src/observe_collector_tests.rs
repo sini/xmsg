@@ -1948,22 +1948,21 @@ async fn mission_control_three_transports_share_the_snapshot_and_cursor() {
     let directory = tempfile::tempdir().unwrap();
     let (issuer, issued) =
         crate::mission_control::tests::transport_fixture(&oidc, &directory).await;
-    let f = Fixture::with_issuer(false, true, Some(issuer)).await;
+    let f = Fixture::with_issuer(false, true, Some(issuer.clone())).await;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap();
-    let http: serde_json::Value = client
+    let response = client
         .get(format!("{}/v1/mission-control/snapshot/fleet", f.url))
         .bearer_auth(&issued.handle)
         .send()
         .await
         .unwrap()
         .error_for_status()
-        .unwrap()
-        .json()
-        .await
         .unwrap();
+    let etag = response.headers()[hyper::header::ETAG].clone();
+    let http: serde_json::Value = response.json().await.unwrap();
     let mut req = format!(
         "{}/v1/mission-control/session",
         f.url.replacen("http://", "ws://", 1)
@@ -2018,7 +2017,7 @@ async fn mission_control_three_transports_share_the_snapshot_and_cursor() {
 
     let mut sse = client
         .get(format!("{}/v1/mission-control/stream/fleet", f.url))
-        .bearer_auth(issued.handle)
+        .bearer_auth(&issued.handle)
         .send()
         .await
         .unwrap()
@@ -2037,4 +2036,33 @@ async fn mission_control_three_transports_share_the_snapshot_and_cursor() {
     assert_eq!(value["type"], "snapshot");
     assert_eq!(value["cursor"], http["cursor"]);
     assert_eq!(value["nodes"], http["nodes"]);
+    let changed = crate::mission_control::tests::suppress_and_revoke(
+        &issuer,
+        &directory,
+        &issued.record.record_id,
+    )
+    .await;
+    let expires = tokio::time::Instant::from_std(changed + Duration::from_secs(1));
+    let closed = tokio::time::timeout_at(expires, socket.next())
+        .await
+        .expect("revoked WebSocket missed cutoff");
+    assert!(
+        matches!(closed, None | Some(Err(_)) | Some(Ok(Message::Close(_)))),
+        "revoked WebSocket received data"
+    );
+    let ended = tokio::time::timeout_at(expires, sse.chunk())
+        .await
+        .expect("revoked SSE missed cutoff");
+    assert!(
+        matches!(ended, Ok(None) | Err(_)),
+        "revoked SSE received data"
+    );
+    let revoked = client
+        .get(format!("{}/v1/mission-control/snapshot/fleet", f.url))
+        .header(hyper::header::IF_NONE_MATCH, etag)
+        .bearer_auth(&issued.handle)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
 }

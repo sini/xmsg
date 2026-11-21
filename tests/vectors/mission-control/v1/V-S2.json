@@ -1,0 +1,11 @@
+{
+  "v": 1,
+  "type": "subscribe",
+  "id": 3,
+  "sub": "n1",
+  "scope": {
+    "kind": "node",
+    "node": "laptop"
+  },
+  "cursor": "<C>"
+}

@@ -677,3 +677,36 @@ expiry, and the connection lease cap. WebSocket close codes include 4401
 for an expired lease and 4403 for revocation or a policy change. The cutoff
 runs from the authority change. The issuer's live registry supplies this
 deadline for the planned WebSocket and SSE writers.
+
+#### Mission Control v1 messages and resume
+
+Every message is a versioned JSON object. WebSocket offers
+`xmsg.mission-control.v1`, then sends `hello` within five seconds before
+`subscribe` or `unsubscribe`. The server accepts text only and ignores
+compression offers. Subscriptions use `fleet`, `attention`, `node` or
+`session` scope. Both HTTP bindings accept the same scope in the path.
+Percent-encode the session endpoint path segment.
+
+A `snapshot` is applied at its `final` part. A later `event` carries a
+collector sequence and an opaque cursor. SSE sends a single JSON
+message per `data` field and puts the cursor in `id` on events and final
+snapshots. Resume using a WebSocket subscription cursor or SSE
+`Last-Event-ID`; the scope and credential record must match. An invalid
+or expired cursor resets the view through a `gap` and fresh snapshot.
+A `tick` proves the connection is alive and leaves event age unchanged.
+
+| WebSocket close | Meaning |
+| --- | --- |
+| 1002, 1003, 1009 | Invalid framing, binary frame, or size limit |
+| 4400 | Invalid message or hello timeout |
+| 4401 | Lease expired |
+| 4403 | Revoked or policy changed |
+| 4408 | Slow consumer |
+| 4409 | Version or required capability unavailable |
+| 4429 | Client rate exceeded |
+
+The protocol defaults to a 16 KiB client message, 256 KiB server
+message, 4 MiB snapshot, and a 15-second heartbeat. The initial upstream
+is polled and reports `delivery: delayed`. The shared conformance
+vectors are in `tests/vectors/mission-control/v1/` in the source tree.
+Command routes and command capability are reserved for a later unit.

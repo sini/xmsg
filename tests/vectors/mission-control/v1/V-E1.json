@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "type": "event",
+  "sub": "fleet",
+  "seq": 1042,
+  "cursor": "<C>",
+  "at": 1795000001000,
+  "delta": {
+    "kind": "node_status",
+    "node": "laptop",
+    "status": "stale",
+    "delivery": "delayed",
+    "last_success_at": 1794999984000,
+    "history_hidden": false
+  }
+}

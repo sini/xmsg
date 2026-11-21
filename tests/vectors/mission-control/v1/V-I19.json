@@ -1,0 +1,7 @@
+{
+  "method": "GET",
+  "path": "/v1/mission-control/session",
+  "carrier": "machine",
+  "Origin": "https://evil.example",
+  "status": 403
+}

@@ -621,3 +621,19 @@ one way to configure it, not a requirement.
 5. **Rollback:** Stop the daemon, run the previous v1 binary across node, relay
    hub, and collector, and remove the `xmsg activity hook` entries. Delivery
    hooks remain untouched.
+
+### Open the planned terminal view
+
+Use the collector's exact public origin and the configured native client
+ID. Keep the command on a terminal you control while approving the code.
+
+```sh
+xmsg mission-control --origin https://collector.example --client-id tui-client
+```
+
+The session bearer stays in process memory. A 302, 401, or 403 on the
+WebSocket upgrade ends automatic retries and asks for re-authentication.
+In the first slice, events are fetched at least two seconds apart and
+snapshots are refreshed at the collector's 30-second cadence outside
+backfill. Allow for poll and network delay when using the HTTP read
+surfaces from a script.
