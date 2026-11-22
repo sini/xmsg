@@ -1,0 +1,168 @@
+---
+title: macOS Staging
+description: Planned standalone preflight verification, disposable local Homebrew tap installation, LaunchAgent preparation, and upgrade/rollback recovery for macOS arm64 staging builds.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Status from '../../../components/Status.astro';
+
+<Status id="xmsg.macos-staging" />
+
+<Aside type="caution" title="No approved run pin yet">
+This page documents the macOS arm64 Homebrew staging verification, installation, and recovery
+procedure ahead of the first approved staging run. It intentionally omits any unissued run ID or
+artifact ID. Once an approved upstream `macOS Staging` workflow run exists in `sini/xmsg`, a
+separate docs update will publish the exact pinned repository ID, workflow ID, run ID, attempt,
+artifact ID, and commit SHA.
+</Aside>
+
+## Supported staging cell and trust anchor
+
+- **Target:** native macOS arm64 (`aarch64-apple-darwin`) with Apple Command Line Tools and
+  Homebrew. Linux packaging, Intel macOS, public tags/releases/taps, and Developer ID notarization
+  remain later work.
+- **Trust anchor:** an exact approved run of `.github/workflows/macos-staging.yml` in public
+  upstream `sini/xmsg`. The workflow uploads an Actions artifact only (no release, tag, or tap
+  push). Checksums inside the downloaded archive detect corruption only; origin is established by
+  verifying GitHub's independent run and artifact metadata (repository ID, non-fork head repository
+  ID, workflow ID and path, run ID and attempt, completed/success status, head SHA, unexpired
+  artifact, and outer artifact SHA-256 digest) before extracting or executing anything.
+- **Gatekeeper consent:** use normal macOS consent (the OS prompt or per-item System Settings
+  "Open Anyway"). Never strip quarantine attributes (`xattr -d com.apple.quarantine`), disable
+  Gatekeeper, or grant blanket Full Disk Access.
+
+## 1. Prerequisites and pinned verifier checkout
+
+Install Apple Command Line Tools (`xcode-select --install`) and Homebrew, then verify CLT tools
+are present before reading any staged content:
+
+```sh
+/usr/bin/python3 --version
+otool --version
+codesign --version 2>&1 || true
+brew --version
+```
+
+Fetch the verifier and pinned formula template from public upstream `sini/xmsg` at the published
+approved commit SHA (`PINNED_SHA`) and verify `git rev-parse HEAD` before running anything:
+
+```sh
+PINNED_SHA="<published-40-hex-sha>"
+VERIFY_REPO=$(mktemp -d)
+chmod 0700 "$VERIFY_REPO"
+git clone --filter=blob:none --no-checkout https://github.com/sini/xmsg.git "$VERIFY_REPO"
+git -C "$VERIFY_REPO" checkout --detach "$PINNED_SHA"
+test "$(git -C "$VERIFY_REPO" rev-parse HEAD)" = "$PINNED_SHA"
+```
+
+## 2. Standalone preflight (before Brew loads Ruby or executes xmsg)
+
+Download the approved Actions artifact zip from the published `sini/xmsg` run into a caller-selected
+private `0700` scratch directory (preflight never derives or writes durable state/cache roots).
+Run `verify_staging.py preflight` with `--live-github-api`:
+
+```sh
+SCRATCH=$(mktemp -d)
+chmod 0700 "$SCRATCH"
+
+/usr/bin/python3 "$VERIFY_REPO/packaging/homebrew/verify_staging.py" preflight \
+  --artifact-zip "/path/to/xmsg-macos-arm64-staging.zip" \
+  --scratch-dir "$SCRATCH" \
+  --formula-template "$VERIFY_REPO/packaging/homebrew/xmsg.rb.tmpl" \
+  --expected-repo "sini/xmsg" \
+  --expected-repo-id "<published-repo-id>" \
+  --expected-workflow-id "<published-workflow-id>" \
+  --expected-workflow-path ".github/workflows/macos-staging.yml" \
+  --expected-run-id "<published-run-id>" \
+  --expected-run-attempt "<published-attempt>" \
+  --expected-artifact-id "<published-artifact-id>" \
+  --expected-source-sha "$PINNED_SHA" \
+  --live-github-api
+```
+
+Preflight verifies all of the following before emitting `$SCRATCH/xmsg.rb`:
+
+1. Independent GitHub run and artifact provenance (`artifact_origin_mismatch` on forks, wrong
+   workflow/run/attempt/commit, or expired artifacts).
+2. Independent outer artifact SHA-256 digest (`artifact_digest_mismatch`).
+3. Outer zip and inner tarball entry safety before extraction (`archive_entry_rejected` on
+   escaping paths, symlinks, or unexpected entries).
+4. Manifest provenance and inner archive/asset SHA-256 digests (`manifest_mismatch`).
+5. Offline Mach-O `arm64` header (`macho_arch_mismatch`), bounded `__DATA,__xmsg_rev` embedded
+   revision via `otool -s __DATA __xmsg_rev` (`embedded_revision_mismatch`), and linker signature
+   via `codesign --verify --strict` (`codesign_verify_failed`).
+6. Generated formula URL, stage version, and `sha256` against the verified inner archive
+   (`formula_checksum_mismatch`).
+
+Stop immediately on any `XMSG_STAGING_ERROR:` diagnostic; do not invoke `brew` or execute the binary.
+
+## 3. Install through a disposable local tap and prepare LaunchAgent
+
+Create a disposable local Homebrew tap from the verified `$SCRATCH/xmsg.rb` (never edit Ruby or
+URLs manually) and install:
+
+```sh
+TAP_SRC=$(mktemp -d)
+mkdir -p "$TAP_SRC/Formula"
+cp "$SCRATCH/xmsg.rb" "$TAP_SRC/Formula/xmsg.rb"
+git -C "$TAP_SRC" init -b main
+git -C "$TAP_SRC" add Formula/xmsg.rb
+git -C "$TAP_SRC" -c user.name=xmsg-staging -c user.email=xmsg-staging@localhost commit -m "stage xmsg"
+
+brew tap xmsg-staging/local "$TAP_SRC"
+brew install xmsg-staging/local/xmsg
+```
+
+After `brew install`, run `prepare_staging.py prepare` against the resolved Homebrew opt binary.
+It verifies the installed binary offline, queries `xmsg doctor --json` to confirm the durable state
+root, caches the verified archive, manifest, digest receipt, and formula under
+`<state>/staging-cache/<stage-version>/` (`0700`/`0600`), pre-creates private `0600` log files, and
+emits a `plutil -lint`-validated LaunchAgent plist (`homebrew.mxcl.xmsg.plist`, `Umask = 63`):
+
+```sh
+OPT_XMSG="$(brew --prefix)/opt/xmsg/bin/xmsg"
+/usr/bin/python3 "$VERIFY_REPO/packaging/homebrew/prepare_staging.py" prepare \
+  --xmsg-bin "$OPT_XMSG" \
+  --verified-dir "$SCRATCH" \
+  --formula-template "$VERIFY_REPO/packaging/homebrew/xmsg.rb.tmpl"
+```
+
+Start and check the LaunchAgent through `brew services` without `sudo`:
+
+```sh
+PLIST="$HOME/Library/Application Support/xmsg/state/homebrew.mxcl.xmsg.plist"
+brew services start xmsg --file "$PLIST"
+"$OPT_XMSG" doctor
+```
+
+For foreground diagnosis, stop the service first (`brew services stop xmsg`), run `"$OPT_XMSG" serve`
+in the foreground, stop it cleanly with Control-C, and only then restart via `brew services start`.
+
+## 4. Upgrade and cached rollback recovery
+
+Stage versions use strictly increasing `<cargo-version>.<workflow-run-number>` ordering (the full
+source SHA stays in metadata, not the version key). Before upgrading:
+
+1. Stop the running service (`brew services stop xmsg`) and verify the currently installed revision,
+   compatible SQLite schema (`"$OPT_XMSG" doctor`), and retained rollback bundle:
+
+   ```sh
+   /usr/bin/python3 "$VERIFY_REPO/packaging/homebrew/prepare_staging.py" check-upgrade \
+     --state-root "$HOME/Library/Application Support/xmsg/state" \
+     --current-version "<current-stage-version>" \
+     --candidate-version "<higher-stage-version>"
+   ```
+
+2. Run `verify_staging.py preflight` on the new approved artifact, update the disposable tap's
+   `Formula/xmsg.rb` with the verified generated formula, run `brew upgrade xmsg-staging/local/xmsg`,
+   re-run `prepare_staging.py prepare` to verify the new opt binary and cache it, then start the
+   service with `brew services start xmsg --file "$PLIST"`.
+3. **Cached executable rollback:** stop the service (`brew services stop xmsg`), copy the previous
+   version's retained formula from `<state>/staging-cache/<previous-version>/xmsg.rb` (which points
+   to the retained verified archive and survives `brew cleanup` and GitHub artifact expiry) into the
+   disposable tap, remove the newer keg (`brew uninstall --force xmsg-staging/local/xmsg`), install
+   the predecessor (`brew install xmsg-staging/local/xmsg`), verify the restored opt executable, and
+   start only when the schema is compatible with the selected binary.
+4. Normal `brew uninstall` removes only the Homebrew keg and leaves per-user state, config, logs,
+   backups, and credentials intact. See also [Runtime, Reloading & Systemd](/operations/runtime-and-systemd/)
+   and [macOS (Cargo)](/getting-started/macos/).

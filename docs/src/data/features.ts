@@ -342,6 +342,19 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		plannedSince: '2026-11-21',
 		note: 'Breaking default path change with coordinated re-pin; Claude adapter and Homebrew staging follow in separate PRs.',
 	},
+	'xmsg.macos-staging': {
+		id: 'xmsg.macos-staging',
+		title: 'macOS arm64 Homebrew staging workflow, standalone preflight verifier, and LaunchAgent preparation',
+		owner: 'sini',
+		evidence: [
+			{ path: 'src/build_meta.rs', anchor: 'pub const fn encode_embedded_revision(' },
+			{ path: 'packaging/homebrew/package_staging.py', anchor: 'def write_deterministic_tarball(' },
+			{ path: 'packaging/homebrew/verify_staging.py', anchor: 'def verify_origin_binding(' },
+			{ path: 'packaging/homebrew/prepare_staging.py', anchor: 'def write_launch_agent_plist(' },
+		],
+		plannedSince: '2026-11-22',
+		note: 'Staging template and verification procedure; exact approved workflow run, artifact ID, and commit SHA are published in a separate docs update after the approved run exists.',
+	},
 };
 
 export const SIBLING_ALLOWLIST: SiblingAllowlistEntry[] = [
