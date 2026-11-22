@@ -1,11 +1,11 @@
 //! Opt-in local metadata query. Production qualification is unavailable by default.
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod lineage_tests;
 #[cfg(test)]
 mod noninterference_tests;
 pub(crate) mod resolve;
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests;
 
 use crate::{client::caller_attribution as wire, http::AppState};
@@ -58,7 +58,7 @@ struct EligibilityFacts {
 trait QualificationProvider: Send + Sync {
     fn current(&self, key: &RuntimeKey) -> Option<EligibilityFacts>;
 }
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 struct FixtureFacts {
     expires: Instant,
     revision: std::sync::atomic::AtomicU64,
@@ -66,7 +66,7 @@ struct FixtureFacts {
     reaper_complete: bool,
     match_complete: bool,
 }
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 impl QualificationProvider for FixtureFacts {
     fn current(&self, key: &RuntimeKey) -> Option<EligibilityFacts> {
         Some(EligibilityFacts {
@@ -299,6 +299,10 @@ fn handle(
     {
         return Err(FailureReason::PeerUid);
     }
+    // XNU may install more rights than it reports when ancillary data is truncated.
+    if cfg!(target_os = "macos") {
+        return Err(FailureReason::Unsupported);
+    }
     let (query, original) = wire::receive_query(stream, deadline)?;
     wire::private_socket(&config.lifecycle_socket, config.expected_uid)?;
     wire::original_endpoint(original.as_fd(), &config.lifecycle_socket)?;
@@ -384,4 +388,105 @@ fn handle(
         principal: resolved.principal,
         authority_stamp: Box::new(resolved.stamp),
     })
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod darwin_tests {
+    use super::*;
+    use std::{io::Read, os::fd::AsRawFd, os::unix::net::UnixStream};
+
+    #[test]
+    fn darwin_refuses_attribution_before_receiving_rights() {
+        let directory = tempfile::Builder::new()
+            .prefix("xd-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let lifecycle_socket = directory.path().canonicalize().unwrap().join("life.sock");
+        let listener = UnixListener::bind(&lifecycle_socket).unwrap();
+        std::fs::set_permissions(&lifecycle_socket, std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let mut peer = UnixStream::connect(&lifecycle_socket).unwrap();
+        let (original, _) = listener.accept().unwrap();
+        let (caller, worker) = UnixStream::pair().unwrap();
+        let uid = crate::client::current_uid();
+        let config = ServerConfig {
+            query_socket: directory.path().join("query.sock"),
+            lifecycle_socket,
+            expected_uid: uid,
+        };
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::init_db(&connection).unwrap();
+        let app = AppState {
+            sessions_dirs: vec![],
+            agy_config: Default::default(),
+            agy_store: crate::agy::new_agy_store(),
+            pi_store: crate::pi::new_pi_store(),
+            pi_notify_tx: tokio::sync::broadcast::channel(16).0,
+            svc_store: crate::svc::new_svc_store(),
+            svc_notify_tx: tokio::sync::broadcast::channel(16).0,
+            node_name: "attribution-test".into(),
+            max_body: 65536,
+            max_attachment_bytes: 65536,
+            request_counter: std::sync::atomic::AtomicU64::new(1),
+            db: Arc::new(std::sync::Mutex::new(connection)),
+            notify_tx: tokio::sync::broadcast::channel(16).0,
+            reply_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+            fed_state: None,
+        };
+        let mut digest = Sha256::new();
+        digest.update(wire::CONTEXT_DOMAIN);
+        digest.update(wire::context_bytes(&None).unwrap());
+        let query = wire::Query {
+            v: wire::VERSION,
+            runtime_epoch: "a".repeat(32),
+            call_nonce: 1,
+            input_digest: "b".repeat(64),
+            context: None,
+            context_digest: hex::encode(digest.finalize()),
+        };
+        let deadline = Instant::now() + AUTHORITY_BUDGET;
+        wire::send_query(&caller, original.as_fd(), &query, deadline).unwrap();
+        drop(original);
+        let stats = ServerStats::default();
+        let before = app.db.lock().unwrap().total_changes();
+        let result = handle(&config, &app, &NoQualification, &stats, &worker, deadline);
+        assert!(
+            matches!(result, Err(FailureReason::Unsupported)),
+            "Darwin attribution must refuse before receiving rights: {result:?}"
+        );
+        wire::send_reply(
+            &worker,
+            &Reply::Unavailable {
+                v: wire::VERSION,
+                reason: FailureReason::Unsupported,
+            },
+            deadline,
+        )
+        .unwrap();
+        assert!(matches!(
+            wire::receive_reply(&caller, deadline),
+            Ok(Reply::Unavailable {
+                reason: FailureReason::Unsupported,
+                ..
+            })
+        ));
+        drop(worker);
+        assert_eq!(stats.resolved(), 0);
+        assert_eq!(app.db.lock().unwrap().total_changes(), before);
+
+        peer.set_nonblocking(true).unwrap();
+        let mut poll = libc::pollfd {
+            fd: peer.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert!(unsafe { libc::poll(&mut poll, 1, 1000) } > 0);
+        assert!(
+            matches!(peer.read(&mut [0]), Ok(0)),
+            "Darwin refusal retained the queued descriptor"
+        );
+    }
 }

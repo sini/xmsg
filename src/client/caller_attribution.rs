@@ -938,6 +938,7 @@ mod tests {
             "second excess descriptor leaked"
         );
     }
+    #[cfg(target_os = "linux")]
     #[test]
     fn attribution_truncated_ancillary_closes_visible_and_hidden_rights() {
         use std::io::Read;

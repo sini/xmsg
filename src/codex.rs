@@ -3406,7 +3406,7 @@ fn readonly_rollout(
     matches.pop().ok_or(FailureReason::Context)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod readonly_attribution_tests {
     use super::*;
     use std::os::unix::fs::{symlink, OpenOptionsExt};

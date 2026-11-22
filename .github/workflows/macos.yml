@@ -300,6 +300,35 @@ jobs:
         run: rustup toolchain install 1.95.0 --profile minimal && rustup default 1.95.0
       - name: cargo test
         run: cargo test --locked --no-fail-fast
+      - name: Darwin attribution refusal source control
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_file=src/caller_attribution.rs
+          backup="$(mktemp)"
+          red_log="$(mktemp)"
+          cp "$source_file" "$backup"
+          trap 'cp "$backup" "$source_file"; rm -f "$backup" "$red_log"' EXIT
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          path = Path("src/caller_attribution.rs")
+          source = path.read_text()
+          guard = '    if cfg!(target_os = "macos") {\n        return Err(FailureReason::Unsupported);\n    }\n'
+          assert source.count(guard) == 1
+          path.write_text(source.replace(guard, "", 1))
+          PYTHON
+          witness=caller_attribution::darwin_tests::darwin_refuses_attribution_before_receiving_rights
+          if cargo test --locked --lib "$witness" -- --exact > "$red_log" 2>&1; then
+            cat "$red_log"
+            exit 1
+          else
+            status=$?
+          fi
+          cat "$red_log"
+          test "$status" -eq 101
+          grep -F 'Darwin attribution must refuse before receiving rights:' "$red_log"
+          cp "$backup" "$source_file"
+          cargo test --locked --lib "$witness" -- --exact
 
   lock-probe:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.lock_probe }}
