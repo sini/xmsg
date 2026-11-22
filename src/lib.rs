@@ -39,6 +39,8 @@ pub mod http;
 #[cfg(feature = "daemon")]
 pub mod inbox;
 #[cfg(feature = "daemon")]
+pub mod install;
+#[cfg(feature = "daemon")]
 pub mod install_paths;
 #[cfg(feature = "daemon")]
 pub mod locator;
