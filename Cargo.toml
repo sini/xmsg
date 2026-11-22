@@ -659,3 +659,8 @@ required-features = ["daemon"]
 name = "gate_tmjs12_socket_publish"
 path = "tests/gate_tmjs12_socket_publish.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "claude_adapter"
+path = "tests/claude_adapter.rs"
+required-features = ["daemon"]

@@ -70,6 +70,17 @@ enum Commands {
     /// Inspect local setup without repairing state
     Doctor(doctor::DoctorArgs),
 
+    /// Preview a reversible per-user harness adapter; writes require --apply
+    Install {
+        #[command(subcommand)]
+        adapter: xmsg::install::Adapter,
+    },
+    /// Preview removal of unchanged owned adapter entries; writes require --apply
+    Uninstall {
+        #[command(subcommand)]
+        adapter: xmsg::install::Adapter,
+    },
+
     /// Watch recipients and local message observations
     Watch(watch::WatchArgs),
 
@@ -229,6 +240,10 @@ pub struct RegisterClaudeArgs {
     /// Agent socket path (defaults to $XDG_RUNTIME_DIR/xmsg/agent.sock)
     #[arg(long, env = "XMSG_AGENT_SOCK")]
     pub sock: Option<PathBuf>,
+
+    /// Database selecting the same state-derived endpoint set as serve
+    #[arg(long, env = "XMSG_DB_PATH")]
+    pub db_path: Option<PathBuf>,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -445,6 +460,9 @@ pub struct ServeArgs {
 
 #[derive(Parser, Debug)]
 pub struct McpArgs {
+    /// Database selecting the same state-derived endpoint set as serve
+    #[arg(long, env = "XMSG_DB_PATH")]
+    pub db_path: Option<PathBuf>,
     /// Path to session metadata directory (repeatable, or separated by ':' in env XMSG_SESSIONS_DIR; defaults to ~/.claude/sessions)
     #[arg(
         long = "sessions-dir",
@@ -537,7 +555,11 @@ async fn enrollment_operator(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Restrict newly created state, config, log, and socket files to owner-only before any write.
     xmsg::install_paths::apply_process_umask();
-    let cli = Cli::parse();
+    let adapter_command=std::env::args_os().nth(1).is_some_and(|command|command=="install"||command=="uninstall");
+    let cli = match Cli::try_parse(){Ok(cli)=>cli,Err(error)=>{
+        if adapter_command&&!matches!(error.kind(),clap::error::ErrorKind::DisplayHelp|clap::error::ErrorKind::DisplayVersion){eprintln!("claude: refused invalid_arguments");std::process::exit(2);}
+        error.exit()
+    }};
 
     match cli.command {
         Commands::ObserveCollector(args) => {
@@ -564,6 +586,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Doctor(args) => {
             if doctor::run(args)? {
                 std::process::exit(1);
+            }
+        }
+        Commands::Install { adapter } => {
+            if !xmsg::install::run_cli(adapter, xmsg::install::Action::Install) {
+                std::process::exit(2);
+            }
+        }
+        Commands::Uninstall { adapter } => {
+            if !xmsg::install::run_cli(adapter, xmsg::install::Action::Uninstall) {
+                std::process::exit(2);
             }
         }
         Commands::Activity(args) => match args.command {
@@ -688,13 +720,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rt.block_on(run_serve(*args))?;
         }
         Commands::Mcp(args) => {
+            let (agent_sock, http_sock) = if let Some(db) = args.db_path.as_deref() {
+                (
+                    Some(xmsg::install_paths::resolve_client_endpoint(
+                        "agent",
+                        args.agent_sock.as_deref(),
+                        Some(db),
+                        false,
+                    )?),
+                    Some(xmsg::install_paths::resolve_client_endpoint(
+                        "http",
+                        args.http_sock.as_deref(),
+                        Some(db),
+                        false,
+                    )?),
+                )
+            } else {
+                (args.agent_sock, args.http_sock)
+            };
             let sessions_dirs = resolve_sessions_dirs(args.sessions_dirs);
             let mut config = McpConfig::new(sessions_dirs, args.xmsg_url);
             config.reply_only = args.reply_only;
-            if let Some(sock) = args.http_sock {
+            if let Some(sock) = http_sock {
                 config.http_sock = Some(sock);
             }
-            if let Some(sock) = args.agent_sock {
+            if let Some(sock) = agent_sock {
                 config.agent_sock = sock;
             }
             let stdin = io::stdin();
@@ -783,7 +833,23 @@ fn run_register_claude(args: RegisterClaudeArgs) {
         eprintln!("xmsg register claude error: failed to read stdin: {e}");
         std::process::exit(2);
     }
-    match xmsg::agent::run_claude_hook(&input, args.sock.as_deref()) {
+    let selected = if args.db_path.is_some() {
+        match xmsg::install_paths::resolve_client_endpoint(
+            "agent",
+            args.sock.as_deref(),
+            args.db_path.as_deref(),
+            false,
+        ) {
+            Ok(path) => Some(path),
+            Err(_) => {
+                eprintln!("xmsg register claude error: endpoint_resolution");
+                std::process::exit(2);
+            }
+        }
+    } else {
+        args.sock
+    };
+    match xmsg::agent::run_claude_hook(&input, selected.as_deref()) {
         Ok(out) => {
             println!("{out}");
         }
@@ -2555,4 +2621,28 @@ async fn run_shutdown_drain(
     // 5. Log completion line and exit 0
     info!("shutdown complete, exiting cleanly");
     Ok(())
+}
+
+#[cfg(test)]
+mod claude_install_cli_tests {
+    use super::*;
+    #[test]
+    fn mcp_and_claude_hook_accept_literal_database_pin() {
+        for arguments in [
+            vec!["xmsg", "mcp", "--db-path", "/synthetic/state/xmsg.db"],
+            vec![
+                "xmsg",
+                "register",
+                "claude",
+                "--hook",
+                "--db-path",
+                "/synthetic/state/xmsg.db",
+            ],
+        ] {
+            assert!(
+                Cli::try_parse_from(arguments).is_ok(),
+                "installed harness command refused its literal database pin"
+            );
+        }
+    }
 }
