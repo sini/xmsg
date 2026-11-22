@@ -298,8 +298,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install toolchain
         run: rustup toolchain install 1.95.0 --profile minimal && rustup default 1.95.0
-      - name: cargo test
-        run: cargo test --locked --no-fail-fast
       - name: Darwin attribution refusal source control
         shell: bash
         run: |
@@ -330,6 +328,8 @@ jobs:
           grep -F 'Darwin attribution must refuse before receiving rights:' "$red_log"
           cp "$backup" "$source_file"
           cargo test --locked --lib "$witness" -- --exact
+      - name: cargo test
+        run: cargo test --locked --no-fail-fast
 
   lock-probe:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.lock_probe }}

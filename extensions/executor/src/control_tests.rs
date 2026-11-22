@@ -114,6 +114,7 @@ fn run_scripted_bridge_clock(
     let query_path = directory.path().join("query.sock");
     let life = UnixListener::bind(&life_path).unwrap();
     let query = UnixListener::bind(&query_path).unwrap();
+    query.set_nonblocking(true).unwrap();
     for socket in [&life_path, &query_path] {
         std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
@@ -139,8 +140,19 @@ fn run_scripted_bridge_clock(
     let held_journal = post_query_wait.then(|| f.service.journal.lock().unwrap());
     let response = std::thread::scope(|scope| {
         let script = scope.spawn(move || {
-            let (stream, _) = query.accept().unwrap();
             let deadline = Instant::now() + std::time::Duration::from_secs(2);
+            let stream = loop {
+                match query.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            return Err("executor did not reach the scripted query socket");
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => return Err("scripted query accept failed"),
+                }
+            };
             let (request, original) = wire::receive_query(&stream, deadline).unwrap();
             let (peer_uid, peer_pid) = wire::socket_peer(original.as_fd()).unwrap();
             let mut reply = Reply::Ok {
@@ -163,6 +175,7 @@ fn run_scripted_bridge_clock(
             };
             mutate(&mut reply);
             wire::send_reply(&stream, &reply, deadline).unwrap();
+            Ok(())
         });
         let mut client = UnixStream::connect(life_path).unwrap();
         let (server, _) = life.accept().unwrap();
@@ -175,13 +188,16 @@ fn run_scripted_bridge_clock(
         client.write_all(&body).unwrap();
         client.write_all(b"\n").unwrap();
         client.shutdown(std::net::Shutdown::Write).unwrap();
-        if post_query_wait {
-            at_rx
+        let reached_barrier = !post_query_wait
+            || at_rx
                 .recv_timeout(std::time::Duration::from_secs(2))
-                .unwrap();
+                .is_ok();
+        if post_query_wait {
             clock.store(201, Ordering::SeqCst);
             drop(held_journal);
-            resume_tx.send(()).unwrap();
+            if reached_barrier {
+                resume_tx.send(()).unwrap();
+            }
         }
         client
             .set_read_timeout(Some(std::time::Duration::from_secs(3)))
@@ -189,7 +205,12 @@ fn run_scripted_bridge_clock(
         let mut result = String::new();
         client.read_to_string(&mut result).unwrap();
         handler.join().unwrap();
-        script.join().unwrap();
+        let script = script.join().unwrap();
+        assert!(
+            reached_barrier,
+            "executor missed the admission barrier: {result}"
+        );
+        assert!(script.is_ok(), "{script:?}; executor response: {result}");
         serde_json::from_str(&result).unwrap()
     });
     (response, count(&f.service, "admissions"))
