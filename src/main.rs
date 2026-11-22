@@ -237,7 +237,7 @@ pub struct RegisterClaudeArgs {
     #[arg(long)]
     pub hook: bool,
 
-    /// Agent socket path (defaults to $XDG_RUNTIME_DIR/xmsg/agent.sock)
+    /// Agent socket override (otherwise resolved from the selected installation)
     #[arg(long, env = "XMSG_AGENT_SOCK")]
     pub sock: Option<PathBuf>,
 
@@ -479,7 +479,7 @@ pub struct McpArgs {
     #[arg(long, env = "XMSG_HTTP_SOCK")]
     pub http_sock: Option<PathBuf>,
 
-    /// Agent socket path (defaults to $XDG_RUNTIME_DIR/xmsg/agent.sock; on macOS without it, the Darwin user temp dir)
+    /// Agent socket override (otherwise resolved from the selected installation)
     #[arg(long, env = "XMSG_AGENT_SOCK")]
     pub agent_sock: Option<PathBuf>,
 
