@@ -36,7 +36,7 @@ def source_copy(destination):
     destination.mkdir()
     for name in ("Cargo.toml", "Cargo.lock"):
         shutil.copyfile(ROOT / name, destination / name)
-    for name in ("src", "tests"):
+    for name in ("src", "tests", "assets"):
         shutil.copytree(ROOT / name, destination / name,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
 

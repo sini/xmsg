@@ -219,7 +219,7 @@ def run_marked(directory, test, changed_source, marker):
     executable = Path(executables[0])
     digest = hashlib.sha256(executable.read_bytes()).hexdigest()
     source = hashlib.sha256()
-    for file in sorted(file for folder in ("src", "tests", "ci") for file in (Path(directory) / folder).rglob("*") if file.is_file()):
+    for file in sorted(file for folder in ("src", "tests", "ci", "assets") for file in (Path(directory) / folder).rglob("*") if file.is_file()):
         source.update(str(file.relative_to(directory)).encode())
         source.update(file.read_bytes())
     for file in ("Cargo.toml", "Cargo.lock"):
@@ -275,7 +275,7 @@ def main():
             dest = Path(directory)
             for file in ("Cargo.toml", "Cargo.lock"):
                 shutil.copyfile(ROOT / file, dest / file)
-            for folder in ("src", "tests", "scripts", "ci"):
+            for folder in ("src", "tests", "scripts", "ci", "assets"):
                 shutil.copytree(ROOT / folder, dest / folder, copy_function=shutil.copyfile)
             green = run(dest, test, changed_source=filename, label=f"{name}:baseline")
             marker = "forbidden dependencies absent with live daemon positive control" if test == "@graph" else "1 passed; 0 failed; 0 ignored"

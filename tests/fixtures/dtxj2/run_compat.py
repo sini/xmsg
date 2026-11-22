@@ -16,7 +16,7 @@ def digest(file):
 
 def source_digest(source):
     files = [source / "Cargo.toml", source / "Cargo.lock"]
-    for directory in ("src", "tests"):
+    for directory in ("src", "tests", "assets"):
         files.extend(file for file in (source / directory).rglob("*")
                      if file.is_file() and "__pycache__" not in file.parts
                      and file.suffix != ".pyc")
