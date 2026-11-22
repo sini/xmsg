@@ -885,10 +885,10 @@ fn cstring_path(path: &Path) -> Result<CString, RuntimeLockError> {
 }
 
 fn is_unsupported_errno(errno: Option<i32>) -> bool {
-    matches!(
-        errno,
-        Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP) | Some(libc::ENOTSUP) | Some(libc::EINVAL)
-    )
+    errno == Some(libc::ENOSYS)
+        || errno == Some(libc::EOPNOTSUPP)
+        || errno == Some(libc::ENOTSUP)
+        || errno == Some(libc::EINVAL)
 }
 
 fn publish_via_link_unlink(tmp: &Path, dst: &Path) -> Result<PublishPrimitive, RuntimeLockError> {
