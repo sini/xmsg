@@ -1050,6 +1050,24 @@ fn outbound_only_peer_is_informational_without_tls_or_clock_claims() {
     status(&report, "federation.probe", "pass");
 }
 
+#[test]
+fn observe_only_peer_is_informational_without_tls_or_clock_claims() {
+    let value = federation_data(
+        "valid",
+        vec![
+            json!({"name":"collector.example","reachability":"unknown","reason":"observe_only","leaf":null,"expiry":"unknown","offset_state":"unknown","observed_offset_seconds":null,"offset_uncertainty_seconds":null}),
+        ],
+    );
+    let fixture = Fixture::with_federation(200, value);
+    let (_, report) = fixture.report();
+    status(&report, "peer.federation.collector.example", "info");
+    assert_eq!(
+        check(&report, "peer.federation.collector.example")["message"],
+        "observe-only, not dialled"
+    );
+    status(&report, "federation.probe", "pass");
+}
+
 fn healthy_ca_metadata(enabled: Option<bool>) -> Value {
     json!({"source":"runtime","enabled":enabled,"pending_approvals":null,"checks":[{"id":"ca.configuration","status":"pass","message":"fixture configuration metadata"}]})
 }

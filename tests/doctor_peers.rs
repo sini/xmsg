@@ -668,6 +668,56 @@ async fn all_outbound_only_leaves_are_not_probed_or_partial() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn observe_only_peer_is_not_probed_while_normal_peer_at_same_address_is_probed() {
+    let own = Identity::new(NODE, 1, 2);
+    let target = Peer::tls(
+        "b-normal.example",
+        Identity::new("normal.node", 1, 2),
+        &own.pin,
+        Date::Present(0),
+    )
+    .await;
+    let mut observe = target.config.clone();
+    observe.name = "a-observe.example".into();
+    observe.allow = vec!["observe".into()];
+    let mut normal = target.config.clone();
+    normal.allow = vec!["send".into()];
+
+    let fixture = Fixture::new(own, vec![observe, normal]).await;
+    let diag = fixture.diagnostics().await;
+    assert_eq!(diag["partial"], false, "{diag}");
+    assert_eq!(target.accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let rows = diag["peers"].as_array().unwrap();
+    let obs_row = rows
+        .iter()
+        .find(|r| r["name"] == "a-observe.example")
+        .unwrap();
+    let norm_row = rows
+        .iter()
+        .find(|r| r["name"] == "b-normal.example")
+        .unwrap();
+    assert_eq!(obs_row["reason"], "observe_only");
+    assert_eq!(obs_row["reachability"], "unknown");
+    assert_eq!(norm_row["reason"], "authenticated_tls");
+    assert_eq!(norm_row["reachability"], "reachable");
+
+    let (output, report) = fixture.doctor().await;
+    assert!(output.status.success(), "{report}");
+    let checks = report["checks"].as_array().unwrap();
+    let obs_check = checks
+        .iter()
+        .find(|c| c["id"] == "peer.federation.a-observe.example")
+        .unwrap();
+    let norm_check = checks
+        .iter()
+        .find(|c| c["id"] == "peer.federation.b-normal.example")
+        .unwrap();
+    assert_eq!(obs_check["status"], "info");
+    assert_eq!(obs_check["message"], "observe-only, not dialled");
+    assert_eq!(norm_check["status"], "pass");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outbound_only_leaf_stays_informational_after_network_budget_exhaustion() {
     let blackhole = Peer::blackhole("blackhole.example").await;
     let mut peers: Vec<_> = (0..17)

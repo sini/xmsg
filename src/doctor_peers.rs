@@ -67,6 +67,10 @@ fn outbound_only(peer: &PeerConfig) -> bool {
             .is_some_and(|label| label.eq_ignore_ascii_case("invalid"))
 }
 
+fn observe_only(peer: &PeerConfig) -> bool {
+    peer.allow.len() == 1 && peer.allow[0] == "observe"
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct Report {
     available: bool,
@@ -158,6 +162,10 @@ async fn next_probe(probes: &mut Vec<Probe>) -> usize {
 }
 
 async fn probe(fed: Arc<FedState>, peer: PeerConfig, progress: Arc<Mutex<Peer>>) {
+    if observe_only(&peer) {
+        progress.lock().unwrap().reason = "observe_only";
+        return;
+    }
     if peer.leaf || !crate::discovery::dial::is_direct(&fed, &peer) {
         progress.lock().unwrap().reason = "not_dialable";
         return;
@@ -330,11 +338,16 @@ pub(crate) async fn collect(fed: Option<Arc<FedState>>) -> Report {
             let mut row = Peer::new(&peer.name);
             if outbound_only(peer) {
                 row.reason = "outbound_only";
+            } else if observe_only(peer) {
+                row.reason = "observe_only";
             }
             Arc::new(Mutex::new(row))
         })
         .collect::<Vec<_>>();
-    let mut completed = configured.iter().map(outbound_only).collect::<Vec<_>>();
+    let mut completed = configured
+        .iter()
+        .map(|peer| outbound_only(peer) || observe_only(peer))
+        .collect::<Vec<_>>();
     let mut pending = Vec::<Probe>::new();
     let mut next = 0;
     let mut budget_exhausted = false;
@@ -386,6 +399,7 @@ pub(crate) async fn collect(fed: Option<Arc<FedState>>) -> Report {
         || own_expiry == "unknown"
         || peers.iter().any(|peer| {
             peer.reason != "outbound_only"
+                && peer.reason != "observe_only"
                 && (peer.reachability == "unknown"
                     || peer.expiry == "unknown"
                     || peer.offset_state == "unknown")

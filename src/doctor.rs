@@ -749,6 +749,16 @@ async fn federation(report: &mut Report, path: Option<&Path>, configured_names: 
             shown += 1;
             continue;
         }
+        if row["reason"] == "observe_only" {
+            report.add(
+                format!("peer.federation.{name}"),
+                Status::Info,
+                "observe-only, not dialled",
+                None,
+            );
+            shown += 1;
+            continue;
+        }
         let reach = match row["reachability"].as_str() {
             Some("reachable") => "reachable",
             Some("unreachable") => "unreachable",

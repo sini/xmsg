@@ -34,7 +34,11 @@ access in its peers file. This example allows only two endpoints on `owner.node`
 ```
 
 Use the exporter's real canonical node name in `targets`. The CA bundle and
-collector certificate are existing operator-provided inputs. This grant does
+collector certificate are existing operator-provided inputs. The peers-file
+loader requires `address` on non-leaf entries (unless mDNS discovery permits
+omission), so keep a placeholder such as `collector.example.org:7788`; `xmsg
+doctor` reports an entry whose `allow` is `["observe"]` as `observe-only, not
+dialled` (`INFO`) without dialling it. This grant does
 not authorize send, reply or recipient discovery. Omit `targets` only when
 node-wide export is intended; an empty array permits no event or descriptor data.
 To permit labels, set `observe_labels: true` and request `labels=true`.
