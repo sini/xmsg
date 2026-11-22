@@ -373,7 +373,7 @@ in
             args = [ "mcp" ];
             env = { };
           };
-          skill = ../../nix/modules/skills/xmsg;
+          skill = ../../assets/claude/xmsg;
           allow = [
             "mcp__plugin_hm_xmsg__list"
             "mcp__plugin_hm_xmsg__send"
@@ -415,6 +415,28 @@ in
           ];
         };
       };
+
+    test-claude-canonical-skill-destination =
+      let
+        destination = "${linux.home.homeDirectory}/.claude/skills/xmsg";
+        canonical = ../../assets/claude/xmsg;
+        installed = linux.home.file.${destination};
+      in
+      {
+        expr = {
+          sameDestination = builtins.hasAttr destination linux.home.file;
+          sameCanonicalSource = toString installed.source == toString canonical;
+          sameCanonicalBytes =
+            builtins.readFile "${installed.source}/SKILL.md" == builtins.readFile "${canonical}/SKILL.md";
+          sameOption = linux.programs.claude-code.skills.xmsg == canonical;
+        };
+        expected = {
+          sameDestination = true;
+          sameCanonicalSource = true;
+          sameCanonicalBytes = true;
+          sameOption = true;
+        };
+      };
     test-agy = {
       expr = {
         mcp = linux.programs.antigravity-cli.mcpServers.xmsg;
@@ -435,7 +457,7 @@ in
           command = exe;
           args = [ "mcp" ];
         };
-        skill = ../../nix/modules/skills/xmsg;
+        skill = ../../assets/claude/xmsg;
         hooks.xmsg-register = {
           PreInvocation = [
             {
@@ -499,7 +521,7 @@ in
       };
       expected = {
         extension = builtins.readFile ../../extensions/pi/index.ts;
-        skill = builtins.readFile ../../nix/modules/skills/xmsg/SKILL.md;
+        skill = builtins.readFile ../../assets/claude/xmsg/SKILL.md;
       };
     };
     # XH2 oracle 12 + XH1.1: the opencode switch writes the plugin and the skill, no opencode.json,
@@ -514,7 +536,7 @@ in
       };
       expected = {
         plugin = builtins.readFile ../../extensions/opencode/xmsg.ts;
-        skill = builtins.readFile ../../nix/modules/skills/xmsg/SKILL.md;
+        skill = builtins.readFile ../../assets/claude/xmsg/SKILL.md;
         opencodeJson = false;
         programsOpencode = false;
         cleanupBefore = [ "linkGeneration" ];
@@ -534,7 +556,7 @@ in
           enabled = [ "xmsg" ];
           entries.xmsg.allow_gateway_injection = true;
         };
-        skill = ../../nix/modules/skills/xmsg + "/SKILL.md";
+        skill = ../../assets/claude/xmsg + "/SKILL.md";
       };
     };
 
@@ -663,7 +685,7 @@ in
             env_vars = [ "XDG_RUNTIME_DIR" ];
             default_tools_approval_mode = "approve";
           };
-          skill = ../../nix/modules/skills/xmsg;
+          skill = ../../assets/claude/xmsg;
           stableBin = exe;
           hooks = {
             SessionStart = mkEventGroup "SessionStart" 5;
