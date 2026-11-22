@@ -940,6 +940,96 @@ fn s1_legacy_guard_enforced_across_every_entrypoint() {
         !new_state.exists(),
         "doctor must not create replacement state while reporting legacy conflicts"
     );
+
+    // 6. Real subprocess parity: with `XMSG_DB_PATH` set against a clean private state root,
+    //    bare `xmsg list` resolves and connects to the exact same `http_socket` that
+    //    `xmsg doctor --json` reports (and `xmsg serve` binds).
+    let clean_state = tmp.path().join("clean-state");
+    let clean_xdg = tmp.path().join("clean-xdg");
+    make_private_dir(&clean_state);
+    make_private_dir(&clean_xdg);
+    let clean_db = clean_state.join("xmsg.db");
+
+    let clean_doc_out = Command::new(BIN)
+        .env_remove("XMSG_HTTP_SOCK")
+        .env_remove("XMSG_AGENT_SOCK")
+        .env_remove("XMSG_REGISTER_SOCK")
+        .env_remove("XMSG_LEAF_REGISTER_SOCK")
+        .env_remove("XMSG_PEERS_FILE")
+        .scrub_agy_env()
+        .env("HOME", &fake_home)
+        .env("XDG_STATE_HOME", &clean_xdg)
+        .env("XDG_RUNTIME_DIR", &clean_rt)
+        .env("XMSG_DB_PATH", &clean_db)
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+    let clean_doc: serde_json::Value = serde_json::from_slice(&clean_doc_out.stdout)
+        .unwrap_or_else(|e| {
+            panic!(
+                "clean doctor --json failed to parse ({e}): stderr={} stdout={}",
+                String::from_utf8_lossy(&clean_doc_out.stderr),
+                String::from_utf8_lossy(&clean_doc_out.stdout)
+            )
+        });
+    let doctor_http_sock = PathBuf::from(
+        clean_doc["http_socket"]
+            .as_str()
+            .expect("doctor --json must report http_socket when XMSG_DB_PATH is set"),
+    );
+    let _rt_cleanup = DirCleanup(doctor_http_sock.parent().map(Path::to_path_buf));
+
+    let mut clean_serve = ChildGuard(
+        Command::new(BIN)
+            .env_remove("XMSG_HTTP_SOCK")
+            .env_remove("XMSG_AGENT_SOCK")
+            .env_remove("XMSG_REGISTER_SOCK")
+            .env_remove("XMSG_LEAF_REGISTER_SOCK")
+            .env_remove("XMSG_PEERS_FILE")
+            .scrub_agy_env()
+            .env("HOME", &fake_home)
+            .env("XDG_STATE_HOME", &clean_xdg)
+            .env("XDG_RUNTIME_DIR", &clean_rt)
+            .env("XMSG_DB_PATH", &clean_db)
+            .args(["serve"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn serve with XMSG_DB_PATH"),
+    );
+    wait_for_socket(
+        &doctor_http_sock,
+        &mut clean_serve.0,
+        Duration::from_secs(10),
+    );
+
+    let bare_list_out = Command::new(BIN)
+        .env_remove("XMSG_HTTP_SOCK")
+        .env_remove("XMSG_AGENT_SOCK")
+        .env_remove("XMSG_REGISTER_SOCK")
+        .env_remove("XMSG_LEAF_REGISTER_SOCK")
+        .env_remove("XMSG_PEERS_FILE")
+        .scrub_agy_env()
+        .env("HOME", &fake_home)
+        .env("XDG_STATE_HOME", &clean_xdg)
+        .env("XDG_RUNTIME_DIR", &clean_rt)
+        .env("XMSG_DB_PATH", &clean_db)
+        .args(["list", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        bare_list_out.status.success(),
+        "bare `xmsg list --json` with XMSG_DB_PATH must reach doctor's reported http_socket {}: stderr={}",
+        doctor_http_sock.display(),
+        String::from_utf8_lossy(&bare_list_out.stderr)
+    );
+    let list_json: serde_json::Value = serde_json::from_slice(&bare_list_out.stdout)
+        .expect("bare `xmsg list --json` must return valid JSON from doctor's http_socket");
+    assert!(
+        list_json.is_object() || list_json.is_array(),
+        "unexpected list --json payload: {list_json}"
+    );
+    drop(clean_serve);
 }
 
 // ===========================================================================
