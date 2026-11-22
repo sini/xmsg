@@ -335,8 +335,10 @@ def turn(text, secs=60):
 # --- run ---------------------------------------------------------------------------------
 
 os.makedirs(os.path.join(HH, "plugins"), exist_ok=True)
-os.makedirs(RUN, mode=0o700, exist_ok=True)
-os.chmod(RUN, 0o700)
+STATE = os.path.join(TMP, "xmsg-state")
+for d in (RUN, SOCKS, STATE):
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    os.chmod(d, 0o700)
 work = os.path.join(TMP, "work")
 os.makedirs(work, exist_ok=True)
 # As the hermes module's activation installs extraPlugins (nix/moduleCommon.nix).
@@ -370,8 +372,23 @@ def can_connect_unix(path):
 
 env = dict(os.environ, HOME=HOME, HERMES_HOME=HH, XDG_RUNTIME_DIR=RUN, TERM="xterm-256color",
            COLUMNS="160", LINES="50")
-procs.append(subprocess.Popen([XMSG, "serve", "--db-path", os.path.join(TMP, "xmsg.db")], env=env,
-                              stdout=open(os.path.join(TMP, "serve.log"), "a"), stderr=subprocess.STDOUT))
+procs.append(subprocess.Popen(
+    [
+        XMSG,
+        "serve",
+        "--db-path",
+        os.path.join(STATE, "xmsg.db"),
+        "--http-sock",
+        os.path.join(SOCKS, "http.sock"),
+        "--agent-sock",
+        os.path.join(SOCKS, "agent.sock"),
+        "--register-sock",
+        os.path.join(SOCKS, "register.sock"),
+    ],
+    env=env,
+    stdout=open(os.path.join(TMP, "serve.log"), "a"),
+    stderr=subprocess.STDOUT,
+))
 wait_until(lambda: can_connect_unix(os.path.join(SOCKS, "http.sock"))
            and can_connect_unix(os.path.join(SOCKS, "register.sock")), 30, "xmsg serve")
 recv = Receiver()

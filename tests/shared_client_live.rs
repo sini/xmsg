@@ -106,9 +106,10 @@ async fn bind_without_listen_race_control() {
 async fn exercise(binary: &Path) {
     assert!(binary.is_file(), "required real-xmsg binary missing");
     let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
     let run = temp.path().join("run");
     let sessions = temp.path().join("sessions");
-    for dir in [&run, &sessions] {
+    for dir in [&state, &run, &sessions] {
         fs::create_dir(dir).unwrap();
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
     }
@@ -130,7 +131,7 @@ async fn exercise(binary: &Path) {
         .env_remove("XMSG_HOST_LABEL")
         .arg("serve")
         .arg("--db-path")
-        .arg(temp.path().join("node.db"))
+        .arg(state.join("node.db"))
         .arg("--sessions-dir")
         .arg(sessions)
         .arg("--http-sock")
@@ -280,9 +281,10 @@ async fn pinned_and_candidate_service_contract() {
 async fn exercise_candidate_service_name_validation(binary: &Path) {
     assert!(binary.is_file(), "required candidate xmsg binary missing");
     let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
     let run = temp.path().join("run");
     let sessions = temp.path().join("sessions");
-    for dir in [&run, &sessions] {
+    for dir in [&state, &run, &sessions] {
         fs::create_dir(dir).unwrap();
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
     }
@@ -318,7 +320,7 @@ async fn exercise_candidate_service_name_validation(binary: &Path) {
         .env_remove("XMSG_HOST_LABEL")
         .arg("serve")
         .arg("--db-path")
-        .arg(temp.path().join("node.db"))
+        .arg(state.join("node.db"))
         .arg("--sessions-dir")
         .arg(&sessions)
         .arg("--http-sock")
@@ -574,9 +576,10 @@ async fn exercise_candidate_effective_limits(binary: &Path) {
     let executable = std::env::current_exe().unwrap();
     for &(envs, extra_args, exp_reply_ttl, exp_idem_ttl, exp_queue_cap, exp_max_body) in cases {
         let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
         let run = temp.path().join("run");
         let sessions = temp.path().join("sessions");
-        for dir in [&run, &sessions] {
+        for dir in [&state, &run, &sessions] {
             fs::create_dir(dir).unwrap();
             fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
         }
@@ -592,7 +595,7 @@ async fn exercise_candidate_effective_limits(binary: &Path) {
         }
         cmd.arg("serve")
             .arg("--db-path")
-            .arg(temp.path().join("node.db"))
+            .arg(state.join("node.db"))
             .arg("--sessions-dir")
             .arg(&sessions)
             .arg("--http-sock")

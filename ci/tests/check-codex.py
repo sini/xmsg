@@ -730,7 +730,7 @@ def write_codex_config(
     xmsg_mcp["command"] = str(mcp_wrapper or xmsg_bin)
     xmsg_mcp["args"] = ["mcp"]
     if include_xdg_env:
-        xmsg_mcp["env_vars"] = ["XDG_RUNTIME_DIR"]
+        xmsg_mcp["env_vars"] = ["XDG_RUNTIME_DIR", "XDG_STATE_HOME"]
     xmsg_mcp["default_tools_approval_mode"] = "approve"
     mcp_servers["xmsg"] = xmsg_mcp
     doc["mcp_servers"] = mcp_servers
@@ -2542,6 +2542,11 @@ def main():
     xdg_run.mkdir(parents=True, exist_ok=True)
     xdg_run.chmod(0o700)
     os.environ["XDG_RUNTIME_DIR"] = str(xdg_run)
+    xdg_state = base_tmp / "state"
+    (xdg_state / "xmsg").mkdir(parents=True, exist_ok=True)
+    xdg_state.chmod(0o700)
+    (xdg_state / "xmsg").chmod(0o700)
+    os.environ["XDG_STATE_HOME"] = str(xdg_state)
     os.environ["HOME"] = str(base_tmp / "home")
     os.environ["CFFIXED_USER_HOME"] = os.environ["HOME"]
     (Path(os.environ["HOME"]) / "Library/Preferences").mkdir(parents=True, exist_ok=True)
@@ -2585,7 +2590,7 @@ def main():
             str(xmsg_bin),
             "serve",
             "--db-path",
-            str(base_tmp / "xmsg.db"),
+            str(xdg_state / "xmsg" / "xmsg.db"),
             "--codex-exe",
             str(codex_bin),
         ]
@@ -2600,10 +2605,16 @@ def main():
             env=os.environ.copy(),
         )
 
-        sock_dir = xdg_run / "xmsg"
-        http_sock = sock_dir / "http.sock"
-        reg_sock = sock_dir / "register.sock"
-        agent_sock = sock_dir / "agent.sock"
+        doc_proc = subprocess.run(
+            [str(xmsg_bin), "doctor", "--json"],
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+        )
+        doc_info = json.loads(doc_proc.stdout)
+        http_sock = Path(doc_info["http_socket"])
+        reg_sock = Path(doc_info["register_socket"])
+        agent_sock = Path(doc_info["agent_socket"])
         wait_for_sock(http_sock)
         wait_for_sock(reg_sock)
         wait_for_sock(agent_sock)

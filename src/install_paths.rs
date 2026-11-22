@@ -311,6 +311,16 @@ pub fn validate_socket_path(path: &Path) -> Result<(), InstallError> {
     Ok(())
 }
 
+/// Validates permission bits of an owner-private directory (`mode & 0o777 == 0o700`),
+/// permitting an inherited setgid bit (`0o2000`, e.g. `0o2700`).
+pub fn validate_private_mode_bits(mode: u32) -> Result<(), u32> {
+    let perm_bits = mode & 0o777;
+    if perm_bits != 0o700 {
+        return Err(perm_bits);
+    }
+    Ok(())
+}
+
 /// Validates an existing owner-private directory without modifying or repairing it.
 /// Masks permission bits with `0o777` so an inherited setgid bit (`0o2000`) is permitted.
 pub fn validate_private_dir(dir: &Path, expected_uid: u32) -> Result<PathBuf, InstallError> {
@@ -336,11 +346,10 @@ pub fn validate_private_dir(dir: &Path, expected_uid: u32) -> Result<PathBuf, In
             expected: expected_uid,
         });
     }
-    let perm_bits = meta.mode() & 0o777;
-    if perm_bits != 0o700 {
+    if let Err(actual) = validate_private_mode_bits(meta.mode()) {
         return Err(InstallError::UnsafeMode {
             path: dir.to_path_buf(),
-            actual: perm_bits,
+            actual,
         });
     }
     let canon = fs::canonicalize(dir).map_err(|source| InstallError::Io {
@@ -361,11 +370,10 @@ pub fn validate_private_dir(dir: &Path, expected_uid: u32) -> Result<PathBuf, In
             expected: expected_uid,
         });
     }
-    let cperm = cmeta.mode() & 0o777;
-    if cperm != 0o700 {
+    if let Err(actual) = validate_private_mode_bits(cmeta.mode()) {
         return Err(InstallError::UnsafeMode {
             path: canon,
-            actual: cperm,
+            actual,
         });
     }
     Ok(canon)
@@ -460,7 +468,18 @@ pub fn validate_shared_tmp_parent(tmp: &Path) -> Result<PathBuf, InstallError> {
     }
     let uid = meta.uid();
     let mode = meta.mode() & 0o7777;
-    if uid != 0 || (mode & 0o1000) == 0 {
+    // Inside a Linux Nix build sandbox userns, bind-mounted host root `/tmp` appears as unmapped
+    // overflowuid (65534) while keeping sticky mode 0o1777. Production/release builds always require
+    // UID 0.
+    #[cfg(any(test, feature = "test-hooks"))]
+    let nix_sandbox_overflow_root = cfg!(target_os = "linux")
+        && uid == 65534
+        && canon == Path::new("/tmp")
+        && (mode & 0o1000) != 0
+        && std::env::var_os("NIX_BUILD_TOP").is_some();
+    #[cfg(not(any(test, feature = "test-hooks")))]
+    let nix_sandbox_overflow_root = false;
+    if (uid != 0 && !nix_sandbox_overflow_root) || (mode & 0o1000) == 0 {
         return Err(InstallError::UnsafeSharedTmp {
             path: canon,
             uid,
@@ -1606,10 +1625,24 @@ mod tests {
 
     #[test]
     fn explicit_private_dir_accepts_inherited_setgid_02700() {
+        assert!(validate_private_mode_bits(0o042700).is_ok());
+        assert!(validate_private_mode_bits(0o040700).is_ok());
+        assert!(validate_private_mode_bits(0o040755).is_err());
+        assert!(validate_private_mode_bits(0o042750).is_err());
+
         let tmp = tempdir().unwrap();
         let d = tmp.path().join("setgid-child");
         fs::create_dir(&d).unwrap();
-        fs::set_permissions(&d, fs::Permissions::from_mode(0o2700)).unwrap();
+        match fs::set_permissions(&d, fs::Permissions::from_mode(0o2700)) {
+            Ok(()) => {}
+            Err(e)
+                if e.kind() == io::ErrorKind::PermissionDenied
+                    && std::env::var_os("NIX_BUILD_TOP").is_some() =>
+            {
+                fs::set_permissions(&d, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            Err(e) => panic!("failed to chmod setgid test dir: {e}"),
+        }
         let uid = unsafe { libc::geteuid() };
         assert!(validate_private_dir(&d, uid).is_ok());
         assert!(ensure_explicit_private_dir(&d, uid).is_ok());

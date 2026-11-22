@@ -508,9 +508,16 @@
             }
             ''
               export HOME=$TMPDIR/home XDG_RUNTIME_DIR=$TMPDIR/run
-              mkdir -p "$HOME/.gemini/antigravity-cli/presence" "$XDG_RUNTIME_DIR"
-              chmod 700 "$XDG_RUNTIME_DIR"
+              mkdir -p "$HOME/.gemini/antigravity-cli/presence" "$XDG_RUNTIME_DIR" "$TMPDIR/xmsg-state"
+              chmod 700 "$XDG_RUNTIME_DIR" "$TMPDIR/xmsg-state"
               sock=$XDG_RUNTIME_DIR/xmsg
+              mkdir -p "$sock"
+              chmod 700 "$sock"
+              export XMSG_HTTP_SOCK="$sock/http.sock"
+              export XMSG_AGENT_SOCK="$sock/agent.sock"
+              export XMSG_REGISTER_SOCK="$sock/register.sock"
+              export XMSG_AGY_PRESENCE_DIR="$HOME/.gemini/antigravity-cli/presence"
+              export XMSG_AGY_BRAIN_DIR="$HOME/.gemini/antigravity-cli/brain"
               conv=4a111111-2222-4333-8444-555555555555
               child=4b222222-3333-4444-8555-666666666666
               lock=$HOME/.gemini/antigravity-cli/presence/$conv.lock
@@ -581,7 +588,7 @@
               }
 
               # The fake agy's executable is flock: it holds C's presence lock and runs the turn.
-              (umask 0077 && exec ${lib.getExe xmsgPkg} serve --agy-exe ${pkgs.util-linux}/bin/flock --db-path "$TMPDIR/xmsg.db") > serve.log 2>&1 &
+              (umask 0077 && exec ${lib.getExe xmsgPkg} serve --agy-exe ${pkgs.util-linux}/bin/flock --db-path "$TMPDIR/xmsg-state/xmsg.db") > serve.log 2>&1 &
               serve=$!
               agy=
               waitfor_sock "$sock/register.sock" || fail "xmsg serve did not accept on register.sock"
